@@ -36,6 +36,13 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
 
+/// Check whether an error chain indicates that no backend worker is available.
+pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool {
+    const UNAVAILABLE: &[DynamoErrorType] = &[DynamoErrorType::Unavailable];
+    const AVAILABLE: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, UNAVAILABLE, AVAILABLE)
+}
+
 /// Check whether an error chain indicates the request was cancelled.
 pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
     const CANCELLATION: &[DynamoErrorType] = &[DynamoErrorType::Cancelled];
@@ -378,8 +385,10 @@ pub enum ErrorType {
     Validation,
     /// Model or resource not found (404)
     NotFound,
-    /// Service overloaded, too many requests (503)
+    /// Service overloaded or rate limited (429 or 529)
     Overload,
+    /// Service unavailable because no backend worker can serve the request
+    Unavailable,
     /// Request cancelled by client or timeout
     Cancelled,
     /// Backend accepted the request but stopped responding (response inactivity timeout)
@@ -1247,6 +1256,7 @@ impl Drop for InflightGuard {
                     ErrorType::Validation => "invalid request parameters",
                     ErrorType::NotFound => "model or resource not found",
                     ErrorType::Overload => "service overloaded or rate limited",
+                    ErrorType::Unavailable => "no backend worker available",
                     ErrorType::NotImplemented => "requested feature not implemented",
                     ErrorType::None => "unknown error",
                 };
@@ -1340,6 +1350,7 @@ impl ErrorType {
             ErrorType::Validation => frontend_service::error_type::VALIDATION,
             ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
             ErrorType::Overload => frontend_service::error_type::OVERLOAD,
+            ErrorType::Unavailable => frontend_service::error_type::UNAVAILABLE,
             ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
             ErrorType::ResponseTimeout => frontend_service::error_type::RESPONSE_TIMEOUT,
             ErrorType::Internal => frontend_service::error_type::INTERNAL,
@@ -2487,6 +2498,7 @@ mod tests {
         assert_eq!(ErrorType::Validation.as_str(), "validation");
         assert_eq!(ErrorType::NotFound.as_str(), "not_found");
         assert_eq!(ErrorType::Overload.as_str(), "overload");
+        assert_eq!(ErrorType::Unavailable.as_str(), "unavailable");
         assert_eq!(ErrorType::Cancelled.as_str(), "cancelled");
         assert_eq!(ErrorType::ResponseTimeout.as_str(), "response_timeout");
         assert_eq!(ErrorType::Internal.as_str(), "internal");
@@ -2727,6 +2739,7 @@ mod tests {
             ErrorType::Validation,
             ErrorType::NotFound,
             ErrorType::Overload,
+            ErrorType::Unavailable,
             ErrorType::Cancelled,
             ErrorType::ResponseTimeout,
             ErrorType::Internal,

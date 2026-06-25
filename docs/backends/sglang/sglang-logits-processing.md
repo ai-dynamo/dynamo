@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Logits Processing
+subtitle: Custom logits processors plug into SGLang's per-step callback through Dynamo's backend-agnostic spec adapter.
 ---
 
 For general SGLang features and configuration, see the [Reference Guide](sglang-reference-guide.md).

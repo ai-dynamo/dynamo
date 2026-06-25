@@ -178,6 +178,101 @@ def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
     assert args[args.index("--cuda-graph-bs") + 1] == "2"
 
 
+def test_vllm_mamba_align_raises_max_num_batched_tokens() -> None:
+    """vLLM Mamba align requires the scheduler token cap to cover block size."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    args = [
+        "--enable-prefix-caching",
+        "--mamba-cache-mode",
+        "align",
+        "--max-num-batched-tokens",
+        "1024",
+    ]
+
+    with patch(
+        "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size",
+        return_value=8320,
+    ):
+        result = modifier._apply_mamba_cache_align_token_floor(args, "nemotron")
+
+    assert result[result.index("--max-num-batched-tokens") + 1] == "8320"
+
+
+def test_vllm_mamba_align_skips_without_explicit_align_mode() -> None:
+    """Do not probe model metadata for ordinary prefix-caching decode workers."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    args = [
+        "--enable-prefix-caching",
+        "--max-num-batched-tokens",
+        "1024",
+    ]
+
+    with patch(
+        "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size"
+    ) as mock_floor:
+        result = modifier._apply_mamba_cache_align_token_floor(args, "llama")
+
+    mock_floor.assert_not_called()
+    assert result == args
+
+
+def test_vllm_model_runtime_constraints_update_decode_config() -> None:
+    """Candidate-level vLLM postprocessing fixes generated decode worker args."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    config = {
+        "metadata": {"name": "test"},
+        "spec": {
+            "services": {
+                "Frontend": {},
+                "VllmDecodeWorker": {
+                    "subComponentType": "decode",
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "args": [
+                                "--mamba-cache-mode",
+                                "align",
+                                "--max-num-batched-tokens",
+                                "1024",
+                            ]
+                        }
+                    },
+                },
+            }
+        },
+    }
+
+    with patch(
+        "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size",
+        return_value=8320,
+    ):
+        result = modifier.apply_model_runtime_constraints(config, "nemotron")
+
+    args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert args[args.index("--max-num-batched-tokens") + 1] == "8320"
+
+
+def test_vllm_model_runtime_constraints_skip_partial_decode_config() -> None:
+    """Final DGD postprocessing should tolerate partial mocked configs."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    config = {
+        "metadata": {"name": "test"},
+        "spec": {
+            "services": {
+                "Frontend": {},
+                "VllmDecodeWorker": {"subComponentType": "decode"},
+            }
+        },
+    }
+
+    result = modifier.apply_model_runtime_constraints(config, "nemotron")
+
+    decode_service = result["spec"]["services"]["VllmDecodeWorker"]
+    assert decode_service["subComponentType"] == "decode"
+    assert decode_service["extraPodSpec"] is None
+
+
 def test_build_dgd_config_multinode_when_tp_exceeds_node() -> None:
     """Single instances that exceed node capacity still get multinode config."""
     modifier = CONFIG_MODIFIERS["sglang"]
@@ -648,10 +743,9 @@ def test_build_dgd_config_pvc_with_model_path_uses_pvc_path(backend) -> None:
             continue
         args = svc.get("extraPodSpec", {}).get("mainContainer", {}).get("args", [])
         flat_args = " ".join(args) if args else ""
-        assert model_path in flat_args, (
-            f"Worker '{svc_name}' should use PVC model path '{model_path}'. "
-            f"args={args}"
-        )
+        assert (
+            model_path in flat_args
+        ), f"Worker '{svc_name}' should use PVC model path '{model_path}'. args={args}"
 
 
 def test_build_dgd_config_pvc_without_model_path_sets_hf_home() -> None:

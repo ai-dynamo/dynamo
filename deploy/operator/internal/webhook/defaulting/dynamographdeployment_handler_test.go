@@ -25,15 +25,21 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// admissionCtx builds a context carrying an admission request for the given operation.
-func admissionCtx(op admissionv1.Operation) context.Context {
+// admissionCtx builds a context carrying an admission request for the given operation and kind.
+func admissionCtx(op admissionv1.Operation, kind schema.GroupVersionKind) context.Context {
 	return admission.NewContextWithRequest(context.Background(), admission.Request{
 		AdmissionRequest: admissionv1.AdmissionRequest{
 			Operation: op,
+			Kind: metav1.GroupVersionKind{
+				Group:   kind.Group,
+				Version: kind.Version,
+				Kind:    kind.Kind,
+			},
 		},
 	})
 }
@@ -52,7 +58,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "CREATE stamps operator version on new DGD without annotations",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Create),
+			ctx:             admissionCtx(admissionv1.Create, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -64,7 +70,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "CREATE stamps operator version on DGD with existing annotations",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Create),
+			ctx:             admissionCtx(admissionv1.Create, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -79,7 +85,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "CREATE does not overwrite pre-existing origin version",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Create),
+			ctx:             admissionCtx(admissionv1.Create, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -94,7 +100,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "UPDATE does not stamp annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Update),
+			ctx:             admissionCtx(admissionv1.Update, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -106,7 +112,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "UPDATE preserves existing annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Update),
+			ctx:             admissionCtx(admissionv1.Update, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -121,7 +127,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 		{
 			name:            "DELETE does not stamp annotation",
 			operatorVersion: testVersion,
-			ctx:             admissionCtx(admissionv1.Delete),
+			ctx:             admissionCtx(admissionv1.Delete, nvidiacomv1alpha1.DynamoGraphDeploymentGVK),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -131,7 +137,7 @@ func TestDGDDefaulter_Default(t *testing.T) {
 			wantAnnotation: "",
 		},
 		{
-			name:            "no admission request in context skips defaulting gracefully",
+			name:            "no admission request in context fails closed",
 			operatorVersion: testVersion,
 			ctx:             context.Background(),
 			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
@@ -141,12 +147,13 @@ func TestDGDDefaulter_Default(t *testing.T) {
 				},
 			},
 			wantAnnotation: "",
+			wantErr:        true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defaulter := NewDGDDefaulter(tt.operatorVersion)
+			defaulter := NewDGDDefaulter(tt.operatorVersion, false)
 
 			err := defaulter.Default(tt.ctx, tt.dgd)
 			if (err != nil) != tt.wantErr {
@@ -230,7 +237,7 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defaulter := NewDGDDefaulter("0.9.0")
+			defaulter := NewDGDDefaulter("0.9.0", false)
 			dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
@@ -238,7 +245,7 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 				},
 			}
 
-			if err := defaulter.Default(admissionCtx(tt.op), dgd); err != nil {
+			if err := defaulter.Default(admissionCtx(tt.op, nvidiacomv1alpha1.DynamoGraphDeploymentGVK), dgd); err != nil {
 				t.Fatalf("Default() unexpected error: %v", err)
 			}
 
@@ -250,6 +257,189 @@ func TestDGDDefaulter_DefaultsNilReplicas(t *testing.T) {
 				}
 				if *svc.Replicas != want {
 					t.Errorf("service %q: replicas = %d, want %d", name, *svc.Replicas, want)
+				}
+			}
+		})
+	}
+}
+
+func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
+	tests := []struct {
+		name             string
+		op               admissionv1.Operation
+		groveEnabled     bool
+		annotations      map[string]string
+		services         map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		wantMinAvailable map[string]*int32
+	}{
+		{
+			name:         "CREATE defaults nil replicas to minAvailable 1 on Grove pathway",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: nil},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "UPDATE defaults positive replicas to minAvailable 1 on Grove pathway",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "defaults zero replicas to minAvailable 1 on Grove pathway",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Idle": {Replicas: ptr.To(int32(0))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Idle": ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "preserves explicit minAvailable",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(3)), MinAvailable: ptr.To(int32(2))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(2)),
+			},
+		},
+		{
+			name:         "CREATE preserves explicit zero minAvailable for validation",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(1)), MinAvailable: ptr.To(int32(0))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(0)),
+			},
+		},
+		{
+			name:         "UPDATE preserves minAvailable when replicas become positive",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(3)), MinAvailable: ptr.To(int32(2))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(2)),
+			},
+		},
+		{
+			name:         "UPDATE preserves minAvailable when replicas become zero",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(0)), MinAvailable: ptr.To(int32(1))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "UPDATE preserves explicit minAvailable away from zero boundary",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(4)), MinAvailable: ptr.To(int32(2))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(2)),
+			},
+		},
+		{
+			name:         "UPDATE preserves explicit zero minAvailable for validation",
+			op:           admissionv1.Update,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(1)), MinAvailable: ptr.To(int32(0))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": ptr.To(int32(0)),
+			},
+		},
+		{
+			name:         "does not default minAvailable when operator disables Grove",
+			op:           admissionv1.Create,
+			groveEnabled: false,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": nil,
+			},
+		},
+		{
+			name:         "does not default minAvailable when DGD opts out of Grove",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			annotations: map[string]string{
+				consts.KubeAnnotationEnableGrove: "false",
+			},
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {Replicas: ptr.To(int32(3))},
+			},
+			wantMinAvailable: map[string]*int32{
+				"Worker": nil,
+			},
+		},
+		{
+			name:         "nil service pointer in map is safe",
+			op:           admissionv1.Create,
+			groveEnabled: true,
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Nil": nil,
+			},
+			wantMinAvailable: map[string]*int32{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defaulter := NewDGDDefaulter("0.9.0", tt.groveEnabled)
+			dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test",
+					Namespace:   "default",
+					Annotations: tt.annotations,
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: tt.services,
+				},
+			}
+			ctx := admissionCtx(tt.op, nvidiacomv1alpha1.DynamoGraphDeploymentGVK)
+
+			if err := defaulter.Default(ctx, dgd); err != nil {
+				t.Fatalf("Default() unexpected error: %v", err)
+			}
+
+			for name, want := range tt.wantMinAvailable {
+				svc := dgd.Spec.Services[name]
+				if want == nil {
+					if svc.MinAvailable != nil {
+						t.Errorf("service %q: minAvailable = %d, want nil", name, *svc.MinAvailable)
+					}
+					continue
+				}
+				if svc.MinAvailable == nil {
+					t.Errorf("service %q: minAvailable is nil, want %d", name, *want)
+					continue
+				}
+				if *svc.MinAvailable != *want {
+					t.Errorf("service %q: minAvailable = %d, want %d", name, *svc.MinAvailable, *want)
 				}
 			}
 		})

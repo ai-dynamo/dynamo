@@ -12,6 +12,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Sequence,
     Set,
     Tuple,
 )
@@ -695,6 +696,113 @@ class WorkerMetricsPublisher:
             active_decode_blocks: Optional scheduler-compatible decode-block signal
             kv_used_blocks: Optional authoritative total KV blocks currently in use
         """
+        ...
+
+class MultimodalEmbeddingCachePublisher:
+    """
+    A publisher for multimodal encode-worker cache state.
+    """
+
+    ...
+
+    def __init__(self) -> None:
+        """
+        Create a `MultimodalEmbeddingCachePublisher` object.
+        """
+
+    async def create_endpoint(self, endpoint: Endpoint) -> None:
+        """
+        Initialize the NATS endpoint for publishing multimodal cache state.
+
+        Args:
+            endpoint: The endpoint to extract component information from.
+        """
+
+    def publish_delta(self, added_keys: list[str], removed_keys: list[str]) -> None:
+        """
+        Publish an incremental cache mutation for this worker.
+
+        Args:
+            added_keys: Newly cached embedding keys.
+            removed_keys: Cache keys no longer present on the worker.
+        """
+        ...
+
+class SelectionService:
+    """
+    In-process handle to a runtime-free Dynamo selection core.
+    """
+
+    def __init__(self, *, indexer_threads: int = 4) -> None:
+        """Create a selection service. `indexer_threads` sizes the KV indexer pool."""
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Stop the service: cancel KV-event listeners and scheduling so that
+        in-flight and queued selections fail fast.
+
+        The KV indexer thread pool is released when the handle is dropped.
+        Idempotent, and also runs automatically on drop.
+        """
+        ...
+
+    async def upsert_worker(self, worker: JsonLike) -> JsonLike:
+        """Upsert a worker and subscribe to its live KV events; returns its catalog record."""
+        ...
+
+    async def delete_worker(self, worker_id: int) -> JsonLike:
+        """Remove a worker and tear down its KV-event listener; returns its catalog record."""
+        ...
+
+    def list_workers(
+        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+    ) -> JsonLike:
+        """List catalog records, optionally filtered by model and tenant."""
+        ...
+
+    def ready(self) -> JsonLike:
+        """Readiness: whether at least one worker is schedulable, plus catalog state."""
+        ...
+
+    async def overlap_scores(self, request: JsonLike) -> JsonLike:
+        """Per-worker KV-overlap scores for a prompt."""
+        ...
+
+    async def select(self, request: JsonLike) -> JsonLike:
+        """Select the best worker by KV-overlap + load, without booking."""
+        ...
+
+    async def select_and_reserve(self, request: JsonLike) -> JsonLike:
+        """Select the best worker and book its load."""
+        ...
+
+    async def create_reservation(self, request: JsonLike) -> JsonLike:
+        """Book a request's load against a chosen worker."""
+        ...
+
+    async def prefill_complete(self, reservation_id: str) -> None:
+        """Mark a reservation's prefill complete; its load shifts prefill -> decode."""
+        ...
+
+    def add_output_block(
+        self, reservation_id: str, *, decay_fraction: Optional[float] = None
+    ) -> None:
+        """Record one decode output block for a reservation, advancing its decode load."""
+        ...
+
+    async def free_reservation(self, reservation_id: str) -> None:
+        """Free a finished reservation, releasing its tracked load."""
+        ...
+
+    def loads(
+        self, *, model_name: Optional[str] = None, tenant_id: Optional[str] = None
+    ) -> JsonLike:
+        """Current per-model active load (pending counts + per-worker potential loads)."""
+        ...
+
+    async def potential_loads(self, request: JsonLike) -> JsonLike:
+        """Per-worker potential loads for a prompt, without booking."""
         ...
 
 class ModelDeploymentCard:
@@ -1551,6 +1659,11 @@ class AicPerfConfig:
         aic_attention_dp_size: Optional[int] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
+        aic_gemm_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
     ) -> None:
         ...
 
@@ -1742,8 +1855,9 @@ class KvRouterConfig:
         router_predicted_ttl_secs: Optional[float] = None,
         *,
         overlap_score_credit: float = 1.0,
+        overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
-        router_queue_by_incoming_missing_isl: Optional[list[tuple[int, int]]] = None,
+        router_policy_config: Optional[str] = None,
     ) -> None:
         """
         Create a KV router configuration.
@@ -1778,19 +1892,9 @@ class KvRouterConfig:
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
                 Set to None to disable queueing (all requests go directly to the scheduler).
-            router_queue_by_incoming_missing_isl: Tiered per-worker pending ISL token caps
-                keyed on the request's incoming missing ISL
-                (ISL minus best cached tokens across eligible workers). Each
-                entry is a `(missing_isl_floor, max_isl_tokens)` tuple; the
-                tier with the highest matched floor wins. The cap is multiplied
-                by worker count to get the total ISL token limit. The list must:
-                  * be non-empty, start with `missing_isl_floor == 0`,
-                    be strictly ascending in floor, and have
-                    `max_isl_tokens > 0` for each tier.
-                The cap is compared against the sum of ISL tokens for all requests
-                currently parked in the pending queue.
-                `None` disables ISL-token capping entirely (unbounded queue cap).
-                Backpressure (ResourceExhausted) is returned when the cap is reached.
+            router_policy_config: Startup-only policy-family and cache-bucket queue
+                YAML path. When omitted, router_queue_threshold and
+                router_queue_policy define one default queue.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
@@ -1821,6 +1925,11 @@ class KvRouterConfig:
     @overlap_score_credit.setter
     def overlap_score_credit(self, value: float) -> None: ...
     @property
+    def overlap_score_credit_decay(self) -> float: ...
+
+    @overlap_score_credit_decay.setter
+    def overlap_score_credit_decay(self, value: float) -> None: ...
+    @property
     def overlap_score_weight(self) -> float: ...
 
     @overlap_score_weight.setter
@@ -1835,6 +1944,7 @@ class KvRouterConfig:
         overlap_score_weight: Optional[float] = None,
         *,
         overlap_score_credit: Optional[float] = None,
+        overlap_score_credit_decay: Optional[float] = None,
         prefill_load_scale: Optional[float] = None,
     ) -> "KvRouterConfig": ...
 
@@ -1893,13 +2003,20 @@ class MockEngineArgs:
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
         aic_mtp_seed: int = 42,
+        aic_gemm_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
         enable_local_indexer: bool = False,
         bootstrap_port: Optional[int] = None,
+        handoff_session_timeout_ms: int = 300000,
         kv_bytes_per_token: Optional[int] = None,
         kv_transfer_bandwidth: Optional[float] = None,
+        kv_transfer_timing_mode: str = "full_prompt",
         reasoning: Optional[ReasoningConfig] = None,
         zmq_kv_events_port: Optional[int] = None,
         zmq_replay_port: Optional[int] = None,
@@ -1955,6 +2072,15 @@ class MockEngineArgs:
 
     @property
     def bootstrap_port(self) -> Optional[int]: ...
+
+    @property
+    def handoff_session_timeout_ms(self) -> int: ...
+
+    @property
+    def kv_transfer_timing_mode(self) -> str: ...
+
+    @property
+    def engine_type(self) -> str: ...
 
     @property
     def num_g2_blocks(self) -> Optional[int]: ...
@@ -2035,6 +2161,36 @@ class MockEngineArgs:
     def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
 
     @property
+    def aic_gemm_dtype(self) -> Optional[str]: ...
+
+    @aic_gemm_dtype.setter
+    def aic_gemm_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_moe_dtype(self) -> Optional[str]: ...
+
+    @aic_moe_dtype.setter
+    def aic_moe_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_fmha_dtype(self) -> Optional[str]: ...
+
+    @aic_fmha_dtype.setter
+    def aic_fmha_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_kv_cache_dtype(self) -> Optional[str]: ...
+
+    @aic_kv_cache_dtype.setter
+    def aic_kv_cache_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
+    def aic_comm_dtype(self) -> Optional[str]: ...
+
+    @aic_comm_dtype.setter
+    def aic_comm_dtype(self, value: Optional[str]) -> None: ...
+
+    @property
     def aic_nextn(self) -> Optional[int]: ...
 
     @aic_nextn.setter
@@ -2098,6 +2254,11 @@ class MockEngineArgs:
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
         aic_mtp_seed: Optional[int] = None,
+        aic_gemm_dtype: Optional[str] = None,
+        aic_moe_dtype: Optional[str] = None,
+        aic_fmha_dtype: Optional[str] = None,
+        aic_kv_cache_dtype: Optional[str] = None,
+        aic_comm_dtype: Optional[str] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
@@ -2248,7 +2409,7 @@ async def run_input(runtime: DistributedRuntime, input: str, engine_config: Engi
     ...
 
 def run_mocker_trace_replay(
-    trace_file: str | os.PathLike[str],
+    trace_files: Sequence[str | os.PathLike[str]],
     extra_engine_args: Optional[MockEngineArgs] = None,
     prefill_engine_args: Optional[MockEngineArgs] = None,
     decode_engine_args: Optional[MockEngineArgs] = None,
@@ -2261,19 +2422,37 @@ def run_mocker_trace_replay(
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
-    trace_block_size: int = 512,
-    trace_format: Literal["mooncake", "applied_compute_agentic"] = "mooncake",
+    trace_block_size: Optional[int] = None,
+    trace_format: Literal[
+        "mooncake",
+        "mooncake-delta",
+        "mooncake_delta",
+        "agentic_mooncake",
+        "agentic-mooncake",
+        "applied_compute_agentic",
+        "dynamo",
+    ] = "mooncake",
     trace_shared_prefix_ratio: float = 0.0,
     trace_num_prefix_groups: int = 0,
     report_jsonl_path: Optional[str | os.PathLike[str]] = None,
     max_sim_time_ms: Optional[float] = None,
+    model_name: Optional[str] = None,
+    sla_ttft_ms: Optional[float] = None,
+    sla_itl_ms: Optional[float] = None,
+    sla_e2e_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs.
+    """Replay mocker trace files and return the simulation report.
+
+    Supports aggregated or disaggregated engine configurations.
 
     When ``report_jsonl_path`` is provided (offline disagg replay only), one
     JSON object per request is written to that path. Each line includes
     arrival/admit/token timestamps, input/output lengths, the full per-token
     ITL series, and prefill/decode worker indices.
+
+    ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
+    (offline replay only). When any is set, the report carries ``goodput_*`` keys
+    classifying SLA-satisfying requests; with none set, goodput is omitted.
     """
     ...
 
@@ -2298,12 +2477,24 @@ def run_mocker_synthetic_trace_replay(
     shared_prefix_ratio: float = 0.0,
     num_prefix_groups: int = 0,
     inter_turn_delay_ms: float = 0.0,
+    model_name: Optional[str] = None,
+    sla_ttft_ms: Optional[float] = None,
+    sla_itl_ms: Optional[float] = None,
+    sla_e2e_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Replay a synthetic mocker workload without requiring a trace file."""
+    """Replay a synthetic mocker workload without requiring a trace file.
+
+    ``sla_ttft_ms`` / ``sla_itl_ms`` / ``sla_e2e_ms`` are the goodput SLA bounds
+    (offline replay only); when any is set the report carries ``goodput_*`` keys
+    classifying SLA-satisfying requests.
+    """
     ...
 
 class PlannerReplayBridge:
-    """Step-based bridge for driving an offline replay with a Python planner."""
+    """Drives an offline replay to completion with a Python planner. The Rust
+    simulation owns the drive loop and calls back into ``planner`` once per
+    ``PlannerTick`` via ``run(planner)`` (``planner`` exposes
+    ``initial_tick_ms() -> float`` and ``on_tick(metrics: dict) -> dict``)."""
 
     def __init__(
         self,
@@ -2312,11 +2503,13 @@ class PlannerReplayBridge:
         num_workers: int,
         router_mode: str = "round_robin",
         router_config: Optional[KvRouterConfig] = None,
+        model_name: Optional[str] = None,
         arrival_speedup_ratio: float = 1.0,
         trace_block_size: int = 512,
         sla_ttft_ms: Optional[float] = None,
         sla_itl_ms: Optional[float] = None,
         sla_e2e_ms: Optional[float] = None,
+        replay_concurrency: Optional[int] = None,
     ) -> None: ...
 
     @staticmethod
@@ -2328,16 +2521,62 @@ class PlannerReplayBridge:
         num_decode_workers: int,
         router_mode: str = "round_robin",
         router_config: Optional[KvRouterConfig] = None,
+        model_name: Optional[str] = None,
         arrival_speedup_ratio: float = 1.0,
         trace_block_size: int = 512,
         sla_ttft_ms: Optional[float] = None,
         sla_itl_ms: Optional[float] = None,
         sla_e2e_ms: Optional[float] = None,
+        replay_concurrency: Optional[int] = None,
     ) -> "PlannerReplayBridge": ...
 
-    def advance_to(self, until_ms: float) -> Dict[str, Any]: ...
-    def apply_scaling(self, target_prefill: int, target_decode: int) -> None: ...
-    def finalize(self) -> Dict[str, Any]: ...
+    @staticmethod
+    def from_synthetic(
+        input_tokens: int,
+        output_tokens: int,
+        request_count: int,
+        extra_engine_args: MockEngineArgs,
+        num_workers: int,
+        router_mode: str = "round_robin",
+        router_config: Optional[KvRouterConfig] = None,
+        model_name: Optional[str] = None,
+        replay_concurrency: Optional[int] = None,
+        arrival_speedup_ratio: float = 1.0,
+        arrival_interval_ms: float = 1.0,
+        turns_per_session: int = 1,
+        shared_prefix_ratio: float = 0.0,
+        num_prefix_groups: int = 0,
+        inter_turn_delay_ms: float = 0.0,
+        sla_ttft_ms: Optional[float] = None,
+        sla_itl_ms: Optional[float] = None,
+        sla_e2e_ms: Optional[float] = None,
+    ) -> "PlannerReplayBridge": ...
+
+    @staticmethod
+    def from_synthetic_disagg(
+        input_tokens: int,
+        output_tokens: int,
+        request_count: int,
+        prefill_engine_args: MockEngineArgs,
+        decode_engine_args: MockEngineArgs,
+        num_prefill_workers: int,
+        num_decode_workers: int,
+        router_mode: str = "round_robin",
+        router_config: Optional[KvRouterConfig] = None,
+        model_name: Optional[str] = None,
+        replay_concurrency: Optional[int] = None,
+        arrival_speedup_ratio: float = 1.0,
+        arrival_interval_ms: float = 1.0,
+        turns_per_session: int = 1,
+        shared_prefix_ratio: float = 0.0,
+        num_prefix_groups: int = 0,
+        inter_turn_delay_ms: float = 0.0,
+        sla_ttft_ms: Optional[float] = None,
+        sla_itl_ms: Optional[float] = None,
+        sla_e2e_ms: Optional[float] = None,
+    ) -> "PlannerReplayBridge": ...
+
+    def run(self, planner: Any) -> Dict[str, Any]: ...
 
 class Layer:
     """
@@ -2665,6 +2904,8 @@ class KvRouter:
         block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
         lora_name: Optional[str] = None,
         routing_constraints: Optional[RoutingConstraints] = None,
+        strict_priority: int = 0,
+        policy_class: Optional[str] = None,
     ) -> Tuple[int, int, int]:
         """
         Find the best matching worker for the given tokens.
@@ -2682,6 +2923,9 @@ class KvRouter:
             block_mm_infos: Optional block-level multimodal metadata aligned to request
                            blocks. When provided, this is used in block hash computation
                            to enable MM-aware worker selection.
+            policy_class: Requested policy family, or an exact explicit class.
+                          Missing, unknown, and ordinary physical-class names use the
+                          configured default family before cache-bucket resolution.
 
         Returns:
             A tuple of (worker_id, dp_rank, overlap_blocks) where:
@@ -2918,6 +3162,14 @@ class DynamoException(Exception):
 
     ...
 
+class RouterQueueLimitExceeded(DynamoException):
+    """A policy-class queue cap rejected the request."""
+
+    policy_class: str
+    limit_kind: str
+    current: int
+    limit: int
+
 class Unknown(DynamoException):
     """Uncategorized or unknown error."""
 
@@ -2957,6 +3209,17 @@ class StreamIncomplete(DynamoException):
     """The response stream was terminated before completion."""
 
     ...
+
+class SelectionServiceError(DynamoException):
+    """
+    Raised by `SelectionService` for selector failures that are not malformed
+    input.
+    """
+
+    # Stable, machine-readable error category, e.g. "not_ready".
+    kind: str
+    # HTTP-style status code for the failure, e.g. 503.
+    status_code: int
 
 # ---------------------------------------------------------------------------
 # `dynamo._core.backend` submodule.

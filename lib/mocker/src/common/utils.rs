@@ -3,7 +3,22 @@
 
 use std::time::{Duration, Instant};
 
-use crate::common::protocols::{MockEngineArgs, WorkerType};
+use crate::common::handoff::HandoffTransferTiming;
+use crate::common::protocols::{KvTransferTimingMode, MockEngineArgs, WorkerType};
+
+pub fn prefill_handoff_transfer_timing(
+    num_input_tokens: usize,
+    kv_transfer_bandwidth: Option<f64>,
+    kv_bytes_per_token: Option<usize>,
+    mode: KvTransferTimingMode,
+) -> HandoffTransferTiming {
+    HandoffTransferTiming {
+        mode,
+        full_prompt_tokens: num_input_tokens,
+        kv_bytes_per_token,
+        bandwidth_gb_s: kv_transfer_bandwidth,
+    }
+}
 
 /// Compute the modeled handoff delay after a prefill worker emits its terminal token.
 ///
@@ -21,21 +36,23 @@ pub fn compute_prefill_handoff_delay_ms(
     if worker_type != WorkerType::Prefill || !completed {
         return None;
     }
-
-    match (kv_transfer_bandwidth, kv_bytes_per_token) {
-        (Some(bw), Some(bpt)) if bw > 0.0 => {
-            let kv_bytes = num_input_tokens as f64 * bpt as f64;
-            let delay_ms = kv_bytes / (bw * 1e9) * 1000.0;
+    let timing = prefill_handoff_transfer_timing(
+        num_input_tokens,
+        kv_transfer_bandwidth,
+        kv_bytes_per_token,
+        KvTransferTimingMode::FullPrompt,
+    );
+    match timing.full_prompt_delay_ms() {
+        Some(delay_ms) => {
             tracing::debug!(
                 num_input_tokens,
-                kv_bytes,
-                bandwidth_gb_s = bw,
+                bandwidth_gb_s = kv_transfer_bandwidth,
                 delay_ms = format!("{delay_ms:.2}"),
                 "KV handoff delay for prefill completion"
             );
             Some(delay_ms)
         }
-        _ => None,
+        None => None,
     }
 }
 

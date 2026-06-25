@@ -40,12 +40,6 @@ impl SglangRequest {
             .saturating_sub(self.materialized_tokens)
     }
 
-    pub(super) fn total_tokens_needed(&self, clip_max_new_tokens: usize) -> usize {
-        let remaining_input = self.extend_input_len();
-        let remaining_output = self.remaining_output_tokens().min(clip_max_new_tokens);
-        remaining_input + remaining_output
-    }
-
     pub(super) fn remaining_output_tokens(&self) -> usize {
         self.max_output_tokens.saturating_sub(self.output_len())
     }

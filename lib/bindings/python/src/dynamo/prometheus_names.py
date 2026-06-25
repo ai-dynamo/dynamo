@@ -343,6 +343,8 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Whether the router currently has a worker/dp_rank registered (1 = registered)
+    WORKER_REGISTERED = "router_worker_registered"
 
 
 class router_request:

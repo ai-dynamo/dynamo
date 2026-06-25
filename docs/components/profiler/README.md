@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Profiler
+subtitle: Automated performance analysis that finds optimal prefill and decode parallelism and generates SLA-driven deployment configurations.
 ---
 
 The Dynamo Profiler is an automated performance analysis tool that measures model inference characteristics to optimize deployment configurations. It determines optimal tensor parallelism (TP) settings for prefill and decode phases, generates performance interpolation data, and enables SLA-driven autoscaling through the Planner.

@@ -19,6 +19,24 @@
  * recipe/benchmark page (and the two landing READMEs).
  */
 const RECIPE_CSS = `
+/* Dark-mode variable re-bind.
+   The shared NVIDIA theme defines the dark values of --pst-color-text-base,
+   --pst-color-text-muted, and --pst-color-surface only under
+   html[data-theme="dark"], but Fern's theme toggle flips dark mode with the
+   .dark *class* and does NOT set data-theme. So in real dark mode these three
+   resolve to their LIGHT values (#1a1a1a text, #666 muted, #f7f7f7 surface),
+   which our components use for text/panels — rendering dark-on-dark. Re-bind
+   them under .dark so they track the class. !important is required: the
+   theme's light-default selector outranks a bare .dark. Scoped safely because
+   this stylesheet only loads on recipe/benchmark pages. (--nv-color-bg-default
+   never flips even with data-theme; those surfaces keep their own .dark
+   background overrides below.) */
+.dark {
+    --pst-color-text-base: #eee !important;
+    --pst-color-text-muted: #999 !important;
+    --pst-color-surface: #1a1a1a !important;
+}
+
 /* Recipe catalog */
 .dynamo-recipe-selector {
     margin: 24px 0;

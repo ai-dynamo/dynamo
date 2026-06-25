@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -46,6 +47,10 @@ func NewDCDDefaulter() *DCDDefaulter {
 // On CREATE, standalone v1beta1 DCDs default spec.name from metadata.name.
 func (d *DCDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dcdDefaultingWebhookName)
+
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoComponentDeploymentGVK); err != nil {
+		return err
+	}
 
 	dcd, ok := obj.(*nvidiacomv1beta1.DynamoComponentDeployment)
 	if !ok {
