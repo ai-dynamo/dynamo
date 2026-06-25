@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated serving via the upstream vLLM SMG sidecar.
+#
+# Each worker pod runs TWO containers sharing the pod network (localhost):
+#   - vllm-engine  : upstream `vllm serve --grpc` exposing SMG's vLLM service
+#                    (GPU)
+#   - mainContainer: the Dynamo vLLM SMG sidecar worker, an SMG client (CPU)
+#
+# The vLLM image must include the optional gRPC dependencies, either through
+# `vllm[grpc]` or `smg-grpc-servicer[vllm]>=0.5.2`.
+#
+# v1 scope is aggregated text/token generation. Disaggregated serving,
+# multimodal URL passthrough, KV-aware routing, and logprobs are intentionally
+# not enabled on this SMG path.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-smg-sidecar-agg
+spec:
+  services:
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    VllmSmgSidecarWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          custom:
+            # Increase this value for larger models
+            ephemeral-storage: "2Gi"
+      extraPodSpec:
+        # Engine container: holds the GPU and runs upstream vLLM's SMG server.
+        containers:
+          - name: vllm-engine
+            image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+            command:
+              - vllm
+              - serve
+              - Qwen/Qwen3-0.6B
+              - --grpc
+              - --host
+              - 127.0.0.1
+              - --port
+              - "50051"
+              - --enforce-eager
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+        # Sidecar container (Dynamo worker): CPU-only SMG client.
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - dynamo-vllm-smg-sidecar
+          args:
+            - --smg-endpoint
+            - 127.0.0.1:50051
