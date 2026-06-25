@@ -158,7 +158,7 @@ kubectl wait gateway/inference-gateway -n ${NAMESPACE} \
   --for=condition=Programmed --timeout=180s
 ```
 
-## Step 4: Send a Request
+### Step 4: Send a Request
 
 > [!IMPORTANT]
 > Before sending requests, you must deploy a well-lit path guide. This sets up
