@@ -17,15 +17,10 @@ spec:
         - name: HF_HOME
           value: /shared-models
       extraPodSpec:
-        # Tolerate the GPU taint so Frontend can land on either CPU or GPU pool —
-        # no agentpool pinning. Scheduler picks based on the ephemeral-storage
-        # request below (which excludes too-small-disk nodes regardless of cloud).
-        tolerations:
-        - key: nvidia.com/gpu
-          operator: Exists
-          effect: NoSchedule
+        # Frontend is CPU-only and runs on a CPU node pool. If your cluster has no
+        # CPU pool, add a toleration for the GPU nodes' taints so it can schedule.
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
           workingDir: /workspace
       replicas: 1
       resources:
@@ -54,26 +49,6 @@ spec:
         - key: nvidia.com/gpu
           operator: Exists
           effect: NoSchedule
-        affinity:
-          # No nodeAffinity / agentpool pinning — recipe is portable across any
-          # AKS cluster. The GPU resource request below ensures workers only land
-          # on GPU-capable nodes (the actual constraint, not pool names).
-          # Per-cluster override: on multi-pool clusters where GPU pools live on
-          # SEPARATE IB partitions (different pkeys → cross-pool RDMA handshake
-          # may fail), add a nodeAffinity selecting one specific pool. Whether
-          # cross-pool actually fails is cluster-specific — verify on your
-          # cluster before adding pinning.
-          podAntiAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                # Both workers are componentType: worker (the operator puts
-                # prefill/decode on the sub-component-type label, not here), so match
-                # "worker" to repel the two onto separate nodes for cross-node KV.
-                - key: nvidia.com/dynamo-component-type
-                  operator: In
-                  values: [worker]
-              topologyKey: kubernetes.io/hostname
         mainContainer:
           command: [python3, -m, dynamo.vllm]
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
@@ -122,8 +97,6 @@ spec:
           - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
           # --- NCCL: IB transport is not exercised in 1P1D. Intra-pod TP collectives
           # use NVLink/P2P; cross-pod KV transfer uses NIXL/UCX, not NCCL. ---
-          - { name: NCCL_IB_HCA,            value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
-          - { name: NCCL_IB_DISABLE,        value: "0" }
           - { name: NCCL_SOCKET_IFNAME,     value: "eth0" }
           - { name: NCCL_DEBUG,             value: "WARN" }
           # --- Dynamo / vLLM ---
@@ -131,21 +104,19 @@ spec:
           - { name: HF_HOME,                  value: /shared-models }
           - { name: VLLM_LOGGING_LEVEL,       value: "INFO" }
           volumeMounts:
-          - { name: ib,  mountPath: /dev/infiniband }
           - { name: shared-model-cache, mountPath: /shared-models }
         volumes:
-        - { name: ib,  hostPath: { path: /dev/infiniband } }
         - { name: shared-model-cache, persistentVolumeClaim: { claimName: shared-model-cache } }
       replicas: 1
       resources:
         limits:
           gpu: '4'
           custom:
-            rdma/shared_ib: "1"
+            rdma/ib: "1"
         requests:
           gpu: '4'
           custom:
-            rdma/shared_ib: "1"
+            rdma/ib: "1"
             ephemeral-storage: "2Gi"
       subComponentType: prefill
       volumeMounts:
@@ -165,26 +136,6 @@ spec:
         - key: nvidia.com/gpu
           operator: Exists
           effect: NoSchedule
-        affinity:
-          # No nodeAffinity / agentpool pinning — recipe is portable across any
-          # AKS cluster. The GPU resource request below ensures workers only land
-          # on GPU-capable nodes (the actual constraint, not pool names).
-          # Per-cluster override: on multi-pool clusters where GPU pools live on
-          # SEPARATE IB partitions (different pkeys → cross-pool RDMA handshake
-          # may fail), add a nodeAffinity selecting one specific pool. Whether
-          # cross-pool actually fails is cluster-specific — verify on your
-          # cluster before adding pinning.
-          podAntiAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                # Both workers are componentType: worker (the operator puts
-                # prefill/decode on the sub-component-type label, not here), so match
-                # "worker" to repel the two onto separate nodes for cross-node KV.
-                - key: nvidia.com/dynamo-component-type
-                  operator: In
-                  values: [worker]
-              topologyKey: kubernetes.io/hostname
         mainContainer:
           command: [python3, -m, dynamo.vllm]
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
@@ -226,30 +177,25 @@ spec:
           # the NIXL KV-bandwidth telemetry counter. Do not set UCX_TLS.
           - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
           - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
-          - { name: NCCL_IB_HCA,            value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
-          - { name: NCCL_IB_DISABLE,        value: "0" }
-          - { name: NCCL_IB_GID_INDEX,      value: "3" }
           - { name: NCCL_SOCKET_IFNAME,     value: "eth0" }
           - { name: NCCL_DEBUG,             value: "WARN" }
           - { name: DYN_HEALTH_CHECK_ENABLED, value: "false" }
           - { name: HF_HOME,                  value: /shared-models }
           - { name: VLLM_LOGGING_LEVEL,       value: "INFO" }
           volumeMounts:
-          - { name: ib,  mountPath: /dev/infiniband }
           - { name: shared-model-cache, mountPath: /shared-models }
         volumes:
-        - { name: ib,  hostPath: { path: /dev/infiniband } }
         - { name: shared-model-cache, persistentVolumeClaim: { claimName: shared-model-cache } }
       replicas: 1
       resources:
         limits:
           gpu: '4'
           custom:
-            rdma/shared_ib: "1"
+            rdma/ib: "1"
         requests:
           gpu: '4'
           custom:
-            rdma/shared_ib: "1"
+            rdma/ib: "1"
             ephemeral-storage: "2Gi"
       subComponentType: decode
       volumeMounts:
