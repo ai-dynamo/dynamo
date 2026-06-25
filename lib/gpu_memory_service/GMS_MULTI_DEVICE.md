@@ -2,12 +2,9 @@
 
 ## 1. Overview
 
-GPU Memory Service (GMS) manages cross-process virtual memory on accelerators
-for weight/KV-cache sharing in Dynamo inference clusters.
+GPU Memory Service (GMS) manages cross-process virtual memory on accelerators for weight /KV-cache sharing in Dynamo inference clusters.
 
-This design introduces a **device-agnostic VMM abstraction layer** so that
-Intel XPU can plug in alongside the existing CUDA path without
-touching the server, client, or snapshot logic.
+This design introduces a **device-agnostic VMM abstraction layer** so that Intel XPU can plug in alongside the existing CUDA path without touching the server, client, or snapshot logic.
 
 ---
 
@@ -15,10 +12,10 @@ touching the server, client, or snapshot logic.
 
 | # | Goal | Status |
 |---|------|--------|
-| G1 | Define a vendor-neutral `VMMDevice` Protocol covering all device operations GMS needs | ✅ Phase 1 |
-| G2 | Wrap existing CUDA helpers in a `CudaVMM` class that satisfies the Protocol | ✅ Phase 1 |
-| G3 | Thread `--device-kind` through CLI → server → client with a factory function | ✅ Phase 1 |
-| G4 | Implement `XpuVMM` with Level-zero | ⬜ Phase 2 |
+| G1 | Define a vendor-neutral `VMMDevice` ABC covering all device operations GMS needs | ✅ Phase 1 |
+| G2 | Wrap existing CUDA helpers in a `CudaVMM` class that inherits the ABC | ✅ Phase 1 |
+| G3 | Process-global VMM singleton via `init_vmm()` / `get_vmm()`, CLI `--device-type` | ✅ Phase 1 |
+| G4 | Implement `XpuVMM` | ⬜ Phase 2 |
 | G5 | Add XPU torch mempool dispatch via `torch.xpu` APIs | ⬜ Phase 2 |
 | G6 | Enable snapshot save/load for XPU | ⬜ Phase 2 |
 
@@ -29,13 +26,14 @@ touching the server, client, or snapshot logic.
 ```
 ┌──────────────────────────────────────────────────────┐
 │                  CLI / Supervisor                     │
-│  server.py  ──→  --device-kind {cuda,xpu}            │
+│  server.py  ──→  --device-type {cuda,xpu}            │
 └────────────────────────┬─────────────────────────────┘
                          │ VMMDeviceType enum
                          ▼
 ┌──────────────────────────────────────────────────────┐
 │            common/vmm/__init__.py                     │
-│  get_vmm_device(device_kind) → VMMDevice             │
+│  init_vmm(device_type) — once per process            │
+│  get_vmm() → VMMDevice  (singleton)                  │
 │                                                      │
 │  ┌───────────────┐          ┌───────────────┐        │
 │  │  CudaVMM      │          │  XpuVMM (TBD) │        │
@@ -57,11 +55,11 @@ touching the server, client, or snapshot logic.
 
 | File | Purpose |
 |------|---------|
-| `__init__.py` | `VMMDeviceType` enum (`cuda` / `xpu`), `get_vmm_device()` factory |
-| `device.py` | `VMMDevice` — `typing.Protocol` with 24 vendor-neutral methods |
-| `cuda_utils.py` | Module-level CUDA helpers (unchanged logic) + `CudaVMM` class |
+| `__init__.py` | `VMMDeviceType` enum, `init_vmm()` singleton initializer, `get_vmm()` accessor, `get_vmm_device_type()` |
+| `device.py` | `VMMDevice` — `abc.ABC` with 24 `@abstractmethod` vendor-neutral methods |
+| `cuda_utils.py` | Module-level CUDA helpers (unchanged logic) + `CudaVMM(VMMDevice)` class |
 
-### 3.2 `VMMDevice` Protocol Surface (24 methods)
+### 3.2 `VMMDevice` ABC Surface (24 methods)
 
 ```
 Category                  Method
@@ -79,9 +77,7 @@ VA space + mapping        address_reserve(size, granularity) → int
                           map(va, size, handle)
                           unmap(va, size)
                           set_access(va, size, device, access)
-Monitoring / sizing      device_memory_info(device) → (free_bytes, total_bytes)
-                          # Unified for CUDA (NVML) and XPU
-
+Monitoring / sizing       device_memory_info(device) → (free_bytes, total_bytes)
 Pointer validation        validate_pointer(va)
 Runtime helpers           runtime_check_result(result, name)
                           runtime_set_device(device)
@@ -93,39 +89,53 @@ Stream management         stream_create_nonblocking() → opaque
 Async copy                memcpy_h2d_async(dst, src, size, stream)
                           memcpy_d2h_async(dst, src, size, stream)
 ```
-### 3.3 CLI Argument Propagation
+
+### 3.3 Singleton Lifecycle
 
 ```
-gms-server (supervisor)        --device-kind cuda|xpu
-  └─→ gms-server (per-device)  --device-kind  (forwarded)
-       └─→ Config.device_kind  ──→ GMSRPCServer ──→ GMS ──→ GMSAllocationManager
+Process startup (cli/server.py, cli/runner.py, snapshot loader/saver):
+    init_vmm(VMMDeviceType.from_str(args.device_type))
+
+Any module needing VMM:
+    vmm = get_vmm()          # returns cached singleton
+    vmm.runtime_set_device(device)
+    vmm.list_devices()
+    ...
 ```
 
-Client-side:
+The singleton is immutable after initialization. Conflicting re-initialization
+raises `RuntimeError`. Thread-safe via `threading.Lock`.
+
+### 3.4 CLI Argument Propagation
+
 ```
-GMSClientMemoryManager(socket, device, tag, device_kind=...)
-GMSStorageClient(..., device_kind=...)
+gms-server (supervisor)        --device-type cuda|xpu
+  └─→ init_vmm(device_type)
+  └─→ gms-server (per-device)  --device-type  (forwarded to child process)
+       └─→ init_vmm(device_type)
+       └─→ get_vmm() used throughout server, allocations, client
 ```
+
+No constructor threading — every module calls `get_vmm()` directly.
 
 ## 4. Files Changed (Phase 1)
 
 | File | Change |
 |------|--------|
-| `cli/args.py` | Add `--device-kind` argument, `Config.device_kind` field |
-| `cli/runner.py` | Pass `device_kind` to `GMSRPCServer` constructor |
-| `cli/server.py` | Parse `--device-kind`, use `vmm.list_devices()` instead of CUDA import |
-| `cli/snapshot/loader.py` | Accept + forward `device_kind` |
-| `cli/snapshot/saver.py` | Accept + forward `device_kind` |
-| `client/memory_manager.py` | Store `_device_kind`, expose `device_kind` property |
-| `client/torch/allocator.py` | CUDA-only guards, forward `device_kind` to manager/pool |
-| `common/vmm/__init__.py` | **NEW** — enum + factory |
-| `common/vmm/device.py` | **NEW** — VMMDevice Protocol |
+| `cli/server.py` | Parse `--device-type`, call `init_vmm()`, use `get_vmm().list_devices()` |
+| `cli/runner.py` | Call `init_vmm(config.device_type)` at startup |
+| `cli/snapshot/loader.py` | Call `init_vmm(device_type)`, `vmm = get_vmm()` in helpers |
+| `cli/snapshot/saver.py` | Call `init_vmm(device_type)`, `vmm = get_vmm()` in helpers |
+| `client/memory_manager.py` | `self._vmm = get_vmm()`, property `device_type` via `get_vmm_device_type()` |
+| `client/torch/allocator.py` | CUDA-only guards via `get_vmm_device_type()` |
+| `common/vmm/__init__.py` | **NEW** — enum + singleton |
+| `common/vmm/device.py` | **NEW** — VMMDevice ABC |
 | `common/vmm/cuda_utils.py` | **NEW** (moved from `common/cuda_utils.py`) — CUDA helpers + CudaVMM class |
 | `common/utils.py` | Add `align_to_granularity()` utility |
-| `server/allocations.py` | Accept `device_kind`, instantiate `_vmm` |
-| `server/gms.py` | Forward `device_kind` to allocations |
-| `server/rpc.py` | Forward `device_kind` to GMS |
-| `snapshot/storage_client.py` | Accept + forward `device_kind` to `GMSClientMemoryManager` |
+| `server/allocations.py` | `self._vmm = get_vmm()` |
+| `server/gms.py` | No longer forwards device params — singleton |
+| `server/rpc.py` | No longer forwards device params — singleton |
+| `snapshot/storage_client.py` | No longer accepts device_type — uses singleton |
 | `snapshot/disk.py` | Fix import path: `common.vmm` |
 | `snapshot/backends/nixl_staging.py` | Fix import path: `common.vmm` |
 | `snapshot/backends/pinned_host.py` | Fix import path: `common.vmm` |
@@ -134,10 +144,11 @@ GMSStorageClient(..., device_kind=...)
 ---
 
 ## 5. Phase 2 — XPU Implementation
-Depend on Phase 1 completion.
+
+Implement `XpuVMM(VMMDevice)` using oneAPI runtime APIs.
 
 ---
 
 ## 6. Backward Compatibility
 
-CUDA path should remain unchanged. All existing `--device-kind cuda` deployments should continue to work identically.
+CUDA path remains unchanged. All existing `--device-type cuda` deployments work identically. The default value is `cuda` everywhere.
