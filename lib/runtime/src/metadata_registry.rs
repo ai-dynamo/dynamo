@@ -39,6 +39,25 @@ pub type Owner = (u64, Option<String>);
 /// `(namespace, component, endpoint, slug, suffix, filename)`.
 type Key = (String, String, String, String, String, String);
 
+#[allow(clippy::too_many_arguments)]
+fn make_key(
+    namespace: &str,
+    component: &str,
+    endpoint: &str,
+    slug: &str,
+    suffix: &str,
+    filename: &str,
+) -> Key {
+    (
+        namespace.to_string(),
+        component.to_string(),
+        endpoint.to_string(),
+        slug.to_string(),
+        suffix.to_string(),
+        filename.to_string(),
+    )
+}
+
 /// Registration collided with a different owner — programmer error.
 #[derive(Debug, Error)]
 #[error("metadata-registry collision on key {key:?}: prior_owner={prior:?}, new_owner={new:?}")]
@@ -73,14 +92,7 @@ impl MetadataArtifactRegistry {
         filename: &str,
         path: PathBuf,
     ) -> Result<(), Box<CollisionError>> {
-        let key = (
-            namespace.to_string(),
-            component.to_string(),
-            endpoint.to_string(),
-            slug.to_string(),
-            suffix.to_string(),
-            filename.to_string(),
-        );
+        let key = make_key(namespace, component, endpoint, slug, suffix, filename);
         let mut entries = self.entries.write();
         if let Some((_, prior)) = entries.get(&key)
             && prior != owner
@@ -114,14 +126,7 @@ impl MetadataArtifactRegistry {
         suffix: &str,
         filename: &str,
     ) -> Option<PathBuf> {
-        let key = (
-            namespace.to_string(),
-            component.to_string(),
-            endpoint.to_string(),
-            slug.to_string(),
-            suffix.to_string(),
-            filename.to_string(),
-        );
+        let key = make_key(namespace, component, endpoint, slug, suffix, filename);
         self.entries.read().get(&key).map(|(p, _)| p.clone())
     }
 
