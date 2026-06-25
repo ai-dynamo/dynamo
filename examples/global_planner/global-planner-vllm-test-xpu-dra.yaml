@@ -11,6 +11,7 @@
 #   DGD gp-decode-0:  LocalRouter + VllmDecodeWorker  (TP1) + Planner
 #
 # Prerequisites:
+#   - Cluster Prometheus deployed and scraping LocalRouter pods via PodMonitor
 #   - Intel XPU GPU driver and DRA (Dynamic Resource Allocation) configured on the cluster.
 #     See: https://github.com/intel/intel-resource-drivers-for-kubernetes
 #   - HuggingFace token secret: kubectl create secret generic hf-token-secret \
@@ -239,7 +240,8 @@ spec:
             - ${MODEL_NAME}
             - --tensor-parallel-size
             - "1"
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
             - --block-size
             - "64"
             - --kv-transfer-config
@@ -339,7 +341,8 @@ spec:
             - ${MODEL_NAME}
             - --tensor-parallel-size
             - "1"
-            - --is-prefill-worker
+            - --disaggregation-mode
+            - prefill
             - --block-size
             - "64"
             - --kv-transfer-config
