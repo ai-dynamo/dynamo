@@ -24,6 +24,7 @@ from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
+    allocate_port,
     allocate_ports,
     deallocate_ports,
 )
@@ -109,8 +110,15 @@ class SGLangProcess(ManagedEngineProcessMixin):
         self._kv_event_ports = allocate_contiguous_ports(
             num_workers, kv_event_rank_span, DefaultPort.SYSTEM1.value
         )
+        # Forward-pass metrics: SGLang publishes FPM over a per-worker ipc://
+        # socket (path derived from the worker's connection_id), so unlike vLLM
+        # it never binds this port -- the env var only flips the feature on. One
+        # shared value across workers is therefore sufficient (no collision).
+        self._fpm_port = allocate_port(DefaultPort.SYSTEM1.value)
         request.addfinalizer(
-            lambda: deallocate_ports(self._system_ports + self._kv_event_ports)
+            lambda: deallocate_ports(
+                self._system_ports + self._kv_event_ports + [self._fpm_port]
+            )
         )
 
         if sglang_args is None:
@@ -207,6 +215,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
                 "DYN_SYSTEM_PORT": str(system_port),
+                "DYN_FORWARDPASS_METRIC_PORT": str(self._fpm_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
 
