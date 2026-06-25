@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Live Simulation with Mocker
+subtitle: Mocker simulates production engine scheduling, KV cache, and timing so you can exercise Dynamo's frontend, router, and planner without GPUs.
 ---
 
 Mocker is the live simulated engine in DynoSim. It runs as a Dynamo backend, registers workers, publishes KV events, and exercises the real frontend/router/planner path without requiring GPUs.

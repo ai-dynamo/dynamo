@@ -54,6 +54,7 @@ pub struct TurnTrace {
     pub delay_after_previous_ms: f64,
     pub priority: i32,
     pub strict_priority: u32,
+    pub policy_class: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -67,6 +68,7 @@ pub struct AgenticTurnTrace {
     pub delay_after_dependencies_ms: f64,
     pub priority: i32,
     pub strict_priority: u32,
+    pub policy_class: Option<String>,
     pub wait_for: Vec<String>,
     pub prefix_reset: bool,
 }

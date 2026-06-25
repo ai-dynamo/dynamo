@@ -126,6 +126,14 @@ impl<T: Send + Sync + 'static> Context<T> {
         self.registry.get_shared(key)
     }
 
+    /// Retrieve an optional object from the registry by key and type.
+    pub fn get_optional<V: Send + Sync + 'static>(
+        &self,
+        key: &str,
+    ) -> Result<Option<Arc<V>>, String> {
+        self.registry.get_shared_optional(key)
+    }
+
     /// Clone a unique object from the registry by key and type.
     pub fn clone_unique<V: Clone + Send + Sync + 'static>(&self, key: &str) -> Result<V, String> {
         self.registry.clone_unique(key)

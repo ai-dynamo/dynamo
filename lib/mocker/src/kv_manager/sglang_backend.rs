@@ -46,6 +46,29 @@ pub struct DecodeTokenReservation {
     indices: VecDeque<usize>,
 }
 
+pub struct SglangDestinationReservation {
+    pub(crate) prefix_len: usize,
+    prefix_indices: Vec<usize>,
+    last_node: NodeId,
+    unpublished_indices: Vec<usize>,
+    pub(crate) allocated_tokens: usize,
+}
+
+impl SglangDestinationReservation {
+    pub(crate) fn transferable_prompt_tokens(&self) -> usize {
+        self.unpublished_indices.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn indices(&self) -> Vec<usize> {
+        self.prefix_indices
+            .iter()
+            .chain(&self.unpublished_indices)
+            .copied()
+            .collect()
+    }
+}
+
 impl DecodeTokenReservation {
     pub fn take(&mut self) -> usize {
         self.indices
@@ -179,9 +202,10 @@ impl SglangKvManager {
         // Find the new deepest node after insert
         let (_, new_last_node) = self.cache.match_prefix(token_ids);
 
-        // Transfer lock: release old path, protect new path
-        self.cache.dec_lock_ref(last_node);
+        // Acquire the extended path before releasing the old prefix so
+        // destination activation never leaves valid transferred KV unprotected.
         self.cache.inc_lock_ref(new_last_node);
+        self.cache.dec_lock_ref(last_node);
 
         new_last_node
     }
@@ -204,6 +228,75 @@ impl SglangKvManager {
             })
     }
 
+    pub(crate) fn reserve_destination(
+        &mut self,
+        token_ids: &[u64],
+    ) -> Option<SglangDestinationReservation> {
+        let (prefix_len, last_node) = self.cache.match_prefix(token_ids);
+        let mut prefix_indices = self.collect_path_indices(last_node);
+        prefix_indices.truncate(prefix_len);
+        self.cache.inc_lock_ref(last_node);
+
+        let allocated_tokens = if token_ids.is_empty() {
+            0
+        } else {
+            token_ids.len().div_ceil(self.cache.page_size()) * self.cache.page_size()
+        };
+        let fresh_tokens = allocated_tokens.saturating_sub(prefix_len);
+        let reservable = self.cache.token_pool.available() + self.cache.evictable_size;
+        if fresh_tokens > reservable {
+            self.cache.dec_lock_ref(last_node);
+            return None;
+        }
+        let available = self.cache.token_pool.available();
+        if fresh_tokens > available {
+            self.evict(fresh_tokens - available);
+        }
+        let Some(unpublished_indices) = self.cache.token_pool.allocate(fresh_tokens) else {
+            self.cache.dec_lock_ref(last_node);
+            return None;
+        };
+        self.log_trace("reserve_destination", fresh_tokens);
+        Some(SglangDestinationReservation {
+            prefix_len,
+            prefix_indices,
+            last_node,
+            unpublished_indices,
+            allocated_tokens,
+        })
+    }
+
+    pub(crate) fn activate_destination(
+        &mut self,
+        reservation: SglangDestinationReservation,
+        token_ids: &[u64],
+    ) -> AllocResult {
+        let SglangDestinationReservation {
+            prefix_len,
+            mut prefix_indices,
+            last_node,
+            mut unpublished_indices,
+            allocated_tokens: _,
+        } = reservation;
+        let missing_tokens = token_ids.len().saturating_sub(prefix_len);
+        let surplus = unpublished_indices.split_off(missing_tokens);
+        self.release_unpublished_indices(surplus);
+        prefix_indices.append(&mut unpublished_indices);
+        let new_last_node =
+            self.cache_unfinished_req(token_ids, &prefix_indices, last_node, prefix_len);
+        self.log_trace("activate_destination", missing_tokens);
+        AllocResult {
+            prefix_len,
+            kv_indices: prefix_indices,
+            last_node: new_last_node,
+        }
+    }
+
+    pub(crate) fn cancel_destination(&mut self, reservation: SglangDestinationReservation) {
+        self.cache.dec_lock_ref(reservation.last_node);
+        self.release_unpublished_indices(reservation.unpublished_indices);
+    }
+
     pub fn publish_decode_token(&mut self, idx: usize, last_idx: Option<usize>) {
         let _ = (idx, last_idx);
         self.log_trace("allocation", 1);
@@ -211,6 +304,10 @@ impl SglangKvManager {
 
     pub fn release_decode_reservation(&mut self, reservation: DecodeTokenReservation) {
         let indices = reservation.indices.into_iter().collect::<Vec<_>>();
+        self.release_unpublished_indices(indices);
+    }
+
+    fn release_unpublished_indices(&mut self, indices: Vec<usize>) {
         if indices.is_empty() {
             return;
         }
@@ -555,6 +652,49 @@ mod tests {
         assert_eq!(r2.prefix_len, 5);
         assert_eq!(r2.kv_indices.len(), 7); // 5 reused + 2 new pages
         assert_eq!(mgr.cache().token_pool.available(), 93); // 100 - 5 - 2
+    }
+
+    #[test]
+    fn destination_transfer_footprint_uses_missing_physical_pages() {
+        let mut mgr = SglangKvManager::new(64, 4, KvEventPublishers::default(), 0);
+        let prompt = (0..10).collect::<Vec<_>>();
+
+        let cold = mgr
+            .reserve_destination(&prompt)
+            .expect("cold destination reservation should fit");
+        assert_eq!(cold.transferable_prompt_tokens(), 12);
+        mgr.cancel_destination(cold);
+
+        let prefix_tokens = &prompt[..4];
+        let prefix = mgr
+            .allocate_for_request(prefix_tokens)
+            .expect("prefix allocation should fit");
+        mgr.cache_finished_req(
+            prefix_tokens,
+            &prefix.kv_indices,
+            prefix.last_node,
+            prefix.prefix_len,
+        );
+        let partial = mgr
+            .reserve_destination(&prompt)
+            .expect("partially cached destination reservation should fit");
+        assert_eq!(partial.transferable_prompt_tokens(), 8);
+        mgr.cancel_destination(partial);
+
+        let aligned_tokens = (20..28).collect::<Vec<_>>();
+        let aligned = mgr
+            .allocate_for_request(&aligned_tokens)
+            .expect("aligned prompt allocation should fit");
+        mgr.cache_finished_req(
+            &aligned_tokens,
+            &aligned.kv_indices,
+            aligned.last_node,
+            aligned.prefix_len,
+        );
+        let full_hit = mgr
+            .reserve_destination(&aligned_tokens)
+            .expect("fully cached destination reservation should fit");
+        assert_eq!(full_hit.transferable_prompt_tokens(), 0);
     }
 
     #[test]

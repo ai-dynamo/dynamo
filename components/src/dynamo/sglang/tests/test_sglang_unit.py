@@ -13,15 +13,18 @@ import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
 import dynamo.sglang._compat as sglang_compat
+from dynamo.common.constants import EmbeddingTransferMode
 from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
 )
 from dynamo.sglang.args import (
+    _normalize_multimodal_disaggregation_args,
     parse_args,
     should_fetch_model,
     use_modelexpress_remote_instance,
 )
+from dynamo.sglang.backend_args import DynamoSGLangConfig
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
@@ -53,6 +56,27 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+def _make_sglang_config(**overrides):
+    config = DynamoSGLangConfig()
+    config.use_sglang_tokenizer = False
+    config.multimodal_encode_worker = False
+    config.multimodal_worker = False
+    config.enable_multimodal = False
+    config.dedicated_mm_encoder = False
+    config.embedding_transfer_mode = EmbeddingTransferMode.NIXL_WRITE
+    config.embedding_worker = False
+    config.image_diffusion_worker = False
+    config.video_generation_worker = False
+    config.enable_rl = False
+    config.frontend_decoding = False
+    config.sglang_trace_level = 2
+    config.disagg_config = None
+    config.disagg_config_key = None
+    for key, value in overrides.items():
+        setattr(config, key, value)
+    return config
 
 
 def test_compat_restores_sglang_top_level_exports():
@@ -314,6 +338,130 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
 
     config = await parse_args(sys.argv[1:])
     assert config.dynamo_args.namespace == "custom-ns"
+
+
+@pytest.mark.parametrize(
+    (
+        "mode",
+        "expected_encode_worker",
+        "expected_mm_worker",
+        "expected_args",
+    ),
+    [
+        ("encode", True, False, []),
+        ("prefill", False, False, ["--disaggregation-mode", "prefill"]),
+        ("decode", False, False, ["--disaggregation-mode", "decode"]),
+        ("agg", False, False, ["--disaggregation-mode", "null"]),
+        ("pd", False, False, ["--disaggregation-mode", "null"]),
+    ],
+)
+def test_enable_multimodal_disaggregation_mode_maps_sglang_roles(
+    mode,
+    expected_encode_worker,
+    expected_mm_worker,
+    expected_args,
+):
+    """Canonical multimodal roles map to SGLang's current worker flags."""
+    config = _make_sglang_config(enable_multimodal=True)
+
+    normalized = _normalize_multimodal_disaggregation_args(
+        ["--disaggregation-mode", mode], config
+    )
+
+    assert normalized == expected_args
+    assert config.multimodal_encode_worker is expected_encode_worker
+    assert config.multimodal_worker is expected_mm_worker
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_args"),
+    [
+        ("prefill", ["--disaggregation-mode", "prefill"]),
+        ("decode", ["--disaggregation-mode", "decode"]),
+        ("pd", ["--disaggregation-mode", "null"]),
+    ],
+)
+def test_dedicated_mm_encoder_selects_internal_multimodal_worker(mode, expected_args):
+    """Dedicated-mm-encoder selects internal E/PD or E/P/D workers."""
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    normalized = _normalize_multimodal_disaggregation_args(
+        ["--disaggregation-mode", mode], config
+    )
+
+    assert normalized == expected_args
+    assert config.multimodal_encode_worker is False
+    assert config.multimodal_worker is True
+
+
+def test_dedicated_mm_encoder_rejects_standalone_modes():
+    """The dedicated encoder flag must not silently turn agg/encode into a different topology."""
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="--dedicated-mm-encoder only applies"):
+        _normalize_multimodal_disaggregation_args(
+            ["--disaggregation-mode", "agg"], config
+        )
+
+
+def test_dedicated_mm_encoder_rejects_encode_worker_mode():
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="Do not combine"):
+        _normalize_multimodal_disaggregation_args(
+            ["--disaggregation-mode", "encode"], config
+        )
+
+
+def test_dedicated_mm_encoder_requires_explicit_worker_role():
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="requires --disaggregation-mode"):
+        _normalize_multimodal_disaggregation_args([], config)
+
+
+def test_multimodal_disaggregation_mode_uses_last_cli_value_with_dedicated_mm_encoder():
+    """Config-merged args precede CLI args, so the last explicit value must win."""
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    normalized = _normalize_multimodal_disaggregation_args(
+        ["--disaggregation-mode", "prefill", "--disaggregation-mode", "pd"],
+        config,
+    )
+
+    assert normalized == ["--disaggregation-mode", "null"]
+    assert config.multimodal_worker is True
+
+
+def test_enable_multimodal_without_role_keeps_standalone_worker():
+    """Capability-only SGLang serving should not select the internal EPD worker."""
+    config = _make_sglang_config(enable_multimodal=True)
+
+    normalized = _normalize_multimodal_disaggregation_args([], config)
+
+    assert normalized == []
+    assert config.enable_multimodal is True
+    assert config.multimodal_worker is False
+    assert config.multimodal_encode_worker is False
+
+
+def test_legacy_multimodal_worker_sets_enable_multimodal():
+    """Legacy multimodal role stays accepted while enabling the canonical flag."""
+    config = _make_sglang_config(multimodal_worker=True)
+
+    with pytest.warns(DeprecationWarning, match="--multimodal-worker"):
+        config.validate()
+
+    assert config.enable_multimodal is True
+    assert config.multimodal_worker is True
+
+
+def test_dedicated_mm_encoder_requires_enable_multimodal():
+    """Dedicated-mm-encoder is a topology modifier, not a multimodal enable switch."""
+    config = _make_sglang_config(dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="requires --enable-multimodal"):
+        config.validate()
 
 
 @pytest.mark.asyncio

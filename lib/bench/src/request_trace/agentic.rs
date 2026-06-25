@@ -50,36 +50,36 @@ pub fn build_agentic_mooncake_rows(
         }
     }
 
-    let mut trajectory_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut parent_by_trajectory: HashMap<String, String> = HashMap::new();
+    let mut session_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut parent_by_session: HashMap<String, String> = HashMap::new();
     for (idx, request) in loaded.requests.iter().enumerate() {
-        let trajectory_id = trajectory_id_for(request);
-        trajectory_to_indices
-            .entry(trajectory_id.clone())
+        let session_id = session_id_for(request);
+        session_to_indices
+            .entry(session_id.clone())
             .or_default()
             .push(idx);
         if let Some(parent) = request
             .agent_context
             .as_ref()
-            .and_then(|context| context.parent_trajectory_id.clone())
+            .and_then(|context| context.parent_session_id.clone())
         {
-            match parent_by_trajectory.get(&trajectory_id) {
+            match parent_by_session.get(&session_id) {
                 Some(existing) if existing != &parent => {
                     bail!(
-                        "trajectory {} has conflicting parent_trajectory_id values: {} and {}",
-                        trajectory_id,
+                        "session {} has conflicting parent_session_id values: {} and {}",
+                        session_id,
                         existing,
                         parent
                     );
                 }
                 Some(_) => {}
                 None => {
-                    parent_by_trajectory.insert(trajectory_id, parent);
+                    parent_by_session.insert(session_id, parent);
                 }
             }
         }
     }
-    for indices in trajectory_to_indices.values_mut() {
+    for indices in session_to_indices.values_mut() {
         indices.sort_by_key(|idx| {
             let request = &loaded.requests[*idx];
             (
@@ -94,7 +94,7 @@ pub fn build_agentic_mooncake_rows(
     let mut branches: Vec<Vec<String>> = vec![Vec::new(); loaded.requests.len()];
     let mut prefix_reset = vec![false; loaded.requests.len()];
 
-    for indices in trajectory_to_indices.values() {
+    for indices in session_to_indices.values() {
         for (pos, idx) in indices.iter().copied().enumerate() {
             prefix_reset[idx] = pos == 0;
             if pos > 0 {
@@ -104,11 +104,11 @@ pub fn build_agentic_mooncake_rows(
         }
     }
 
-    for (trajectory_id, parent_id) in &parent_by_trajectory {
-        let Some(child_indices) = trajectory_to_indices.get(trajectory_id) else {
+    for (session_id, parent_id) in &parent_by_session {
+        let Some(child_indices) = session_to_indices.get(session_id) else {
             continue;
         };
-        let Some(parent_indices) = trajectory_to_indices.get(parent_id) else {
+        let Some(parent_indices) = session_to_indices.get(parent_id) else {
             continue;
         };
         let first_child_idx = child_indices[0];
@@ -128,7 +128,7 @@ pub fn build_agentic_mooncake_rows(
                         &right_request.request.request_id,
                     ))
             })
-            .expect("child trajectory is non-empty");
+            .expect("child session is non-empty");
         let child_start_ms = loaded.requests[first_child_idx].start_ms;
         let child_end_ms = loaded.requests[last_finishing_child_idx].end_ms;
 
@@ -152,14 +152,14 @@ pub fn build_agentic_mooncake_rows(
         }
     }
 
-    let mut tools_by_trajectory: HashMap<String, Vec<ToolEntry>> = HashMap::new();
+    let mut tools_by_session: HashMap<String, Vec<ToolEntry>> = HashMap::new();
     for tool in loaded.tools {
-        tools_by_trajectory
-            .entry(tool.trajectory_id.clone())
+        tools_by_session
+            .entry(tool.session_id.clone())
             .or_default()
             .push(tool);
     }
-    for tools in tools_by_trajectory.values_mut() {
+    for tools in tools_by_session.values_mut() {
         tools.sort_by_key(|tool| (tool.start_ms, tool.end_ms));
     }
 
@@ -173,7 +173,7 @@ pub fn build_agentic_mooncake_rows(
                 request.request.request_id
             )
         })?;
-        let trajectory_id = trajectory_id_for(request);
+        let session_id = session_id_for(request);
         let dep_end_ms = wait_for[idx]
             .iter()
             .filter_map(|dependency| id_to_index.get(dependency))
@@ -181,8 +181,8 @@ pub fn build_agentic_mooncake_rows(
             .max();
         let (delay, tool_wait_ms, tool_events) = if let Some(dep_end_ms) = dep_end_ms {
             let observed_gap_ms = request.start_ms.saturating_sub(dep_end_ms).max(0) as f64;
-            let (raw_tool_wait_ms, contributing) = tools_by_trajectory
-                .get(&trajectory_id)
+            let (raw_tool_wait_ms, contributing) = tools_by_session
+                .get(&session_id)
                 .map(|tools| collect_tools_in_window(tools, dep_end_ms, request.start_ms))
                 .unwrap_or_else(|| (0.0, Vec::new()));
             let tool_wait_ms = raw_tool_wait_ms.min(observed_gap_ms);
@@ -202,7 +202,7 @@ pub fn build_agentic_mooncake_rows(
 
         rows.push(AgenticMooncakeRow {
             request_id: request.request.request_id.clone(),
-            session_id: Some(trajectory_id),
+            session_id: Some(session_id),
             input_length: Some(request.replay.input_length),
             output_length: Some(
                 usize::try_from(output_length).context("output length does not fit in usize")?,
@@ -222,11 +222,11 @@ pub fn build_agentic_mooncake_rows(
     Ok((trace_block_size, rows))
 }
 
-fn trajectory_id_for(request: &RequestEntry) -> String {
+fn session_id_for(request: &RequestEntry) -> String {
     request
         .agent_context
         .as_ref()
-        .map(|context| context.trajectory_id.clone())
+        .map(|context| context.session_id.clone())
         .unwrap_or_else(|| request.request.request_id.clone())
 }
 
@@ -321,7 +321,7 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 #[derive(Debug, Default)]
 pub struct ToolSummary {
     pub total_spans: usize,
-    pub trajectories: usize,
+    pub sessions: usize,
     pub by_status: BTreeMap<String, usize>,
     pub by_class: BTreeMap<String, usize>,
     pub total_wall_ms: f64,
@@ -331,8 +331,8 @@ impl ToolSummary {
     pub fn render(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
-            "Tool events: {} spans across {} trajectories\n",
-            self.total_spans, self.trajectories
+            "Tool events: {} spans across {} sessions\n",
+            self.total_spans, self.sessions
         ));
         out.push_str(&format!(
             "  Status:    {}\n",
@@ -367,7 +367,7 @@ pub fn summarize_tools(tools: &[ToolEntry]) -> ToolSummary {
     }
     summary.total_spans = tools.len();
 
-    let mut trajectories: HashSet<&str> = HashSet::new();
+    let mut sessions: HashSet<&str> = HashSet::new();
     for tool in tools {
         let status_key = if tool.status.is_empty() {
             tool.terminal_event.clone()
@@ -377,9 +377,9 @@ pub fn summarize_tools(tools: &[ToolEntry]) -> ToolSummary {
         *summary.by_status.entry(status_key).or_insert(0) += 1;
         *summary.by_class.entry(tool.tool_class.clone()).or_insert(0) += 1;
         summary.total_wall_ms += tool.duration_ms;
-        trajectories.insert(tool.trajectory_id.as_str());
+        sessions.insert(tool.session_id.as_str());
     }
-    summary.trajectories = trajectories.len();
+    summary.sessions = sessions.len();
     summary
 }
 
@@ -418,29 +418,29 @@ mod tests {
 
     fn contextual_request(
         request_id: &str,
-        trajectory_id: &str,
-        parent_trajectory_id: Option<&str>,
+        session_id: &str,
+        parent_session_id: Option<&str>,
         start_ms: i64,
         end_ms: i64,
         sequence_hashes: Vec<u64>,
     ) -> RequestEntry {
         let mut entry = request(request_id, start_ms, end_ms, sequence_hashes);
         entry.agent_context = Some(AgentContextFields {
-            trajectory_id: trajectory_id.to_string(),
-            parent_trajectory_id: parent_trajectory_id.map(str::to_string),
+            session_id: session_id.to_string(),
+            parent_session_id: parent_session_id.map(str::to_string),
         });
         entry
     }
 
     fn tool(
-        trajectory_id: &str,
+        session_id: &str,
         tool_call_id: &str,
         tool_class: &str,
         start_ms: i64,
         end_ms: i64,
     ) -> ToolEntry {
         ToolEntry {
-            trajectory_id: trajectory_id.to_string(),
+            session_id: session_id.to_string(),
             start_ms,
             end_ms,
             tool_call_id: tool_call_id.to_string(),
@@ -549,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn agentic_converter_rejects_conflicting_trajectory_parents() {
+    fn agentic_converter_rejects_conflicting_session_parents() {
         let loaded = LoadedAgentTrace {
             requests: vec![
                 contextual_request("child-1", "child", Some("root-a"), 1_000, 1_100, vec![11]),
@@ -559,7 +559,7 @@ mod tests {
         };
 
         let err = build_agentic_mooncake_rows(loaded).unwrap_err();
-        assert!(err.to_string().contains("conflicting parent_trajectory_id"));
+        assert!(err.to_string().contains("conflicting parent_session_id"));
     }
 
     #[test]
