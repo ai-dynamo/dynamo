@@ -14,8 +14,11 @@ use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::context::Controller;
 use opentelemetry::global::BoxedSpan;
-use opentelemetry::trace::{Span as OtelSpan, Status, TraceContextExt, Tracer};
-use opentelemetry::{KeyValue, global};
+use opentelemetry::trace::{
+    Span as OtelSpan, SpanContext, SpanId, Status, TraceContextExt, TraceFlags, TraceId,
+    TraceState, Tracer,
+};
+use opentelemetry::{Context as OtelContext, KeyValue, global};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 use std::collections::{BTreeMap, HashMap};
@@ -429,6 +432,78 @@ impl Context {
             }
         }
         Some(headers)
+    }
+
+    /// Open the worker-level `engine.generate` span for backends that do
+    /// NOT run through the Rust `EngineAdapter` (the legacy per-backend
+    /// workers, e.g. TRT-LLM's `HandlerBase`). The unified backend
+    /// receives this span from the adapter via `with_span`; legacy
+    /// handlers call this once, before invoking the engine, so that:
+    ///
+    ///   * `trace_headers()` returns the *bridged* traceparent — downstream
+    ///     engine internals (TRT-LLM forward, etc.) nest UNDER
+    ///     `engine.generate` instead of directly under the inbound frontend
+    ///     span, matching the unified backend's trace tree, and
+    ///   * `current_span()` / `start_span()` become functional for the
+    ///     legacy handler.
+    ///
+    /// The span is parented to the inbound `DistributedTraceContext` (the
+    /// frontend's span) when present — the same source `fallback_traceparent`
+    /// uses — so the worker layer slots contiguously into the distributed
+    /// trace. It is stored on the `Context` and ends when the `Context` is
+    /// dropped at request completion.
+    ///
+    /// Idempotent: if a span is already attached (a second call, or the
+    /// unified path) it is reused and no new span is opened. Returns a
+    /// no-op `SpanProxy` when the OTel bridge layer isn't installed (the
+    /// span carries no valid OTel context).
+    ///
+    /// `attrs` are applied to the span (e.g. `{"disagg_role": "prefill"}`).
+    #[pyo3(signature = (attrs=None))]
+    fn start_engine_span(&mut self, attrs: Option<&Bound<'_, PyDict>>) -> PyResult<SpanProxy> {
+        if self.span.is_none() {
+            let span = tracing::info_span!(target: "request_span", "engine.generate");
+            // Parent to the inbound frontend span so the worker layer is
+            // contiguous in the distributed trace. No-op when the inbound
+            // context is absent or malformed — the span is then a root.
+            if let Some(tc) = self.trace_context.as_ref()
+                && let (Ok(trace_id), Ok(span_id)) = (
+                    TraceId::from_hex(&tc.trace_id),
+                    SpanId::from_hex(&tc.span_id),
+                )
+            {
+                let parent = OtelContext::new().with_remote_span_context(SpanContext::new(
+                    trace_id,
+                    span_id,
+                    TraceFlags::SAMPLED,
+                    true, // is_remote
+                    TraceState::default(),
+                ));
+                // Errors only when the bridge layer isn't installed; the
+                // `is_valid()` check below handles (and warns about) that.
+                let _ = span.set_parent(parent);
+            }
+            self.span = Some(span);
+        }
+
+        let span = self
+            .span
+            .as_ref()
+            .expect("span attached above or already present");
+        if !span.context().span().span_context().is_valid() {
+            warn_bridge_missing_once("start_engine_span");
+            return Ok(SpanProxy {
+                inner: SpanProxyInner::NoOp,
+            });
+        }
+        if let Some(d) = attrs {
+            for (k, v) in d.iter() {
+                span.set_attribute(k.extract::<String>()?, py_to_otel_value(&v)?);
+            }
+        }
+        Ok(SpanProxy {
+            inner: SpanProxyInner::Tracing(span.clone()),
+        })
     }
 }
 
