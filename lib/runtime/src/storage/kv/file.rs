@@ -316,8 +316,8 @@ impl Bucket for Directory {
             .map_err(a_to_fs_err)?;
 
         if revision == 0 {
-            // No-clobber publish: the link fails if another writer already created the key,
-            // and readers never see a partial target file.
+            // No-clobber publish for revision-zero inserts: the link fails if another
+            // writer already created the key, and readers never see a partial target file.
             match fs::hard_link(&temp_path, &full_path) {
                 Ok(()) => {
                     if let Err(err) = fs::remove_file(&temp_path) {
@@ -340,7 +340,16 @@ impl Bucket for Directory {
                     }
                     return Ok(StoreOutcome::Exists(0));
                 }
-                Err(err) => return Err(to_fs_err(err)),
+                Err(err) => {
+                    if let Err(remove_err) = fs::remove_file(&temp_path) {
+                        tracing::warn!(
+                            path = %temp_path.display(),
+                            error = %remove_err,
+                            "Failed to remove unused FileStore temp file after create-if-absent error"
+                        );
+                    }
+                    return Err(to_fs_err(err));
+                }
             }
         }
 
@@ -350,7 +359,7 @@ impl Bucket for Directory {
             .map_err(a_to_fs_err)?;
 
         self.owned_files.lock().insert(full_path.clone());
-        Ok(StoreOutcome::Created(0))
+        Ok(StoreOutcome::Created(revision))
     }
 
     /// Read a file from the directory
@@ -608,7 +617,7 @@ mod tests {
         let value = bucket.get(&key).await.unwrap().unwrap();
         cancel_token.cancel();
 
-        assert_eq!(outcome, StoreOutcome::Created(0));
+        assert_eq!(outcome, StoreOutcome::Created(1));
         assert_eq!(value.as_ref(), b"new");
     }
 
