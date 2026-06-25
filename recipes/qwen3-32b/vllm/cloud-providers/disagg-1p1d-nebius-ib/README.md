@@ -8,7 +8,7 @@ This is the **Nebius MK8S NDR InfiniBand** member of the cross-provider benchmar
 |---|---|
 | **RDMA resource** | `rdma/ib: "1"` under `resources.limits.custom`. This is the Network Operator's RDMA-shared-device-plugin slot count, **not** an HCA count. One slot grants the pod access to all 8 HCAs via `/dev/infiniband/*`. Do NOT request `rdma/ib: 8` — pod will be unschedulable. |
 | **NIXL backend selection** | Defaults (UCX). No `DYN_KVBM_NIXL_BACKEND_LIBFABRIC` / `_UCX` env. |
-| **Transport env** | `UCX_NET_DEVICES=mlx5_0:1..7` (pins KV transfer to the 8 NDR HCAs), `UCX_IB_GPU_DIRECT_RDMA=yes`. Plus `NCCL_IB_HCA=mlx5_0,...,mlx5_7`, `NCCL_IB_DISABLE=0`, `NCCL_SOCKET_IFNAME=eth0`. **No `UCX_TLS`** — let UCX auto-probe. |
+| **Transport env** | `UCX_NET_DEVICES=mlx5_0:1..7` (pins KV transfer to the 8 NDR HCAs), `UCX_IB_GPU_DIRECT_RDMA=yes`, `NCCL_SOCKET_IFNAME=eth0`. **No `UCX_TLS`** — let UCX auto-probe. |
 | **HostPath volumes** | `/dev/infiniband` (hostPath) and `/dev/shm` (tmpfs emptyDir, 64 GiB) bind-mounted into both worker pods. |
 
 

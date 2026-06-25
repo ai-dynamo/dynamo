@@ -23,9 +23,7 @@ Each subdirectory ships:
 |---|---|---|---|
 | Frontend | 1 | — | any CPU node |
 | VllmPrefillWorker | 1 | **4** | one GPU node |
-| VllmDecodeWorker | 1 | **4** | **different** GPU node — pod anti-affinity on `kubernetes.io/hostname` |
-
-The pod anti-affinity is load-bearing: it forces KV transfer across the provider's RDMA fabric, not the intra-node NVLink/CUDA-IPC shortcut.
+| VllmDecodeWorker | 1 | **4** | one GPU node |
 
 ## What differs per variant
 
@@ -45,13 +43,15 @@ Each variant overrides **only** what its fabric requires:
 1. **AKS uses `rdma/shared_ib`, not `rdma/ib`.** AKS schedules RDMA through the NVIDIA Network Operator's *shared* IB device plugin, so the resource key differs from Nebius/Nscale (`rdma/ib`). Same `"1"` slot convention, different key — copying the Nebius/Nscale value leaves the pod without its RDMA resource.
 2. **Nscale's `UCX_NET_DEVICES` is a non-contiguous subset (`mlx5_0..5,10,11`).** Its nodes expose a mixed fabric; the listed NICs are the compute fabric and deliberately exclude the side-fabric NICs (`mlx5_6..9`, smaller MTU / different subnet). Listing the "obvious" `mlx5_0..7` (like Nebius) puts transfers on the side fabric and breaks the cross-rank handshake. This value must be derived from `ibv_devinfo` on the actual nodes — it cannot be copied from another CSP.
 
-Everything else (vLLM args, anti-affinity, `IPC_LOCK`, NIXL telemetry, Prometheus annotations, etcd/NATS discovery) is identical and copied verbatim.
+Everything else (vLLM args, `IPC_LOCK`, NIXL telemetry, Prometheus annotations, etcd/NATS discovery) is identical and copied verbatim.
 
 ## Workload
 
 All `perf.yaml` files run the same aiperf profile against the [Mooncake conversation trace](https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/conversation_trace.jsonl): 12,031 requests, ISL avg ~12k tokens, OSL avg ~340 tokens, streaming, goodput SLA `TTFT≤2000ms ∧ ITL≤25ms`.
 
 ## Measured KV bandwidth (TP=4, Mooncake trace, formula: `rank0_bytes × TP / wall_time`)
+
+Measured with prefill and decode pinned to **separate nodes** (`kubernetes.io/hostname` pod anti-affinity) to force KV transfer over the RDMA fabric. The recipes don't set that anti-affinity by default — to reproduce these numbers, place the two workers on separate nodes.
 
 | Variant | KV BW | Per-rank | Mean ITL | Mean TTFT | Completion | Notes |
 |---|---:|---:|---:|---:|---:|---|

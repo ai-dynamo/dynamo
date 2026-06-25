@@ -3,7 +3,7 @@
 #
 # Qwen3-32B BF16 disagg, 1 prefill + 1 decode, cross-node over Nebius NDR InfiniBand.
 # Purpose: measure NIXL KV-transfer bandwidth over the UCX/IB backend on Nebius MK8S.
-# Topology: TP=4 prefill on node A, TP=4 decode on node B (pod anti-affinity). TP=4 is the cross-CSP family standard.
+# Topology: TP=4 prefill + TP=4 decode. TP=4 is the cross-CSP family standard.
 # Each worker gets `rdma/ib: 1` — the Network Operator's RDMA shared-device-plugin
 # slot count (NOT an HCA count). One slot grants the pod access to all 8 HCAs via
 # /dev/infiniband/*. 8 x NDR400 = 3.2 Tb/s aggregate per H200 node.
@@ -26,7 +26,7 @@ spec:
           # The vllm-runtime:1.1.1 image has a built-in ENTRYPOINT for the frontend
           # role. Explicit `python -m dynamo.frontend` makes the Rust binary parse
           # those as args and crash with "Unknown arguments specified".
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
           workingDir: /workspace
           # On a fresh empty PVC, the image's default user can't create /model-cache/hub
           # for tokenizer registration → Permission denied (os error 13) → `/v1/models`
@@ -53,15 +53,6 @@ spec:
           prometheus.io/port: "19090"
           prometheus.io/path: "/metrics"
       extraPodSpec:
-        affinity:
-          podAntiAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-component-type
-                  operator: In
-                  values: [worker]
-              topologyKey: kubernetes.io/hostname
         mainContainer:
           command: [python3, -m, dynamo.vllm]
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
@@ -99,12 +90,9 @@ spec:
           # is unset, so no explicit selector env is needed here.
           # --- UCX over NDR InfiniBand (8 ConnectX-7 HCAs: mlx5_0..mlx5_7) ---
           # Don't set UCX_TLS — an explicit transport allowlist can omit the internal
-          # transports UCX needs for wireup. Restrict the NIC set with UCX_NET_DEVICES.
-          - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1" }
-          - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
-          # --- NCCL over the same 8 IB rails; eth0 is control plane only ---
-          - { name: NCCL_IB_HCA,            value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
-          - { name: NCCL_IB_DISABLE,        value: "0" }
+          # transports UCX needs for wireup. Let UCX auto-probe the NIC set (all 8 HCAs
+          # are NDR-IB compute; there is no side fabric to exclude).
+          # --- NCCL: IB transport not exercised in 1P1D (TP uses NVLink/P2P); eth0 is control plane only ---
           - { name: NCCL_SOCKET_IFNAME,     value: "eth0" }
           - { name: NCCL_DEBUG,             value: "WARN" }
           # --- Dynamo / vLLM ---
@@ -142,15 +130,6 @@ spec:
           prometheus.io/port: "19090"
           prometheus.io/path: "/metrics"
       extraPodSpec:
-        affinity:
-          podAntiAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-component-type
-                  operator: In
-                  values: [worker]
-              topologyKey: kubernetes.io/hostname
         mainContainer:
           command: [python3, -m, dynamo.vllm]
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
@@ -185,11 +164,7 @@ spec:
           - { name: NIXL_TELEMETRY_EXPORTER,        value: "prometheus" }
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
           # NOTE: no UCX_TLS — see prefill block; let UCX auto-probe.
-          - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_7:1" }
-          - { name: UCX_IB_GPU_DIRECT_RDMA, value: "yes" }
           - { name: UCX_RNDV_THRESH,        value: "8192" }
-          - { name: NCCL_IB_HCA,            value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" }
-          - { name: NCCL_IB_DISABLE,        value: "0" }
           - { name: NCCL_SOCKET_IFNAME,     value: "eth0" }
           - { name: NCCL_DEBUG,             value: "WARN" }
           - { name: DYN_HEALTH_CHECK_ENABLED, value: "false" }

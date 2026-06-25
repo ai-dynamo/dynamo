@@ -19,7 +19,7 @@ spec:
           value: /shared-models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
           workingDir: /workspace
       replicas: 1
       resources:
@@ -41,15 +41,6 @@ spec:
       extraPodSpec:
         tolerations:
         - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
-        affinity:
-          podAntiAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-component-type
-                  operator: In
-                  values: [worker]
-              topologyKey: kubernetes.io/hostname
         mainContainer:
           command: [python3, -m, dynamo.vllm]
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
@@ -87,7 +78,6 @@ spec:
           # Side fabric (mlx5_6..9) must be excluded: mixing fabrics caused
           # NIXL_ERR_REMOTE_DISCONNECT at first transfer in earlier experiments.
           - { name: UCX_NET_DEVICES,    value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1" }
-          - { name: MX_RDMA_NIC_PIN,    value: "auto" }
           - { name: NIXL_LOG_LEVEL,     value: "INFO" }
           # - { name: UCX_LOG_LEVEL,      value: "debug" }
           # - { name: UCX_RNDV_SCHEME,    value: "get_zcopy" }
@@ -131,15 +121,6 @@ spec:
       extraPodSpec:
         tolerations:
         - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }
-        affinity:
-          podAntiAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-component-type
-                  operator: In
-                  values: [worker]
-              topologyKey: kubernetes.io/hostname
         mainContainer:
           command: [python3, -m, dynamo.vllm]
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
@@ -175,7 +156,6 @@ spec:
           - { name: NIXL_TELEMETRY_PROMETHEUS_PORT,  value: "19090" }
           # --- UCX IB minimal symmetric (see prefill block) ---
           - { name: UCX_NET_DEVICES,        value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1" }
-          - { name: MX_RDMA_NIC_PIN,        value: "auto" }
           - { name: NIXL_LOG_LEVEL,         value: "INFO" }
           # - { name: UCX_LOG_LEVEL,          value: "debug" }
           # - { name: UCX_RNDV_SCHEME,        value: "get_zcopy" }

@@ -14,7 +14,7 @@ This is the **GCP GKE / A4X / RoCEv2-over-ConnectX-7** member of the cross-provi
 ## GKE-A4X-specific findings
 
 - **All-or-nothing GPU allocation.** GKE GPUDirect-RDMA requires a pod to use *all* GPUs **and** all RDMA NICs on the node — RDMA can't be shared between pods on a node. Request exactly `gpu: '4'` (a full A4X node).
-- **No cross-node NVLink shortcut without a ComputeDomain.** GB200 NVL72 racks share NVLink across the rack, but cross-node GPU P2P (MNNVL / `cuda_ipc`) requires an IMEX channel provisioned by a `ComputeDomain`, which this recipe does not declare. So KV transfer stays on RoCE regardless of whether prefill and decode land in the same rack — host-level anti-affinity (different nodes) is sufficient and rack-level separation is not needed.
+- **No cross-node NVLink shortcut without a ComputeDomain.** GB200 NVL72 racks share NVLink across the rack, but cross-node GPU P2P (MNNVL / `cuda_ipc`) requires an IMEX channel provisioned by a `ComputeDomain`, which this recipe does not declare. So cross-node KV transfer stays on RoCE regardless of rack placement — no rack-level separation is needed. (On A4X's 4-GPU nodes the two TP=4 workers can't co-locate anyway, so they always land on separate nodes.)
 - **`networking.gke.io/default-interface: eth0`** must be set or the pod gets a default route through one of the RDMA NICs and TCP traffic (control plane, etcd, NATS, HF download) breaks.
 
 ## Results

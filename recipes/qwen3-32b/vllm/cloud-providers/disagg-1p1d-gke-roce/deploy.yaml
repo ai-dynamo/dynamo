@@ -22,7 +22,7 @@ spec:
         - name: nvcr-pull-secret
         # vllm-runtime:1.1.1 has a built-in ENTRYPOINT — overriding command crashes the Rust binary.
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
           workingDir: /workspace
           # Without this mount, Dynamo runtime fails to register the model card with
           # "Failed to create cache directory /shared-models/hub: Permission denied"
@@ -53,37 +53,11 @@ spec:
              {"interfaceName":"eth4","network":"rdma-2"},
              {"interfaceName":"eth5","network":"rdma-3"}]
       extraPodSpec:
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.product: NVIDIA-GB200
         imagePullSecrets:
         - name: nvcr-pull-secret
         tolerations:
         - { key: nvidia.com/gpu,                            operator: Exists, effect: NoSchedule }
         - { key: kubernetes.io/arch,                        operator: Equal, value: arm64, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-0,         operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-1,         operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-2,         operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-3,         operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-0.IP,      operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-1.IP,      operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-2.IP,      operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-3.IP,      operator: Exists, effect: NoSchedule }
-        affinity:
-          podAntiAffinity:
-            # Hard anti-affinity: prefill and decode on different hosts (keeps the KV
-            # path cross-node). Cross-node NVLink (MNNVL) would require a ComputeDomain /
-            # IMEX channel, which this recipe does not provision, so KV transfer uses RoCE
-            # regardless of rack placement — no rack-level separation is needed.
-            requiredDuringSchedulingIgnoredDuringExecution:
-            # Operator labels worker pods with sub-component-type=prefill/decode
-            # (component-type itself is "worker", which matches both — too broad).
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-sub-component-type
-                  operator: In
-                  values: [prefill, decode]
-              topologyKey: kubernetes.io/hostname
         mainContainer:
           command: [python3, -m, dynamo.vllm]
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
@@ -188,37 +162,11 @@ spec:
              {"interfaceName":"eth4","network":"rdma-2"},
              {"interfaceName":"eth5","network":"rdma-3"}]
       extraPodSpec:
-        nodeSelector:
-          kubernetes.io/arch: arm64
-          nvidia.com/gpu.product: NVIDIA-GB200
         imagePullSecrets:
         - name: nvcr-pull-secret
         tolerations:
         - { key: nvidia.com/gpu,                            operator: Exists, effect: NoSchedule }
         - { key: kubernetes.io/arch,                        operator: Equal, value: arm64, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-0,         operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-1,         operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-2,         operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-3,         operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-0.IP,      operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-1.IP,      operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-2.IP,      operator: Exists, effect: NoSchedule }
-        - { key: networking.gke.io.networks/rdma-3.IP,      operator: Exists, effect: NoSchedule }
-        affinity:
-          podAntiAffinity:
-            # Hard anti-affinity: prefill and decode on different hosts (keeps the KV
-            # path cross-node). Cross-node NVLink (MNNVL) would require a ComputeDomain /
-            # IMEX channel, which this recipe does not provision, so KV transfer uses RoCE
-            # regardless of rack placement — no rack-level separation is needed.
-            requiredDuringSchedulingIgnoredDuringExecution:
-            # Operator labels worker pods with sub-component-type=prefill/decode
-            # (component-type itself is "worker", which matches both — too broad).
-            - labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-sub-component-type
-                  operator: In
-                  values: [prefill, decode]
-              topologyKey: kubernetes.io/hostname
         mainContainer:
           command: [python3, -m, dynamo.vllm]
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
