@@ -74,6 +74,11 @@ Session identity is header-only. Use the coding-agent headers or Dynamo
 session headers described in [Session IDs](../../agents/session-ids.md);
 `nvext` does not accept session identity fields.
 
+When session affinity is enabled with `--router-session-affinity-ttl-secs`, the
+router also uses `X-Dynamo-Session-ID` for router-local affinity. See
+[Configuration and Tuning](../router/router-configuration.md#session-affinity)
+for routing behavior and TTL settings.
+
 For trace sink configuration and JSONL schema details, see
 [Agent Tracing](../../agents/agent-tracing.md).
 
@@ -224,4 +229,4 @@ When the client requests response metadata via `extra_fields`, the response incl
 | [Session IDs](../../agents/session-ids.md) | Passive session identity |
 | [Agent Tracing](../../agents/agent-tracing.md) | JSONL request traces, inferred tool-call metadata, and harness tool-event ingestion |
 | [Agent Hints](../../agents/agent-hints.md) | Per-request serving hints for routing, scheduling, and cache behavior |
-| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session control |
+| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session-aware radix tagging |

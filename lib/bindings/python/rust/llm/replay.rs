@@ -13,7 +13,7 @@ use dynamo_mocker::common::protocols::{
 use dynamo_mocker::loadgen::{
     ArrivalSpec, DelaySpec, LengthSpec, SyntheticTraceSpec, Trace as RsTrace,
 };
-use dynamo_mocker::replay::ReplayArgsMode;
+use dynamo_mocker::replay::{PlannerHook, PlannerTickDecision, PlannerTickMetrics, ReplayArgsMode};
 use pyo3::{
     exceptions::{PyException, PyValueError},
     prelude::*,
@@ -1016,7 +1016,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, arrival_interval_ms=1.0, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -1041,7 +1041,28 @@ pub fn run_mocker_synthetic_trace_replay(
     num_prefix_groups: usize,
     inter_turn_delay_ms: f64,
     model_name: Option<String>,
+    sla_ttft_ms: Option<f64>,
+    sla_itl_ms: Option<f64>,
+    sla_e2e_ms: Option<f64>,
 ) -> PyResult<PyObject> {
+    validate_sla_threshold("sla_ttft_ms", sla_ttft_ms)?;
+    validate_sla_threshold("sla_itl_ms", sla_itl_ms)?;
+    validate_sla_threshold("sla_e2e_ms", sla_e2e_ms)?;
+    let sla = dynamo_mocker::replay::SlaThresholds {
+        ttft_ms: sla_ttft_ms,
+        itl_ms: sla_itl_ms,
+        e2e_ms: sla_e2e_ms,
+    };
+    // The online branches below don't thread `sla`, so reject SLA with a
+    // non-offline replay_mode rather than silently dropping goodput
+    // (mirrors run_mocker_trace_replay).
+    if replay_mode != "offline"
+        && (sla_ttft_ms.is_some() || sla_itl_ms.is_some() || sla_e2e_ms.is_some())
+    {
+        return Err(PyValueError::new_err(
+            "sla_ttft_ms, sla_itl_ms, and sla_e2e_ms only support replay_mode='offline'",
+        ));
+    }
     let args_selection = load_replay_args_selection(
         py,
         extra_engine_args,
@@ -1099,6 +1120,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             max_in_flight,
                             num_workers,
                             router_mode,
+                            sla,
                         )
                     }
                     ("offline", None) => {
@@ -1109,6 +1131,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             trace,
                             num_workers,
                             router_mode,
+                            sla,
                         )
                     }
                     ("online", Some(max_in_flight)) => {
@@ -1147,6 +1170,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             trace,
                             max_in_flight,
                             router_mode,
+                            sla,
                         ),
                         ("offline", None) => dynamo_mocker::replay::simulate_trace_workload_disagg_with_router_mode(
                             *config,
@@ -1154,6 +1178,7 @@ pub fn run_mocker_synthetic_trace_replay(
                             prefill_load_estimator.clone(),
                             trace,
                             router_mode,
+                            sla,
                         ),
                         (other, _) => anyhow::bail!(
                             "replay_mode must be either 'offline' or 'online', got '{}'",
@@ -1184,6 +1209,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         max_in_flight,
                         num_workers,
                         router_mode,
+                        sla,
                     )
                 }
                 ("offline", None) => dynamo_mocker::replay::simulate_trace_requests_with_router_mode(
@@ -1194,6 +1220,7 @@ pub fn run_mocker_synthetic_trace_replay(
                     num_workers,
                     arrival_speedup_ratio,
                     router_mode,
+                    sla,
                 ),
                 ("online", Some(max_in_flight)) => {
                     dynamo_mocker::replay::simulate_concurrency_live_requests_with_router_mode(
@@ -1233,6 +1260,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         requests,
                         max_in_flight,
                         router_mode,
+                        sla,
                     )
                 }
                 ("offline", None) => {
@@ -1243,6 +1271,7 @@ pub fn run_mocker_synthetic_trace_replay(
                         requests,
                         arrival_speedup_ratio,
                         router_mode,
+                        sla,
                     )
                 }
                 (other, _) => anyhow::bail!(
@@ -1700,12 +1729,6 @@ fn fpm_snapshots_to_json(
         .collect()
 }
 
-/// Step-based bridge for driving an offline replay with a Python planner.
-///
-/// Supports both aggregated and disaggregated topologies. The Python adapter
-/// calls `advance_to()` to run the simulation forward, collects FPM/traffic
-/// metrics, feeds them to the planner state machine, then calls
-/// `apply_scaling()` to resize worker pools.
 /// Reject a goodput SLA threshold that is not a finite, non-negative value;
 /// `None` (unset) is allowed and means "do not gate on this dimension".
 fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
@@ -2001,106 +2024,110 @@ impl PlannerReplayBridge {
         })
     }
 
-    /// Advance the simulation to `until_ms` simulated time.
-    ///
-    /// Returns a dict with separate prefill/decode worker counts and FPM snapshots.
-    /// Traffic metrics are NOT included — call `drain_traffic()` explicitly on
-    /// throughput-scaling ticks only.
-    fn advance_to(&mut self, py: Python<'_>, until_ms: f64) -> PyResult<PyObject> {
-        let handle = self
-            .handle
-            .as_mut()
-            .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
-
-        let tick_data = handle.advance_to(until_ms).map_err(to_pyerr)?;
-
-        let result = json!({
-            "now_ms": tick_data.now_ms,
-            "is_done": tick_data.is_done,
-            "prefill_fpm_snapshots": fpm_snapshots_to_json(tick_data.prefill_fpm_snapshots),
-            "decode_fpm_snapshots": fpm_snapshots_to_json(tick_data.decode_fpm_snapshots),
-            "active_prefill_count": tick_data.active_prefill_count,
-            "active_decode_count": tick_data.active_decode_count,
-            "total_prefill_count": tick_data.total_prefill_count,
-            "total_decode_count": tick_data.total_decode_count,
-        });
-
-        pythonize(py, &result)
-            .map_err(to_pyerr)
-            .map(|obj| obj.unbind())
-    }
-
-    /// Drain accumulated traffic metrics since the last drain.
-    ///
-    /// Returns a dict with:
-    ///   - `duration_s`      (f64): window length in seconds
-    ///   - `num_req`         (usize): completed requests in the window
-    ///   - `avg_isl`         (f64): mean input sequence length (tokens)
-    ///   - `avg_osl`         (f64): mean output sequence length (tokens)
-    ///   - `avg_ttft_ms`     (f64): mean time-to-first-token in milliseconds,
-    ///                              averaged only over requests that reported
-    ///                              a TTFT sample (0.0 when no samples)
-    ///   - `avg_itl_ms`      (f64): mean inter-token latency in milliseconds,
-    ///                              averaged only over requests that generated
-    ///                              at least one token gap (0.0 when no samples)
-    ///   - `avg_accept_length` (f64 | None): mean visible tokens per decode
-    ///                              request-forward, including the base token
-    ///                              (`None` when no decode forwards were observed)
-    ///   - `avg_kv_hit_rate` (f64): arithmetic mean of per-request
-    ///                              ``overlap_blocks / isl_blocks`` ratios
-    ///                              across router admissions in the window
-    ///                              (one sample per request, not weighted
-    ///                              by ISL), matching the real router's
-    ///                              `dynamo_component_router_kv_hit_rate`
-    ///                              histogram semantics
-    ///
-    /// Call this only on throughput-scaling ticks so the observation window
-    /// covers the full `throughput_adjustment_interval`.
-    fn drain_traffic(&mut self, py: Python<'_>) -> PyResult<PyObject> {
-        let handle = self
-            .handle
-            .as_mut()
-            .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
-
-        let stats = handle.drain_traffic();
-
-        let result = json!({
-            "duration_s": stats.duration_s,
-            "num_req": stats.num_req,
-            "avg_isl": stats.avg_isl,
-            "avg_osl": stats.avg_osl,
-            "avg_ttft_ms": stats.avg_ttft_ms,
-            "avg_itl_ms": stats.avg_itl_ms,
-            "avg_accept_length": stats.avg_accept_length,
-            "avg_kv_hit_rate": stats.avg_kv_hit_rate,
-        });
-
-        pythonize(py, &result)
-            .map_err(to_pyerr)
-            .map(|obj| obj.unbind())
-    }
-
-    /// Apply a scaling decision with separate prefill and decode targets.
-    /// For agg mode, `target_prefill` is ignored (pass 0).
-    fn apply_scaling(&mut self, target_prefill: usize, target_decode: usize) -> PyResult<()> {
-        let handle = self
-            .handle
-            .as_mut()
-            .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
-        handle
-            .apply_scaling(target_prefill, target_decode)
-            .map_err(to_pyerr)
-    }
-
-    /// Finalize the replay and return the trace simulation report.
-    fn finalize(&mut self, py: Python<'_>) -> PyResult<PyObject> {
+    /// Run the whole replay to completion with the Python planner driving the tick
+    /// cadence (the unified replacement for the advance_to/apply_scaling stepping
+    /// loop). `planner` must expose `initial_tick_ms() -> float` and
+    /// `on_tick(metrics: dict) -> dict` with keys `target_prefill`/`target_decode`
+    /// (int | None) and `next_tick_ms` (float | None). The simulation owns the drive
+    /// loop and calls back into `planner` once per `PlannerTick`; the GIL is held
+    /// throughout, so each callback is a cheap re-entry. Returns the trace report.
+    fn run(&mut self, py: Python<'_>, planner: Py<PyAny>) -> PyResult<PyObject> {
         let handle = self
             .handle
             .take()
-            .ok_or_else(|| PyException::new_err("bridge has already been finalized"))?;
-        let report = handle.finalize();
+            .ok_or_else(|| PyException::new_err("bridge has been finalized"))?;
+        let hook: Box<dyn PlannerHook> = Box::new(PyPlannerHook { callback: planner });
+        let report = handle.run(hook).map_err(planner_run_err_to_pyerr)?;
         pythonize(py, &report)
             .map_err(to_pyerr)
             .map(|obj| obj.unbind())
+    }
+}
+
+/// Convert a planner-run error back into a `PyErr`, preserving the original
+/// Python exception (its type and traceback) when the failure originated in a
+/// planner callback (`initial_tick_ms` / `on_tick` stash the `PyErr` via
+/// `anyhow::Error::new`). Non-Python errors (e.g. a simulation dead-end) fall
+/// back to the generic conversion.
+fn planner_run_err_to_pyerr(err: anyhow::Error) -> PyErr {
+    match err.downcast::<PyErr>() {
+        Ok(py_err) => py_err,
+        Err(other) => to_pyerr(other),
+    }
+}
+
+/// Adapts a Python planner object to the Rust [`PlannerHook`] trait. Invoked once
+/// per `PlannerTick` from inside the simulation's `run()` loop; the bridge holds the
+/// GIL while running so the per-tick `Python::with_gil` is a cheap re-entry.
+struct PyPlannerHook {
+    callback: Py<PyAny>,
+}
+
+impl PlannerHook for PyPlannerHook {
+    fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+        Python::with_gil(|py| {
+            self.callback
+                .bind(py)
+                .call_method0("initial_tick_ms")?
+                .extract::<f64>()
+        })
+        // Preserve the original `PyErr` (type + traceback) through the anyhow
+        // boundary so `PlannerReplayBridge::run` can re-raise it unchanged.
+        .map_err(anyhow::Error::new)
+    }
+
+    fn on_tick(&mut self, metrics: PlannerTickMetrics) -> anyhow::Result<PlannerTickDecision> {
+        let PlannerTickMetrics {
+            now_ms,
+            prefill_fpm,
+            decode_fpm,
+            traffic,
+            active_prefill,
+            active_decode,
+            total_prefill,
+            total_decode,
+        } = metrics;
+        Python::with_gil(|py| -> PyResult<PlannerTickDecision> {
+            // The metrics dict mirrors the old `advance_to` + `drain_traffic` dicts so
+            // the Python adapter's `_build_tick_input` consumes it unchanged.
+            let metrics_json = json!({
+                "now_ms": now_ms,
+                "prefill_fpm_snapshots": fpm_snapshots_to_json(prefill_fpm),
+                "decode_fpm_snapshots": fpm_snapshots_to_json(decode_fpm),
+                "active_prefill_count": active_prefill,
+                "active_decode_count": active_decode,
+                "total_prefill_count": total_prefill,
+                "total_decode_count": total_decode,
+                "traffic": {
+                    "duration_s": traffic.duration_s,
+                    "num_req": traffic.num_req,
+                    "avg_isl": traffic.avg_isl,
+                    "avg_osl": traffic.avg_osl,
+                    "avg_ttft_ms": traffic.avg_ttft_ms,
+                    "avg_itl_ms": traffic.avg_itl_ms,
+                    "avg_accept_length": traffic.avg_accept_length,
+                    "avg_kv_hit_rate": traffic.avg_kv_hit_rate,
+                    // Denominators behind the two ratio averages, so the Python
+                    // adapter can merge partial windows with exact count weights
+                    // instead of approximating with num_req.
+                    "hit_rate_count": traffic.hit_rate_count,
+                    "accept_length_forward_count": traffic.accept_length_forward_count,
+                },
+            });
+            let metrics_obj = pythonize(py, &metrics_json).map_err(to_pyerr)?;
+            let decision = self
+                .callback
+                .bind(py)
+                .call_method1("on_tick", (metrics_obj,))?;
+            // The planner returns a dict with all three keys (values may be None).
+            Ok(PlannerTickDecision {
+                target_prefill: decision.get_item("target_prefill")?.extract()?,
+                target_decode: decision.get_item("target_decode")?.extract()?,
+                next_tick_ms: decision.get_item("next_tick_ms")?.extract()?,
+            })
+        })
+        // Preserve the original `PyErr` (type + traceback) through the anyhow
+        // boundary so `PlannerReplayBridge::run` can re-raise it unchanged.
+        .map_err(anyhow::Error::new)
     }
 }

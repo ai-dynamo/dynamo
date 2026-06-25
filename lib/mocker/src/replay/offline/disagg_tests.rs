@@ -622,7 +622,8 @@ fn chunked_prefill_handoff_waits_for_full_materialization(#[case] engine_type: E
         ReplayRouterMode::RoundRobin,
     )
     .unwrap()
-    .with_per_request_records(true);
+    .with_per_request_records(true)
+    .with_fpm_capture();
 
     let mut prefill_fpm = Vec::new();
     for _ in 0..32 {

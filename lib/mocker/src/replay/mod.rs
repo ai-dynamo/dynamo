@@ -86,9 +86,13 @@ pub use entrypoints::{
     simulate_trace_workload, simulate_trace_workload_disagg_with_router_mode,
     simulate_trace_workload_with_router_mode,
 };
+pub use offline::components::TrafficStats;
+pub use offline::planner_hook::{
+    NoopPlannerHook, PlannerHook, PlannerTickDecision, PlannerTickMetrics,
+};
 #[doc(hidden)]
 pub use offline::run_offline_handoff_conformance;
-pub use planner_handle::{PlannerReplayHandle, PlannerTickData};
+pub use planner_handle::PlannerReplayHandle;
 pub use validate::validate_replay_args_mode;
 
 pub(crate) fn normalize_trace_requests(

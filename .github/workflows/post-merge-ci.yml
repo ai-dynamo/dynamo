@@ -136,7 +136,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
-      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+      archive_sources: false
     secrets: inherit
 
   vllm-dev-build:
@@ -174,7 +174,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
-      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+      archive_sources: false
     secrets: inherit
 
   sglang-build:
@@ -193,7 +193,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
-      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+      archive_sources: false
     secrets: inherit
 
   sglang-dev-build:
@@ -231,7 +231,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-efa-{0}', github.sha) || '' }}
-      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+      archive_sources: false
     secrets: inherit
 
   trtllm-build:
@@ -250,7 +250,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
-      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+      archive_sources: false
     secrets: inherit
 
   trtllm-dev-build:
@@ -288,7 +288,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
-      archive_sources: ${{ startsWith(github.ref, 'refs/heads/release/') }}
+      archive_sources: false
     secrets: inherit
 
   planner-build:
@@ -521,10 +521,10 @@ jobs:
   # vllm/sglang/trtllm: compliance extract + verify runs as an inline step
   # INSIDE each shipped framework build job (inline_compliance: true above), on
   # the same warm builder — a cache hit + small scratch export instead of a cold
-  # full-image rebuild on a separate fresh builder. archive_sources is threaded
-  # to the build job, so release branches still emit the /sources.zip OSRB
-  # artifact; EFA images are covered (make_efa flows to the extract). A
-  # compliance failure fails the build.
+  # full-image rebuild on a separate fresh builder. archive_sources is currently
+  # false (source archival temporarily disabled), so release branches do not emit
+  # the /sources.zip OSRB artifact; EFA images are covered (make_efa flows to the
+  # extract). A compliance failure fails the build.
   #
   # planner/frontend stay on the legacy shared-compliance scan until they
   # migrate to the inline system.
