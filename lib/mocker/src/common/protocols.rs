@@ -378,6 +378,31 @@ impl FromStr for WorkerType {
     }
 }
 
+/// Physical KV footprint used to model a coordinated disaggregated transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KvTransferTimingMode {
+    /// Charge the source request's full logical prompt length.
+    #[default]
+    FullPrompt,
+    /// Charge only the physical prompt footprint missing at the destination.
+    DestinationMissing,
+}
+
+impl FromStr for KvTransferTimingMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "full_prompt" => Ok(Self::FullPrompt),
+            "destination_missing" => Ok(Self::DestinationMissing),
+            _ => Err(format!(
+                "Invalid kv_transfer_timing_mode '{value}'. Must be 'full_prompt' or 'destination_missing'."
+            )),
+        }
+    }
+}
+
 /// Configuration for reasoning/thinking token output in the mocker.
 ///
 /// When set, the mocker wraps the first portion of each response in thinking
@@ -523,8 +548,10 @@ struct MockEngineArgsSerde {
     free_gpu_memory_fraction: OptionalConfigValue<f64>,
     enable_local_indexer: OptionalConfigValue<bool>,
     bootstrap_port: OptionalConfigValue<u16>,
+    handoff_session_timeout_ms: OptionalConfigValue<u64>,
     kv_bytes_per_token: OptionalConfigValue<usize>,
     kv_transfer_bandwidth: OptionalConfigValue<f64>,
+    kv_transfer_timing_mode: OptionalConfigValue<String>,
     num_g2_blocks: OptionalConfigValue<usize>,
     num_g3_blocks: OptionalConfigValue<usize>,
     enable_g4_storage: OptionalConfigValue<bool>,
@@ -749,6 +776,11 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub bootstrap_port: Option<u16>,
 
+    /// Absolute live handoff session timeout, excluding modeled transfer delay.
+    #[builder(default = "300_000")]
+    #[validate(range(min = 1))]
+    pub handoff_session_timeout_ms: u64,
+
     /// KV cache bytes per token, auto-computed from model config by Python CLI.
     /// Formula: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
     #[builder(default = "None")]
@@ -760,6 +792,11 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     #[validate(range(min = 0.0))]
     pub kv_transfer_bandwidth: Option<f64>,
+
+    /// Selects whether disaggregated transfer timing charges the full prompt
+    /// or only the physical prompt footprint missing at the destination.
+    #[builder(default = "KvTransferTimingMode::FullPrompt")]
+    pub kv_transfer_timing_mode: KvTransferTimingMode,
 
     /// KVBM G2 (host DRAM) block capacity. When the `kvbm-offload`
     /// feature is enabled, setting this explicitly opts the mocker into
@@ -1102,11 +1139,23 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(bootstrap_port) = compat.bootstrap_port.into_nullable() {
             builder = builder.bootstrap_port(bootstrap_port);
         }
+        if let Some(timeout_ms) = compat
+            .handoff_session_timeout_ms
+            .into_non_null("handoff_session_timeout_ms")?
+        {
+            builder = builder.handoff_session_timeout_ms(timeout_ms);
+        }
         if let Some(kv_bytes_per_token) = compat.kv_bytes_per_token.into_nullable() {
             builder = builder.kv_bytes_per_token(kv_bytes_per_token);
         }
         if let Some(kv_transfer_bandwidth) = compat.kv_transfer_bandwidth.into_nullable() {
             builder = builder.kv_transfer_bandwidth(kv_transfer_bandwidth);
+        }
+        if let Some(mode) = compat
+            .kv_transfer_timing_mode
+            .into_non_null("kv_transfer_timing_mode")?
+        {
+            builder = builder.kv_transfer_timing_mode(mode.parse()?);
         }
         if let Some(num_g2_blocks) = compat.num_g2_blocks.into_nullable() {
             builder = builder.num_g2_blocks(num_g2_blocks);
@@ -1201,6 +1250,14 @@ impl MockEngineArgs {
     /// provisioned worker-seconds into GPU-hours.
     pub fn aic_gpus_per_worker(&self) -> usize {
         self.aic_tp_size.unwrap_or(1) * self.aic_attention_dp_size.unwrap_or(1)
+    }
+
+    /// Finite ownership bound for live handoff queues and sessions.
+    ///
+    /// An unset runnable-sequence limit is semantically unbounded, so use the
+    /// physical KV block count as the conservative process-local bound.
+    pub fn effective_handoff_capacity(&self) -> usize {
+        self.max_num_seqs.unwrap_or(self.num_gpu_blocks).max(1)
     }
 
     pub fn normalized(mut self) -> anyhow::Result<Self> {
@@ -1386,8 +1443,10 @@ mod tests {
             "aic_model_path": args.aic_model_path,
             "enable_local_indexer": args.enable_local_indexer,
             "bootstrap_port": args.bootstrap_port,
+            "handoff_session_timeout_ms": args.handoff_session_timeout_ms,
             "kv_bytes_per_token": args.kv_bytes_per_token,
             "kv_transfer_bandwidth": args.kv_transfer_bandwidth,
+            "kv_transfer_timing_mode": "full_prompt",
             "num_g2_blocks": args.num_g2_blocks,
             "num_g3_blocks": args.num_g3_blocks,
             "enable_g4_storage": args.enable_g4_storage,
@@ -1412,6 +1471,10 @@ mod tests {
         assert_eq!(restored.worker_type, WorkerType::Decode);
         assert_eq!(restored.max_num_seqs, None);
         assert_eq!(restored.max_num_batched_tokens, None);
+        assert_eq!(
+            restored.kv_transfer_timing_mode,
+            KvTransferTimingMode::FullPrompt
+        );
     }
 
     #[test]

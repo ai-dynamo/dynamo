@@ -2006,8 +2006,10 @@ class MockEngineArgs:
         free_gpu_memory_fraction: Optional[float] = None,
         enable_local_indexer: bool = False,
         bootstrap_port: Optional[int] = None,
+        handoff_session_timeout_ms: int = 300000,
         kv_bytes_per_token: Optional[int] = None,
         kv_transfer_bandwidth: Optional[float] = None,
+        kv_transfer_timing_mode: str = "full_prompt",
         reasoning: Optional[ReasoningConfig] = None,
         zmq_kv_events_port: Optional[int] = None,
         zmq_replay_port: Optional[int] = None,
@@ -2063,6 +2065,15 @@ class MockEngineArgs:
 
     @property
     def bootstrap_port(self) -> Optional[int]: ...
+
+    @property
+    def handoff_session_timeout_ms(self) -> int: ...
+
+    @property
+    def kv_transfer_timing_mode(self) -> str: ...
+
+    @property
+    def engine_type(self) -> str: ...
 
     @property
     def num_g2_blocks(self) -> Optional[int]: ...

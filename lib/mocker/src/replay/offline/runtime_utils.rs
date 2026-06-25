@@ -8,9 +8,11 @@ use std::collections::VecDeque;
 use dynamo_kv_router::protocols::RouterEvent;
 
 use super::events::{SimulationEvent, SimulationEventKind, SimulationWorkerStage};
+use crate::common::handoff::HandoffId;
 #[cfg(test)]
 use crate::common::protocols::DirectRequest;
-use crate::common::protocols::OutputSignal;
+use crate::common::protocols::{ForwardPassSnapshot, OutputSignal};
+use crate::scheduler::SchedulerLifecycleEvent;
 
 #[derive(Debug)]
 pub(super) struct WorkerCompletionPayload {
@@ -18,7 +20,9 @@ pub(super) struct WorkerCompletionPayload {
     pub worker_idx: usize,
     pub completed_requests: usize,
     pub output_signals: Vec<OutputSignal>,
+    pub lifecycle_events: Vec<SchedulerLifecycleEvent>,
     pub kv_events: Vec<RouterEvent>,
+    pub fpm: Option<ForwardPassSnapshot>,
     pub accept_length_output_tokens: usize,
     pub accept_length_decode_forwards: usize,
 }
@@ -78,7 +82,9 @@ pub(super) fn push_worker_completion(
             worker_idx: payload.worker_idx,
             completed_requests: payload.completed_requests,
             output_signals: payload.output_signals,
+            lifecycle_events: payload.lifecycle_events,
             kv_events: payload.kv_events,
+            fpm: payload.fpm.map(Box::new),
             accept_length_output_tokens: payload.accept_length_output_tokens,
             accept_length_decode_forwards: payload.accept_length_decode_forwards,
         },
@@ -103,7 +109,9 @@ pub(super) fn pop_ready_worker_completion(
         worker_idx,
         completed_requests,
         output_signals,
+        lifecycle_events,
         kv_events,
+        fpm,
         accept_length_output_tokens,
         accept_length_decode_forwards,
     ) = match event.kind {
@@ -112,7 +120,9 @@ pub(super) fn pop_ready_worker_completion(
             worker_idx,
             completed_requests,
             output_signals,
+            lifecycle_events,
             kv_events,
+            fpm,
             accept_length_output_tokens,
             accept_length_decode_forwards,
         } => (
@@ -120,11 +130,13 @@ pub(super) fn pop_ready_worker_completion(
             worker_idx,
             completed_requests,
             output_signals,
+            lifecycle_events,
             kv_events,
+            fpm.map(|fpm| *fpm),
             accept_length_output_tokens,
             accept_length_decode_forwards,
         ),
-        SimulationEventKind::DecodeHandoff { .. }
+        SimulationEventKind::TransferComplete { .. }
         | SimulationEventKind::WorkerReady { .. }
         | SimulationEventKind::PlannerTick => {
             unreachable!("peeked worker completion event must match popped event")
@@ -135,42 +147,44 @@ pub(super) fn pop_ready_worker_completion(
         worker_idx,
         completed_requests,
         output_signals,
+        lifecycle_events,
         kv_events,
+        fpm,
         accept_length_output_tokens,
         accept_length_decode_forwards,
     })
 }
 
-pub(super) fn push_decode_handoff(
+pub(super) fn push_transfer_complete(
     events: &mut BinaryHeap<SimulationEvent>,
     next_event_seq: &mut u64,
     at_ms: f64,
-    uuid: uuid::Uuid,
+    handoff_id: HandoffId,
 ) {
     events.push(SimulationEvent {
         at_ms,
         seq_no: *next_event_seq,
-        kind: SimulationEventKind::DecodeHandoff { uuid },
+        kind: SimulationEventKind::TransferComplete { handoff_id },
     });
     *next_event_seq += 1;
 }
 
-pub(super) fn pop_ready_decode_handoff(
+pub(super) fn pop_ready_transfer_complete(
     events: &mut BinaryHeap<SimulationEvent>,
     now_ms: f64,
-) -> Option<uuid::Uuid> {
+) -> Option<HandoffId> {
     let event = events.peek()?;
     if event.at_ms != now_ms {
         return None;
     }
-    let SimulationEventKind::DecodeHandoff { .. } = &event.kind else {
+    let SimulationEventKind::TransferComplete { .. } = &event.kind else {
         return None;
     };
     let event = events.pop().expect("event must exist after peek");
-    let SimulationEventKind::DecodeHandoff { uuid } = event.kind else {
+    let SimulationEventKind::TransferComplete { handoff_id } = event.kind else {
         unreachable!("peeked decode handoff event must match popped event");
     };
-    Some(uuid)
+    Some(handoff_id)
 }
 
 pub(super) fn push_worker_ready(
@@ -315,7 +329,9 @@ mod tests {
                     rejected: false,
                     handoff_delay_ms: None,
                 }],
+                lifecycle_events: Vec::new(),
                 kv_events: Vec::new(),
+                fpm: None,
                 accept_length_output_tokens: 1,
                 accept_length_decode_forwards: 1,
             },
@@ -334,7 +350,9 @@ mod tests {
                     rejected: false,
                     handoff_delay_ms: None,
                 }],
+                lifecycle_events: Vec::new(),
                 kv_events: Vec::new(),
+                fpm: None,
                 accept_length_output_tokens: 1,
                 accept_length_decode_forwards: 1,
             },
@@ -410,7 +428,9 @@ mod tests {
                 worker_idx: 0,
                 completed_requests: 1,
                 output_signals: Vec::new(),
+                lifecycle_events: Vec::new(),
                 kv_events: Vec::new(),
+                fpm: None,
                 accept_length_output_tokens: 0,
                 accept_length_decode_forwards: 0,
             },

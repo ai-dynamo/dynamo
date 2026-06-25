@@ -6,6 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use dynamo_kv_router::{
     PrefillLoadEstimator, config::RouterConfigOverride, protocols::RoutingConstraints,
@@ -351,9 +352,9 @@ impl PrefillRouter {
                     bootstrap_host: host,
                     bootstrap_port: port,
                     bootstrap_room,
+                    handoff_id: Some(Uuid::new_v4()),
                 })
             });
-
         let routing = request.routing_mut();
         routing.prefill_worker_id = Some(worker_id);
         routing.prefill_dp_rank = dp_rank;

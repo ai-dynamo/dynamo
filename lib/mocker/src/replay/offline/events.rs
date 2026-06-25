@@ -3,8 +3,9 @@
 
 use std::cmp::Ordering;
 
+use crate::common::handoff::HandoffId;
 use crate::common::protocols::OutputSignal;
-use uuid::Uuid;
+use crate::scheduler::SchedulerLifecycleEvent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SimulationWorkerStage {
@@ -20,12 +21,14 @@ pub(crate) enum SimulationEventKind {
         worker_idx: usize,
         completed_requests: usize,
         output_signals: Vec<OutputSignal>,
+        lifecycle_events: Vec<SchedulerLifecycleEvent>,
         kv_events: Vec<dynamo_kv_router::protocols::RouterEvent>,
+        fpm: Option<Box<crate::common::protocols::ForwardPassSnapshot>>,
         accept_length_output_tokens: usize,
         accept_length_decode_forwards: usize,
     },
-    DecodeHandoff {
-        uuid: Uuid,
+    TransferComplete {
+        handoff_id: HandoffId,
     },
     WorkerReady {
         stage: SimulationWorkerStage,

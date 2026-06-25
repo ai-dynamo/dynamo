@@ -23,9 +23,9 @@ pub(crate) use collector::TraceCollector;
 #[cfg(test)]
 pub(crate) use collector::TraceRequestStatsSnapshot;
 pub use collector::{
-    PerRequestRecord, SlaThresholds, TraceDistributionStats, TraceGoodputStats,
-    TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts, TraceSimulationReport,
-    TraceThroughputStats,
+    PerRequestRecord, ReplayTerminalStatus, SlaThresholds, TraceDistributionStats,
+    TraceGoodputStats, TraceInterTokenLatencyStats, TraceLatencyStats, TraceRequestCounts,
+    TraceSimulationReport, TraceThroughputStats,
 };
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayRouterMode {
@@ -96,6 +96,8 @@ pub use offline::components::TrafficStats;
 pub use offline::planner_hook::{
     NoopPlannerHook, PlannerHook, PlannerTickDecision, PlannerTickMetrics,
 };
+#[doc(hidden)]
+pub use offline::run_offline_handoff_conformance;
 pub use planner_handle::PlannerReplayHandle;
 pub use validate::validate_replay_args_mode;
 
