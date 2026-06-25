@@ -693,7 +693,9 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 {% if device == "cuda" -%}
 # CUDA: bundle UCX shared libs and UCX/NIXL plugins into the wheel via auditwheel +
 # NIXL's contrib/wheel_add_ucx_plugins.py, so the installed nixl Python package
-# uses its own bundled UCX rather than the system /usr/local/ucx install.
+# uses its own bundled UCX rather than the system /usr/local/ucx install. This
+# mirrors the documented PyPI wheel behavior:
+# https://github.com/ai-dynamo/nixl#pypi-wheel
 {% endif -%}
 ARG PYTHON_VERSION
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
