@@ -58,7 +58,7 @@ pub struct FidelityReport {
 impl FidelityReport {
     pub fn render(&self) -> String {
         format!(
-            "Fidelity: requests={0}/{0} usage={1}/{0} tools={2}/{2} child_links={3}/{3} cache_prefix_blocks={4}\nBackground: tools={5} agents={6} missing_completions={7} title_requests_unreplayable={8}\nLimitations: synthetic_kv_hashes={1} unmatched_tool_calls={9} unmatched_tool_results={10} unresolved_child_sessions={11}",
+            "Fidelity: requests={0}/{0} usage={1}/{0} tools={2}/{2} child_links={3}/{3} cache_prefix_blocks={4}\nBackground: tools={5} agents={6} missing_completions={7} title_requests_unreplayable={8}\nLimitations: synthetic_kv_hashes={0} unmatched_tool_calls={9} unmatched_tool_results={10} unresolved_child_sessions={11}",
             self.requests_verified,
             self.usage_requests_verified,
             self.tools_verified,
@@ -381,9 +381,12 @@ impl FidelityVerifier {
             || self.tools_by_class != self.oracle.tools_by_class
         {
             bail!(
-                "fidelity verification tool mismatch: source={}, emitted={}",
+                "fidelity verification tool mismatch: count={}/{}, errors={}/{}, classes_equal={}",
                 self.oracle.paired_tools,
-                tool_rows
+                tool_rows,
+                self.oracle.tool_errors,
+                self.tool_errors,
+                self.tools_by_class == self.oracle.tools_by_class
             );
         }
         if self.child_links != self.oracle.child_links

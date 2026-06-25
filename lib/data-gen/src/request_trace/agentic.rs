@@ -130,11 +130,7 @@ where
             continue;
         };
         if !session_to_indices.contains_key(child_session_id) {
-            bail!(
-                "tool {} references unknown child session {}",
-                tool.tool_call_id,
-                child_session_id
-            );
+            continue;
         }
         if explicit_tool_by_child
             .insert(child_session_id.to_string(), tool)
@@ -706,6 +702,29 @@ mod tests {
 
         let err = lower_rows(loaded).unwrap_err();
         assert!(err.to_string().contains("dependencies contain a cycle"));
+    }
+
+    #[test]
+    fn missing_child_trace_replays_as_external_background_tool() {
+        let mut agent_tool = tool("root", "agent-call", "Agent", 1_100, 1_250);
+        agent_tool.source_request_id = Some("parent-1".to_string());
+        agent_tool.consumer_request_id = Some("parent-2".to_string());
+        agent_tool.child_session_id = Some("missing-child".to_string());
+        agent_tool.execution_mode = Some("background".to_string());
+        let rows = lower_rows(LoadedAgentTrace {
+            requests: vec![
+                contextual_request("parent-1", "root", None, 1_000, 1_100, vec![11]),
+                contextual_request("parent-2", "root", None, 1_300, 1_400, vec![11, 22]),
+            ],
+            tools: vec![agent_tool],
+        })
+        .unwrap();
+
+        assert!(rows[0].branches.is_empty());
+        assert_eq!(rows[1].wait_for, vec!["parent-1"]);
+        assert_eq!(rows[1].tool_wait_ms, Some(150.0));
+        assert_eq!(rows[1].delay, Some(50.0));
+        assert_eq!(rows[1].tool_events.len(), 1);
     }
 
     #[test]

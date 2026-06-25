@@ -152,6 +152,7 @@ pub struct SessionTurnBuilder {
     top_level_indices: Vec<usize>,
     progress_metrics_index: FxHashMap<String, CachedProgressMetrics>,
     request_index_by_group_key: FxHashMap<String, usize>,
+    request_start_ms_by_group_key: FxHashMap<String, i64>,
     top_level_cursor: usize,
     normalizer: ToolIdNormalizer,
     conversation_entries: Vec<ConversationEntry>,
@@ -205,6 +206,7 @@ impl SessionTurnBuilder {
             })
             .collect();
         let mut request_index_by_group_key = FxHashMap::default();
+        let mut request_start_ms_by_group_key = FxHashMap::default();
         for index in &top_level_indices {
             let record = &records[*index];
             if record.row_type != "assistant" {
@@ -213,8 +215,12 @@ impl SessionTurnBuilder {
             let group_key = assistant_group_key(record);
             let next_index = request_index_by_group_key.len();
             request_index_by_group_key
-                .entry(group_key)
+                .entry(group_key.clone())
                 .or_insert(next_index);
+            request_start_ms_by_group_key
+                .entry(group_key)
+                .and_modify(|start: &mut i64| *start = (*start).min(record.timestamp_ms))
+                .or_insert(record.timestamp_ms);
         }
 
         Self {
@@ -225,6 +231,7 @@ impl SessionTurnBuilder {
             top_level_indices,
             progress_metrics_index,
             request_index_by_group_key,
+            request_start_ms_by_group_key,
             top_level_cursor: 0,
             normalizer: ToolIdNormalizer::default(),
             conversation_entries: Vec::new(),
@@ -311,6 +318,7 @@ impl SessionTurnBuilder {
                 &interleaved_user_indices,
                 &self.records,
                 &self.request_index_by_group_key,
+                &self.request_start_ms_by_group_key,
                 &group_key,
                 self.preserve_session_ids,
             )?;
@@ -596,7 +604,21 @@ pub fn build_source_fidelity_oracle(
     let mut tool_calls: FxHashMap<(String, String), String> = FxHashMap::default();
     let mut background_titles = BTreeSet::new();
     let mut background_tool_ids = BTreeSet::new();
-    let mut completed_background_tool_ids = BTreeSet::new();
+    let background_completions = sessions
+        .iter()
+        .flat_map(|(trace_id, records)| {
+            records.iter().filter_map(|record| {
+                let content = (record.row_type == "queue-operation"
+                    && record.raw.get("operation").and_then(Value::as_str) == Some("enqueue"))
+                .then(|| record.raw.get("content").and_then(Value::as_str))
+                .flatten()?;
+                Some((
+                    (trace_id.clone(), queued_tool_id(content)?.to_string()),
+                    !content.contains("<status>completed</status>"),
+                ))
+            })
+        })
+        .collect::<FxHashMap<_, _>>();
 
     for (trace_id, records) in sessions {
         let root_session_id = records
@@ -614,17 +636,6 @@ pub fn build_source_fidelity_oracle(
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 background_titles.insert((record.session_id.clone(), title.to_string()));
-                continue;
-            }
-            if record.row_type == "queue-operation"
-                && record.raw.get("operation").and_then(Value::as_str) == Some("enqueue")
-                && let Some(raw_id) = record
-                    .raw
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .and_then(queued_tool_id)
-            {
-                completed_background_tool_ids.insert((trace_id.clone(), raw_id.to_string()));
                 continue;
             }
             let is_top_level = matches!(record.row_type.as_str(), "user" | "assistant")
@@ -658,19 +669,18 @@ pub fn build_source_fidelity_oracle(
                     };
                     oracle.paired_tools += 1;
                     *oracle.tools_by_class.entry(tool_class).or_insert(0) += 1;
-                    if block
+                    let launch_error = block
                         .get("is_error")
                         .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                    {
-                        oracle.tool_errors += 1;
-                    }
+                        .unwrap_or(false);
+                    let mut is_async = false;
                     if let Some(result) = record.raw.get("toolUseResult").and_then(Value::as_object)
                     {
-                        let is_async = result
+                        is_async = result
                             .get("isAsync")
                             .and_then(Value::as_bool)
-                            .unwrap_or(false);
+                            .unwrap_or(false)
+                            || result.get("backgroundTaskId").is_some();
                         if result.get("agentId").and_then(Value::as_str).is_some() {
                             oracle.child_links += 1;
                             oracle.background_agents += usize::from(is_async);
@@ -680,6 +690,14 @@ pub fn build_source_fidelity_oracle(
                             background_tool_ids.insert(key);
                         }
                     }
+                    oracle.tool_errors += usize::from(if is_async {
+                        background_completions
+                            .get(&(trace_id.clone(), raw_id.to_string()))
+                            .copied()
+                            .unwrap_or(launch_error)
+                    } else {
+                        launch_error
+                    });
                 }
                 continue;
             }
@@ -759,7 +777,8 @@ pub fn build_source_fidelity_oracle(
 
     oracle.background_titles = background_titles.len();
     oracle.background_completions_missing = background_tool_ids
-        .difference(&completed_background_tool_ids)
+        .iter()
+        .filter(|tool_id| !background_completions.contains_key(*tool_id))
         .count();
     oracle.unmatched_tool_calls = tool_calls.len();
     Ok(oracle)
@@ -879,6 +898,7 @@ fn pair_tool_results(
     user_indices: &[usize],
     records: &[TraceRecord],
     request_index_by_group_key: &FxHashMap<String, usize>,
+    request_start_ms_by_group_key: &FxHashMap<String, i64>,
     current_group_key: &str,
     preserve_session_ids: bool,
 ) -> Result<Vec<ToolDraft>> {
@@ -908,7 +928,8 @@ fn pair_tool_results(
             let is_async = tool_result
                 .and_then(|result| result.get("isAsync"))
                 .and_then(Value::as_bool)
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || tool_result.is_some_and(|result| result.get("backgroundTaskId").is_some());
             let child_session_id = tool_result
                 .and_then(|result| result.get("agentId"))
                 .and_then(Value::as_str)
@@ -919,22 +940,29 @@ fn pair_tool_results(
                         anonymized_session_id(id)
                     }
                 });
+            let launch_error = block
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let (ended_at_ms, output_bytes, is_error, consumer_turn_index) = if is_async {
                 async_tool_completion(
                     records,
                     raw_id,
-                    record.source_order,
+                    record.timestamp_ms,
                     request_index_by_group_key,
+                    request_start_ms_by_group_key,
                 )
-                .unwrap_or((record.timestamp_ms, content.len(), false, None))
+                .unwrap_or((
+                    record.timestamp_ms,
+                    content.len(),
+                    launch_error,
+                    None,
+                ))
             } else {
                 (
                     record.timestamp_ms,
                     content.len(),
-                    block
-                        .get("is_error")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
+                    launch_error,
                     next_consumer_turn(
                         records,
                         record.source_order,
@@ -987,35 +1015,37 @@ fn next_consumer_turn(
 fn async_tool_completion(
     records: &[TraceRecord],
     raw_tool_id: &str,
-    after_source_order: u64,
+    after_timestamp_ms: i64,
     request_index_by_group_key: &FxHashMap<String, usize>,
+    request_start_ms_by_group_key: &FxHashMap<String, i64>,
 ) -> Option<(i64, usize, bool, Option<usize>)> {
     let tool_marker = format!("<tool-use-id>{raw_tool_id}</tool-use-id>");
-    let completion = records.iter().find(|record| {
-        record.source_order > after_source_order
-            && record.row_type == "queue-operation"
-            && record.raw.get("operation").and_then(Value::as_str) == Some("enqueue")
-            && record
-                .raw
-                .get("content")
-                .and_then(Value::as_str)
-                .is_some_and(|content| content.contains(&tool_marker))
-    })?;
+    let completion = records
+        .iter()
+        .filter(|record| {
+            record.timestamp_ms >= after_timestamp_ms
+                && record.row_type == "queue-operation"
+                && record.raw.get("operation").and_then(Value::as_str) == Some("enqueue")
+                && record
+                    .raw
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| content.contains(&tool_marker))
+        })
+        .min_by_key(|record| (record.timestamp_ms, record.source_order))?;
     let content = completion
         .raw
         .get("content")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let consumer_turn_index = records
+    let consumer_turn_index = request_index_by_group_key
         .iter()
-        .filter(|record| {
-            record.source_order > completion.source_order && record.row_type == "assistant"
+        .filter_map(|(group_key, turn_index)| {
+            let start_ms = *request_start_ms_by_group_key.get(group_key)?;
+            (start_ms > completion.timestamp_ms).then_some((start_ms, *turn_index))
         })
-        .find_map(|record| {
-            request_index_by_group_key
-                .get(&assistant_group_key(record))
-                .copied()
-        });
+        .min()
+        .map(|(_, turn_index)| turn_index);
     Some((
         completion.timestamp_ms,
         content.len(),
@@ -1568,10 +1598,13 @@ fn summarize_progress_indices(indices: &[usize], records: &[TraceRecord]) -> Cac
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionTurnBuilder, TraceRecord, load_trace_records};
+    use super::{
+        SessionTurnBuilder, TraceRecord, build_source_fidelity_oracle, load_trace_records,
+    };
     use crate::coding::common::anonymized_session_id;
     use crate::coding::tokenizer::TokenizerWorker;
     use anyhow::Result;
+    use rustc_hash::FxHashMap;
     use serde_json::{Value, json};
     use tempfile::TempDir;
 
@@ -1876,15 +1909,21 @@ mod tests {
                 json!({"type":"queue-operation","operation":"enqueue","content":"<tool-use-id>agent-call</tool-use-id><status>completed</status>done"}),
             ),
             make_record(
+                "assistant",
+                1_810,
+                6,
+                json!({"type":"assistant","requestId":"req-2","message":{"id":"msg-2","content":[{"type":"text","text":"late fragment"}],"usage":{"output_tokens":2}}}),
+            ),
+            make_record(
                 "user",
                 1_850,
-                6,
+                7,
                 json!({"type":"user","message":{"role":"user","content":"use result"}}),
             ),
             make_record(
                 "assistant",
                 1_900,
-                7,
+                8,
                 json!({"type":"assistant","requestId":"req-3","message":{"id":"msg-3","content":[{"type":"text","text":"finished"}],"usage":{"output_tokens":1}}}),
             ),
         ];
@@ -1900,6 +1939,70 @@ mod tests {
         assert_eq!(tool.ended_at_ms, 1_800);
         assert_eq!(tool.consumer_turn_index, Some(2));
         assert_eq!(tool.child_session_id.as_deref(), Some("child-agent"));
+        assert_eq!(tool.execution_mode, "background");
+    }
+
+    #[test]
+    fn background_bash_uses_terminal_notification_status() {
+        let records = vec![
+            make_record(
+                "user",
+                1_000,
+                0,
+                json!({"type":"user","message":{"role":"user","content":"start command"}}),
+            ),
+            make_record(
+                "assistant",
+                1_100,
+                1,
+                json!({"type":"assistant","requestId":"req-1","message":{"id":"msg-1","content":[{"type":"tool_use","id":"bash-call","name":"Bash","input":{"run_in_background":true}}],"usage":{"output_tokens":2}}}),
+            ),
+            make_record(
+                "user",
+                1_150,
+                2,
+                json!({"type":"user","toolUseResult":{"backgroundTaskId":"task-1"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"bash-call","content":"launched","is_error":false}]}}),
+            ),
+            make_record(
+                "assistant",
+                1_300,
+                3,
+                json!({"type":"assistant","requestId":"req-2","message":{"id":"msg-2","content":[{"type":"text","text":"other work"}],"usage":{"output_tokens":1}}}),
+            ),
+            make_record(
+                "queue-operation",
+                1_500,
+                4,
+                json!({"type":"queue-operation","operation":"enqueue","content":"<task-id>task-1</task-id><tool-use-id>bash-call</tool-use-id><status>failed</status>"}),
+            ),
+            make_record(
+                "user",
+                1_510,
+                5,
+                json!({"type":"user","message":{"role":"user","content":"<tool-use-id>bash-call</tool-use-id><status>failed</status>"}}),
+            ),
+            make_record(
+                "assistant",
+                1_600,
+                6,
+                json!({"type":"assistant","requestId":"req-3","message":{"id":"msg-3","content":[{"type":"text","text":"handled"}],"usage":{"output_tokens":1}}}),
+            ),
+        ];
+        let mut sessions = FxHashMap::default();
+        sessions.insert("session-1".to_string(), records.clone());
+        let oracle = build_source_fidelity_oracle(&sessions).unwrap();
+        assert_eq!(oracle.background_tools, 1);
+        assert_eq!(oracle.background_agents, 0);
+        assert_eq!(oracle.background_completions_missing, 0);
+        assert_eq!(oracle.tool_errors, 1);
+
+        let mut builder = SessionTurnBuilder::new("session-1".to_string(), records, true);
+        let first = builder.next_turn(&mut StubTokenizer).unwrap().unwrap();
+        let tool = &first.tools[0];
+        assert_eq!(tool.ended_at_ms, 1_500);
+        assert_eq!(tool.consumer_turn_index, Some(2));
+        assert!(tool.is_error);
+        assert!(tool.child_session_id.is_none());
         assert_eq!(tool.execution_mode, "background");
     }
 
