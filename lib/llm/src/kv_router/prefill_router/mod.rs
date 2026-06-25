@@ -277,7 +277,8 @@ impl
                         &true,
                     )?;
                     let merged = stream::once(async move { annotation }).chain(response_stream);
-                    return Ok(ResponseStream::new(Box::pin(merged), ctx));
+                    let bypass_stream = ResponseStream::new(Box::pin(merged), ctx);
+                    return Ok(self.wrap_decode_stream(bypass_stream, session_cache_key));
                 }
                 Ok(None) => {}
                 Err(error) => {

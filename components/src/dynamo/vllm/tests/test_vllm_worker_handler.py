@@ -919,15 +919,15 @@ class TestDecodeWorkerMultimodalBranching:
         assert len(chunks) == 1
         assert chunks[0]["message"] == "test stop"
 
-    async def test_decode_only_bypass_annotation_text_only_does_not_set_kv_params(self):
-        """Text-only bypass request: no `kv_transfer_params` flows to vLLM.
+    async def test_decode_only_bypass_annotation_text_only_does_not_require_prefill_kv_params(
+        self,
+    ):
+        """Text-only bypass request does not require incoming prefill KV params.
 
         Confirms the AGG-style execution doesn't accidentally pick up KV
         transfer metadata. We stop just before the engine call by returning
-        an error from `_build_prompt_from_request`, then inspect the
-        sampling_params constructed up to that point would have no
-        kv_transfer_params (none were extracted because there is no
-        `prefill_result`).
+        an error from `_build_prompt_from_request`; no `prefill_result` is
+        required on the bypass path.
         """
         handler = _make_decode_handler(disaggregation_mode="DECODE")
         handler._extract_multimodal_data = AsyncMock(return_value=None)
@@ -948,11 +948,77 @@ class TestDecodeWorkerMultimodalBranching:
         async for chunk in handler._generate_token_mode(request, context, "req-1"):
             chunks.append(chunk)
 
-        # Reached the AGG branch (sampling params would not have
-        # kv_transfer_params attached since no prefill_result was supplied).
-        # Bypass should not error on the missing prefill_result.
+        # Reached the AGG branch. Bypass should not error on the missing
+        # prefill_result.
         assert len(chunks) == 1
         assert chunks[0]["message"] == "stop"
+
+    async def test_decode_only_bypass_annotation_emits_final_kv_transfer_params(self):
+        """Bypass runs like AGG but still emits decode KV params for D->P cache seeding."""
+        handler = _make_decode_handler(disaggregation_mode="DECODE")
+        handler.engine_client = MagicMock()
+        handler.engine_client.vllm_config.kv_transfer_config = SimpleNamespace(
+            kv_connector="NixlConnector"
+        )
+        handler._extract_multimodal_data = AsyncMock(return_value=None)
+        handler._get_mm_processor_kwargs = MagicMock(return_value={})
+        handler._build_prompt_from_request = MagicMock(
+            return_value=(PatchedTokensPrompt(prompt_token_ids=[1, 2, 3]), None, None)
+        )
+        handler._resolve_lora_request = MagicMock(return_value=None)
+        handler._to_local_dp_rank = MagicMock(return_value=None)
+
+        @asynccontextmanager
+        async def noop_abort_monitor(*args, **kwargs):
+            yield None
+
+        handler._abort_monitor = noop_abort_monitor
+
+        kv_transfer_params = {
+            "do_remote_decode": False,
+            "do_remote_prefill": False,
+            "remote_block_ids": [[7, 8]],
+        }
+        captured = {}
+
+        async def fake_generate_tokens(*args, **kwargs):
+            captured["kv_transfer_params"] = args[1].extra_args["kv_transfer_params"]
+            captured["emit_kv_transfer_params"] = kwargs["emit_kv_transfer_params"]
+            yield {
+                "index": 0,
+                "token_ids": [99],
+                "finish_reason": "stop",
+                "disaggregated_params": {
+                    "kv_transfer_params": kv_transfer_params,
+                },
+            }
+
+        handler.generate_tokens = fake_generate_tokens
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": {},
+            "output_options": {},
+            "routing": {},
+            "annotations": [mod.BYPASS_REMOTE_PREFILL_ANNOTATION],
+        }
+        context = MagicMock()
+        context.trace_headers.return_value = {}
+
+        chunks = [
+            chunk
+            async for chunk in handler._generate_token_mode(request, context, "req-1")
+        ]
+
+        assert captured["kv_transfer_params"] == {
+            "do_remote_prefill": False,
+            "do_remote_decode": False,
+        }
+        assert captured["emit_kv_transfer_params"] is True
+        assert chunks[-1]["disaggregated_params"] == {
+            "kv_transfer_params": kv_transfer_params
+        }
 
 
 # ── Prefill _build_embedding_params tests ──────────────────────────

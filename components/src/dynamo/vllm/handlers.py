@@ -92,6 +92,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     NixlConnectorProtocol,
+    kv_transfer_config_has_connector,
     make_kv_connector_protocol,
 )
 
@@ -131,7 +132,7 @@ _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 # routes the request straight to the chosen decode worker, skipping the
 # remote prefill stage. The decode handler treats a request carrying this
 # annotation as if disaggregation_mode were AGGREGATED — full prefill+decode
-# on this worker, no `kv_transfer_params`.
+# on this worker.
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 
 
@@ -3177,9 +3178,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             embedding_params = None
 
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
-        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
-            request.get("annotations") or []
-        ):
+        is_conditional_bypass = is_decode_only and (
+            BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or [])
+        )
+        emit_decode_kv_transfer_params = is_decode_only
+        if is_conditional_bypass:
             # Conditional-disagg bypass: the Rust router skipped the remote
             # prefill stage for this request. Run it like an AGG request
             # (full prefill+decode locally) instead of taking the decode-only
@@ -3307,6 +3310,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             enable_rl=self.config.enable_rl,
         )
 
+        if is_conditional_bypass and kv_transfer_config_has_connector(
+            self.engine_client.vllm_config, "NixlConnector"
+        ):
+            # Bypass runs full prefill+decode on this decode worker, so it
+            # must not pull remote KV now. Still seed a non-empty NIXL context:
+            # vLLM uses its presence at request finish to export this D-side
+            # worker's block handles, which Dynamo can cache for later D->P
+            # pulls on the same session.
+            if sampling_params.extra_args is None:
+                sampling_params.extra_args = {}
+            sampling_params.extra_args["kv_transfer_params"] = {
+                "do_remote_prefill": False,
+                "do_remote_decode": False,
+            }
+
         if kv_params is not None:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
@@ -3384,7 +3402,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
-                        emit_kv_transfer_params=is_decode_only,
+                        emit_kv_transfer_params=emit_decode_kv_transfer_params,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
