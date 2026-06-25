@@ -42,6 +42,7 @@ def claude_subagent_definition(subagent_name: str) -> str:
 
 
 def claude_subagent_prompt(subagent_name: str) -> str:
+    """Prompt Claude Code to invoke the named smoke subagent."""
     return (
         f"Use the Agent tool exactly once with subagent_type={subagent_name}, "
         'description="run smoke test", and prompt="Return exactly OK." '

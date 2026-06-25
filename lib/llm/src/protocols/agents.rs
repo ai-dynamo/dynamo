@@ -78,6 +78,9 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
         let parent_session_id = mapping
             .parent_session_header
             .and_then(|parent_header| header_value(headers, parent_header))
+            .filter(|_| {
+                !mapping.infer_parent_from_session_for_child || session_id != root_session_id
+            })
             .or_else(|| {
                 (mapping.infer_parent_from_session_for_child && session_id != root_session_id)
                     .then(|| root_session_id.clone())
