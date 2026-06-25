@@ -119,7 +119,7 @@ Dynamo can run in two deployment modes. Both expose an OpenAI-compatible API and
 
 In **standalone** mode, request flow is `client → Frontend → Router → workers`. In **gateway** mode, request flow is `client → Inference Gateway → EPP (KV-aware routing) → Frontend sidecar (direct) → workers`.
 
-See the [Inference Gateway (GAIE) guide](docs/kubernetes/inference-gateway.md) for the full setup, supported features, and configuration of gateway mode.
+See the [Inference Gateway (GAIE) guide](docs/kubernetes/gateway-api/README.mdx) for the full setup, supported features, and configuration of gateway mode.
 
 ## Quick Start
 
