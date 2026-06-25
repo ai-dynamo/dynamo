@@ -18,10 +18,26 @@ on:
         description: 'Build and push trtllm image, tagged with branch name'
         type: boolean
         default: false
+      build_trtllm_placeholder:
+        description: 'Build and push trtllm snapshot placeholder image'
+        type: boolean
+        default: false
+      build_snapshot_agent:
+        description: 'Build and push snapshot-agent image'
+        type: boolean
+        default: false
       build_operator:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      trtllm_runtime_image:
+        description: 'Optional base image repository for trtllm runtime build'
+        type: string
+        default: ''
+      trtllm_runtime_image_tag:
+        description: 'Optional base image tag for trtllm runtime build'
+        type: string
+        default: ''
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -89,6 +105,9 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
+      extra_build_args: |
+        ${{ inputs.trtllm_runtime_image != '' && format('RUNTIME_IMAGE={0}', inputs.trtllm_runtime_image) || '' }}
+        ${{ inputs.trtllm_runtime_image_tag != '' && format('RUNTIME_IMAGE_TAG={0}', inputs.trtllm_runtime_image_tag) || '' }}
     secrets: inherit
 
   vllm-copy-to-acr:
@@ -123,6 +142,53 @@ jobs:
       override_arch: amd64 # We are using AMD64 images only on the rest of the clusters.
       copy_timeout_minutes: 10
     secrets: inherit
+
+  snapshot-agent:
+    name: Snapshot Agent
+    needs: [init]
+    if: inputs.build_snapshot_agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push snapshot agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          image_tag: ${{ github.sha }}-snapshot-agent
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+
+  trtllm-placeholder:
+    name: TRTLLM Snapshot Placeholder
+    needs: [init, trtllm-copy-to-acr]
+    if: inputs.build_trtllm_placeholder
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ github.sha }}-trtllm-placeholder
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-placeholder
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-trtllm-runtime
 
   # ============================================================================
   # OPERATOR (build-only)
@@ -194,7 +260,14 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [init, vllm-build, sglang-build, trtllm-build, operator]
+    needs:
+      - init
+      - vllm-build
+      - sglang-build
+      - trtllm-build
+      - snapshot-agent
+      - trtllm-placeholder
+      - operator
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
