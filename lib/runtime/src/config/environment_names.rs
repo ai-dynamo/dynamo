@@ -541,6 +541,9 @@ pub mod tcp_response_stream {
         /// address is used. Useful when connecting by IP to a server whose certificate
         /// uses a DNS SAN.
         pub const DYN_TCP_TLS_SERVER_NAME: &str = "DYN_TCP_TLS_SERVER_NAME";
+
+        /// TLS handshake timeout in seconds (default: 3).
+        pub const DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS: &str = "DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS";
     }
 }
 
@@ -771,6 +774,7 @@ mod tests {
             tcp_response_stream::tls::DYN_TCP_TLS_CA_CERT_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_INSECURE,
             tcp_response_stream::tls::DYN_TCP_TLS_SERVER_NAME,
+            tcp_response_stream::tls::DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,

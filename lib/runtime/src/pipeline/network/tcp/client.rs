@@ -73,7 +73,7 @@ impl TcpClient {
         if let Some(connector) = get_tls_connector()? {
             let server_name = tls_server_name(address)?;
             let tls_stream = tokio::time::timeout(
-                std::time::Duration::from_secs(10),
+                crate::tls_utils::handshake_timeout(),
                 connector.connect(server_name, stream),
             )
             .await
@@ -281,7 +281,7 @@ fn build_tls_connector_from_env() -> anyhow::Result<Option<TlsConnector>> {
     use crate::config::environment_names::tcp_response_stream::tls as env;
     let ca_cert_path = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).ok();
     let insecure = std::env::var(env::DYN_TCP_TLS_INSECURE)
-        .map(|v| v.eq_ignore_ascii_case("true"))
+        .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
 
     let tls_requested = ca_cert_path.is_some() || insecure;

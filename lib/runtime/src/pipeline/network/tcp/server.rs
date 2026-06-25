@@ -386,7 +386,7 @@ impl TcpStreamServer {
                 // TLS client (or vice versa) results in failed connections that are hard to debug.
                 let client_tls_set = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).is_ok()
                     || std::env::var(env::DYN_TCP_TLS_INSECURE)
-                        .map(|v| v.eq_ignore_ascii_case("true"))
+                        .map(|v| v == "1" || v == "true")
                         .unwrap_or(false);
                 if client_tls_set {
                     tracing::warn!(
@@ -631,13 +631,16 @@ async fn tcp_listener(
         }
 
         // Spawn per-connection so the accept loop is never blocked by a slow
-        // TLS handshake. The handshake is bounded by a 10-second timeout.
+        // TLS handshake. The handshake is bounded by DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS (default 3s).
         let state_clone = state.clone();
         let tls_acceptor_clone = tls_acceptor.clone();
         tokio::spawn(async move {
             let (reader, writer) = if let Some(ref tls) = tls_acceptor_clone {
-                match tokio::time::timeout(std::time::Duration::from_secs(10), tls.accept(stream))
-                    .await
+                match tokio::time::timeout(
+                    crate::tls_utils::handshake_timeout(),
+                    tls.accept(stream),
+                )
+                .await
                 {
                     Ok(Ok(tls_stream)) => {
                         let (r, w) = tokio::io::split(tls_stream);

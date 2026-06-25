@@ -59,6 +59,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     http_port: int
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
+    tcp_tls_ca_cert_path: Optional[str] = None
 
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
@@ -244,6 +245,14 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help="TLS certificate key path, PEM format.",
             arg_type=pathlib.Path,
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-ca-cert-path",
+            env_var="DYN_TCP_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate used to verify the TCP peer's certificate.",
         )
 
         # Router options (shared with dynamo.router)

@@ -259,8 +259,13 @@ async def async_main():
         kwargs["model_path"] = config.model_path
     if config.tls_cert_path:
         kwargs["tls_cert_path"] = config.tls_cert_path
+        # Enable TCP TLS in lock step with HTTP TLS on the frontend.
+        os.environ["DYN_TCP_TLS_CERT_PATH"] = str(config.tls_cert_path)
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
+        os.environ["DYN_TCP_TLS_KEY_PATH"] = str(config.tls_key_path)
+    if config.tcp_tls_ca_cert_path:
+        os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = config.tcp_tls_ca_cert_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:
