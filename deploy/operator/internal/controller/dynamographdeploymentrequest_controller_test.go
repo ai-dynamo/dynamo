@@ -23,7 +23,6 @@ import (
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	dgdv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -561,7 +560,12 @@ spec:
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 
 			// Check that DGD spec was generated (stored in annotation)
-			Expect(updated.Annotations["nvidia.com/generated-dgd-spec"]).NotTo(BeEmpty())
+			generatedSpec := updated.Annotations["nvidia.com/generated-dgd-spec"]
+			Expect(generatedSpec).NotTo(BeEmpty())
+			Expect(generatedSpec).Should(ContainSubstring("apiVersion: nvidia.com/v1beta1"))
+			Expect(updated.Status.ProfilingResults).ShouldNot(BeNil())
+			Expect(updated.Status.ProfilingResults.SelectedConfig).ShouldNot(BeNil())
+			Expect(string(updated.Status.ProfilingResults.SelectedConfig.Raw)).Should(ContainSubstring("nvidia.com/v1beta1"))
 
 			// autoApply defaults to true in v1beta1, so after profiling the DGDR transitions to Deploying
 			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseDeploying))
@@ -685,9 +689,11 @@ spec:
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Verify DGD was created with the DGDR-scoped name (not the profiler's "vllm-agg")
-			dgd := &dgdv1alpha1.DynamoGraphDeployment{}
+			// Verify beta DGD was created with the DGDR-scoped name (not the profiler's "vllm-agg")
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: expectedDGDName, Namespace: namespace}, dgd)).Should(Succeed())
+			Expect(dgd.Spec.Components).Should(HaveLen(1))
+			Expect(dgd.Spec.Components[0].ComponentName).Should(Equal("Frontend"))
 
 			// Get final DGDR status
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
@@ -826,7 +832,7 @@ spec:
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			dgd := &dgdv1alpha1.DynamoGraphDeployment{}
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: expectedDGDName, Namespace: namespace}, dgd)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
 
@@ -871,12 +877,12 @@ spec:
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
-			dgd := &dgdv1alpha1.DynamoGraphDeployment{
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdName,
 					Namespace: namespace,
 				},
-				Spec: dgdv1alpha1.DynamoGraphDeploymentSpec{},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{},
 			}
 			Expect(k8sClient.Create(ctx, dgd)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
@@ -927,12 +933,12 @@ spec:
 			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
-			dgd := &dgdv1alpha1.DynamoGraphDeployment{
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdName,
 					Namespace: namespace,
 				},
-				Spec: dgdv1alpha1.DynamoGraphDeploymentSpec{},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{},
 			}
 			Expect(k8sClient.Create(ctx, dgd)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
@@ -1720,10 +1726,33 @@ spec:
 			dgd, additionalResources, err := reconciler.extractResourcesFromYAML([]byte(multiDocYAML))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(dgd).NotTo(BeNil())
+			Expect(dgd.APIVersion).Should(Equal(nvidiacomv1beta1.GroupVersion.String()))
 			Expect(dgd.Name).Should(Equal("test-dgd"))
 			Expect(additionalResources).To(HaveLen(1))
 			Expect(additionalResources[0].GetKind()).Should(Equal("ConfigMap"))
 			Expect(additionalResources[0].GetName()).Should(Equal("model-config"))
+		})
+
+		It("Should extract native beta DGD output", func() {
+			betaDGDYAML := `apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: test-beta-dgd
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1`
+
+			dgd, err := reconciler.extractDGDFromYAML([]byte(betaDGDYAML))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dgd).NotTo(BeNil())
+			Expect(dgd.APIVersion).Should(Equal(nvidiacomv1beta1.GroupVersion.String()))
+			Expect(dgd.Name).Should(Equal("test-beta-dgd"))
+			Expect(dgd.Spec.Components).Should(HaveLen(1))
+			Expect(dgd.Spec.Components[0].ComponentName).Should(Equal("Frontend"))
+			Expect(dgd.Spec.Components[0].ComponentType).Should(Equal(nvidiacomv1beta1.ComponentTypeFrontend))
 		})
 
 		It("Should handle multiple additional resources", func() {
@@ -2117,7 +2146,7 @@ spec:
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
 			// Create the DGD in Ready state
-			dgd := &dgdv1alpha1.DynamoGraphDeployment{
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd-deployed",
 					Namespace: namespace,
@@ -2126,13 +2155,13 @@ spec:
 						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
 					},
 				},
-				Spec: dgdv1alpha1.DynamoGraphDeploymentSpec{},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{},
 			}
 			Expect(k8sClient.Create(ctx, dgd)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
 
 			// Set DGD to Successful state
-			dgd.Status.State = dgdv1alpha1.DGDStateSuccessful
+			dgd.Status.State = nvidiacomv1beta1.DGDStateSuccessful
 			Expect(k8sClient.Status().Update(ctx, dgd)).Should(Succeed())
 
 			// Reconcile — should transition DGDR to Deployed
@@ -2379,6 +2408,7 @@ spec:
 			var updated nvidiacomv1beta1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
 			Expect(updated.Annotations["nvidia.com/generated-dgd-spec"]).Should(ContainSubstring(expectedDGDName))
+			Expect(updated.Annotations["nvidia.com/generated-dgd-spec"]).Should(ContainSubstring("apiVersion: nvidia.com/v1beta1"))
 		})
 
 		It("Should populate profilingJobName in status", func() {
@@ -3482,7 +3512,7 @@ var _ = Describe("DGDR Image Pull Error Detection", func() {
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
 			// DGD exists but is still in a non-successful state.
-			dgd := &dgdv1alpha1.DynamoGraphDeployment{
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdName,
 					Namespace: namespace,
@@ -3491,11 +3521,11 @@ var _ = Describe("DGDR Image Pull Error Detection", func() {
 						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
 					},
 				},
-				Spec: dgdv1alpha1.DynamoGraphDeploymentSpec{},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{},
 			}
 			Expect(k8sClient.Create(ctx, dgd)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
-			dgd.Status.State = dgdv1alpha1.DGDStatePending
+			dgd.Status.State = nvidiacomv1beta1.DGDStatePending
 			Expect(k8sClient.Status().Update(ctx, dgd)).Should(Succeed())
 
 			// Worker pod belonging to the DGD is stuck on ErrImagePull.
