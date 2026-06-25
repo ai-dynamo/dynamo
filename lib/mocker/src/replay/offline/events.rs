@@ -31,6 +31,24 @@ pub(crate) enum SimulationEventKind {
         stage: SimulationWorkerStage,
         worker_id: usize,
     },
+    /// A recurring planner heartbeat. Payload-free: the planner metrics are
+    /// gathered from live runtime state when the tick fires. Re-enqueues itself
+    /// at the time the planner hook returns (see `apply_planner_ticks`).
+    PlannerTick,
+}
+
+impl SimulationEventKind {
+    /// Tie-breaker among events at the *same* `at_ms`: a `PlannerTick` always
+    /// sorts after every other kind, so the planner observes a fully settled
+    /// timestamp (all worker completions / ready / handoff events at that time
+    /// drain first). `seq_no` is globally unique, so this only ever reorders a
+    /// tick relative to same-timestamp events — never two real events.
+    fn ordering_rank(&self) -> u8 {
+        match self {
+            SimulationEventKind::PlannerTick => 1,
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -60,6 +78,7 @@ impl Ord for SimulationEvent {
             .at_ms
             .partial_cmp(&self.at_ms)
             .unwrap_or(Ordering::Equal)
+            .then_with(|| other.kind.ordering_rank().cmp(&self.kind.ordering_rank()))
             .then_with(|| other.seq_no.cmp(&self.seq_no))
     }
 }

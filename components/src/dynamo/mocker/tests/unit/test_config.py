@@ -449,6 +449,50 @@ def test_replay_engine_args_compute_kv_bytes_for_g4_before_validation(monkeypatc
     assert calls == [("/models/mock", "auto")]
 
 
+def test_get_kv_cache_dtype_bytes_supports_int8():
+    # AIC KVCacheQuantMode allows int8; the byte map must size it at 1 byte
+    # instead of silently falling back to 2, or offload KV-byte estimates and
+    # transfer latency are overstated.
+    from types import SimpleNamespace
+
+    from dynamo.mocker.utils.kv_cache import get_kv_cache_dtype_bytes
+
+    cfg = SimpleNamespace(dtype="bfloat16")
+    assert get_kv_cache_dtype_bytes(cfg, "int8") == 1
+    assert get_kv_cache_dtype_bytes(cfg, "fp8") == 1
+    assert get_kv_cache_dtype_bytes(cfg, "auto") == 2  # model default dtype
+
+
+def test_replay_engine_args_forwards_aic_kv_cache_dtype(monkeypatch):
+    # Offload KV-byte estimation must use the configured (normalized) KV dtype,
+    # not always "auto".
+    import dynamo.replay.main as replay_main
+
+    calls = []
+
+    def fake_compute_kv_bytes_per_token(model_path, kv_cache_dtype="auto"):
+        calls.append((model_path, kv_cache_dtype))
+        return 131072
+
+    monkeypatch.setattr(
+        replay_main, "compute_kv_bytes_per_token", fake_compute_kv_bytes_per_token
+    )
+
+    replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "num_g2_blocks": 8192,
+                "num_g3_blocks": 16384,
+                "aic_model_path": "/models/mock",
+                "aic_kv_cache_dtype": "fp8",
+            }
+        )
+    )
+
+    assert calls == [("/models/mock", "fp8")]
+
+
 def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
     calls = []
 

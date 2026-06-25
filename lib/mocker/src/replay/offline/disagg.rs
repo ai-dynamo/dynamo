@@ -9,15 +9,19 @@ use dynamo_kv_router::protocols::RouterEvent;
 use uuid::Uuid;
 
 pub(super) use super::components::ReplayMode;
+#[cfg(test)]
+use super::components::TrafficStats;
 use super::components::{
     AdmissionQueue, EngineComponent, EngineEffects, EnginePassMode, OfflineReplayRouter,
-    ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator, TrafficStats, WorkerAdmission,
+    ReadyArrival, ScheduledWorkerCompletion, TrafficAccumulator, WorkerAdmission,
 };
 use super::events::{SimulationEvent, SimulationWorkerStage};
+use super::planner_hook::{PlannerHook, PlannerTickMetrics};
 use super::progress::ReplayProgress;
 use super::runtime_utils::{
-    next_timestamp as choose_next_timestamp, pop_ready_decode_handoff, pop_ready_worker_completion,
-    pop_ready_worker_ready, push_decode_handoff, push_worker_completion, push_worker_ready,
+    next_timestamp as choose_next_timestamp, pop_ready_decode_handoff, pop_ready_planner_tick,
+    pop_ready_worker_completion, pop_ready_worker_ready, push_decode_handoff, push_planner_tick,
+    push_worker_completion, push_worker_ready,
 };
 #[cfg(test)]
 use super::state::DisaggRequestSnapshot;
@@ -44,7 +48,7 @@ pub(crate) enum DisaggTransition {
 
 #[cfg(test)]
 #[derive(Debug, Default, Clone, PartialEq)]
-pub(super) struct DisaggRuntimeStats {
+pub(in crate::replay) struct DisaggRuntimeStats {
     request_snapshots: HashMap<Uuid, DisaggRequestSnapshot>,
     prefill_assignments: HashMap<Uuid, usize>,
     decode_assignments: HashMap<Uuid, usize>,
@@ -59,7 +63,7 @@ pub(super) struct DisaggRuntimeStats {
 
 #[cfg(not(test))]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(super) struct DisaggRuntimeStats;
+pub(in crate::replay) struct DisaggRuntimeStats;
 
 pub(in crate::replay) struct DisaggRuntime {
     now_ms: f64,
@@ -85,6 +89,15 @@ pub(in crate::replay) struct DisaggRuntime {
     /// gracefully once the next scheduled timestamp exceeds this cap, leaving
     /// any in-flight requests as incomplete in the report.
     max_sim_time_ms: Option<f64>,
+    /// Planner hook. When set, `run()` seeds a recurring `PlannerTick` event and
+    /// calls back into the planner at each tick (this is the unified replacement
+    /// for the old Python-driven `advance_to` stepping loop).
+    planner_hook: Option<Box<dyn PlannerHook>>,
+    /// Whether to retain per-pass FPM snapshots in the buffers above. Only the
+    /// planner consumes them, so the plain `run()` path leaves this `false` —
+    /// otherwise the buffers grow unbounded (one entry per worker pass) for the
+    /// whole run with no reader (the memory leak this gating fixes).
+    collect_fpm: bool,
 }
 
 impl DisaggRuntime {
@@ -217,6 +230,8 @@ impl DisaggRuntime {
             decode_fpm_buffer: Vec::new(),
             traffic: TrafficAccumulator::new(),
             max_sim_time_ms: None,
+            planner_hook: None,
+            collect_fpm: false,
         })
     }
 
@@ -250,6 +265,14 @@ impl DisaggRuntime {
     /// Set the SLA thresholds used to classify goodput in the final report.
     pub(in crate::replay) fn with_sla_thresholds(mut self, sla: SlaThresholds) -> Self {
         self.collector.set_sla_thresholds(sla);
+        self
+    }
+
+    /// Attach a planner hook. Enables FPM collection and makes `run()` drive the
+    /// planner via recurring `PlannerTick` events (one `on_tick` callback per tick).
+    pub(in crate::replay) fn with_planner_hook(mut self, hook: Box<dyn PlannerHook>) -> Self {
+        self.collect_fpm = true;
+        self.planner_hook = Some(hook);
         self
     }
 
@@ -457,9 +480,12 @@ impl DisaggRuntime {
         Ok(uuid)
     }
 
-    /// Return true once both stages, both routers, and all admissions are fully drained.
+    /// Return true once both stages, both routers, and all admissions are fully
+    /// drained. Lingering `WorkerReady`/`PlannerTick` events (worker startup, a
+    /// re-armed planner heartbeat) do not represent request work, so they do not
+    /// keep the run alive — otherwise a recurring tick would never let `run()` exit.
     fn is_done(&self) -> bool {
-        self.events.is_empty()
+        self.only_idle_events_remain()
             && self.cluster_in_flight() == 0
             && self.admission.is_drained()
             && self.prefill_engine.is_drained()
@@ -467,21 +493,26 @@ impl DisaggRuntime {
     }
 
     /// Return true once the request workload is complete, even if `WorkerReady`
-    /// events remain in the queue.
+    /// or `PlannerTick` events remain in the queue.
     fn is_workload_done(&self) -> bool {
         self.cluster_in_flight() == 0
             && self.admission.is_drained()
             && self.prefill_engine.is_drained()
             && self.decode_engine.is_drained()
-            && self.only_worker_ready_events_remain()
+            && self.only_idle_events_remain()
     }
 
-    /// True if the event heap is empty or contains only `WorkerReady` events.
-    fn only_worker_ready_events_remain(&self) -> bool {
+    /// True if the event heap is empty or contains only "idle" events that carry no
+    /// pending request work: `WorkerReady` (a worker still starting up) or
+    /// `PlannerTick` (a re-armed planner heartbeat).
+    fn only_idle_events_remain(&self) -> bool {
         use super::events::SimulationEventKind;
-        self.events
-            .iter()
-            .all(|e| matches!(e.kind, SimulationEventKind::WorkerReady { .. }))
+        self.events.iter().all(|e| {
+            matches!(
+                e.kind,
+                SimulationEventKind::WorkerReady { .. } | SimulationEventKind::PlannerTick
+            )
+        })
     }
 
     /// Pick the next logical timestamp from arrivals, worker completions, or decode handoffs.
@@ -801,7 +832,9 @@ impl DisaggRuntime {
     }
 
     fn handle_prefill_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
-        self.prefill_fpm_buffer.extend(effects.fpm_snapshots);
+        if self.collect_fpm {
+            self.prefill_fpm_buffer.extend(effects.fpm_snapshots);
+        }
         self.record_prefill_admissions(effects.admissions);
         self.apply_prefill_router_events(effects.pass_start_kv_events)?;
         for payload in effects.immediate_completions {
@@ -827,7 +860,9 @@ impl DisaggRuntime {
     }
 
     fn handle_decode_engine_effects(&mut self, effects: EngineEffects) -> Result<()> {
-        self.decode_fpm_buffer.extend(effects.fpm_snapshots);
+        if self.collect_fpm {
+            self.decode_fpm_buffer.extend(effects.fpm_snapshots);
+        }
         for payload in effects.immediate_completions {
             let payload = self.decode_engine.on_scheduled_completion(payload)?;
             self.process_decode_pass(
@@ -892,12 +927,99 @@ impl DisaggRuntime {
             changed |= self.release_ready_arrivals()?;
             changed |= self.drive_prefill_workers()?;
             changed |= self.drive_decode_workers()?;
+            // Planner ticks fire LAST so the planner observes a fully settled
+            // timestamp (matching the old advance-then-tick ordering). Any scaling
+            // it applies is picked up by the next loop iteration.
+            if self.planner_hook.is_some() {
+                changed |= self.apply_planner_ticks()?;
+            }
 
             if !changed {
                 break;
             }
         }
         Ok(())
+    }
+
+    /// Seed the first `PlannerTick` event from the hook's requested start time.
+    /// A non-finite time means "no tick" (e.g. `NoopPlannerHook`) and is skipped.
+    fn seed_first_planner_tick(&mut self) -> Result<()> {
+        let Some(mut hook) = self.planner_hook.take() else {
+            return Ok(());
+        };
+        let first_ms = hook.initial_tick_ms();
+        self.planner_hook = Some(hook);
+        let first_ms = first_ms?;
+        if first_ms.is_finite() {
+            let at_ms = first_ms.max(self.now_ms);
+            push_planner_tick(&mut self.events, &mut self.next_event_seq, at_ms);
+        } else {
+            // No tick will ever fire to drain the FPM buffers; stop collecting them.
+            self.collect_fpm = false;
+        }
+        Ok(())
+    }
+
+    /// Fire every `PlannerTick` scheduled for the current timestamp: gather the
+    /// drained metrics, call the planner, apply its scaling decision, and re-arm
+    /// the next tick. Called only when a hook is attached.
+    fn apply_planner_ticks(&mut self) -> Result<bool> {
+        let mut changed = false;
+        while pop_ready_planner_tick(&mut self.events, self.now_ms) {
+            // Once the workload is finished, drop the tick without bothering the
+            // planner and without re-arming (mirrors the Python loop's pre-tick
+            // `if is_done: break`), so the heap drains and `run()` exits.
+            if self.is_workload_done() {
+                continue;
+            }
+            let metrics = PlannerTickMetrics {
+                now_ms: self.now_ms,
+                prefill_fpm: std::mem::take(&mut self.prefill_fpm_buffer),
+                decode_fpm: std::mem::take(&mut self.decode_fpm_buffer),
+                traffic: self.traffic.drain(self.now_ms),
+                active_prefill: self.active_prefill_count(),
+                active_decode: self.active_decode_count(),
+                total_prefill: self.total_prefill_count(),
+                total_decode: self.total_decode_count(),
+            };
+            // Borrow the hook out so the runtime stays mutably available for
+            // apply_scaling; restore it before propagating any error.
+            let mut hook = self
+                .planner_hook
+                .take()
+                .expect("planner tick fired without a hook");
+            let decision = hook.on_tick(metrics);
+            self.planner_hook = Some(hook);
+            let decision = decision?;
+
+            if decision.target_prefill.is_some() || decision.target_decode.is_some() {
+                let target_prefill = decision
+                    .target_prefill
+                    .unwrap_or_else(|| self.total_prefill_count());
+                let target_decode = decision
+                    .target_decode
+                    .unwrap_or_else(|| self.total_decode_count());
+                self.apply_scaling(target_prefill, target_decode)?;
+            }
+
+            // Re-arm only into the strict, finite future and only while work
+            // remains; the `at_ms == now_ms` pop guard plus this check prevent a
+            // same-pass re-fire or an infinite spin from a degenerate
+            // `next_tick_ms <= now_ms`. When no future tick will fire, stop FPM
+            // collection so neither buffer grows unbounded after the cadence ends.
+            let next_tick = decision
+                .next_tick_ms
+                .filter(|next_ms| next_ms.is_finite() && *next_ms > self.now_ms);
+            if let Some(next_ms) = next_tick
+                && !self.is_workload_done()
+            {
+                push_planner_tick(&mut self.events, &mut self.next_event_seq, next_ms);
+            } else {
+                self.collect_fpm = false;
+            }
+            changed = true;
+        }
+        Ok(changed)
     }
 
     /// Finalize test-only request snapshots before returning.
@@ -913,41 +1035,9 @@ impl DisaggRuntime {
     }
 
     // ------------------------------------------------------------------
-    // Planner integration: step-based execution
+    // Planner integration: scaling + worker-count accessors used by the
+    // in-loop `PlannerTick` handler (apply_planner_ticks).
     // ------------------------------------------------------------------
-
-    /// Advance the simulation up to `until_ms` simulated time, then pause.
-    /// Returns `true` if the request workload is done — pending `WorkerReady`
-    /// events do not block completion since there is no work for those workers.
-    pub(in crate::replay) fn advance_to(&mut self, until_ms: f64) -> Result<bool> {
-        self.drain_current_timestamp()?;
-
-        while !self.is_done() {
-            let Some(next_timestamp_ms) = self.next_timestamp() else {
-                bail!(
-                    "offline disagg replay reached a dead end with {} in-flight requests remaining",
-                    self.cluster_in_flight()
-                );
-            };
-
-            if next_timestamp_ms > until_ms {
-                if until_ms > self.now_ms {
-                    self.advance_now_ms(until_ms);
-                }
-                break;
-            }
-
-            self.advance_now_ms(next_timestamp_ms);
-            self.drain_current_timestamp()?;
-        }
-
-        Ok(self.is_workload_done())
-    }
-
-    /// Current simulated time in milliseconds.
-    pub(in crate::replay) fn now_ms(&self) -> f64 {
-        self.now_ms
-    }
 
     /// Advance the sim clock to `new_now_ms`, integrating provisioned
     /// worker-seconds for both pools over the interval just elapsed.
@@ -978,21 +1068,6 @@ impl DisaggRuntime {
 
     pub(in crate::replay) fn total_decode_count(&self) -> usize {
         self.decode_engine.worker_count()
-    }
-
-    /// Drain accumulated prefill FPM snapshots since the last drain.
-    pub(in crate::replay) fn drain_prefill_fpm(&mut self) -> Vec<(usize, ForwardPassSnapshot)> {
-        std::mem::take(&mut self.prefill_fpm_buffer)
-    }
-
-    /// Drain accumulated decode FPM snapshots since the last drain.
-    pub(in crate::replay) fn drain_decode_fpm(&mut self) -> Vec<(usize, ForwardPassSnapshot)> {
-        std::mem::take(&mut self.decode_fpm_buffer)
-    }
-
-    /// Drain accumulated traffic stats since the last drain.
-    pub(in crate::replay) fn drain_traffic(&mut self) -> TrafficStats {
-        self.traffic.drain(self.now_ms)
     }
 
     /// Apply a scaling decision with separate prefill and decode targets.
@@ -1074,23 +1149,68 @@ impl DisaggRuntime {
         Ok(())
     }
 
-    /// Finalize the replay and return the simulation report directly.
-    pub(in crate::replay) fn finalize_report(self) -> crate::replay::TraceSimulationReport {
-        self.progress.finish();
-        self.collector.finish()
+    // ------------------------------------------------------------------
+    // Test-only stepping helpers. White-box unit tests advance the sim to a
+    // chosen simulated time, inspect mid-flight state, apply a manual scaling
+    // decision, and resume — a granularity `run()` (which goes straight to
+    // completion) cannot offer. Not part of the production drive path.
+    // ------------------------------------------------------------------
+
+    /// Advance the simulation up to `until_ms` simulated time, then pause.
+    /// Returns `true` if the request workload is done — pending `WorkerReady`
+    /// events do not block completion since there is no work for those workers.
+    #[cfg(test)]
+    fn advance_to(&mut self, until_ms: f64) -> Result<bool> {
+        self.drain_current_timestamp()?;
+
+        while !self.is_done() {
+            let Some(next_timestamp_ms) = self.next_timestamp() else {
+                bail!(
+                    "offline disagg replay reached a dead end with {} in-flight requests remaining",
+                    self.cluster_in_flight()
+                );
+            };
+
+            if next_timestamp_ms > until_ms {
+                if until_ms > self.now_ms {
+                    self.advance_now_ms(until_ms);
+                }
+                break;
+            }
+
+            self.advance_now_ms(next_timestamp_ms);
+            self.drain_current_timestamp()?;
+        }
+
+        Ok(self.is_workload_done())
+    }
+
+    /// Current simulated time in milliseconds.
+    #[cfg(test)]
+    fn now_ms(&self) -> f64 {
+        self.now_ms
+    }
+
+    /// Drain accumulated traffic stats since the last drain.
+    #[cfg(test)]
+    fn drain_traffic(&mut self) -> TrafficStats {
+        self.traffic.drain(self.now_ms)
     }
 
     /// Run the staged offline replay until both prefill and decode pipelines are drained.
     /// If `max_sim_time_ms` is set, exits gracefully when the next scheduled
     /// timestamp would exceed that cap; in-flight requests at that point are
     /// reported as incomplete.
-    pub(super) fn run(mut self) -> Result<(TraceCollector, DisaggRuntimeStats)> {
+    pub(in crate::replay) fn run(mut self) -> Result<(TraceCollector, DisaggRuntimeStats)> {
         if let Some(cap_ms) = self.max_sim_time_ms
             && (!cap_ms.is_finite() || cap_ms < 0.0)
         {
             bail!("max_sim_time_ms must be a finite, non-negative value; got {cap_ms}");
         }
         self.drain_current_timestamp()?;
+        // With a planner attached, seed the recurring heartbeat; ticks then fire as
+        // events inside drain_current_timestamp (see apply_planner_ticks).
+        self.seed_first_planner_tick()?;
 
         while !self.is_done() {
             let Some(next_timestamp_ms) = self.next_timestamp() else {

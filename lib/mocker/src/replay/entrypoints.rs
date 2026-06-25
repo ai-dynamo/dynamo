@@ -587,9 +587,11 @@ pub fn simulate_trace_requests(
         num_workers,
         arrival_speedup_ratio,
         ReplayRouterMode::RoundRobin,
+        SlaThresholds::default(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_trace_requests_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -598,6 +600,7 @@ pub fn simulate_trace_requests_with_router_mode(
     num_workers: usize,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode)?;
@@ -615,7 +618,7 @@ pub fn simulate_trace_requests_with_router_mode(
         router_mode,
         false,
         None,
-        SlaThresholds::default(),
+        sla,
     )?;
     Ok(report)
 }
@@ -627,6 +630,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode(
     requests: Vec<DirectRequest>,
     arrival_speedup_ratio: f64,
     router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_replay_args(&config, router_mode)?;
@@ -643,7 +647,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode(
         router_mode,
         false,
         None,
-        SlaThresholds::default(),
+        sla,
     )?;
     Ok(report)
 }
@@ -1011,9 +1015,11 @@ pub fn simulate_concurrency_requests(
         max_in_flight,
         num_workers,
         ReplayRouterMode::RoundRobin,
+        SlaThresholds::default(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_requests_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -1022,6 +1028,7 @@ pub fn simulate_concurrency_requests_with_router_mode(
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_concurrency_args(&args, num_workers, max_in_flight, router_mode)?;
@@ -1039,7 +1046,7 @@ pub fn simulate_concurrency_requests_with_router_mode(
         router_mode,
         false,
         None,
-        SlaThresholds::default(),
+        sla,
     )
 }
 
@@ -1050,6 +1057,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode(
     requests: Vec<DirectRequest>,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
@@ -1066,7 +1074,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode(
         router_mode,
         false,
         None,
-        SlaThresholds::default(),
+        sla,
     )
 }
 
@@ -1082,6 +1090,7 @@ pub fn simulate_trace_workload(
         trace,
         num_workers,
         ReplayRouterMode::RoundRobin,
+        SlaThresholds::default(),
     )
 }
 
@@ -1092,6 +1101,7 @@ pub fn simulate_trace_workload_with_router_mode(
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     simulate_trace_workload_with_router_mode_and_options(
         args,
@@ -1102,7 +1112,7 @@ pub fn simulate_trace_workload_with_router_mode(
         router_mode,
         false,
         None,
-        SlaThresholds::default(),
+        sla,
     )
 }
 
@@ -1140,6 +1150,7 @@ pub fn simulate_trace_workload_disagg_with_router_mode(
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     trace: Trace,
     router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     simulate_trace_workload_disagg_with_router_mode_and_options(
         config,
@@ -1149,7 +1160,7 @@ pub fn simulate_trace_workload_disagg_with_router_mode(
         router_mode,
         false,
         None,
-        SlaThresholds::default(),
+        sla,
     )
 }
 
@@ -1228,9 +1239,11 @@ pub fn simulate_concurrency_workload(
         max_in_flight,
         num_workers,
         ReplayRouterMode::RoundRobin,
+        SlaThresholds::default(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_concurrency_workload_with_router_mode(
     args: MockEngineArgs,
     router_config: Option<KvRouterConfig>,
@@ -1239,6 +1252,7 @@ pub fn simulate_concurrency_workload_with_router_mode(
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     simulate_concurrency_workload_with_router_mode_and_options(
         args,
@@ -1250,7 +1264,7 @@ pub fn simulate_concurrency_workload_with_router_mode(
         router_mode,
         false,
         None,
-        SlaThresholds::default(),
+        sla,
     )
 }
 
@@ -1290,6 +1304,7 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode(
     trace: Trace,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
+    sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     simulate_concurrency_workload_disagg_with_router_mode_and_options(
         config,
@@ -1300,7 +1315,7 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode(
         router_mode,
         false,
         None,
-        SlaThresholds::default(),
+        sla,
     )
 }
 
@@ -1433,6 +1448,7 @@ mod tests {
             1,
             1.0,
             ReplayRouterMode::RoundRobin,
+            SlaThresholds::default(),
         )
         .unwrap_err();
 

@@ -79,7 +79,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
 
-use super::error::SanitizedError;
+use super::error::{SanitizedError, overload_status_code};
 
 pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
@@ -115,6 +115,7 @@ pub(crate) struct ErrorMessage {
 fn map_error_code_to_error_type(code: StatusCode) -> String {
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
+        None if code.as_u16() == 529 => "Overloaded".to_string(),
         // 499 is not IANA-registered (nginx convention for client-closed-request),
         // so canonical_reason() returns None. Use the de facto standard name.
         None if code.as_u16() == 499 => "Client Closed Request".to_string(),
@@ -136,8 +137,9 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
         StatusCode::NOT_FOUND => ErrorType::NotFound, // 404
         StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented, // 501
         StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload, // 429
-        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload, // 503
+        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Unavailable, // 503
         StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal, // 500
+        _ if code.as_u16() == 529 => ErrorType::Overload, // 529
         _ if code.as_u16() == 499 => ErrorType::Cancelled, // 499 Client Closed Request
         _ if code.is_client_error() => ErrorType::Validation, // other 4xx
         _ => ErrorType::Internal,                     // everything else
@@ -365,7 +367,7 @@ impl ErrorMessage {
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
         if let Some(rejection) = find_queue_rejection_in_chain(err.as_ref()) {
-            let code = StatusCode::SERVICE_UNAVAILABLE;
+            let code = overload_status_code();
             return (
                 code,
                 Json(ErrorMessage {
@@ -377,10 +379,18 @@ impl ErrorMessage {
             );
         }
 
-        // Check for ResourceExhausted anywhere in the error chain → HTTP 503
+        // Check for ResourceExhausted anywhere in the error chain → HTTP 529
         if super::metrics::request_was_rejected(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Overloaded,
+                format!("{err:#}"),
+            );
+        }
+
+        // No backend workers are currently routable → HTTP 503.
+        if super::metrics::request_was_unavailable(err.as_ref()) {
+            return ErrorMessage::sanitized_with_details(
+                SanitizedError::Unavailable,
                 format!("{err:#}"),
             );
         }
@@ -3381,7 +3391,9 @@ mod tests {
             .build()
             .into();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.code, 529);
+        assert_eq!(response.1.error_type, "Overloaded");
         assert_eq!(response.1.message, "Service temporarily overloaded");
         assert!(
             !response.1.message.contains("All workers are busy"),
@@ -3390,7 +3402,23 @@ mod tests {
     }
 
     #[test]
-    fn queue_rejection_maps_to_structured_http_503() {
+    fn unavailable_error_response_from_anyhow() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Unavailable)
+            .message("No workers available for endpoint test/worker/generate")
+            .build()
+            .into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+        assert_eq!(response.1.message, "Service temporarily unavailable");
+    }
+
+    #[test]
+    fn queue_rejection_maps_to_structured_http_529() {
         use dynamo_kv_router::scheduling::{QueueLimitKind, QueueRejection};
 
         let rejection = QueueRejection {
@@ -3402,8 +3430,9 @@ mod tests {
         let response =
             ErrorMessage::from_anyhow(anyhow::Error::new(rejection), BACKUP_ERROR_MESSAGE);
 
-        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.code, 529);
+        assert_eq!(response.1.error_type, "Overloaded");
         assert_eq!(
             response.1.details.as_deref(),
             Some(&serde_json::json!({
@@ -4485,7 +4514,11 @@ mod tests {
             ErrorType::Overload
         );
         assert_eq!(
-            classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Overloaded"),
+            classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Unavailable"),
+            ErrorType::Unavailable
+        );
+        assert_eq!(
+            classify_error_for_metrics(overload_status_code(), "Overloaded"),
             ErrorType::Overload
         );
         assert_eq!(
@@ -4533,7 +4566,7 @@ mod tests {
         let response = ErrorMessage::model_unavailable();
         assert_eq!(
             extract_error_type_from_response(&response),
-            ErrorType::Overload
+            ErrorType::Unavailable
         );
     }
 
