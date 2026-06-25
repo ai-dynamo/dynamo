@@ -29,14 +29,17 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -310,7 +313,6 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		return ctrl.Result{}, nil
 	}
 
-	// Check Job status
 	job := &batchv1.Job{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: ckpt.Status.JobName}, job); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -330,41 +332,67 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		return ctrl.Result{}, err
 	}
 
-	// Required step: create the PodSnapshot once the source pod exists. The checkpoint cannot
-	// reach Ready without it, so creation failure fails or requeues the capture.
 	checkpointID, err := checkpoint.CheckpointID(ckpt)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Locate this checkpoint's PodSnapshot by owner label (never by reconstructed name). A list/owner
+	// error (including the >1-owned invariant violation) is non-terminal: return it to requeue.
+	snap, err := r.findOwnedPodSnapshot(ctx, ckpt)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if snap != nil {
+		return r.observePodSnapshot(ctx, ckpt, job, snap, checkpointID)
+	}
+
+	// No owned PodSnapshot found. status.podSnapshotName distinguishes the two reasons:
+	//  - set: one was created and has gone missing (deleted / cache lag) — guard against a hung Job,
+	//    then wait for a watch event (Owns(&Job) re-enqueues on the Job's terminal transition).
+	//  - unset: never created — create it.
+	if ckpt.Status.PodSnapshotName != "" {
+		if failed, message := checkpointJobFailed(job); failed {
+			return r.failCreating(ctx, ckpt, "JobFailed", message)
+		}
+		return ctrl.Result{}, nil
+	}
+
 	pod, err := r.findSourcePod(ctx, job)
 	if err != nil {
 		if client.IgnoreNotFound(err) == nil {
-			return ctrl.Result{RequeueAfter: time.Second}, nil
+			// The source pod has not been created yet. Do not poll: the scoped pod watch re-enqueues
+			// when it appears, and the Owns(&Job) watch fails the checkpoint if the Job never produces
+			// a pod (e.g. unschedulable → k8s sets JobFailed/DeadlineExceeded).
+			if failed, message := checkpointJobFailed(job); failed {
+				return r.failCreating(ctx, ckpt, "JobFailed", message)
+			}
+			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
 	}
-	if err := r.ensurePodSnapshot(ctx, ckpt, checkpointID, pod.Name); err != nil {
+
+	created, err := r.createPodSnapshot(ctx, ckpt, checkpointID, pod.Name)
+	if err != nil {
 		if commonController.IgnoreIntermediateError(err) != nil {
 			r.updateFailedStatus(ctx, ckpt, err)
 		}
 		return ctrl.Result{}, err
 	}
-
-	return r.observePodSnapshot(ctx, ckpt, job, checkpointID)
-}
-
-// observePodSnapshot maps the bound PodSnapshot's status (and the owned Job's failure / deadline
-// hang guards) onto the DynamoCheckpoint phase. Completion cascades up from PodSnapshotContent
-// → PodSnapshot → DynamoCheckpoint, so this never reads the Job's terminal annotation.
-func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job, checkpointID string) (ctrl.Result, error) {
-	snap := &nvidiacomv1alpha1.PodSnapshot{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: podSnapshotName(checkpointID)}, snap); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{RequeueAfter: time.Second}, nil
-		}
+	// Record the authoritative pointer; the Owns(&PodSnapshot) watch re-enqueues for observation.
+	ckpt.Status.PodSnapshotName = created.Name
+	if err := r.Status().Update(ctx, ckpt); err != nil {
 		return ctrl.Result{}, err
 	}
+	return ctrl.Result{}, nil
+}
 
+// observePodSnapshot maps the owned PodSnapshot's status (and the Job's failure hang guard) onto the
+// DynamoCheckpoint phase. The snapshot is resolved and owner-confirmed by the
+// caller, so this never re-reads it by name. Completion cascades up from PodSnapshotContent →
+// PodSnapshot → DynamoCheckpoint, so this never reads the Job's terminal annotation. The Job is read
+// only on the non-terminal path (the terminal PodSnapshot result always wins).
+func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job, snap *nvidiacomv1alpha1.PodSnapshot, checkpointID string) (ctrl.Result, error) {
 	// A PodSnapshot can fail before it is bound (e.g. the PodSnapshotReconciler rejects the
 	// source pod), so always observe Failed. Ready is only meaningful once bound.
 	if nvidiacomv1alpha1.IsPodSnapshotFailed(snap) {
@@ -374,20 +402,12 @@ func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvi
 		return r.markCheckpointReady(ctx, ckpt, checkpointID, podSnapshotConditionMessage(snap, nvidiacomv1alpha1.PodSnapshotConditionReady))
 	}
 
-	// Hang guard 1: the owned Job failed while the PodSnapshot is still non-terminal.
-	if jobFailed, message := checkpointJobFailed(job); jobFailed {
+	// Non-terminal: a failed Job is the hang guard. k8s enforces ActiveDeadlineSeconds and sets
+	// JobFailed (reason DeadlineExceeded) on expiry, which the Owns(&Job) watch delivers — so this is
+	// watch-driven, no self-requeue.
+	if failed, message := checkpointJobFailed(job); failed {
 		return r.failCreating(ctx, ckpt, "JobFailed", message)
 	}
-
-	// Hang guard 2: the Job ran past its deadline without a terminal PodSnapshot.
-	if job.Spec.ActiveDeadlineSeconds != nil {
-		deadline := job.CreationTimestamp.Add(time.Duration(*job.Spec.ActiveDeadlineSeconds) * time.Second)
-		if time.Now().After(deadline) {
-			return r.failCreating(ctx, ckpt, "CheckpointDeadlineExceeded",
-				fmt.Sprintf("checkpoint did not complete before the Job deadline (%s)", deadline.Format(time.RFC3339)))
-		}
-	}
-
 	return ctrl.Result{}, nil
 }
 
@@ -537,6 +557,37 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		})).
+		Watches(&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(mapSourcePodToCheckpoint),
+			builder.WithPredicates(predicate.Funcs{
+				// Only checkpoint-source pods, and only their appearance: handleCreating waits solely
+				// for the source pod to exist, so Create is the only relevant transition. Update would
+				// fire on every kubelet heartbeat (a reconcile storm); Delete is covered by the
+				// Owns(&Job) terminal transition.
+				CreateFunc:  func(ce event.CreateEvent) bool { return isCheckpointSourcePod(ce.Object) },
+				UpdateFunc:  func(ue event.UpdateEvent) bool { return false },
+				DeleteFunc:  func(de event.DeleteEvent) bool { return false },
+				GenericFunc: func(ge event.GenericEvent) bool { return false },
+			}),
+		).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
 		Complete(r)
+}
+
+// isCheckpointSourcePod reports whether an object is a checkpoint-source pod (carries
+// CheckpointSourceLabel=true), scoping the pod watch to checkpoint Job pods rather than all pods.
+func isCheckpointSourcePod(obj client.Object) bool {
+	return obj.GetLabels()[snapshotprotocol.CheckpointSourceLabel] == consts.KubeLabelValueTrue
+}
+
+// mapSourcePodToCheckpoint maps a checkpoint-source pod back to its owning DynamoCheckpoint via the
+// SnapshotOwnerLabel (stamped on the Job pod template by buildCheckpointJob). It enqueues nothing when
+// the label is absent. The pod and its checkpoint always share a namespace because buildCheckpointJob
+// creates the Job in the checkpoint's namespace.
+func mapSourcePodToCheckpoint(ctx context.Context, obj client.Object) []reconcile.Request {
+	owner := obj.GetLabels()[consts.SnapshotOwnerLabel]
+	if owner == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: owner}}}
 }

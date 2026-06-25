@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"testing"
-	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -155,6 +154,9 @@ func TestBuildCheckpointJob(t *testing.T) {
 	assert.Equal(t, testHash, job.Labels[snapshotprotocol.CheckpointIDLabel])
 	assert.Equal(t, "true", job.Spec.Template.Labels[snapshotprotocol.CheckpointSourceLabel])
 	assert.Equal(t, testHash, job.Spec.Template.Labels[snapshotprotocol.CheckpointIDLabel])
+	// The owner label on the Job pod template is what mapSourcePodToCheckpoint reads to drive the
+	// source-pod watch (LLD §5); without it the watch never enqueues and capture hangs silently.
+	assert.Equal(t, ckpt.Name, job.Spec.Template.Labels[consts.SnapshotOwnerLabel])
 
 	// Env vars: checkpoint-specific env is added, and the caller-provided
 	// workload env is preserved. Dynamo-specific runtime env is expected to be
@@ -803,7 +805,9 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		r := makeCheckpointReconciler(s, ckpt, job) // no Job-owned pod yet
 		result, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
-		assert.Equal(t, time.Second, result.RequeueAfter)
+		// Source pod not yet created: no time-based poll — the scoped pod watch re-enqueues. The Job
+		// here has no deadline, so the result is empty (watch-driven).
+		assert.Zero(t, result.RequeueAfter)
 
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
@@ -824,10 +828,15 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 
 		snap := &nvidiacomv1alpha1.PodSnapshot{}
 		require.NoError(t, r.Get(ctx,
-			types.NamespacedName{Name: podSnapshotName(testHash), Namespace: testNamespace}, snap))
-		assert.Equal(t, testHash, snap.Labels[snapshotprotocol.CheckpointIDLabel])
+			types.NamespacedName{Name: podSnapshotName(ckpt), Namespace: testNamespace}, snap))
+		assert.Equal(t, ckpt.Name, snap.Labels[consts.SnapshotOwnerLabel])
 		assert.Equal(t, "worker-0", snap.Spec.Source.PodRef.Name)
 		assert.True(t, metav1.IsControlledBy(snap, ckpt))
+
+		// The created snapshot's name is recorded in status as the authoritative pointer.
+		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
+		assert.Equal(t, snap.Name, updated.Status.PodSnapshotName)
 	})
 
 	// ownedSnapshot returns a PodSnapshot owned by ckpt and bound to a PodSnapshotContent,
@@ -836,8 +845,9 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		bound := "podsnapshotcontent-" + testHash
 		snap := &nvidiacomv1alpha1.PodSnapshot{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      podSnapshotName(testHash),
+				Name:      podSnapshotName(ckpt),
 				Namespace: testNamespace,
+				Labels:    map[string]string{consts.SnapshotOwnerLabel: ckpt.Name},
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
 					Kind:       "DynamoCheckpoint",
@@ -925,11 +935,17 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
 	})
 
-	t.Run("past deadline without terminal PodSnapshot transitions to Failed", func(t *testing.T) {
+	t.Run("Job DeadlineExceeded (k8s-set JobFailed) transitions to Failed", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
 		job := newCheckpointJob(defaultCheckpointJobName)
-		job.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Hour))
-		job.Spec.ActiveDeadlineSeconds = ptr.To(int64(60))
+		// k8s enforces ActiveDeadlineSeconds and, on expiry, sets a JobFailed condition with reason
+		// DeadlineExceeded; the operator just observes that condition.
+		job.Status.Conditions = []batchv1.JobCondition{{
+			Type:    batchv1.JobFailed,
+			Status:  corev1.ConditionTrue,
+			Reason:  "DeadlineExceeded",
+			Message: "Job was active longer than specified deadline",
+		}}
 		snap := ownedSnapshot(ckpt, "")
 
 		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
@@ -947,10 +963,58 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		job := newCheckpointJob(defaultCheckpointJobName)
 
 		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
-		// ensurePodSnapshot will create the PodSnapshot; without a status it stays Pending,
-		// so the checkpoint remains Creating.
+		// createPodSnapshot creates the PodSnapshot and records status.podSnapshotName; the snapshot
+		// is not yet terminal, so the checkpoint stays Creating.
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
+
+		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
+	})
+
+	t.Run("source pod absent with failed Job transitions to Failed", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
+		job := newCheckpointJob(defaultCheckpointJobName)
+		job.Status = batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Message: "unschedulable"}},
+		}
+		r := makeCheckpointReconciler(s, ckpt, job) // no source pod
+
+		_, err := r.handleCreating(ctx, ckpt)
+		require.NoError(t, err)
+
+		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
+	})
+
+	t.Run("previously-created snapshot now missing with failed Job transitions to Failed", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
+		ckpt.Status.PodSnapshotName = ckpt.Name // created before, but no snapshot object exists now
+		job := newCheckpointJob(defaultCheckpointJobName)
+		job.Status = batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Message: "boom"}},
+		}
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
+
+		_, err := r.handleCreating(ctx, ckpt)
+		require.NoError(t, err)
+
+		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
+	})
+
+	t.Run("previously-created snapshot now missing with healthy Job stays Creating, no requeue", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
+		ckpt.Status.PodSnapshotName = ckpt.Name
+		job := newCheckpointJob(defaultCheckpointJobName)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
+
+		result, err := r.handleCreating(ctx, ckpt)
+		require.NoError(t, err)
+		assert.Zero(t, result.RequeueAfter, "watch-driven: Owns(&Job) re-enqueues on the Job's terminal transition")
 
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
