@@ -68,13 +68,80 @@ def _register_model_source_path(engine: sgl.Engine, server_args: ServerArgs) -> 
     return server_args.model_path
 
 
-def _build_media_decoder_and_fetcher():
+# Models whose worker-side HF-processor video path we support. Other models
+# keep URL passthrough so the frontend never emits Decoded video.
+_FRONTEND_VIDEO_DECODE_MODELS = ("qwen3_vl", "qwen3_vl_moe")
+
+
+def _env_float(name: str, default: float) -> float:
+    """Parse a float env override, falling back (with a warning) on garbage so a
+    typo can't take down worker startup with a raw ValueError traceback."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logging.warning("Ignoring malformed %s=%r; using %s", name, raw, default)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Integer counterpart of :func:`_env_float`."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logging.warning("Ignoring malformed %s=%r; using %s", name, raw, default)
+        return default
+
+
+def _engine_model_type(engine: sgl.Engine) -> Optional[str]:
+    """Best-effort HF ``model_type`` of the loaded model, or None."""
+    try:
+        return engine.tokenizer_manager.model_config.hf_config.model_type
+    except AttributeError:
+        return None
+
+
+def _build_media_decoder_and_fetcher(engine: sgl.Engine):
     """Construct MediaDecoder/MediaFetcher for frontend-decoded multimodal.
 
     Mirrors the vLLM backend pattern (components/src/dynamo/vllm/main.py).
+    Video decoding is gated to supported Qwen3-VL configs; unsupported models
+    keep URL passthrough (the frontend never emits Decoded video for them).
     """
     media_decoder = MediaDecoder()
     media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+
+    model_type = _engine_model_type(engine)
+    if model_type in _FRONTEND_VIDEO_DECODE_MODELS and hasattr(
+        media_decoder, "enable_video"
+    ):
+        # enable_video exists only when the Rust bindings were built with the
+        # media-ffmpeg feature (the sglang dev image enables it).
+        fps = _env_float("DYN_SGL_VIDEO_FPS", 2.0)
+        max_frames = _env_int("DYN_SGL_VIDEO_MAX_FRAMES", 128)
+        media_decoder.enable_video(
+            {
+                "fps": fps,
+                "max_frames": max_frames,
+                "limits": {"max_alloc": 1024 * 1024 * 1024},
+            }
+        )
+        logging.info(
+            "Frontend video decoding enabled for model_type=%s (fps=%s, max_frames=%s)",
+            model_type,
+            fps,
+            max_frames,
+        )
+    elif model_type is not None:
+        logging.info(
+            "Frontend video decoding not enabled for model_type=%s (URL passthrough)",
+            model_type,
+        )
 
     media_fetcher = MediaFetcher()
     media_fetcher.timeout_ms(30000)
@@ -130,7 +197,7 @@ async def _register_model_with_runtime_config(
     media_decoder = None
     media_fetcher = None
     if getattr(dynamo_args, "frontend_decoding", False):
-        media_decoder, media_fetcher = _build_media_decoder_and_fetcher()
+        media_decoder, media_fetcher = _build_media_decoder_and_fetcher(engine)
 
     try:
         await register_model(

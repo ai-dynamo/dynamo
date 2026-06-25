@@ -27,7 +27,7 @@ nccl = ["dep:cudarc", "cudarc/nccl"]  # Enable NCCL collective operations
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
-media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile"]
+media-ffmpeg = ["dep:ffmpeg-next", "dep:memfile"]
 bench = ["dynamo-kv-router/bench"]
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
@@ -180,7 +180,6 @@ json-five = { version = "0.3" }
 reqwest = { workspace = true }
 base64 = { version = "0.22" }
 image = { version = "0.25", features = ["serde"] }
-video-rs = { version = "0.11.0", optional = true }
 ffmpeg-next = { version = "8.1.0", optional = true }
 memfile = { version = "0.3.2", optional = true }
 tokio-rayon = {version = "2" }
