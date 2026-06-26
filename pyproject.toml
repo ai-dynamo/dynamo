@@ -179,6 +179,10 @@ addopts = [
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
+    # power-agent ships a standalone suite run in-image (deploy/power-agent
+    # Dockerfile `test` stage + its own pytest.ini); its tests/ package name
+    # collides with the repo-root tests/ package during repo-wide collection.
+    "--ignore-glob=deploy/power-agent/tests/*",
     "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
     "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
     "--ignore-glob=components/src/dynamo/vllm/multimodal_utils/*",

@@ -12,6 +12,7 @@
 //! copies of the schema.
 
 pub mod mooncake;
+pub mod request_trace;
 
 pub use mooncake::{
     AgenticMooncakeRow, AgenticToolEvent, MooncakeJsonlWriter, MooncakeRow, RollingHashIdMapper,

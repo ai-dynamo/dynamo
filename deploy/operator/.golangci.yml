@@ -46,6 +46,18 @@ issues:
     - linters:
         - staticcheck
       text: "SA1019:.*(CheckpointMode|omit mode|DynamoCheckpointIdentity|required by v1alpha1|omit for DGD-managed checkpoints|legacy spec.identity|checkpoint launch uses)"
+    # controller-runtime v0.24 deprecates these compatibility APIs, but moving
+    # the operator to the replacement generic admission and events APIs is a
+    # larger behavior-preserving refactor than this Kubernetes dependency bump.
+    # TODO: Remove these suppressions by migrating the deprecated APIs tracked in
+    # https://github.com/ai-dynamo/dynamo/issues/10795.
+    - linters:
+        - staticcheck
+      text: "SA1019:.*(scheme.Builder|CustomValidator|WithCustomValidator|GetEventRecorderFor).*deprecated"
+    - path: "internal/webhook/validation/.*_handler.go"
+      linters:
+        - staticcheck
+      text: "SA1019: admission\\."
 linters:
   disable-all: true
   enable:
