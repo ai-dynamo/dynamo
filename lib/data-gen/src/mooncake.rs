@@ -5,15 +5,14 @@
 //!
 //! This module is producer- and consumer-agnostic: it defines the row schema,
 //! the block-hash-to-id mapping, the token-block hashing helper, and the JSONL
-//! writer. Workload-specific orchestration (session scheduling, tokenization,
-//! parsing) lives elsewhere -- the Claude exporter in `dynamo-bench` is one
-//! such producer; the `dynamo-mocker` load generator is one such consumer.
+//! writer. Workload-specific orchestration such as scheduling, tokenization,
+//! and parsing lives elsewhere.
 //!
 //! The [`MooncakeRow`] schema deliberately matches the externally-authored
 //! Mooncake trace format: `timestamp` and `delay` are `f64` milliseconds, and
 //! `input_length`/`output_length`/`timestamp`/`delay` accept the upstream
 //! aliases (`input_tokens`, `output_tokens`, `created_time`, `delay_ms`) on
-//! deserialization. Dynamo-produced traces always emit the canonical names.
+//! deserialization. Serialization emits the canonical names.
 
 use anyhow::{Context, Result, bail};
 use dynamo_kv_hashing::{Request, compute_hash_v2, compute_next_sequence_hash};

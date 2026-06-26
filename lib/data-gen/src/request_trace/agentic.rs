@@ -11,7 +11,9 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::load::{LoadedAgentTrace, RequestEntry, ToolEntry};
 
-/// Emits agentic Mooncake rows in replay order without retaining them.
+/// Streams agentic Mooncake-compatible rows into the replay builder.
+///
+/// This is an in-memory compatibility layer; it does not write a Mooncake trace.
 pub fn lower_agentic_mooncake_rows<F>(mut loaded: LoadedAgentTrace, mut emit: F) -> Result<usize>
 where
     F: FnMut(usize, AgenticMooncakeRow) -> Result<()>,
