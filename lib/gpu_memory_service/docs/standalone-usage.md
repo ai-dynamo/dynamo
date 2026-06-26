@@ -3,205 +3,221 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# GPU Memory Service: standalone usage and shadow-engine failover
+# GPU Memory Service: shadow-engine failover with plain processes
 
-This is a quick, steps-oriented sketch of what a user *does* with the GPU Memory
-Service (GMS) **without** the Dynamo Kubernetes operator, what they *get*, and
-how shadow-engine failover works (including the multi-node / WideEP case). For
-GMS internals see [`../README.md`](../README.md); for the runnable recipe see
-[`../examples/shadow_failover/README.md`](../examples/shadow_failover/README.md);
-for the Kubernetes workflow see
-[`../../../docs/kubernetes/shadow-engine-failover.md`](../../../docs/kubernetes/shadow-engine-failover.md).
+This describes how to use the GPU Memory Service (GMS) to get **shadow-engine
+failover when you run plain inference-engine processes yourself** — on one node
+or a couple of nodes, launched however you like (Slurm, `ssh`, a supervisor,
+`systemd`; it doesn't matter). It explains what GMS gives you, what your engine
+must support, and — the important part — **what you have to wire up yourself**.
+
+If you happen to run on Kubernetes, the Dynamo operator automates everything in
+the "what you wire up" sections below (see
+[`../../../docs/kubernetes/shadow-engine-failover.md`](../../../docs/kubernetes/shadow-engine-failover.md)).
+This doc is the from-scratch version. For GMS internals see
+[`../README.md`](../README.md); for a runnable single-GPU example see
+[`../examples/shadow_failover/README.md`](../examples/shadow_failover/README.md).
 
 > ⚠️ **Experimental.** API shape and behavior may change. Use for non-production
 > evaluation only.
 
 ## What GMS is, and why you'd use it
 
-GMS is an **out-of-process, per-GPU memory server**: it talks to clients over a
-Unix socket (RPC + `SCM_RIGHTS` FD passing), owns GPU memory via CUDA VMM
-mappings, and hands those mappings to inference engines. The engine **attaches
-to** GPU-resident model weights (and optionally KV cache) instead of owning
-them.
+GMS is an **out-of-process, per-GPU memory server**. It owns GPU memory via CUDA
+VMM mappings and hands those mappings to engine processes over a Unix socket
+(RPC + `SCM_RIGHTS` FD passing). The engine **attaches to** GPU-resident model
+weights (and optionally KV cache) instead of owning them.
 
-**Benefit:**
+Two benefits:
 
-1. **No re-loading weights from disk on engine restart** — a restarted engine
-   imports the already-resident weights zero-copy.
+1. **No weight reload on engine restart** — a restarted engine imports the
+   already-resident weights zero-copy instead of reading them from disk again.
 2. **Warm standby ("shadow") engines** — a pre-initialized standby shares the
-   *same* resident weights and can take over a same-node, process-level engine
-   failure **without a weight reload**.
+   *same* resident weights and can take over a process-level engine crash
+   **without a weight reload**.
 
-**Non-goals (be clear about these):** GMS is *not* GPU-loss or node-loss
-recovery; it does *not* preserve in-flight requests or KV-cache contents; it is
-experimental.
+**Non-goals:** GMS is *not* GPU-loss or node-loss recovery; it does *not*
+preserve in-flight requests or KV-cache contents. It recovers from a
+**software/process-level engine failure on a healthy GPU and node**.
 
-## The core user flow (framework-agnostic)
+## The pieces involved
 
-1. **Start the GMS server — one per node.**
+Shadow failover is the cooperation of three things. GMS gives you only the
+first; you supply (or your engine supplies) the other two:
+
+1. **GMS (the wheel)** — holds the weights in GPU memory and provides a lock
+   primitive. *Does not* decide who is active or restart anything.
+2. **A standby-capable engine** — an engine that can boot, attach to the
+   resident weights, sit idle, and later "wake" and serve without reloading.
+   vLLM via `dynamo.vllm` does this today; see [what the engine must
+   support](#what-the-engine-itself-must-support).
+3. **Your orchestration** — start the processes, route traffic to whichever
+   engine is active, detect a death, and restart the dead one. This is what you
+   own; the rest of this doc is mostly about it.
+
+## Single node: what you do
+
+On one node with one (or a few) GPUs:
+
+1. **Start a GMS server on the node.**
 
    ```bash
-   python -m gpu_memory_service.cli.server
+   GMS_SOCKET_DIR=/tmp/gms python -m gpu_memory_service.cli.server
    ```
 
-   It auto-discovers GPUs and runs one server process per `(device, tag)` for
-   the tags `weights` and `kv_cache`. Every client **and** the server must share
-   the same `GMS_SOCKET_DIR`; sockets are named `gms_<GPU-UUID>_<tag>.sock`.
+   It auto-discovers GPUs and runs one server per `(device, tag)` for tags
+   `weights` and `kv_cache`. The server and every engine must share the same
+   `GMS_SOCKET_DIR` (sockets are `gms_<GPU-UUID>_<tag>.sock`).
 
-2. **Launch your engine as a GMS client** by passing the backend's GMS load
-   flag (e.g. vLLM / SGLang / TRT-LLM `--load-format gms`). The **first** client
-   to connect loads weights from disk (RW) and publishes them into GMS; **later**
-   clients import them read-only (RO), zero-copy — **no second disk load**.
+2. **Launch a primary and one or more shadows on the same GPU**, all as GMS
+   clients (`--load-format gms`), all pointing at the same `GMS_SOCKET_DIR` and
+   the same lock file. The **first** to connect (`ENGINE_ID=0`) loads the model
+   from disk and publishes the weights into GMS; the rest import them read-only,
+   zero-copy — **no second disk load**, and no second copy of the weights in GPU
+   memory.
 
-3. **(For failover) launch one or more standby engines as RO clients** so a warm
-   shadow already holds the resident weights.
+3. **Decide who serves — two options:**
 
-The single user-visible knob is the **load-format flag**. Pass it again on
-restart so a restarted engine re-imports instead of reloading.
+   - **Autonomous (recommended).** Run the engines in *shadow mode* with a shared
+     lock file (`FAILOVER_LOCK_PATH`). Each engine boots, parks itself, and
+     blocks on a kernel **`flock`** over that file. Exactly one acquires it and
+     starts serving; the others wait. When the active engine's process dies —
+     even on `SIGKILL` — **the kernel releases the lock automatically**, a
+     waiting standby acquires it and takes over. No health-checker required for
+     the promotion itself.
+   - **Manual.** Drive the engine's `/engine/control/sleep` and `wake_up`
+     endpoints yourself and decide when to promote. This is what the runnable
+     [recipe](../examples/shadow_failover/README.md) does so the steps are
+     visible.
 
-## Single-node shadow failover
+**What you must provide on a single node:**
 
-A runnable, single-GPU, no-Kubernetes example lives at
-[`../examples/shadow_failover/README.md`](../examples/shadow_failover/README.md).
-Its flow, in ~5 steps:
+- **GPU memory headroom for co-residency.** The weights are shared (one copy in
+  GMS), but each engine still has its own CUDA context, activations, and — for
+  the active one — KV cache. Size `--gpu-memory-utilization` (or your engine's
+  equivalent) so a primary and a standby fit on the device. CUDA processes share
+  a GPU natively, so you do **not** need anything like MPS for this to work
+  (MPS can improve sharing but is optional).
+- **A shared lock file path** reachable by all the engines (a normal local path;
+  `flock` is a kernel lock on that file).
+- **Routing to the active engine.** Whatever fronts your engines (a load
+  balancer, your own router, or the Dynamo frontend if you use `dynamo.vllm`)
+  must send traffic only to the engine that currently holds the lock. In
+  `dynamo.vllm`, the engine only registers with discovery *after* it acquires
+  the lock, so the router naturally sees only the active one; with a plain
+  engine you point your LB at the active endpoint (or health-check the standbys
+  out until they take over).
+- **Restarting the dead engine.** Promotion is automatic, but you are now down
+  one standby. Your launcher (Slurm, a supervisor, `systemd`, a shell loop)
+  should relaunch a fresh standby to restore redundancy.
 
-1. Start the GMS server and supporting infra (etcd / nats / `dynamo.frontend`).
-2. Launch the **primary** (RW writer) — it loads the model once and publishes
-   weights into GMS.
-3. Launch the **shadow** (RO importer) — it attaches to the *same* resident
-   weights, then **pauses** (releases GPU memory, keeps VA reservations).
-4. **Kill the primary** (SIGKILL — simulates a process crash; GPU/node stay
-   healthy).
-5. **Wake the shadow** — it re-attaches to the resident weights and serves
-   **without reloading them**.
+That's the whole single-node story, and it is genuinely simple: a GMS server, a
+writer, one or more readers sharing a lock file, plus a way to route and a way
+to relaunch.
 
-### Who becomes active: two mechanisms
+## What the engine itself must support
 
-- **Manual control (what the standalone recipe uses).** You drive the engine's
-  `/engine/control/sleep` and `/engine/control/wake_up` endpoints and SIGKILL
-  the primary yourself. Simpler to demo; the mechanics are visible.
-- **Autonomous flock (what the operator uses).** A standby blocks on a kernel
-  `flock` and is promoted automatically when the holder dies. See the
-  orchestration section below for how this fits together.
+A *vanilla* engine can't just share GMS weights and stand by — its normal
+"sleep" copies GPU buffers to host (which breaks on GMS's `cuMemMap`'d memory),
+and its memory accounting assumes it owns the whole GPU. To be a GMS standby, an
+engine needs:
 
-## Orchestration: who does what (and how to replicate it)
+- **GMS weight load** (`--load-format gms`): RW writer publishes, RO readers
+  import; choose the role per process (e.g. by an `ENGINE_ID` env var so
+  exactly one writes — this also avoids a deadlock when the engine is itself
+  multi-GPU/tensor-parallel).
+- **GMS-aware sleep/wake**: on sleep, *unmap* the GMS virtual addresses and
+  release physical backing; on wake, reconnect and *remap the same virtual
+  addresses*. This remap is how a standby re-attaches to the resident weights
+  instead of reloading them.
+- **Memory-accounting fixes** so a co-resident engine doesn't think the GPU is
+  full, and so KV-cache sizing ignores the active engine's allocation.
+- **"Scratch KV"** so a standby can fully initialize while the active engine
+  still owns the real KV layout (throwaway backing now, real GMS-backed KV on
+  wake).
+- **Hold-until-active behavior**: boot, initialize, then wait (on the `flock`,
+  or on your signal) and only start serving once promoted.
 
-Shadow failover is split across three layers. GMS supplies the memory
-primitives; an engine wrapper turns those into a sleep/wake-able standby; an
-orchestrator decides who is active and recovers a dead cohort. Knowing which
-layer owns what tells you exactly how much you must build to do this yourself.
+For vLLM this is all implemented in `dynamo.vllm`
+(`components/src/dynamo/vllm` + `lib/gpu_memory_service/integrations/vllm`), so
+you get it by running that engine. **If you are integrating GMS into a different
+engine, this list is exactly the work to do** — and the primitives you need
+(the `flock`, scratch managers, unmap/remap) are already in the GMS wheel.
 
-### Layer 1 — the GMS wheel (primitives)
+| Engine | Standby lifecycle today |
+| --- | --- |
+| **vLLM** (`dynamo.vllm`) | **Full** — GMS load, GMS-aware sleep/wake, scratch KV, `flock` activation. Use the [recipe](../examples/shadow_failover/README.md). |
+| **TensorRT-LLM** | **Weight load only (prototype)** — `LoadFormat.GMS` RW writer / RO readers. **No** sleep/wake, scratch KV, or `flock` activation yet; shadow failover needs the lifecycle above added (reusing the wheel's primitives). |
+| **SGLang** | GMS weight / memory-saver integration via the Dynamo runtime. |
 
-The wheel gives you an out-of-process, per-GPU memory server and the building
-blocks to share its memory:
+## A couple of nodes: what you have to build
 
-- **RW-writer / RO-importer weight sharing** — the first client loads from disk
-  and publishes; later clients import the resident weights zero-copy.
-- a **torch mempool / pluggable allocator** so engine allocations are routed
-  through GMS;
-- a kernel **`flock`-based failover lock** (`gpu_memory_service.failover_lock`)
-  whose holder is auto-released by the kernel on process death;
-- **scratch-allocation managers** and **unmap/remap of VA reservations** for
-  tearing down and re-attaching backing at stable virtual addresses.
+When the engine itself spans nodes (tensor/pipeline parallel, or wide expert
+parallel), the same idea applies but **you** own more of it. The key facts:
 
-GMS does **not** decide who is active, when to fail over, or how to co-schedule
-engines. Those are the next two layers.
+- **Run complete engine groups, not single processes.** A multi-node engine is
+  one distributed group (a leader + workers across the nodes, joined by a
+  rendezvous address). To have a warm standby, you run the whole active group
+  **plus one or more whole standby groups** — every group spans all the nodes.
+  All groups attach to the same GMS-resident weights (one server per node), so
+  the standby groups cost no extra weight memory.
+- **Each group needs its own rendezvous, and members must pair up by slot.**
+  Give each group its own leader address/port (master addr/port), and make the
+  *same-slot* members across nodes join the *same* leader. Concretely: standby
+  group #1's workers on every node rendezvous with standby group #1's leader —
+  not with the active leader. This pairing is what makes a standby group a
+  self-contained, ready-to-serve engine rather than a pile of stray processes.
+- **Promotion is still a single-node lock.** Only the *leader* processes serve /
+  register, and the leaders all live on one node (the leader node). So the
+  `flock` election happens among the leader processes on that one node — it is
+  node-local, and that's fine. Whichever leader holds the lock is the active
+  group; its workers on the other nodes are already bound to it. Workers never
+  contend the lock.
 
-### Layer 2 — the engine wrapper (what makes a standby possible)
+**What you must build (your launcher / control plane):**
 
-A vanilla engine cannot just share GMS weights and stand by — vanilla sleep
-copies GPU buffers to host and breaks on GMS's `cuMemMap`'d memory, and the
-engine's memory accounting assumes it owns the whole GPU. Dynamo's vLLM wrapper
-(`components/src/dynamo/vllm` + `lib/gpu_memory_service/integrations/vllm`) adds:
+1. **Failure detection** — notice when any process in the active group dies.
+2. **Cohort-atomic teardown** — kill the *entire* active group across all nodes,
+   not just the dead process. A multi-node group shares NCCL collectives and a
+   `torch.distributed` rendezvous; once one rank dies the rest are wedged and
+   **cannot be partially recovered**. (Do not try to restart a single rank
+   in-place.)
+3. **Promotion** — let a standby group take over. With autonomous `flock` shadow
+   mode this is automatic: the dead leader released the lock, a standby leader
+   acquires it and serves, and its workers were already paired to it.
+4. **Re-create a standby** — relaunch a fresh group to restore redundancy.
 
-- the `--load-format gms` loader and auto-selection of the GMS worker class;
-- a **GMS-aware sleep/wake**: sleep unmaps the VAs and releases physical backing;
-  wake reconnects and **remaps the same virtual addresses** — this is how a
-  standby re-attaches to the resident weights instead of reloading them;
-- **memory-accounting fixes** so a co-resident engine doesn't think the GPU is
-  full, and so KV-cache sizing ignores the active engine's allocation;
-- **scratch KV** so a standby can fully initialize while co-resident with the
-  active engine (throwaway KV backing now, real GMS-backed KV on wake);
-- **RW/RO role selection by `ENGINE_ID`** (engine `0` writes weights, others
-  import) to avoid a multi-rank deadlock;
-- the **activation/standby behavior**: in autonomous *shadow mode* the engine
-  boots, pauses, blocks on the shared `flock`, and only registers with service
-  discovery (becomes routable) **after** it acquires the lock — so the router
-  only ever sees the active engine, and the kernel releasing the lock on process
-  death promotes a standby automatically. The standalone recipe instead drives
-  the equivalent sleep/wake by hand via the engine control endpoints.
-
-**Takeaway:** if you integrate GMS into another engine, *this* is the layer you
-reimplement — sleep/wake-as-unmap/remap, scratch KV, `ENGINE_ID` RW/RO, and
-either a flock-gated activation or your own promote/serve trigger.
-
-### Layer 3 — the Dynamo Kubernetes operator (cluster orchestration)
-
-The operator supplies what GMS and the wrapper don't:
-
-- **co-location and GPU sharing** — it puts the GMS server and engine(s) on the
-  same GPU and shares that GPU across pods/containers via DRA, with a shared
-  volume so every engine sees the same lock file and GMS sockets;
-- **failover env injection** — `ENGINE_ID` from the pod index, the shared lock
-  path, shadow mode, scratch KV, and the socket dir;
-- **failure handling** — failover engine pods use `restartPolicy: Never` plus a
-  cascade controller, so when *any* engine in a failover group terminates the
-  **whole group** is torn down and recreated cleanly (no half-dead distributed
-  group);
-- **multi-node** — one GMS server per rank, pod-index-pinned leader hostnames so
-  each standby *cohort* (same pod index across ranks) rendezvouses around its own
-  leader, headless workers, and `flock` leader election running only on the
-  rank-0/leader node (it is node-local by design).
-
-**Takeaway:** doing shadow failover **without** the operator is easy on a single
-node — run a GMS server, launch a writer plus one or more RO standbys on the
-same GPU sharing one lock file, and the kernel `flock` handles promotion. That
-is exactly this recipe. **Multi-node is the hard part you must build yourself:**
-stable per-cohort rendezvous + cohort-atomic teardown/recreate + failure
-detection. There is no GMS-level shortcut for it.
+You can do all four with whatever you already use — a Slurm job array with a
+prolog/epilog, a supervisor process, a small controller script. **The Dynamo
+Kubernetes operator is simply an implementation of these four steps** (gang
+scheduling for the groups, a cascade controller for the atomic teardown); off
+Kubernetes you implement the equivalent in your launcher. GMS gives you the fast
+weight re-materialization and the lock; the detect / tear-down / promote /
+relaunch loop is yours.
 
 ### WideEP ("fail over many servers at once")
 
-This is the same split at scale. GMS's only contribution is **fast per-rank
-weight re-materialization**: when a rank/server dies, its replacement imports
-*that rank's* weight shard from GMS instead of reloading from disk. TRT-LLM's
+Same split, at scale. GMS's contribution is **fast per-rank weight
+re-materialization**: when a rank/server dies, its replacement imports *that
+rank's* weight shard from GMS instead of reloading from disk. TRT-LLM's
 `weight_sharing/source_identity.py` supplies the per-rank weight-set identity
 ("rank N imports the shard produced for rank N") that keeps this correct.
 
 GMS does **not** detect the dead rank, decide to serve degraded (N−1), re-spawn
 the rank, or rejoin the collective (back to N). That detect / serve-degraded /
-respawn / rejoin control plane is the orchestrator's job — Layer 3 above, or the
-backend's own fault tolerance. GMS alone does **not** "fail over many servers."
+respawn / rejoin loop is your control plane — the same four steps as above. GMS
+alone does **not** "fail over many servers."
 
-## Backend support status
+## What the GMS wheel must expose
 
-| Backend | Standalone status |
-| --- | --- |
-| **vLLM** | **Full standalone shadow failover works today** — custom worker, GMS-aware sleep/wake, scratch-KV, flock activation. See the recipe. |
-| **TensorRT-LLM** | **Weight-sharing load path only (prototype)** — RW writer / RO readers via `LoadFormat.GMS` + `GmsConfig`. **No** shadow-failover lifecycle yet (no GMS-aware sleep/wake, no scratch-KV, no flock activation). |
-| **SGLang** | GMS weight / memory-saver integration via the Dynamo runtime. |
-
-**TRT-LLM current gates to know about:**
-
-- The **RO import path is effectively inert** until the publisher
-  source-identity seam is implemented.
-- **GMS + the MoE load balancer is rejected at config time.**
-
-So TRT-LLM gets **fast weight sharing now**; shadow / WideEP failover needs
-additional orchestration glue — which can reuse primitives already in the GMS
-wheel (the `flock`, scratch managers, unmap/remap).
-
-## What the GMS wheel must expose for standalone use
-
-A non-Dynamo engine (e.g. TRT-LLM) builds its own integration against these
-import surfaces, so the **published wheel must include them**:
+An engine integrating GMS itself (e.g. TensorRT-LLM) builds against these import
+surfaces, so the **published wheel must include them**:
 
 - `gpu_memory_service.client.torch.{allocator, module, tensor}`
 - `gpu_memory_service.common.{locks, utils}` — including `get_socket_path`
-- `gpu_memory_service.server` and `gpu_memory_service.cli` — server entrypoint
-  is `python -m gpu_memory_service.cli.server`
-- `gpu_memory_service.failover_lock` — for failover
+- `gpu_memory_service.server` and `gpu_memory_service.cli` — the server
+  entrypoint is `python -m gpu_memory_service.cli.server`
+- `gpu_memory_service.failover_lock` — the `flock` lock used for promotion
 - `gpu_memory_service.integrations.common.{patches, utils}` — e.g.
   `patch_empty_cache`, `finalize_gms_write`
 
