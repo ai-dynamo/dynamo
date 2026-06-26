@@ -117,24 +117,17 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # this path and runs in dev-derived test images.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
-{# dev/local-dev have no venv yet (created later in the shared dev stage), so
-   third-party deps must go into upstream's externally-managed system Python;
-   runtime targets install into the active venv. #}
+{# dev/local-dev create the venv later in the shared dev stage, so install
+   third-party deps into system Python. Runtime targets use the active venv. #}
 {% if target in ("dev", "local-dev") %}
 {% set trtllm_pip_flags = "--system --break-system-packages" %}
 {% else %}
 {% set trtllm_pip_flags = "" %}
 {% endif %}
 
-# Third-party Python deps the Dynamo wheels declare but upstream
-# tensorrt-llm/release lacks, plus the huggingface-hub pin and KVBM-matching
-# nixl-cu13. Installed for ALL targets — dev/local-dev build only the *Dynamo*
-# wheels from source, but still need these PyPI packages. In particular `nixl`
-# is not a declared dependency of ai_dynamo_runtime, so the source build never
-# pulls it in; gating this behind non-dev left dev/local-dev images without nixl.
-# The requirements.trtllm.txt file itself carries a `--no-binary imageio-ffmpeg`
-# directive that keeps the GPL-encumbered prebuilt ffmpeg off disk; IMAGEIO_FFMPEG_EXE
-# below points imageio at the in-tree LGPL CLI. --no-deps preserves upstream's solve.
+# Install TRT-LLM third-party deps for all targets. dev/local-dev build Dynamo
+# wheels from source later, but still need these packages available through the
+# shared dev venv's system-site-packages. --no-deps preserves upstream's solve.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
     export UV_CACHE_DIR=/root/.cache/uv && \
