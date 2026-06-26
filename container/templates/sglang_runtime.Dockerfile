@@ -196,9 +196,9 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 # process recompiles torch/transformers/sglang from source on first import (~+3.5s
 # each), which previously added ~8-10 min to the sglang CI job. This was implicitly
 # provided by the now-removed vendored-patch step that ran `import sglang` at build.
-RUN python3 -m compileall -q -j0 \
-    "$(python3 -c 'import site; print(site.getsitepackages()[0])')" \
-    /sgl-workspace/sglang/python || true
+RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    python3 -m compileall -q -j0 "$SITE_PACKAGES" && \
+    (python3 -m compileall -q -j0 /sgl-workspace/sglang/python || true)
 {%- endif %}
 
 USER dynamo
