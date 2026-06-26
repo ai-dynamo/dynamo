@@ -2997,7 +2997,6 @@ class EntrypointArgs:
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
         *,
-        context_length: Optional[int] = None,
         metrics_prefix: Optional[str] = None,
         enable_anthropic_api: Optional[bool] = None,
         strip_anthropic_preamble: Optional[bool] = None,
@@ -3032,7 +3031,6 @@ class EntrypointArgs:
             migration_max_seq_len: Optional max sequence length for migration
             chat_engine_factory: Optional Python chat completions engine factory callback
             aic_perf_config: Optional AIC perf-model configuration for default KV routing
-            context_length: Optional context length override
             metrics_prefix: Optional Prometheus metrics prefix override
             enable_anthropic_api: Optional Anthropic Messages API override
             strip_anthropic_preamble: Optional Anthropic preamble stripping override
