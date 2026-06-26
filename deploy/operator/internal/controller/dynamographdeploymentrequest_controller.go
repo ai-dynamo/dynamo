@@ -34,6 +34,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
+	runtimejson "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/tools/record"
@@ -2082,30 +2084,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 		}
 	}
 
-	// The DGDR status/annotation store a manifest that is parsed later as
-	// unstructured YAML, so keep apiVersion/kind there without setting TypeMeta
-	// on the typed object submitted through the Kubernetes client.
-	dgdManifest, err := betaDGDManifestObject(dgd)
+	// Store manifest bytes with apiVersion/kind in status/annotation without
+	// setting TypeMeta on the typed object submitted through the Kubernetes client.
+	dgdJSON, dgdYAML, err := r.encodeBetaDGDManifest(dgd)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to build generated DGD manifest: %w", err)
-	}
-
-	// Store the generated DGD in ProfilingResults.SelectedConfig
-	dgdJSON, err := json.Marshal(dgdManifest)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to marshal generated DGD to JSON: %w", err)
+		return nil, "", fmt.Errorf("failed to encode generated DGD manifest: %w", err)
 	}
 	profilingResults.SelectedConfig = &runtime.RawExtension{Raw: dgdJSON}
 
 	// Serialize the DGD spec to an annotation so createDGD can retrieve it
-	dgdBytes, err := sigsyaml.Marshal(dgdManifest)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to marshal generated DGD: %w", err)
-	}
 	if dgdr.Annotations == nil {
 		dgdr.Annotations = make(map[string]string)
 	}
-	dgdr.Annotations["nvidia.com/generated-dgd-spec"] = string(dgdBytes)
+	dgdr.Annotations["nvidia.com/generated-dgd-spec"] = string(dgdYAML)
 
 	if err := r.Update(ctx, dgdr); err != nil {
 		return nil, "", fmt.Errorf("failed to update DGDR with generated DGD annotation: %w", err)
@@ -2113,17 +2104,36 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 	return profilingResults, dgd.Name, nil
 }
 
-// betaDGDManifestObject returns the serialized-manifest form of a beta DGD.
-// Typed client objects should let the scheme provide GVK, but stored manifests
-// need explicit apiVersion/kind so extractResourcesFromYAML can identify them.
-func betaDGDManifestObject(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (map[string]interface{}, error) {
-	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(dgd)
+// encodeBetaDGDManifest returns JSON/YAML manifest bytes for a beta DGD.
+// The Kubernetes versioning encoder temporarily supplies apiVersion/kind from
+// the scheme during serialization and restores the typed object's TypeMeta after.
+func (r *DynamoGraphDeploymentRequestReconciler) encodeBetaDGDManifest(dgd *nvidiacomv1beta1.DynamoGraphDeployment) ([]byte, []byte, error) {
+	scheme := r.Scheme()
+	codecs := serializer.NewCodecFactory(scheme)
+
+	jsonSerializer := runtimejson.NewSerializerWithOptions(
+		runtimejson.DefaultMetaFactory,
+		scheme,
+		scheme,
+		runtimejson.SerializerOptions{},
+	)
+	jsonBytes, err := runtime.Encode(codecs.EncoderForVersion(jsonSerializer, nvidiacomv1beta1.GroupVersion), dgd)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	obj["apiVersion"] = nvidiacomv1beta1.GroupVersion.String()
-	obj["kind"] = consts.ResourceTypeDynamoGraphDeployment
-	return obj, nil
+
+	yamlSerializer := runtimejson.NewSerializerWithOptions(
+		runtimejson.DefaultMetaFactory,
+		scheme,
+		scheme,
+		runtimejson.SerializerOptions{Yaml: true},
+	)
+	yamlBytes, err := runtime.Encode(codecs.EncoderForVersion(yamlSerializer, nvidiacomv1beta1.GroupVersion), dgd)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return jsonBytes, yamlBytes, nil
 }
 
 // extractParetoFromWebUIData parses webui_data.json and returns all Pareto-optimal

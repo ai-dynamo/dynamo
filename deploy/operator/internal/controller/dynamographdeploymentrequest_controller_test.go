@@ -1599,7 +1599,7 @@ var _ = Describe("DGDR Error Handling", func() {
 	})
 
 	Context("When parsing multi-document YAML", func() {
-		It("Should add apiVersion and kind when serializing beta DGD manifests", func() {
+		It("Should include apiVersion and kind when serializing beta DGD manifests", func() {
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-dgd",
@@ -1614,10 +1614,14 @@ var _ = Describe("DGDR Error Handling", func() {
 			Expect(rawTypedObject).NotTo(HaveKey("apiVersion"))
 			Expect(rawTypedObject).NotTo(HaveKey("kind"))
 
-			manifest, err := betaDGDManifestObject(dgd)
+			manifestJSON, manifestYAML, err := reconciler.encodeBetaDGDManifest(dgd)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(manifest).To(HaveKeyWithValue("apiVersion", nvidiacomv1beta1.GroupVersion.String()))
-			Expect(manifest).To(HaveKeyWithValue("kind", consts.ResourceTypeDynamoGraphDeployment))
+			Expect(string(manifestJSON)).Should(ContainSubstring(`"apiVersion":"nvidia.com/v1beta1"`))
+			Expect(string(manifestJSON)).Should(ContainSubstring(`"kind":"DynamoGraphDeployment"`))
+			Expect(string(manifestYAML)).Should(ContainSubstring("apiVersion: nvidia.com/v1beta1"))
+			Expect(string(manifestYAML)).Should(ContainSubstring("kind: DynamoGraphDeployment"))
+			Expect(dgd.APIVersion).Should(BeEmpty())
+			Expect(dgd.Kind).Should(BeEmpty())
 		})
 
 		It("Should extract DGD from ConfigMap + DGD YAML", func() {
