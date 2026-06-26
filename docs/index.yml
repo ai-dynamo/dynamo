@@ -143,16 +143,14 @@ navigation:
                 path: kubernetes/dgdr.md
               - page: DGDR Examples
                 path: kubernetes/dgdr-examples.md
-          - section: Gateway API
+          - section: Gateway API Inference Extension (GAIE)
             contents:
-              - section: Gateway API Inference Extension (GAIE)
-                contents:
-                  - page: Overview
-                    path: kubernetes/gateway-api/README.mdx
-                  - page: Quickstart
-                    path: kubernetes/gateway-api/quickstart.mdx
-                  - page: Reference
-                    path: kubernetes/gateway-api/reference.mdx
+              - page: Overview
+                path: kubernetes/gateway-api/README.mdx
+              - page: Quickstart
+                path: kubernetes/gateway-api/quickstart.mdx
+              - page: Reference
+                path: kubernetes/gateway-api/reference.mdx
           - section: Model Loading
             contents:
               - page: Model Caching
