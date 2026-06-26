@@ -3,11 +3,13 @@
 
 """Unit tests for dynamo.vllm.multimodal_utils.qwen_custom_encoder.
 
-QwenCustomEncoder presets the Qwen image placeholder token string; the numeric
-id is resolved from the model tokenizer. These tests pin that the preset token
-is used, that the same string resolves to the per-version id (151655 for
-Qwen3-VL, 248056 for Qwen3.5 — the reason the tokenizer is authoritative rather
-than a static id table), and that the class stays abstract.
+QwenCustomEncoder implements get_image_placeholder_token_id by resolving the
+Qwen image placeholder token string against the model tokenizer (assigned by the
+subclass in load()). These tests pin the preset string, per-version id
+resolution (151655 for Qwen3-VL, 248056 for Qwen3.5 — why the tokenizer is
+authoritative rather than a static id table), the fail-fast errors (unset
+tokenizer, token the tokenizer does not define), and that the class stays
+abstract.
 """
 
 from typing import List
@@ -51,7 +53,6 @@ class _ConcreteQwen(QwenCustomEncoder):
 def test_preset_token_string():
     """QwenCustomEncoder presets the Qwen placeholder token string."""
     assert QWEN_IMAGE_PLACEHOLDER_TOKEN == "<|image_pad|>"
-    assert _ConcreteQwen.image_placeholder_token == QWEN_IMAGE_PLACEHOLDER_TOKEN
 
 
 @pytest.mark.parametrize("token_id", [151655, 248056])
@@ -62,6 +63,21 @@ def test_same_string_resolves_per_version_id(token_id):
     enc.tokenizer = _FakeTokenizer({QWEN_IMAGE_PLACEHOLDER_TOKEN: token_id})
     assert enc.get_image_placeholder_token_id() == token_id
     enc.validate()  # must not raise
+
+
+def test_unset_tokenizer_raises():
+    """No tokenizer assigned in load() -> ValueError."""
+    enc = _ConcreteQwen()
+    with pytest.raises(ValueError, match="tokenizer is not set"):
+        enc.get_image_placeholder_token_id()
+
+
+def test_token_not_defined_raises():
+    """Token mapping to unk_token_id is treated as undefined -> ValueError."""
+    enc = _ConcreteQwen()
+    enc.tokenizer = _FakeTokenizer({"something_else": 1}, unk_token_id=0)
+    with pytest.raises(ValueError, match="does not define placeholder token"):
+        enc.get_image_placeholder_token_id()
 
 
 def test_qwen_custom_encoder_is_abstract():

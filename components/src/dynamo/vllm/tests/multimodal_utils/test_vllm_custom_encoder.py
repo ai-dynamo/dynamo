@@ -3,12 +3,12 @@
 
 """Unit tests for dynamo.vllm.multimodal_utils.custom_encoder.
 
-The image placeholder token is identified by its token *string*, set on the
-subclass via ``image_placeholder_token``; the numeric id is resolved from the
-model tokenizer (``placeholder_token_id_from_tokenizer``). These tests pin that
-generic resolution, the fail-fast errors (unset token string, unset tokenizer,
-token the tokenizer does not define), and ``validate()`` as the post-load early
-check. Qwen-specific behavior lives in test_vllm_qwen_custom_encoder.py.
+The base CustomEncoder defines the *contract* only: subclasses implement
+load/encode/get_image_placeholder_token_id. How the placeholder id is obtained
+(tokenizer, token string, constant) is a subclass implementation detail — Qwen
+resolution is covered in test_vllm_qwen_custom_encoder.py. These tests pin the
+abstract contract, validate()'s fail-fast dispatch to the subclass impl, and the
+reusable placeholder_token_id_from_tokenizer helper.
 """
 
 from typing import List
@@ -16,7 +16,10 @@ from typing import List
 import pytest
 import torch
 
-from dynamo.vllm.multimodal_utils.custom_encoder import CustomEncoder
+from dynamo.vllm.multimodal_utils.custom_encoder import (
+    CustomEncoder,
+    placeholder_token_id_from_tokenizer,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -41,7 +44,7 @@ class _FakeTokenizer:
 
 
 class _Encoder(CustomEncoder):
-    image_placeholder_token = _TOKEN
+    """Concrete encoder returning a fixed placeholder id."""
 
     def load(self, model_id: str, device: str) -> None:  # pragma: no cover - stub
         ...
@@ -49,54 +52,60 @@ class _Encoder(CustomEncoder):
     def encode(self, image_urls: List[str]) -> List[torch.Tensor]:  # pragma: no cover
         return []
 
+    def get_image_placeholder_token_id(self) -> int:
+        return 42
 
-class _NoTokenEncoder(CustomEncoder):
+
+class _MisconfiguredEncoder(CustomEncoder):
+    """Encoder whose id resolution fails, to exercise validate() propagation."""
+
     def load(self, model_id: str, device: str) -> None:  # pragma: no cover - stub
         ...
 
     def encode(self, image_urls: List[str]) -> List[torch.Tensor]:  # pragma: no cover
         return []
 
-
-def test_resolves_id_from_tokenizer():
-    """A subclass that sets image_placeholder_token resolves it via the tokenizer."""
-    enc = _Encoder()
-    enc.tokenizer = _FakeTokenizer({_TOKEN: 42})
-    assert enc.get_image_placeholder_token_id() == 42
+    def get_image_placeholder_token_id(self) -> int:
+        raise ValueError("placeholder id unresolved")
 
 
-def test_token_not_defined_raises():
-    """Token mapping to unk_token_id is treated as undefined -> ValueError."""
-    enc = _Encoder()
-    enc.tokenizer = _FakeTokenizer({"something_else": 1}, unk_token_id=0)
-    with pytest.raises(ValueError, match="does not define placeholder token"):
-        enc.get_image_placeholder_token_id()
+def test_helper_resolves_id():
+    """The helper resolves a defined token to its id."""
+    tok = _FakeTokenizer({_TOKEN: 42})
+    assert placeholder_token_id_from_tokenizer(tok, _TOKEN) == 42
 
 
-def test_unset_token_string_raises():
-    """An encoder that never sets image_placeholder_token -> ValueError."""
-    enc = _NoTokenEncoder()
-    enc.tokenizer = _FakeTokenizer({_TOKEN: 42})
-    with pytest.raises(ValueError, match="image_placeholder_token is not set"):
-        enc.get_image_placeholder_token_id()
+def test_helper_returns_none_when_token_maps_to_unk():
+    """A token mapping to unk_token_id is treated as undefined -> None."""
+    tok = _FakeTokenizer({"something_else": 1}, unk_token_id=0)
+    assert placeholder_token_id_from_tokenizer(tok, _TOKEN) is None
 
 
-def test_unset_tokenizer_raises():
-    """No tokenizer assigned in load() -> ValueError."""
-    enc = _Encoder()
-    with pytest.raises(ValueError, match="self.tokenizer is not set"):
-        enc.get_image_placeholder_token_id()
+def test_helper_returns_none_without_convert_method():
+    """An object without convert_tokens_to_ids resolves to None, not an error."""
+    assert placeholder_token_id_from_tokenizer(object(), _TOKEN) is None
 
 
-def test_validate_passes_when_resolvable():
-    """validate() is a no-op when the placeholder id resolves."""
-    enc = _Encoder()
-    enc.tokenizer = _FakeTokenizer({_TOKEN: 42})
-    enc.validate()  # must not raise
+def test_get_image_placeholder_token_id_is_abstract():
+    """A subclass that omits get_image_placeholder_token_id cannot instantiate."""
+
+    class _Missing(CustomEncoder):
+        def load(self, model_id: str, device: str) -> None:
+            ...
+
+        def encode(self, image_urls: List[str]) -> List[torch.Tensor]:
+            return []
+
+    with pytest.raises(TypeError):
+        _Missing()
 
 
-def test_validate_fails_fast_on_bad_config():
-    """validate() surfaces a misconfigured encoder before the first request."""
-    enc = _Encoder()  # tokenizer never set
-    with pytest.raises(ValueError):
-        enc.validate()
+def test_validate_passes_when_id_resolves():
+    """validate() is a no-op when the subclass returns an id."""
+    _Encoder().validate()  # must not raise
+
+
+def test_validate_propagates_subclass_error():
+    """validate() surfaces the subclass's resolution error at startup."""
+    with pytest.raises(ValueError, match="placeholder id unresolved"):
+        _MisconfiguredEncoder().validate()
