@@ -15,13 +15,14 @@
 
 import logging
 import time
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from urllib.parse import urlparse
-from urllib.request import urlopen
 
+import httpx
 import torch
+from safetensors.torch import load as safetensors_load
+from safetensors.torch import load_file as safetensors_load_file
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.common.multimodal.image_loader import ImageLoader
@@ -57,6 +58,7 @@ class MultimodalRequestProcessor:
         max_file_size_mb: int,
         tokenizer: Optional[TokenizerProtocol] = None,
         allowed_local_media_path: str = "",
+        enable_frontend_decoding: bool = False,
     ):
         self.model_type = model_type
         self.model_dir = model_dir
@@ -73,7 +75,9 @@ class MultimodalRequestProcessor:
         else:
             self.tokenizer = tokenizer_factory(model_dir)
 
-        self.image_loader = ImageLoader()
+        self.image_loader = ImageLoader(
+            enable_frontend_decoding=enable_frontend_decoding
+        )
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
@@ -83,45 +87,86 @@ class MultimodalRequestProcessor:
             return False
         return bool(parsed.scheme and parsed.netloc)
 
-    def load_tensor_from_path_or_url(self, path: str) -> torch.Tensor:
-        """Load a tensor from either a local file path or a URL."""
+    def _unwrap_safetensors(
+        self, data: Dict[str, torch.Tensor]
+    ) -> "torch.Tensor | Dict[str, torch.Tensor]":
+        """Return a single tensor when the file has one key, else the full dict.
+
+        Multi-key files (e.g. Maverick/Scout with mm_embeddings +
+        image_special_tokens + image_special_token_offsets) need the
+        full dict so encode_helper can extract auxiliary data.
+        """
+        if len(data) == 1:
+            return next(iter(data.values()))
+        return data
+
+    def load_tensor_from_path_or_url(
+        self, path: str
+    ) -> "torch.Tensor | Dict[str, torch.Tensor]":
+        """Load tensors from a local .safetensors path or URL.
+
+        Returns a single tensor for single-key files (e.g. LLaVA-NeXT),
+        or a dict of tensors for multi-key files (e.g. Maverick/Scout).
+        Only .safetensors format is accepted.
+        """
+        parsed = urlparse(path)
+        lower_path = parsed.path.lower()
+        if lower_path.endswith((".pt", ".pth", ".bin")):
+            raise RuntimeError(
+                "Unsafe tensor format: .pt/.pth/.bin files are not allowed. "
+                "Use .safetensors format instead."
+            )
+        if not lower_path.endswith(".safetensors"):
+            raise RuntimeError("Only .safetensors embedding files are supported.")
+
         if self.is_url(path):
-            # Download directly to memory using BytesIO (no filesystem ops)
+            if parsed.scheme not in ("http", "https"):
+                raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
             try:
-                with urlopen(path) as response:
-                    # Read at most max_size + 1 bytes to detect if file exceeds limit
-                    data = response.read(self.max_file_size_bytes + 1)
-                    if len(data) > self.max_file_size_bytes:
-                        raise RuntimeError(
-                            f"File size exceeds limit: {len(data) // (1024*1024)}MB > "
-                            f"{self.max_file_size_mb}MB "
-                        )
-                    tensor_stream = BytesIO(data)
-                    tensor = torch.load(
-                        tensor_stream, map_location="cpu", weights_only=True
-                    )
-                    return tensor
+                with httpx.Client(timeout=300.0) as client:
+                    with client.stream("GET", path) as resp:
+                        resp.raise_for_status()
+                        content_length = resp.headers.get("content-length")
+                        if (
+                            content_length
+                            and int(content_length) > self.max_file_size_bytes
+                        ):
+                            raise RuntimeError(
+                                f"File size exceeds limit: "
+                                f"{int(content_length) // (1024*1024)}MB > "
+                                f"{self.max_file_size_mb}MB"
+                            )
+                        chunks = []
+                        downloaded = 0
+                        for chunk in resp.iter_bytes():
+                            downloaded += len(chunk)
+                            if downloaded > self.max_file_size_bytes:
+                                raise RuntimeError(
+                                    f"File size exceeds limit: "
+                                    f"{downloaded // (1024*1024)}MB > "
+                                    f"{self.max_file_size_mb}MB"
+                                )
+                            chunks.append(chunk)
+                        content = b"".join(chunks)
+                    data = safetensors_load(content)
+                    return self._unwrap_safetensors(data)
+            except RuntimeError:
+                raise
             except Exception as e:
-                # Log actual error for debugging, return generic error to user
                 logging.error(f"Failed to download or load tensor from URL: {e}")
                 raise RuntimeError("Failed to load tensor")
         else:
-            # Restrict local file access to configured directory only
             try:
-                # Check if local media path is configured
                 if not self.allowed_local_media_path:
                     logging.warning(
                         "Local file access attempted but no allowed path configured"
                     )
                     raise RuntimeError("Failed to load tensor")
 
-                # Strip file:// prefix if present
                 local_path = path.removeprefix("file://")
-
                 resolved_path = Path(local_path).resolve()
                 allowed_path = Path(self.allowed_local_media_path).resolve()
 
-                # Secure path validation: Check if the resolved path is actually within allowed directory
                 try:
                     resolved_path.relative_to(allowed_path)
                 except ValueError:
@@ -130,17 +175,19 @@ class MultimodalRequestProcessor:
                     )
                     raise RuntimeError("Failed to load tensor")
 
-                # Check file size before loading
-                if resolved_path.exists():
-                    file_size = resolved_path.stat().st_size
-                    if file_size > self.max_file_size_bytes:
-                        raise RuntimeError(
-                            f"File size ({file_size // (1024*1024)}MB) exceeds "
-                            f"maximum allowed size ({self.max_file_size_bytes // (1024*1024)}MB)"
-                        )
-                return torch.load(resolved_path, map_location="cpu", weights_only=True)
+                if not resolved_path.exists():
+                    raise RuntimeError(f"Embedding file not found: {resolved_path}")
+                file_size = resolved_path.stat().st_size
+                if file_size > self.max_file_size_bytes:
+                    raise RuntimeError(
+                        f"File size ({file_size // (1024*1024)}MB) exceeds "
+                        f"maximum allowed size ({self.max_file_size_bytes // (1024*1024)}MB)"
+                    )
+                data = safetensors_load_file(str(resolved_path))
+                return self._unwrap_safetensors(data)
+            except RuntimeError:
+                raise
             except Exception as e:
-                # Log actual error for debugging, return generic error to user
                 logging.error(f"Failed to load tensor from local path: {e}")
                 raise RuntimeError("Failed to load tensor")
 
@@ -164,7 +211,7 @@ class MultimodalRequestProcessor:
                         if not url:
                             continue
                         self.modality = "image"
-                        if url.endswith((".pt", ".pth", ".bin")):
+                        if url.endswith(".safetensors"):
                             embedding_paths.append(url)
                         else:
                             image_urls.append(url)
@@ -247,7 +294,7 @@ class MultimodalRequestProcessor:
         multi_modal_data = request.get("multi_modal_data")
         if multi_modal_data and isinstance(multi_modal_data, dict):
             processed_mm_data = {}
-            loaded_embeddings = []
+            loaded_embeddings: list[torch.Tensor] = []
 
             # Process images and embedding paths from image_url field
             image_items = multi_modal_data.get("image_url", [])
@@ -274,8 +321,7 @@ class MultimodalRequestProcessor:
                         )
                         continue
 
-                    # Check if this is an embedding file based on extension
-                    if url.endswith((".pt", ".pth", ".bin")):
+                    if url.endswith(".safetensors"):
                         embedding_paths.append(url)
                     else:
                         # Keep original item format for load_image_batch
@@ -299,14 +345,25 @@ class MultimodalRequestProcessor:
                         logging.error(f"Failed to load images: {e}")
                         return None
 
-                # Load embedding files (.pt, .pth, .bin) for PD flow
-                # These are pre-computed vision encoder outputs
+                # Load pre-computed vision encoder embeddings (.safetensors) for PD flow
                 if embedding_paths:
                     try:
-                        loaded_embeddings = [
+                        raw_loaded = [
                             self.load_tensor_from_path_or_url(path)
                             for path in embedding_paths
                         ]
+                        loaded_embeddings = []
+                        for item in raw_loaded:
+                            if isinstance(item, dict):
+                                emb = item.get("mm_embeddings")
+                                if emb is None:
+                                    logging.error(
+                                        "Dictionary embeddings missing 'mm_embeddings' key"
+                                    )
+                                    return None
+                                loaded_embeddings.append(emb)
+                            else:
+                                loaded_embeddings.append(item)
                         if loaded_embeddings:
                             logging.info(
                                 f"Loaded {len(loaded_embeddings)} embedding file(s) from paths: {embedding_paths}"

@@ -14,7 +14,7 @@ from typing import Any
 import uvloop
 from transformers import AutoTokenizer
 
-from dynamo.llm import ModelInput, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from tests.frontend.test_prepost import OUTPUTS_INTERVAL_20
 from tests.frontend.test_vllm_prepost_integration import CAPTURE_PATH_ENV
@@ -67,9 +67,7 @@ class VllmPrepostTestHandler:
 async def main():
     """Register a token-based chat model and stream deterministic responses."""
 
-    runtime = DistributedRuntime(
-        asyncio.get_running_loop(), "etcd", "tcp", enable_nats=False
-    )
+    runtime = DistributedRuntime(asyncio.get_running_loop(), "etcd", "tcp")
     endpoint = runtime.endpoint("test.vllm-prepost.generate")
     await register_model(
         ModelInput.Tokens,
@@ -77,6 +75,7 @@ async def main():
         endpoint,
         QWEN,
         model_name=QWEN,
+        worker_type=WorkerType.Aggregated,
     )
 
     handler = VllmPrepostTestHandler(QWEN)

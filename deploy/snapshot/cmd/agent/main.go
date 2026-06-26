@@ -4,20 +4,27 @@
 package main
 
 import (
+	"cmp"
 	"context"
+	"flag"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/containerd/containerd"
 	"github.com/go-logr/logr"
 
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/common"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/controller"
-	"github.com/ai-dynamo/dynamo/deploy/snapshot/pkg/logging"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/controller"
+	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/logging"
+	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 )
 
 func main() {
+	runtimeType := flag.String("runtime", cmp.Or(os.Getenv("RUNTIME_TYPE"), snapshotruntime.RuntimeContainerd),
+		"Container runtime backend: containerd or crio")
+	runtimeSocket := flag.String("runtime-socket", os.Getenv("RUNTIME_SOCKET"),
+		"Path to the container runtime socket (defaults to per-runtime convention)")
+	flag.Parse()
+
 	rootLog := logging.ConfigureLogger("stdout")
 	agentLog := rootLog.WithName("agent")
 
@@ -29,11 +36,16 @@ func main() {
 		fatal(agentLog, err, "Invalid configuration")
 	}
 
-	ctrd, err := containerd.New(common.ContainerdSocket)
+	rt, err := snapshotruntime.New(*runtimeType, *runtimeSocket)
 	if err != nil {
-		fatal(agentLog, err, "Failed to connect to containerd")
+		fatal(agentLog, err, "Failed to initialize container runtime",
+			"runtime", *runtimeType, "socket", *runtimeSocket)
 	}
-	defer ctrd.Close()
+	defer func() {
+		if closeErr := rt.Close(); closeErr != nil {
+			agentLog.Error(closeErr, "Failed to close runtime client")
+		}
+	}()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -44,9 +56,10 @@ func main() {
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,
 		"restricted_namespace", cfg.RestrictedNamespace,
+		"runtime", *runtimeType,
 	)
 
-	nodeController, err := controller.NewNodeController(cfg, ctrd, rootLog.WithName("controller"))
+	nodeController, err := controller.NewNodeController(cfg, rt, rootLog.WithName("controller"))
 	if err != nil {
 		fatal(agentLog, err, "Failed to create snapshot node controller")
 	}

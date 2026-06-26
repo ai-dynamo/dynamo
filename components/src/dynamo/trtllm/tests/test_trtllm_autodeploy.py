@@ -28,6 +28,7 @@ pytestmark = [
     # the `gpu_0` marker.
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
 ]
 _PYTORCH_LLM_CLS_NAME = "dynamo.trtllm.engine.LLM"
 _AUTODEPLOY_LLM_CLS_NAME = "tensorrt_llm._torch.auto_deploy.LLM"
@@ -80,9 +81,11 @@ class TestTensorRTLLMEngine:
         engine_args["backend"] = Backend.AUTODEPLOY
         # This allows us to catch cases where a field being pruned away is now supported by
         # AutoDeploy when bumping TRT-LLM.
-        with pytest.raises(
-            pydantic.ValidationError
-        ) if is_forbidden else contextlib.nullcontext():
+        with (
+            pytest.raises(pydantic.ValidationError)
+            if is_forbidden
+            else contextlib.nullcontext()
+        ):
             ADLlmArgs(model="foo", **engine_args)
 
         engine = TensorRTLLMEngine(engine_args=engine_args)

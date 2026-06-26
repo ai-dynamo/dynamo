@@ -193,7 +193,6 @@ async def _fetch_from_encode_workers(
         multimodal_groups: List[MultiModalGroup] = []
         for stream in encode_response_streams:
             async for response in stream:
-                logger.debug(f"Received response from encode worker: {response}")
                 output = vLLMMultimodalRequest.model_validate_json(response.data())  # type: ignore[attr-defined]
                 if output.multimodal_inputs:
                     multimodal_groups.extend(output.multimodal_inputs)
@@ -204,6 +203,7 @@ async def _fetch_from_encode_workers(
         tasks = [
             asyncio.create_task(receiver.receive_embeddings(group.serialized_request))
             for group in multimodal_groups
+            if group.serialized_request is not None
         ]
         loaded = await asyncio.gather(*tasks)
 
@@ -305,7 +305,6 @@ class MultiModalEmbeddingLoader:
         request_id: str,
         *,
         model: str,
-        embeddings_dtype: torch.dtype,
         context=None,
     ) -> Dict[str, Any]:
         """Fetch embeddings and build engine-ready ``multi_modal_data``.
@@ -315,7 +314,7 @@ class MultiModalEmbeddingLoader:
 
         Returns a dict suitable for passing to ``TokensPrompt(multi_modal_data=...)``.
         """
-        if not self._encode_worker_client or not image_urls:
+        if self._encode_worker_client is None or not image_urls:
             return {}
 
         groups, pending = await _fetch_embeddings(
@@ -336,7 +335,7 @@ class MultiModalEmbeddingLoader:
                 _accumulate_embeddings(
                     multi_modal_data,
                     model,
-                    embeddings_dtype,
+                    group.loaded_embedding.dtype,
                     group.loaded_embedding,
                     group.image_grid_thw,
                 )

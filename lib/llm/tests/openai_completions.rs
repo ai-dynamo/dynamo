@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_async_openai::types::CreateCompletionRequestArgs;
 use dynamo_llm::protocols::openai::{completions::NvCreateCompletionRequest, validate};
+use dynamo_protocols::types::CreateCompletionRequestArgs;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -29,6 +29,7 @@ impl CompletionSample {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
 
@@ -125,10 +126,10 @@ fn build_samples() -> Result<Vec<CompletionSample>, String> {
 
 #[test]
 fn test_batch_prompt_utilities() {
-    use dynamo_async_openai::types::Prompt;
     use dynamo_llm::protocols::openai::completions::{
         extract_single_prompt, get_prompt_batch_size,
     };
+    use dynamo_protocols::types::Prompt;
 
     // Test single string prompt
     let single_string = Prompt::String("Hello, world!".to_string());
@@ -216,8 +217,8 @@ fn test_total_choices_validation() {
 
 #[test]
 fn test_batch_prompt_with_n_parameter() {
-    use dynamo_async_openai::types::Prompt;
     use dynamo_llm::protocols::openai::completions::get_prompt_batch_size;
+    use dynamo_protocols::types::Prompt;
 
     // Test batch size calculation
     let prompt = Prompt::StringArray(vec!["p1".to_string(), "p2".to_string(), "p3".to_string()]);
@@ -246,10 +247,10 @@ fn test_batch_prompt_with_n_parameter() {
 
 #[test]
 fn test_single_prompt_in_array() {
-    use dynamo_async_openai::types::Prompt;
     use dynamo_llm::protocols::openai::completions::{
         extract_single_prompt, get_prompt_batch_size,
     };
+    use dynamo_protocols::types::Prompt;
 
     // Single element array should work like regular prompt
     let single_in_array = Prompt::StringArray(vec!["Single prompt".to_string()]);

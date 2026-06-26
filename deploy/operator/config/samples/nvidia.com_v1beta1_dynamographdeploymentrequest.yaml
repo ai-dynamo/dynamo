@@ -25,7 +25,7 @@ spec:
   backend: trtllm
 
   # Image is the container image reference for the profiling job
-  image: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
 
   # SearchStrategy controls the profiling search depth
   # "rapid" for fast sweep; "thorough" for deeper exploration
@@ -56,7 +56,7 @@ spec:
   # Optional: Features controls optional Dynamo platform features
   # features:
   #   planner:
-  #     plannerMinEndpoint: 2
+  #     min_endpoint: 2
   #   mocker:
   #     enabled: false
 

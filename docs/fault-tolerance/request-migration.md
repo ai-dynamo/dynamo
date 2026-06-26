@@ -2,7 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Migration
+subtitle: Preserves token state and reissues in-flight requests on healthy workers when their original worker fails.
 ---
+
+<p align="left">
+  <a href="./request-migration.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
 
 This document describes how Dynamo implements request migration to handle worker failures gracefully during LLM text generation. Request migration allows in-progress requests to continue on different workers when the original worker becomes unavailable, providing fault tolerance and improved user experience.
 
@@ -29,6 +34,16 @@ The migration limit is configured at the **frontend** level and applies globally
 - Default behavior: no migration allowed (migration_limit=0)
 - Set via `--migration-limit` flag on the frontend
 - Applies to all models served by the frontend
+
+### Max Sequence Length Configuration
+
+The max sequence length setting controls how long the migration system will cache token state for a request. Once the total sequence length (prompt + generated tokens) exceeds this limit, migration is disabled for that request and token tracking stops:
+
+- Default behavior: no limit (`--migration-max-seq-len` unset)
+- Set via `--migration-max-seq-len` flag or `DYN_MIGRATION_MAX_SEQ_LEN` environment variable on the frontend
+- Prevents unbounded memory growth from caching long sequences
+- Boundary: exactly at the limit is still migratable; only strictly exceeding it disables migration
+- The check runs both at request initialization (prompt length) and during generation (prompt + output tokens)
 
 ## Token State Tracking and Request Migration
 
@@ -118,19 +133,44 @@ The migration system exposes Prometheus metrics to monitor migration activity. T
   - Labels:
     - `model`: The model name being served
     - `migration_type`: Either `new_request` (initial connection failure) or `ongoing_request` (mid-stream disconnection)
+- `dynamo_frontend_model_migration_max_seq_len_exceeded_total`: Counter tracking the number of times migration was disabled because the sequence length exceeded the configured `--migration-max-seq-len`
+  - Labels:
+    - `model`: The model name being served
 
 **Example metrics output:**
-```
+```text
 dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 3
 dynamo_frontend_model_migration_total{migration_type="new_request",model="Qwen/Qwen3-0.6B"} 1
+dynamo_frontend_model_migration_max_seq_len_exceeded_total{model="Qwen/Qwen3-0.6B"} 2
 ```
 
 These metrics can be used to:
 - Monitor worker reliability and failure patterns
 - Alert on excessive migration rates indicating infrastructure issues
 - Track the effectiveness of fault tolerance mechanisms
+- Monitor how often `--migration-max-seq-len` is being reached, which may indicate the limit needs adjustment
 
 For more information on Dynamo metrics, see the [Metrics documentation](../observability/metrics.md).
+
+## Known Limitations
+
+### Multiple Choices (`n > 1`)
+
+Request migration is **not supported** for OpenAI-compatible requests that ask for multiple generated choices with `n > 1`. Dynamo disables migration for those requests, even when `--migration-limit` is greater than 0.
+
+**Why:** Multi-choice generation maintains separate per-choice output state. Migrating a partially completed request would need to transfer the generated token state, remaining token budget, finish state, and decoder state for each choice independently. The current migration path preserves a single continuation state, so retrying an interleaved `n > 1` request could duplicate or drop choice-specific output.
+
+This limitation does not affect normal single-choice requests where `n` is omitted or set to 1.
+
+### Guided Decoding (Structured Output)
+
+Request migration is **not supported** for requests that use guided decoding (structured output / JSON schema). When a worker fails mid-stream during a guided-decoding request, the error is propagated to the client instead of attempting migration.
+
+**Why:** Inference backends initialize the guided-decoding finite state machine (FSM) fresh for every new request and only advance it on newly-generated tokens, not on context/prompt tokens. When a partially-completed request is migrated to a new worker, the new worker replays the already-generated tokens as context but starts the FSM from the schema root. This mismatch between the token state and FSM state produces corrupted output — typically duplicated or nested JSON.
+
+This limitation applies equally to all backends (vLLM, SGLang, TRT-LLM).
+
+**Future path:** Supporting migration for guided-decoding requests would require serializing and restoring the FSM state across workers, or replaying prior output tokens through the FSM on the new worker. This is tracked as a future enhancement.
 
 ## Operational Impact
 

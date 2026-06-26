@@ -6,7 +6,7 @@ use anyhow::Result;
 use dynamo_llm::block_manager::block::{
     data::logical::distributed_leader_worker::DistributedLeaderWorkerResources, locality::Logical,
 };
-use dynamo_llm::block_manager::kv_consolidator::EventSource;
+use dynamo_llm::block_manager::kv_consolidator::{EventSource, KvEventConsolidationMode};
 use dynamo_llm::block_manager::offload::filter::FrequencyFilter;
 use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
 use dynamo_runtime::DistributedRuntime;
@@ -21,7 +21,7 @@ mod distributed;
 
 pub mod vllm;
 
-/// Add bingings from this crate to the provided module
+/// Add bindings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BlockManager>()?;
     m.add_class::<distributed::KvbmWorker>()?;
@@ -29,6 +29,9 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<controller::BlockManagerClient>()?;
     m.add_class::<controller::BlockPoolStatus>()?;
     m.add_class::<controller::ResetBlocksResponse>()?;
+
+    m.add_class::<distributed::PyNcclBootstrap>()?;
+    m.add_class::<distributed::PyNcclCommRef>()?;
 
     vllm::add_to_module(m)?;
 
@@ -249,7 +252,12 @@ pub struct BlockManagerBuilder {
     page_size: usize,
     disable_device_pool: bool,
     kvbm_metrics: Option<dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics>,
-    consolidator_config: Option<(String, Option<String>, EventSource)>, // (engine_endpoint, output_endpoint (optional), engine_source)
+    consolidator_config: Option<(
+        String,
+        Option<String>,
+        EventSource,
+        KvEventConsolidationMode,
+    )>, // (engine_endpoint, output_endpoint (optional), engine_source, mode)
 }
 
 impl BlockManagerBuilder {
@@ -290,8 +298,9 @@ impl BlockManagerBuilder {
         engine_endpoint: String,
         output_endpoint: Option<String>,
         engine_source: EventSource,
+        mode: KvEventConsolidationMode,
     ) -> Self {
-        self.consolidator_config = Some((engine_endpoint, output_endpoint, engine_source));
+        self.consolidator_config = Some((engine_endpoint, output_endpoint, engine_source, mode));
         self
     }
 
@@ -365,9 +374,9 @@ impl BlockManagerBuilder {
             config_builder = config_builder.kvbm_metrics(Some(kvbm_metrics));
         }
 
-        if let Some((engine_ep, output_ep, engine_source)) = self.consolidator_config {
+        if let Some((engine_ep, output_ep, engine_source, mode)) = self.consolidator_config {
             config_builder =
-                config_builder.consolidator_config(engine_ep, output_ep, engine_source);
+                config_builder.consolidator_config(engine_ep, output_ep, engine_source, mode);
         }
 
         let config = config_builder.build()?;

@@ -5,10 +5,11 @@ import json
 import logging
 import re
 from typing import Tuple
+from uuid import uuid4
 
 import yaml
 
-from dynamo.planner.defaults import SubComponentType
+from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
     Config,
     append_argument,
@@ -46,6 +47,68 @@ DEFAULT_TRTLLM_AGG_CONFIG_PATH = resolve_deploy_path(
 )
 
 
+def _trtllm_flags(overrides: dict) -> list[str]:
+    """Build a flat ``--trtllm.<dotted.key> <value>`` flag list."""
+    flags: list[str] = []
+    for key, value in overrides.items():
+        flags.append(f"--trtllm.{key}")
+        if value is None:
+            flags.append("none")
+        elif isinstance(value, bool):
+            flags.append(str(value).lower())
+        else:
+            flags.append(str(value))
+    return flags
+
+
+def _dotted_to_nested(overrides: dict) -> dict:
+    """Convert flat dotted-key overrides to a nested dict.
+
+    Example::
+
+        {"kv_cache_config.enable_block_reuse": False}
+        ->  {"kv_cache_config": {"enable_block_reuse": False}}
+    """
+    result: dict = {}
+    for dotted_key, value in overrides.items():
+        keys = dotted_key.split(".")
+        current = result
+        for key in keys[:-1]:
+            current = current.setdefault(key, {})
+        current[keys[-1]] = value
+    return result
+
+
+def _deep_merge(base: dict, overrides: dict) -> dict:
+    """Deep-merge *overrides* into *base*, with overrides taking precedence."""
+    merged = dict(base)
+    for key, value in overrides.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _merge_overrides_into_args(args: list[str], overrides: dict) -> list[str]:
+    """Apply TRT-LLM overrides without creating mutually-exclusive flags.
+
+    If ``--override-engine-args`` already exists in *args*, the overrides are
+    merged into its JSON blob.  Otherwise ``--trtllm.*`` dynamic flags are
+    appended (the previous default behaviour).
+    """
+    override_dict, args = parse_override_engine_args(args)
+
+    if override_dict:
+        nested = _dotted_to_nested(overrides)
+        merged = _deep_merge(override_dict, nested)
+        args = append_argument(args, ["--override-engine-args", json.dumps(merged)])
+    else:
+        args = append_argument(args, _trtllm_flags(overrides))
+
+    return args
+
+
 class TrtllmConfigModifier(BaseConfigModifier):
     BACKEND = "trtllm"
 
@@ -79,7 +142,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
         cfg = Config.model_validate(config)
 
         # set metadata name
-        cfg.metadata.name = "trtllm-agg"
+        cfg.metadata.name = f"trtllm-agg-{uuid4().hex[:8]}"
 
         # disable planner
         if "Planner" in cfg.spec.services:
@@ -116,28 +179,14 @@ class TrtllmConfigModifier(BaseConfigModifier):
             args = remove_valued_arguments(args, "--disaggregation-mode")
             args = remove_valued_arguments(args, "--disaggregation-strategy")
 
-            # Keep the original extra-engine-args (prefill.yaml) which may contain user settings
-            # Check if user already has override-engine-args and merge with our changes
-            override_dict, args = parse_override_engine_args(args)
-
-            # Merge our overrides for converting prefill-only disagg to aggregated:
-            # - Disable enable_block_reuse (no KV reuse for prefill-only)
-            # - Enable overlap scheduler (disabled in prefill.yaml but needed for agg)
-            # - Remove cache_transceiver_config (not needed in agg mode)
-            if "kv_cache_config" not in override_dict or not isinstance(
-                override_dict["kv_cache_config"], dict
-            ):
-                override_dict["kv_cache_config"] = {}
-            override_dict["kv_cache_config"]["enable_block_reuse"] = False
-            override_dict[
-                "disable_overlap_scheduler"
-            ] = False  # Enable overlap scheduler for agg
-            override_dict[
-                "cache_transceiver_config"
-            ] = None  # Remove cache transceiver for agg
-
-            override_str = json.dumps(override_dict)
-            args = append_argument(args, ["--override-engine-args", override_str])
+            args = _merge_overrides_into_args(
+                args,
+                {
+                    "kv_cache_config.enable_block_reuse": False,
+                    "disable_overlap_scheduler": False,
+                    "cache_transceiver_config": None,
+                },
+            )
 
             worker_service.extraPodSpec.mainContainer.args = args
 
@@ -170,24 +219,13 @@ class TrtllmConfigModifier(BaseConfigModifier):
             args = remove_valued_arguments(args, "--disaggregation-mode")
             args = remove_valued_arguments(args, "--disaggregation-strategy")
 
-            # Keep the original extra-engine-args (decode.yaml) which may contain user settings
-            # Check if user already has override-engine-args and merge with our changes
-            override_dict, args = parse_override_engine_args(args)
-
-            # Merge our overrides for converting decode-only disagg to aggregated:
-            # - Enable enable_block_reuse (to skip prefill in decode-only)
-            # - Remove cache_transceiver_config (not needed in agg mode)
-            if "kv_cache_config" not in override_dict or not isinstance(
-                override_dict["kv_cache_config"], dict
-            ):
-                override_dict["kv_cache_config"] = {}
-            override_dict["kv_cache_config"]["enable_block_reuse"] = True
-            override_dict[
-                "cache_transceiver_config"
-            ] = None  # Remove cache transceiver for agg
-
-            override_str = json.dumps(override_dict)
-            args = append_argument(args, ["--override-engine-args", override_str])
+            args = _merge_overrides_into_args(
+                args,
+                {
+                    "kv_cache_config.enable_block_reuse": True,
+                    "cache_transceiver_config": None,
+                },
+            )
 
             worker_service.extraPodSpec.mainContainer.args = args
 
@@ -225,14 +263,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
         # Break arguments to handle both joined strings and lists
         args = break_arguments(args)
 
-        # For TRT-LLM, we need to update the override-engine-args
-        # to set the tensor_parallel_size
-        override_dict, args = parse_override_engine_args(args)
-
-        # Add/update tensor_parallel_size in the override
-        override_dict["tensor_parallel_size"] = tp_size
-        override_str = json.dumps(override_dict)
-        args = append_argument(args, ["--override-engine-args", override_str])
+        args = _merge_overrides_into_args(args, {"tensor_parallel_size": tp_size})
 
         worker_service.extraPodSpec.mainContainer.args = args
 
@@ -291,8 +322,24 @@ class TrtllmConfigModifier(BaseConfigModifier):
     def get_kv_cache_size_from_dynamo_log(
         cls, dynamo_log_fn: str, attention_dp_size: int = 1
     ) -> int:
+        """Return TRT-LLM paged KV cache token capacity parsed from Dynamo logs.
+
+        TRT-LLM may emit multiple memory allocation lines for paged KV cache
+        during startup. This parser scans the full file and returns the token
+        value from the last matching entry, which reflects the effective
+        configured capacity.
+
+        Args:
+            dynamo_log_fn: Path to the Dynamo runtime log file.
+            attention_dp_size: Unused for TRT-LLM; included for interface parity.
+
+        Returns:
+            Parsed max token count for paged KV cache, or ``100000`` when no
+            matching log entry is found.
+        """
         # TRT-LLM log parsing for KV cache size
         # Format: [TensorRT-LLM][INFO] [MemUsageChange] Allocated XX GiB for max tokens in paged KV cache (XXXXXX).
+        max_tokens: int | None = None
         try:
             with open(dynamo_log_fn, "r") as f:
                 for line in f:
@@ -305,12 +352,12 @@ class TrtllmConfigModifier(BaseConfigModifier):
                         match = re.search(r"paged KV cache \((\d+)\)", line)
                         if match:
                             max_tokens = int(match.group(1))
-                            logger.info(
-                                f"Found TRT-LLM KV cache max tokens: {max_tokens}"
-                            )
-                            return max_tokens
         except Exception as e:
             logger.warning(f"Failed to parse KV cache size from log file. Error: {e}")
+
+        if max_tokens is not None:
+            logger.info(f"Found TRT-LLM KV cache max tokens: {max_tokens}")
+            return max_tokens
 
         # Return a reasonable default if we couldn't find the KV cache size in logs
         logger.warning(
@@ -328,7 +375,7 @@ class TrtllmConfigModifier(BaseConfigModifier):
     ) -> dict:
         """
         Configure prefill-related limits for aggregated prefill runs.
-        For TRT-LLM we set these via --override-engine-args JSON:
+        For TRT-LLM we set these via ``--trtllm.*`` dynamic CLI flags:
         - max_batch_size
         - max_num_tokens
         """
@@ -339,12 +386,13 @@ class TrtllmConfigModifier(BaseConfigModifier):
         args = validate_and_get_worker_args(worker_service, backend="trtllm")
         args = break_arguments(args)
 
-        # Parse existing override-engine-args (if any) and update
-        override_dict, args = parse_override_engine_args(args)
-        override_dict["max_batch_size"] = int(max_batch_size)
-        override_dict["max_num_tokens"] = int(max_num_tokens)
-        override_str = json.dumps(override_dict)
-        args = append_argument(args, ["--override-engine-args", override_str])
+        args = _merge_overrides_into_args(
+            args,
+            {
+                "max_batch_size": int(max_batch_size),
+                "max_num_tokens": int(max_num_tokens),
+            },
+        )
 
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()

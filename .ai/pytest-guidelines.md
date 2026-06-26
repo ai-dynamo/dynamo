@@ -36,6 +36,34 @@ export HF_HUB_OFFLINE=1 HF_TOKEN="$(cat ~/.cache/huggingface/token)"
 python3 -m pytest -xvv --basetemp=/tmp/pytest_temp --durations=0 tests/
 ```
 
+### Running against a pre-populated local model cache
+
+If you have models already downloaded into a read-only directory (e.g. a shared
+NFS mount or a bind-mounted volume), pass `--models-dir` to skip all network
+downloads and avoid any writes to the cache:
+
+```bash
+python3 -m pytest --models-dir=/path/to/hf_cache -xvv tests/serve/test_vllm.py
+```
+
+Accepts either a **bare `HF_HUB_CACHE` directory** (contains `models--org--name/`
+subdirs) or an **`HF_HOME` directory** (auto-detected: if a `hub/` subdirectory is
+present, `HF_HOME` is used; otherwise `HF_HUB_CACHE` is used). A warning is logged
+when the `HF_HOME` layout is detected so you can verify the choice is correct.
+
+What `--models-dir` does:
+- Sets `HF_HUB_CACHE` (or `HF_HOME`) to the supplied path.
+- Enables `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` — no network calls.
+- Short-circuits `predownload_models` and `predownload_tokenizers` — no writes to
+  the cache directory.
+- Sets `DYNAMO_MODELS_DIR` — code that would perform network downloads (e.g. LoRA
+  adapters in `download_lora()`) will `pytest.skip()` instead of failing.
+
+**LoRA tests are incompatible with `--models-dir`** because they download adapters
+from HuggingFace Hub at test time. Tests that call `download_lora()` will be
+skipped automatically with a clear message when the flag is active. To run LoRA
+tests locally, omit `--models-dir` and ensure `HF_TOKEN` is set.
+
 - `python3 -m pytest` ensures the venv's pytest runs with the correct `sys.path`.
   The system `pytest` at `/usr/local/bin/pytest` is **outside** the venv and cannot
   see venv-installed packages (like `dynamo`).
@@ -228,6 +256,23 @@ Every test must have **at least**:
    - `integration` -- integration test
    - `e2e` -- end-to-end test
 
+4. **A component marker** -- which backend component the test exercises (only required
+   when the test also has a framework marker like `vllm`/`trtllm`/`sglang`). Pick
+   **exactly one** so tests are grouped consistently by feature area:
+   - `multimodal` -- exercises image/video/audio paths, VL models, omni pipeline,
+     multimodal embedding caches, multimodal hashing/routing
+   - `router` -- exercises the dynamo request router (worker selection, KV-prefix
+     routing, KV cache events on the router path); not the same as omni's internal
+     stage_router
+   - `kvbm` -- exercises the KV Block Manager (cross-engine determinism, offload/
+     onboard, eviction, the consolidator); use `kvbm_concurrency` *additionally*
+     for stress tests that should run separately
+   - `fault_tolerance` -- exercises fault-tolerance paths: request cancellation,
+     migration, etcd HA failover, worker health checks, canary rank-pause detection
+   - `core` -- residual: anything that isn't multimodal/router/kvbm/fault_tolerance.
+     Worker handlers, scheduler, prefill/decode, frontend HTTP/gRPC, CUDA version
+     checks, predownload, etc.
+
 ### Scheduling marker guidance
 
 CI compute is finite. Choose placement carefully:
@@ -245,6 +290,12 @@ CI compute is finite. Choose placement carefully:
 
 Apply when the test depends on a specific inference backend:
 - `vllm`, `trtllm`, `sglang`
+
+Framework markers say **which backend** the test runs against. They are independent
+of the component marker (`multimodal` / `router` / `kvbm` / `fault_tolerance` / `core`),
+which says **which part of the backend** the test exercises. Together they let
+selectors like `pytest -m "vllm and multimodal"` target a specific slice locally
+or in CI.
 
 ### Timeouts
 
@@ -275,6 +326,8 @@ def test_poll_server():
 @pytest.mark.pre_merge
 @pytest.mark.gpu_0
 @pytest.mark.unit
+@pytest.mark.vllm
+@pytest.mark.core  # component bucket: pick one of core, multimodal, router, kvbm, fault_tolerance
 def test_vllm_aggregated(...):
     ...
 ```
@@ -288,7 +341,8 @@ Timing comments let AI/automation understand requirements when shuffling test su
 - `slow` -- known slow test.
 - `parallel` -- safe to run with pytest-xdist.
 - `h100` -- requires H100 hardware.
-- `fault_tolerance`, `deploy`, `router`, `planner`, `kvbm` -- component markers.
+- `deploy`, `planner` -- additional component markers (alongside `core` / `multimodal` /
+  `router` / `kvbm` / `fault_tolerance`).
 - `k8s` -- requires Kubernetes.
 
 ### Example
@@ -298,6 +352,7 @@ Timing comments let AI/automation understand requirements when shuffling test su
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.vllm
+@pytest.mark.core  # component bucket — pick exactly one of: core, multimodal, router, kvbm, fault_tolerance
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(300)
 def test_vllm_aggregated(start_serve_deployment):

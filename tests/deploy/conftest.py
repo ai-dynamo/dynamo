@@ -18,7 +18,7 @@ from tests.utils.managed_deployment import DeploymentSpec, _get_workspace_dir
 
 
 # Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
-# Only deploy-specific options are defined here.
+# Deploy-specific options are defined here.
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add deploy-specific command-line options.
 
@@ -39,6 +39,19 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         help="Deployment profile to test (e.g., agg, disagg, disagg_router). "
         "If not specified, runs all profiles for the selected framework.",
+    )
+    parser.addoption(
+        "--frontend-image",
+        type=str,
+        default=None,
+        help="Frontend container image (used by GAIE and checkpoint deploy tests).",
+    )
+    parser.addoption(
+        "--checkpoint-backend",
+        type=str,
+        default="vllm",
+        choices=("vllm", "sglang"),
+        help="DynamoCheckpoint backend to test.",
     )
 
 

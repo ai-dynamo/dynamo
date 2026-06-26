@@ -1,0 +1,133 @@
+name: 'Teardown Dynamo Operator'
+description: 'Delete a vCluster and its dynamic host namespace, preserving shared deploy-test namespaces'
+
+inputs:
+  kubeconfig_base64:
+    description: 'Base64-encoded kubeconfig for host cluster access'
+    required: false
+    default: ''
+  vcluster_name:
+    description: 'Name of the vCluster to delete'
+    required: true
+  vcluster_namespace:
+    description: 'Host namespace where the vCluster is running'
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Stop vCluster port-forward watchdog
+      shell: bash
+      run: |
+        echo "::group::Stop vCluster port-forward watchdog"
+        set -euo pipefail
+
+        for pid_file in \
+          "${{ github.workspace }}/.vcluster-port-forward-watchdog.pid" \
+          "${{ github.workspace }}/.vcluster-port-forward.pid"; do
+          if [ ! -f "${pid_file}" ]; then
+            continue
+          fi
+
+          pid="$(cat "${pid_file}")"
+          if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
+            echo "Stopping process ${pid} from ${pid_file}"
+            kill "${pid}" 2>/dev/null || true
+            for _ in $(seq 1 10); do
+              if ! kill -0 "${pid}" 2>/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            if kill -0 "${pid}" 2>/dev/null; then
+              echo "Process ${pid} did not exit after SIGTERM; sending SIGKILL"
+              kill -9 "${pid}" 2>/dev/null || true
+            fi
+          fi
+          rm -f "${pid_file}"
+        done
+
+        echo "::endgroup::"
+
+    - name: Setup host kubeconfig
+      if: inputs.kubeconfig_base64 != ''
+      shell: bash
+      run: |
+        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
+        chmod 600 ${{ github.workspace }}/.kubeconfig
+        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
+
+    - name: Install vCluster CLI
+      uses: ./.github/actions/install-vcluster-cli
+
+    - name: Delete vCluster
+      shell: bash
+      env:
+        VCLUSTER_NAME: ${{ inputs.vcluster_name }}
+        NAMESPACE: ${{ inputs.vcluster_namespace }}
+      run: |
+        echo "::group::Delete vCluster ${VCLUSTER_NAME}"
+        set -euo pipefail
+
+        if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "Namespace ${NAMESPACE} does not exist; nothing to delete"
+          echo "::endgroup::"
+          exit 0
+        fi
+
+        # vCluster HostPath Mapper is installed on the host for checkpoint
+        # tests. Remove it explicitly before deleting the namespace so GPU-node
+        # DaemonSet pods do not linger until namespace garbage collection.
+        helm uninstall vcluster-hpm \
+          --namespace "${NAMESPACE}" \
+          --wait \
+          --timeout 5m || true
+
+        kubectl delete daemonset \
+          -n "${NAMESPACE}" \
+          -l app=vcluster-hostpath-mapper,release=vcluster-hpm \
+          --ignore-not-found \
+          --wait=true \
+          --timeout=300s || true
+
+        if ! vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" 2>&1; then
+          echo "::warning::vcluster delete failed; deleting vCluster resources directly"
+          kubectl delete statefulset "${VCLUSTER_NAME}" \
+            -n "${NAMESPACE}" \
+            --ignore-not-found 2>&1 || true
+          kubectl delete pvc,secret,svc,configmap \
+            -n "${NAMESPACE}" \
+            -l "release=${VCLUSTER_NAME}" \
+            --ignore-not-found 2>&1 || true
+        fi
+
+        kubectl wait "statefulset/${VCLUSTER_NAME}" -n "${NAMESPACE}" \
+          --for=delete --timeout=120s 2>/dev/null || true
+
+        if kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "::error::vCluster ${VCLUSTER_NAME} still exists in ${NAMESPACE} after cleanup"
+          kubectl get pods,statefulsets -n "${NAMESPACE}" -l app=vcluster -o wide || true
+          exit 1
+        fi
+
+        if [ "${NAMESPACE}" = "dynamo-deploy-test" ]; then
+          echo "Preserving shared namespace ${NAMESPACE}"
+          echo "::endgroup::"
+          exit 0
+        fi
+
+        if ! kubectl delete namespace "${NAMESPACE}" --wait=true --timeout=300s; then
+          echo "::error::Namespace ${NAMESPACE} did not delete cleanly"
+          kubectl get daemonset,pods,pvc,svc -n "${NAMESPACE}" -o wide || true
+          kubectl get all -n "${NAMESPACE}" -o wide || true
+          kubectl describe namespace "${NAMESPACE}" || true
+          exit 1
+        fi
+
+        if kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "::error::Namespace ${NAMESPACE} still exists after delete completed"
+          kubectl get daemonset,pods,pvc,svc -n "${NAMESPACE}" -o wide || true
+          exit 1
+        fi
+
+        echo "Namespace ${NAMESPACE} deleted"
+        echo "::endgroup::"

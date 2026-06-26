@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 
 from dynamo._core import log_message
 
+_DEFAULT_DYNAMO_LOGGING_CONFIG_PATH = "/opt/dynamo/etc/logging.toml"
+
 
 class LogHandler(logging.Handler):
     """
@@ -89,22 +91,30 @@ class VllmColorFormatter(logging.Formatter):
         else:
             target = record.module
         msg = record.getMessage()
-        return (
+        result = (
             f"{self._DIM}{ts}{self._RESET} "
             f"{color}{level:>5}{self._RESET} "
             f"{self._DIM}{target}{self._RESET}{self._DIM}:{self._RESET} "
             f"{msg}"
         )
+        if record.exc_info and record.exc_info[0] is not None:
+            result += "\n" + self.formatException(record.exc_info)
+        return result
 
 
 # Configure the Python logger to use the NimLogHandler
-def configure_logger(service_name: str | None, worker_id: int | None) -> None:
+def configure_logger(
+    service_name: str | None, worker_id: int | None, level: int = logging.INFO
+) -> None:
     """
     Called once to configure the Python logger to use the LogHandler
     """
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(level)
     handler = LogHandler()
+    # Child loggers can propagate records below the root logger's level. Keep
+    # the bridge handler aligned so those records are dropped before formatting.
+    handler.setLevel(level)
 
     # Simple formatter without date and level info since it's already provided by Rust
     formatter = logging.Formatter("%(message)s")
@@ -138,12 +148,14 @@ def configure_dynamo_logging(
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
-    # Configure the logger with Dynamo's handler
-    configure_logger(service_name, worker_id)
-
     # map the DYN_LOG variable to a logging level
     dyn_var = os.environ.get("DYN_LOG", "info")
     dyn_level = log_level_mapping(dyn_var)
+
+    # Configure the logger with Dynamo's handler. Rust applies the final
+    # target-specific filtering, but Python should cheaply discard levels that
+    # no DYN_LOG directive can enable before formatting bridge records.
+    configure_logger(service_name, worker_id, python_log_level_mapping(dyn_var))
 
     # configure inference engine loggers
     configure_vllm_logging(dyn_level)
@@ -181,6 +193,28 @@ def log_level_mapping(level: str) -> int:
         return logging.INFO
 
 
+def python_log_level_mapping(filters: str) -> int:
+    """Return the lowest Python level enabled by a Rust-style DYN_LOG filter."""
+    config_path = os.getenv("DYN_LOGGING_CONFIG_PATH")
+    if (config_path is not None and os.path.isfile(config_path)) or os.path.isfile(
+        _DEFAULT_DYNAMO_LOGGING_CONFIG_PATH
+    ):
+        # Rust merges TOML log filters after DYN_LOG. Preserve DEBUG records so
+        # Python does not discard messages enabled only by file configuration.
+        return logging.DEBUG
+
+    levels = []
+    for directive in filters.split(","):
+        level = directive.rsplit("=", 1)[-1].strip().lower()
+        if level == "trace":
+            # Python has no TRACE level. Keep DEBUG records available for Rust
+            # when any target explicitly enables trace output.
+            levels.append(logging.DEBUG)
+        else:
+            levels.append(log_level_mapping(level))
+    return min(levels, default=logging.INFO)
+
+
 def configure_sglang_logging(dyn_level: int) -> None:
     """
     SGLang allows us to create a custom logging config file
@@ -202,7 +236,12 @@ def configure_sglang_logging(dyn_level: int) -> None:
                 "handlers": ["dynamo"],
                 "level": sglang_level,
                 "propagate": False,
-            }
+            },
+            "gpu_memory_service": {
+                "handlers": ["dynamo"],
+                "level": sglang_level,
+                "propagate": False,
+            },
         },
         "version": 1,
         "disable_existing_loggers": False,
@@ -257,7 +296,12 @@ def configure_vllm_logging(dyn_level: int) -> None:
                 "handlers": ["vllm_stderr"],
                 "level": vllm_level,
                 "propagate": False,
-            }
+            },
+            "gpu_memory_service": {
+                "handlers": ["vllm_stderr"],
+                "level": vllm_level,
+                "propagate": False,
+            },
         },
         "version": 1,
         "disable_existing_loggers": False,

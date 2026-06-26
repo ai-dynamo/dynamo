@@ -30,6 +30,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 	var (
 		validReplicas    = int32(3)
 		negativeReplicas = int32(-1)
+		validMinAvail    = int32(2)
 	)
 
 	tests := []struct {
@@ -69,6 +70,23 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "spec.replicas must be non-negative",
+		},
+		{
+			name: "minAvailable is unsupported for standalone DCD",
+			deployment: &nvidiacomv1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deployment",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+					DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						Replicas:     &validReplicas,
+						MinAvailable: &validMinAvail,
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.minAvailable is currently supported only for Grove-backed DynamoGraphDeployment components",
 		},
 		{
 			name: "invalid ingress",

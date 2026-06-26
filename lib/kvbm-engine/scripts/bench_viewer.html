@@ -1,0 +1,894 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KVBM Bench Engine Results Viewer</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f9f9f7;--card:#fff;--border:#e0e0e0;--text:#1a1a1a;--text2:#555;
+  --green:#76B900;--green-dark:#4A7A00;--blue:#0074DF;--blue-dark:#1565C0;
+  --orange:#EF9100;--orange-dark:#C67800;--red:#E52020;--red-dark:#C62828;
+  --nav:#1a1a1a;--radius:16px;--font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --mono:'SF Mono','Cascadia Code',Consolas,monospace;
+}
+html{scroll-behavior:smooth;scroll-padding-top:56px}
+body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:1.5}
+
+/* Nav */
+nav{position:sticky;top:0;z-index:100;background:var(--nav);display:flex;align-items:center;gap:4px;padding:0 16px;height:48px;overflow-x:auto;white-space:nowrap}
+nav a{color:#ccc;text-decoration:none;font-size:13px;padding:6px 10px;border-radius:6px;transition:color .15s,background .15s}
+nav a:hover{color:#fff;background:rgba(255,255,255,.08)}
+nav a.active{color:#fff;background:rgba(118,185,0,.25);border-bottom:2px solid var(--green)}
+nav .spacer{flex:1}
+nav select{background:#333;color:#fff;border:1px solid #555;border-radius:6px;padding:4px 8px;font-size:13px;font-family:var(--font)}
+nav .brand{color:#fff;font-weight:700;font-size:14px;margin-right:12px;letter-spacing:.3px}
+
+/* Header / data loading */
+.header{max-width:1200px;margin:0 auto;padding:24px 20px}
+.header h1{font-size:22px;font-weight:700;margin-bottom:4px}
+.header p{color:var(--text2);font-size:14px;margin-bottom:16px}
+.drop-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:40px 20px;text-align:center;transition:border-color .2s,background .2s;cursor:pointer}
+.drop-zone.over{border-color:var(--green);background:rgba(118,185,0,.06)}
+.drop-zone h3{font-size:16px;margin-bottom:8px}
+.drop-zone p{color:var(--text2);font-size:13px}
+.load-row{display:flex;gap:12px;margin-top:12px;align-items:center;flex-wrap:wrap}
+.load-row input[type=file]{font-size:13px}
+.load-row textarea{flex:1;min-width:200px;height:60px;font-family:var(--mono);font-size:12px;padding:8px;border:1px solid var(--border);border-radius:8px;resize:vertical}
+.btn{display:inline-flex;align-items:center;gap:4px;padding:6px 14px;font-size:13px;font-family:var(--font);border:none;border-radius:8px;cursor:pointer;transition:background .15s}
+.btn-green{background:var(--green);color:#fff}.btn-green:hover{background:#6aa600}
+.btn-sm{padding:4px 10px;font-size:12px;border-radius:6px}
+.loaded-bar{display:flex;align-items:center;gap:12px;padding:10px 16px;background:var(--card);border:1px solid var(--border);border-radius:10px}
+.loaded-bar .fname{font-family:var(--mono);font-size:13px;color:var(--green)}
+.loaded-bar .count{font-size:13px;color:var(--text2)}
+
+/* Main */
+main{max-width:1200px;margin:0 auto;padding:0 20px 40px;display:none}
+section{margin-bottom:36px}
+section h2{font-size:18px;font-weight:700;margin-bottom:4px}
+section .desc{color:var(--text2);font-size:13px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;transition:box-shadow .2s}
+.card:hover{box-shadow:0 4px 16px rgba(0,0,0,.06)}
+
+/* KPI cards */
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+.kpi{border-left:3px solid var(--green);padding:14px 16px}
+.kpi.blue{border-left-color:var(--blue)}.kpi.amber{border-left-color:var(--orange)}
+.kpi .label{font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px}
+.kpi .value{font-size:26px;font-weight:700;margin:2px 0}
+.kpi .sub{font-size:12px;color:var(--text2)}
+
+/* Pills */
+.pills{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.pill{padding:4px 12px;font-size:12px;border:1px solid var(--border);border-radius:20px;cursor:pointer;background:var(--card);transition:all .15s;font-family:var(--font)}
+.pill.active{background:var(--green);color:#fff;border-color:var(--green)}
+
+/* Chart container */
+.chart-wrap{overflow-x:auto}
+.chart-wrap svg{display:block}
+.chart-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(520px,1fr));gap:16px}
+
+/* Legend */
+.legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;font-size:12px}
+.legend-item{display:flex;align-items:center;gap:4px}
+.legend-swatch{width:14px;height:4px;border-radius:2px}
+
+/* Table */
+.table-wrap{overflow-x:auto;max-height:500px;overflow-y:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+th{position:sticky;top:0;background:var(--card);cursor:pointer;user-select:none;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.3px;color:var(--text2)}
+th:hover{color:var(--text)}
+th .sort-arrow{font-size:10px;margin-left:2px}
+td{font-family:var(--mono);font-size:12px}
+tr:hover td{background:rgba(118,185,0,.04)}
+
+/* Tooltip */
+#tooltip{position:fixed;z-index:200;pointer-events:none;background:rgba(26,26,26,.92);color:#fff;font-size:12px;font-family:var(--mono);padding:8px 12px;border-radius:8px;line-height:1.6;max-width:300px;display:none;backdrop-filter:blur(4px)}
+
+/* Footer */
+footer{text-align:center;padding:20px;font-size:12px;color:#999}
+
+/* Responsive */
+@media(max-width:600px){
+  .chart-grid{grid-template-columns:1fr}
+  .kpi-grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
+}
+</style>
+</head>
+<body>
+
+<nav id="nav">
+  <span class="brand">KVBM Bench</span>
+  <a href="#summary" data-sec="summary">Summary</a>
+  <a href="#concurrency" data-sec="concurrency">Concurrency</a>
+  <a href="#pagesize" data-sec="pagesize">Page Size</a>
+  <a href="#bounce" data-sec="bounce">Bounce</a>
+  <a href="#g2g3" data-sec="g2g3">G2/G3</a>
+  <a href="#gds" data-sec="gds">GDS vs Staged</a>
+  <a href="#bidir" data-sec="bidir">Bidirectional</a>
+  <a href="#latency" data-sec="latency">Latency</a>
+  <a href="#rawdata" data-sec="rawdata">Data</a>
+  <span class="spacer"></span>
+  <select id="gpuFilter"><option value="all">All GPUs</option></select>
+</nav>
+
+<div class="header" id="headerZone">
+  <h1>KVBM Benchmark Results Viewer</h1>
+  <p>Load bench_engine JSON Lines output to visualize performance characteristics</p>
+  <div class="drop-zone" id="dropZone">
+    <h3>Drop .jsonl file here</h3>
+    <p>or use the controls below</p>
+  </div>
+  <div class="load-row">
+    <input type="file" id="filePicker" accept=".jsonl,.json,.txt">
+    <textarea id="pasteArea" placeholder="Paste JSON Lines here..."></textarea>
+    <button class="btn btn-green" id="pasteBtn">Load</button>
+  </div>
+  <div class="loaded-bar" id="loadedBar" style="display:none">
+    <span class="fname" id="loadedName">file.jsonl</span>
+    <span class="count" id="loadedCount">0 records</span>
+    <span class="spacer" style="flex:1"></span>
+    <button class="btn btn-sm btn-green" id="reloadBtn">Load Different</button>
+  </div>
+</div>
+
+<main id="main">
+  <section id="summary"><h2>Summary</h2><p class="desc">Key performance indicators across all tests</p><div class="kpi-grid" id="kpiGrid"></div></section>
+  <section id="concurrency"><h2>Concurrency Scaling</h2><p class="desc">Bandwidth vs concurrency &mdash; find the saturation point for each transfer type</p><div class="pills" id="concPills"></div><div class="chart-grid" id="concCharts"></div></section>
+  <section id="pagesize"><h2>Page Size Efficiency</h2><p class="desc">Bandwidth vs page_size &mdash; block size amortization</p><div class="pills" id="psPills"></div><div class="chart-wrap" id="psChart"></div></section>
+  <section id="bounce"><h2>Bounce Buffer Analysis</h2><p class="desc">Bandwidth vs bounce_blocks &mdash; double-buffering effectiveness</p><div class="chart-wrap" id="bounceChart"></div></section>
+  <section id="g2g3"><h2>G2/G3 Raw Bandwidth</h2><p class="desc">NVMe read vs write bandwidth at each concurrency level</p><div class="chart-wrap" id="g2g3Chart"></div></section>
+  <section id="gds"><h2>GDS vs Staged</h2><p class="desc">GPUDirect Storage bypass compared to best staged transfer</p><div class="chart-wrap" id="gdsChart"></div></section>
+  <section id="bidir"><h2>Bidirectional Contention</h2><p class="desc">Isolated vs contended bandwidth to measure contention degradation</p><div class="chart-wrap" id="bidirChart"></div></section>
+  <section id="latency"><h2>Latency Distribution</h2><p class="desc">Horizontal box plots showing min / p50 / p95 / p99 / max per test</p><div class="chart-wrap" id="latChart"></div></section>
+  <section id="rawdata"><h2>Raw Data</h2><p class="desc">All loaded records &mdash; click column headers to sort</p><div class="card"><div class="table-wrap" id="tableWrap"></div></div></section>
+</main>
+
+<div id="tooltip"></div>
+<footer>KVBM Bench Viewer &mdash; NVIDIA CORPORATION &amp; AFFILIATES</footer>
+
+<script>
+"use strict";
+
+/* ── Color map ── */
+const COLOR={
+  g1_to_g2:"#76B900",g2_to_g1:"#4A7A00",g2_to_g3:"#0074DF",g3_to_g2:"#1565C0",
+  g1_to_g3_staged:"#EF9100",g3_to_g1_staged:"#C67800",
+  g1_to_g3_gds:"#E52020",g3_to_g1_gds:"#C62828",
+  bidir_g1_to_g2:"#76B900",bidir_g2_to_g1:"#4A7A00"
+};
+const DASHED=new Set(["bidir_g1_to_g2","bidir_g2_to_g1"]);
+function testColor(t){return COLOR[t]||"#888"}
+
+/* ── State ── */
+let DATA=[];
+let FILTERED=[];
+let sortCol=null,sortAsc=true;
+
+/* ── DOM helpers ── */
+const $=s=>document.querySelector(s);
+const $$=s=>[...document.querySelectorAll(s)];
+function el(tag,attrs,children){
+  const e=document.createElement(tag);
+  if(attrs)for(const[k,v]of Object.entries(attrs)){
+    if(k==="style"&&typeof v==="object")Object.assign(e.style,v);
+    else if(k.startsWith("on"))e.addEventListener(k.slice(2),v);
+    else e.setAttribute(k,v);
+  }
+  if(children){
+    if(typeof children==="string")e.textContent=children;
+    else if(Array.isArray(children))children.forEach(c=>{if(c)e.appendChild(typeof c==="string"?document.createTextNode(c):c)});
+    else e.appendChild(children);
+  }
+  return e;
+}
+
+/* ── SVG mini-lib ── */
+const SVG_NS="http://www.w3.org/2000/svg";
+function svgEl(tag,attrs){
+  const e=document.createElementNS(SVG_NS,tag);
+  if(attrs)for(const[k,v]of Object.entries(attrs))e.setAttribute(k,v);
+  return e;
+}
+function createSVG(w,h){
+  const s=svgEl("svg",{width:w,height:h,viewBox:`0 0 ${w} ${h}`});
+  s.style.overflow="visible";
+  return s;
+}
+function scaleLinear(domain,range){
+  const[d0,d1]=domain,[r0,r1]=range;
+  const m=(d1===d0)?0:(r1-r0)/(d1-d0);
+  function fn(v){return r0+m*(v-d0)}
+  fn.domain=domain;fn.range=range;
+  fn.ticks=function(n=6){
+    if(d0===d1)return[d0];
+    const step=niceStep((d1-d0)/n);
+    const start=Math.ceil(d0/step)*step;
+    const arr=[];
+    for(let v=start;v<=d1+step*0.001;v+=step)arr.push(+v.toPrecision(12));
+    return arr;
+  };
+  fn.invert=function(px){return d0===d1?d0:d0+(px-r0)/m};
+  return fn;
+}
+function niceStep(raw){
+  const mag=Math.pow(10,Math.floor(Math.log10(raw)));
+  const res=raw/mag;
+  if(res<=1)return mag;if(res<=2)return 2*mag;if(res<=5)return 5*mag;return 10*mag;
+}
+
+/* Margins for charts */
+const M={top:28,right:20,bottom:44,left:60};
+
+function drawXAxis(svg,scale,y,label,fmt){
+  const ticks=scale.ticks(7);
+  const g=svgEl("g");
+  g.appendChild(svgEl("line",{x1:scale.range[0],x2:scale.range[1],y1:y,y2:y,stroke:"#ddd","stroke-width":1}));
+  ticks.forEach(t=>{
+    const x=scale(t);
+    g.appendChild(svgEl("line",{x1:x,x2:x,y1:y,y2:y+5,stroke:"#bbb","stroke-width":1}));
+    const txt=svgEl("text",{x,y:y+18,"text-anchor":"middle",fill:"#777","font-size":"11",style:"font-family:var(--font)"});
+    txt.textContent=fmt?fmt(t):fmtNum(t);
+    g.appendChild(txt);
+  });
+  if(label){
+    const lbl=svgEl("text",{x:(scale.range[0]+scale.range[1])/2,y:y+36,"text-anchor":"middle",fill:"#999","font-size":"11",style:"font-family:var(--font)"});
+    lbl.textContent=label;g.appendChild(lbl);
+  }
+  svg.appendChild(g);
+}
+function drawYAxis(svg,scale,x,label){
+  const ticks=scale.ticks(6);
+  const g=svgEl("g");
+  g.appendChild(svgEl("line",{x1:x,x2:x,y1:scale.range[0],y2:scale.range[1],stroke:"#ddd","stroke-width":1}));
+  ticks.forEach(t=>{
+    const y=scale(t);
+    g.appendChild(svgEl("line",{x1:x-5,x2:x,y1:y,y2:y,stroke:"#bbb","stroke-width":1}));
+    /* grid line */
+    g.appendChild(svgEl("line",{x1:x,x2:x+scale.range[0]-x+400,y1:y,y2:y,stroke:"#f0f0f0","stroke-width":1}));
+    const txt=svgEl("text",{x:x-8,y:y+4,"text-anchor":"end",fill:"#777","font-size":"11",style:"font-family:var(--font)"});
+    txt.textContent=fmtNum(t);g.appendChild(txt);
+  });
+  if(label){
+    const lbl=svgEl("text",{x:0,y:0,"text-anchor":"middle",fill:"#999","font-size":"11",style:"font-family:var(--font)",transform:`translate(${x-44},${(scale.range[0]+scale.range[1])/2}) rotate(-90)`});
+    lbl.textContent=label;g.appendChild(lbl);
+  }
+  svg.appendChild(g);
+}
+function drawGridY(svg,scaleY,x0,x1){
+  const ticks=scaleY.ticks(6);
+  ticks.forEach(t=>{
+    const y=scaleY(t);
+    svg.appendChild(svgEl("line",{x1:x0,x2:x1,y1:y,y2:y,stroke:"#f0f0f0","stroke-width":1}));
+  });
+}
+
+function drawLine(svg,points,color,dashed){
+  if(points.length===0)return;
+  const d=points.map((p,i)=>(i===0?"M":"L")+p[0]+","+p[1]).join(" ");
+  const attrs={d,fill:"none",stroke:color,"stroke-width":2,"stroke-linejoin":"round","stroke-linecap":"round"};
+  if(dashed)attrs["stroke-dasharray"]="6,4";
+  svg.appendChild(svgEl("path",attrs));
+  points.forEach(p=>{
+    const c=svgEl("circle",{cx:p[0],cy:p[1],r:4,fill:color,stroke:"#fff","stroke-width":1.5,style:"cursor:pointer"});
+    c._tip=p[2];
+    c.addEventListener("mouseenter",e=>showTip(e,p[2]));
+    c.addEventListener("mouseleave",hideTip);
+    svg.appendChild(c);
+  });
+}
+
+/* Tooltip */
+const tooltip=document.getElementById("tooltip");
+function showTip(e,html){
+  tooltip.innerHTML=html;tooltip.style.display="block";
+  positionTip(e);
+}
+function positionTip(e){
+  const tw=tooltip.offsetWidth,th=tooltip.offsetHeight;
+  let x=e.clientX+12,y=e.clientY-th-8;
+  if(x+tw>window.innerWidth)x=e.clientX-tw-12;
+  if(y<0)y=e.clientY+16;
+  tooltip.style.left=x+"px";tooltip.style.top=y+"px";
+}
+function hideTip(){tooltip.style.display="none"}
+document.addEventListener("mousemove",e=>{if(tooltip.style.display==="block")positionTip(e)});
+
+function fmtNum(v){
+  if(v>=1000)return v.toLocaleString(undefined,{maximumFractionDigits:1});
+  if(v===0)return"0";
+  if(Math.abs(v)<0.01)return v.toExponential(1);
+  return +v.toFixed(2)+"";
+}
+function fmtBW(v){return v.toFixed(2)+" GB/s"}
+function fmtUs(v){return v.toFixed(1)+" us"}
+function fmtLabel(t){return t.replace(/_/g," ")}
+
+/* ── Data loading ── */
+function parseJSONL(text){
+  const lines=text.trim().split("\n");
+  const out=[];
+  for(const line of lines){
+    const s=line.trim();
+    if(!s)continue;
+    try{out.push(JSON.parse(s))}catch(e){/* skip */}
+  }
+  return out;
+}
+
+function loadData(records,name){
+  DATA=records;
+  populateGPUFilter();
+  applyFilter();
+  $("#main").style.display="block";
+  /* collapse loader */
+  $("#dropZone").style.display="none";
+  $(".load-row").style.display="none";
+  $("#loadedBar").style.display="flex";
+  $("#loadedName").textContent=name||"pasted data";
+  $("#loadedCount").textContent=records.length+" records";
+}
+
+/* Drop zone */
+const dz=$("#dropZone");
+dz.addEventListener("dragover",e=>{e.preventDefault();dz.classList.add("over")});
+dz.addEventListener("dragleave",()=>dz.classList.remove("over"));
+dz.addEventListener("drop",e=>{
+  e.preventDefault();dz.classList.remove("over");
+  const f=e.dataTransfer.files[0];
+  if(f)readFile(f);
+});
+dz.addEventListener("click",()=>$("#filePicker").click());
+
+$("#filePicker").addEventListener("change",e=>{
+  const f=e.target.files[0];
+  if(f)readFile(f);
+});
+function readFile(f){
+  const r=new FileReader();
+  r.onload=()=>loadData(parseJSONL(r.result),f.name);
+  r.readAsText(f);
+}
+$("#pasteBtn").addEventListener("click",()=>{
+  const txt=$("#pasteArea").value;
+  if(txt.trim())loadData(parseJSONL(txt),"pasted");
+});
+$("#reloadBtn").addEventListener("click",()=>{
+  $("#dropZone").style.display="";$(".load-row").style.display="";
+  $("#loadedBar").style.display="none";
+});
+
+/* GPU filter */
+function populateGPUFilter(){
+  const sel=$("#gpuFilter");
+  sel.innerHTML='<option value="all">All GPUs</option>';
+  const ids=[...new Set(DATA.map(d=>d.device_id))].sort((a,b)=>a-b);
+  ids.forEach(id=>{
+    const o=document.createElement("option");o.value=id;o.textContent="GPU "+id;
+    sel.appendChild(o);
+  });
+}
+$("#gpuFilter").addEventListener("change",()=>applyFilter());
+
+function applyFilter(){
+  const sel=$("#gpuFilter").value;
+  FILTERED=sel==="all"?DATA.slice():DATA.filter(d=>String(d.device_id)===sel);
+  renderAll();
+}
+
+/* ── Render orchestrator ── */
+function renderAll(){
+  renderKPIs();
+  renderConcurrency();
+  renderPageSize();
+  renderBounce();
+  renderG2G3();
+  renderGDS();
+  renderBidir();
+  renderLatency();
+  renderTable();
+  hideEmptySections();
+}
+
+/* ── Helpers ── */
+function unique(arr,key){return[...new Set(arr.map(d=>d[key]))].sort((a,b)=>a-b)}
+function groupBy(arr,key){
+  const m={};
+  arr.forEach(d=>{const k=d[key];(m[k]=m[k]||[]).push(d)});
+  return m;
+}
+
+/* ── Section: KPIs ── */
+function renderKPIs(){
+  const g=$("#kpiGrid");g.innerHTML="";
+  if(!FILTERED.length)return;
+  const maxBW=Math.max(...FILTERED.map(d=>d.bandwidth_gbs||0));
+  const maxAgg=Math.max(...FILTERED.map(d=>d.aggregate_bandwidth_gbs||0));
+  const tests=[...new Set(FILTERED.map(d=>d.test))];
+  const devices=[...new Set(FILTERED.map(d=>d.device_id))];
+  const avgLat=FILTERED.reduce((s,d)=>s+(d.latency_us?.mean_us||0),0)/FILTERED.length;
+
+  const kpis=[
+    {label:"Peak Single-Stream BW",value:fmtBW(maxBW),sub:FILTERED.find(d=>d.bandwidth_gbs===maxBW)?.test,cls:""},
+    {label:"Peak Aggregate BW",value:fmtBW(maxAgg),sub:"across all streams",cls:""},
+    {label:"Tests",value:tests.length,sub:tests.slice(0,3).join(", ")+(tests.length>3?" ...":""),cls:"blue"},
+    {label:"GPUs",value:devices.length,sub:"device IDs: "+devices.join(", "),cls:"blue"},
+    {label:"Total Records",value:FILTERED.length,sub:"loaded",cls:"amber"},
+    {label:"Avg Latency",value:fmtUs(avgLat),sub:"mean across all tests",cls:"amber"},
+  ];
+  kpis.forEach(k=>{
+    const d=el("div",{class:"card kpi"+(k.cls?" "+k.cls:"")});
+    d.appendChild(el("div",{class:"label"},k.label));
+    d.appendChild(el("div",{class:"value"},String(k.value)));
+    d.appendChild(el("div",{class:"sub"},k.sub||""));
+    g.appendChild(d);
+  });
+}
+
+/* ── Section: Concurrency Scaling ── */
+let concPageFilter=null;
+function renderConcurrency(){
+  const wrap=$("#concCharts");wrap.innerHTML="";
+  const pillsEl=$("#concPills");pillsEl.innerHTML="";
+  const pages=unique(FILTERED,"page_size");
+  if(pages.length>1){
+    pages.forEach(ps=>{
+      const p=el("button",{class:"pill"+(concPageFilter===ps?" active":""),onclick:()=>{concPageFilter=concPageFilter===ps?null:ps;renderConcurrency()}},String(ps));
+      pillsEl.appendChild(p);
+    });
+  }
+  let data=FILTERED;
+  if(concPageFilter!==null)data=data.filter(d=>d.page_size===concPageFilter);
+
+  const byTest=groupBy(data,"test");
+  const tests=Object.keys(byTest);
+  if(!tests.length)return;
+
+  const W=540,H=300;
+  const svg=createSVG(W,H);
+  const xVals=unique(data,"concurrency");
+  const allBW=data.map(d=>d.aggregate_bandwidth_gbs||d.bandwidth_gbs||0);
+  const xS=scaleLinear([Math.min(...xVals),Math.max(...xVals)],[M.left,W-M.right]);
+  const yS=scaleLinear([0,Math.max(...allBW)*1.1],[H-M.bottom,M.top]);
+
+  drawGridY(svg,yS,M.left,W-M.right);
+  drawXAxis(svg,xS,H-M.bottom,"Concurrency");
+  drawYAxis(svg,yS,M.left,"BW (GB/s)");
+
+  tests.forEach(t=>{
+    const pts=byTest[t].slice().sort((a,b)=>a.concurrency-b.concurrency);
+    const mapped=pts.map(d=>[xS(d.concurrency),yS(d.aggregate_bandwidth_gbs||d.bandwidth_gbs),
+      `<b>${fmtLabel(t)}</b><br>conc: ${d.concurrency}<br>BW: ${fmtBW(d.aggregate_bandwidth_gbs||d.bandwidth_gbs)}<br>page: ${d.page_size}`]);
+    drawLine(svg,mapped,testColor(t),DASHED.has(t));
+  });
+
+  const card=el("div",{class:"card"});
+  card.appendChild(svg);
+  card.appendChild(makeLegend(tests));
+  wrap.appendChild(card);
+}
+
+function makeLegend(tests){
+  const lg=el("div",{class:"legend"});
+  tests.forEach(t=>{
+    const item=el("div",{class:"legend-item"});
+    const sw=el("span",{class:"legend-swatch",style:{background:testColor(t),width:"14px",height:DASHED.has(t)?"2px":"4px",borderTop:DASHED.has(t)?`2px dashed ${testColor(t)}`:"none",background:DASHED.has(t)?"transparent":testColor(t)}});
+    item.appendChild(sw);
+    item.appendChild(el("span",{},fmtLabel(t)));
+    lg.appendChild(item);
+  });
+  return lg;
+}
+
+/* ── Section: Page Size ── */
+let psConcFilter=null;
+function renderPageSize(){
+  const wrap=$("#psChart");wrap.innerHTML="";
+  const pillsEl=$("#psPills");pillsEl.innerHTML="";
+  const concs=unique(FILTERED,"concurrency");
+  if(concs.length>1){
+    concs.forEach(c=>{
+      const p=el("button",{class:"pill"+(psConcFilter===c?" active":""),onclick:()=>{psConcFilter=psConcFilter===c?null:c;renderPageSize()}},String(c));
+      pillsEl.appendChild(p);
+    });
+  }
+  let data=FILTERED;
+  if(psConcFilter!==null)data=data.filter(d=>d.concurrency===psConcFilter);
+
+  const byTest=groupBy(data,"test");
+  const tests=Object.keys(byTest);
+  const pages=unique(data,"page_size");
+  if(!tests.length||!pages.length)return;
+
+  const barW=20,groupGap=24,innerGap=2;
+  const groupWidth=tests.length*barW+(tests.length-1)*innerGap;
+  const W=M.left+M.right+pages.length*(groupWidth+groupGap);
+  const H=320;
+  const svg=createSVG(Math.max(W,400),H);
+
+  const allBW=data.map(d=>d.bandwidth_gbs||0);
+  const yS=scaleLinear([0,Math.max(...allBW)*1.15],[H-M.bottom,M.top]);
+  drawGridY(svg,yS,M.left,Math.max(W,400)-M.right);
+  drawYAxis(svg,yS,M.left,"BW (GB/s)");
+
+  pages.forEach((ps,pi)=>{
+    const gx=M.left+pi*(groupWidth+groupGap)+groupGap/2;
+    /* x-label */
+    const lbl=svgEl("text",{x:gx+groupWidth/2,y:H-M.bottom+18,"text-anchor":"middle",fill:"#777","font-size":"11",style:"font-family:var(--font)"});
+    lbl.textContent=ps;svg.appendChild(lbl);
+
+    tests.forEach((t,ti)=>{
+      const rec=byTest[t]?.find(d=>d.page_size===ps);
+      if(!rec)return;
+      const bw=rec.bandwidth_gbs||0;
+      const bx=gx+ti*(barW+innerGap);
+      const by=yS(bw);
+      const bh=yS(0)-by;
+      const rect=svgEl("rect",{x:bx,y:by,width:barW,height:Math.max(bh,1),rx:3,fill:testColor(t),style:"cursor:pointer"});
+      rect.addEventListener("mouseenter",e=>showTip(e,`<b>${fmtLabel(t)}</b><br>page_size: ${ps}<br>BW: ${fmtBW(bw)}`));
+      rect.addEventListener("mouseleave",hideTip);
+      svg.appendChild(rect);
+    });
+  });
+  /* x-axis label */
+  const xLbl=svgEl("text",{x:(M.left+Math.max(W,400)-M.right)/2,y:H-4,"text-anchor":"middle",fill:"#999","font-size":"11",style:"font-family:var(--font)"});
+  xLbl.textContent="page_size";svg.appendChild(xLbl);
+
+  const card=el("div",{class:"card"});
+  card.appendChild(svg);card.appendChild(makeLegend(tests));
+  wrap.appendChild(card);
+}
+
+/* ── Section: Bounce Buffer ── */
+function renderBounce(){
+  const wrap=$("#bounceChart");wrap.innerHTML="";
+  const data=FILTERED.filter(d=>d.bounce_blocks!=null);
+  if(!data.length){return}
+
+  const byTest=groupBy(data,"test");
+  const tests=Object.keys(byTest);
+  const W=540,H=300;
+  const svg=createSVG(W,H);
+
+  const xVals=unique(data,"bounce_blocks");
+  const allBW=data.map(d=>d.bandwidth_gbs||0);
+  const xS=scaleLinear([Math.min(...xVals),Math.max(...xVals)],[M.left,W-M.right]);
+  const yS=scaleLinear([0,Math.max(...allBW)*1.1],[H-M.bottom,M.top]);
+
+  drawGridY(svg,yS,M.left,W-M.right);
+  drawXAxis(svg,xS,H-M.bottom,"bounce_blocks");
+  drawYAxis(svg,yS,M.left,"BW (GB/s)");
+
+  tests.forEach(t=>{
+    const pts=byTest[t].slice().sort((a,b)=>a.bounce_blocks-b.bounce_blocks);
+    const mapped=pts.map(d=>[xS(d.bounce_blocks),yS(d.bandwidth_gbs),
+      `<b>${fmtLabel(t)}</b><br>bounce: ${d.bounce_blocks}<br>BW: ${fmtBW(d.bandwidth_gbs)}`]);
+    drawLine(svg,mapped,testColor(t),DASHED.has(t));
+  });
+
+  const card=el("div",{class:"card"});
+  card.appendChild(svg);card.appendChild(makeLegend(tests));
+  wrap.appendChild(card);
+}
+
+/* ── Section: G2/G3 ── */
+function renderG2G3(){
+  const wrap=$("#g2g3Chart");wrap.innerHTML="";
+  const tests=["g2_to_g3","g3_to_g2"];
+  const data=FILTERED.filter(d=>tests.includes(d.test));
+  if(!data.length)return;
+
+  const concs=unique(data,"concurrency");
+  const byTest=groupBy(data,"test");
+  const barW=24,innerGap=4,groupGap=30;
+  const groupWidth=tests.length*barW+(tests.length-1)*innerGap;
+  const W=M.left+M.right+concs.length*(groupWidth+groupGap);
+  const H=320;
+  const svg=createSVG(Math.max(W,400),H);
+
+  const allBW=data.map(d=>d.bandwidth_gbs||0);
+  const yS=scaleLinear([0,Math.max(...allBW)*1.15],[H-M.bottom,M.top]);
+  drawGridY(svg,yS,M.left,Math.max(W,400)-M.right);
+  drawYAxis(svg,yS,M.left,"BW (GB/s)");
+
+  concs.forEach((c,ci)=>{
+    const gx=M.left+ci*(groupWidth+groupGap)+groupGap/2;
+    const lbl=svgEl("text",{x:gx+groupWidth/2,y:H-M.bottom+18,"text-anchor":"middle",fill:"#777","font-size":"11",style:"font-family:var(--font)"});
+    lbl.textContent=c;svg.appendChild(lbl);
+
+    tests.forEach((t,ti)=>{
+      const rec=(byTest[t]||[]).find(d=>d.concurrency===c);
+      if(!rec)return;
+      const bw=rec.bandwidth_gbs||0;
+      const bx=gx+ti*(barW+innerGap);
+      const by=yS(bw);
+      const rect=svgEl("rect",{x:bx,y:by,width:barW,height:Math.max(yS(0)-by,1),rx:3,fill:testColor(t),style:"cursor:pointer"});
+      rect.addEventListener("mouseenter",e=>showTip(e,`<b>${fmtLabel(t)}</b><br>conc: ${c}<br>BW: ${fmtBW(bw)}`));
+      rect.addEventListener("mouseleave",hideTip);
+      svg.appendChild(rect);
+    });
+  });
+  const xLbl=svgEl("text",{x:(M.left+Math.max(W,400)-M.right)/2,y:H-4,"text-anchor":"middle",fill:"#999","font-size":"11",style:"font-family:var(--font)"});
+  xLbl.textContent="Concurrency";svg.appendChild(xLbl);
+
+  const card=el("div",{class:"card"});
+  card.appendChild(svg);card.appendChild(makeLegend(tests));
+  wrap.appendChild(card);
+}
+
+/* ── Section: GDS vs Staged ── */
+function renderGDS(){
+  const wrap=$("#gdsChart");wrap.innerHTML="";
+  const gdsTests=["g1_to_g3_gds","g3_to_g1_gds"];
+  const stagedTests=["g1_to_g3_staged","g3_to_g1_staged"];
+  const allTests=[...gdsTests,...stagedTests];
+  const data=FILTERED.filter(d=>allTests.includes(d.test));
+  if(!data.filter(d=>gdsTests.includes(d.test)).length)return;
+
+  const concs=unique(data,"concurrency");
+  const byTest=groupBy(data,"test");
+  const present=allTests.filter(t=>byTest[t]?.length);
+  const barW=22,innerGap=3,groupGap=28;
+  const groupWidth=present.length*barW+(present.length-1)*innerGap;
+  const W=M.left+M.right+concs.length*(groupWidth+groupGap);
+  const H=320;
+  const svg=createSVG(Math.max(W,400),H);
+
+  const allBW=data.map(d=>d.bandwidth_gbs||0);
+  const yS=scaleLinear([0,Math.max(...allBW)*1.15],[H-M.bottom,M.top]);
+  drawGridY(svg,yS,M.left,Math.max(W,400)-M.right);
+  drawYAxis(svg,yS,M.left,"BW (GB/s)");
+
+  concs.forEach((c,ci)=>{
+    const gx=M.left+ci*(groupWidth+groupGap)+groupGap/2;
+    const lbl=svgEl("text",{x:gx+groupWidth/2,y:H-M.bottom+18,"text-anchor":"middle",fill:"#777","font-size":"11",style:"font-family:var(--font)"});
+    lbl.textContent=c;svg.appendChild(lbl);
+
+    present.forEach((t,ti)=>{
+      const rec=(byTest[t]||[]).find(d=>d.concurrency===c);
+      if(!rec)return;
+      const bw=rec.bandwidth_gbs||0;
+      const bx=gx+ti*(barW+innerGap);
+      const by=yS(bw);
+      const rect=svgEl("rect",{x:bx,y:by,width:barW,height:Math.max(yS(0)-by,1),rx:3,fill:testColor(t),style:"cursor:pointer"});
+      rect.addEventListener("mouseenter",e=>showTip(e,`<b>${fmtLabel(t)}</b><br>conc: ${c}<br>BW: ${fmtBW(bw)}`));
+      rect.addEventListener("mouseleave",hideTip);
+      svg.appendChild(rect);
+    });
+  });
+  const xLbl=svgEl("text",{x:(M.left+Math.max(W,400)-M.right)/2,y:H-4,"text-anchor":"middle",fill:"#999","font-size":"11",style:"font-family:var(--font)"});
+  xLbl.textContent="Concurrency";svg.appendChild(xLbl);
+
+  const card=el("div",{class:"card"});
+  card.appendChild(svg);card.appendChild(makeLegend(present));
+  wrap.appendChild(card);
+}
+
+/* ── Section: Bidirectional ── */
+function renderBidir(){
+  const wrap=$("#bidirChart");wrap.innerHTML="";
+  const bidirTests=["bidir_g1_to_g2","bidir_g2_to_g1"];
+  const isoTests=["g1_to_g2","g2_to_g1"];
+  const data=FILTERED.filter(d=>[...bidirTests,...isoTests].includes(d.test));
+  if(!data.filter(d=>bidirTests.includes(d.test)).length)return;
+
+  const concs=unique(data,"concurrency");
+  const byTest=groupBy(data,"test");
+  const present=[...isoTests,...bidirTests].filter(t=>byTest[t]?.length);
+  const barW=22,innerGap=3,groupGap=28;
+  const groupWidth=present.length*barW+(present.length-1)*innerGap;
+  const W=M.left+M.right+concs.length*(groupWidth+groupGap);
+  const H=320;
+  const svg=createSVG(Math.max(W,400),H);
+
+  const allBW=data.map(d=>d.bandwidth_gbs||0);
+  const yS=scaleLinear([0,Math.max(...allBW)*1.15],[H-M.bottom,M.top]);
+  drawGridY(svg,yS,M.left,Math.max(W,400)-M.right);
+  drawYAxis(svg,yS,M.left,"BW (GB/s)");
+
+  concs.forEach((c,ci)=>{
+    const gx=M.left+ci*(groupWidth+groupGap)+groupGap/2;
+    const lbl=svgEl("text",{x:gx+groupWidth/2,y:H-M.bottom+18,"text-anchor":"middle",fill:"#777","font-size":"11",style:"font-family:var(--font)"});
+    lbl.textContent=c;svg.appendChild(lbl);
+
+    present.forEach((t,ti)=>{
+      const rec=(byTest[t]||[]).find(d=>d.concurrency===c);
+      if(!rec)return;
+      const bw=rec.bandwidth_gbs||0;
+      const bx=gx+ti*(barW+innerGap);
+      const by=yS(bw);
+      const hatch=DASHED.has(t);
+      const rect=svgEl("rect",{x:bx,y:by,width:barW,height:Math.max(yS(0)-by,1),rx:3,fill:testColor(t),opacity:hatch?"0.6":"1",style:"cursor:pointer"});
+      if(hatch){
+        rect.setAttribute("stroke",testColor(t));
+        rect.setAttribute("stroke-width","2");
+        rect.setAttribute("stroke-dasharray","4,3");
+      }
+      rect.addEventListener("mouseenter",e=>showTip(e,`<b>${fmtLabel(t)}</b><br>conc: ${c}<br>BW: ${fmtBW(bw)}`));
+      rect.addEventListener("mouseleave",hideTip);
+      svg.appendChild(rect);
+    });
+  });
+  const xLbl=svgEl("text",{x:(M.left+Math.max(W,400)-M.right)/2,y:H-4,"text-anchor":"middle",fill:"#999","font-size":"11",style:"font-family:var(--font)"});
+  xLbl.textContent="Concurrency";svg.appendChild(xLbl);
+
+  const card=el("div",{class:"card"});
+  card.appendChild(svg);card.appendChild(makeLegend(present));
+  wrap.appendChild(card);
+}
+
+/* ── Section: Latency Distribution ── */
+function renderLatency(){
+  const wrap=$("#latChart");wrap.innerHTML="";
+  const data=FILTERED.filter(d=>d.latency_us);
+  if(!data.length)return;
+
+  /* Aggregate per test: take the record with max mean_us per test for interesting spread,
+     or just show all unique test entries. We'll pick one representative per (test, concurrency, page_size). */
+  const byTest=groupBy(data,"test");
+  const tests=Object.keys(byTest);
+  const rowH=36,padY=8;
+  const W=700,H=M.top+tests.length*(rowH+padY)+M.bottom;
+  const svg=createSVG(W,H);
+
+  /* Find global latency range */
+  let gMin=Infinity,gMax=0;
+  tests.forEach(t=>{
+    byTest[t].forEach(d=>{
+      const l=d.latency_us;
+      if(l.min_us<gMin)gMin=l.min_us;
+      if(l.max_us>gMax)gMax=l.max_us;
+    });
+  });
+  const xS=scaleLinear([0,gMax*1.05],[M.left+100,W-M.right]);
+
+  /* x-axis */
+  drawXAxis(svg,xS,H-M.bottom,"Latency (us)");
+
+  tests.forEach((t,i)=>{
+    /* Use the record closest to median concurrency */
+    const recs=byTest[t].slice().sort((a,b)=>(a.latency_us.mean_us)-(b.latency_us.mean_us));
+    const mid=recs[Math.floor(recs.length/2)];
+    const l=mid.latency_us;
+    const cy=M.top+i*(rowH+padY)+rowH/2;
+    const color=testColor(t);
+
+    /* label */
+    const lbl=svgEl("text",{x:M.left+94,y:cy+4,"text-anchor":"end",fill:color,"font-size":"12","font-weight":"600",style:"font-family:var(--font)"});
+    lbl.textContent=fmtLabel(t);svg.appendChild(lbl);
+
+    /* whisker: min to max */
+    svg.appendChild(svgEl("line",{x1:xS(l.min_us),x2:xS(l.max_us),y1:cy,y2:cy,stroke:color,"stroke-width":1}));
+    /* caps */
+    svg.appendChild(svgEl("line",{x1:xS(l.min_us),x2:xS(l.min_us),y1:cy-8,y2:cy+8,stroke:color,"stroke-width":1.5}));
+    svg.appendChild(svgEl("line",{x1:xS(l.max_us),x2:xS(l.max_us),y1:cy-8,y2:cy+8,stroke:color,"stroke-width":1.5}));
+
+    /* box: p50 to p95 */
+    const bx=xS(l.p50_us),bx2=xS(l.p95_us);
+    const boxRect=svgEl("rect",{x:bx,y:cy-10,width:Math.max(bx2-bx,2),height:20,rx:4,fill:color,opacity:"0.25",stroke:color,"stroke-width":1.5});
+    svg.appendChild(boxRect);
+
+    /* p99 mark */
+    const p99x=xS(l.p99_us);
+    svg.appendChild(svgEl("line",{x1:p99x,x2:p99x,y1:cy-10,y2:cy+10,stroke:color,"stroke-width":2,"stroke-dasharray":"3,2"}));
+
+    /* median line */
+    const medX=xS(l.p50_us);
+    svg.appendChild(svgEl("line",{x1:medX,x2:medX,y1:cy-10,y2:cy+10,stroke:color,"stroke-width":2.5}));
+
+    /* hover target */
+    const hover=svgEl("rect",{x:xS(l.min_us)-2,y:cy-12,width:xS(l.max_us)-xS(l.min_us)+4,height:24,fill:"transparent",style:"cursor:pointer"});
+    hover.addEventListener("mouseenter",e=>showTip(e,
+      `<b>${fmtLabel(t)}</b> (conc=${mid.concurrency}, page=${mid.page_size})<br>`+
+      `min: ${fmtUs(l.min_us)}<br>p50: ${fmtUs(l.p50_us)}<br>p95: ${fmtUs(l.p95_us)}<br>p99: ${fmtUs(l.p99_us)}<br>max: ${fmtUs(l.max_us)}`));
+    hover.addEventListener("mouseleave",hideTip);
+    svg.appendChild(hover);
+  });
+
+  /* Legend for box plot parts */
+  const card=el("div",{class:"card"});
+  card.appendChild(svg);
+  const lgDiv=el("div",{class:"legend",style:{marginTop:"6px",fontSize:"11px",color:"#999"}});
+  lgDiv.innerHTML="<span>Whiskers: min/max</span> &middot; <span>Box: p50&ndash;p95</span> &middot; <span>Dashed: p99</span> &middot; <span>Bold line: p50</span>";
+  card.appendChild(lgDiv);
+  wrap.appendChild(card);
+}
+
+/* ── Section: Raw Data Table ── */
+const TABLE_COLS=[
+  {key:"test",label:"Test",fmt:v=>v},
+  {key:"device_id",label:"GPU",fmt:v=>v},
+  {key:"page_size",label:"Page Size",fmt:v=>v},
+  {key:"blocks_per_batch",label:"Blocks/Batch",fmt:v=>v},
+  {key:"concurrency",label:"Conc",fmt:v=>v},
+  {key:"bounce_blocks",label:"Bounce",fmt:v=>v==null?"-":v},
+  {key:"bandwidth_gbs",label:"BW (GB/s)",fmt:v=>v?.toFixed(2)??""},
+  {key:"aggregate_bandwidth_gbs",label:"Agg BW",fmt:v=>v?.toFixed(2)??""},
+  {key:"_lat_mean",label:"Lat mean",fmt:v=>v?.toFixed(1)??""},
+  {key:"_lat_p50",label:"Lat p50",fmt:v=>v?.toFixed(1)??""},
+  {key:"_lat_p99",label:"Lat p99",fmt:v=>v?.toFixed(1)??""},
+  {key:"iterations",label:"Iters",fmt:v=>v},
+];
+function getVal(d,key){
+  if(key==="_lat_mean")return d.latency_us?.mean_us;
+  if(key==="_lat_p50")return d.latency_us?.p50_us;
+  if(key==="_lat_p99")return d.latency_us?.p99_us;
+  return d[key];
+}
+function renderTable(){
+  const wrap=$("#tableWrap");wrap.innerHTML="";
+  if(!FILTERED.length)return;
+
+  let rows=FILTERED.slice();
+  if(sortCol!==null){
+    rows.sort((a,b)=>{
+      let va=getVal(a,sortCol),vb=getVal(b,sortCol);
+      if(va==null)va=sortAsc?Infinity:-Infinity;
+      if(vb==null)vb=sortAsc?Infinity:-Infinity;
+      if(typeof va==="string")return sortAsc?va.localeCompare(vb):vb.localeCompare(va);
+      return sortAsc?(va-vb):(vb-va);
+    });
+  }
+
+  const table=el("table");
+  const thead=el("thead");
+  const tr=el("tr");
+  TABLE_COLS.forEach(c=>{
+    const th=el("th",{onclick:()=>{
+      if(sortCol===c.key)sortAsc=!sortAsc;else{sortCol=c.key;sortAsc=true;}
+      renderTable();
+    }});
+    th.innerHTML=c.label+(sortCol===c.key?` <span class="sort-arrow">${sortAsc?"\u25B2":"\u25BC"}</span>`:"");
+    tr.appendChild(th);
+  });
+  thead.appendChild(tr);table.appendChild(thead);
+
+  const tbody=el("tbody");
+  rows.forEach(d=>{
+    const row=el("tr");
+    TABLE_COLS.forEach(c=>{
+      const td=el("td");
+      const v=getVal(d,c.key);
+      td.textContent=c.fmt(v);
+      if(c.key==="test")td.style.color=testColor(v);
+      row.appendChild(td);
+    });
+    tbody.appendChild(row);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+}
+
+/* ── Section auto-hide ── */
+function hideEmptySections(){
+  const checks={
+    bounce:FILTERED.some(d=>d.bounce_blocks!=null),
+    g2g3:FILTERED.some(d=>["g2_to_g3","g3_to_g2"].includes(d.test)),
+    gds:FILTERED.some(d=>["g1_to_g3_gds","g3_to_g1_gds"].includes(d.test)),
+    bidir:FILTERED.some(d=>d.test.startsWith("bidir_")),
+  };
+  for(const[id,show]of Object.entries(checks)){
+    const sec=document.getElementById(id);
+    if(sec)sec.style.display=show?"":"none";
+  }
+}
+
+/* ── Nav IntersectionObserver ── */
+const navLinks=$$("nav a[data-sec]");
+const secEls=navLinks.map(a=>document.getElementById(a.dataset.sec)).filter(Boolean);
+const obsOpts={rootMargin:"-56px 0px -60% 0px",threshold:0};
+const observer=new IntersectionObserver(entries=>{
+  entries.forEach(en=>{
+    if(en.isIntersecting){
+      navLinks.forEach(a=>a.classList.toggle("active",a.dataset.sec===en.target.id));
+    }
+  });
+},obsOpts);
+secEls.forEach(s=>observer.observe(s));
+</script>
+</body>
+</html>

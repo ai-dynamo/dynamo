@@ -254,6 +254,17 @@ impl VirtualConnectorCoordinator {
                 ));
             };
             for _ in 0..inner.max_retries {
+                // If no scaling decision has been made yet, return immediately
+                // rather than waiting for a scaled_decision_id that will never
+                // appear (the client only writes it after handling a decision).
+                let current = load(&inner.decision_id);
+                if current == NONE_SENTINEL {
+                    tracing::info!(
+                        decision_id = current,
+                        "No scaling decision pending, skipping wait"
+                    );
+                    return Ok(());
+                }
                 match kv_cache.get("scaled_decision_id").await {
                     None => {
                         tokio::time::sleep(inner.check_interval).await;
@@ -261,8 +272,7 @@ impl VirtualConnectorCoordinator {
                     Some(scaled_decision_id_bytes) => {
                         match String::from_utf8_lossy(&scaled_decision_id_bytes).parse::<usize>() {
                             Ok(scaled_decision_id) => {
-                                let current = load(&inner.decision_id);
-                                if scaled_decision_id >= current || current == NONE_SENTINEL {
+                                if scaled_decision_id >= current {
                                     tracing::info!(
                                         decision_id = current,
                                         "Scaling decision completed"

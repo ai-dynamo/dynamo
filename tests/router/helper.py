@@ -8,7 +8,8 @@ import os
 import random
 import string
 import sys
-from typing import Any, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import aiohttp
 import nats
@@ -35,6 +36,19 @@ def generate_random_suffix() -> str:
 def get_kv_indexer_command() -> list[str]:
     """Return the preferred standalone indexer command for the current Python env."""
     return [sys.executable, "-m", "dynamo.indexer"]
+
+
+def get_select_service_command() -> list[str]:
+    """Return the preferred standalone selection service command."""
+    return [sys.executable, "-m", "dynamo.select_service"]
+
+
+def get_kv_indexer_test_env() -> Dict[str, str]:
+    """Indexer launch env that enables the listener-control test endpoints
+    (gated off by default; used by the ZMQ replay scenario)."""
+    env = os.environ.copy()
+    env["DYN_KV_INDEXER_TEST_ENDPOINTS"] = "1"
+    return env
 
 
 def assert_event_dumps_equal(
@@ -118,8 +132,13 @@ def verify_response_worker_ids(
     )
 
 
-def verify_response_timing(timing_info: dict[str, Any]) -> None:
-    """Verify timing info has valid values (ttft_ms > 0, total_time_ms > 0)."""
+def verify_response_timing(timing_info: dict[str, Any], disagg: bool = False) -> None:
+    """Verify timing info has valid values (ttft_ms > 0, total_time_ms > 0).
+
+    Args:
+        timing_info: Dict of timing fields from nvext.timing in the response.
+        disagg: If True, also verify kv_transfer_estimated_latency_ms > 0 (disaggregated mode only).
+    """
     ttft_ms = timing_info.get("ttft_ms")
     total_time_ms = timing_info.get("total_time_ms")
 
@@ -134,6 +153,21 @@ def verify_response_timing(timing_info: dict[str, Any]) -> None:
         f"✓ Verified timing: ttft_ms={ttft_ms:.2f}, total_time_ms={total_time_ms:.2f}"
     )
 
+    if disagg:
+        kv_transfer_estimated_latency_ms = timing_info.get(
+            "kv_transfer_estimated_latency_ms"
+        )
+        assert (
+            kv_transfer_estimated_latency_ms is not None
+            and kv_transfer_estimated_latency_ms > 0
+        ), (
+            f"Expected kv_transfer_estimated_latency_ms > 0 in disaggregated mode, "
+            f"got: {kv_transfer_estimated_latency_ms}"
+        )
+        logger.info(
+            f"✓ Verified kv_transfer_estimated_latency_ms={kv_transfer_estimated_latency_ms:.2f}"
+        )
+
 
 ########################################################
 # Utility functions
@@ -141,34 +175,79 @@ def verify_response_timing(timing_info: dict[str, Any]) -> None:
 
 
 async def wait_for_frontend_ready(
-    frontend_url: str, expected_num_workers: int = 2, timeout: int = 120
+    frontend_url: str,
+    expected_num_workers: int | None = None,
+    timeout: int = 120,
+    test_payload: dict[str, Any] | None = None,
+    engine_workers=None,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+    request_headers: dict[str, str] | None = None,
 ):
     """Wait for backend worker(s) to be ready via the HTTP frontend (OpenAI API).
 
-    This function performs a two-phase readiness check through the frontend HTTP server:
-        1. Polls GET /v1/models until at least one model is registered (workers connected)
-        2. Sends a test POST to /v1/chat/completions to verify the request pipeline is functional
+    This function performs a three-phase readiness check:
+        1. Polls discovery for every expected worker when engine_workers is provided.
+        2. Polls GET /v1/models until at least one model is registered.
+        3. Sends a test POST to /v1/chat/completions to verify the request pipeline is functional.
 
     Use this when testing through the HTTP frontend server (dynamo.frontend).
     For direct Python API testing with KvRouter, use wait_for_workers_ready() instead.
 
     Args:
         frontend_url: Base URL of the frontend HTTP server (e.g., "http://localhost:8000")
-        expected_num_workers: Number of workers to wait for (currently logs but doesn't enforce)
-        timeout: Maximum time to wait in seconds for both phases combined
+        expected_num_workers: Exact total worker count to enforce through discovery.
+        timeout: Maximum time to wait in seconds for each readiness phase.
+        test_payload: Optional chat completions payload for the final readiness probe.
+            Use this when readiness must satisfy the same routing constraints as the test.
+        engine_workers: Worker process object, or a list of process objects, exposing
+            namespace, component_name, and num_workers.
+        store_backend: Discovery backend used by the workers.
+        request_plane: Request transport used by the workers.
+        request_headers: Optional headers for the chat-completions readiness probe.
 
     Raises:
         TimeoutError: If workers don't register or pipeline doesn't become ready within timeout
         aiohttp.ClientError: If HTTP requests fail unexpectedly
     """
 
+    if expected_num_workers is not None:
+        if engine_workers is None:
+            raise ValueError(
+                "engine_workers is required when expected_num_workers is set"
+            )
+
+        worker_groups = (
+            list(engine_workers)
+            if isinstance(engine_workers, (list, tuple))
+            else [engine_workers]
+        )
+        configured_workers = sum(group.num_workers for group in worker_groups)
+        if configured_workers != expected_num_workers:
+            raise ValueError(
+                "expected_num_workers does not match configured workers: "
+                f"expected={expected_num_workers}, configured={configured_workers}"
+            )
+
+        runtime = get_runtime(
+            store_backend=store_backend,
+            request_plane=request_plane,
+        )
+        for group in worker_groups:
+            endpoint = runtime.endpoint(
+                f"{group.namespace}.{group.component_name}.generate"
+            )
+            await poll_for_worker_instances(
+                endpoint,
+                group.num_workers,
+                max_wait_time=timeout,
+            )
+
     models_url = f"{frontend_url}/v1/models"
     chat_url = f"{frontend_url}/v1/chat/completions"
     start_time = asyncio.get_event_loop().time()
 
-    logger.info(
-        f"Waiting for {expected_num_workers} workers to register on HTTP frontend (timeout={timeout}s)..."
-    )
+    logger.info("Waiting for HTTP frontend readiness (timeout=%ss)...", timeout)
 
     # Phase 1: Wait for models to appear in /v1/models
     model_name = None
@@ -196,7 +275,7 @@ async def wait_for_frontend_ready(
                             logger.debug(
                                 f"No models registered yet (elapsed: {elapsed:.1f}s)"
                             )
-        except Exception as e:
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
             logger.debug(f"Error checking models endpoint: {e}")
 
         # Wait before next poll
@@ -204,12 +283,16 @@ async def wait_for_frontend_ready(
 
     # Phase 2: Wait for chat completions pipeline to be ready
     logger.info("Waiting for chat completions pipeline to be built...")
-    test_payload = {
-        "model": model_name,
-        "messages": [{"role": "user", "content": "test"}],
-        "max_tokens": 1,
-        "stream": False,
-    }
+    if test_payload is None:
+        test_payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 1,
+            "stream": False,
+        }
+    else:
+        test_payload = {**test_payload}
+        test_payload.setdefault("model", model_name)
 
     while True:
         elapsed = asyncio.get_event_loop().time() - start_time
@@ -221,7 +304,11 @@ async def wait_for_frontend_ready(
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(chat_url, json=test_payload) as response:
+                async with session.post(
+                    chat_url,
+                    json=test_payload,
+                    headers=request_headers,
+                ) as response:
                     if response.status == 200:
                         logger.info("Chat completions pipeline ready!")
                         return
@@ -229,11 +316,51 @@ async def wait_for_frontend_ready(
                         logger.debug(
                             f"Chat completions not ready yet, status {response.status} (elapsed: {elapsed:.1f}s)"
                         )
-        except Exception as e:
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
             logger.debug(f"Error testing chat completions: {e}")
 
         # Wait before next poll
         await asyncio.sleep(1)
+
+
+async def poll_for_worker_instances(
+    endpoint,
+    expected_num_workers: int,
+    max_wait_time: int = 60,
+) -> list[int]:
+    """Poll the endpoint's discovery client until the expected number of worker instances appear.
+
+    Args:
+        endpoint: The endpoint object to get the client from
+        expected_num_workers: Number of worker instances to wait for
+        max_wait_time: Timeout in seconds
+
+    Returns:
+        List of discovered instance IDs (unsorted).
+
+    Raises:
+        AssertionError: If the expected number of workers don't appear within max_wait_time.
+    """
+    logger.info(f"Waiting for {expected_num_workers} worker instance(s) to register...")
+    client = await endpoint.client()
+    instance_ids: list[int] = []
+    start_time = asyncio.get_running_loop().time()
+
+    while len(instance_ids) < expected_num_workers:
+        instance_ids = client.instance_ids()
+        logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
+
+        if len(instance_ids) >= expected_num_workers:
+            break
+
+        if asyncio.get_running_loop().time() - start_time > max_wait_time:
+            raise AssertionError(
+                f"Timeout waiting for workers. Found {len(instance_ids)} instance(s), expected {expected_num_workers}"
+            )
+
+        await asyncio.sleep(1.0)
+
+    return instance_ids
 
 
 async def wait_for_workers_ready(
@@ -260,31 +387,7 @@ async def wait_for_workers_ready(
     Raises:
         AssertionError: If workers don't become ready or warmup request fails.
     """
-    logger.info("Waiting for workers to be ready")
-
-    # Get the client from the endpoint
-    client = await endpoint.client()
-
-    # Poll for instance IDs until we have the expected number
-    instance_ids: list[int] = []
-    max_wait_time = 60  # seconds
-    start_time = asyncio.get_running_loop().time()
-
-    while len(instance_ids) < expected_num_workers:
-        instance_ids = client.instance_ids()
-        logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
-
-        if len(instance_ids) >= expected_num_workers:
-            break
-
-        # Check timeout
-        if asyncio.get_running_loop().time() - start_time > max_wait_time:
-            raise AssertionError(
-                f"Timeout waiting for workers. Found {len(instance_ids)} instance(s), expected {expected_num_workers}"
-            )
-
-        # Wait 1 second before polling again
-        await asyncio.sleep(1.0)
+    instance_ids = await poll_for_worker_instances(endpoint, expected_num_workers)
 
     # Send a warmup request to verify workers can handle requests
     test_token_ids = [random.randint(1, 10000) for _ in range(4)]
@@ -295,8 +398,6 @@ async def wait_for_workers_ready(
             kv_python_router=router,
             model_name=model_name,
             token_ids=test_token_ids,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,
                 "max_tokens": 2,
@@ -378,6 +479,58 @@ async def wait_for_indexer_workers_active(
     )
 
 
+async def wait_for_selection_service_ready(
+    selector_url: str,
+    expected_worker_ids: set[int],
+    timeout_s: float = 30.0,
+) -> None:
+    """Wait until the standalone selection service reports expected workers ready."""
+    if not expected_worker_ids:
+        return
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    ready_url = f"{selector_url}/ready"
+
+    async with aiohttp.ClientSession() as session:
+        while loop.time() < deadline:
+            remaining_s = deadline - loop.time()
+            if remaining_s <= 0:
+                break
+
+            try:
+                request_timeout = aiohttp.ClientTimeout(total=min(2.0, remaining_s))
+                async with session.get(ready_url, timeout=request_timeout) as resp:
+                    if resp.status not in (200, 503):
+                        await asyncio.sleep(0.5)
+                        continue
+                    body = await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                await asyncio.sleep(0.5)
+                continue
+
+            workers_by_id = {
+                worker["worker_id"]: worker for worker in body.get("workers", [])
+            }
+            all_schedulable = all(
+                workers_by_id.get(worker_id, {}).get("lifecycle") == "schedulable"
+                for worker_id in expected_worker_ids
+            )
+            if (
+                resp.status == 200
+                and body.get("ready") is True
+                and body.get("schedulable_workers", 0) >= len(expected_worker_ids)
+                and all_schedulable
+            ):
+                return
+
+            await asyncio.sleep(0.5)
+
+    raise RuntimeError(
+        f"Timed out waiting for selection service workers to become ready at {ready_url}"
+    )
+
+
 async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8):
     """Send a single request with exponential backoff retry"""
     wait_time = 1  # Start with 1 second
@@ -408,12 +561,17 @@ async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8)
     return False
 
 
-def get_runtime(store_backend="etcd", request_plane="tcp"):
+def get_runtime(
+    store_backend: str = "etcd",
+    request_plane: str = "tcp",
+    event_plane: Optional[str] = None,
+):
     """Create a DistributedRuntime instance for testing.
 
     Args:
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        request_plane: How frontend talks to backend ("tcp", "http" or "nats"). Defaults to "tcp".
+        request_plane: How frontend talks to backend ("tcp", "nats"). Defaults to "tcp".
+        event_plane: How KV events are transported ("nats" or "zmq"). Defaults to runtime behavior.
     """
     try:
         # Try to get running loop (works in async context)
@@ -422,7 +580,9 @@ def get_runtime(store_backend="etcd", request_plane="tcp"):
         # No running loop, create a new one (sync context)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    return DistributedRuntime(loop, store_backend, request_plane)
+    return DistributedRuntime(
+        loop, store_backend, request_plane, event_plane=event_plane
+    )
 
 
 async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):
@@ -527,8 +687,8 @@ async def send_request_via_python_kv_router(
     kv_python_router: KvRouter,
     model_name: str,
     token_ids: list,
-    initial_wait: float,
-    max_retries: int,
+    initial_wait: float = 0.25,
+    max_retries: int = 8,
     stop_conditions: Optional[dict] = None,
     sampling_options: Optional[dict] = None,
     output_options: Optional[dict] = None,
@@ -616,11 +776,13 @@ async def send_request_via_python_kv_router(
                     f"Stream finished with reason: {response['finish_reason']}"
                 )
 
-            # Extract worker IDs and dp_ranks from disaggregated_params if present
-            if return_worker_ids and "disaggregated_params" in response:
-                disagg_params = response["disaggregated_params"]
-                if isinstance(disagg_params, dict) and "worker_id" in disagg_params:
-                    worker_id_info = disagg_params["worker_id"]
+            # Extract worker IDs and dp_ranks from routing_data if present. The KvRouter
+            # binding forwards worker attribution on the typed ``routing_data.worker_id``
+            # field rather than the legacy ``disaggregated_params`` JSON blob.
+            if return_worker_ids and "routing_data" in response:
+                routing_data = response["routing_data"]
+                if isinstance(routing_data, dict) and "worker_id" in routing_data:
+                    worker_id_info = routing_data["worker_id"]
                     if isinstance(worker_id_info, dict):
                         if "prefill_worker_id" in worker_id_info:
                             prefill_worker_id = worker_id_info["prefill_worker_id"]
@@ -658,3 +820,24 @@ async def send_request_via_python_kv_router(
         }
 
     return True
+
+
+def topology_env(
+    tmp_path: Path,
+    name: str,
+    topology_domains: Dict[str, str],
+    *,
+    transfer_domain: str = "zone",
+    enforcement: str = "required",
+) -> Dict[str, str]:
+    topology_dir = tmp_path / name
+    topology_dir.mkdir()
+    for domain, value in topology_domains.items():
+        (topology_dir / domain).write_text(value)
+
+    return {
+        "DYN_TOPOLOGY_ENABLED": "true",
+        "DYN_TOPOLOGY_MOUNT_PATH": str(topology_dir),
+        "DYN_KV_TRANSFER_DOMAIN": transfer_domain,
+        "DYN_KV_TRANSFER_ENFORCEMENT": enforcement,
+    }

@@ -24,10 +24,24 @@ use once_cell::sync::OnceCell;
 use std::{
     mem::ManuallyDrop,
     sync::{Arc, atomic::Ordering},
+    time::Duration,
 };
 use tokio::{signal, sync::Mutex, task::JoinHandle};
 
 pub use tokio_util::sync::CancellationToken;
+
+const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 15 * 60;
+
+fn graceful_shutdown_timeout() -> Duration {
+    let timeout_secs = std::env::var(
+        config::environment_names::runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+    )
+    .ok()
+    .and_then(|s| s.parse::<u64>().ok())
+    .unwrap_or(DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS);
+
+    Duration::from_secs(timeout_secs)
+}
 
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone, Debug)]
@@ -51,6 +65,9 @@ pub struct Runtime {
 
 impl Runtime {
     fn new(runtime: RuntimeType, secondary: Option<RuntimeType>) -> anyhow::Result<Runtime> {
+        // Initialise NVTX toggle once from environment (no-op when feature is off)
+        crate::nvtx::init();
+
         // worker id
         let id = Arc::new(uuid::Uuid::new_v4().to_string());
 
@@ -146,6 +163,12 @@ impl Runtime {
         if let (Some(pool), Some(permits)) = (&self.compute_pool, &self.block_in_place_permits) {
             crate::compute::thread_local::initialize_context(Arc::clone(pool), Arc::clone(permits));
         }
+        // Name this worker thread in the Nsight Systems timeline (no-op when nvtx feature is off)
+        let thread_name = std::thread::current()
+            .name()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| format!("tokio-worker-{:?}", std::thread::current().id()));
+        crate::nvtx::name_current_thread_impl(&thread_name);
     }
 
     /// Initialize thread-local compute context on all worker threads using a barrier
@@ -321,13 +344,22 @@ impl Runtime {
             tracing::info!("Active graceful endpoints: {count}");
 
             if count != 0 {
-                tracker.wait_for_completion().await;
+                let timeout = graceful_shutdown_timeout();
+                if tokio::time::timeout(timeout, tracker.wait_for_completion())
+                    .await
+                    .is_err()
+                {
+                    let remaining = tracker.get_count();
+                    tracing::error!(
+                        timeout_secs = timeout.as_secs(),
+                        remaining_endpoints = remaining,
+                        "Graceful endpoint shutdown timed out; proceeding with runtime teardown"
+                    );
+                }
             }
 
             // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
-            tracing::info!(
-                "Phase 3: All endpoints ended gracefully. Connections to backend services will now be disconnected"
-            );
+            tracing::info!("Phase 3: Connections to backend services will now be disconnected");
             main_token.cancel();
         });
     }
@@ -380,5 +412,47 @@ impl Drop for RuntimeType {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::environment_names::runtime as env_runtime;
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_cancels_main_token_after_graceful_timeout() {
+        temp_env::async_with_vars(
+            [(
+                env_runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+                Some("5"),
+            )],
+            async {
+                let runtime = Runtime::from_current().unwrap();
+                let tracker = runtime.graceful_shutdown_tracker();
+                let _guard = tracker.register_task();
+                let main_token = runtime.primary_token();
+                let endpoint_token = runtime.child_token();
+
+                runtime.shutdown();
+                tokio::task::yield_now().await;
+
+                assert!(endpoint_token.is_cancelled());
+                assert!(!main_token.is_cancelled());
+                assert_eq!(tracker.get_count(), 1);
+
+                tokio::time::advance(Duration::from_secs(4)).await;
+                tokio::task::yield_now().await;
+
+                assert!(!main_token.is_cancelled());
+
+                tokio::time::advance(Duration::from_secs(1)).await;
+                tokio::task::yield_now().await;
+
+                assert!(main_token.is_cancelled());
+                assert_eq!(tracker.get_count(), 1);
+            },
+        )
+        .await;
     }
 }
