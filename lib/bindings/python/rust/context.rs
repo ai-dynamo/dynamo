@@ -239,8 +239,7 @@ impl Context {
         if tc.trace_id.is_empty() || tc.span_id.is_empty() {
             return None;
         }
-        // Assumes sampled — inbound `DistributedTraceContext` doesn't carry flags.
-        Some(format!("00-{}-{}-01", tc.trace_id, tc.span_id))
+        Some(tc.create_traceparent())
     }
 }
 

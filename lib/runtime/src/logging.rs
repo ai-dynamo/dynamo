@@ -72,7 +72,7 @@ use tracing_subscriber::registry::SpanData;
 use uuid::Uuid;
 
 use opentelemetry::propagation::{Extractor, Injector, TextMapPropagator};
-use opentelemetry::trace::TraceContextExt;
+use opentelemetry::trace::{Span as OtelSpan, TraceContextExt};
 use opentelemetry::{global, trace::Tracer};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig;
@@ -162,6 +162,11 @@ pub struct DistributedTraceIdLayer;
 pub struct DistributedTraceContext {
     pub trace_id: String,
     pub span_id: String,
+    #[serde(
+        default = "default_trace_flags",
+        skip_serializing_if = "is_default_trace_flags"
+    )]
+    pub trace_flags: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,6 +187,7 @@ struct PendingDistributedTraceContext {
     trace_id: Option<String>,
     span_id: Option<String>,
     parent_id: Option<String>,
+    trace_flags: Option<String>,
     tracestate: Option<String>,
     x_request_id: Option<String>,
     request_id: Option<String>,
@@ -206,30 +212,82 @@ macro_rules! emit_at_level {
 impl DistributedTraceContext {
     /// Create a traceparent string from the context
     pub fn create_traceparent(&self) -> String {
-        format!("00-{}-{}-01", self.trace_id, self.span_id)
+        format!(
+            "00-{}-{}-{}",
+            self.trace_id,
+            self.span_id,
+            normalize_trace_flags(&self.trace_flags)
+        )
     }
 }
 
+fn default_trace_flags() -> String {
+    "01".to_string()
+}
+
+fn is_default_trace_flags(trace_flags: &str) -> bool {
+    trace_flags == "01"
+}
+
+fn is_valid_trace_flags(trace_flags: &str) -> bool {
+    trace_flags.len() == 2 && trace_flags.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn normalize_trace_flags(trace_flags: &str) -> String {
+    if is_valid_trace_flags(trace_flags) {
+        trace_flags.to_ascii_lowercase()
+    } else {
+        default_trace_flags()
+    }
+}
+
+fn current_otel_trace_flags() -> Option<String> {
+    let context = Span::current().context();
+    let span = context.span();
+    let span_context = span.span_context();
+    if !span_context.is_valid() {
+        return None;
+    }
+
+    Some(
+        if span_context.trace_flags().is_sampled() {
+            "01"
+        } else {
+            "00"
+        }
+        .to_string(),
+    )
+}
+
 /// Parse a traceparent string into its components
-pub fn parse_traceparent(traceparent: &str) -> (Option<String>, Option<String>) {
+pub fn parse_traceparent(traceparent: &str) -> (Option<String>, Option<String>, Option<String>) {
     let pieces: Vec<_> = traceparent.split('-').collect();
     if pieces.len() != 4 {
-        return (None, None);
+        return (None, None, None);
     }
     let trace_id = pieces[1];
     let parent_id = pieces[2];
+    let trace_flags = pieces[3];
 
-    if !is_valid_trace_id(trace_id) || !is_valid_span_id(parent_id) {
-        return (None, None);
+    if !is_valid_trace_id(trace_id)
+        || !is_valid_span_id(parent_id)
+        || !is_valid_trace_flags(trace_flags)
+    {
+        return (None, None, None);
     }
 
-    (Some(trace_id.to_string()), Some(parent_id.to_string()))
+    (
+        Some(trace_id.to_string()),
+        Some(parent_id.to_string()),
+        Some(trace_flags.to_ascii_lowercase()),
+    )
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct TraceParent {
     pub trace_id: Option<String>,
     pub parent_id: Option<String>,
+    pub trace_flags: Option<String>,
     pub tracestate: Option<String>,
     pub x_request_id: Option<String>,
     pub request_id: Option<String>,
@@ -255,12 +313,13 @@ impl TraceParent {
     pub fn from_headers<H: GenericHeaders>(headers: &H) -> TraceParent {
         let mut trace_id = None;
         let mut parent_id = None;
+        let mut trace_flags = None;
         let mut tracestate = None;
         let mut x_request_id = None;
         let mut request_id = None;
 
         if let Some(header_value) = headers.get("traceparent") {
-            (trace_id, parent_id) = parse_traceparent(header_value);
+            (trace_id, parent_id, trace_flags) = parse_traceparent(header_value);
         }
 
         if let Some(header_value) = headers.get("x-request-id") {
@@ -282,6 +341,7 @@ impl TraceParent {
         TraceParent {
             trace_id,
             parent_id,
+            trace_flags,
             tracestate,
             x_request_id,
             request_id,
@@ -317,6 +377,7 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
         version = %version,
         trace_id = trace_parent.trace_id,
         parent_id = trace_parent.parent_id,
+        trace_flags = trace_parent.trace_flags,
         x_request_id = trace_parent.x_request_id,
         request_id = %request_id,
         model = tracing::field::Empty,
@@ -361,6 +422,7 @@ pub fn make_system_request_span<B>(req: &Request<B>) -> Span {
         version = %version,
         trace_id = trace_parent.trace_id,
         parent_id = trace_parent.parent_id,
+        trace_flags = trace_parent.trace_flags,
         x_request_id = trace_parent.x_request_id,
         request_id = %request_id,
         model = tracing::field::Empty,
@@ -432,6 +494,7 @@ pub fn make_handle_payload_span(
             "handle_payload",
             trace_id = trace_id.as_str(),
             parent_id = parent_id.as_str(),
+            trace_flags = trace_parent.trace_flags,
             x_request_id = trace_parent.x_request_id,
             request_id = trace_parent.request_id,
             tracestate = trace_parent.tracestate,
@@ -449,6 +512,7 @@ pub fn make_handle_payload_span(
         tracing::info_span!(
             target: "request_span",
             "handle_payload",
+            trace_flags = trace_parent.trace_flags,
             x_request_id = trace_parent.x_request_id,
             request_id = trace_parent.request_id,
             tracestate = trace_parent.tracestate,
@@ -476,6 +540,10 @@ pub fn make_handle_payload_span_from_tcp_headers(
         .filter(|id| uuid::Uuid::parse_str(id).is_ok())
         .cloned();
     let tracestate = headers.get("tracestate").cloned();
+    let trace_flags = headers.get("traceparent").and_then(|value| {
+        let (_, _, flags) = parse_traceparent(value);
+        flags
+    });
 
     if let (Some(trace_id), Some(parent_id)) = (trace_id.as_ref(), parent_span_id.as_ref()) {
         let span = tracing::info_span!(
@@ -483,6 +551,7 @@ pub fn make_handle_payload_span_from_tcp_headers(
             "handle_payload",
             trace_id = trace_id.as_str(),
             parent_id = parent_id.as_str(),
+            trace_flags = trace_flags,
             x_request_id = x_request_id,
             request_id = request_id,
             tracestate = tracestate,
@@ -500,6 +569,7 @@ pub fn make_handle_payload_span_from_tcp_headers(
         tracing::info_span!(
             target: "request_span",
             "handle_payload",
+            trace_flags = trace_flags,
             x_request_id = x_request_id,
             request_id = request_id,
             tracestate = tracestate,
@@ -524,7 +594,7 @@ fn extract_otel_context_from_tcp_headers(
         None => return (None, None, None),
     };
 
-    let (trace_id, parent_span_id) = parse_traceparent(traceparent_value);
+    let (trace_id, parent_span_id, _) = parse_traceparent(traceparent_value);
 
     struct TcpHeaderExtractor<'a>(&'a std::collections::HashMap<String, String>);
 
@@ -566,7 +636,7 @@ pub fn extract_otel_context_from_nats_headers(
         None => return (None, None, None),
     };
 
-    let (trace_id, parent_span_id) = parse_traceparent(traceparent_value);
+    let (trace_id, parent_span_id, _) = parse_traceparent(traceparent_value);
 
     struct NatsHeaderExtractor<'a>(&'a async_nats::HeaderMap);
 
@@ -669,6 +739,7 @@ pub fn make_client_request_span(
                 instance_id = inst_id,
                 trace_id = ctx.trace_id.as_str(),
                 parent_id = ctx.span_id.as_str(),
+                trace_flags = ctx.trace_flags.as_str(),
                 x_request_id = ctx.x_request_id.as_deref(),
             )
         } else {
@@ -678,6 +749,7 @@ pub fn make_client_request_span(
                 request_id = request_id,
                 trace_id = ctx.trace_id.as_str(),
                 parent_id = ctx.span_id.as_str(),
+                trace_flags = ctx.trace_flags.as_str(),
                 x_request_id = ctx.x_request_id.as_deref(),
             )
         };
@@ -744,6 +816,7 @@ where
             let mut trace_id: Option<String> = None;
             let mut parent_id: Option<String> = None;
             let mut span_id: Option<String> = None;
+            let mut trace_flags: Option<String> = None;
             let mut x_request_id: Option<String> = None;
             let mut request_id: Option<String> = None;
             let mut tracestate: Option<String> = None;
@@ -777,6 +850,14 @@ where
                 }
             }
 
+            if let Some(trace_flags_input) = visitor.fields.get("trace_flags") {
+                if !is_valid_trace_flags(trace_flags_input) {
+                    tracing::trace!("trace flags '{trace_flags_input}' are not valid! Ignoring.");
+                } else {
+                    trace_flags = Some(trace_flags_input.to_ascii_lowercase());
+                }
+            }
+
             // Extract tracestate
             if let Some(tracestate_input) = visitor.fields.get("tracestate") {
                 tracestate = Some(tracestate_input.to_string());
@@ -803,6 +884,9 @@ where
                 if let Some(parent_tracing_context) = parent_ext.get::<DistributedTraceContext>() {
                     trace_id = Some(parent_tracing_context.trace_id.clone());
                     parent_id = Some(parent_tracing_context.span_id.clone());
+                    if trace_flags.is_none() {
+                        trace_flags = Some(parent_tracing_context.trace_flags.clone());
+                    }
                     tracestate = parent_tracing_context.tracestate.clone();
                     if x_request_id.is_none() {
                         x_request_id = parent_tracing_context.x_request_id.clone();
@@ -827,6 +911,7 @@ where
                 trace_id,
                 span_id,
                 parent_id,
+                trace_flags,
                 tracestate,
                 x_request_id,
                 request_id,
@@ -860,6 +945,7 @@ where
             let mut trace_id = pending.trace_id;
             let mut span_id = pending.span_id;
             let parent_id = pending.parent_id;
+            let mut trace_flags = pending.trace_flags;
             let tracestate = pending.tracestate;
             let x_request_id = pending.x_request_id;
             let request_id = pending.request_id;
@@ -893,6 +979,10 @@ where
                 }
             }
 
+            if trace_flags.is_none() {
+                trace_flags = current_otel_trace_flags();
+            }
+
             // Panic if we still don't have required IDs
             if trace_id.is_none() {
                 panic!(
@@ -909,6 +999,7 @@ where
             extensions.insert(DistributedTraceContext {
                 trace_id: trace_id.expect("Trace ID must be set"),
                 span_id: span_id.expect("Span ID must be set"),
+                trace_flags: trace_flags.unwrap_or_else(default_trace_flags),
                 parent_id,
                 tracestate,
                 start: Some(Instant::now()),
@@ -942,6 +1033,12 @@ pub fn get_distributed_tracing_context() -> Option<DistributedTraceContext> {
                 })
         })
         .flatten()
+        .map(|mut context| {
+            if let Some(trace_flags) = current_otel_trace_flags() {
+                context.trace_flags = trace_flags;
+            }
+            context
+        })
 }
 
 /// Initialize the logger - must be called when Tokio runtime is available
@@ -1574,6 +1671,170 @@ pub mod tests {
             result.push(val);
         }
         Ok(result)
+    }
+
+    #[test]
+    fn parse_traceparent_preserves_trace_flags() {
+        let traceparent = "00-11111111111111111111111111111111-2222222222222222-00";
+        let (trace_id, parent_id, trace_flags) = parse_traceparent(traceparent);
+
+        assert_eq!(
+            trace_id.as_deref(),
+            Some("11111111111111111111111111111111")
+        );
+        assert_eq!(parent_id.as_deref(), Some("2222222222222222"));
+        assert_eq!(trace_flags.as_deref(), Some("00"));
+    }
+
+    #[test]
+    fn parse_traceparent_rejects_invalid_trace_flags() {
+        let traceparent = "00-11111111111111111111111111111111-2222222222222222-0x";
+        let (trace_id, parent_id, trace_flags) = parse_traceparent(traceparent);
+
+        assert!(trace_id.is_none());
+        assert!(parent_id.is_none());
+        assert!(trace_flags.is_none());
+    }
+
+    #[test]
+    fn trace_parent_from_headers_preserves_unsampled_flag() {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-11111111111111111111111111111111-2222222222222222-00",
+        );
+
+        let trace_parent = TraceParent::from_headers(&headers);
+
+        assert_eq!(
+            trace_parent.trace_id.as_deref(),
+            Some("11111111111111111111111111111111")
+        );
+        assert_eq!(trace_parent.parent_id.as_deref(), Some("2222222222222222"));
+        assert_eq!(trace_parent.trace_flags.as_deref(), Some("00"));
+    }
+
+    #[test]
+    fn distributed_context_creates_traceparent_with_stored_flags() {
+        let context = DistributedTraceContext {
+            trace_id: "11111111111111111111111111111111".to_string(),
+            span_id: "2222222222222222".to_string(),
+            trace_flags: "00".to_string(),
+            parent_id: None,
+            tracestate: None,
+            start: None,
+            end: None,
+            x_request_id: None,
+            request_id: None,
+        };
+
+        assert_eq!(
+            context.create_traceparent(),
+            "00-11111111111111111111111111111111-2222222222222222-00"
+        );
+    }
+
+    #[test]
+    fn inject_trace_headers_preserves_current_span_flags() {
+        let _guard = tracing_subscriber::registry()
+            .with(DistributedTraceIdLayer)
+            .set_default();
+        let span = tracing::info_span!(
+            "root",
+            trace_id = "11111111111111111111111111111111",
+            span_id = "2222222222222222",
+            trace_flags = "00"
+        );
+        let _enter = span.enter();
+        let mut headers = std::collections::HashMap::new();
+
+        inject_trace_headers_into_map(&mut headers);
+
+        assert_eq!(
+            headers.get("traceparent").map(String::as_str),
+            Some("00-11111111111111111111111111111111-2222222222222222-00")
+        );
+    }
+
+    #[test]
+    fn request_span_preserves_inbound_trace_flags() {
+        let _guard = tracing_subscriber::registry()
+            .with(DistributedTraceIdLayer)
+            .set_default();
+        let req = Request::builder()
+            .header(
+                "traceparent",
+                "00-11111111111111111111111111111111-2222222222222222-00",
+            )
+            .body(())
+            .unwrap();
+        let trace_parent = TraceParent::from_headers(req.headers());
+        let span = tracing::info_span!(
+            "root",
+            trace_id = trace_parent.trace_id,
+            span_id = "3333333333333333",
+            parent_id = trace_parent.parent_id,
+            trace_flags = trace_parent.trace_flags
+        );
+        let _enter = span.enter();
+        let mut headers = std::collections::HashMap::new();
+
+        inject_trace_headers_into_map(&mut headers);
+
+        assert_eq!(
+            headers.get("traceparent").map(String::as_str),
+            Some("00-11111111111111111111111111111111-3333333333333333-00")
+        );
+    }
+
+    #[test]
+    fn root_context_uses_otel_unsampled_decision() {
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOff)
+            .build();
+        let tracer = provider.tracer("test");
+        let _guard = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .with(DistributedTraceIdLayer)
+            .set_default();
+        let span = tracing::info_span!("root");
+        let _enter = span.enter();
+        let mut headers = std::collections::HashMap::new();
+
+        inject_trace_headers_into_map(&mut headers);
+
+        assert!(headers["traceparent"].ends_with("-00"));
+        assert_eq!(
+            get_distributed_tracing_context()
+                .as_ref()
+                .map(|ctx| ctx.trace_flags.as_str()),
+            Some("00")
+        );
+    }
+
+    #[test]
+    fn root_context_uses_otel_sampled_decision() {
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
+            .build();
+        let tracer = provider.tracer("test");
+        let _guard = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .with(DistributedTraceIdLayer)
+            .set_default();
+        let span = tracing::info_span!("root");
+        let _enter = span.enter();
+        let mut headers = std::collections::HashMap::new();
+
+        inject_trace_headers_into_map(&mut headers);
+
+        assert!(headers["traceparent"].ends_with("-01"));
+        assert_eq!(
+            get_distributed_tracing_context()
+                .as_ref()
+                .map(|ctx| ctx.trace_flags.as_str()),
+            Some("01")
+        );
     }
 
     #[tokio::test]
