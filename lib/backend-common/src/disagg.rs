@@ -22,6 +22,8 @@ use crate::error::{BackendError, DynamoError, ErrorType};
 /// `Aggregated` is the default: the worker handles prefill and decode in the
 /// same engine. `Prefill` and `Decode` workers split the two phases across
 /// processes / GPUs and exchange KV cache via the engine-specific transport.
+/// `Encode` workers run a multimodal encoder upstream of Prefill/Aggregated
+/// and emit an opaque `encoder_result` payload on their terminal chunk.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum DisaggregationMode {
@@ -37,6 +39,11 @@ pub enum DisaggregationMode {
     /// Worker only runs the decode phase, consuming KV cache produced by a
     /// prefill peer. Does not advertise a local KV indexer.
     Decode,
+    /// Worker runs a multimodal encoder and emits an opaque `encoder_result`
+    /// payload on its terminal chunk. Registered as `WorkerType::Encode` with
+    /// topology needs `[[Prefill, Decode], [Aggregated]]`. Does not advertise
+    /// a local KV indexer.
+    Encode,
 }
 
 impl DisaggregationMode {
@@ -47,6 +54,7 @@ impl DisaggregationMode {
             Self::Aggregated => "agg",
             Self::Prefill => "prefill",
             Self::Decode => "decode",
+            Self::Encode => "encode",
         }
     }
 
@@ -58,6 +66,11 @@ impl DisaggregationMode {
     /// `true` when this worker only runs the decode phase.
     pub fn is_decode(&self) -> bool {
         matches!(self, Self::Decode)
+    }
+
+    /// `true` when this worker runs the encoder phase.
+    pub fn is_encode(&self) -> bool {
+        matches!(self, Self::Encode)
     }
 }
 
@@ -78,10 +91,11 @@ impl FromStr for DisaggregationMode {
             "agg" | "aggregated" => Ok(Self::Aggregated),
             "prefill" => Ok(Self::Prefill),
             "decode" => Ok(Self::Decode),
+            "encode" => Ok(Self::Encode),
             other => Err(DynamoError::builder()
                 .error_type(ErrorType::Backend(BackendError::InvalidArgument))
                 .message(format!(
-                    "unknown disaggregation mode '{other}' (expected one of: agg, prefill, decode)"
+                    "unknown disaggregation mode '{other}' (expected one of: agg, prefill, decode, encode)"
                 ))
                 .build()),
         }
@@ -106,6 +120,10 @@ mod tests {
             "decode".parse::<DisaggregationMode>().unwrap(),
             DisaggregationMode::Decode
         );
+        assert_eq!(
+            "encode".parse::<DisaggregationMode>().unwrap(),
+            DisaggregationMode::Encode
+        );
     }
 
     #[test]
@@ -122,7 +140,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown() {
-        let e = "encode".parse::<DisaggregationMode>().unwrap_err();
+        let e = "not-a-mode".parse::<DisaggregationMode>().unwrap_err();
         assert_eq!(
             e.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
@@ -135,6 +153,7 @@ mod tests {
             DisaggregationMode::Aggregated,
             DisaggregationMode::Prefill,
             DisaggregationMode::Decode,
+            DisaggregationMode::Encode,
         ] {
             let printed = mode.to_string();
             assert_eq!(printed.parse::<DisaggregationMode>().unwrap(), mode);
@@ -145,9 +164,15 @@ mod tests {
     fn predicates_match_variants() {
         assert!(DisaggregationMode::Prefill.is_prefill());
         assert!(!DisaggregationMode::Prefill.is_decode());
+        assert!(!DisaggregationMode::Prefill.is_encode());
         assert!(DisaggregationMode::Decode.is_decode());
+        assert!(!DisaggregationMode::Decode.is_encode());
+        assert!(DisaggregationMode::Encode.is_encode());
+        assert!(!DisaggregationMode::Encode.is_prefill());
+        assert!(!DisaggregationMode::Encode.is_decode());
         assert!(!DisaggregationMode::Aggregated.is_prefill());
         assert!(!DisaggregationMode::Aggregated.is_decode());
+        assert!(!DisaggregationMode::Aggregated.is_encode());
     }
 
     #[test]
@@ -164,5 +189,10 @@ mod tests {
         assert_eq!(json, "\"prefill\"");
         let back: DisaggregationMode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, DisaggregationMode::Prefill);
+
+        let json = serde_json::to_string(&DisaggregationMode::Encode).unwrap();
+        assert_eq!(json, "\"encode\"");
+        let back: DisaggregationMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, DisaggregationMode::Encode);
     }
 }

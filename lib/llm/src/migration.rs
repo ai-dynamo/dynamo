@@ -435,6 +435,7 @@ mod tests {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             completion_usage: None,
             engine_data: None,

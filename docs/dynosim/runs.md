@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: DynoSim Runs
 subtitle: Run one trace or synthetic workload through a simulated Dynamo configuration
@@ -138,7 +138,7 @@ Example:
 ```
 
 Rows without `session_id` are independent timestamped requests. Use this shape for wall-clock
-request traces, including agent-converted traces where parallel LLM calls should remain parallel.
+Mooncake-format inputs where parallel LLM calls should remain parallel.
 
 `priority` and `strict_priority` affect only KV-router pending-queue ordering when
 `--router-mode kv_router` is active and requests are actually queued. Negative `priority` values
@@ -165,9 +165,9 @@ row also waits for the first turn to complete plus the inferred 50 ms timestamp 
 ### Dynamo Request Traces
 
 `--trace-format dynamo` reads one or more original
-`dynamo.request.trace.v1` JSONL or JSONL.GZ shards. Replay derives the block
-size from the records and selects standard or agentic lowering based on
-`agent_context`.
+`dynamo.request.trace.v1` JSONL or JSONL.GZ shards directly. Replay derives the
+block size from the records and builds the standard or agentic in-memory model
+based on `agent_context`. It does not create an intermediate Mooncake file.
 
 ```bash
 python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
@@ -182,7 +182,8 @@ python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
 
 `--trace-format agentic_mooncake` simulates request-level workflow dependencies in addition to the
 Mooncake request fields. Each row should contain the normal Mooncake fields plus a stable
-`request_id`. Dependency fields are optional.
+`request_id`. Dependency fields are optional. This is a separate input format for externally
+authored Mooncake-compatible traces, not an intermediate format for Dynamo request traces.
 
 ```json
 {
@@ -207,7 +208,7 @@ child requests spawned by this row, and `prefix_reset` marks the first row in a 
 Run it with:
 
 ```bash
-python -m dynamo.replay /tmp/dynamo-request-trace.agentic-mooncake.jsonl \
+python -m dynamo.replay /path/to/agentic-mooncake.jsonl \
     --trace-format agentic_mooncake \
     --trace-block-size 128 \
     --replay-mode offline \
