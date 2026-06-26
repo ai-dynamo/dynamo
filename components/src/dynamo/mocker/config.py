@@ -296,6 +296,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         enable_local_indexer=not getattr(args, "durable_kv_events", False),
         kv_bytes_per_token=getattr(args, "kv_bytes_per_token", None),
         kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
+        kv_transfer_timing_mode=getattr(args, "kv_transfer_timing_mode", "full_prompt"),
         num_g2_blocks=getattr(args, "num_g2_blocks", None),
         num_g3_blocks=getattr(args, "num_g3_blocks", None),
         enable_g4_storage=getattr(args, "enable_g4_storage", False),

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: KVBM
+subtitle: Unified memory layer and write-through KV cache spanning GPU, host, SSD, and remote storage via NIXL for TensorRT-LLM and vLLM.
 ---
 
 <p align="left">

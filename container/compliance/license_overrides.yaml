@@ -1,0 +1,995 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Hand-curated license overrides for packages whose upstream metadata is empty,
+# malformed, or otherwise unhelpful. Consulted by
+# container/compliance/overrides.py via license_overrides.lookup(), which every
+# NOTICES generator calls before falling back to UNKNOWN.
+#
+# Match is by (ecosystem, name) — version-agnostic. If a package legitimately
+# changes license across versions, add separate entries with the version baked
+# into the name (e.g. cuda-nvcc-12-9 vs cuda-nvcc-13-0).
+#
+# Schema:
+#   ecosystem: rust | go | python | dpkg | native
+#   name:      package name (must match exactly what the SBOM/metadata reports)
+#   license:   SPDX expression OR LicenseRef-* identifier
+#   source:    REQUIRED audit trail — link to the upstream LICENSE/EULA URL
+#              that establishes this license, OR a justification for why we're
+#              overriding upstream (e.g. "PyPI metadata empty; verified at <URL>")
+#
+# Add a new entry: confirm the upstream license, paste the URL into source:,
+# pick the SPDX ID, and (if it's a LicenseRef-*) make sure it appears in
+# container/compliance/policy/licenses.toml's [licenses].allow list — otherwise
+# the policy gate will reject it.
+
+overrides:
+  # --- NVIDIA CUDA Python wheels ---
+  # Most ship via pypi.nvidia.com; the wheel METADATA's License field is empty
+  # or contains marketing prose. The actual EULA is bundled in the wheel
+  # under .dist-info/LICENSE.txt. SPDX has no NVIDIA-specific ID, so we use
+  # LicenseRef-NVIDIA-Proprietary (matches what the modern nvidia-*-cu13
+  # wheels publish in License-Expression).
+  - ecosystem: python
+    name: nvidia-cuda-cupti
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cuda-nvrtc
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cuda-runtime
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cublas
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cufft
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cufile
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-curand
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cusolver
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cusparse
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cusparselt-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA cuSPARSELt License Agreement — https://docs.nvidia.com/cuda/cusparselt/license.html"
+
+  - ecosystem: python
+    name: nvidia-nccl-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA NCCL License — https://docs.nvidia.com/deeplearning/nccl/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-nvjitlink
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  # --- NVIDIA -cu12 wheel variants (sglang v0.5.11 cuda12.9 image installs these
+  # alongside dynamo's own CUDA-12 wheels; mirrors the unsuffixed entries above)
+  - ecosystem: python
+    name: nvidia-cublas-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cuda-cupti-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cuda-nvrtc-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cuda-runtime-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cufft-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cufile-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-curand-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cusolver-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cusparse-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-cusparselt-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA cuSPARSELt License Agreement — https://docs.nvidia.com/cuda/cusparselt/license.html"
+
+  - ecosystem: python
+    name: nvidia-nvjitlink-cu12
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  - ecosystem: python
+    name: nvidia-nvshmem-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA NVSHMEM License — https://docs.nvidia.com/nvshmem/api/eula.html"
+
+  - ecosystem: python
+    name: nvidia-cudnn-cu13
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA cuDNN Software License Agreement — https://docs.nvidia.com/deeplearning/cudnn/sla/index.html"
+
+  - ecosystem: python
+    name: cuda-bindings
+    license: LicenseRef-NVIDIA-SOFTWARE-LICENSE
+    source: "NVIDIA Software License Agreement — https://docs.nvidia.com/cuda/cuda-bindings/eula.html"
+
+  - ecosystem: python
+    name: cuda-toolkit
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "NVIDIA CUDA Toolkit EULA — https://docs.nvidia.com/cuda/eula/index.html"
+
+  # --- NVIDIA-internal Python tools ---
+  - ecosystem: python
+    name: perf-analyzer
+    license: LicenseRef-NVIDIA-Proprietary
+    source: "Internal NVIDIA tool — distributed via NGC under the NVIDIA Software License Agreement"
+
+  # --- NVIDIA CUDA Toolkit dpkgs ---
+  # Apt-installed CUDA components from the NVIDIA repo. Their copyright files
+  # reference /usr/share/common-licenses/GPL-3 because some bundled GDB-related
+  # binaries (cuda-gdb) inherit GDB's GPL-3 license. The packages themselves
+  # are governed by the NVIDIA CUDA Toolkit EULA.
+  # Override is by (ecosystem, name) — version-agnostic. CUDA-version suffix
+  # (e.g., -12-9) is part of the package name, so each major.minor needs its
+  # own entry; the patch version is what changes between rebuilds.
+  - { ecosystem: dpkg, name: cuda-cccl-12-9,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-crt-12-9,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cudart-12-9,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cudart-dev-12-9,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cuobjdump-12-9,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cupti-12-9,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cupti-dev-12-9,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-driver-dev-12-9,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-gdb-12-9,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA — cuda-gdb proper, not GDB upstream" }
+  - { ecosystem: dpkg, name: cuda-nvcc-12-9,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvdisasm-12-9,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvml-dev-12-9,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvprof-12-9,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA — cuda-nvprof proper, not GPL profiler tooling" }
+  - { ecosystem: dpkg, name: cuda-nvprune-12-9,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvrtc-12-9,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvrtc-dev-12-9,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvtx-12-9,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvvm-12-9,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-profiler-api-12-9,           license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-sanitizer-12-9,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-toolkit-12-9-config-common,  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-toolkit-12-config-common,    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-toolkit-config-common,       license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcublas-12-9,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcublas-dev-12-9,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufft-12-9,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufft-dev-12-9,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufile-12-9,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufile-dev-12-9,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcurand-12-9,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcurand-dev-12-9,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusolver-12-9,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusolver-dev-12-9,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusparse-12-9,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusparse-dev-12-9,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnpp-12-9,                      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnpp-dev-12-9,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjitlink-12-9,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjitlink-dev-12-9,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjpeg-12-9,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjpeg-dev-12-9,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusparselt-dev,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA cuSPARSELt License Agreement" }
+  - { ecosystem: dpkg, name: libcusparselt0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA cuSPARSELt License Agreement" }
+  - { ecosystem: dpkg, name: libnccl-dev,                      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA NCCL License" }
+  - { ecosystem: dpkg, name: libnccl2,                         license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA NCCL License" }
+  - { ecosystem: dpkg, name: nsight-compute-2025.2.1,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA Nsight EULA" }
+  - { ecosystem: dpkg, name: nsight-compute-2025.3.1,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA Nsight EULA" }
+  - { ecosystem: dpkg, name: nsight-systems-cli-2025.3.1,      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA Nsight EULA" }
+  - { ecosystem: dpkg, name: nsight-systems-cli-2025.5.1,      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA Nsight EULA" }
+
+  # --- CUDA 13 toolkit dpkgs (cuda-dl-base 25.11-cuda13.0 + later) ---
+  # Same NVIDIA EULA as the 12.9 variants above; the cuda-dl-base 25.11
+  # image bundles cuda-gdb so DEP-5 parser misclassifies these as GPL-3.
+  - { ecosystem: dpkg, name: cuda-cccl-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-crt-13-0,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cudart-13-0,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cudart-dev-13-0,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-culibos-13-0,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-culibos-dev-13-0,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cuobjdump-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cupti-13-0,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-cupti-dev-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-driver-dev-13-0,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-gdb-13-0,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA — cuda-gdb proper, not GDB upstream" }
+  - { ecosystem: dpkg, name: cuda-nvcc-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvdisasm-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvml-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvprune-13-0,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvrtc-13-0,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvrtc-dev-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-nvtx-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-profiler-api-13-0,           license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-sanitizer-13-0,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-toolkit-13-0-config-common,  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-toolkit-13-config-common,    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcublas-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcublas-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufft-13-0,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufft-dev-13-0,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufile-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcufile-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcurand-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcurand-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusolver-13-0,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusolver-dev-13-0,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusparse-13-0,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusparse-dev-13-0,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libcusparselt0-cuda-13,           license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA cuSPARSELt License Agreement" }
+  - { ecosystem: dpkg, name: libcusparselt0-dev-cuda-13,       license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA cuSPARSELt License Agreement" }
+  - { ecosystem: dpkg, name: libnpp-13-0,                      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnpp-dev-13-0,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvfatbin-13-0,                 license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjitlink-13-0,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjitlink-dev-13-0,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjpeg-13-0,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvjpeg-dev-13-0,               license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvptxcompiler-13-0,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: libnvvm-13-0,                     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: mlnx-dpdk,                        license: "BSD-3-Clause", source: "Mellanox build of upstream DPDK — https://www.dpdk.org/about/legal/" }
+
+  # --- NVIDIA DOCA SDK (cuda-dl-base 25.11 ships these) ---
+  - { ecosystem: dpkg, name: doca-sdk-common,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
+  - { ecosystem: dpkg, name: doca-sdk-dpdk-bridge,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
+  - { ecosystem: dpkg, name: doca-sdk-eth,                     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
+  - { ecosystem: dpkg, name: doca-sdk-gpunetio,                license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
+  - { ecosystem: dpkg, name: doca-sdk-rdma,                    license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
+  - { ecosystem: dpkg, name: doca-sdk-verbs,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
+  - { ecosystem: dpkg, name: libnet1,                          license: "BSD-3-Clause", source: "libnet upstream — https://github.com/libnet/libnet/blob/master/LICENSE" }
+
+  # --- Misc dpkg packages with parser-miss UNKNOWN ---
+  # Verified upstream license; parser couldn't extract from the copyright file shape.
+  - { ecosystem: dpkg, name: openssl,           license: "Apache-2.0",       source: "OpenSSL 3.0+ relicensed to Apache-2.0; https://www.openssl.org/source/license-openssl-ssleay.txt" }
+  - { ecosystem: dpkg, name: libpcap0.8t64,     license: "BSD-3-Clause",     source: "tcpdump.org libpcap upstream — https://github.com/the-tcpdump-group/libpcap/blob/master/LICENSE" }
+  - { ecosystem: dpkg, name: libpcap0.8-dev,    license: "BSD-3-Clause",     source: "tcpdump.org libpcap upstream — https://github.com/the-tcpdump-group/libpcap/blob/master/LICENSE" }
+  - { ecosystem: dpkg, name: libpython3-stdlib, license: "PSF-2.0",          source: "CPython upstream — https://docs.python.org/3/license.html" }
+  - { ecosystem: dpkg, name: python3,           license: "PSF-2.0",          source: "CPython upstream — https://docs.python.org/3/license.html" }
+  - { ecosystem: dpkg, name: python3-minimal,   license: "PSF-2.0",          source: "CPython upstream — https://docs.python.org/3/license.html" }
+  - { ecosystem: dpkg, name: python3-yaml,      license: "MIT",              source: "PyYAML upstream — https://github.com/yaml/pyyaml/blob/main/LICENSE" }
+  - { ecosystem: dpkg, name: unzip,             license: "Info-ZIP",         source: "Info-ZIP license — http://www.info-zip.org/license.html" }
+  - { ecosystem: dpkg, name: nats-server,       license: "Apache-2.0",       source: "NATS Server upstream — https://github.com/nats-io/nats-server/blob/main/LICENSE" }
+  - { ecosystem: dpkg, name: media-types,       license: "GPL-2.0-or-later", source: "Debian/Ubuntu media-types package; copyright file references common-licenses/GPL" }
+  - { ecosystem: dpkg, name: libgc1,            license: "BSD-3-Clause",     source: "Boehm-GC upstream — http://www.hboehm.info/gc/license.txt (MIT-like, mapped to closest SPDX)" }
+  - { ecosystem: dpkg, name: numactl,           license: "GPL-2.0-or-later", source: "Linux NUMA tools, GPL-2+" }
+  - { ecosystem: dpkg, name: ubuntu-keyring,    license: "GPL-2.0-or-later", source: "Ubuntu keyring; copyright file references common-licenses/GPL-2" }
+
+  # --- Sglang cuda12.9 — dpkg additions on top of cuda:12.9.1-cudnn-devel ---
+  # X11 / libdrm / common system libs whose syft DEP-5 parse came back UNKNOWN.
+  - { ecosystem: dpkg, name: libdrm-amdgpu1,    license: "MIT",              source: "freedesktop libdrm — https://gitlab.freedesktop.org/mesa/drm/-/blob/main/LICENSE" }
+  - { ecosystem: dpkg, name: libdrm-common,     license: "MIT",              source: "freedesktop libdrm" }
+  - { ecosystem: dpkg, name: libdrm2,           license: "MIT",              source: "freedesktop libdrm" }
+  - { ecosystem: dpkg, name: libxau6,           license: "MIT",              source: "X.Org libXau — MIT/X11 style" }
+  - { ecosystem: dpkg, name: libxcb1,           license: "MIT",              source: "X.Org libxcb — MIT/X11 style" }
+  - { ecosystem: dpkg, name: libxdmcp6,         license: "MIT",              source: "X.Org libXdmcp — MIT/X11 style" }
+  - { ecosystem: dpkg, name: libxext6,          license: "MIT",              source: "X.Org libXext — MIT/X11 style" }
+  - { ecosystem: dpkg, name: libtcl8.6,         license: "TCL",              source: "Tcl/Tk Foundation TCL license — https://www.tcl-lang.org/software/tcltk/license.html" }
+  - { ecosystem: dpkg, name: libtk8.6,          license: "TCL",              source: "Tcl/Tk Foundation TCL license" }
+  - { ecosystem: dpkg, name: python3-gdbm,      license: "PSF-2.0",          source: "CPython stdlib (gdbm bindings) — PSF" }
+  - { ecosystem: dpkg, name: python3-lib2to3,   license: "PSF-2.0",          source: "CPython stdlib (lib2to3) — PSF" }
+  - { ecosystem: dpkg, name: python3-tk,        license: "PSF-2.0",          source: "CPython stdlib (tkinter bindings) — PSF" }
+
+  # --- Sglang cuda12.9 — Python wheel additions ---
+  # Wheel METADATA missing or non-parseable; verified upstream license per entry.
+  - { ecosystem: python, name: addict,                    license: "MIT",       source: "addict upstream — https://github.com/mewwts/addict/blob/master/LICENSE" }
+  - { ecosystem: python, name: annotated-types,           license: "MIT",       source: "annotated-types upstream — https://github.com/annotated-types/annotated-types/blob/main/LICENSE" }
+  - { ecosystem: python, name: blinker,                   license: "MIT",       source: "blinker upstream — https://github.com/pallets-eco/blinker/blob/main/LICENSE.rst" }
+  - { ecosystem: python, name: blobfile,                  license: "MIT",       source: "blobfile upstream — https://github.com/christopher-hesse/blobfile/blob/master/LICENSE" }
+  - { ecosystem: python, name: cache-dit,                 license: "Apache-2.0",  source: "cache-dit upstream — https://github.com/vipshop/cache-dit/blob/main/LICENSE" }
+  - { ecosystem: python, name: deep-ep,                   license: "MIT",       source: "deep-ep upstream — https://github.com/deepseek-ai/DeepEP/blob/main/LICENSE" }
+  - { ecosystem: python, name: gguf,                      license: "MIT",       source: "gguf (llama.cpp Python binding) — https://github.com/ggerganov/llama.cpp/blob/master/LICENSE" }
+  - { ecosystem: python, name: google-crc32c,             license: "Apache-2.0",  source: "google-crc32c upstream — https://github.com/googleapis/python-crc32c/blob/main/LICENSE" }
+  - { ecosystem: python, name: icdiff,                    license: "BSD-3-Clause",  source: "icdiff upstream — https://github.com/jeffkaufman/icdiff/blob/master/LICENSE" }
+  - { ecosystem: python, name: jinja2,                    license: "BSD-3-Clause",  source: "Jinja upstream — https://github.com/pallets/jinja/blob/main/LICENSE.rst" }
+  - { ecosystem: python, name: jiter,                     license: "MIT",       source: "jiter upstream — https://github.com/pydantic/jiter/blob/main/LICENSE" }
+  - { ecosystem: python, name: kiwisolver,                license: "BSD-3-Clause",  source: "kiwisolver upstream — https://github.com/nucleic/kiwi/blob/main/LICENSE" }
+  - { ecosystem: python, name: loguru,                    license: "MIT",       source: "loguru upstream — https://github.com/Delgan/loguru/blob/master/LICENSE" }
+  - { ecosystem: python, name: markdown-it-py,            license: "MIT",       source: "markdown-it-py upstream — https://github.com/executablebooks/markdown-it-py/blob/master/LICENSE" }
+  - { ecosystem: python, name: matplotlib,                license: "LicenseRef-Matplotlib",  source: "matplotlib upstream — BSD-style — https://matplotlib.org/stable/users/project/license.html" }
+  - { ecosystem: python, name: matplotlib-inline,         license: "BSD-3-Clause",  source: "matplotlib-inline upstream — https://github.com/ipython/matplotlib-inline/blob/main/LICENSE" }
+  - { ecosystem: python, name: mooncake-transfer-engine,  license: "Apache-2.0",  source: "Mooncake upstream — https://github.com/kvcache-ai/Mooncake/blob/main/LICENSE" }
+  - { ecosystem: python, name: ninja,                     license: "Apache-2.0",  source: "Ninja upstream — https://github.com/ninja-build/ninja/blob/master/COPYING" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl,        license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL — proprietary distribution wrapper around the BSD CUTLASS library" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-base, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs" }
+  - { ecosystem: python, name: openai-harmony,            license: "MIT",       source: "openai-harmony upstream — https://github.com/openai/harmony/blob/main/LICENSE" }
+  - { ecosystem: python, name: pandas,                    license: "BSD-3-Clause",  source: "pandas upstream — https://github.com/pandas-dev/pandas/blob/main/LICENSE" }
+  - { ecosystem: python, name: pathspec,                  license: "MPL-2.0",   source: "pathspec upstream — https://github.com/cpburnz/python-pathspec/blob/master/LICENSE" }
+  - { ecosystem: python, name: prompt-toolkit,            license: "BSD-3-Clause",  source: "prompt-toolkit upstream — https://github.com/prompt-toolkit/python-prompt-toolkit/blob/main/LICENSE" }
+  - { ecosystem: python, name: ptyprocess,                license: "ISC",       source: "ptyprocess upstream — https://github.com/pexpect/ptyprocess/blob/master/LICENSE" }
+  - { ecosystem: python, name: py-spy,                    license: "MIT",       source: "py-spy upstream — https://github.com/benfred/py-spy/blob/master/LICENSE" }
+  - { ecosystem: python, name: pycryptodomex,             license: "BSD-2-Clause",  source: "PyCryptodomex — BSD-2-Clause + Public Domain dual-licensed; tracked as BSD-2-Clause per Debian/Fedora packaging" }
+  - { ecosystem: python, name: pyparsing,                 license: "MIT",       source: "pyparsing upstream — https://github.com/pyparsing/pyparsing/blob/master/LICENSE" }
+  - { ecosystem: python, name: python-dateutil,           license: "Apache-2.0",  source: "python-dateutil upstream — dual-licensed Apache-2.0 OR BSD-3-Clause; we ship under Apache-2.0" }
+  - { ecosystem: python, name: quack-kernels,             license: "Apache-2.0",  source: "quack-kernels upstream (sglang CUTLASS kernels) — Apache-2.0" }
+  - { ecosystem: python, name: runai-model-streamer,      license: "Apache-2.0",  source: "Run:ai model streamer — https://github.com/run-ai/runai-model-streamer/blob/main/LICENSE" }
+  - { ecosystem: python, name: safetensors,               license: "Apache-2.0",  source: "HuggingFace safetensors — https://github.com/huggingface/safetensors/blob/main/LICENSE" }
+  - { ecosystem: python, name: scikit-image,              license: "BSD-3-Clause",  source: "scikit-image upstream — https://github.com/scikit-image/scikit-image/blob/main/LICENSE.txt" }
+  - { ecosystem: python, name: sentencepiece,             license: "Apache-2.0",  source: "Google SentencePiece — https://github.com/google/sentencepiece/blob/master/LICENSE" }
+  - { ecosystem: python, name: sglang,                    license: "Apache-2.0",  source: "SGLang upstream — https://github.com/sgl-project/sglang/blob/main/LICENSE" }
+  - { ecosystem: python, name: st-attn,                   license: "Apache-2.0",  source: "st-attn (sglang attention kernels) — Apache-2.0" }
+  - { ecosystem: python, name: tokenizers,                license: "Apache-2.0",  source: "HuggingFace tokenizers — https://github.com/huggingface/tokenizers/blob/main/LICENSE" }
+  - { ecosystem: python, name: torchaudio,                license: "BSD-2-Clause",  source: "Meta torchaudio — https://github.com/pytorch/audio/blob/main/LICENSE" }
+  - { ecosystem: python, name: triton,                    license: "MIT",       source: "OpenAI Triton — https://github.com/openai/triton/blob/main/LICENSE" }
+  - { ecosystem: python, name: vsa,                       license: "Apache-2.0",  source: "vsa (visual self-attention, sglang component) — Apache-2.0" }
+
+  # --- Sglang cuda12.9 — Go module additions (UNKNOWN from syft) ---
+  # All well-known projects; syft can't run go-license-detector against
+  # compiled binaries so license comes back UNKNOWN.
+  - { ecosystem: go, name: github.com/coreos/go-semver,     license: "Apache-2.0", source: "coreos/go-semver — https://github.com/coreos/go-semver/blob/main/LICENSE" }
+  - { ecosystem: go, name: github.com/coreos/go-systemd/v22, license: "Apache-2.0", source: "coreos/go-systemd — https://github.com/coreos/go-systemd/blob/main/LICENSE" }
+  - { ecosystem: go, name: github.com/gogo/protobuf,        license: "BSD-3-Clause", source: "gogo/protobuf — https://github.com/gogo/protobuf/blob/master/LICENSE" }
+  - { ecosystem: go, name: github.com/golang/protobuf,      license: "BSD-3-Clause", source: "golang/protobuf — https://github.com/golang/protobuf/blob/master/LICENSE" }
+  - { ecosystem: go, name: go.etcd.io/etcd/api/v3,          license: "Apache-2.0", source: "etcd-io/etcd — https://github.com/etcd-io/etcd/blob/main/LICENSE" }
+  - { ecosystem: go, name: go.etcd.io/etcd/client/pkg/v3,   license: "Apache-2.0", source: "etcd-io/etcd" }
+  - { ecosystem: go, name: go.etcd.io/etcd/client/v3,       license: "Apache-2.0", source: "etcd-io/etcd" }
+  - { ecosystem: go, name: go.uber.org/atomic,              license: "MIT",      source: "uber-go/atomic — https://github.com/uber-go/atomic/blob/master/LICENSE.txt" }
+  - { ecosystem: go, name: go.uber.org/multierr,            license: "MIT",      source: "uber-go/multierr — https://github.com/uber-go/multierr/blob/master/LICENSE.txt" }
+  - { ecosystem: go, name: go.uber.org/zap,                 license: "MIT",      source: "uber-go/zap — https://github.com/uber-go/zap/blob/master/LICENSE" }
+  - { ecosystem: go, name: golang.org/x/net,                license: "BSD-3-Clause", source: "golang.org/x — standard golang BSD-3-Clause" }
+  - { ecosystem: go, name: golang.org/x/sys,                license: "BSD-3-Clause", source: "golang.org/x — standard golang BSD-3-Clause" }
+  - { ecosystem: go, name: golang.org/x/text,               license: "BSD-3-Clause", source: "golang.org/x — standard golang BSD-3-Clause" }
+  - { ecosystem: go, name: google.golang.org/genproto/googleapis/api, license: "Apache-2.0", source: "googleapis/go-genproto — https://github.com/googleapis/go-genproto/blob/main/LICENSE" }
+  - { ecosystem: go, name: google.golang.org/genproto/googleapis/rpc, license: "Apache-2.0", source: "googleapis/go-genproto" }
+  - { ecosystem: go, name: google.golang.org/grpc,          license: "Apache-2.0", source: "grpc/grpc-go — https://github.com/grpc/grpc-go/blob/master/LICENSE" }
+  - { ecosystem: go, name: google.golang.org/protobuf,      license: "BSD-3-Clause", source: "protocolbuffers/protobuf-go — https://github.com/protocolbuffers/protobuf-go/blob/master/LICENSE" }
+
+  # --- Sglang v0.5.11 — new Python deps with empty PyPI metadata ---
+  # All confirmed against the upstream LICENSE file at capture time.
+  - { ecosystem: python, name: kernels-data,                    license: "Apache-2.0",   source: "HuggingFace kernels — https://github.com/huggingface/kernels/blob/main/LICENSE" }
+  - { ecosystem: python, name: runai-model-streamer-azure,      license: "Apache-2.0",   source: "Run:AI runai-model-streamer — https://github.com/run-ai/runai-model-streamer" }
+  - { ecosystem: python, name: runai-model-streamer-gcs,        license: "Apache-2.0",   source: "Run:AI runai-model-streamer — https://github.com/run-ai/runai-model-streamer" }
+  - { ecosystem: python, name: runai-model-streamer-s3,         license: "Apache-2.0",   source: "Run:AI runai-model-streamer — https://github.com/run-ai/runai-model-streamer" }
+  - { ecosystem: python, name: torchao,                         license: "BSD-3-Clause", source: "PyTorch ao — https://github.com/pytorch/ao/blob/main/LICENSE" }
+  - { ecosystem: python, name: mooncake-transfer-engine-cuda13, license: "Apache-2.0",   source: "Mooncake KV cache — https://github.com/kvcache-ai/Mooncake (LICENSE-APACHE)" }
+  # Stray test package accidentally installed by upstream sglang v0.5.11-cu130-runtime.
+  # Placeholder PyPI upload; license confirmed MIT in package metadata.
+  # TODO: file upstream issue at sgl-project/sglang to remove from runtime image.
+  - { ecosystem: python, name: my-test-package,                 license: "MIT",          source: "PyPI my-test-package — Jaye Heffernan, placeholder; declared MIT in package metadata" }
+
+  # --- sglang v0.5.11 — additional Python deps pulled in by dynamo's
+  # wheel install on top of the sglang runtime image (not present in the
+  # upstream sglang image alone; surfaced by the CI build's licenses stage)
+  - { ecosystem: python, name: cache_dit,                       license: "Apache-2.0",   source: "vipshop/cache-dit — https://github.com/vipshop/cache-dit (Apache-2.0 badge in README)" }
+  - { ecosystem: python, name: deep_ep,                         license: "MIT",          source: "DeepSeek DeepEP — https://github.com/deepseek-ai/DeepEP (MIT)" }
+  - { ecosystem: python, name: flash_mla,                       license: "MIT",          source: "DeepSeek FlashMLA — https://github.com/deepseek-ai/FlashMLA/blob/main/LICENSE (MIT, (c) 2025 DeepSeek)" }
+  - { ecosystem: python, name: flash-mla,                       license: "MIT",          source: "DeepSeek FlashMLA — https://github.com/deepseek-ai/FlashMLA/blob/main/LICENSE (MIT, (c) 2025 DeepSeek)" }
+  - { ecosystem: python, name: tiktoken,                        license: "MIT",          source: "OpenAI tiktoken — https://github.com/openai/tiktoken/blob/main/LICENSE" }
+  - { ecosystem: python, name: torch_memory_saver,              license: "Apache-2.0",   source: "sgl-project torch_memory_saver — Apache-2.0" }
+  - { ecosystem: python, name: torchcodec,                      license: "BSD-3-Clause", source: "PyTorch torchcodec — https://github.com/pytorch/torchcodec/blob/main/LICENSE" }
+  - { ecosystem: python, name: xatlas,                          license: "MIT",          source: "xatlas (jpcy/xatlas wrapper) — https://github.com/mworchel/xatlas-python (MIT)" }
+
+  # --- Additional Python deps surfaced by vllm-dev / trtllm-dev / sglang-dev builds ---
+  - { ecosystem: python, name: deep_gemm,                       license: "MIT",          source: "DeepSeek DeepGEMM — https://github.com/deepseek-ai/DeepGEMM (MIT)" }
+  - { ecosystem: python, name: nvidia-cudnn-frontend,           license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA cuDNN Frontend — bundled under NVIDIA cuDNN SLA" }
+  - { ecosystem: python, name: onnx,                            license: "Apache-2.0",   source: "ONNX — https://github.com/onnx/onnx (Apache-2.0)" }
+  - { ecosystem: python, name: setuptools,                      license: "MIT",          source: "setuptools — pypa/setuptools (MIT)" }
+  - { ecosystem: python, name: tensorrt,                        license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA TensorRT SLA — https://docs.nvidia.com/deeplearning/tensorrt/sla/index.html" }
+  - { ecosystem: python, name: tensorrt_cu13,                   license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA TensorRT SLA" }
+  - { ecosystem: python, name: tensorrt_cu13_bindings,          license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA TensorRT SLA" }
+  - { ecosystem: python, name: tensorrt_cu13_libs,              license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA TensorRT SLA" }
+  - { ecosystem: python, name: torch_c_dlpack_ext,              license: "Apache-2.0",   source: "PyPI torch-c-dlpack-ext — metadata declares Apache-2.0" }
+  - { ecosystem: python, name: torchtitan,                      license: "BSD-3-Clause", source: "PyTorch torchtitan — https://github.com/pytorch/torchtitan (BSD-3-Clause)" }
+  - { ecosystem: python, name: xdsl,                            license: "Apache-2.0",   source: "xdsl — https://github.com/xdslproject/xdsl (Apache-2.0 WITH LLVM-exception; treated as Apache-2.0 for policy)" }
+
+  # --- Additional NVIDIA dpkg meta-packages ---
+  - { ecosystem: dpkg, name: cuda-command-line-tools-12-9,      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+  - { ecosystem: dpkg, name: cuda-command-line-tools-13-0,      license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
+
+  # --- sglang Rust ecosystem additions ---
+  # sgl-model-gateway is sglang's Rust serving gateway crate, packaged inside
+  # the runtime image's wheel set (we install it via pip install ai_dynamo*).
+  # It carries no License field in Cargo.toml; per the sglang root LICENSE the
+  # workspace is Apache-2.0.
+  - { ecosystem: rust, name: sgl-model-gateway,                 license: "Apache-2.0",   source: "sgl-project/sglang root LICENSE — Apache-2.0" }
+
+  # --- sglang dpkg additions: X11/font/tk stack ---
+  # The upstream sglang image installs the X11/font stack to support
+  # matplotlib/tk-based visualization tools. Debian/Ubuntu DEP-5 declarations
+  # for these are either UNKNOWN (parser misreads multi-section copyright)
+  # or report GPL-2.0-or-later for build-only scripts. Override to the
+  # actual upstream license of the shipped binary.
+  - { ecosystem: dpkg, name: blt,                license: "BSD-3-Clause", source: "BLT Tcl/Tk extension — BSD-3-Clause (upstream)" }
+  - { ecosystem: dpkg, name: tk8.6-blt2.5,       license: "BSD-3-Clause", source: "BLT Tcl/Tk extension — BSD-3-Clause (upstream)" }
+  - { ecosystem: dpkg, name: fontconfig-config,  license: "MIT",          source: "Fontconfig — HPND-equivalent MIT-style permissive (https://gitlab.freedesktop.org/fontconfig/fontconfig)" }
+  - { ecosystem: dpkg, name: libfontconfig1,     license: "MIT",          source: "Fontconfig — HPND-equivalent MIT-style permissive" }
+  - { ecosystem: dpkg, name: libxft2,            license: "MIT",          source: "X.org libXft — MIT-style X11 license" }
+  - { ecosystem: dpkg, name: libxrender1,        license: "MIT",          source: "X.org libXrender — MIT-style X11 license" }
+  - { ecosystem: dpkg, name: libxss1,            license: "MIT",          source: "X.org libXScrnSaver — MIT-style X11 license" }
+  - { ecosystem: dpkg, name: libcares2,          license: "MIT",          source: "c-ares — MIT (https://c-ares.org); DEP-5 GPL-2 line refers to packaging scripts, not the shipped library" }
+  - { ecosystem: dpkg, name: libpciaccess0,      license: "MIT",          source: "X.org libpciaccess — MIT-style X11 license; DEP-5 GPL-2 line refers to debian/ build scripts not in the .deb" }
+  - { ecosystem: dpkg, name: x11-common,         license: "MIT",          source: "X.org common files — MIT-style; DEP-5 GPL-2 line refers to debian/ build scripts not in the .deb" }
+
+  # --- vLLM/uv Rust stack (surfaced by nvidia/cuda baseline; resolved via
+  #     crates.io declared license / uv workspace; see PR discussion) ---
+  - { ecosystem: rust, name: adler2, license: "0BSD OR MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/adler2" }
+  - { ecosystem: rust, name: aes, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/aes" }
+  - { ecosystem: rust, name: aho-corasick, license: "Unlicense OR MIT", source: "crates.io declared license — https://crates.io/crates/aho-corasick" }
+  - { ecosystem: rust, name: allocator-api2, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/allocator-api2" }
+  - { ecosystem: rust, name: ambient-id, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/ambient-id" }
+  - { ecosystem: rust, name: anstream, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/anstream" }
+  - { ecosystem: rust, name: anstyle, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/anstyle" }
+  - { ecosystem: rust, name: anstyle-parse, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/anstyle-parse" }
+  - { ecosystem: rust, name: anstyle-query, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/anstyle-query" }
+  - { ecosystem: rust, name: anyhow, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/anyhow" }
+  - { ecosystem: rust, name: arcstr, license: "Apache-2.0 OR MIT OR Zlib", source: "crates.io declared license — https://crates.io/crates/arcstr" }
+  - { ecosystem: rust, name: asn1-rs, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/asn1-rs" }
+  - { ecosystem: rust, name: asn1-rs-impl, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/asn1-rs-impl" }
+  - { ecosystem: rust, name: assert-json-diff, license: "MIT", source: "crates.io declared license — https://crates.io/crates/assert-json-diff" }
+  - { ecosystem: rust, name: assert_cmd, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/assert_cmd" }
+  - { ecosystem: rust, name: assert_fs, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/assert_fs" }
+  - { ecosystem: rust, name: astral-pubgrub, license: "MPL-2.0", source: "astral-sh/pubgrub Cargo.toml license field — MPL-2.0 (fork of pubgrub, MPL-2.0)" }
+  - { ecosystem: rust, name: astral-reqwest-middleware, license: "MIT OR Apache-2.0", source: "astral-sh/reqwest-middleware (reqwest-middleware) Cargo.toml license field — MIT OR Apache-2.0" }
+  - { ecosystem: rust, name: astral-reqwest-retry, license: "MIT OR Apache-2.0", source: "astral-sh/reqwest-middleware (reqwest-retry) Cargo.toml license field — MIT OR Apache-2.0" }
+  - { ecosystem: rust, name: astral-tl, license: "MIT", source: "astral-sh/astral-tl Cargo.toml license field — MIT" }
+  - { ecosystem: rust, name: astral-tokio-tar, license: "MIT OR Apache-2.0", source: "astral-sh/tokio-tar Cargo.toml license field — MIT OR Apache-2.0" }
+  - { ecosystem: rust, name: astral-version-ranges, license: "MPL-2.0", source: "astral-sh/pubgrub (version-ranges member) Cargo.toml license field — MPL-2.0" }
+  - { ecosystem: rust, name: astral_async_http_range_reader, license: "MIT", source: "astral-sh/async_http_range_reader Cargo.toml license field — MIT" }
+  - { ecosystem: rust, name: astral_async_zip, license: "MIT", source: "astral-sh/rs-async-zip Cargo.toml license field — MIT" }
+  - { ecosystem: rust, name: async-broadcast, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/async-broadcast" }
+  - { ecosystem: rust, name: async-channel, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/async-channel" }
+  - { ecosystem: rust, name: async-compression, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/async-compression" }
+  - { ecosystem: rust, name: async-recursion, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/async-recursion" }
+  - { ecosystem: rust, name: async-trait, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/async-trait" }
+  - { ecosystem: rust, name: atomic-waker, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/atomic-waker" }
+  - { ecosystem: rust, name: aws-lc-rs, license: "ISC AND (Apache-2.0 OR ISC)", source: "crates.io declared license — https://crates.io/crates/aws-lc-rs" }
+  - { ecosystem: rust, name: aws-lc-sys, license: "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)", source: "crates.io declared license — https://crates.io/crates/aws-lc-sys" }
+  - { ecosystem: rust, name: axoasset, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/axoasset" }
+  - { ecosystem: rust, name: axoprocess, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/axoprocess" }
+  - { ecosystem: rust, name: axotag, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/axotag" }
+  - { ecosystem: rust, name: axoupdater, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/axoupdater" }
+  - { ecosystem: rust, name: base64, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/base64" }
+  - { ecosystem: rust, name: base64ct, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/base64ct" }
+  - { ecosystem: rust, name: bitflags, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/bitflags" }
+  - { ecosystem: rust, name: blake2, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/blake2" }
+  - { ecosystem: rust, name: block-buffer, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/block-buffer" }
+  - { ecosystem: rust, name: block-padding, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/block-padding" }
+  - { ecosystem: rust, name: borrow-or-share, license: "MIT-0", source: "crates.io declared license — https://crates.io/crates/borrow-or-share" }
+  - { ecosystem: rust, name: boxcar, license: "MIT", source: "crates.io declared license — https://crates.io/crates/boxcar" }
+  - { ecosystem: rust, name: bstr, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/bstr" }
+  - { ecosystem: rust, name: bytecheck, license: "MIT", source: "crates.io declared license — https://crates.io/crates/bytecheck" }
+  - { ecosystem: rust, name: bytemuck, license: "Zlib OR Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/bytemuck" }
+  - { ecosystem: rust, name: byteorder-lite, license: "Unlicense OR MIT", source: "crates.io declared license — https://crates.io/crates/byteorder-lite" }
+  - { ecosystem: rust, name: bytes, license: "MIT", source: "crates.io declared license — https://crates.io/crates/bytes" }
+  - { ecosystem: rust, name: bzip2, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/bzip2" }
+  - { ecosystem: rust, name: bzip2-sys, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/bzip2-sys" }
+  - { ecosystem: rust, name: camino, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/camino" }
+  - { ecosystem: rust, name: cargo-util, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/cargo-util" }
+  - { ecosystem: rust, name: cbc, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/cbc" }
+  - { ecosystem: rust, name: cfg-if, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/cfg-if" }
+  - { ecosystem: rust, name: charset, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/charset" }
+  - { ecosystem: rust, name: cipher, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/cipher" }
+  - { ecosystem: rust, name: clap, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/clap" }
+  - { ecosystem: rust, name: clap_builder, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/clap_builder" }
+  - { ecosystem: rust, name: clap_complete, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/clap_complete" }
+  - { ecosystem: rust, name: clap_complete_command, license: "MIT", source: "crates.io declared license — https://crates.io/crates/clap_complete_command" }
+  - { ecosystem: rust, name: clap_complete_nushell, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/clap_complete_nushell" }
+  - { ecosystem: rust, name: clap_lex, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/clap_lex" }
+  - { ecosystem: rust, name: colorchoice, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/colorchoice" }
+  - { ecosystem: rust, name: concurrent-queue, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/concurrent-queue" }
+  - { ecosystem: rust, name: configparser, license: "MIT OR LGPL-3.0-or-later", source: "crates.io declared license — https://crates.io/crates/configparser" }
+  - { ecosystem: rust, name: console, license: "MIT", source: "crates.io declared license — https://crates.io/crates/console" }
+  - { ecosystem: rust, name: const-oid, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/const-oid" }
+  - { ecosystem: rust, name: const-random, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/const-random" }
+  - { ecosystem: rust, name: cpufeatures, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/cpufeatures" }
+  - { ecosystem: rust, name: crc32fast, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/crc32fast" }
+  - { ecosystem: rust, name: crossbeam-channel, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/crossbeam-channel" }
+  - { ecosystem: rust, name: crossbeam-deque, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/crossbeam-deque" }
+  - { ecosystem: rust, name: crossbeam-epoch, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/crossbeam-epoch" }
+  - { ecosystem: rust, name: crossbeam-utils, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/crossbeam-utils" }
+  - { ecosystem: rust, name: crypto-common, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/crypto-common" }
+  - { ecosystem: rust, name: csv, license: "Unlicense OR MIT", source: "crates.io declared license — https://crates.io/crates/csv" }
+  - { ecosystem: rust, name: csv-core, license: "Unlicense OR MIT", source: "crates.io declared license — https://crates.io/crates/csv-core" }
+  - { ecosystem: rust, name: ctrlc, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/ctrlc" }
+  - { ecosystem: rust, name: cyclonedx-bom, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/cyclonedx-bom" }
+  - { ecosystem: rust, name: cyclonedx-bom-macros, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/cyclonedx-bom-macros" }
+  - { ecosystem: rust, name: dashmap, license: "MIT", source: "crates.io declared license — https://crates.io/crates/dashmap" }
+  - { ecosystem: rust, name: data-encoding, license: "MIT", source: "crates.io declared license — https://crates.io/crates/data-encoding" }
+  - { ecosystem: rust, name: deadpool, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/deadpool" }
+  - { ecosystem: rust, name: deadpool-runtime, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/deadpool-runtime" }
+  - { ecosystem: rust, name: der, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/der" }
+  - { ecosystem: rust, name: der-parser, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/der-parser" }
+  - { ecosystem: rust, name: deranged, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/deranged" }
+  - { ecosystem: rust, name: difflib, license: "MIT", source: "crates.io declared license — https://crates.io/crates/difflib" }
+  - { ecosystem: rust, name: digest, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/digest" }
+  - { ecosystem: rust, name: dirs, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/dirs" }
+  - { ecosystem: rust, name: dirs-sys, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/dirs-sys" }
+  - { ecosystem: rust, name: diskus, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/diskus" }
+  - { ecosystem: rust, name: displaydoc, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/displaydoc" }
+  - { ecosystem: rust, name: dlv-list, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/dlv-list" }
+  - { ecosystem: rust, name: doc-comment, license: "MIT", source: "crates.io declared license — https://crates.io/crates/doc-comment" }
+  - { ecosystem: rust, name: dotenvy, license: "MIT", source: "crates.io declared license — https://crates.io/crates/dotenvy" }
+  - { ecosystem: rust, name: dunce, license: "CC0-1.0 OR MIT-0 OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/dunce" }
+  - { ecosystem: rust, name: dyn-clone, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/dyn-clone" }
+  - { ecosystem: rust, name: either, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/either" }
+  - { ecosystem: rust, name: encoding_rs, license: "(Apache-2.0 OR MIT) AND BSD-3-Clause", source: "crates.io declared license — https://crates.io/crates/encoding_rs" }
+  - { ecosystem: rust, name: encoding_rs_io, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/encoding_rs_io" }
+  - { ecosystem: rust, name: endi, license: "MIT", source: "crates.io declared license — https://crates.io/crates/endi" }
+  - { ecosystem: rust, name: enumflags2, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/enumflags2" }
+  - { ecosystem: rust, name: equivalent, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/equivalent" }
+  - { ecosystem: rust, name: erased-serde, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/erased-serde" }
+  - { ecosystem: rust, name: errno, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/errno" }
+  - { ecosystem: rust, name: etcetera, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/etcetera" }
+  - { ecosystem: rust, name: event-listener, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/event-listener" }
+  - { ecosystem: rust, name: event-listener-strategy, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/event-listener-strategy" }
+  - { ecosystem: rust, name: fastrand, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/fastrand" }
+  - { ecosystem: rust, name: filetime, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/filetime" }
+  - { ecosystem: rust, name: fixedbitset, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/fixedbitset" }
+  - { ecosystem: rust, name: flate2, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/flate2" }
+  - { ecosystem: rust, name: float-cmp, license: "MIT", source: "crates.io declared license — https://crates.io/crates/float-cmp" }
+  - { ecosystem: rust, name: fluent-uri, license: "MIT", source: "crates.io declared license — https://crates.io/crates/fluent-uri" }
+  - { ecosystem: rust, name: fnv, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/fnv" }
+  - { ecosystem: rust, name: foldhash, license: "Zlib", source: "crates.io declared license — https://crates.io/crates/foldhash" }
+  - { ecosystem: rust, name: form_urlencoded, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/form_urlencoded" }
+  - { ecosystem: rust, name: fs-err, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/fs-err" }
+  - { ecosystem: rust, name: futures, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/futures" }
+  - { ecosystem: rust, name: futures-channel, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/futures-channel" }
+  - { ecosystem: rust, name: futures-core, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/futures-core" }
+  - { ecosystem: rust, name: futures-executor, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/futures-executor" }
+  - { ecosystem: rust, name: futures-io, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/futures-io" }
+  - { ecosystem: rust, name: futures-lite, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/futures-lite" }
+  - { ecosystem: rust, name: futures-sink, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/futures-sink" }
+  - { ecosystem: rust, name: futures-task, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/futures-task" }
+  - { ecosystem: rust, name: futures-util, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/futures-util" }
+  - { ecosystem: rust, name: generic-array, license: "MIT", source: "crates.io declared license — https://crates.io/crates/generic-array" }
+  - { ecosystem: rust, name: getrandom, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/getrandom" }
+  - { ecosystem: rust, name: glob, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/glob" }
+  - { ecosystem: rust, name: globset, license: "Unlicense OR MIT", source: "crates.io declared license — https://crates.io/crates/globset" }
+  - { ecosystem: rust, name: globwalk, license: "MIT", source: "crates.io declared license — https://crates.io/crates/globwalk" }
+  - { ecosystem: rust, name: goblin, license: "MIT", source: "crates.io declared license — https://crates.io/crates/goblin" }
+  - { ecosystem: rust, name: h2, license: "MIT", source: "crates.io declared license — https://crates.io/crates/h2" }
+  - { ecosystem: rust, name: hashbrown, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/hashbrown" }
+  - { ecosystem: rust, name: hex, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/hex" }
+  - { ecosystem: rust, name: hkdf, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/hkdf" }
+  - { ecosystem: rust, name: hmac, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/hmac" }
+  - { ecosystem: rust, name: homedir, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/homedir" }
+  - { ecosystem: rust, name: html-escape, license: "MIT", source: "crates.io declared license — https://crates.io/crates/html-escape" }
+  - { ecosystem: rust, name: http, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/http" }
+  - { ecosystem: rust, name: http-body, license: "MIT", source: "crates.io declared license — https://crates.io/crates/http-body" }
+  - { ecosystem: rust, name: http-body-util, license: "MIT", source: "crates.io declared license — https://crates.io/crates/http-body-util" }
+  - { ecosystem: rust, name: http-content-range, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/http-content-range" }
+  - { ecosystem: rust, name: httparse, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/httparse" }
+  - { ecosystem: rust, name: httpdate, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/httpdate" }
+  - { ecosystem: rust, name: hyper, license: "MIT", source: "crates.io declared license — https://crates.io/crates/hyper" }
+  - { ecosystem: rust, name: hyper-rustls, license: "Apache-2.0 OR ISC OR MIT", source: "crates.io declared license — https://crates.io/crates/hyper-rustls" }
+  - { ecosystem: rust, name: hyper-util, license: "MIT", source: "crates.io declared license — https://crates.io/crates/hyper-util" }
+  - { ecosystem: rust, name: icu_collections, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/icu_collections" }
+  - { ecosystem: rust, name: icu_locale_core, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/icu_locale_core" }
+  - { ecosystem: rust, name: icu_normalizer, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/icu_normalizer" }
+  - { ecosystem: rust, name: icu_normalizer_data, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/icu_normalizer_data" }
+  - { ecosystem: rust, name: icu_properties, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/icu_properties" }
+  - { ecosystem: rust, name: icu_properties_data, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/icu_properties_data" }
+  - { ecosystem: rust, name: icu_provider, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/icu_provider" }
+  - { ecosystem: rust, name: idna, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/idna" }
+  - { ecosystem: rust, name: idna_adapter, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/idna_adapter" }
+  - { ecosystem: rust, name: ignore, license: "Unlicense OR MIT", source: "crates.io declared license — https://crates.io/crates/ignore" }
+  - { ecosystem: rust, name: image, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/image" }
+  - { ecosystem: rust, name: indexmap, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/indexmap" }
+  - { ecosystem: rust, name: indicatif, license: "MIT", source: "crates.io declared license — https://crates.io/crates/indicatif" }
+  - { ecosystem: rust, name: indoc, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/indoc" }
+  - { ecosystem: rust, name: inout, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/inout" }
+  - { ecosystem: rust, name: insta, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/insta" }
+  - { ecosystem: rust, name: ipnet, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/ipnet" }
+  - { ecosystem: rust, name: iri-string, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/iri-string" }
+  - { ecosystem: rust, name: is-docker, license: "MIT", source: "crates.io declared license — https://crates.io/crates/is-docker" }
+  - { ecosystem: rust, name: is-wsl, license: "MIT", source: "crates.io declared license — https://crates.io/crates/is-wsl" }
+  - { ecosystem: rust, name: is_ci, license: "ISC", source: "crates.io declared license — https://crates.io/crates/is_ci" }
+  - { ecosystem: rust, name: is_terminal_polyfill, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/is_terminal_polyfill" }
+  - { ecosystem: rust, name: itertools, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/itertools" }
+  - { ecosystem: rust, name: itoa, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/itoa" }
+  - { ecosystem: rust, name: jiff, license: "Unlicense OR MIT", source: "crates.io declared license — https://crates.io/crates/jiff" }
+  - { ecosystem: rust, name: jobserver, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/jobserver" }
+  - { ecosystem: rust, name: jsonwebtoken, license: "MIT", source: "crates.io declared license — https://crates.io/crates/jsonwebtoken" }
+  - { ecosystem: rust, name: lazy_static, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/lazy_static" }
+  - { ecosystem: rust, name: libc, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/libc" }
+  - { ecosystem: rust, name: libm, license: "MIT", source: "crates.io declared license — https://crates.io/crates/libm" }
+  - { ecosystem: rust, name: linux-raw-sys, license: "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/linux-raw-sys" }
+  - { ecosystem: rust, name: litemap, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/litemap" }
+  - { ecosystem: rust, name: lock_api, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/lock_api" }
+  - { ecosystem: rust, name: log, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/log" }
+  - { ecosystem: rust, name: lru-slab, license: "MIT OR Apache-2.0 OR Zlib", source: "crates.io declared license — https://crates.io/crates/lru-slab" }
+  - { ecosystem: rust, name: lzma-sys, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/lzma-sys" }
+  - { ecosystem: rust, name: mailparse, license: "0BSD", source: "crates.io declared license — https://crates.io/crates/mailparse" }
+  - { ecosystem: rust, name: matchers, license: "MIT", source: "crates.io declared license — https://crates.io/crates/matchers" }
+  - { ecosystem: rust, name: md-5, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/md-5" }
+  - { ecosystem: rust, name: memchr, license: "Unlicense OR MIT", source: "crates.io declared license — https://crates.io/crates/memchr" }
+  - { ecosystem: rust, name: memmap2, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/memmap2" }
+  - { ecosystem: rust, name: miette, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/miette" }
+  - { ecosystem: rust, name: mime, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/mime" }
+  - { ecosystem: rust, name: mime_guess, license: "MIT", source: "crates.io declared license — https://crates.io/crates/mime_guess" }
+  - { ecosystem: rust, name: minimal-lexical, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/minimal-lexical" }
+  - { ecosystem: rust, name: miniz_oxide, license: "MIT OR Zlib OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/miniz_oxide" }
+  - { ecosystem: rust, name: mio, license: "MIT", source: "crates.io declared license — https://crates.io/crates/mio" }
+  - { ecosystem: rust, name: moxcms, license: "BSD-3-Clause OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/moxcms" }
+  - { ecosystem: rust, name: munge, license: "MIT", source: "crates.io declared license — https://crates.io/crates/munge" }
+  - { ecosystem: rust, name: nix, license: "MIT", source: "crates.io declared license — https://crates.io/crates/nix" }
+  - { ecosystem: rust, name: nom, license: "MIT", source: "crates.io declared license — https://crates.io/crates/nom" }
+  - { ecosystem: rust, name: normalize-line-endings, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/normalize-line-endings" }
+  - { ecosystem: rust, name: nu-ansi-term, license: "MIT", source: "crates.io declared license — https://crates.io/crates/nu-ansi-term" }
+  - { ecosystem: rust, name: num, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/num" }
+  - { ecosystem: rust, name: num-bigint, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/num-bigint" }
+  - { ecosystem: rust, name: num-bigint-dig, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/num-bigint-dig" }
+  - { ecosystem: rust, name: num-complex, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/num-complex" }
+  - { ecosystem: rust, name: num-conv, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/num-conv" }
+  - { ecosystem: rust, name: num-integer, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/num-integer" }
+  - { ecosystem: rust, name: num-iter, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/num-iter" }
+  - { ecosystem: rust, name: num-rational, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/num-rational" }
+  - { ecosystem: rust, name: num-traits, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/num-traits" }
+  - { ecosystem: rust, name: num_cpus, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/num_cpus" }
+  - { ecosystem: rust, name: oid-registry, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/oid-registry" }
+  - { ecosystem: rust, name: once_cell, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/once_cell" }
+  - { ecosystem: rust, name: open, license: "MIT", source: "crates.io declared license — https://crates.io/crates/open" }
+  - { ecosystem: rust, name: openssl-probe, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/openssl-probe" }
+  - { ecosystem: rust, name: option-ext, license: "MPL-2.0", source: "crates.io declared license — https://crates.io/crates/option-ext" }
+  - { ecosystem: rust, name: ordered-float, license: "MIT", source: "crates.io declared license — https://crates.io/crates/ordered-float" }
+  - { ecosystem: rust, name: ordered-multimap, license: "MIT", source: "crates.io declared license — https://crates.io/crates/ordered-multimap" }
+  - { ecosystem: rust, name: ordered-stream, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/ordered-stream" }
+  - { ecosystem: rust, name: os_str_bytes, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/os_str_bytes" }
+  - { ecosystem: rust, name: owo-colors, license: "MIT", source: "crates.io declared license — https://crates.io/crates/owo-colors" }
+  - { ecosystem: rust, name: parking, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/parking" }
+  - { ecosystem: rust, name: parking_lot, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/parking_lot" }
+  - { ecosystem: rust, name: parking_lot_core, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/parking_lot_core" }
+  - { ecosystem: rust, name: path-slash, license: "MIT", source: "crates.io declared license — https://crates.io/crates/path-slash" }
+  - { ecosystem: rust, name: pathdiff, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/pathdiff" }
+  - { ecosystem: rust, name: pbkdf2, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/pbkdf2" }
+  - { ecosystem: rust, name: pem, license: "MIT", source: "crates.io declared license — https://crates.io/crates/pem" }
+  - { ecosystem: rust, name: pem-rfc7468, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/pem-rfc7468" }
+  - { ecosystem: rust, name: percent-encoding, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/percent-encoding" }
+  - { ecosystem: rust, name: pest, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/pest" }
+  - { ecosystem: rust, name: pest_derive, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/pest_derive" }
+  - { ecosystem: rust, name: pest_generator, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/pest_generator" }
+  - { ecosystem: rust, name: pest_meta, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/pest_meta" }
+  - { ecosystem: rust, name: petgraph, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/petgraph" }
+  - { ecosystem: rust, name: pin-project, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/pin-project" }
+  - { ecosystem: rust, name: pin-project-lite, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/pin-project-lite" }
+  - { ecosystem: rust, name: pkcs1, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/pkcs1" }
+  - { ecosystem: rust, name: pkcs5, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/pkcs5" }
+  - { ecosystem: rust, name: pkcs8, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/pkcs8" }
+  - { ecosystem: rust, name: plain, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/plain" }
+  - { ecosystem: rust, name: portable-atomic, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/portable-atomic" }
+  - { ecosystem: rust, name: potential_utf, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/potential_utf" }
+  - { ecosystem: rust, name: powerfmt, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/powerfmt" }
+  - { ecosystem: rust, name: ppv-lite86, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/ppv-lite86" }
+  - { ecosystem: rust, name: predicates, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/predicates" }
+  - { ecosystem: rust, name: predicates-core, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/predicates-core" }
+  - { ecosystem: rust, name: predicates-tree, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/predicates-tree" }
+  - { ecosystem: rust, name: priority-queue, license: "LGPL-3.0-or-later OR MPL-2.0", source: "crates.io declared license — https://crates.io/crates/priority-queue" }
+  - { ecosystem: rust, name: proc-macro-crate, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/proc-macro-crate" }
+  - { ecosystem: rust, name: proc-macro2, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/proc-macro2" }
+  - { ecosystem: rust, name: procfs, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/procfs" }
+  - { ecosystem: rust, name: procfs-core, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/procfs-core" }
+  - { ecosystem: rust, name: ptr_meta, license: "MIT", source: "crates.io declared license — https://crates.io/crates/ptr_meta" }
+  - { ecosystem: rust, name: purl, license: "MIT", source: "crates.io declared license — https://crates.io/crates/purl" }
+  - { ecosystem: rust, name: pxfm, license: "BSD-3-Clause OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/pxfm" }
+  - { ecosystem: rust, name: quick-xml, license: "MIT", source: "crates.io declared license — https://crates.io/crates/quick-xml" }
+  - { ecosystem: rust, name: quinn, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/quinn" }
+  - { ecosystem: rust, name: quinn-proto, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/quinn-proto" }
+  - { ecosystem: rust, name: quinn-udp, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/quinn-udp" }
+  - { ecosystem: rust, name: quote, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/quote" }
+  - { ecosystem: rust, name: quoted_printable, license: "0BSD", source: "crates.io declared license — https://crates.io/crates/quoted_printable" }
+  - { ecosystem: rust, name: rancor, license: "MIT", source: "crates.io declared license — https://crates.io/crates/rancor" }
+  - { ecosystem: rust, name: rand, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/rand" }
+  - { ecosystem: rust, name: rand_chacha, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/rand_chacha" }
+  - { ecosystem: rust, name: rand_core, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/rand_core" }
+  - { ecosystem: rust, name: rayon, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/rayon" }
+  - { ecosystem: rust, name: rayon-core, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/rayon-core" }
+  - { ecosystem: rust, name: ref-cast, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/ref-cast" }
+  - { ecosystem: rust, name: reflink-copy, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/reflink-copy" }
+  - { ecosystem: rust, name: regex, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/regex" }
+  - { ecosystem: rust, name: regex-automata, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/regex-automata" }
+  - { ecosystem: rust, name: regex-syntax, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/regex-syntax" }
+  - { ecosystem: rust, name: rend, license: "MIT", source: "crates.io declared license — https://crates.io/crates/rend" }
+  - { ecosystem: rust, name: reqsign, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/reqsign" }
+  - { ecosystem: rust, name: reqsign-aws-v4, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/reqsign-aws-v4" }
+  - { ecosystem: rust, name: reqsign-azure-storage, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/reqsign-azure-storage" }
+  - { ecosystem: rust, name: reqsign-command-execute-tokio, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/reqsign-command-execute-tokio" }
+  - { ecosystem: rust, name: reqsign-core, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/reqsign-core" }
+  - { ecosystem: rust, name: reqsign-file-read-tokio, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/reqsign-file-read-tokio" }
+  - { ecosystem: rust, name: reqsign-google, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/reqsign-google" }
+  - { ecosystem: rust, name: reqsign-http-send-reqwest, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/reqsign-http-send-reqwest" }
+  - { ecosystem: rust, name: reqwest, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/reqwest" }
+  - { ecosystem: rust, name: retry-policies, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/retry-policies" }
+  - { ecosystem: rust, name: ring, license: "Apache-2.0 AND ISC", source: "crates.io declared license — https://crates.io/crates/ring" }
+  - { ecosystem: rust, name: rkyv, license: "MIT", source: "crates.io declared license — https://crates.io/crates/rkyv" }
+  - { ecosystem: rust, name: rmp, license: "MIT", source: "crates.io declared license — https://crates.io/crates/rmp" }
+  - { ecosystem: rust, name: rmp-serde, license: "MIT", source: "crates.io declared license — https://crates.io/crates/rmp-serde" }
+  - { ecosystem: rust, name: rsa, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/rsa" }
+  - { ecosystem: rust, name: rust-ini, license: "MIT", source: "crates.io declared license — https://crates.io/crates/rust-ini" }
+  - { ecosystem: rust, name: rustc-hash, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/rustc-hash" }
+  - { ecosystem: rust, name: rusticata-macros, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/rusticata-macros" }
+  - { ecosystem: rust, name: rustix, license: "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/rustix" }
+  - { ecosystem: rust, name: rustls, license: "Apache-2.0 OR ISC OR MIT", source: "crates.io declared license — https://crates.io/crates/rustls" }
+  - { ecosystem: rust, name: rustls-native-certs, license: "Apache-2.0 OR ISC OR MIT", source: "crates.io declared license — https://crates.io/crates/rustls-native-certs" }
+  - { ecosystem: rust, name: rustls-pki-types, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/rustls-pki-types" }
+  - { ecosystem: rust, name: rustls-platform-verifier, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/rustls-platform-verifier" }
+  - { ecosystem: rust, name: rustls-webpki, license: "ISC", source: "crates.io declared license — https://crates.io/crates/rustls-webpki" }
+  - { ecosystem: rust, name: ryu, license: "Apache-2.0 OR BSL-1.0", source: "crates.io declared license — https://crates.io/crates/ryu" }
+  - { ecosystem: rust, name: salsa20, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/salsa20" }
+  - { ecosystem: rust, name: same-file, license: "Unlicense OR MIT", source: "crates.io declared license — https://crates.io/crates/same-file" }
+  - { ecosystem: rust, name: schemars, license: "MIT", source: "crates.io declared license — https://crates.io/crates/schemars" }
+  - { ecosystem: rust, name: scopeguard, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/scopeguard" }
+  - { ecosystem: rust, name: scroll, license: "MIT", source: "crates.io declared license — https://crates.io/crates/scroll" }
+  - { ecosystem: rust, name: scrypt, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/scrypt" }
+  - { ecosystem: rust, name: seahash, license: "MIT", source: "crates.io declared license — https://crates.io/crates/seahash" }
+  - { ecosystem: rust, name: secrecy, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/secrecy" }
+  - { ecosystem: rust, name: secret-service, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/secret-service" }
+  - { ecosystem: rust, name: semver, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/semver" }
+  - { ecosystem: rust, name: serde, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/serde" }
+  - { ecosystem: rust, name: serde-untagged, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/serde-untagged" }
+  - { ecosystem: rust, name: serde_core, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/serde_core" }
+  - { ecosystem: rust, name: serde_json, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/serde_json" }
+  - { ecosystem: rust, name: serde_repr, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/serde_repr" }
+  - { ecosystem: rust, name: serde_spanned, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/serde_spanned" }
+  - { ecosystem: rust, name: serde_urlencoded, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/serde_urlencoded" }
+  - { ecosystem: rust, name: sha1, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/sha1" }
+  - { ecosystem: rust, name: sha2, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/sha2" }
+  - { ecosystem: rust, name: sharded-slab, license: "MIT", source: "crates.io declared license — https://crates.io/crates/sharded-slab" }
+  - { ecosystem: rust, name: shell-escape, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/shell-escape" }
+  - { ecosystem: rust, name: shellexpand, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/shellexpand" }
+  - { ecosystem: rust, name: signal-hook-registry, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/signal-hook-registry" }
+  - { ecosystem: rust, name: signature, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/signature" }
+  - { ecosystem: rust, name: simd-adler32, license: "MIT", source: "crates.io declared license — https://crates.io/crates/simd-adler32" }
+  - { ecosystem: rust, name: simdutf8, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/simdutf8" }
+  - { ecosystem: rust, name: similar, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/similar" }
+  - { ecosystem: rust, name: simple_asn1, license: "ISC", source: "crates.io declared license — https://crates.io/crates/simple_asn1" }
+  - { ecosystem: rust, name: slab, license: "MIT", source: "crates.io declared license — https://crates.io/crates/slab" }
+  - { ecosystem: rust, name: smallvec, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/smallvec" }
+  - { ecosystem: rust, name: smawk, license: "MIT", source: "crates.io declared license — https://crates.io/crates/smawk" }
+  - { ecosystem: rust, name: socket2, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/socket2" }
+  - { ecosystem: rust, name: spdx, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/spdx" }
+  - { ecosystem: rust, name: spin, license: "MIT", source: "crates.io declared license — https://crates.io/crates/spin" }
+  - { ecosystem: rust, name: spki, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/spki" }
+  - { ecosystem: rust, name: stable_deref_trait, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/stable_deref_trait" }
+  - { ecosystem: rust, name: strsim, license: "MIT", source: "crates.io declared license — https://crates.io/crates/strsim" }
+  - { ecosystem: rust, name: strum, license: "MIT", source: "crates.io declared license — https://crates.io/crates/strum" }
+  - { ecosystem: rust, name: subtle, license: "BSD-3-Clause", source: "crates.io declared license — https://crates.io/crates/subtle" }
+  - { ecosystem: rust, name: supports-color, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/supports-color" }
+  - { ecosystem: rust, name: supports-hyperlinks, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/supports-hyperlinks" }
+  - { ecosystem: rust, name: supports-unicode, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/supports-unicode" }
+  - { ecosystem: rust, name: syn, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/syn" }
+  - { ecosystem: rust, name: sync_wrapper, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/sync_wrapper" }
+  - { ecosystem: rust, name: synstructure, license: "MIT", source: "crates.io declared license — https://crates.io/crates/synstructure" }
+  - { ecosystem: rust, name: target-lexicon, license: "Apache-2.0 WITH LLVM-exception", source: "crates.io declared license — https://crates.io/crates/target-lexicon" }
+  - { ecosystem: rust, name: temp-env, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/temp-env" }
+  - { ecosystem: rust, name: tempfile, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/tempfile" }
+  - { ecosystem: rust, name: terminal_size, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/terminal_size" }
+  - { ecosystem: rust, name: termtree, license: "MIT", source: "crates.io declared license — https://crates.io/crates/termtree" }
+  - { ecosystem: rust, name: textwrap, license: "MIT", source: "crates.io declared license — https://crates.io/crates/textwrap" }
+  - { ecosystem: rust, name: thiserror, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/thiserror" }
+  - { ecosystem: rust, name: thread_local, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/thread_local" }
+  - { ecosystem: rust, name: tikv-jemalloc-sys, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/tikv-jemalloc-sys" }
+  - { ecosystem: rust, name: tikv-jemallocator, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/tikv-jemallocator" }
+  - { ecosystem: rust, name: time, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/time" }
+  - { ecosystem: rust, name: time-core, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/time-core" }
+  - { ecosystem: rust, name: tinystr, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/tinystr" }
+  - { ecosystem: rust, name: tinyvec, license: "Zlib OR Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/tinyvec" }
+  - { ecosystem: rust, name: tinyvec_macros, license: "MIT OR Apache-2.0 OR Zlib", source: "crates.io declared license — https://crates.io/crates/tinyvec_macros" }
+  - { ecosystem: rust, name: tokio, license: "MIT", source: "crates.io declared license — https://crates.io/crates/tokio" }
+  - { ecosystem: rust, name: tokio-rustls, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/tokio-rustls" }
+  - { ecosystem: rust, name: tokio-stream, license: "MIT", source: "crates.io declared license — https://crates.io/crates/tokio-stream" }
+  - { ecosystem: rust, name: tokio-util, license: "MIT", source: "crates.io declared license — https://crates.io/crates/tokio-util" }
+  - { ecosystem: rust, name: toml, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/toml" }
+  - { ecosystem: rust, name: toml_datetime, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/toml_datetime" }
+  - { ecosystem: rust, name: toml_edit, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/toml_edit" }
+  - { ecosystem: rust, name: toml_parser, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/toml_parser" }
+  - { ecosystem: rust, name: toml_writer, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/toml_writer" }
+  - { ecosystem: rust, name: tower, license: "MIT", source: "crates.io declared license — https://crates.io/crates/tower" }
+  - { ecosystem: rust, name: tower-http, license: "MIT", source: "crates.io declared license — https://crates.io/crates/tower-http" }
+  - { ecosystem: rust, name: tower-layer, license: "MIT", source: "crates.io declared license — https://crates.io/crates/tower-layer" }
+  - { ecosystem: rust, name: tower-service, license: "MIT", source: "crates.io declared license — https://crates.io/crates/tower-service" }
+  - { ecosystem: rust, name: tracing, license: "MIT", source: "crates.io declared license — https://crates.io/crates/tracing" }
+  - { ecosystem: rust, name: tracing-attributes, license: "MIT", source: "crates.io declared license — https://crates.io/crates/tracing-attributes" }
+  - { ecosystem: rust, name: tracing-core, license: "MIT", source: "crates.io declared license — https://crates.io/crates/tracing-core" }
+  - { ecosystem: rust, name: tracing-log, license: "MIT", source: "crates.io declared license — https://crates.io/crates/tracing-log" }
+  - { ecosystem: rust, name: tracing-subscriber, license: "MIT", source: "crates.io declared license — https://crates.io/crates/tracing-subscriber" }
+  - { ecosystem: rust, name: tracing-tree, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/tracing-tree" }
+  - { ecosystem: rust, name: try-lock, license: "MIT", source: "crates.io declared license — https://crates.io/crates/try-lock" }
+  - { ecosystem: rust, name: typeid, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/typeid" }
+  - { ecosystem: rust, name: typenum, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/typenum" }
+  - { ecosystem: rust, name: ucd-trie, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/ucd-trie" }
+  - { ecosystem: rust, name: unicase, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/unicase" }
+  - { ecosystem: rust, name: unicode-ident, license: "(MIT OR Apache-2.0) AND Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/unicode-ident" }
+  - { ecosystem: rust, name: unicode-linebreak, license: "Apache-2.0", source: "crates.io declared license — https://crates.io/crates/unicode-linebreak" }
+  - { ecosystem: rust, name: unicode-width, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/unicode-width" }
+  - { ecosystem: rust, name: unit-prefix, license: "MIT", source: "crates.io declared license — https://crates.io/crates/unit-prefix" }
+  - { ecosystem: rust, name: unscanny, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/unscanny" }
+  - { ecosystem: rust, name: untrusted, license: "ISC", source: "crates.io declared license — https://crates.io/crates/untrusted" }
+  - { ecosystem: rust, name: url, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/url" }
+  - { ecosystem: rust, name: utf8-width, license: "MIT", source: "crates.io declared license — https://crates.io/crates/utf8-width" }
+  - { ecosystem: rust, name: utf8_iter, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/utf8_iter" }
+  - { ecosystem: rust, name: utf8parse, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/utf8parse" }
+  - { ecosystem: rust, name: uuid, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/uuid" }
+  - { ecosystem: rust, name: uv, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-audit, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-auth, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-bin-install, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-build-backend, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-build-frontend, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-cache, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-cache-info, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-cache-key, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-cli, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-client, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-configuration, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-console, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-dirs, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-dispatch, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-distribution, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-distribution-filename, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-distribution-types, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-errors, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-extract, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-fastid, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-flags, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-fs, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-git, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-git-types, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-globfilter, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-install-wheel, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-installer, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-keyring, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-logging, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-metadata, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-netrc, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-normalize, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-once-map, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-options-metadata, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-pep440, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-pep508, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-performance-memory-allocator, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-platform, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-platform-tags, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-preview, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-publish, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-pypi-types, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-python, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-redacted, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-requirements, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-requirements-txt, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-resolver, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-scripts, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-settings, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-shell, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-small-str, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-state, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-static, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-test, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-toml, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-tool, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-torch, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-trampoline-builder, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-types, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-unix, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-version, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-virtualenv, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-warnings, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: uv-workspace, license: "MIT OR Apache-2.0", source: "astral-sh/uv (uv tooling) — MIT OR Apache-2.0 dual license" }
+  - { ecosystem: rust, name: wait-timeout, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/wait-timeout" }
+  - { ecosystem: rust, name: walkdir, license: "Unlicense OR MIT", source: "crates.io declared license — https://crates.io/crates/walkdir" }
+  - { ecosystem: rust, name: want, license: "MIT", source: "crates.io declared license — https://crates.io/crates/want" }
+  - { ecosystem: rust, name: webpki-root-certs, license: "CDLA-Permissive-2.0", source: "crates.io declared license — https://crates.io/crates/webpki-root-certs" }
+  - { ecosystem: rust, name: which, license: "MIT", source: "crates.io declared license — https://crates.io/crates/which" }
+  - { ecosystem: rust, name: winnow, license: "MIT", source: "crates.io declared license — https://crates.io/crates/winnow" }
+  - { ecosystem: rust, name: wiremock, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/wiremock" }
+  - { ecosystem: rust, name: writeable, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/writeable" }
+  - { ecosystem: rust, name: x509-parser, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/x509-parser" }
+  - { ecosystem: rust, name: xattr, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/xattr" }
+  - { ecosystem: rust, name: xml-rs, license: "MIT", source: "crates.io declared license — https://crates.io/crates/xml-rs" }
+  - { ecosystem: rust, name: xz2, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/xz2" }
+  - { ecosystem: rust, name: yoke, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/yoke" }
+  - { ecosystem: rust, name: yoke-derive, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/yoke-derive" }
+  - { ecosystem: rust, name: zbus, license: "MIT", source: "crates.io declared license — https://crates.io/crates/zbus" }
+  - { ecosystem: rust, name: zbus_macros, license: "MIT", source: "crates.io declared license — https://crates.io/crates/zbus_macros" }
+  - { ecosystem: rust, name: zbus_names, license: "MIT", source: "crates.io declared license — https://crates.io/crates/zbus_names" }
+  - { ecosystem: rust, name: zerocopy, license: "BSD-2-Clause OR Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/zerocopy" }
+  - { ecosystem: rust, name: zerocopy-derive, license: "BSD-2-Clause OR Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/zerocopy-derive" }
+  - { ecosystem: rust, name: zerofrom, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/zerofrom" }
+  - { ecosystem: rust, name: zerofrom-derive, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/zerofrom-derive" }
+  - { ecosystem: rust, name: zeroize, license: "Apache-2.0 OR MIT", source: "crates.io declared license — https://crates.io/crates/zeroize" }
+  - { ecosystem: rust, name: zerotrie, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/zerotrie" }
+  - { ecosystem: rust, name: zerovec, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/zerovec" }
+  - { ecosystem: rust, name: zerovec-derive, license: "Unicode-3.0", source: "crates.io declared license — https://crates.io/crates/zerovec-derive" }
+  - { ecosystem: rust, name: zlib-rs, license: "Zlib", source: "crates.io declared license — https://crates.io/crates/zlib-rs" }
+  - { ecosystem: rust, name: zmij, license: "MIT", source: "crates.io declared license — https://crates.io/crates/zmij" }
+  - { ecosystem: rust, name: zstd, license: "MIT", source: "crates.io declared license — https://crates.io/crates/zstd" }
+  - { ecosystem: rust, name: zstd-safe, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/zstd-safe" }
+  - { ecosystem: rust, name: zstd-sys, license: "MIT OR Apache-2.0", source: "crates.io declared license — https://crates.io/crates/zstd-sys" }
+  - { ecosystem: rust, name: zvariant, license: "MIT", source: "crates.io declared license — https://crates.io/crates/zvariant" }
+  - { ecosystem: rust, name: zvariant_derive, license: "MIT", source: "crates.io declared license — https://crates.io/crates/zvariant_derive" }
+  - { ecosystem: rust, name: zvariant_utils, license: "MIT", source: "crates.io declared license — https://crates.io/crates/zvariant_utils" }
+
+  # --- vllm-runtime base dpkg packages syft/DEP-5 left UNKNOWN (permissive X.Org/Wayland/BSD; nvidia/cuda baseline) ---
+  - { ecosystem: dpkg, name: fontconfig, license: "MIT", source: "Ubuntu 24.04 fontconfig (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libduktape207, license: "MIT", source: "Ubuntu 24.04 libduktape207 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libice6, license: "MIT", source: "Ubuntu 24.04 libice6 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libjxl0.7, license: "BSD-3-Clause", source: "Ubuntu 24.04 libjxl0.7 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libsm6, license: "MIT", source: "Ubuntu 24.04 libsm6 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libstemmer0d, license: "BSD-3-Clause", source: "Ubuntu 24.04 libstemmer0d (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libtiff6, license: "libtiff", source: "Ubuntu 24.04 libtiff6 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libwayland-client0, license: "MIT", source: "Ubuntu 24.04 libwayland-client0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libwayland-cursor0, license: "MIT", source: "Ubuntu 24.04 libwayland-cursor0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libwayland-egl1, license: "MIT", source: "Ubuntu 24.04 libwayland-egl1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-dri3-0, license: "MIT", source: "Ubuntu 24.04 libxcb-dri3-0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-glx0, license: "MIT", source: "Ubuntu 24.04 libxcb-glx0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-present0, license: "MIT", source: "Ubuntu 24.04 libxcb-present0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-randr0, license: "MIT", source: "Ubuntu 24.04 libxcb-randr0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-render0, license: "MIT", source: "Ubuntu 24.04 libxcb-render0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-shape0, license: "MIT", source: "Ubuntu 24.04 libxcb-shape0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-shm0, license: "MIT", source: "Ubuntu 24.04 libxcb-shm0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-sync1, license: "MIT", source: "Ubuntu 24.04 libxcb-sync1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcb-xfixes0, license: "MIT", source: "Ubuntu 24.04 libxcb-xfixes0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxcursor1, license: "MIT", source: "Ubuntu 24.04 libxcursor1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxfixes3, license: "MIT", source: "Ubuntu 24.04 libxfixes3 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxi6, license: "MIT", source: "Ubuntu 24.04 libxi6 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxkbcommon0, license: "MIT", source: "Ubuntu 24.04 libxkbcommon0 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxrandr2, license: "MIT", source: "Ubuntu 24.04 libxrandr2 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxshmfence1, license: "MIT", source: "Ubuntu 24.04 libxshmfence1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxv1, license: "MIT", source: "Ubuntu 24.04 libxv1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: libxxf86vm1, license: "MIT", source: "Ubuntu 24.04 libxxf86vm1 (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+  - { ecosystem: dpkg, name: xkb-data, license: "MIT", source: "Ubuntu 24.04 xkb-data (syft/DEP-5 could not auto-resolve; permissive X.Org/Wayland/BSD license) " }
+
+  # --- vLLM-Omni kernel packages surfaced by the nvidia/cuda baseline (UNKNOWN
+  #     to syft/pip; resolved from upstream) ---
+  - { ecosystem: python, name: humming-kernels,               license: "Apache-2.0",                   source: "inclusionAI/humming JIT GEMM kernels — https://github.com/inclusionAI/humming/blob/main/LICENSE (Apache-2.0)" }
+  - { ecosystem: python, name: tokenspeed-mla,                license: "MIT",                          source: "LightSeek Foundation tokenspeed — https://github.com/lightseekorg/tokenspeed (MIT, PyPI license field)" }
+  - { ecosystem: python, name: nvidia-cutlass-dsl-libs-cu13,  license: "LicenseRef-NVIDIA-Proprietary", source: "NVIDIA CUTLASS Python DSL license — https://docs.nvidia.com/cutlass/latest/media/docs/pythonDSL/license.html (PyPI classifier: Other/Proprietary)" }
+
+  # --- libdrm family (X.Org DRM; MIT; syft/DEP-5 leaves the per-GPU subpackages
+  #     UNKNOWN — libdrm-intel1 is amd64-only so it missed the arm64-derived pass) ---
+  - { ecosystem: dpkg, name: libdrm-intel1,   license: "MIT", source: "X.Org libdrm (MIT); Intel DRM component" }
+  - { ecosystem: dpkg, name: libdrm-amdgpu1,  license: "MIT", source: "X.Org libdrm (MIT); AMDGPU DRM component" }
+  - { ecosystem: dpkg, name: libdrm-nouveau2, license: "MIT", source: "X.Org libdrm (MIT); Nouveau DRM component" }
+  - { ecosystem: dpkg, name: libdrm-radeon1,  license: "MIT", source: "X.Org libdrm (MIT); Radeon DRM component" }
+  - { ecosystem: dpkg, name: libdrm2,         license: "MIT", source: "X.Org libdrm (MIT)" }
+  - { ecosystem: dpkg, name: libdrm-common,   license: "MIT", source: "X.Org libdrm (MIT); common data" }

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Global Planner Deployment Guide
+subtitle: Deploys GlobalPlanner as the centralized scaling layer for multi-DGD policy enforcement and single-endpoint multi-pool deployments.
 ---
 
 This guide explains how to deploy `GlobalPlanner` and when to use it. `GlobalPlanner` is the centralized scaling execution layer for deployments where multiple DGDs should delegate scaling through one component, whether those DGDs expose separate endpoints or sit behind one shared endpoint.
