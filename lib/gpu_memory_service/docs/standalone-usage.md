@@ -77,49 +77,102 @@ Its flow, in ~5 steps:
 
 ### Who becomes active: two mechanisms
 
-- **Autonomous flock (what the operator uses).** A standby started in shadow
-  mode boots, pauses, and blocks on a kernel `flock` over a shared lock file.
-  The Linux kernel auto-releases the lock when the holder dies — even on
-  SIGKILL — so a standby is **promoted automatically**. This is leader election
-  that is **node-local**: the lock file lives on one host.
 - **Manual control (what the standalone recipe uses).** You drive the engine's
   `/engine/control/sleep` and `/engine/control/wake_up` endpoints and SIGKILL
   the primary yourself. Simpler to demo; the mechanics are visible.
+- **Autonomous flock (what the operator uses).** A standby blocks on a kernel
+  `flock` and is promoted automatically when the holder dies. See the
+  orchestration section below for how this fits together.
 
-## Multi-node and WideEP: what's automatic vs. what needs a control plane
+## Orchestration: who does what (and how to replicate it)
 
-The `flock` only does leader election **on a single node** (the leader / rank-0
-node). It does **not** coordinate across nodes. In a multi-node engine, two
-pieces make cross-node failover work, and **neither is part of GMS**:
+Shadow failover is split across three layers. GMS supplies the memory
+primitives; an engine wrapper turns those into a sleep/wake-able standby; an
+orchestrator decides who is active and recovers a dead cohort. Knowing which
+layer owns what tells you exactly how much you must build to do this yourself.
 
-1. **Stable per-rank / per-shadow identity + rendezvous** so each standby cohort
-   assembles around its own leader.
-2. **Cohort-atomic teardown/recreate** so one member's death tears down and
-   recreates the whole distributed group cleanly.
+### Layer 1 — the GMS wheel (primitives)
 
-In Dynamo these are provided by the **operator + Grove** (gang scheduling,
-pod-index-pinned hostnames, a cascade controller), tied to how pods are launched
-in Kubernetes. **Outside the operator you must build the equivalent control
-plane yourself.**
+The wheel gives you an out-of-process, per-GPU memory server and the building
+blocks to share its memory:
+
+- **RW-writer / RO-importer weight sharing** — the first client loads from disk
+  and publishes; later clients import the resident weights zero-copy.
+- a **torch mempool / pluggable allocator** so engine allocations are routed
+  through GMS;
+- a kernel **`flock`-based failover lock** (`gpu_memory_service.failover_lock`)
+  whose holder is auto-released by the kernel on process death;
+- **scratch-allocation managers** and **unmap/remap of VA reservations** for
+  tearing down and re-attaching backing at stable virtual addresses.
+
+GMS does **not** decide who is active, when to fail over, or how to co-schedule
+engines. Those are the next two layers.
+
+### Layer 2 — the engine wrapper (what makes a standby possible)
+
+A vanilla engine cannot just share GMS weights and stand by — vanilla sleep
+copies GPU buffers to host and breaks on GMS's `cuMemMap`'d memory, and the
+engine's memory accounting assumes it owns the whole GPU. Dynamo's vLLM wrapper
+(`components/src/dynamo/vllm` + `lib/gpu_memory_service/integrations/vllm`) adds:
+
+- the `--load-format gms` loader and auto-selection of the GMS worker class;
+- a **GMS-aware sleep/wake**: sleep unmaps the VAs and releases physical backing;
+  wake reconnects and **remaps the same virtual addresses** — this is how a
+  standby re-attaches to the resident weights instead of reloading them;
+- **memory-accounting fixes** so a co-resident engine doesn't think the GPU is
+  full, and so KV-cache sizing ignores the active engine's allocation;
+- **scratch KV** so a standby can fully initialize while co-resident with the
+  active engine (throwaway KV backing now, real GMS-backed KV on wake);
+- **RW/RO role selection by `ENGINE_ID`** (engine `0` writes weights, others
+  import) to avoid a multi-rank deadlock;
+- the **activation/standby behavior**: in autonomous *shadow mode* the engine
+  boots, pauses, blocks on the shared `flock`, and only registers with service
+  discovery (becomes routable) **after** it acquires the lock — so the router
+  only ever sees the active engine, and the kernel releasing the lock on process
+  death promotes a standby automatically. The standalone recipe instead drives
+  the equivalent sleep/wake by hand via the engine control endpoints.
+
+**Takeaway:** if you integrate GMS into another engine, *this* is the layer you
+reimplement — sleep/wake-as-unmap/remap, scratch KV, `ENGINE_ID` RW/RO, and
+either a flock-gated activation or your own promote/serve trigger.
+
+### Layer 3 — the Dynamo Kubernetes operator (cluster orchestration)
+
+The operator supplies what GMS and the wrapper don't:
+
+- **co-location and GPU sharing** — it puts the GMS server and engine(s) on the
+  same GPU and shares that GPU across pods/containers via DRA, with a shared
+  volume so every engine sees the same lock file and GMS sockets;
+- **failover env injection** — `ENGINE_ID` from the pod index, the shared lock
+  path, shadow mode, scratch KV, and the socket dir;
+- **failure handling** — failover engine pods use `restartPolicy: Never` plus a
+  cascade controller, so when *any* engine in a failover group terminates the
+  **whole group** is torn down and recreated cleanly (no half-dead distributed
+  group);
+- **multi-node** — one GMS server per rank, pod-index-pinned leader hostnames so
+  each standby *cohort* (same pod index across ranks) rendezvouses around its own
+  leader, headless workers, and `flock` leader election running only on the
+  rank-0/leader node (it is node-local by design).
+
+**Takeaway:** doing shadow failover **without** the operator is easy on a single
+node — run a GMS server, launch a writer plus one or more RO standbys on the
+same GPU sharing one lock file, and the kernel `flock` handles promotion. That
+is exactly this recipe. **Multi-node is the hard part you must build yourself:**
+stable per-cohort rendezvous + cohort-atomic teardown/recreate + failure
+detection. There is no GMS-level shortcut for it.
 
 ### WideEP ("fail over many servers at once")
 
-GMS's contribution to WideEP fault tolerance is **fast per-rank weight
-re-materialization**: when a rank/server dies, a replacement imports *that
-rank's* weight shard from GMS instead of reloading from disk. TRT-LLM's
-`weight_sharing/source_identity.py` provides the **per-rank weight-set identity**
-("rank N must import the shard produced for rank N") that makes this correct.
+This is the same split at scale. GMS's only contribution is **fast per-rank
+weight re-materialization**: when a rank/server dies, its replacement imports
+*that rank's* weight shard from GMS instead of reloading from disk. TRT-LLM's
+`weight_sharing/source_identity.py` supplies the per-rank weight-set identity
+("rank N imports the shard produced for rank N") that keeps this correct.
 
-GMS does **not**, however:
-
-- detect the dead rank,
-- decide to serve degraded (N−1),
-- re-spawn the rank, or
-- rejoin the collective (back to N).
-
-That detection + coordination + re-spawn control plane is the **engine's /
-orchestrator's** responsibility (the operator in Dynamo, or the backend's own
-fault-tolerance). GMS alone does **not** "fail over many servers."
+GMS does **not** detect the dead rank, decide to serve degraded (N−1), re-spawn
+the rank, or rejoin the collective (back to N). That detect / serve-degraded /
+respawn / rejoin control plane is the orchestrator's job — Layer 3 above, or the
+backend's own fault tolerance. GMS alone does **not** "fail over many servers."
 
 ## Backend support status
 
