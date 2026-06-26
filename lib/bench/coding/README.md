@@ -75,8 +75,8 @@ The exporter:
 - reconstructs each `subagents/*.jsonl` file as a separate child session
 - groups assistant fragments by `requestId`, then `message.id`, across interleaved tool-result rows
 - excludes `thinking` and `redacted_thinking`
-- resets transcript state on `compact_boundary`
-- starts post-compaction turns from the injected `isCompactSummary` row
+- pairs `compact_boundary` with its injected `isCompactSummary` row and emits the otherwise-hidden summarizer request
+- resets post-compaction transcript state to the summary while retaining Claude's observed stable cache prefix
 - skips local command wrapper noise such as `<local-command-caveat>`, `<local-command-stdout>`, and command wrapper rows
 - preserves top-level tool-use and tool-result structure in hashed text form
 - emits matched `tool_end` / `tool_error` events with Claude-observed timing
@@ -91,11 +91,13 @@ The exporter:
 - Request ingress is approximated by the most recent preceding user/tool-result timestamp. EOF does not imply `session_final`, because Claude sessions can resume.
 - Source Claude timestamps are parsed as UTC and normalized to millisecond replay timing; recorder-envelope timestamps are relative to the first request.
 - When Claude usage is present, input length and cached-prefix shape come from `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. The sequence hashes are deterministic synthetic hashes because local Claude JSONL omits the system prompt and complete tool schemas needed to reproduce wire-exact token IDs. The sidecar records this as `replay_hash_fidelity=synthetic_usage_shaped`.
-- After compaction, future rows are built from the compact summary forward, not from pre-compact raw history.
+- The synthetic compaction request keeps Claude's `preTokens` input length, reuses every recoverable pre-compaction prefix block, and reserves a synthetic suffix for the unknown instruction. Its duration and context sizes come from `compactMetadata`; output length comes from tokenizing `isCompactSummary` because `postTokens` is post-compaction context size, not summary output. The exporter omits `cached_tokens` because Claude does not record cache usage for this hidden request.
+- The first post-compaction request reuses exactly Claude's observed `cache_read_input_tokens`, writes the new summary suffix once, and makes that suffix available to later turns. A full cache reset and a zero-write summary are both intentionally avoided.
 - Rows are written incrementally as turns are merged across sessions.
-- Every export runs a source-to-output fidelity verifier. Request cardinality/order/timing, usage, tool classes/errors, child links, cached-prefix hashes, and forward causal references fail the export on mismatch.
+- Every export runs a source-to-output fidelity verifier. Request and compaction cardinality/timing, usage, tool classes/errors, child links, pre-compaction and post-compaction cached-prefix hashes, and forward causal references fail the export on mismatch.
 - The verifier always prints non-fatal source limitations: synthetic KV hashes, unmatched tools, missing background completions, unresolved child sessions, and `ai-title` rows that lack enough timing/usage data to replay as requests.
 - `tool.claude` is exporter-only replay evidence, not a requirement for live request-trace or ZMQ tool-event producers. Direct replay consumes it while reconstructing the in-memory request graph and falls back to timestamps when it is absent.
+- `request.claude.compaction` is likewise exporter-only evidence. Direct replay ignores the metadata and replays the row as an ordinary model request.
 
 ## Replay Metadata Flow
 
@@ -108,4 +110,4 @@ flowchart LR
     E --> F["In-memory standard or<br/>agentic replay model"]
 ```
 
-The Claude exporter adds `tool.claude` to the canonical request trace. The direct replay loader consumes that metadata while reconstructing exact launch, join, and tool-wait dependencies. Live traces omit it and use timestamp inference. Neither path writes an intermediate Mooncake file.
+The Claude exporter adds `tool.claude` causality and `request.claude.compaction` evidence to the canonical request trace. The direct replay loader consumes tool causality while the compaction row follows the ordinary request path. Live traces can omit both Claude-only objects. Neither path writes an intermediate Mooncake file.
