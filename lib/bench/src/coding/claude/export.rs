@@ -42,6 +42,7 @@ pub struct ExportStats {
 #[derive(Debug, Clone, Default)]
 pub struct FidelityReport {
     pub requests_verified: usize,
+    pub compactions_verified: usize,
     pub usage_requests_verified: usize,
     pub tools_verified: usize,
     pub child_links_verified: usize,
@@ -50,6 +51,8 @@ pub struct FidelityReport {
     pub background_completions_missing: usize,
     pub background_titles_unreplayable: usize,
     pub cache_prefix_blocks_verified: usize,
+    pub compaction_prefix_blocks_verified: usize,
+    pub post_compaction_prefix_blocks_verified: usize,
     pub unmatched_tool_calls: usize,
     pub unmatched_tool_results: usize,
     pub unresolved_child_sessions: usize,
@@ -72,13 +75,19 @@ struct ClaudeToolReplayMetadata {
 
 impl FidelityReport {
     pub fn render(&self) -> String {
+        let ordinary_requests = self
+            .requests_verified
+            .saturating_sub(self.compactions_verified);
         format!(
-            "Fidelity: requests={0}/{0} usage={1}/{0} tools={2}/{2} child_links={3}/{3} cache_prefix_blocks={4}\nBackground: tools={5} agents={6} missing_completions={7} title_requests_unreplayable={8}\nLimitations: synthetic_kv_hashes={0} unmatched_tool_calls={9} unmatched_tool_results={10} unresolved_child_sessions={11}",
+            "Fidelity: requests={0}/{0} compactions={1}/{1} usage={2}/{15} tools={3}/{3} child_links={4}/{4} cache_prefix_blocks={5} compaction_prefix_blocks={6} post_compaction_prefix_blocks={7}\nBackground: tools={8} agents={9} missing_completions={10} title_requests_unreplayable={11}\nLimitations: synthetic_kv_hashes={0} unmatched_tool_calls={12} unmatched_tool_results={13} unresolved_child_sessions={14}",
             self.requests_verified,
+            self.compactions_verified,
             self.usage_requests_verified,
             self.tools_verified,
             self.child_links_verified,
             self.cache_prefix_blocks_verified,
+            self.compaction_prefix_blocks_verified,
+            self.post_compaction_prefix_blocks_verified,
             self.background_tools,
             self.background_agents,
             self.background_completions_missing,
@@ -86,6 +95,7 @@ impl FidelityReport {
             self.unmatched_tool_calls,
             self.unmatched_tool_results,
             self.unresolved_child_sessions,
+            ordinary_requests,
         )
     }
 }
@@ -93,6 +103,7 @@ impl FidelityReport {
 struct FidelityVerifier {
     oracle: SourceFidelityOracle,
     seen_requests: BTreeSet<(String, String)>,
+    seen_compactions: BTreeSet<(String, String)>,
     tools_by_class: BTreeMap<String, usize>,
     tool_count: usize,
     tool_errors: usize,
@@ -101,9 +112,13 @@ struct FidelityVerifier {
     background_agents: usize,
     usage_requests: usize,
     cache_prefix_blocks_verified: usize,
+    compaction_prefix_blocks_verified: usize,
+    post_compaction_prefix_blocks_verified: usize,
     next_turn_by_session: FxHashMap<String, usize>,
     previous_hashes_by_session: FxHashMap<String, Vec<u64>>,
     previous_input_length_by_session: FxHashMap<String, usize>,
+    previous_was_compaction_by_session: FxHashMap<String, bool>,
+    expected_next_cache_read_by_session: FxHashMap<String, usize>,
     export_sessions: BTreeSet<String>,
     causal_references: Vec<(String, usize, String)>,
     child_session_references: Vec<String>,
@@ -169,6 +184,7 @@ impl FidelityVerifier {
         Self {
             oracle,
             seen_requests: BTreeSet::new(),
+            seen_compactions: BTreeSet::new(),
             tools_by_class: BTreeMap::new(),
             tool_count: 0,
             tool_errors: 0,
@@ -177,9 +193,13 @@ impl FidelityVerifier {
             background_agents: 0,
             usage_requests: 0,
             cache_prefix_blocks_verified: 0,
+            compaction_prefix_blocks_verified: 0,
+            post_compaction_prefix_blocks_verified: 0,
             next_turn_by_session: FxHashMap::default(),
             previous_hashes_by_session: FxHashMap::default(),
             previous_input_length_by_session: FxHashMap::default(),
+            previous_was_compaction_by_session: FxHashMap::default(),
+            expected_next_cache_read_by_session: FxHashMap::default(),
             export_sessions: BTreeSet::new(),
             causal_references: Vec::new(),
             child_session_references: Vec::new(),
@@ -194,47 +214,109 @@ impl FidelityVerifier {
         block_size: usize,
     ) -> Result<()> {
         let key = (turn.session_id.clone(), turn.source_request_id.clone());
-        let expected = self.oracle.requests.get(&key).ok_or_else(|| {
-            anyhow!(
-                "fidelity verification found unexpected request {} in session {}",
-                turn.source_request_id,
-                turn.session_id
-            )
-        })?;
-        if !self.seen_requests.insert(key) {
-            bail!(
-                "fidelity verification found duplicate request {} in session {}",
-                turn.source_request_id,
-                turn.session_id
-            );
+        if let Some(compaction) = &turn.compaction {
+            let expected = self.oracle.compactions.get(&key).ok_or_else(|| {
+                anyhow!(
+                    "fidelity verification found unexpected compaction {} in session {}",
+                    turn.source_request_id,
+                    turn.session_id
+                )
+            })?;
+            if compaction != expected || !self.seen_compactions.insert(key) {
+                bail!(
+                    "fidelity verification compaction mismatch for session {} sequence {}",
+                    turn.session_id,
+                    compaction.sequence
+                );
+            }
+            let expected_turn = self
+                .next_turn_by_session
+                .get(&turn.session_id)
+                .copied()
+                .unwrap_or_default();
+            let expected_start = compaction
+                .ended_at_ms
+                .saturating_sub(compaction.duration_ms);
+            if turn.turn_index != expected_turn
+                || turn.request_start_ms != expected_start
+                || turn.assistant_end_ms != compaction.ended_at_ms
+                || turn.observed_input_length != Some(compaction.pre_tokens)
+                || turn.cache_read_input_tokens.is_some()
+                || replay_tokens.len() != compaction.pre_tokens
+            {
+                bail!(
+                    "fidelity verification compaction timing/cache mismatch for session {} sequence {}",
+                    turn.session_id,
+                    compaction.sequence
+                );
+            }
+        } else {
+            let expected = self.oracle.requests.get(&key).ok_or_else(|| {
+                anyhow!(
+                    "fidelity verification found unexpected request {} in session {}",
+                    turn.source_request_id,
+                    turn.session_id
+                )
+            })?;
+            if !self.seen_requests.insert(key) {
+                bail!(
+                    "fidelity verification found duplicate request {} in session {}",
+                    turn.source_request_id,
+                    turn.session_id
+                );
+            }
+            let expected_turn = self
+                .next_turn_by_session
+                .entry(turn.session_id.clone())
+                .or_default();
+            if turn.turn_index != *expected_turn {
+                bail!(
+                    "fidelity verification expected turn {} for session {}, got {}",
+                    *expected_turn,
+                    turn.session_id,
+                    turn.turn_index
+                );
+            }
+            *expected_turn += 1;
+            if turn.request_start_ms != expected.request_start_ms
+                || turn.assistant_end_ms != expected.assistant_end_ms
+            {
+                bail!(
+                    "fidelity verification timing mismatch for session {} turn {}: expected {}..{}, got {}..{}",
+                    turn.session_id,
+                    turn.turn_index,
+                    expected.request_start_ms,
+                    expected.assistant_end_ms,
+                    turn.request_start_ms,
+                    turn.assistant_end_ms
+                );
+            }
+            if let Some(output_length) = expected.output_length
+                && turn.output_length != output_length
+            {
+                bail!(
+                    "fidelity verification output mismatch for session {} turn {}: expected {}, got {}",
+                    turn.session_id,
+                    turn.turn_index,
+                    output_length,
+                    turn.output_length
+                );
+            }
+            if let Some(input_length) = expected.input_length {
+                self.usage_requests += 1;
+                if replay_tokens.len() != input_length
+                    || turn.cache_read_input_tokens != expected.cache_read_input_tokens
+                    || turn.cache_creation_input_tokens != expected.cache_creation_input_tokens
+                {
+                    bail!(
+                        "fidelity verification input/cache mismatch for session {} turn {}",
+                        turn.session_id,
+                        turn.turn_index
+                    );
+                }
+            }
         }
-        let expected_turn = self
-            .next_turn_by_session
-            .entry(turn.session_id.clone())
-            .or_default();
-        if turn.turn_index != *expected_turn {
-            bail!(
-                "fidelity verification expected turn {} for session {}, got {}",
-                *expected_turn,
-                turn.session_id,
-                turn.turn_index
-            );
-        }
-        *expected_turn += 1;
         self.export_sessions.insert(turn.export_session_id.clone());
-        if turn.request_start_ms != expected.request_start_ms
-            || turn.assistant_end_ms != expected.assistant_end_ms
-        {
-            bail!(
-                "fidelity verification timing mismatch for session {} turn {}: expected {}..{}, got {}..{}",
-                turn.session_id,
-                turn.turn_index,
-                expected.request_start_ms,
-                expected.assistant_end_ms,
-                turn.request_start_ms,
-                turn.assistant_end_ms
-            );
-        }
         if turn.request_start_ms > turn.assistant_start_ms
             || turn.assistant_start_ms > turn.assistant_end_ms
         {
@@ -243,29 +325,6 @@ impl FidelityVerifier {
                 turn.session_id,
                 turn.turn_index
             );
-        }
-        if let Some(output_length) = expected.output_length
-            && turn.output_length != output_length
-        {
-            bail!(
-                "fidelity verification output mismatch for session {} turn {}: expected {}, got {}",
-                turn.session_id,
-                turn.turn_index,
-                output_length,
-                turn.output_length
-            );
-        }
-        if let Some(input_length) = expected.input_length {
-            self.usage_requests += 1;
-            if replay_tokens.len() != input_length
-                || turn.cache_read_input_tokens != expected.cache_read_input_tokens
-            {
-                bail!(
-                    "fidelity verification input/cache mismatch for session {} turn {}",
-                    turn.session_id,
-                    turn.turn_index
-                );
-            }
         }
         let expected_hashes = replay_tokens.len().div_ceil(block_size);
         if input_sequence_hashes.len() != expected_hashes {
@@ -277,18 +336,34 @@ impl FidelityVerifier {
                 input_sequence_hashes.len()
             );
         }
-        if let Some(previous_hashes) = self.previous_hashes_by_session.get(&turn.session_id) {
-            let cached_blocks = turn.cache_read_input_tokens.unwrap_or(0) / block_size;
-            let previous_complete_blocks = self
-                .previous_input_length_by_session
-                .get(&turn.session_id)
-                .copied()
-                .unwrap_or_default()
-                / block_size;
-            let verifiable_blocks = cached_blocks
-                .min(previous_complete_blocks)
-                .min(previous_hashes.len())
-                .min(input_sequence_hashes.len());
+        let previous_was_compaction = self
+            .previous_was_compaction_by_session
+            .get(&turn.session_id)
+            .copied()
+            .unwrap_or(false);
+        let previous_input_length = self
+            .previous_input_length_by_session
+            .get(&turn.session_id)
+            .copied();
+        let previous_hashes = self.previous_hashes_by_session.get(&turn.session_id);
+        if turn.compaction.is_some() && previous_hashes.is_none() {
+            bail!(
+                "fidelity verification cannot recover compaction prefix for session {}",
+                turn.session_id
+            );
+        }
+        if let (Some(previous_hashes), Some(previous_input_length)) =
+            (previous_hashes, previous_input_length)
+        {
+            let verifiable_blocks = if let Some(compaction) = &turn.compaction {
+                previous_input_length.min(compaction.pre_tokens.saturating_sub(1)) / block_size
+            } else {
+                let cached_blocks = turn.cache_read_input_tokens.unwrap_or(0) / block_size;
+                cached_blocks
+                    .min(previous_input_length / block_size)
+                    .min(previous_hashes.len())
+                    .min(input_sequence_hashes.len())
+            };
             if previous_hashes[..verifiable_blocks] != input_sequence_hashes[..verifiable_blocks] {
                 bail!(
                     "fidelity verification cached prefix mismatch for session {} turn {}",
@@ -297,11 +372,55 @@ impl FidelityVerifier {
                 );
             }
             self.cache_prefix_blocks_verified += verifiable_blocks;
+            if turn.compaction.is_some() {
+                if verifiable_blocks == 0 {
+                    bail!(
+                        "fidelity verification found no recoverable compaction prefix blocks for session {}",
+                        turn.session_id
+                    );
+                }
+                self.compaction_prefix_blocks_verified += verifiable_blocks;
+            } else if previous_was_compaction {
+                let cached_tokens = turn.cache_read_input_tokens.unwrap_or(0);
+                let cached_blocks = cached_tokens / block_size;
+                let cache_creation_tokens = turn.cache_creation_input_tokens.unwrap_or(0);
+                if cached_blocks == 0
+                    || cache_creation_tokens == 0
+                    || cached_tokens > previous_input_length
+                    || verifiable_blocks != cached_blocks
+                {
+                    bail!(
+                        "fidelity verification found post-compaction cache miss for session {}",
+                        turn.session_id
+                    );
+                }
+                self.post_compaction_prefix_blocks_verified += verifiable_blocks;
+                self.expected_next_cache_read_by_session.insert(
+                    turn.session_id.clone(),
+                    cached_tokens.saturating_add(cache_creation_tokens),
+                );
+            }
+        }
+        if turn.compaction.is_none()
+            && !previous_was_compaction
+            && let Some(expected_cache_read) = self
+                .expected_next_cache_read_by_session
+                .remove(&turn.session_id)
+            && turn.cache_read_input_tokens != Some(expected_cache_read)
+        {
+            bail!(
+                "fidelity verification expected {} post-compaction cache-read tokens for session {}, got {:?}",
+                expected_cache_read,
+                turn.session_id,
+                turn.cache_read_input_tokens
+            );
         }
         self.previous_hashes_by_session
             .insert(turn.session_id.clone(), input_sequence_hashes.to_vec());
         self.previous_input_length_by_session
             .insert(turn.session_id.clone(), replay_tokens.len());
+        self.previous_was_compaction_by_session
+            .insert(turn.session_id.clone(), turn.compaction.is_some());
 
         for tool in &turn.tools {
             if tool.started_at_ms > tool.ended_at_ms {
@@ -379,13 +498,17 @@ impl FidelityVerifier {
             .iter()
             .filter(|session_id| !self.export_sessions.contains(*session_id))
             .count();
-        if request_rows != self.oracle.requests.len()
-            || request_rows != self.seen_requests.len()
+        let source_request_rows = self.oracle.requests.len() + self.oracle.compactions.len();
+        let seen_request_rows = self.seen_requests.len() + self.seen_compactions.len();
+        if request_rows != source_request_rows
+            || request_rows != seen_request_rows
+            || self.seen_compactions.len() != self.oracle.compactions.len()
             || sidecar_rows != request_rows
         {
             bail!(
-                "fidelity verification request mismatch: source={}, emitted={}, sidecar={}",
-                self.oracle.requests.len(),
+                "fidelity verification request mismatch: source={} ({} compactions), emitted={}, sidecar={}",
+                source_request_rows,
+                self.oracle.compactions.len(),
                 request_rows,
                 sidecar_rows
             );
@@ -420,6 +543,7 @@ impl FidelityVerifier {
         }
         Ok(FidelityReport {
             requests_verified: request_rows,
+            compactions_verified: self.seen_compactions.len(),
             usage_requests_verified: self.usage_requests,
             tools_verified: tool_rows,
             child_links_verified: self.child_links,
@@ -428,6 +552,8 @@ impl FidelityVerifier {
             background_completions_missing: self.oracle.background_completions_missing,
             background_titles_unreplayable: self.oracle.background_titles,
             cache_prefix_blocks_verified: self.cache_prefix_blocks_verified,
+            compaction_prefix_blocks_verified: self.compaction_prefix_blocks_verified,
+            post_compaction_prefix_blocks_verified: self.post_compaction_prefix_blocks_verified,
             unmatched_tool_calls: self.oracle.unmatched_tool_calls,
             unmatched_tool_results: self.oracle.unmatched_tool_results,
             unresolved_child_sessions,
@@ -576,7 +702,12 @@ where
             &input_sequence_hashes,
             config.block_size,
         )?;
-        let request_id = canonical_request_id(&turn.export_session_id, turn.turn_index);
+        let request_id = turn.compaction.as_ref().map_or_else(
+            || canonical_request_id(&turn.export_session_id, turn.turn_index),
+            |compaction| {
+                canonical_compaction_request_id(&turn.export_session_id, compaction.sequence)
+            },
+        );
         let mut agent_context = Map::from_iter([(
             "session_id".to_string(),
             Value::String(turn.export_session_id.clone()),
@@ -587,26 +718,53 @@ where
                 Value::String(parent_session_id.clone()),
             );
         }
+        let mut request = Map::from_iter([
+            ("request_id".to_string(), json!(request_id)),
+            ("model".to_string(), json!(turn.model)),
+            ("input_tokens".to_string(), json!(replay_tokens.len())),
+            ("output_tokens".to_string(), json!(turn.output_length)),
+            (
+                "request_received_ms".to_string(),
+                json!(nonnegative_ms(turn.request_start_ms)),
+            ),
+            (
+                "total_time_ms".to_string(),
+                json!((turn.assistant_end_ms - turn.request_start_ms).max(0) as f64),
+            ),
+            (
+                "replay".to_string(),
+                json!({
+                    "trace_block_size": config.block_size,
+                    "input_length": replay_tokens.len(),
+                    "input_sequence_hashes": input_sequence_hashes,
+                }),
+            ),
+        ]);
+        if let Some(cached_tokens) = turn.cache_read_input_tokens {
+            request.insert("cached_tokens".to_string(), json!(cached_tokens));
+        }
+        if let Some(compaction) = &turn.compaction {
+            request.insert(
+                "claude".to_string(),
+                json!({
+                    "compaction": {
+                        "trigger": compaction.trigger,
+                        "pre_tokens": compaction.pre_tokens,
+                        "post_tokens": compaction.post_tokens,
+                        "duration_ms": compaction.duration_ms,
+                        "cache_fidelity": "recoverable_cache_safe_prefix",
+                        "output_fidelity": "tokenized_compact_summary",
+                    }
+                }),
+            );
+        }
         let event = json!({
             "schema": "dynamo.request.trace.v1",
             "event_type": "request_end",
             "event_time_unix_ms": nonnegative_ms(turn.assistant_end_ms),
             "event_source": "harness",
             "agent_context": agent_context,
-            "request": {
-                "request_id": request_id,
-                "model": turn.model,
-                "input_tokens": replay_tokens.len(),
-                "output_tokens": turn.output_length,
-                "cached_tokens": turn.cache_read_input_tokens,
-                "request_received_ms": nonnegative_ms(turn.request_start_ms),
-                "total_time_ms": (turn.assistant_end_ms - turn.request_start_ms).max(0) as f64,
-                "replay": {
-                    "trace_block_size": config.block_size,
-                    "input_length": replay_tokens.len(),
-                    "input_sequence_hashes": input_sequence_hashes,
-                }
-            }
+            "request": request,
         });
         let row = json!({
             "timestamp": nonnegative_ms(turn.assistant_end_ms - trace_start_ms),
@@ -716,6 +874,10 @@ fn canonical_request_id(session_id: &str, turn_index: usize) -> String {
     format!("claude:{session_id}:{turn_index}")
 }
 
+fn canonical_compaction_request_id(session_id: &str, sequence: usize) -> String {
+    format!("claude:{session_id}:compact:{sequence}")
+}
+
 fn materialize_replay_tokens(
     turn: &TurnDraft,
     rendered_tokens: &[u32],
@@ -724,6 +886,26 @@ fn materialize_replay_tokens(
     let Some(input_length) = turn.observed_input_length else {
         return rendered_tokens.to_vec();
     };
+
+    if turn.compaction.is_some() {
+        let shared_length = previous_tokens
+            .map(|tokens| tokens.len())
+            .unwrap_or_default()
+            .min(input_length.saturating_sub(1));
+        let mut tokens = Vec::with_capacity(input_length);
+        if let Some(previous_tokens) = previous_tokens {
+            tokens.extend_from_slice(&previous_tokens[..shared_length]);
+        }
+        while tokens.len() < input_length {
+            tokens.push(synthetic_token(
+                &turn.export_session_id,
+                turn.turn_index,
+                tokens.len(),
+                rendered_tokens,
+            ));
+        }
+        return tokens;
+    }
 
     let cached_length = turn.cache_read_input_tokens.unwrap_or(0).min(input_length);
     let mut tokens = Vec::with_capacity(input_length);
@@ -1030,12 +1212,14 @@ mod tests {
                         output_length: 1,
                         observed_input_length: None,
                         cache_read_input_tokens: None,
+                        cache_creation_input_tokens: None,
                         request_start_ms: 1,
                         assistant_start_ms: 1,
                         assistant_end_ms: 2,
                         delay_ms: None,
                         tools: Vec::new(),
                         sidecar: json!({}),
+                        compaction: None,
                     },
                     turn_key: 9,
                     scheduled: true,
@@ -1178,6 +1362,193 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(first_hashes.as_slice(), &second_hashes[..2]);
+    }
+
+    #[test]
+    fn streamed_writer_replays_cache_safe_compaction() {
+        use dynamo_data_gen::request_trace::{
+            agentic::lower_agentic_mooncake_rows, load::load_request_trace_records,
+        };
+
+        let temp = TempDir::new().unwrap();
+        let output_path = temp.path().join("trace.jsonl");
+        let sidecar_path = temp.path().join("trace.sidecar.jsonl");
+        let mut sessions = FxHashMap::default();
+        sessions.insert(
+            "session-a".to_string(),
+            vec![
+                make_record(
+                    "session-a",
+                    "user",
+                    1_000,
+                    0,
+                    json!({"type":"user","message":{"role":"user","content":"first prompt"}}),
+                ),
+                make_record(
+                    "session-a",
+                    "assistant",
+                    1_100,
+                    1,
+                    json!({"type":"assistant","requestId":"req-0","message":{"id":"a-0","model":"test-model","content":[{"type":"text","text":"first answer"}],"usage":{"input_tokens":8,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":2}}}),
+                ),
+                make_record(
+                    "session-a",
+                    "system",
+                    2_000,
+                    2,
+                    json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":10,"postTokens":3,"durationMs":500}}),
+                ),
+                make_record(
+                    "session-a",
+                    "user",
+                    2_000,
+                    3,
+                    json!({"type":"user","isCompactSummary":true,"message":{"role":"user","content":"compact summary"}}),
+                ),
+                make_record(
+                    "session-a",
+                    "assistant",
+                    2_100,
+                    4,
+                    json!({"type":"assistant","requestId":"req-1","message":{"id":"a-1","model":"test-model","content":[{"type":"text","text":"after compact"}],"usage":{"input_tokens":2,"cache_read_input_tokens":4,"cache_creation_input_tokens":6,"output_tokens":2}}}),
+                ),
+                make_record(
+                    "session-a",
+                    "user",
+                    2_200,
+                    5,
+                    json!({"type":"user","message":{"role":"user","content":"next prompt"}}),
+                ),
+                make_record(
+                    "session-a",
+                    "assistant",
+                    2_300,
+                    6,
+                    json!({"type":"assistant","requestId":"req-2","message":{"id":"a-2","model":"test-model","content":[{"type":"text","text":"next answer"}],"usage":{"input_tokens":2,"cache_read_input_tokens":10,"cache_creation_input_tokens":2,"output_tokens":2}}}),
+                ),
+            ],
+        );
+
+        let no_prefix_error = write_streamed_request_trace_rows(
+            &temp.path().join("no-prefix.jsonl"),
+            &temp.path().join("no-prefix.sidecar.jsonl"),
+            sessions.clone(),
+            true,
+            StubFactory::default(),
+            ExportConfig {
+                block_size: 16,
+                delta_overlap_words: 50,
+                tokenizer_workers: 1,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            no_prefix_error
+                .to_string()
+                .contains("no recoverable compaction prefix")
+        );
+
+        let mut no_summary_write = sessions.clone();
+        let first_post = no_summary_write
+            .get_mut("session-a")
+            .unwrap()
+            .iter_mut()
+            .find(|record| record.raw["requestId"] == "req-1")
+            .unwrap();
+        first_post.raw["message"]["usage"]["cache_creation_input_tokens"] = json!(0);
+        let no_summary_write_error = write_streamed_request_trace_rows(
+            &temp.path().join("no-summary-write.jsonl"),
+            &temp.path().join("no-summary-write.sidecar.jsonl"),
+            no_summary_write,
+            true,
+            StubFactory::default(),
+            ExportConfig {
+                block_size: 2,
+                delta_overlap_words: 50,
+                tokenizer_workers: 1,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            no_summary_write_error
+                .to_string()
+                .contains("post-compaction cache miss")
+        );
+
+        let stats = write_streamed_request_trace_rows(
+            &output_path,
+            &sidecar_path,
+            sessions,
+            true,
+            StubFactory::default(),
+            ExportConfig {
+                block_size: 2,
+                delta_overlap_words: 50,
+                tokenizer_workers: 1,
+            },
+        )
+        .unwrap();
+
+        let rows = std::fs::read_to_string(&output_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let sidecars = std::fs::read_to_string(&sidecar_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(stats.row_count, 4);
+        assert_eq!(stats.sidecar_count, 4);
+        assert_eq!(stats.fidelity.compactions_verified, 1);
+        assert_eq!(stats.fidelity.compaction_prefix_blocks_verified, 4);
+        assert_eq!(stats.fidelity.post_compaction_prefix_blocks_verified, 2);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(sidecars.len(), 4);
+        assert_eq!(
+            rows[1]["event"]["request"]["request_id"],
+            "claude:session-a:compact:0"
+        );
+        assert_eq!(rows[1]["event"]["request"]["request_received_ms"], 1_500);
+        assert_eq!(rows[1]["event"]["event_time_unix_ms"], 2_000);
+        assert_eq!(rows[1]["event"]["request"]["total_time_ms"], 500.0);
+        assert!(rows[1]["event"]["request"].get("cached_tokens").is_none());
+        assert_eq!(rows[1]["event"]["request"]["replay"]["input_length"], 10);
+        assert_eq!(
+            rows[1]["event"]["request"]["claude"]["compaction"]["pre_tokens"],
+            10
+        );
+        assert_eq!(
+            rows[1]["event"]["request"]["claude"]["compaction"]["post_tokens"],
+            3
+        );
+
+        let hashes = rows
+            .iter()
+            .map(|row| {
+                row["event"]["request"]["replay"]["input_sequence_hashes"]
+                    .as_array()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(hashes[0], &hashes[1][..4]);
+        assert_eq!(&hashes[1][..2], &hashes[2][..2]);
+        assert_ne!(hashes[1][2], hashes[2][2]);
+        assert_eq!(&hashes[2][..5], &hashes[3][..5]);
+        assert_ne!(hashes[2][5], hashes[3][5]);
+
+        let loaded = load_request_trace_records(&[output_path]).unwrap();
+        assert_eq!(loaded.requests.len(), 4);
+        let mut agentic_rows = Vec::new();
+        lower_agentic_mooncake_rows(loaded, |_, row| {
+            agentic_rows.push(row);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(agentic_rows.len(), 4);
+        assert_eq!(agentic_rows[1].request_id, "claude:session-a:compact:0");
     }
 
     #[test]

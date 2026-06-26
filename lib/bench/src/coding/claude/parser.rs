@@ -92,18 +92,31 @@ pub struct TurnDraft {
     pub output_length: usize,
     pub observed_input_length: Option<usize>,
     pub cache_read_input_tokens: Option<usize>,
+    pub cache_creation_input_tokens: Option<usize>,
     pub request_start_ms: i64,
     pub assistant_start_ms: i64,
     pub assistant_end_ms: i64,
     pub delay_ms: Option<i64>,
     pub tools: Vec<ToolDraft>,
     pub sidecar: Value,
+    pub compaction: Option<CompactionMetadata>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompactionMetadata {
+    pub sequence: usize,
+    pub trigger: String,
+    pub pre_tokens: usize,
+    pub post_tokens: usize,
+    pub duration_ms: i64,
+    pub ended_at_ms: i64,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct SourceRequestExpectation {
     pub input_length: Option<usize>,
     pub cache_read_input_tokens: Option<usize>,
+    pub cache_creation_input_tokens: Option<usize>,
     pub output_length: Option<usize>,
     pub request_start_ms: i64,
     pub assistant_end_ms: i64,
@@ -112,6 +125,7 @@ pub struct SourceRequestExpectation {
 #[derive(Clone, Debug, Default)]
 pub struct SourceFidelityOracle {
     pub requests: BTreeMap<(String, String), SourceRequestExpectation>,
+    pub compactions: BTreeMap<(String, String), CompactionMetadata>,
     pub tools_by_class: BTreeMap<String, usize>,
     pub paired_tools: usize,
     pub tool_errors: usize,
@@ -122,6 +136,12 @@ pub struct SourceFidelityOracle {
     pub background_titles: usize,
     pub unmatched_tool_calls: usize,
     pub unmatched_tool_results: usize,
+}
+
+#[derive(Debug)]
+struct PendingCompaction {
+    metadata: CompactionMetadata,
+    prompt_text: String,
 }
 
 #[derive(Debug, Default)]
@@ -160,7 +180,9 @@ pub struct SessionTurnBuilder {
     pending_request_start_ms: Option<i64>,
     previous_assistant_end_ms: Option<i64>,
     turn_index: usize,
-    pending_compact_reset: bool,
+    pending_compaction: Option<PendingCompaction>,
+    previous_model: Option<String>,
+    compaction_sequence: usize,
     preserve_session_ids: bool,
 }
 
@@ -239,7 +261,9 @@ impl SessionTurnBuilder {
             pending_request_start_ms: None,
             previous_assistant_end_ms: None,
             turn_index: 0,
-            pending_compact_reset: false,
+            pending_compaction: None,
+            previous_model: None,
+            compaction_sequence: 0,
             preserve_session_ids,
         }
     }
@@ -250,14 +274,20 @@ impl SessionTurnBuilder {
             let record = &self.records[record_index];
 
             if record.row_type == "system" {
-                self.pending_compact_reset = is_compact_boundary(record);
+                if is_compact_boundary(record) {
+                    let metadata = compaction_metadata(record, self.compaction_sequence)?;
+                    self.compaction_sequence += 1;
+                    self.pending_compaction = Some(PendingCompaction {
+                        metadata,
+                        prompt_text: self.prompt_text.clone(),
+                    });
+                }
                 self.top_level_cursor += 1;
                 continue;
             }
 
             if record.row_type == "user" {
                 if should_skip_user_record(record)? {
-                    self.pending_compact_reset = false;
                     self.top_level_cursor += 1;
                     continue;
                 }
@@ -265,18 +295,97 @@ impl SessionTurnBuilder {
                 let request_start_ms = record.timestamp_ms;
                 let message = object_field(&record.raw, "message");
                 let rendered_entries = render_user_entries(message, &mut self.normalizer)?;
-                if self.pending_compact_reset && is_compact_summary(record) {
+                if is_compact_summary(record) {
+                    let summary_text = flatten_block_content_text(
+                        message
+                            .and_then(|message| message.get("content"))
+                            .unwrap_or(&Value::Null),
+                    )?;
                     self.replace_conversation_entries(rendered_entries);
+                    self.pending_request_start_ms = Some(request_start_ms);
+                    self.top_level_cursor += 1;
+
+                    let Some(pending) = self.pending_compaction.take() else {
+                        continue;
+                    };
+
+                    let output_length = tokenizer.encode(&summary_text)?.len();
+                    let input_text = if pending.prompt_text.is_empty() {
+                        "[system] Compact the conversation.".to_string()
+                    } else {
+                        format!(
+                            "{}\n[system] Compact the conversation.",
+                            pending.prompt_text
+                        )
+                    };
+                    let source_request_id = format!("compact:{}", pending.metadata.sequence);
+                    let mut sidecar = Map::new();
+                    sidecar.insert(
+                        "session_id".to_string(),
+                        Value::String(self.export_session_id.clone()),
+                    );
+                    if let Some(parent_session_id) = &self.export_parent_session_id {
+                        sidecar.insert(
+                            "parent_session_id".to_string(),
+                            Value::String(parent_session_id.clone()),
+                        );
+                    }
+                    sidecar.insert("turn_index".to_string(), json!(self.turn_index));
+                    sidecar.insert(
+                        "source_request_id".to_string(),
+                        Value::String(source_request_id.clone()),
+                    );
+                    sidecar.insert("request_kind".to_string(), json!("compaction"));
+                    sidecar.insert(
+                        "input_fidelity".to_string(),
+                        json!("claude_cache_safe_fork"),
+                    );
+                    sidecar.insert(
+                        "replay_hash_fidelity".to_string(),
+                        json!("synthetic_usage_shaped"),
+                    );
+                    sidecar.insert(
+                        "compaction".to_string(),
+                        compaction_json(&pending.metadata, output_length),
+                    );
+                    let request_start_ms = pending
+                        .metadata
+                        .ended_at_ms
+                        .saturating_sub(pending.metadata.duration_ms);
+                    self.previous_assistant_end_ms = Some(pending.metadata.ended_at_ms);
+                    return Ok(Some(TurnDraft {
+                        session_id: self.session_id.clone(),
+                        source_request_id,
+                        export_session_id: self.export_session_id.clone(),
+                        export_parent_session_id: self.export_parent_session_id.clone(),
+                        turn_index: self.turn_index,
+                        model: self
+                            .previous_model
+                            .clone()
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        input_text,
+                        output_length,
+                        observed_input_length: Some(pending.metadata.pre_tokens),
+                        cache_read_input_tokens: None,
+                        cache_creation_input_tokens: None,
+                        request_start_ms,
+                        assistant_start_ms: pending.metadata.ended_at_ms,
+                        assistant_end_ms: pending.metadata.ended_at_ms,
+                        delay_ms: None,
+                        tools: Vec::new(),
+                        sidecar: Value::Object(sidecar),
+                        compaction: Some(pending.metadata),
+                    }));
                 } else {
+                    self.pending_compaction = None;
                     self.extend_conversation_entries(rendered_entries);
                 }
                 self.pending_request_start_ms = Some(request_start_ms);
-                self.pending_compact_reset = false;
                 self.top_level_cursor += 1;
                 continue;
             }
 
-            self.pending_compact_reset = false;
+            self.pending_compaction = None;
             let group_key = assistant_group_key(record);
             let mut group_indices = vec![record_index];
             let mut interleaved_user_indices = Vec::new();
@@ -446,17 +555,20 @@ impl SessionTurnBuilder {
                 }
             }
 
+            let model = group_summary.model;
+            self.previous_model = Some(model.clone());
             let turn = TurnDraft {
                 session_id: self.session_id.clone(),
                 source_request_id: group_key,
                 export_session_id: self.export_session_id.clone(),
                 export_parent_session_id: self.export_parent_session_id.clone(),
                 turn_index: self.turn_index,
-                model: group_summary.model,
+                model,
                 input_text,
                 output_length: group_summary.output_length,
                 observed_input_length: group_summary.input_length,
                 cache_read_input_tokens: group_summary.cache_read_input_tokens,
+                cache_creation_input_tokens: group_summary.cache_creation_input_tokens,
                 request_start_ms,
                 assistant_start_ms: group_summary.start_ms,
                 assistant_end_ms: group_summary.end_ms,
@@ -465,6 +577,7 @@ impl SessionTurnBuilder {
                     .map(|previous_end| (request_start_ms - previous_end).max(0)),
                 tools,
                 sidecar: Value::Object(sidecar),
+                compaction: None,
             };
 
             let mut ordered_indices = group_indices;
@@ -627,6 +740,7 @@ pub fn build_source_fidelity_oracle(
             .unwrap_or(trace_id);
         let is_subagent = trace_id != root_session_id;
         let mut pending_request_start_ms = None;
+        let mut compaction_sequence = 0;
 
         for record in records {
             if record.row_type == "ai-title" {
@@ -638,7 +752,7 @@ pub fn build_source_fidelity_oracle(
                 background_titles.insert((record.session_id.clone(), title.to_string()));
                 continue;
             }
-            let is_top_level = matches!(record.row_type.as_str(), "user" | "assistant")
+            let is_top_level = matches!(record.row_type.as_str(), "user" | "assistant" | "system")
                 && (is_subagent
                     || !record
                         .raw
@@ -646,6 +760,18 @@ pub fn build_source_fidelity_oracle(
                         .and_then(Value::as_bool)
                         .unwrap_or(false));
             if !is_top_level {
+                continue;
+            }
+            if is_compact_boundary(record) {
+                let metadata = compaction_metadata(record, compaction_sequence)?;
+                let source_request_id = format!("compact:{}", metadata.sequence);
+                oracle
+                    .compactions
+                    .insert((trace_id.clone(), source_request_id), metadata);
+                compaction_sequence += 1;
+                continue;
+            }
+            if record.row_type == "system" {
                 continue;
             }
 
@@ -749,6 +875,16 @@ pub fn build_source_fidelity_oracle(
                         .unwrap_or_default()
                         .max(cache_read),
                 );
+                let cache_creation = usage
+                    .get("cache_creation_input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                expectation.cache_creation_input_tokens = Some(
+                    expectation
+                        .cache_creation_input_tokens
+                        .unwrap_or_default()
+                        .max(cache_creation),
+                );
                 if let Some(output_length) = usage.get("output_tokens").and_then(Value::as_u64) {
                     expectation.output_length = Some(
                         expectation
@@ -823,6 +959,57 @@ fn is_compact_summary(record: &TraceRecord) -> bool {
             .get("isCompactSummary")
             .and_then(Value::as_bool)
             .unwrap_or(false)
+}
+
+fn compaction_metadata(record: &TraceRecord, sequence: usize) -> Result<CompactionMetadata> {
+    let metadata = record
+        .raw
+        .get("compactMetadata")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!("compact_boundary is missing compactMetadata"))?;
+    let trigger = metadata
+        .get("trigger")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("compactMetadata is missing trigger"))?
+        .to_string();
+    let pre_tokens = metadata
+        .get("preTokens")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| anyhow::anyhow!("compactMetadata has invalid preTokens"))?;
+    if pre_tokens == 0 {
+        anyhow::bail!("compactMetadata preTokens leaves no recoverable prefix");
+    }
+    let post_tokens = metadata
+        .get("postTokens")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| anyhow::anyhow!("compactMetadata has invalid postTokens"))?;
+    let duration_ms = metadata
+        .get("durationMs")
+        .and_then(Value::as_u64)
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or_else(|| anyhow::anyhow!("compactMetadata has invalid durationMs"))?;
+    Ok(CompactionMetadata {
+        sequence,
+        trigger,
+        pre_tokens,
+        post_tokens,
+        duration_ms,
+        ended_at_ms: record.timestamp_ms,
+    })
+}
+
+fn compaction_json(metadata: &CompactionMetadata, summary_output_tokens: usize) -> Value {
+    json!({
+        "trigger": metadata.trigger,
+        "pre_tokens": metadata.pre_tokens,
+        "post_tokens": metadata.post_tokens,
+        "duration_ms": metadata.duration_ms,
+        "summary_output_tokens": summary_output_tokens,
+        "cache_fidelity": "recoverable_cache_safe_prefix",
+        "output_fidelity": "tokenized_compact_summary",
+    })
 }
 
 fn is_local_command_wrapper_text(text: &str) -> bool {
@@ -1709,7 +1896,7 @@ mod tests {
         std::fs::write(
             &trace,
             concat!(
-                "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"sessionId\":\"session-1\",\"timestamp\":\"2026-01-01T00:00:00.002Z\"}\n",
+                "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"sessionId\":\"session-1\",\"timestamp\":\"2026-01-01T00:00:00.002Z\",\"compactMetadata\":{\"trigger\":\"manual\",\"preTokens\":10,\"postTokens\":3,\"durationMs\":1}}\n",
                 "{\"type\":\"user\",\"isCompactSummary\":true,\"sessionId\":\"session-1\",\"timestamp\":\"2026-01-01T00:00:00.001Z\",\"message\":{\"content\":\"summary\"}}\n",
                 "{\"type\":\"assistant\",\"sessionId\":\"session-1\",\"timestamp\":\"2026-01-01T00:00:00.003Z\",\"message\":{\"id\":\"msg-1\",\"content\":[{\"type\":\"text\",\"text\":\"done\"}],\"usage\":{\"output_tokens\":1}}}\n"
             ),
@@ -1722,6 +1909,8 @@ mod tests {
         assert_eq!(records[1].row_type, "user");
 
         let mut builder = SessionTurnBuilder::new("session-1".to_string(), records.clone(), true);
+        let compaction = builder.next_turn(&mut StubTokenizer).unwrap().unwrap();
+        assert!(compaction.compaction.is_some());
         let turn = builder.next_turn(&mut StubTokenizer).unwrap().unwrap();
         assert_eq!(turn.input_text, "[user] summary");
     }
@@ -1750,6 +1939,27 @@ mod tests {
     }
 
     #[test]
+    fn fidelity_oracle_ignores_root_sidechain_compaction() {
+        let mut sessions = FxHashMap::default();
+        sessions.insert(
+            "session-1".to_string(),
+            vec![make_record(
+                "system",
+                1_000,
+                0,
+                json!({"type":"system","subtype":"compact_boundary","isSidechain":true,"compactMetadata":{"trigger":"manual","preTokens":10,"postTokens":3,"durationMs":500}}),
+            )],
+        );
+
+        assert!(
+            build_source_fidelity_oracle(&sessions)
+                .unwrap()
+                .compactions
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn compact_boundary_restarts_transcript_from_summary() {
         let records = vec![
             make_record(
@@ -1768,7 +1978,7 @@ mod tests {
                 "system",
                 3_000,
                 2,
-                json!({"type":"system","subtype":"compact_boundary"}),
+                json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":10,"postTokens":3,"durationMs":500}}),
             ),
             make_record(
                 "user",
@@ -1794,14 +2004,22 @@ mod tests {
         assert_eq!(
             turns
                 .iter()
+                .filter(|turn| turn.compaction.is_none())
                 .map(|turn| turn.input_text.as_str())
                 .collect::<Vec<_>>(),
             vec!["[user] before compact", "[user] compacted summary"]
         );
+        assert_eq!(
+            turns
+                .iter()
+                .filter(|turn| turn.compaction.is_some())
+                .count(),
+            1
+        );
     }
 
     #[test]
-    fn compact_boundary_skips_local_command_noise_after_summary() {
+    fn compact_boundary_survives_ignored_rows_around_summary() {
         let records = vec![
             make_record(
                 "user",
@@ -1819,13 +2037,13 @@ mod tests {
                 "system",
                 3_000,
                 2,
-                json!({"type":"system","subtype":"compact_boundary"}),
+                json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":10,"postTokens":3,"durationMs":500}}),
             ),
             make_record(
-                "user",
+                "system",
                 3_001,
                 3,
-                json!({"type":"user","isCompactSummary":true,"message":{"role":"user","content":"compacted summary"}}),
+                json!({"type":"system","subtype":"turn_duration"}),
             ),
             make_record(
                 "user",
@@ -1837,18 +2055,30 @@ mod tests {
                 "user",
                 3_003,
                 5,
-                json!({"type":"user","message":{"role":"user","content":"<command-name>/compact</command-name>\n<command-message>compact</command-message>"}}),
+                json!({"type":"user","isCompactSummary":true,"message":{"role":"user","content":"compacted summary"}}),
             ),
             make_record(
                 "user",
                 3_004,
                 6,
+                json!({"type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>ignore me</local-command-caveat>"}}),
+            ),
+            make_record(
+                "user",
+                3_005,
+                7,
+                json!({"type":"user","message":{"role":"user","content":"<command-name>/compact</command-name>\n<command-message>compact</command-message>"}}),
+            ),
+            make_record(
+                "user",
+                3_006,
+                8,
                 json!({"type":"user","message":{"role":"user","content":"<local-command-stdout>Compacted</local-command-stdout>"}}),
             ),
             make_record(
                 "assistant",
                 4_000,
-                7,
+                9,
                 json!({"type":"assistant","message":{"id":"assistant-2","content":[{"type":"text","text":"second answer"}],"usage":{"output_tokens":5}}}),
             ),
         ];
@@ -1863,9 +2093,59 @@ mod tests {
         assert_eq!(
             turns
                 .iter()
+                .filter(|turn| turn.compaction.is_none())
                 .map(|turn| turn.input_text.as_str())
                 .collect::<Vec<_>>(),
             vec!["[user] before compact", "[user] compacted summary"]
+        );
+    }
+
+    #[test]
+    fn orphan_compact_summary_still_replaces_transcript() {
+        let records = vec![
+            make_record(
+                "user",
+                1_000,
+                0,
+                json!({"type":"user","message":{"role":"user","content":"old prompt"}}),
+            ),
+            make_record(
+                "assistant",
+                2_000,
+                1,
+                json!({"type":"assistant","message":{"id":"assistant-1","content":[{"type":"text","text":"old answer"}],"usage":{"output_tokens":2}}}),
+            ),
+            make_record(
+                "user",
+                3_000,
+                2,
+                json!({"type":"user","isCompactSummary":true,"message":{"role":"user","content":"summary only"}}),
+            ),
+            make_record(
+                "assistant",
+                4_000,
+                3,
+                json!({"type":"assistant","message":{"id":"assistant-2","content":[{"type":"text","text":"new answer"}],"usage":{"output_tokens":2}}}),
+            ),
+        ];
+
+        let mut builder = SessionTurnBuilder::new("session-1".to_string(), records, true);
+        let mut tokenizer = StubTokenizer;
+        assert_eq!(
+            builder
+                .next_turn(&mut tokenizer)
+                .unwrap()
+                .unwrap()
+                .input_text,
+            "[user] old prompt"
+        );
+        assert_eq!(
+            builder
+                .next_turn(&mut tokenizer)
+                .unwrap()
+                .unwrap()
+                .input_text,
+            "[user] summary only"
         );
     }
 
