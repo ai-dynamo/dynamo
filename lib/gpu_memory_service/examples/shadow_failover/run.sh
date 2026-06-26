@@ -2,73 +2,78 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Bare-bones single-GPU GMS shadow-engine failover, no Kubernetes.
+# Bare-bones GMS shadow-engine failover, no Kubernetes. Run this SAME script on
+# every node; set NODE_RANK per node (0 = leader). For a single node, just run
+# it with the defaults (NNODES=1).
 #
-# Two vLLM engines share one GPU and one set of GMS-resident weights, both in
-# autonomous shadow mode: each boots, parks itself, and blocks on a shared
-# kernel flock. ENGINE_ID 0 wins the lock and serves; ENGINE_ID 1 waits. Kill
-# the primary and the kernel releases the lock, so the shadow takes over with no
-# weight reload. Follow /tmp/gms-demo-shadow.log to watch the takeover.
+# Each node runs a GMS server. The leader node also runs etcd + nats + the
+# Dynamo frontend. Two engines start per node in autonomous shadow mode sharing
+# one flock: cohort 0 is the primary (ENGINE_ID=0, loads + publishes the
+# weights), cohort 1 is the shadow (ENGINE_ID=1, imports them). The primary
+# serves; the shadow parks on the lock.
+#
+# This script does NOT kill anything. To trigger failover, kill the primary
+# yourself; the kernel then hands the lock to the shadow automatically:
+#   kill -KILL -"$(cat /tmp/gms-demo-engine-0.pgid)"
 set -euo pipefail
 
 # Tunables (override via env).
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
+TP="${TP:-1}"                            # tensor-parallel size (total GPUs per engine)
+NNODES="${NNODES:-1}"                    # nodes per engine group
+NODE_RANK="${NODE_RANK:-0}"              # this node's rank; 0 = leader
+LEADER_ADDR="${LEADER_ADDR:-127.0.0.1}"  # leader host that workers dial
+FRONTEND_PORT="${FRONTEND_PORT:-8000}"
 export GMS_SOCKET_DIR="${GMS_SOCKET_DIR:-/tmp/gms-demo}"
-export ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://localhost:2379}"
-export NATS_SERVER="${NATS_SERVER:-nats://localhost:4222}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-LOCK="${FAILOVER_LOCK_PATH:-$GMS_SOCKET_DIR/failover.lock}"
+export ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://${LEADER_ADDR}:2379}"
+export NATS_SERVER="${NATS_SERVER:-nats://${LEADER_ADDR}:4222}"
 
+# Reap every process group we start on exit.
 PIDS=()
-# Tear everything down on exit. Guard the group-kills: an unset PGID must NOT
-# become `kill -0` (that targets our own process group).
 cleanup() {
-  local g
-  for g in "${PRIMARY_PGID:-}" "${SHADOW_PGID:-}"; do
-    [ -n "$g" ] && kill -KILL "-$g" 2>/dev/null || true
-  done
-  [ "${#PIDS[@]}" -gt 0 ] && kill "${PIDS[@]}" 2>/dev/null || true
+  local p
+  [ "${#PIDS[@]}" -eq 0 ] && return 0
+  for p in "${PIDS[@]}"; do kill -KILL "-$p" 2>/dev/null || true; done
 }
 trap cleanup EXIT
-
 mkdir -p "$GMS_SOCKET_DIR"
 
-# A GMS client in shadow mode. ENGINE_ID 0 is the RW writer (loads the model
-# from disk and publishes it into GMS); any other id imports it read-only.
-# Per-engine ports keep the two processes from colliding on one host.
-engine() { # engine <engine_id>
+# Launch one shadow-mode engine in its own process group. cohort 0 = primary
+# (writer); others import read-only. Multi-node groups (NNODES>1) get the
+# distributed flags, and non-leader ranks run headless.
+engine() { # engine <cohort_id>
+  local id="$1"
+  local args=(--model "$MODEL" --load-format gms --enforce-eager --enable-sleep-mode
+              --tensor-parallel-size "$TP")
+  if [ "$NNODES" -gt 1 ]; then
+    args+=(--distributed-executor-backend mp --nnodes "$NNODES" --node-rank "$NODE_RANK"
+           --master-addr "$LEADER_ADDR" --master-port "$((29500 + id * 100))")
+    [ "$NODE_RANK" -ne 0 ] && args+=(--headless)
+  fi
   setsid env \
-    ENGINE_ID="$1" \
+    ENGINE_ID="$id" \
     DYN_VLLM_GMS_SHADOW_MODE=true \
-    FAILOVER_LOCK_PATH="$LOCK" \
-    DYN_SYSTEM_PORT="$((8080 + $1))" \
-    VLLM_NIXL_SIDE_CHANNEL_PORT="$((8280 + $1))" \
-    python -m dynamo.vllm --model "$MODEL" --load-format gms \
-    --enforce-eager --enable-sleep-mode
+    FAILOVER_LOCK_PATH="$GMS_SOCKET_DIR/failover.lock" \
+    DYN_SYSTEM_PORT="$((8080 + id))" \
+    VLLM_NIXL_SIDE_CHANNEL_PORT="$((8280 + id))" \
+    python -m dynamo.vllm "${args[@]}" >"/tmp/gms-demo-engine-$id.log" 2>&1 &
+  PIDS+=("$!")
+  printf '%s\n' "$!" >"/tmp/gms-demo-engine-$id.pgid"  # so you can kill this engine's group
 }
 
-# Discovery + message bus that dynamo.vllm registers with.
-etcd --data-dir /tmp/gms-demo-etcd >/tmp/gms-demo-etcd.log 2>&1 & PIDS+=($!)
-nats-server -js --store_dir /tmp/gms-demo-nats >/tmp/gms-demo-nats.log 2>&1 & PIDS+=($!)
+# Every node runs a GMS server (holds this node's weights for both engines).
+setsid python -m gpu_memory_service.cli.server >/tmp/gms-demo-gms.log 2>&1 & PIDS+=("$!")
 
-# Per-GPU weight/KV server that holds the model for both engines.
-python -m gpu_memory_service.cli.server >/tmp/gms-demo-gms.log 2>&1 & PIDS+=($!)
+# The leader node also runs discovery + the frontend; engines register there.
+if [ "$NODE_RANK" -eq 0 ]; then
+  setsid etcd --data-dir /tmp/gms-demo-etcd >/tmp/gms-demo-etcd.log 2>&1 & PIDS+=("$!")
+  setsid nats-server -js --store_dir /tmp/gms-demo-nats >/tmp/gms-demo-nats.log 2>&1 & PIDS+=("$!")
+  setsid python -m dynamo.frontend --http-port "$FRONTEND_PORT" >/tmp/gms-demo-frontend.log 2>&1 & PIDS+=("$!")
+fi
 
-# Primary (writer) wins the flock and serves; shadow (reader) parks behind it.
-engine 0 >/tmp/gms-demo-primary.log 2>&1 & PRIMARY_PGID=$!
-engine 1 >/tmp/gms-demo-shadow.log 2>&1 & SHADOW_PGID=$!
+engine 0  # primary
+engine 1  # shadow
 
-# Wait until the shadow has loaded weights and parked on the flock (the standby
-# is only "warm" once it is blocked waiting for the lock). Abort if it dies
-# first (check /tmp/gms-demo-shadow.log for the cause).
-until grep -q "waiting for lock" /tmp/gms-demo-shadow.log 2>/dev/null; do
-  kill -0 "$SHADOW_PGID" 2>/dev/null || exit 1
-  sleep 2
-done
-
-# Crash the primary's process group; the kernel releases its flock and the
-# shadow takes over without reloading weights (see /tmp/gms-demo-shadow.log).
-kill -KILL -"$PRIMARY_PGID"
-
-# Keep the shadow running so you can observe the takeover; Ctrl-C to tear down.
+# Everything is up. Kill the primary yourself (see the header) to trigger
+# failover, then watch /tmp/gms-demo-engine-1.log.
 wait
