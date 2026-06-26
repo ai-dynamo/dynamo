@@ -32,7 +32,10 @@ use tracing::Instrument;
 use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
+    metrics::{
+        CancellationLabels, Endpoint,
+        process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
+    },
     service_v2,
 };
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
@@ -42,8 +45,8 @@ use crate::protocols::anthropic::types::{
     chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, NvExt, agent_context_from_headers, apply_header_routing_overrides,
-    validate_nvext_semantics,
+    AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
+    apply_header_routing_overrides, session_affinity_from_headers,
 };
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -174,6 +177,9 @@ async fn handler_anthropic_messages(
     if let Some(agent_context) = agent_context_from_headers(&headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
+    if let Some(session_affinity) = session_affinity_from_headers(&headers) {
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+    }
     let context = request.context();
 
     // Create connection handles
@@ -297,10 +303,6 @@ async fn anthropic_messages(
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
     apply_anthropic_header_routing_overrides(&mut chat_request, &headers, state.nvext_enabled());
-    if let Some(response) = validate_anthropic_nvext(chat_request.nvext.as_ref()) {
-        return Err(response);
-    }
-
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
     //
@@ -338,6 +340,14 @@ async fn anthropic_messages(
 
     let request = context.map(|_req| chat_request);
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // Create inflight_guard early to ensure all errors are counted
@@ -355,6 +365,18 @@ async fn anthropic_messages(
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+            inflight_guard.mark_error(super::metrics::ErrorType::Overload);
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Overloaded,
+                format!("{e:#}"),
+            );
+        }
+        if super::metrics::request_was_unavailable(e.as_ref()) {
+            inflight_guard.mark_error(super::metrics::ErrorType::Unavailable);
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Unavailable,
+                format!("{e:#}"),
+            );
         }
         // Check for cancelled request (client disconnected before response was sent)
         if super::metrics::request_was_cancelled(e.as_ref()) {
@@ -793,16 +815,6 @@ fn apply_anthropic_header_routing_overrides(
     }
 }
 
-fn validate_anthropic_nvext(nvext: Option<&NvExt>) -> Option<Response> {
-    validate_nvext_semantics(nvext).err().map(|e| {
-        anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            &format!("Invalid nvext: {e}"),
-        )
-    })
-}
-
 /// Build an Anthropic-formatted error response from a canonical
 /// [`SanitizedError`] variant. The status, public message, and Anthropic
 /// `error_type` all come from the variant; `details` are logged
@@ -900,7 +912,7 @@ mod tests {
     fn anthropic_nvext_rejects_agent_context() {
         let err = parse_nvext(Some(serde_json::json!({
             "agent_context": {
-                "trajectory_id": "run-123"
+                "session_id": "run-123"
             }
         })))
         .unwrap_err();
@@ -913,9 +925,9 @@ mod tests {
         let request = request_with_nvext();
         let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
         let mut headers = HeaderMap::new();
-        headers.insert("x-worker-instance-id", "42".parse().unwrap());
-        headers.insert("x-prefill-instance-id", "7".parse().unwrap());
-        headers.insert("x-dp-rank", "3".parse().unwrap());
+        headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
+        headers.insert("x-dynamo-prefill-instance-id", "7".parse().unwrap());
+        headers.insert("x-dynamo-dp-rank", "3".parse().unwrap());
 
         apply_anthropic_header_routing_overrides(&mut chat_request, &headers, true);
         let nvext = chat_request.nvext.unwrap();
@@ -931,7 +943,7 @@ mod tests {
         let request = request_with_nvext();
         let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
         let mut headers = HeaderMap::new();
-        headers.insert("x-worker-instance-id", "42".parse().unwrap());
+        headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
 
         apply_anthropic_header_routing_overrides(&mut chat_request, &headers, false);
         let nvext = chat_request.nvext.unwrap();

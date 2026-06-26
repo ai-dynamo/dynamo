@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Planner Examples
+subtitle: Examples for custom load predictors and the VirtualConnector for non-Kubernetes scaling environments.
 ---
 
 Planner-specific examples for advanced configuration and non-Kubernetes

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Dynamo Operator
+subtitle: Reference for the Dynamo Kubernetes operator covering its controllers, deployment modes, and reconciliation workflow.
 ---
 
 ## Overview

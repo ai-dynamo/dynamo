@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Prometheus + Grafana Setup
+subtitle: Single-machine setup for collecting Dynamo metrics in Prometheus and visualizing them in Grafana for local development and demos.
 ---
 
 ## Overview

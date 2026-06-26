@@ -83,6 +83,18 @@ fn worker_set_key(
     format!("{}:{}:{}", namespace, mt, wt)
 }
 
+fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
+    card.worker_type == Some(WorkerType::Encode)
+        || card.media_decoder.is_some()
+        || card.model_type.supports_images()
+        || card.model_type.supports_videos()
+        || card
+            .needs
+            .iter()
+            .flatten()
+            .any(|worker_type| *worker_type == WorkerType::Encode)
+}
+
 /// Resolve the effective [`WorkerType`] for a card during the
 /// cross-version rollout.
 ///
@@ -459,12 +471,25 @@ impl ModelWatcher {
             .await
             .with_context(|| model_name.clone())?;
 
-        // Check if instances of the SAME component remain in this namespace.
-        // In disaggregated deployments, prefill and decode are different components
-        // in the same namespace, so we must check at the component level to avoid
-        // removing one type's WorkerSet while the other still has workers.
-        let component_has_instances = active_instances.iter().any(|(eid, _)| {
-            eid.namespace == *worker_namespace && eid.component == *worker_component
+        // Check if instances of the SAME role and component remain in
+        // this namespace. In disaggregated deployments, prefill and
+        // decode are different components in the same namespace -- so
+        // checking only (ns, component) is necessary but not sufficient.
+        // Encode workers can share a (ns, component) with Aggregated, so
+        // we ALSO require the remaining instance to map to the same
+        // computed `ws_key` (which folds in worker_type for Encode). If
+        // we used only (ns, component), removing the last Encode
+        // instance from a namespace that still has an Aggregated worker
+        // in the same component would see "instances exist" and skip
+        // remove_worker_set, leaking the Encode WorkerSet forever.
+        let component_has_instances = active_instances.iter().any(|(eid, other_card)| {
+            eid.namespace == *worker_namespace
+                && eid.component == *worker_component
+                && worker_set_key(
+                    &eid.namespace,
+                    other_card.model_type,
+                    other_card.worker_type,
+                ) == ws_key
         });
 
         if !component_has_instances {
@@ -947,6 +972,7 @@ impl ModelWatcher {
                             Some(prefill_config),
                             self.prefill_load_estimator.clone(),
                             router_config.enforce_disagg,
+                            router_config.session_affinity_ttl_secs,
                             model_name.clone(),
                             namespace.clone(),
                             prefill_enable_eagle,
@@ -975,7 +1001,9 @@ impl ModelWatcher {
                         worker_monitor.clone(),
                         kv_chooser.clone(),
                         prefill_chooser.clone(),
+                        uses_multimodal_cache_routing(card),
                         router_config.enforce_disagg,
+                        router_config.session_affinity_ttl_secs,
                     )
                     .await
                     .context("build_preprocessed_routing")?,
@@ -1111,9 +1139,7 @@ impl ModelWatcher {
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
             }
@@ -1122,9 +1148,7 @@ impl ModelWatcher {
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
@@ -1430,5 +1454,24 @@ mod tests {
         );
         let prefill = worker_set_key("ns1", ModelType::empty(), Some(WorkerType::Prefill));
         assert_ne!(decode, prefill);
+    }
+
+    #[test]
+    fn worker_set_key_encode_and_aggregated_coexist_in_same_namespace() {
+        // Regression for the Encode/Aggregated key collision: Encode and
+        // Aggregated workers in the same namespace MUST map to different keys,
+        // so both can register without an MDC checksum mismatch. Under the
+        // role-in-key scheme, an Encode worker registers surface-less
+        // (ModelType::empty()) and lands in `{ns}::encode`, while Aggregated
+        // keeps its `{ns}:chat|completions:aggregated` bucket.
+        let agg_key = worker_set_key(
+            "dynamo",
+            ModelType::Chat | ModelType::Completions,
+            Some(WorkerType::Aggregated),
+        );
+        let enc_key = worker_set_key("dynamo", ModelType::empty(), Some(WorkerType::Encode));
+        assert_ne!(agg_key, enc_key);
+        assert_eq!(agg_key, "dynamo:chat|completions:aggregated");
+        assert_eq!(enc_key, "dynamo::encode");
     }
 }

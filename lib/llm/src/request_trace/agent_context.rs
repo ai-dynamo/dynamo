@@ -632,9 +632,10 @@ mod tests {
 
         let trace_state = AgentContextTraceState {
             agent_context: AgentContext {
-                trajectory_id: "run-finish:agent".to_string(),
-                parent_trajectory_id: None,
-                trajectory_final: None,
+                session_id: "run-finish:agent".to_string(),
+                parent_session_id: None,
+                session_final: None,
+                kv_hints: None,
             },
             request_model: "test-model".to_string(),
             request_tracker: None,
@@ -675,6 +676,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             Annotated::from_data(NvCreateChatCompletionStreamResponse {
                 inner: CreateChatCompletionStreamResponse {
@@ -700,6 +702,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
         ];
         for response in &responses {
@@ -746,9 +749,10 @@ mod tests {
 
         let trace_state = AgentContextTraceState {
             agent_context: AgentContext {
-                trajectory_id: "run-completion-finish:agent".to_string(),
-                parent_trajectory_id: None,
-                trajectory_final: None,
+                session_id: "run-completion-finish:agent".to_string(),
+                parent_session_id: None,
+                session_final: None,
+                kv_hints: None,
             },
             request_model: "test-model".to_string(),
             request_tracker: None,
