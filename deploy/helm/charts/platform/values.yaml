@@ -50,19 +50,32 @@ global:
     # create PodCliqueSets for multinode deployments.
     enabled: false
 
-  disaggregatedset:
-    # -- Whether this chart should install the bundled DisaggregatedSet (DS) subchart.
-    # When true, deploys the DS operator cluster-wide. DS orchestrates N LeaderWorkerSets
-    # (one per role) and is the recommended orchestrator for prefill/decode disaggregation.
-    # DS's Helm chart declares LWS as a subchart dependency, so installing DS transitively
-    # pulls in LWS as well.
-    # NOTE: For production environments, it is recommended to install DS separately.
+  lws:
+    # -- Whether this chart should install the bundled LeaderWorkerSet (LWS) subchart.
+    # When true, deploys the LWS operator cluster-wide. LWS is the multinode
+    # orchestrator used by the operator's LWS pathway.
+    # NOTE: For production environments, it is recommended to install LWS separately.
     install: false
-    # -- Whether to enable DS integration (multinode orchestration via DisaggregatedSets).
-    # Set to true when DS is available in the cluster (installed externally).
+    # -- Whether to enable LWS integration (multinode orchestration via LeaderWorkerSets).
+    # Set to true when LWS is available in the cluster (installed externally).
     # Automatically true when install=true. The operator uses this to decide whether to
-    # create DisaggregatedSets for multinode deployments when the DGD carries the
-    # nvidia.com/enable-disaggregatedset: "true" annotation.
+    # create LeaderWorkerSets for multinode deployments.
+    enabled: false
+
+  disaggregatedset:
+    # -- Whether to enable DisaggregatedSet (DS) support on top of LWS.
+    # When true, passes `enableDisaggregatedSet=true` to the LWS subchart, which
+    # installs the DS editor/viewer/admin ClusterRoles and validating webhook.
+    # Requires LWS to be installed (either via `global.lws.install=true` or
+    # externally). The DS CRD and bundled controller ship with the LWS chart and
+    # are always present once LWS is installed.
+    # DS orchestrates N LeaderWorkerSets (one per role) and is the recommended
+    # orchestrator for prefill/decode disaggregation.
+    install: false
+    # -- Whether to enable DS integration in the operator.
+    # Set to true to make the operator create DisaggregatedSets for multinode
+    # deployments when the DGD carries the `nvidia.com/enable-disaggregatedset:
+    # "true"` annotation. Automatically true when install=true.
     enabled: false
 
 # Subcharts configuration
@@ -294,26 +307,20 @@ grove:
   # -- Affinity for Grove pods
   affinity: {}
 
-# DisaggregatedSet component - role-coordinated multinode orchestration
-# Installation is controlled by global.disaggregatedset.install above.
-# Integration is controlled by global.disaggregatedset.enabled above.
-disaggregatedset:
-  controllerManager:
-    manager:
-      # -- Override the controller manager image. The default is upstream's
-      # `controller:latest`, which is not published. Set this to the image
-      # you built (e.g. `ghcr.io/<org>/disaggregatedset:v0.1.0`).
-      image:
-        repository: controller
-        tag: latest
-      resources:
-        limits:
-          cpu: 500m
-          memory: 128Mi
-        requests:
-          cpu: 10m
-          memory: 64Mi
-    replicas: 1
+# LeaderWorkerSet component - multinode orchestration
+# Installation is controlled by global.lws.install above.
+# Integration is controlled by global.lws.enabled above.
+lws:
+  # -- Install the DisaggregatedSet editor/viewer/admin ClusterRoles and
+  # validating webhook in the LWS chart. The DisaggregatedSet CRD and the
+  # bundled controller ship with the LWS chart and are always installed once
+  # LWS is enabled. Set to true when `global.disaggregatedset.install=true`
+  # so the operator can use the DS pathway.
+  enableDisaggregatedSet: false
+  # -- Node tolerations for LWS pods
+  tolerations: []
+  # -- Affinity for LWS pods
+  affinity: {}
 
 # Kai Scheduler component - advanced workload scheduling
 # Installation is controlled by global.kai-scheduler.install above.
