@@ -110,12 +110,13 @@ _CONCURRENT_TIMEOUT = _SERVER_START_TIMEOUT + 2 * (
 )
 
 # Test markers to align with repository conventions
-# Todo: enable the rest when kvbm is built in the ci
 pytestmark = [
+    pytest.mark.kvbm_determinism,
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_1,
-    pytest.mark.nightly,
+    pytest.mark.h100,
+    pytest.mark.post_merge,
 ]
 
 
