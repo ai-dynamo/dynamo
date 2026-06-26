@@ -9,7 +9,8 @@
 // via ../gen.sh -- they do not vendor a divergent copy. See ../CLAUDE.md for
 // edit + regeneration discipline.
 //
-// Source spec: sidecar-info/openengine_api.md
+// Human-readable reference:
+// https://github.com/connorcarpenter15/openengine/blob/main/docs/api.md
 
 syntax = "proto3";
 
@@ -293,21 +294,12 @@ message KvSessionRef {
   string transfer_backend = 2;
   repeated KvEndpoint endpoints = 3;
   uint32 dp_rank = 4;
-  // DEPRECATED: stringly-typed. The engine must re-parse each value to recover
-  // its JSON type (number vs string vs bool/array), which is error-prone -- a
-  // reparsed integer can leak back onto the wire as a tagged map and corrupt
-  // numeric params like NixlConnector remote_port/tp_size. Prefer
-  // `attributes_struct` (field 6). Retained for v1 compatibility.
-  map<string, string> attributes = 5;
   // Engine-specific KV-transfer parameters (e.g. NixlConnector
   // remote_host / remote_port / tp_size / remote_block_ids / do_remote_*),
   // carried as a Struct so numbers, booleans, and arrays survive the wire with
-  // their JSON type intact -- no string re-parsing on the engine side.
-  // Supersedes `attributes` (field 5): senders SHOULD set exactly one;
-  // receivers MUST prefer this when present. NOTE: Struct numbers are IEEE-754
-  // doubles (exact only to 2^53); for KV params with 64-bit integer values,
-  // carry them as strings within the Struct or use a dedicated field.
-  google.protobuf.Struct attributes_struct = 6;
+  // their JSON type intact. Struct numbers are IEEE-754 doubles (exact only to
+  // 2^53); carry larger integer values as strings or use a dedicated field.
+  google.protobuf.Struct attributes_struct = 5;
 }
 
 message KvEndpoint {
@@ -344,10 +336,8 @@ message GetKvEventSourcesResponse {
 
 message KvEventSource {
   string transport = 1;          // grpc, zmq
-  // DEPRECATED: free-form URL. Engines have advertised bind-style wildcards
-  // here (e.g. "tcp://*:5557") that a remote consumer cannot connect to.
-  // Prefer `endpoint_addr` (field 11). Retained for v1 compatibility.
-  string endpoint = 2;           // e.g. tcp://host:5557
+  // Connectable address. MUST use a routable host, never a bind wildcard.
+  KvEndpoint endpoint_addr = 2;
   string topic = 3;
   string replay_endpoint = 4;    // optional, for ZMQ replay
   uint32 data_parallel_rank = 5;
@@ -356,10 +346,6 @@ message KvEventSource {
   uint32 buffer_steps = 8;
   uint32 hwm = 9;
   uint32 max_queue_size = 10;
-  // Connectable address for the source. MUST be a routable host:port -- never
-  // a bind wildcard (e.g. host "*" / "0.0.0.0"). Supersedes `endpoint`
-  // (field 2): senders SHOULD set this; receivers MUST prefer it when present.
-  KvEndpoint endpoint_addr = 11;
 }
 
 message SubscribeKvEventsRequest {

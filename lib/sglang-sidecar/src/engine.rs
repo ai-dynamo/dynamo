@@ -468,23 +468,18 @@ impl LLMEngine for SglangSidecarEngine {
             .sources
             .into_iter()
             .filter(|s| s.transport == "zmq")
-            .map(|s| {
-                // Prefer the connectable `endpoint_addr` (a routable host:port)
-                // over the legacy `endpoint` string, which the engine often
-                // sets to a bind wildcard (e.g. `tcp://*:5557`) that the KV
-                // router cannot dial from another node.
-                let endpoint = match s.endpoint_addr {
-                    Some(e) => {
-                        let proto = if e.protocol.is_empty() { "tcp" } else { &e.protocol };
-                        format!("{proto}://{}:{}", e.host, e.port)
-                    }
-                    None => s.endpoint,
+            .filter_map(|s| {
+                let e = s.endpoint_addr?;
+                let proto = if e.protocol.is_empty() {
+                    "tcp"
+                } else {
+                    &e.protocol
                 };
-                KvEventSource::Zmq {
-                    endpoint,
+                Some(KvEventSource::Zmq {
+                    endpoint: format!("{proto}://{}:{}", e.host, e.port),
                     topic: s.topic,
                     dp_rank: s.data_parallel_rank,
-                }
+                })
             })
             .collect();
         Ok(sources)
@@ -856,7 +851,6 @@ fn bootstrap_info_to_kv_session(
         transfer_backend: "nixl".to_string(),
         endpoints: Vec::new(),
         dp_rank: 0,
-        attributes: std::collections::HashMap::new(),
         attributes_struct: Some(prost_types::Struct {
             fields: fields.into_iter().collect(),
         }),
@@ -867,9 +861,7 @@ fn bootstrap_info_to_kv_session(
 /// forwards to the decode peer (round-trips with
 /// [`disagg_json_to_kv_session`]).
 ///
-/// The sidecar is an opaque pass-through for the connector's handoff metadata:
-/// the typed `attributes_struct` is carried as native JSON (types preserved),
-/// with the legacy string-map `attributes` carried alongside only if set.
+/// The sidecar carries typed connector handoff metadata as native JSON.
 pub(crate) fn kv_session_to_disagg_json(session: pb::KvSessionRef) -> serde_json::Value {
     let mut obj = serde_json::json!({
         "session_id": session.session_id,
@@ -878,9 +870,6 @@ pub(crate) fn kv_session_to_disagg_json(session: pb::KvSessionRef) -> serde_json
     });
     if let Some(s) = session.attributes_struct.as_ref() {
         obj["attributes_struct"] = prost_struct_to_json(s);
-    }
-    if !session.attributes.is_empty() {
-        obj["attributes"] = serde_json::json!(session.attributes);
     }
     obj
 }
@@ -905,22 +894,11 @@ pub(crate) fn disagg_json_to_kv_session(
     let attributes_struct = obj
         .and_then(|o| o.get("attributes_struct"))
         .and_then(json_to_prost_struct);
-    let attributes = obj
-        .and_then(|o| o.get("attributes"))
-        .and_then(|v| v.as_object())
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
-
     pb::KvSessionRef {
         session_id,
         transfer_backend,
         endpoints: Vec::new(),
         dp_rank,
-        attributes,
         attributes_struct,
     }
 }
