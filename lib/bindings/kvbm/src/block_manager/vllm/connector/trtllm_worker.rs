@@ -369,7 +369,7 @@ impl Worker for KvConnectorWorker {
     }
 
     fn start_load_kv(&mut self) -> anyhow::Result<()> {
-        let onboarding_operations = self.onboarding_operations.clone();
+        let onboarding_operations = std::mem::take(&mut self.onboarding_operations);
         for operation in onboarding_operations {
             let request_id = operation.request_id.clone();
             self.connector.enqueue_request(operation);

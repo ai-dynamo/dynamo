@@ -1746,17 +1746,18 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
 
         // Skip actual transfers when in test mode
         if !shared.skip_transfers {
+            let expected_results = keys.len();
             // Execute object put via ObjectBlockOps
             let results = shared
                 .object_ops
-                .put_blocks(keys.clone(), shared.src_layout, block_ids)
+                .put_blocks(keys, shared.src_layout, block_ids)
                 .await;
 
             // Guard: put_blocks must return exactly one result per input block.
             // If mismatched, mark all blocks as failed since we can't correlate results.
-            if results.len() != keys.len() {
+            if results.len() != expected_results {
                 tracing::error!(
-                    expected = keys.len(),
+                    expected = expected_results,
                     actual = results.len(),
                     "put_blocks returned mismatched result count"
                 );
