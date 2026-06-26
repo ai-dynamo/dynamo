@@ -10,9 +10,11 @@
 // round-tripping a prior assistant turn as input:
 //   - `OutputMessage.id` / `.status` — omitted when echoing a previous output
 //   - `OutputTextContent.annotations` — omitted when the part carried none
-// Upstream is slow to relax these (see e.g. 64bit/async-openai#535 for the
-// sibling `ReasoningItem.id` fix, still open at time of writing); OpenAI's own
-// hosted API accepts the relaxed shapes on input regardless.
+//   - `ReasoningItem.id` — omitted by Codex/OpenCode/agent SDKs on echo
+// Upstream is slow to relax these (the sibling `ReasoningItem.id` fix landed in
+// 64bit/async-openai#535, but after our pinned 0.34, so we mirror it locally
+// as `InputReasoningItem`); OpenAI's own hosted API accepts the relaxed shapes
+// on input regardless.
 //
 // This mirrors the pattern in `crate::types::chat` where Dynamo owns the
 // request types it needs to extend or relax while re-exporting the rest of
@@ -120,6 +122,44 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+/// Deserialize `tool_choice`, coercing the object form `{"type": "auto" |
+/// "none" | "required", ...}` into the upstream `Mode` variant.
+///
+/// Upstream `ToolChoiceParam` only accepts `auto`/`none`/`required` as a bare
+/// string; the object form is reserved for naming a *specific* tool
+/// (`{"type": "function", "name": ...}`). But Anthropic-style clients (and
+/// litellm forwarding them verbatim) express the mode as an object, e.g.
+/// `{"type": "auto", "disable_parallel_tool_use": true}`. OpenAI's hosted API
+/// treats `{"type": "auto"}` and the bare `"auto"` identically; we do the same.
+/// Extra keys (e.g. `disable_parallel_tool_use`) are accepted and ignored —
+/// Dynamo has no per-call parallel-tool-use toggle to honor.
+///
+/// Any value that is not a mode-typed object falls through to standard
+/// `ToolChoiceParam` deserialization, so bare strings and specific-tool /
+/// hosted-tool objects keep working unchanged.
+fn deserialize_tool_choice<'de, D>(deserializer: D) -> Result<Option<ToolChoiceParam>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if let Some(serde_json::Value::String(t)) = value.get("type") {
+        let mode = match t.as_str() {
+            "auto" => Some(ToolChoiceOptions::Auto),
+            "none" => Some(ToolChoiceOptions::None),
+            "required" => Some(ToolChoiceOptions::Required),
+            _ => None,
+        };
+        if let Some(mode) = mode {
+            return Ok(Some(ToolChoiceParam::Mode(mode)));
+        }
+    }
+    ToolChoiceParam::deserialize(value)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 /// Relaxed counterpart to upstream `OutputTextContent` for input-side content.
@@ -265,8 +305,40 @@ pub enum MessageItem {
     Input(InputMessage),
 }
 
+/// A reasoning item echoed back as input for a subsequent turn. Relaxed
+/// compared to upstream `ReasoningItem`: `id` and `summary` are both optional.
+///
+/// Upstream marks `id` (and a present `summary` array) as required, but real
+/// clients omit them when round-tripping a prior reasoning turn as input:
+/// Codex / OpenCode / agent SDKs send `reasoning` items carrying only
+/// `encrypted_content` (and sometimes a `summary`) with no `id`. OpenAI's own
+/// hosted API accepts this; the OpenAPI spec is wrong. Upstream fixed `id` in
+/// `64bit/async-openai#535` (merged after our pinned 0.34), so we mirror that
+/// one-line relaxation here rather than chase a multi-version crate bump.
+///
+/// Named `InputReasoningItem` (not `ReasoningItem`) because upstream's
+/// `ReasoningItem` is dual-side: it is the canonical output-side type in
+/// `OutputItem::Reasoning(..)` / `Response.output`, which must stay strict.
+/// Same naming discipline as `InputOutputMessage` vs `OutputMessage`.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct InputReasoningItem {
+    /// Optional on input — upstream requires it; clients drop it on echo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Defaults to empty when absent — upstream requires a present array.
+    #[serde(default)]
+    pub summary: Vec<SummaryPart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<Vec<ReasoningTextContent>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<OutputStatus>,
+}
+
 /// Structured input/output item, discriminated by `type`. Mirrors upstream
-/// `Item` variant-for-variant; only `Message` uses a Dynamo-owned type.
+/// `Item` variant-for-variant; only `Message` and `Reasoning` use Dynamo-owned
+/// types.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Item {
@@ -279,7 +351,7 @@ pub enum Item {
     FunctionCallOutput(FunctionCallOutputItemParam),
     ToolSearchCall(ToolSearchCallItemParam),
     ToolSearchOutput(ToolSearchOutputItemParam),
-    Reasoning(ReasoningItem),
+    Reasoning(InputReasoningItem),
     Compaction(CompactionSummaryItemParam),
     ImageGenerationCall(ImageGenToolCall),
     CodeInterpreterCall(CodeInterpreterToolCall),
@@ -373,7 +445,11 @@ pub struct CreateResponse {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<ResponseTextParam>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_tool_choice",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub tool_choice: Option<ToolChoiceParam>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
@@ -388,6 +464,125 @@ pub struct CreateResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- issue #10963: tool_choice object form (CASE 1) ----
+
+    fn tool_choice_of(json: serde_json::Value) -> Option<ToolChoiceParam> {
+        let req: CreateResponse = serde_json::from_value(serde_json::json!({
+            "input": "hi",
+            "tool_choice": json,
+        }))
+        .expect("CreateResponse should deserialize");
+        req.tool_choice
+    }
+
+    #[test]
+    fn tool_choice_mode_object_coerces_to_mode() {
+        // Anthropic-style / litellm shape: a mode expressed as an object with
+        // extra keys. Must coerce to the corresponding `Mode`, ignoring extras.
+        assert_eq!(
+            tool_choice_of(serde_json::json!({"type": "auto", "disable_parallel_tool_use": true})),
+            Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+        );
+        assert_eq!(
+            tool_choice_of(serde_json::json!({"type": "none"})),
+            Some(ToolChoiceParam::Mode(ToolChoiceOptions::None)),
+        );
+        assert_eq!(
+            tool_choice_of(serde_json::json!({"type": "required"})),
+            Some(ToolChoiceParam::Mode(ToolChoiceOptions::Required)),
+        );
+    }
+
+    #[test]
+    fn tool_choice_bare_string_still_works() {
+        assert_eq!(
+            tool_choice_of(serde_json::json!("auto")),
+            Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+        );
+    }
+
+    #[test]
+    fn tool_choice_specific_function_object_still_works() {
+        // The object form naming a specific tool must NOT be swallowed by the
+        // mode coercion — `type: "function"` is not a mode.
+        match tool_choice_of(serde_json::json!({"type": "function", "name": "get_weather"})) {
+            Some(ToolChoiceParam::Function(f)) => assert_eq!(f.name, "get_weather"),
+            other => panic!("expected Function tool choice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_choice_absent_is_none() {
+        let req: CreateResponse =
+            serde_json::from_value(serde_json::json!({"input": "hi"})).unwrap();
+        assert!(req.tool_choice.is_none());
+    }
+
+    // ---- issue #10963: reasoning item echoed back without id/summary (CASE 2) ----
+
+    #[test]
+    fn reasoning_input_without_id_deserializes() {
+        // Codex / OpenCode / agent SDKs echo a reasoning item with no `id`.
+        let json = serde_json::json!({
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "thinking"}],
+        });
+        match serde_json::from_value::<InputItem>(json).expect("should deserialize") {
+            InputItem::Item(Item::Reasoning(r)) => {
+                assert!(r.id.is_none());
+                assert_eq!(r.summary.len(), 1);
+            }
+            other => panic!("expected Item::Reasoning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reasoning_input_encrypted_without_id_or_summary_deserializes() {
+        let json = serde_json::json!({
+            "type": "reasoning",
+            "encrypted_content": "AB==",
+        });
+        match serde_json::from_value::<InputItem>(json).expect("should deserialize") {
+            InputItem::Item(Item::Reasoning(r)) => {
+                assert!(r.id.is_none());
+                assert!(r.summary.is_empty());
+                assert_eq!(r.encrypted_content.as_deref(), Some("AB=="));
+            }
+            other => panic!("expected Item::Reasoning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reasoning_input_with_id_still_works() {
+        let json = serde_json::json!({
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "x"}],
+            "status": "completed",
+        });
+        match serde_json::from_value::<InputItem>(json).expect("should deserialize") {
+            InputItem::Item(Item::Reasoning(r)) => assert_eq!(r.id.as_deref(), Some("rs_1")),
+            other => panic!("expected Item::Reasoning, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn full_request_with_idless_reasoning_item_deserializes() {
+        // The exact failure mode reported in #10963: a turn-2 `input` list
+        // containing an echoed reasoning item that lost its `id`.
+        let req: Result<CreateResponse, _> = serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "input": [
+                {"role": "user", "content": "hi"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "x"}]},
+            ],
+        }));
+        assert!(
+            req.is_ok(),
+            "idless reasoning input should deserialize: {req:?}"
+        );
+    }
 
     #[test]
     fn relaxed_assistant_message_without_id_or_status() {
