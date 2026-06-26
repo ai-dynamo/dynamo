@@ -87,10 +87,7 @@ func (i *DockerSecretIndexer) RefreshIndex(ctx context.Context) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.secrets = tmpSecrets
-	if len(refreshErrors) > 0 {
-		return errors.Join(refreshErrors...)
-	}
-	return nil
+	return errors.Join(refreshErrors...)
 }
 
 func (i *DockerSecretIndexer) listOptions() []client.ListOption {

@@ -585,11 +585,8 @@ func main() {
 			case <-mainCtx.Done():
 				return
 			case <-ticker.C:
-				setupLog.Info("refreshing docker secrets index...")
 				if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
-					setupLog.Error(err, "unable to refresh docker secrets index")
-				} else {
-					setupLog.Info("docker secrets index refreshed")
+					setupLog.Error(err, "failed to refresh docker secrets index")
 				}
 			}
 		}
