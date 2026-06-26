@@ -33,6 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -563,9 +564,11 @@ spec:
 			generatedSpec := updated.Annotations["nvidia.com/generated-dgd-spec"]
 			Expect(generatedSpec).NotTo(BeEmpty())
 			Expect(generatedSpec).Should(ContainSubstring("apiVersion: nvidia.com/v1beta1"))
+			Expect(generatedSpec).Should(ContainSubstring("kind: DynamoGraphDeployment"))
 			Expect(updated.Status.ProfilingResults).ShouldNot(BeNil())
 			Expect(updated.Status.ProfilingResults.SelectedConfig).ShouldNot(BeNil())
 			Expect(string(updated.Status.ProfilingResults.SelectedConfig.Raw)).Should(ContainSubstring("nvidia.com/v1beta1"))
+			Expect(string(updated.Status.ProfilingResults.SelectedConfig.Raw)).Should(ContainSubstring(`"kind":"DynamoGraphDeployment"`))
 
 			// autoApply defaults to true in v1beta1, so after profiling the DGDR transitions to Deploying
 			Expect(updated.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseDeploying))
@@ -1596,6 +1599,27 @@ var _ = Describe("DGDR Error Handling", func() {
 	})
 
 	Context("When parsing multi-document YAML", func() {
+		It("Should add apiVersion and kind when serializing beta DGD manifests", func() {
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-dgd",
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+				},
+			}
+
+			rawTypedObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(dgd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rawTypedObject).NotTo(HaveKey("apiVersion"))
+			Expect(rawTypedObject).NotTo(HaveKey("kind"))
+
+			manifest, err := betaDGDManifestObject(dgd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(manifest).To(HaveKeyWithValue("apiVersion", nvidiacomv1beta1.GroupVersion.String()))
+			Expect(manifest).To(HaveKeyWithValue("kind", consts.ResourceTypeDynamoGraphDeployment))
+		})
+
 		It("Should extract DGD from ConfigMap + DGD YAML", func() {
 			// Multi-document YAML with ConfigMap first, then DGD
 			multiDocYAML := `---
@@ -1619,7 +1643,6 @@ spec:
 			dgd, err := reconciler.extractDGDFromYAML([]byte(multiDocYAML))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(dgd).NotTo(BeNil())
-			Expect(dgd.Kind).Should(Equal("DynamoGraphDeployment"))
 			Expect(dgd.Name).Should(Equal("test-dgd"))
 			Expect(dgd.Spec.BackendFramework).Should(Equal("vllm"))
 		})
@@ -1638,7 +1661,6 @@ spec:
 			dgd, err := reconciler.extractDGDFromYAML([]byte(singleDocYAML))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(dgd).NotTo(BeNil())
-			Expect(dgd.Kind).Should(Equal("DynamoGraphDeployment"))
 			Expect(dgd.Name).Should(Equal("test-dgd-single"))
 		})
 
@@ -1665,7 +1687,6 @@ data:
 			dgd, err := reconciler.extractDGDFromYAML([]byte(multiDocYAML))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(dgd).NotTo(BeNil())
-			Expect(dgd.Kind).Should(Equal("DynamoGraphDeployment"))
 			Expect(dgd.Name).Should(Equal("test-dgd-first"))
 		})
 
@@ -1726,7 +1747,6 @@ spec:
 			dgd, additionalResources, err := reconciler.extractResourcesFromYAML([]byte(multiDocYAML))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(dgd).NotTo(BeNil())
-			Expect(dgd.APIVersion).Should(Equal(nvidiacomv1beta1.GroupVersion.String()))
 			Expect(dgd.Name).Should(Equal("test-dgd"))
 			Expect(additionalResources).To(HaveLen(1))
 			Expect(additionalResources[0].GetKind()).Should(Equal("ConfigMap"))
@@ -1748,7 +1768,6 @@ spec:
 			dgd, err := reconciler.extractDGDFromYAML([]byte(betaDGDYAML))
 			Expect(err).NotTo(HaveOccurred())
 			Expect(dgd).NotTo(BeNil())
-			Expect(dgd.APIVersion).Should(Equal(nvidiacomv1beta1.GroupVersion.String()))
 			Expect(dgd.Name).Should(Equal("test-beta-dgd"))
 			Expect(dgd.Spec.Components).Should(HaveLen(1))
 			Expect(dgd.Spec.Components[0].ComponentName).Should(Equal("Frontend"))

@@ -977,10 +977,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 
 	// Create DGD from generated deployment
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: nvidiacomv1beta1.GroupVersion.String(),
-			Kind:       consts.ResourceTypeDynamoGraphDeployment,
-		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        dgdName,
 			Namespace:   dgdNamespace,
@@ -2086,15 +2082,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 		}
 	}
 
+	// The DGDR status/annotation store a manifest that is parsed later as
+	// unstructured YAML, so keep apiVersion/kind there without setting TypeMeta
+	// on the typed object submitted through the Kubernetes client.
+	dgdManifest, err := betaDGDManifestObject(dgd)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to build generated DGD manifest: %w", err)
+	}
+
 	// Store the generated DGD in ProfilingResults.SelectedConfig
-	dgdJSON, err := json.Marshal(dgd)
+	dgdJSON, err := json.Marshal(dgdManifest)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to marshal generated DGD to JSON: %w", err)
 	}
 	profilingResults.SelectedConfig = &runtime.RawExtension{Raw: dgdJSON}
 
 	// Serialize the DGD spec to an annotation so createDGD can retrieve it
-	dgdBytes, err := sigsyaml.Marshal(dgd)
+	dgdBytes, err := sigsyaml.Marshal(dgdManifest)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to marshal generated DGD: %w", err)
 	}
@@ -2107,6 +2111,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 		return nil, "", fmt.Errorf("failed to update DGDR with generated DGD annotation: %w", err)
 	}
 	return profilingResults, dgd.Name, nil
+}
+
+// betaDGDManifestObject returns the serialized-manifest form of a beta DGD.
+// Typed client objects should let the scheme provide GVK, but stored manifests
+// need explicit apiVersion/kind so extractResourcesFromYAML can identify them.
+func betaDGDManifestObject(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (map[string]interface{}, error) {
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(dgd)
+	if err != nil {
+		return nil, err
+	}
+	obj["apiVersion"] = nvidiacomv1beta1.GroupVersion.String()
+	obj["kind"] = consts.ResourceTypeDynamoGraphDeployment
+	return obj, nil
 }
 
 // extractParetoFromWebUIData parses webui_data.json and returns all Pareto-optimal
@@ -2271,19 +2288,11 @@ func dgdFromUnstructured(obj *unstructured.Unstructured) (*nvidiacomv1beta1.Dyna
 		if err := alphaDGD.ConvertTo(betaDGD); err != nil {
 			return nil, err
 		}
-		betaDGD.TypeMeta = metav1.TypeMeta{
-			APIVersion: nvidiacomv1beta1.GroupVersion.String(),
-			Kind:       consts.ResourceTypeDynamoGraphDeployment,
-		}
 		return betaDGD, nil
 	case nvidiacomv1beta1.GroupVersion.String():
 		betaDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, betaDGD); err != nil {
 			return nil, err
-		}
-		betaDGD.TypeMeta = metav1.TypeMeta{
-			APIVersion: nvidiacomv1beta1.GroupVersion.String(),
-			Kind:       consts.ResourceTypeDynamoGraphDeployment,
 		}
 		return betaDGD, nil
 	default:
