@@ -47,6 +47,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 use futures::StreamExt;
+use rand::Rng;
 use serde::Deserialize;
 use tokio::sync::{Notify, OnceCell, Semaphore, mpsc, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
