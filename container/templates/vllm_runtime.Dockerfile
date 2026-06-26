@@ -24,6 +24,7 @@ ARG NIXL_REF
 ARG CUDA_MAJOR
 {% endif %}
 ARG MODELEXPRESS_VERSION
+ARG MODELEXPRESS_REF
 
 WORKDIR /workspace
 
@@ -200,8 +201,17 @@ RUN uv pip uninstall triton && \
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
-    uv pip install {{ pip_target }} --no-deps \
-        "modelexpress==${MODELEXPRESS_VERSION}"
+    if [ -n "${MODELEXPRESS_REF:-}" ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends git; \
+        rm -rf /var/lib/apt/lists/*; \
+        uv pip install {{ pip_target }} --no-deps \
+            "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
+    else \
+        uv pip install {{ pip_target }} --no-deps \
+            "modelexpress==${MODELEXPRESS_VERSION}"; \
+    fi; \
+    python3 -c "from modelexpress import MxV2RefitReceiver; import modelexpress.nemo_rl_v2 as v2; print(v2.__file__)"
 {% endif %}
 
 {% endif %}
