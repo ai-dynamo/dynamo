@@ -35,7 +35,7 @@ Override any tunable via the environment (defaults shown):
 
 ```bash
 MODEL=Qwen/Qwen3-0.6B GMS_SOCKET_DIR=/tmp/gms-demo \
-CUDA_VISIBLE_DEVICES=0 WARMUP=90 ./run.sh
+CUDA_VISIBLE_DEVICES=0 ./run.sh
 ```
 
 `run.sh` starts etcd + nats + the GMS server + both engines, waits for them to

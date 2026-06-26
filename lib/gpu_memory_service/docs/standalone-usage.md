@@ -144,7 +144,7 @@ engine, this list is exactly the work to do** — and the primitives you need
 | **TensorRT-LLM** | **Weight load only (prototype)** — `LoadFormat.GMS` RW writer / RO readers. **No** sleep/wake, scratch KV, or `flock` activation yet; shadow failover needs the lifecycle above added (reusing the wheel's primitives). |
 | **SGLang** | GMS weight / memory-saver integration via the Dynamo runtime. |
 
-## A couple of nodes: what you have to build
+## Multiple nodes: what you have to build
 
 When the engine itself spans nodes (tensor/pipeline parallel, or wide expert
 parallel), the same idea applies but **you** own more of it. The key facts:
@@ -189,15 +189,11 @@ Kubernetes you implement the equivalent in your launcher. GMS gives you the fast
 weight re-materialization and the lock; the detect / tear-down / promote /
 relaunch loop is yours.
 
-### WideEP ("fail over many servers at once")
-
-Same split, at scale. GMS's contribution is **fast per-rank weight
-re-materialization**: when a rank/server dies, its replacement imports *that
-rank's* weight shard from GMS instead of reloading from disk. TRT-LLM's
-`weight_sharing/source_identity.py` supplies the per-rank weight-set identity
-("rank N imports the shard produced for rank N") that keeps this correct.
-
-GMS does **not** detect the dead rank, decide to serve degraded (N−1), re-spawn
-the rank, or rejoin the collective (back to N). That detect / serve-degraded /
-respawn / rejoin loop is your control plane — the same four steps as above. GMS
-alone does **not** "fail over many servers."
+The same applies to wide expert parallelism (WideEP) — it is just a large
+multi-node deployment. When a rank/server dies, its replacement imports *that
+rank's* weight shard from GMS instead of reloading from disk (TRT-LLM's
+`weight_sharing/source_identity.py` provides the per-rank identity that keeps
+"rank N imports the shard produced for rank N" correct). GMS still does **not**
+detect the dead rank, serve degraded (N−1), re-spawn it, or rejoin the
+collective — that's the same detect / tear-down / promote / relaunch loop above,
+just across more processes.

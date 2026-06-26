@@ -18,7 +18,6 @@ export ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://localhost:2379}"
 export NATS_SERVER="${NATS_SERVER:-nats://localhost:4222}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 LOCK="${FAILOVER_LOCK_PATH:-$GMS_SOCKET_DIR/failover.lock}"
-WARMUP="${WARMUP:-90}" # seconds for both engines to load weights and park
 
 PIDS=()
 trap 'kill -KILL -"${PRIMARY_PGID:-0}" -"${SHADOW_PGID:-0}" 2>/dev/null; kill "${PIDS[@]}" 2>/dev/null' EXIT
@@ -50,8 +49,9 @@ python -m gpu_memory_service.cli.server >/tmp/gms-demo-gms.log 2>&1 & PIDS+=($!)
 engine 0 >/tmp/gms-demo-primary.log 2>&1 & PRIMARY_PGID=$!
 engine 1 >/tmp/gms-demo-shadow.log 2>&1 & SHADOW_PGID=$!
 
-# Let both engines load weights and reach the flock.
-sleep "$WARMUP"
+# Wait until the shadow has loaded weights and parked on the flock (the standby
+# is only "warm" once it is blocked waiting for the lock).
+until grep -q "waiting for lock" /tmp/gms-demo-shadow.log 2>/dev/null; do sleep 2; done
 
 # Crash the primary's process group; the kernel releases its flock and the
 # shadow takes over without reloading weights (see /tmp/gms-demo-shadow.log).
