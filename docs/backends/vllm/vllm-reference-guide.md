@@ -5,8 +5,6 @@ title: Reference Guide
 subtitle: Configuration, arguments, and operational details for the vLLM backend
 ---
 
-# Reference Guide
-
 ## Overview
 
 The vLLM backend in Dynamo integrates [vLLM](https://github.com/vllm-project/vllm) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, and request cancellation. Dynamo leverages vLLM's native KV cache events, NIXL-based transfer mechanisms, and metric reporting.
@@ -26,6 +24,36 @@ The `--help` output is organized into the following groups:
 - **Dynamo Runtime Options** — Namespace, discovery backend, request/event plane, endpoint types, tool/reasoning parsers, and custom chat templates. These are common across all Dynamo backends and use `DYN_*` env vars.
 - **Dynamo vLLM Options** — Disaggregation mode, tokenizer selection, sleep mode, multimodal flags, vLLM-Omni pipeline configuration, headless mode, and ModelExpress. These use `DYN_VLLM_*` env vars.
 - **vLLM Engine Options** — All native vLLM arguments (`--model`, `--tensor-parallel-size`, `--kv-transfer-config`, `--kv-events-config`, `--enable-prefix-caching`, etc.). See the [vLLM serve args documentation](https://docs.vllm.ai/en/stable/configuration/serve_args.html).
+
+### Tool and Reasoning Parsers
+
+Use `--dyn-tool-call-parser` and `--dyn-reasoning-parser` to match the model's output format when the model emits tool calls and/or reasoning content. The current supported values are documented in [Tool Call Parsing (Dynamo)](../../tool-calling/README.md#supported-tool-call-parsers) and [Reasoning Parsing (Dynamo)](../../reasoning/README.md#supported-reasoning-parsers).
+
+### Priority Scheduling
+
+vLLM engine-level request priority is controlled by the upstream vLLM
+`--scheduling-policy priority` argument.
+
+```bash
+python -m dynamo.vllm \
+    --model <model> \
+    --scheduling-policy priority
+```
+
+Clients still send the Dynamo API value directly:
+`nvext.agent_hints.priority`. Higher values mean higher priority at the Dynamo
+API layer. Dynamo converts that value before passing it to vLLM, which uses a
+different native priority polarity internally.
+
+Do not negate `nvext.agent_hints.priority` in the client for vLLM. If you are
+also using the router queue, configure the frontend-side
+`--router-queue-threshold` separately; vLLM engine scheduling only applies
+after a request reaches the worker.
+
+For the cross-layer behavior, see
+[Priority Scheduling](../../components/router/priority-scheduling.md). For the upstream
+flag definition, see the
+[vLLM serve args documentation](https://docs.vllm.ai/en/stable/configuration/serve_args.html).
 
 ### Prompt Embeddings
 
@@ -92,5 +120,5 @@ Dynamo supports [request migration](../../fault-tolerance/request-migration.md) 
 - **[Examples](vllm-examples.md)**: All deployment patterns with launch scripts
 - **[vLLM README](README.md)**: Quick start and feature overview
 - **[Observability](vllm-observability.md)**: Metrics and monitoring setup
-- **[Router Guide](../../components/router/router-guide.md)**: KV-aware routing configuration
+- **[Configuration and Tuning](../../components/router/router-configuration.md)**: KV-aware routing configuration
 - **[Fault Tolerance](../../fault-tolerance/README.md)**: Request migration, cancellation, and graceful shutdown

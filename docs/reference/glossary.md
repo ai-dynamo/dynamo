@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Glossary
+subtitle: Definitions of core Dynamo terms covering disaggregated serving, KV cache, components, and the distributed runtime.
 ---
 
 ## B
@@ -17,6 +18,8 @@ title: Glossary
 
 **Disaggregated Serving** - Dynamo's core architecture that separates prefill and decode phases into specialized engines to maximize GPU throughput and improve performance.
 
+**Discovery Plane** - The service discovery layer where components (frontend, router, and workers) register services, discover services, and watch for new service life-cycle events at runtime using Kubernetes or etcd backends.
+
 **Distributed Runtime** - Dynamo's Rust-based core system that manages service discovery, communication, and component lifecycle across distributed clusters.
 
 **Dynamo** - NVIDIA's high-performance distributed inference framework for Large Language Models (LLMs) and generative AI models, designed for multinode environments with disaggregated serving and cache-aware routing.
@@ -26,6 +29,8 @@ title: Glossary
 ## E
 **Endpoint** - A specific network-accessible API within a Dynamo component, such as `generate` or `load_metrics`.
 
+**Event Plane** - The pub/sub layer for KV cache updates, worker metrics, and sequence tracking; it supports KV-aware routing and disaggregated serving architectures.
+
 ## F
 **Frontend** - Dynamo's API server component that receives user requests and provides OpenAI-compatible HTTP endpoints.
 
@@ -33,7 +38,9 @@ title: Glossary
 **Graph** - A collection of interconnected Dynamo components that form a complete inference pipeline with request paths (single-in) and response paths (many-out for streaming). A graph can be packaged into a Dynamo Artifact for deployment.
 
 ## I
-**Instance** - A running process with a unique `instance_id`. Multiple instances can serve the same namespace, component, and endpoint for load balancing
+**Instance** - A running process with a unique `instance_id`. Multiple instances can serve the same namespace, component, and endpoint for load balancing.
+
+**Inter-Token Latency (ITL)** - The latency between consecutive output tokens during the decode phase; typically paired with TTFT to define performance SLAs.
 
 ## K
 **KV Block Manager (KVBM)** - Dynamo's scalable runtime component that handles memory allocation, management, and remote sharing of Key-Value blocks across heterogeneous and distributed environments.
@@ -46,6 +53,11 @@ title: Glossary
 
 **KVPublisher** - Dynamo component that emits KV cache events (stored/removed) from individual workers to the global KVIndexer.
 
+**KV Transfer Policy** - Kubernetes DGD policy under `spec.experimental.kvTransferPolicy` that tells Dynamo which worker topology domain to use for disaggregated prefill-to-decode KV-cache transfer routing.
+
+## L
+
+**LoRA (Low-Rank Adaptation)** - A fine-tuning technique for serving specialized model variants without duplicating full model weights. Dynamo supports dynamic loading and serving of LoRA adapters at runtime using worker APIs (for example, to load/unload,or for discovery in /v1/models).
 
 ## M
 **Model Deployment Card (MDC)** - A configuration structure containing all information required for distributed model serving. When a worker loads a model, it creates an MDC containing references to components such as the tokenizer, templates, runtime config. Workers publish their MDC to make the model discoverable to frontends. Frontends use the MDC to configure request preprocessing (tokenization, prompt formatting).
@@ -66,13 +78,19 @@ title: Glossary
 
 **Processor** - Dynamo component that handles request preprocessing, tokenization, and routing decisions.
 
+**Profiler** - Dynamo component that analyzes model performance to determine optimal engine configurations, including disagg/agg, parallelization mapping (TP, TEP, DEP), and other engine knobs (batch size, max num tokens), feeding the Planner for SLA-driven autoscaling.
+
 ## R
 **RadixAttention** - Technique from SGLang that uses a prefix tree structure for efficient KV cache matching, insertion, and eviction.
 
 **RDMA (Remote Direct Memory Access)** - Technology that allows direct memory access between distributed systems, used for efficient KV cache transfers.
 
+**Request Plane** - The transport layer that transmits RPCs between components (frontend-to-worker or router-to-router) utilizing one of these protocols: TCP, HTTP, or NATS.
+
 ## S
 **SGLang** - Fast LLM inference framework with native embedding support and RadixAttention.
+
+**Speculative Decoding** - An optimization where a draft model proposes tokens for parallel verification by the main model; reduces latency (for example, vLLM with Eagle).
 
 ## T
 **Tensor Parallelism (TP)** - Model parallelism technique where model weights are distributed across multiple GPUs.
@@ -80,6 +98,12 @@ title: Glossary
 **TensorRT-LLM** - NVIDIA's optimized LLM inference engine with multinode MPI distributed support.
 
 **Time-To-First-Token (TTFT)** - The latency from receiving a request to generating the first output token.
+
+**Topology-Aware KV Transfer** - Dynamo routing behavior that constrains or biases decode worker selection toward workers sharing the selected prefill worker's topology domain.
+
+**Topology Domain** - A logical level in the cluster topology, such as `zone` or `rack`. For topology-aware KV transfer, workers publish domain values in `ModelRuntimeConfig.topology_domains`.
+
+**Topology Taint** - A canonical worker taint generated from topology metadata in the form `dynamo.topology/<domain>=<value>`. The router uses these taints through normal `RoutingConstraints`.
 
 ## V
 **vLLM** - High-throughput LLM serving engine with distributed tensor/pipeline parallelism and PagedAttention.

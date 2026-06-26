@@ -24,7 +24,7 @@ limitations under the License.
 // The Dynamo KV scorer sets routing headers that the Lua filter at the
 // gateway uses to inject nvext into the request body:
 //
-//   - x-worker-instance-id: Selected worker ID (decode worker in disagg mode)
+//   - x-dynamo-worker-instance-id: Selected worker ID (decode worker in disagg mode)
 //   - x-prefiller-host-port: Prefill worker ID (disaggregated mode only)
 //   - x-dynamo-routing-mode: "aggregated" or "disaggregated"
 //
@@ -38,7 +38,7 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/gateway-api-inference-extension/cmd/epp/runner"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
+	plugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/framework/interface/plugin"
 
 	// Dynamo plugins
 	"github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/disagg"

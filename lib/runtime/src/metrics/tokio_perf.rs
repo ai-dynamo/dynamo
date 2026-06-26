@@ -8,6 +8,7 @@ use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntCounterVec, IntGau
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
+use tokio_util::sync::CancellationToken;
 
 use super::prometheus_names::{frontend_perf, name_prefix, tokio_perf as names};
 use crate::MetricsRegistry;
@@ -246,7 +247,8 @@ pub fn ensure_tokio_perf_metrics_registered_prometheus(
 
 /// Run the tokio metrics collector (1s interval) and event-loop canary.
 /// Spawn this on the runtime you want to monitor (e.g. primary handle).
-pub async fn tokio_metrics_and_canary_loop() {
+/// The loop exits cleanly when `cancel` is triggered.
+pub async fn tokio_metrics_and_canary_loop(cancel: CancellationToken) {
     let canary_interval = Duration::from_millis(10);
     let stall_threshold = Duration::from_millis(5);
     let collect_interval = Duration::from_secs(1);
@@ -254,7 +256,13 @@ pub async fn tokio_metrics_and_canary_loop() {
     let mut prev_counters = PrevWorkerCounters::new();
     loop {
         let start = Instant::now();
-        tokio::time::sleep(canary_interval).await;
+        tokio::select! {
+            _ = tokio::time::sleep(canary_interval) => {}
+            _ = cancel.cancelled() => {
+                tracing::debug!("tokio metrics and canary loop shutting down");
+                return;
+            }
+        }
         let delay = start.elapsed().saturating_sub(canary_interval);
         EVENT_LOOP_DELAY_SECONDS.observe(delay.as_secs_f64());
         if delay > stall_threshold {

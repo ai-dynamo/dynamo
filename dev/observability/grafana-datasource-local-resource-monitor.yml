@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Grafana datasource for the high-frequency resource monitoring Prometheus instance.
+# This is a separate datasource from the main Prometheus so that Grafana panels
+# can query dynamo_gpu_* and dynamo_cpu_* metrics at 200ms resolution.
+
+apiVersion: 1
+
+datasources:
+  - name: dynamo-resource-monitor
+    type: prometheus
+    uid: dynamo-resource-monitor
+    access: proxy
+    url: http://dynamo-resource-monitor:9091
+    isDefault: false
+    jsonData:
+      timeInterval: 200ms

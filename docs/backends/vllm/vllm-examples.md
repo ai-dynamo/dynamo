@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Examples
+subtitle: Launch scripts cover aggregated, disaggregated, KV-routed, and expert-parallel deployment patterns for the vLLM backend.
 ---
-
-# vLLM Examples
 
 For quick start instructions, see the [vLLM README](README.md). This document provides all deployment patterns for running vLLM with Dynamo, including aggregated, disaggregated, KV-routed, and expert-parallel configurations.
 
@@ -21,12 +20,12 @@ For quick start instructions, see the [vLLM README](README.md). This document pr
 For local/bare-metal development, start etcd and optionally NATS using Docker Compose:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 <Note>
 - **etcd** is optional but is the default local discovery backend. File-based discovery is also available (see `python -m dynamo.vllm --help` for `--discovery-backend` options).
-- **NATS** is only needed when using KV routing with events. Prediction-based routing does not require NATS.
+- **NATS** is only needed when using NATS-backed KV routing events. ZMQ-backed events and prediction-based routing do not require NATS.
 - **On Kubernetes**, neither is required when using the Dynamo operator.
 </Note>
 
@@ -40,19 +39,36 @@ Each launch script runs the frontend and worker(s) in a single terminal. You can
 
 The simplest deployment pattern: a single worker handles both prefill and decode. Requires 1 GPU.
 
+Run on CUDA devices:
+
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg.sh
+```
+
+Run on XPUs:
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/xpu/agg_xpu.sh
 ```
 
 ### Aggregated Serving with KV Routing
 
 Two workers behind a [KV-aware router](../../components/router/README.md) that maximizes cache reuse. Requires 2 GPUs.
 
+Run on CUDA devices:
+
 ```bash
 cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/agg_router.sh
 ```
+Run on XPUs:
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/xpu/agg_router_xpu.sh
+```
+
 
 This launches the frontend in KV routing mode with two workers publishing KV events over ZMQ.
 
@@ -113,7 +129,7 @@ Start NATS/ETCD on the head node so all worker nodes can reach them:
 
 ```bash
 # On head node
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 
 # Set on ALL nodes
 export HEAD_NODE_IP="<your-head-node-ip>"

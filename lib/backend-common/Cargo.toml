@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-backend-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Shared runtime glue for Rust LLM backends."
+# examples/mocker is its own workspace member crate, not a cargo-auto-discovered example.
+autoexamples = false
+
+[features]
+# Enables the conformance test kit (testing.rs). Intended for `[dev-dependencies]`
+# in backend crates — adds no weight to production binaries.
+testing = []
+# Enables NATS-backed integration tests (e.g. the on_endpoint_ready handoff).
+# Forwards to dynamo-runtime's integration feature for `create_test_drt_async`.
+integration = ["dynamo-runtime/integration"]
+
+[dependencies]
+dynamo-runtime = { workspace = true }
+dynamo-llm = { path = "../llm", default-features = false }
+dynamo-protocols = { workspace = true }
+
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+async-trait = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+futures = { workspace = true }
+opentelemetry = { workspace = true }
+parking_lot = { workspace = true }
+prometheus = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }

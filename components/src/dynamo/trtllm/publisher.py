@@ -31,14 +31,14 @@ from contextlib import asynccontextmanager
 from queue import Queue
 from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
-import msgpack
+import msgspec
 import zmq
 from prometheus_client import CollectorRegistry
 
 from dynamo.common.utils.prometheus import LLMBackendMetrics
-from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.llm import FpmDirectPublisher, KvEventPublisher, WorkerMetricsPublisher
 
-logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # Create a dedicated registry for dynamo_component metrics
 # This ensures these metrics are isolated and can be exposed via their own callback
@@ -54,6 +54,45 @@ _PUBLISH_BACKOFF_FACTOR = 2.0
 _KV_EVENTS_MIN_SLEEP_SEC = 0.005
 _KV_EVENTS_MAX_SLEEP_SEC = 0.02
 _KV_EVENTS_BACKOFF_FACTOR = 1.5
+
+# InflightBatchingStats fields the FPM publisher consumes. As of
+# NVIDIA/TensorRT-LLM#13199 (merged 2026-04-27) all 11 fields live nested
+# inside iterationStats["inflightBatchingStats"]. The first-stat schema
+# probe requires the nested dict to be present and to carry every key
+# below; any missing field disables the publisher so we do not emit
+# all-zero snapshots that the Planner would misread as "worker idle".
+#
+# Mapping to the Dynamo planner-level fields:
+#   numContextRequests        -> scheduled_num_prefill_requests
+#   numCtxTokens              -> scheduled_sum_prefill_tokens (compute this
+#                                iter; excludes KV-read tokens, matches
+#                                vLLM TTFT-prediction semantics)
+#   numCtxKvTokens            -> scheduled_sum_prefill_kv_tokens
+#   numGenRequests            -> scheduled_num_decode_requests
+#   numGenKvTokens            -> scheduled_sum_decode_kv_tokens
+#   numQueuedContextRequests  -> queued_num_prefill_requests
+#   numQueuedCtxTokens        -> queued_sum_prefill_tokens
+#   numPausedRequests
+#     + numQueuedGenRequests  -> queued_num_decode_requests   (composite)
+#   numPausedKvTokens
+#     + numQueuedGenKvTokens  -> queued_sum_decode_kv_tokens  (composite)
+# Paused-request double-counting (also present in numScheduledRequests
+# upstream) is intentional: the Planner reads queued_decode as a
+# KV-pressure preemption signal where paused-decodes carry the same
+# semantic weight as queued-gen-only requests.
+_FPM_REQUIRED_IBS_FIELDS = (
+    "numContextRequests",
+    "numCtxTokens",
+    "numCtxKvTokens",
+    "numGenRequests",
+    "numGenKvTokens",
+    "numQueuedContextRequests",
+    "numQueuedCtxTokens",
+    "numQueuedGenRequests",
+    "numQueuedGenKvTokens",
+    "numPausedRequests",
+    "numPausedKvTokens",
+)
 
 
 def _to_signed_i64(value: int | None) -> int | None:
@@ -184,8 +223,10 @@ class ZmqKvEventPublisher:
                 f"TensorRT-LLM: ZMQ publisher sending {event_type} event (dp_rank={attention_dp_rank}) to {self.zmq_endpoint}"
             )
 
-            # Serialize with msgpack (vLLM uses msgpack/rmp_serde compatible format)
-            payload = msgpack.packb(batch, use_bin_type=True)
+            # Serialize with msgspec's msgpack implementation to match the
+            # vLLM wire format without depending on the separate msgpack
+            # package.
+            payload = msgspec.msgpack.encode(batch)
 
             # Create multipart message: [topic, sequence, payload]
             # Format matches what consolidator expects: 3 frames [topic, sequence, payload]
@@ -212,6 +253,12 @@ class ZmqKvEventPublisher:
 class ManagedThread(threading.Thread):
     """
     A thread that runs a task and handles errors.
+
+    Each ManagedThread owns a private asyncio event loop. Previously the thread
+    submitted its coroutine to a captured request-handler loop via
+    run_coroutine_threadsafe(), making publisher work compete with HTTP request
+    handling on the same event loop. Now the publisher's polling work runs on
+    a dedicated loop in a real OS thread, decoupled from the request loop.
     """
 
     def __init__(
@@ -226,59 +273,87 @@ class ManagedThread(threading.Thread):
         self.task = task
         self.error_queue = error_queue
         self.kwargs = kwargs
+        # `loop` is accepted for ABI compatibility but is no longer used: the
+        # thread constructs and owns its own loop in run().
         self.loop = loop
         self.daemon = True
-        self._current_future: Optional[concurrent.futures.Future] = None
+        self._owned_loop: Optional[asyncio.AbstractEventLoop] = None
 
         self._stop_event = threading.Event()
 
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        # ABI-preserving no-op; see class docstring.
         self.loop = loop
 
     def run(self) -> None:
-        while not self._stop_event.is_set():
-            task: Optional[
-                Union[Callable[..., Awaitable[bool]], weakref.WeakMethod]
-            ] = self.task
-            if isinstance(task, weakref.WeakMethod):
-                task = task()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._owned_loop = loop
+
+        try:
+            while not self._stop_event.is_set():
+                task: Optional[
+                    Union[Callable[..., Awaitable[bool]], weakref.WeakMethod]
+                ] = self.task
+                if isinstance(task, weakref.WeakMethod):
+                    task = task()
+                    if task is None:
+                        # Normally, this should not happen.
+                        logging.warning("WeakMethod is expired.")
+                        break
+
                 if task is None:
-                    # Normally, this should not happen.
-                    logging.warning("WeakMethod is expired.")
                     break
 
-            if task is None:
-                break
+                try:
+                    coro = task(**self.kwargs)
+                    if not asyncio.iscoroutine(coro):
+                        logging.error(f"Task {task} did not return a coroutine")
+                        break
 
+                    loop.run_until_complete(coro)
+                except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                    logging.debug(f"Thread {self.name} was cancelled")
+                    break
+                except Exception as e:
+                    logging.error(
+                        f"Error in thread {self.name}: {e}\n{traceback.format_exc()}"
+                    )
+                    if self.error_queue is not None:
+                        self.error_queue.put(e)
+                    break
+        finally:
             try:
-                if self.loop is None:
-                    logging.error("[ManagedThread] Loop not initialized!")
-                    break
-
-                # Call the task function to get the coroutine
-                coro = task(**self.kwargs)
-                if not asyncio.iscoroutine(coro):
-                    logging.error(f"Task {task} did not return a coroutine")
-                    break
-
-                self._current_future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-                _ = self._current_future.result()
-            except (asyncio.CancelledError, concurrent.futures.CancelledError):
-                logging.debug(f"Thread {self.name} was cancelled")
-                break
-            except Exception as e:
-                logging.error(
-                    f"Error in thread {self.name}: {e}\n{traceback.format_exc()}"
-                )
-                if self.error_queue is not None:
-                    self.error_queue.put(e)
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            loop.close()
+            self._owned_loop = None
 
         logging.info(f"Thread {self.name} stopped.")
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._current_future and not self._current_future.done():
-            self._current_future.cancel()
+        # If the owned loop is still alive, schedule a task cancellation onto it
+        # so any in-flight polling coroutine breaks out of `await sleep()`. This
+        # is only needed when the upstream Publisher._stop_event hasn't been set
+        # before stop() — normally cleanup() sets that first and the coroutine
+        # exits naturally on its next iteration check.
+        owned_loop = self._owned_loop
+        if owned_loop is not None and not owned_loop.is_closed():
+            try:
+                owned_loop.call_soon_threadsafe(self._cancel_running_tasks)
+            except RuntimeError:
+                # Loop already stopped/closed; nothing more to do.
+                pass
+
+    def _cancel_running_tasks(self) -> None:
+        """Cancel any running task on the owned loop. Runs in the loop's thread."""
+        loop = self._owned_loop
+        if loop is None:
+            return
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
 
 
 class Publisher:
@@ -306,6 +381,8 @@ class Publisher:
         kv_block_size: int,
         metrics_labels: Any,
         component_gauges: LLMBackendMetrics,
+        additional_metrics: Any = None,
+        event_buffer_max_size: int = 0,
         zmq_endpoint: Optional[str] = None,
         enable_local_indexer: bool = False,
         metrics_collector: Any = None,
@@ -317,6 +394,9 @@ class Publisher:
         self.max_window_size = None
         self.metrics_labels = metrics_labels
         self.component_gauges = component_gauges
+        self.additional_metrics = additional_metrics
+        if self.additional_metrics is not None:
+            self.additional_metrics.set_kv_event_buffer_capacity(event_buffer_max_size)
         self.enable_local_indexer = enable_local_indexer
         self.metrics_collector = metrics_collector
         self.attention_dp_size = engine.get_attention_dp_size()
@@ -328,6 +408,15 @@ class Publisher:
 
         # Needed by the events and metrics publishers
         self.metrics_publisher: Optional[WorkerMetricsPublisher] = None
+        # FPM is emitted as one logical channel per TRT-LLM attention-DP rank.
+        # TRT-LLM tags each IterationStats row with attentionDpRank, which is
+        # forwarded as Dynamo's dp_rank for planner-visible per-rank load.
+        self.fpm_publisher: Optional[FpmDirectPublisher] = None
+        # One-shot schema probe gate. The first IterationStats delivered to
+        # handle_stat is checked against _FPM_REQUIRED_STAT_FIELDS; on mismatch
+        # the publisher is shut down and None'd. Prevents silent planner poison
+        # when running against a TRT-LLM version that predates #13199.
+        self._fpm_schema_checked: bool = False
         self.kv_event_publishers: Optional[
             Dict[int, KvEventPublisher]
         ] = None  # One per attention_dp_rank
@@ -339,8 +428,9 @@ class Publisher:
         self.partial_block_hashes: set[int] = set()
         self.error_queue: Queue = Queue()
         self._stop_event = threading.Event()
-        # Track the last engine event_id to assert consecutive event IDs from the engine
-        self._last_engine_event_id: Optional[int] = None
+        # Track the last engine event_id per attention-DP rank. TRT-LLM emits
+        # independent rank-local sequences before gathering them on rank 0.
+        self._last_engine_event_id_by_rank: dict[int, int] = {}
 
         # Initialize ZMQ publisher if endpoint is provided (consolidator enabled)
         if zmq_endpoint:
@@ -370,6 +460,28 @@ class Publisher:
         task.add_done_callback(
             lambda _: logging.debug("metrics publisher endpoint created")
         )
+
+        # Setup the ForwardPassMetrics publisher with one internal channel per
+        # attention-DP rank. Non-attention-DP engines report size 1. Under
+        # attention-DP, TRT-LLM emits one IterationStats row per rank and
+        # Dynamo forwards attentionDpRank as the FPM dp_rank.
+        try:
+            fpm_dp_size = max(1, int(self.attention_dp_size or 1))
+            self.fpm_publisher = FpmDirectPublisher(
+                endpoint=self.endpoint,
+                worker_id=str(self.worker_id),
+                dp_size=fpm_dp_size,
+            )
+            logging.info(f"FpmDirectPublisher initialized with dp_size={fpm_dp_size}")
+        except RuntimeError as e:
+            # PyO3 surfaces all FpmDirectPublisher::new failures as
+            # PyRuntimeError (Endpoint missing, tokio runtime missing,
+            # etc.). Catch only that — any other exception here would
+            # signal a programming error worth surfacing.
+            logging.warning(
+                f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
+            )
+            self.fpm_publisher = None
 
         # Setup the kv cache events publisher
         # Publisher selection based on consolidator configuration:
@@ -408,11 +520,12 @@ class Publisher:
             logging.error("KV metrics publisher not initialized!")
             return
 
-        # Publish initial metrics with 0 active blocks
-        # TRT-LLM doesn't use data parallelism currently (dp_rank="0")
-        self.metrics_publisher.publish(None, 0)
-        self.component_gauges.set_total_blocks("0", 0)
-        self.component_gauges.set_gpu_cache_usage("0", 0.0)
+        # Publish initial metrics with 0 active blocks for each attention-DP rank.
+        for rank in range(self.attention_dp_size):
+            self.metrics_publisher.publish(rank, kv_used_blocks=0)
+            rank_label = str(rank)
+            self.component_gauges.set_total_blocks(rank_label, 0)
+            self.component_gauges.set_gpu_cache_usage(rank_label, 0.0)
 
         # Prepare threads for publishing stats but don't start them yet.
         # TRTLLM needs to start generating tokens first before stats
@@ -441,24 +554,82 @@ class Publisher:
         min_sleep: float,
         max_sleep: float,
         backoff_factor: float,
+        batch_size_handler_fn=None,
     ):
         sleep_s = min_sleep
         while not self._stop_event.is_set():
             had_data = False
+            batch_size = 0
             try:
                 async for item in fetch_fn():
                     had_data = True
+                    batch_size += 1
                     handler_fn(item)
             except (asyncio.TimeoutError, TimeoutError, asyncio.QueueEmpty):
                 pass
             except Exception as e:
                 logging.warning(f"Publisher polling loop error: {e}", exc_info=True)
+                raise
+
+            if batch_size and batch_size_handler_fn is not None:
+                batch_size_handler_fn(batch_size)
 
             if not had_data:
                 await asyncio.sleep(sleep_s)
                 sleep_s = min(max_sleep, sleep_s * backoff_factor)
             else:
                 sleep_s = min_sleep
+
+    def _check_fpm_schema(self, stat: dict) -> None:
+        """One-shot probe: disable FPM publisher if the TRT-LLM IterationStats
+        nested ``inflightBatchingStats`` dict is missing or incomplete.
+
+        Runs exactly once (gated by ``self._fpm_schema_checked``). Strict: if
+        the nested dict is absent or any field in ``_FPM_REQUIRED_IBS_FIELDS``
+        is missing, the publisher is shut down and set to ``None`` so the
+        subsequent ``if self.fpm_publisher is not None:`` short-circuit
+        suppresses all FPM emission for the lifetime of this worker. This
+        prevents silent planner poison when running against a TRT-LLM that
+        predates NVIDIA/TensorRT-LLM#13199 — otherwise every field would
+        default to 0 and the emitted snapshot would be byte-identical to the
+        idle heartbeat, making the Planner treat a loaded worker as idle.
+        """
+        self._fpm_schema_checked = True
+        if self.fpm_publisher is None:
+            return
+
+        ibs = stat.get("inflightBatchingStats")
+        if not isinstance(ibs, dict):
+            logging.warning(
+                "TRT-LLM IterationStats has no 'inflightBatchingStats' dict; "
+                "disabling FpmDirectPublisher. Upgrade TRT-LLM past "
+                "NVIDIA/TensorRT-LLM#13199 to enable FPM."
+            )
+            self._disable_fpm_publisher()
+            return
+        missing = [f for f in _FPM_REQUIRED_IBS_FIELDS if f not in ibs]
+        if not missing:
+            return
+        logging.warning(
+            "TRT-LLM inflightBatchingStats is missing required FPM fields %s; "
+            "disabling FpmDirectPublisher to prevent planner poison. "
+            "Upgrade TRT-LLM past NVIDIA/TensorRT-LLM#13199 to enable FPM.",
+            missing,
+        )
+        self._disable_fpm_publisher()
+
+    def _disable_fpm_publisher(self) -> None:
+        """Shut down ``self.fpm_publisher`` (best effort) and None it out."""
+        publisher = self.fpm_publisher
+        if publisher is None:
+            return
+        try:
+            publisher.shutdown()
+        except RuntimeError as e:
+            logging.warning(
+                f"FpmDirectPublisher shutdown after schema mismatch failed: {e}"
+            )
+        self.fpm_publisher = None
 
     async def _publish_stats_task(self):
         """
@@ -475,19 +646,20 @@ class Publisher:
         def handle_stat(stat):
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
             kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
+            dp_rank = int(stat.get("attentionDpRank", 0))
             logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
-            # TRT-LLM doesn't use data parallelism currently (dp_rank=None for NATS, "0" for Prometheus)
             assert self.metrics_publisher is not None
-            self.metrics_publisher.publish(None, kv_active_blocks)
+            self.metrics_publisher.publish(dp_rank, kv_used_blocks=kv_active_blocks)
 
             # Publish Prometheus metrics
-            self.component_gauges.set_total_blocks("0", kv_total_blocks)
+            dp_rank_label = str(dp_rank)
+            self.component_gauges.set_total_blocks(dp_rank_label, kv_total_blocks)
 
             # Calculate and publish GPU cache usage percentage
             gpu_cache_usage = (
                 kv_active_blocks / kv_total_blocks if kv_total_blocks > 0 else 0.0
             )
-            self.component_gauges.set_gpu_cache_usage("0", gpu_cache_usage)
+            self.component_gauges.set_gpu_cache_usage(dp_rank_label, gpu_cache_usage)
 
             # Log iteration stats to TRT-LLM MetricsCollector (PR #11243)
             # This populates trtllm_kv_cache_hit_rate and trtllm_kv_cache_utilization gauges
@@ -498,6 +670,79 @@ class Publisher:
                     self.metrics_collector.log_iteration_stats(stat)
                 except Exception as e:
                     logging.warning(f"Failed to log iteration stats: {e}")
+
+            # Publish ForwardPassMetrics. TRT-LLM tags each stat dict with
+            # top-level attentionDpRank inside BaseWorker._stats_serializer.
+            # Under attention-DP, TRT-LLM emits one row per rank. Scheduled
+            # fields are rank-local, while engine-global queued fields are
+            # naturally nonzero only on rank 0. The FPM source fields live
+            # nested under stat["inflightBatchingStats"] (camelCase from
+            # NLOHMANN serialization). Variance fields are not yet computed in
+            # TRT-LLM's PyExecutor and default to 0.0 on the Rust side.
+            #
+            # The first stat delivered here triggers a one-shot schema probe:
+            # if the nested IBS dict is missing or any required field is
+            # absent (e.g. running against a TRT-LLM that predates #13199)
+            # the probe shuts down the publisher, which flips the guard
+            # below to short-circuit FPM emission for the rest of this
+            # worker's lifetime.
+            if self.fpm_publisher is not None and not self._fpm_schema_checked:
+                self._check_fpm_schema(stat)
+            if self.fpm_publisher is not None:
+                try:
+                    ibs = stat.get("inflightBatchingStats") or {}
+                    # numCtxTokens is the prefill compute volume *this iter*
+                    # (excludes prefix-cache/chunked carryover counted in
+                    # numCtxKvTokens). Mapped to scheduled_sum_prefill_tokens
+                    # to match vLLM's TTFT-prediction semantics on the
+                    # planner side.
+                    sched_num_prefill = int(ibs.get("numContextRequests", 0))
+                    sched_sum_prefill_tokens = int(ibs.get("numCtxTokens", 0))
+                    sched_sum_prefill_kv_tokens = int(ibs.get("numCtxKvTokens", 0))
+                    sched_num_decode = int(ibs.get("numGenRequests", 0))
+                    sched_sum_decode_kv_tokens = int(ibs.get("numGenKvTokens", 0))
+                    queued_num_prefill = int(ibs.get("numQueuedContextRequests", 0))
+                    queued_sum_prefill_tokens = int(ibs.get("numQueuedCtxTokens", 0))
+                    # Composite: paused-decodes + queued-gen-only requests.
+                    # Both represent decode work blocked from progressing
+                    # this iter due to KV pressure or pending KV transfer.
+                    # numPausedRequests is also counted in numScheduledRequests
+                    # upstream — the double-count is intentional because the
+                    # Planner reads queued_decode as a preemption-pressure
+                    # signal where paused-decodes carry the same weight as
+                    # queued-gen-only requests.
+                    queued_num_decode = int(ibs.get("numPausedRequests", 0)) + int(
+                        ibs.get("numQueuedGenRequests", 0)
+                    )
+                    queued_sum_decode_kv_tokens = int(
+                        ibs.get("numPausedKvTokens", 0)
+                    ) + int(ibs.get("numQueuedGenKvTokens", 0))
+                    # iterLatencyMS is ms; the Rust snapshot expects seconds.
+                    wall_time_secs = float(stat.get("iterLatencyMS", 0.0)) / 1000.0
+                    attention_dp_rank = stat.get("attentionDpRank")
+                    dp_rank = (
+                        int(attention_dp_rank) if attention_dp_rank is not None else 0
+                    )
+                    self.fpm_publisher.publish(
+                        dp_rank=dp_rank,
+                        scheduled_num_prefill_requests=sched_num_prefill,
+                        scheduled_sum_prefill_tokens=sched_sum_prefill_tokens,
+                        scheduled_sum_prefill_kv_tokens=sched_sum_prefill_kv_tokens,
+                        scheduled_num_decode_requests=sched_num_decode,
+                        scheduled_sum_decode_kv_tokens=sched_sum_decode_kv_tokens,
+                        queued_num_prefill_requests=queued_num_prefill,
+                        queued_sum_prefill_tokens=queued_sum_prefill_tokens,
+                        queued_num_decode_requests=queued_num_decode,
+                        queued_sum_decode_kv_tokens=queued_sum_decode_kv_tokens,
+                        wall_time_secs=wall_time_secs,
+                    )
+                except Exception as e:
+                    # Defensive (broad on purpose): the FPM publish path is
+                    # cold compared to ActiveLoad/Prometheus and we'd rather
+                    # drop a single FPM snapshot than poison the existing
+                    # metrics pipeline if TRT-LLM ever emits an unexpected
+                    # stat shape.
+                    logging.warning(f"FPM publish failed: {e}")
 
         await self._polling_loop(
             lambda: self.engine.llm.get_stats_async(timeout=_STATS_TIMEOUT_SEC),
@@ -530,86 +775,110 @@ class Publisher:
             _KV_EVENTS_MIN_SLEEP_SEC,
             _KV_EVENTS_MAX_SLEEP_SEC,
             _KV_EVENTS_BACKOFF_FACTOR,
+            self._record_kv_event_drain_batch,
         )
         return True
 
+    def _record_kv_event_drain_batch(self, batch_size: int) -> None:
+        if self.additional_metrics is not None:
+            self.additional_metrics.record_kv_event_drain_batch(batch_size)
+
     def _handle_kv_event(self, event):
-        logging.debug(f"KV cache event received: {event}")
+        event_id = event["event_id"]
+        attention_dp_rank = event.get("attention_dp_rank", 0)
+
+        # Check the raw engine stream before filtering non-global-attention
+        # events so expected filtering does not look like queue loss.
+        last_event_id = self._last_engine_event_id_by_rank.get(attention_dp_rank)
+        if last_event_id is not None:
+            expected_id = last_event_id + 1
+            if event_id != expected_id:
+                logging.warning(
+                    f"Non-consecutive engine event_id on rank={attention_dp_rank}: "
+                    f"expected {expected_id}, got {event_id}"
+                )
+                if self.additional_metrics is not None:
+                    self.additional_metrics.record_kv_event_id_gap(
+                        max(0, event_id - expected_id)
+                    )
+        self._last_engine_event_id_by_rank[attention_dp_rank] = event_id
+
         # drop the events that is not emitted from the global attention layer.
         if self.should_drop_event(event):
             return
 
-        event_id = event["event_id"]
-
-        # Check for consecutive event IDs from the engine
-        if self._last_engine_event_id is not None:
-            expected_id = self._last_engine_event_id + 1
-            if event_id != expected_id:
-                logging.warning(
-                    f"Non-consecutive engine event_id: expected {expected_id}, got {event_id}"
-                )
-        self._last_engine_event_id = event_id
-
         data = event["data"]
         if data["type"] == "stored":
+            # Tighter per-block walk: inner per-token .append() loop replaced
+            # with extend(comprehension); attribute lookups
+            # (`self.kv_block_size`, `self.partial_block_hashes`) hoisted to
+            # locals so the tight loop avoids LOAD_ATTR per iteration. mm_keys
+            # handling skipped entirely when absent. For ISL=2048 / 32-token
+            # blocks this trims ~64x32=2048 Python ops per prefill to ~64 ops
+            # plus a single fused comprehension, reducing GIL-held time on
+            # the publisher thread (which would otherwise contend with HTTP
+            # request handling under load).
             self.processing_initial_created_events = False
             parent_hash = _to_signed_i64(data["parent_hash"])
             token_ids: list[int] = []
             num_block_tokens: list[int] = []
             block_hashes: list[int] = []
             block_mm_infos: list[dict | None] = []
+            kv_block_size = self.kv_block_size
+            partial_block_hashes = self.partial_block_hashes
             for block in data["blocks"]:
-                token_num_in_block = len(block["tokens"])
-                block_hash = _to_signed_i64(block["block_hash"])
-                if token_num_in_block > self.kv_block_size:
+                block_tokens = block["tokens"]
+                token_num_in_block = len(block_tokens)
+                if token_num_in_block > kv_block_size:
                     logging.error(
-                        f"Block {block_hash} contains {token_num_in_block} tokens, which is greater than kv_block_size {self.kv_block_size}"
+                        f"Block contains {token_num_in_block} tokens, which is greater than kv_block_size {kv_block_size}"
                     )
                     return
+                block_hash = _to_signed_i64(block["block_hash"])
                 if block_hash is None:
                     logging.warning(
                         f"Skipping block with None hash containing {token_num_in_block} tokens"
                     )
                     continue
-                if token_num_in_block < self.kv_block_size:
-                    logging.debug(
-                        f"Early stop when block {block_hash} containing {token_num_in_block} tokens not equal to kv_block_size {self.kv_block_size}"
-                    )
-                    self.partial_block_hashes.add(block_hash)
+                if token_num_in_block < kv_block_size:
+                    partial_block_hashes.add(block_hash)
                     break
                 num_block_tokens.append(token_num_in_block)
                 block_hashes.append(block_hash)
-                for token in block["tokens"]:
-                    token_ids.append(int(token["token_id"]))
+                token_ids.extend(int(t["token_id"]) for t in block_tokens)
 
-                # Extract multimodal hash info for this block
-                # {"mm_keys": [{"type":"mm_key","hash":"<hex>","start_offset":N}]}
-                mm_keys = block.get("mm_keys", [])
-                mm_hashes = [
-                    int(mm_key["hash"][:16], 16)
-                    for mm_key in mm_keys
-                    if mm_key.get("type") == "mm_key" and mm_key.get("hash")
-                ]
-                if mm_hashes:
-                    block_mm_infos.append(
-                        {
-                            "mm_objects": [
-                                {"mm_hash": mm_hash, "offsets": []}
-                                for mm_hash in mm_hashes
-                            ]
-                        }
-                    )
+                mm_keys = block.get("mm_keys")
+                if mm_keys:
+                    mm_hashes = [
+                        int(mk["hash"][:16], 16)
+                        for mk in mm_keys
+                        if mk.get("type") == "mm_key" and mk.get("hash")
+                    ]
+                    if mm_hashes:
+                        block_mm_infos.append(
+                            {
+                                "mm_objects": [
+                                    {"mm_hash": h, "offsets": []} for h in mm_hashes
+                                ]
+                            }
+                        )
+                    else:
+                        block_mm_infos.append(None)
                 else:
                     block_mm_infos.append(None)
 
             lora_name = data.get("lora_name")
 
-            # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
-            # Default to 0 for backwards compatibility with older TRT-LLM versions
-            attention_dp_rank = event.get("attention_dp_rank", 0)
-
-            logging.debug(
-                f"publish stored event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_name: {lora_name}, parent_hash: {parent_hash}"
+            logger.debug(
+                "Publishing stored KV event: engine_event_id=%s "
+                "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s "
+                "has_parent=%s",
+                event_id,
+                attention_dp_rank,
+                len(block_hashes),
+                len(token_ids),
+                lora_name,
+                parent_hash is not None,
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
@@ -645,24 +914,28 @@ class Publisher:
         elif data["type"] == "removed":
             self.processing_initial_created_events = False
             removed_block_hashes: list[int] = []
+            skipped_partial_blocks = 0
             for block_hash in data["block_hashes"]:
                 block_hash = _to_signed_i64(block_hash)
                 if block_hash is None:
                     continue
                 if block_hash in self.partial_block_hashes:
-                    logging.debug(
-                        f"Skipping removing block hash {block_hash} since it is a partial block"
-                    )
                     self.partial_block_hashes.remove(block_hash)
+                    skipped_partial_blocks += 1
                     continue
                 removed_block_hashes.append(block_hash)
 
-            # Get attention_dp_rank from event (TRT-LLM includes this in KVCacheEvent)
-            attention_dp_rank = event.get("attention_dp_rank", 0)
-
-            logging.debug(
-                f"publish removed event: engine_event_id: {event_id}, attention_dp_rank: {attention_dp_rank}, block_hashes: {removed_block_hashes}"
+            logger.debug(
+                "Publishing removed KV event: engine_event_id=%s "
+                "attention_dp_rank=%s blocks=%s skipped_partial_blocks=%s",
+                event_id,
+                attention_dp_rank,
+                len(removed_block_hashes),
+                skipped_partial_blocks,
             )
+            if not removed_block_hashes:
+                return
+
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS
             # Note: event_id is managed internally by the publisher (monotonic counter per dp_rank)
             if self.zmq_kv_event_publisher:
@@ -685,20 +958,18 @@ class Publisher:
             self.update_max_window_size(event)
 
     def start(self) -> None:
+        # Each ManagedThread owns its own asyncio loop now, so we no longer
+        # capture the request-handler loop and pass it via set_loop(). The
+        # threads run their polling coroutines on private loops, off the
+        # request loop.
         if (
             self.publish_kv_cache_events_thread
             and not self.publish_kv_cache_events_thread.is_alive()
         ):
-            # REVISIT
-            # [NOTE:] TRTLLM needs the stats to be collected on the same loop as the request handler.
-            self._stats_loop = asyncio.get_running_loop()
-            self.publish_kv_cache_events_thread.set_loop(self._stats_loop)
             self.publish_kv_cache_events_thread.start()
             logging.debug("Started kv cache events thread")
 
         if self.publish_stats_thread and not self.publish_stats_thread.is_alive():
-            self._stats_loop = asyncio.get_running_loop()
-            self.publish_stats_thread.set_loop(self._stats_loop)
             self.publish_stats_thread.start()
             logging.debug("Started stats thread")
 
@@ -732,6 +1003,16 @@ class Publisher:
         # Shutdown ZMQ publisher if it exists
         if self.zmq_kv_event_publisher:
             self.zmq_kv_event_publisher.shutdown()
+
+        # Shutdown FpmDirectPublisher (stops the per-rank serialization tasks
+        # and the event-plane publisher task on the Rust side). PyO3 surfaces
+        # shutdown failures as PyRuntimeError; narrower catch keeps real
+        # programming errors visible.
+        if self.fpm_publisher is not None:
+            try:
+                self.fpm_publisher.shutdown()
+            except RuntimeError as e:
+                logging.warning(f"FpmDirectPublisher shutdown failed: {e}")
 
     def update_max_window_size(self, event: dict) -> None:
         if "window_size" in event:
@@ -778,6 +1059,8 @@ async def get_publisher(
     kv_block_size: int,
     metrics_labels: Any,
     component_gauges: LLMBackendMetrics,
+    additional_metrics: Any = None,
+    event_buffer_max_size: int = 0,
     zmq_endpoint: Optional[str] = None,
     enable_local_indexer: bool = False,
     metrics_collector: Any = None,
@@ -789,6 +1072,8 @@ async def get_publisher(
         kv_block_size,
         metrics_labels,
         component_gauges=component_gauges,
+        additional_metrics=additional_metrics,
+        event_buffer_max_size=event_buffer_max_size,
         zmq_endpoint=zmq_endpoint,
         enable_local_indexer=enable_local_indexer,
         metrics_collector=metrics_collector,

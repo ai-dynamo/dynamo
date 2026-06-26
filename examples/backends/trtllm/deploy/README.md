@@ -2,6 +2,8 @@
 
 This directory contains Kubernetes Custom Resource Definition (CRD) templates for deploying TensorRT-LLM inference graphs using the **DynamoGraphDeployment** resource.
 
+The top-level `deploy/*.yaml` templates use `nvidia.com/v1alpha1` for compatibility with existing tooling. Equivalent `nvidia.com/v1beta1` templates are available under [`v1beta1/`](./v1beta1/).
+
 ## Available Deployment Patterns
 
 ### 1. **Aggregated Deployment** (`agg.yaml`)
@@ -23,16 +25,16 @@ High-performance deployment with separated prefill and decode workers.
 
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
-- `TRTLLMDecodeWorker`: Specialized decode-only worker
-- `TRTLLMPrefillWorker`: Specialized prefill-only worker
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker
 
 ### 4. **Disaggregated Router Deployment** (`disagg_router.yaml`)
 Advanced disaggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: HTTP API server (with kv router mode enabled)
-- `TRTLLMDecodeWorker`: Specialized decode-only worker
-- `TRTLLMPrefillWorker`: Specialized prefill-only worker (2 replicas for load balancing)
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (2 replicas for load balancing)
 
 ### 5. **Aggregated Deployment with Config** (`agg-with-config.yaml`)
 Aggregated deployment with custom configuration.
@@ -49,11 +51,22 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 - `Frontend`: HTTP API server coordinating between workers
 - `Planner`: SLA-based planner that monitors performance and scales workers automatically
 - `Prometheus`: Metrics collection and monitoring
-- `TRTLLMDecodeWorker`: Specialized decode-only worker
-- `TRTLLMPrefillWorker`: Specialized prefill-only worker
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker
 
 > [!NOTE]
-> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for detailed instructions.
+> This deployment can use native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for the optional bootstrap workflow.
+
+### 7. **Snapshot Restore Example** (`v1beta1/snapshot-restore.yaml`)
+Experimental Dynamo Snapshot restore example for Qwen3-0.6B with a single
+TensorRT-LLM worker. This example uses the conservative engine configuration in
+[`../engine_configs/qwen3/snapshot.yaml`](../engine_configs/qwen3/snapshot.yaml).
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server
+- `TRTLLMWorker`: Single GPU TensorRT-LLM worker restored with
+  `experimental.checkpoint.enabled: true` and
+  `startupPolicy: WaitForCheckpoint`
 
 ## CRD Structure
 
@@ -118,16 +131,9 @@ docker build -f container/rendered.Dockerfile .
 # Update the image references in the YAML files
 ```
 
-**Note:** TensorRT-LLM uses git-lfs, which needs to be installed in advance:
-```bash
-apt-get update && apt-get -y install git git-lfs
-```
+The Dynamo TensorRT-LLM image is based on the upstream `nvcr.io/nvidia/tensorrt-llm/release` container, which publishes both `amd64` and `arm64` variants. To build for arm64, pass `--platform=linux/arm64` to `render.py` and `docker buildx build`.
 
-For ARM machines, use:
-```bash
-python container/render.py --framework=vllm --platform arm64 --output-short-filename
-docker build -f container/rendered.Dockerfile .
-```
+For more customization (pinning a different upstream TRT-LLM tag or using a TRT-LLM image you built from source), see the [Building a Custom Container](../../../../docs/backends/trtllm/trtllm-building-custom-container.md) guide.
 
 ## Usage
 
@@ -256,12 +262,6 @@ args:
   - "3"
 ```
 
-## Benchmarking
-
-To benchmark your deployment with AIPerf, see this utility script: [perf.sh](../../../../benchmarks/llm/perf.sh)
-
-Configure the `model` name and `host` based on your deployment.
-
 ## Further Reading
 
 - **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/kubernetes/deployment/create-deployment.md)
@@ -282,7 +282,5 @@ Common issues and solutions:
 3. **Health check failures**: Review model loading logs and increase `initialDelaySeconds`
 4. **Out of memory**: Increase memory limits or reduce model batch size
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
-6. **Git LFS issues**: Ensure git-lfs is installed before building containers
-7. **ARM deployment**: Use `--platform linux/arm64` when building on ARM machines
 
 For additional support, refer to the [deployment troubleshooting guide](../../../../docs/kubernetes/README.md).

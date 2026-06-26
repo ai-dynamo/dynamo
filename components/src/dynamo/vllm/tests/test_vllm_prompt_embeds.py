@@ -29,6 +29,9 @@ def mock_handler():
         pass
 
     handler = MockHandler()
+    handler.model_config = Mock(enable_prompt_embeds=True)
+    handler.model_config.dtype = torch.float32
+    handler.model_config.get_hidden_size.return_value = 4096
     handler._decode_prompt_embeds = BaseWorkerHandler._decode_prompt_embeds.__get__(  # type: ignore
         handler
     )
@@ -51,15 +54,14 @@ class TestPromptEmbedsDecode:
         [
             ((10, 4096), torch.float32),  # 2D: sequence x hidden
             ((10, 768), torch.float32),  # 2D: smaller hidden dim
-            ((2, 10, 768), torch.float32),  # 3D: batch x sequence x hidden
-            ((5, 20, 1024), torch.float16),  # 3D with float16
         ],
-        ids=["2d-4096", "2d-768", "3d-batch", "3d-float16"],
+        ids=["2d-4096", "2d-768"],
     )
     def test_decode_valid_embeddings_various_shapes(self, mock_handler, shape, dtype):
         """Test decoding embeddings with various shapes and dtypes."""
         embeddings = torch.randn(*shape, dtype=dtype)
         embeddings_base64 = encode_tensor_to_base64(embeddings)
+        mock_handler.model_config.get_hidden_size.return_value = shape[1]
 
         result = mock_handler._decode_prompt_embeds(embeddings_base64)
 
@@ -113,7 +115,7 @@ class TestPromptEmbedsDecode:
         non_tensor = {"key": "value"}
         embeddings_base64 = encode_tensor_to_base64_obj(non_tensor)
 
-        with pytest.raises(ValueError, match="must be a torch.Tensor"):
+        with pytest.raises(ValueError, match="Failed to decode"):
             mock_handler._decode_prompt_embeds(embeddings_base64)
 
 
@@ -131,12 +133,13 @@ class TestEmbeddingsDataFormats:
     @pytest.mark.parametrize("size", [128, 384, 768, 1024, 2048, 4096])
     def test_various_embedding_sizes(self, mock_handler, size):
         """Test decoding embeddings of various sizes."""
-        embeddings = torch.randn(size, dtype=torch.float32)
+        embeddings = torch.randn(1, size, dtype=torch.float32)
         embeddings_base64 = encode_tensor_to_base64(embeddings)
+        mock_handler.model_config.get_hidden_size.return_value = size
 
         result = mock_handler._decode_prompt_embeds(embeddings_base64)
 
-        assert result.shape == (size,), f"Failed for size {size}"
+        assert result.shape == (1, size), f"Failed for size {size}"
         torch.testing.assert_close(result, embeddings, rtol=1e-5, atol=1e-5)
 
     @pytest.mark.parametrize(
@@ -152,8 +155,9 @@ class TestEmbeddingsDataFormats:
     )
     def test_embedding_value_ranges_preserved(self, mock_handler, values):
         """Test that various value ranges are preserved with float32 precision."""
-        embeddings = torch.tensor(values, dtype=torch.float32)
+        embeddings = torch.tensor([values], dtype=torch.float32)
         embeddings_base64 = encode_tensor_to_base64(embeddings)
+        mock_handler.model_config.get_hidden_size.return_value = len(values)
 
         result = mock_handler._decode_prompt_embeds(embeddings_base64)
 

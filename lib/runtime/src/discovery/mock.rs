@@ -157,7 +157,7 @@ impl Discovery for MockDiscovery {
         self.instance_id
     }
 
-    async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+    async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
         let instance = spec.with_instance_id(self.instance_id);
 
         self.registry
@@ -170,13 +170,13 @@ impl Discovery for MockDiscovery {
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
-        let instance_id = instance.instance_id();
+        let target_id = instance.id();
 
         self.registry
             .instances
             .lock()
             .unwrap()
-            .retain(|i| i.instance_id() != instance_id);
+            .retain(|i| i.id() != target_id);
 
         Ok(())
     }
@@ -241,6 +241,46 @@ mod tests {
     use super::*;
     use futures::StreamExt;
 
+    fn model_spec(
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        model_name: &str,
+    ) -> DiscoverySpec {
+        DiscoverySpec::Model {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            endpoint: endpoint.to_string(),
+            card_json: serde_json::json!({
+                "display_name": model_name,
+            }),
+            model_suffix: None,
+        }
+    }
+
+    fn lora_model_spec(
+        namespace: &str,
+        component: &str,
+        endpoint: &str,
+        model_name: &str,
+        source_path: &str,
+        lora_name: &str,
+    ) -> DiscoverySpec {
+        DiscoverySpec::Model {
+            namespace: namespace.to_string(),
+            component: component.to_string(),
+            endpoint: endpoint.to_string(),
+            card_json: serde_json::json!({
+                "display_name": model_name,
+                "source_path": source_path,
+                "lora": {
+                    "name": lora_name,
+                },
+            }),
+            model_suffix: Some(lora_name.to_string()),
+        }
+    }
+
     #[tokio::test]
     async fn test_mock_discovery_add_and_remove() {
         let registry = SharedMockRegistry::new();
@@ -252,6 +292,7 @@ mod tests {
             component: "test-comp".to_string(),
             endpoint: "test-ep".to_string(),
             transport: crate::component::TransportType::Nats("test-subject".to_string()),
+            device_type: None,
         };
 
         let query = DiscoveryQuery::Endpoint {
@@ -264,7 +305,7 @@ mod tests {
         let mut stream = client1.list_and_watch(query.clone(), None).await.unwrap();
 
         // Add first instance
-        client1.register(spec.clone()).await.unwrap();
+        let instance1 = client1.register(spec.clone()).await.unwrap();
 
         let event = stream.next().await.unwrap().unwrap();
         match event {
@@ -286,11 +327,7 @@ mod tests {
         }
 
         // Remove first instance
-        registry.instances.lock().unwrap().retain(|i| match i {
-            DiscoveryInstance::Endpoint(inst) => inst.instance_id != 1,
-            DiscoveryInstance::Model { instance_id, .. } => *instance_id != 1,
-            DiscoveryInstance::EventChannel { instance_id, .. } => *instance_id != 1,
-        });
+        client1.unregister(instance1).await.unwrap();
 
         let event = stream.next().await.unwrap().unwrap();
         match event {
@@ -300,5 +337,143 @@ mod tests {
             }
             _ => panic!("Expected Removed event for instance-1"),
         }
+    }
+
+    #[tokio::test]
+    async fn register_allows_same_model_name_on_same_endpoint() {
+        let registry = SharedMockRegistry::new();
+        let discovery1 = MockDiscovery::new(Some(1), registry.clone());
+        let discovery2 = MockDiscovery::new(Some(2), registry);
+        let spec = model_spec("ns", "comp", "generate", "model-a");
+
+        discovery1.register(spec.clone()).await.unwrap();
+        discovery2.register(spec).await.unwrap();
+
+        let instances = discovery1
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn register_rejects_different_model_name_on_same_endpoint() {
+        let registry = SharedMockRegistry::new();
+        let discovery1 = MockDiscovery::new(Some(1), registry.clone());
+        let discovery2 = MockDiscovery::new(Some(2), registry);
+
+        discovery1
+            .register(model_spec("ns", "comp", "generate", "model-a"))
+            .await
+            .unwrap();
+
+        let err = discovery2
+            .register(model_spec("ns", "comp", "generate", "model-b"))
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains(
+            "Cannot register model 'model-b' on endpoint 'ns/comp/generate': a different model 'model-a' is already registered there"
+        ));
+
+        let instances = discovery1
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(instances.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn register_allows_different_model_names_on_different_endpoints() {
+        let registry = SharedMockRegistry::new();
+        let discovery1 = MockDiscovery::new(Some(1), registry.clone());
+        let discovery2 = MockDiscovery::new(Some(2), registry);
+
+        discovery1
+            .register(model_spec("ns", "comp", "generate-a", "model-a"))
+            .await
+            .unwrap();
+        discovery2
+            .register(model_spec("ns", "comp", "generate-b", "model-b"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn register_allows_lora_adapter_on_same_endpoint() {
+        let registry = SharedMockRegistry::new();
+        let discovery1 = MockDiscovery::new(Some(1), registry.clone());
+        let discovery2 = MockDiscovery::new(Some(2), registry);
+
+        discovery1
+            .register(DiscoverySpec::Model {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "generate".to_string(),
+                card_json: serde_json::json!({
+                    "display_name": "base-model",
+                    "source_path": "base-repo",
+                }),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+
+        discovery2
+            .register(lora_model_spec(
+                "ns",
+                "comp",
+                "generate",
+                "adapter-a",
+                "base-repo",
+                "adapter-a",
+            ))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn register_rejects_lora_adapter_for_different_base_model() {
+        let registry = SharedMockRegistry::new();
+        let discovery1 = MockDiscovery::new(Some(1), registry.clone());
+        let discovery2 = MockDiscovery::new(Some(2), registry);
+
+        discovery1
+            .register(DiscoverySpec::Model {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "generate".to_string(),
+                card_json: serde_json::json!({
+                    "display_name": "base-model",
+                    "source_path": "base-repo",
+                }),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+
+        let err = discovery2
+            .register(lora_model_spec(
+                "ns",
+                "comp",
+                "generate",
+                "adapter-a",
+                "other-base-repo",
+                "adapter-a",
+            ))
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains(
+            "Cannot register model 'adapter-a' on endpoint 'ns/comp/generate': a different model 'base-model' is already registered there"
+        ));
     }
 }

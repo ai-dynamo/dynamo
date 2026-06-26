@@ -25,10 +25,12 @@ from aiconfigurator.generator.module_bridge import task_config_to_generator_conf
 from aiconfigurator.generator.naive import build_naive_generator_params
 from aiconfigurator.sdk.task import TaskConfig, TaskRunner
 
+from dynamo.profiler.utils.config import clamp_total_gpus_to_budget
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
 from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
     needs_profile_data,
+    resolve_model_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,7 @@ def _generate_dgd_from_pick(
     best_config_df: pd.DataFrame,
     chosen_exp: str,
     task_configs: dict[str, TaskConfig],
+    picking_mode: str = "default",
 ) -> dict | None:
     """Generate a DGD config dict from the rank-1 picked result via AIC's generator."""
     if best_config_df is None or best_config_df.empty:
@@ -76,16 +79,45 @@ def _generate_dgd_from_pick(
         return None
 
     original_total_gpus = tc.total_gpus
-    if "total_gpus_needed" in row.index and row["total_gpus_needed"] > 0:
-        tc.total_gpus = int(row["total_gpus_needed"])
+    try:
+        if picking_mode == "autoscale":
+            # pick_autoscale returns rows with (p)workers=1 / (d)workers=1 by
+            # construction; the planner handles runtime scaling. AIC's
+            # module_bridge rescales workers by total_gpus // gpus_per_replica
+            # whenever total_gpus is truthy, which would override the picker's
+            # intent. Zeroing total_gpus here disables that rescale so the
+            # picker's workers=1 flows through unchanged.
+            tc.total_gpus = 0
+        elif "total_gpus_needed" in row.index:
+            clamped_total_gpus, was_clamped = clamp_total_gpus_to_budget(
+                row["total_gpus_needed"],
+                original_total_gpus,
+            )
+            # Enforce DGDR hardware budget as a hard cap in rapid mode.
+            # Some AIC pickers expose total_gpus_needed as a ranking signal rather
+            # than a strict feasibility constraint.
+            if was_clamped:
+                logger.warning(
+                    "Picked config requests %d GPUs but DGDR budget is %d; "
+                    "clamping generated deployment to budget.",
+                    int(row["total_gpus_needed"]),
+                    original_total_gpus,
+                )
+            tc.total_gpus = clamped_total_gpus
 
-    k8s_overrides = _build_k8s_overrides(dgdr, tc.backend_name)
-    cfg = task_config_to_generator_config(
-        task_config=tc,
-        result_df=row,
-        generator_overrides={"K8sConfig": k8s_overrides} if k8s_overrides else None,
-    )
-    tc.total_gpus = original_total_gpus
+        k8s_overrides = _build_k8s_overrides(dgdr, tc.backend_name)
+        cfg = task_config_to_generator_config(
+            task_config=tc,
+            result_df=row,
+            generator_overrides={"K8sConfig": k8s_overrides} if k8s_overrides else None,
+        )
+    finally:
+        tc.total_gpus = original_total_gpus
+
+    service_cfg = cfg.get("ServiceConfig")
+    if isinstance(service_cfg, dict):
+        service_cfg["model_path"] = dgdr.model
+        service_cfg["served_model_path"] = dgdr.model
 
     artifacts = generate_backend_artifacts(
         params=cfg,
@@ -173,9 +205,10 @@ def _run_autoscale_sim(
             "Throughput-based scaling enabled — only disagg mode is supported."
         )
 
+    local_or_hf_model = resolve_model_path(dgdr)
     task = TaskConfig(
         serving_mode="disagg",
-        model_path=model,
+        model_path=local_or_hf_model,
         system_name=system,
         backend_name=backend,
         total_gpus=total_gpus,
@@ -196,7 +229,9 @@ def _run_autoscale_sim(
         best_latencies["request_latency"] = float(row.get("request_latency", 0.0))
 
     task_configs = {"disagg": task}
-    dgd_config = _generate_dgd_from_pick(dgdr, pareto_df, "disagg", task_configs)
+    dgd_config = _generate_dgd_from_pick(
+        dgdr, pareto_df, "disagg", task_configs, "autoscale"
+    )
     return {
         "best_config_df": pareto_df,
         "best_latencies": best_latencies,
@@ -221,8 +256,9 @@ def _run_default_sim(
     picking_mode: str,
 ) -> dict:
     """Build default task_configs, apply load_match kwargs, run simulation, generate DGD."""
+    local_or_hf_model = resolve_model_path(dgdr)
     task_configs = build_default_task_configs(
-        model_path=model,
+        model_path=local_or_hf_model,
         total_gpus=total_gpus,
         system=system,
         backend=backend,
@@ -273,7 +309,9 @@ def _run_default_sim(
         chosen, {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
     )
 
-    dgd_config = _generate_dgd_from_pick(dgdr, best_config_df, chosen, task_configs)
+    dgd_config = _generate_dgd_from_pick(
+        dgdr, best_config_df, chosen, task_configs, picking_mode
+    )
 
     # When backend="auto" AIC expands to per-backend task configs; the winning
     # row carries the concrete backend name so downstream consumers (e.g.

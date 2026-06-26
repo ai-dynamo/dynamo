@@ -28,14 +28,30 @@ use super::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Respons
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO, SegmentSource,
-    ServiceBackend, ServiceEngine, SingleIn, Source, context,
+    AsyncTransportEngine, Context, Data, Error, ManyIn, ManyOut, PipelineError, PipelineIO,
+    SegmentSource, ServiceBackend, ServiceEngine, SingleIn, Source, context,
 };
-use ingress::push_handler::WorkHandlerMetrics;
-
-// Add Prometheus metrics types
 use crate::metrics::MetricsHierarchy;
+use crate::metrics::prometheus_names::work_handler;
+use crate::protocols::maybe_error::MaybeError;
+use ingress::push_handler::WorkHandlerMetrics;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
+
+/// Shared default maximum TCP message size across request-plane components.
+pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
+
+static TCP_MAX_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
+
+/// Read the configured TCP max message size once and share it across client,
+/// server, and zero-copy decoder code paths.
+pub(crate) fn get_tcp_max_message_size() -> usize {
+    *TCP_MAX_MESSAGE_SIZE.get_or_init(|| {
+        std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_TCP_MAX_MESSAGE_SIZE)
+    })
+}
 
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
 impl<T: PipelineIO + Serialize + for<'de> Deserialize<'de>> Codable for T {}
@@ -46,11 +62,45 @@ pub trait WorkQueueConsumer {
     async fn dequeue(&self) -> Result<Bytes, String>;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamType {
     Request,
     Response,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RequestType {
+    SingleIn,
+    ManyIn,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ResponseType {
+    SingleOut,
+    ManyOut,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RequestControlMessage {
+    pub(crate) id: String,
+    pub(crate) request_type: RequestType,
+    pub(crate) response_type: ResponseType,
+    pub(crate) connection_info: ConnectionInfo,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) metadata: std::collections::BTreeMap<String, String>,
+    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
+    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
+    /// Reliable for single-machine profiling; treat cross-host values as approximate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) frontend_send_ts_ns: Option<u64>,
+    /// For bidirectional dispatch (`request_type == ManyIn`): connection info the
+    /// worker dials back to in order to receive subsequent request frames. `None`
+    /// for the unary path, which is the wire-compatible default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request_stream_connection_info: Option<ConnectionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,23 +124,62 @@ pub struct ResponseStreamPrologue {
 
 pub type StreamProvider<T> = tokio::sync::oneshot::Receiver<Result<T, String>>;
 
-/// The [`RegisteredStream`] object is acquired from a [`StreamProvider`] and is used to provide
-/// an awaitable receiver which will the `T` which is either a stream writer for a request stream
-/// or a stream reader for a response stream.
-///
-/// make this an raii object linked to some stream provider
-/// if the object has not been awaited an the type T unwrapped, the registered stream
-/// on the stream provider will be informed and can clean up a stream that will never
-/// be connected.
-#[derive(Debug)]
+/// Owning `Drop` here (rather than on `RegisteredStream`) lets `into_parts()`
+/// move the public fields out by plain destructure.
+struct Cleanup(Option<Box<dyn FnOnce() + Send + 'static>>);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
+
+/// Awaitable handle for a stream sender or receiver. Drop without calling
+/// [`into_parts()`] runs the optional cleanup closure, removing the
+/// registration from the stream server's maps.
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
     pub stream_provider: StreamProvider<T>,
+    cleanup: Cleanup,
+}
+
+impl<T> std::fmt::Debug for RegisteredStream<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisteredStream")
+            .field("connection_info", &self.connection_info)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T> RegisteredStream<T> {
+    pub(crate) fn new(connection_info: ConnectionInfo, stream_provider: StreamProvider<T>) -> Self {
+        Self {
+            connection_info,
+            stream_provider,
+            cleanup: Cleanup(None),
+        }
+    }
+
+    pub(crate) fn with_cleanup<F>(mut self, cleanup: F) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.cleanup.0 = Some(Box::new(cleanup));
+        self
+    }
+
+    /// Consume the registration, disarming the RAII cleanup. Caller takes
+    /// responsibility for cleanup if the stream provider is never awaited.
     pub fn into_parts(self) -> (ConnectionInfo, StreamProvider<T>) {
-        (self.connection_info, self.stream_provider)
+        let Self {
+            connection_info,
+            stream_provider,
+            mut cleanup,
+        } = self;
+        cleanup.0.take();
+        (connection_info, stream_provider)
     }
 }
 
@@ -117,6 +206,68 @@ impl PendingConnections {
 #[async_trait::async_trait]
 pub trait ResponseService {
     async fn register(&self, options: StreamOptions) -> PendingConnections;
+}
+
+#[cfg(test)]
+mod registered_stream_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn dummy_conn_info() -> ConnectionInfo {
+        ConnectionInfo {
+            transport: "test".to_string(),
+            info: "{}".to_string(),
+        }
+    }
+
+    /// Drop without `into_parts()` must run the cleanup closure.
+    #[test]
+    fn drop_runs_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        drop(stream);
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "cleanup must fire when RegisteredStream is dropped"
+        );
+    }
+
+    /// `into_parts()` must disarm the cleanup. After the call, dropping the
+    /// returned halves must NOT trigger the closure -- the caller has taken
+    /// ownership of cleanup responsibility.
+    #[test]
+    fn into_parts_disarms_cleanup() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_clone = flag.clone();
+
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let stream = RegisteredStream::new(dummy_conn_info(), rx).with_cleanup(move || {
+            flag_clone.store(true, Ordering::SeqCst);
+        });
+
+        let (conn, provider) = stream.into_parts();
+        drop(conn);
+        drop(provider);
+
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "into_parts() must disarm the cleanup closure"
+        );
+    }
+
+    /// `RegisteredStream` with no cleanup configured must drop cleanly.
+    #[test]
+    fn drop_without_cleanup_is_a_noop() {
+        let (_tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+        let stream: RegisteredStream<()> = RegisteredStream::new(dummy_conn_info(), rx);
+        drop(stream); // must not panic; nothing observable to assert beyond that
+    }
 }
 
 // #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +357,11 @@ pub struct ConnectionInfo {
     pub info: String,
 }
 
+/// Default number of frames buffered between the data-plane socket task and the
+/// engine consumer/producer for a single stream. Preserves the historically
+/// hard-coded mpsc channel capacity used by the TCP transport.
+pub const DEFAULT_SEND_BUFFER_COUNT: usize = 64;
+
 /// When registering a new TransportStream on the server, the caller specifies if the
 /// stream is a sender, receiver or both.
 ///
@@ -218,17 +374,19 @@ pub struct StreamOptions {
     pub context: Arc<dyn AsyncEngineContext>,
 
     /// Register with the server that this connection will have a server-side Sender
-    /// that can be picked up by the Request/Forward pipeline
-    ///
-    /// TODO - note, this option is currently not implemented and will cause a panic
+    /// that can be picked up by the Request/Forward pipeline. The downstream side
+    /// dials in via [`crate::pipeline::network::tcp::client::TcpClient::create_request_stream`]
+    /// to receive the frames the server pushes.
     pub enable_request_stream: bool,
 
     /// Register with the server that this connection will have a server-side Receiver
     /// that can be picked up by the Response/Reverse pipeline
     pub enable_response_stream: bool,
 
-    /// The number of messages to buffer before blocking
-    #[builder(default = "8")]
+    /// The number of frames buffered between the data-plane socket task and the
+    /// engine consumer/producer before backpressure kicks in. Drives the mpsc
+    /// channel capacity for the per-stream buffer in the TCP transport.
+    #[builder(default = "DEFAULT_SEND_BUFFER_COUNT")]
     pub send_buffer_count: usize,
 
     /// The number of messages to buffer before blocking
@@ -246,6 +404,67 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
     transport_engine: Arc<dyn AsyncTransportEngine<Req, Resp>>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEFAULT_SEND_BUFFER_COUNT, RequestControlMessage, RequestType, ResponseType, StreamOptions,
+    };
+    use crate::engine::AsyncEngineContextProvider;
+    use crate::pipeline::Context;
+
+    #[test]
+    fn stream_options_send_buffer_count_defaults_to_64() {
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .build()
+            .expect("stream options should build");
+
+        assert_eq!(DEFAULT_SEND_BUFFER_COUNT, 64);
+        assert_eq!(options.send_buffer_count, DEFAULT_SEND_BUFFER_COUNT);
+    }
+
+    #[test]
+    fn stream_options_send_buffer_count_overrides_default() {
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .send_buffer_count(128)
+            .build()
+            .expect("stream options should build");
+
+        assert_eq!(options.send_buffer_count, 128);
+    }
+
+    #[test]
+    fn request_control_message_defaults_missing_metadata() {
+        let json = r#"{
+            "id": "request-123",
+            "request_type": "single_in",
+            "response_type": "many_out",
+            "connection_info": {
+                "transport": "tcp",
+                "info": "{}"
+            }
+        }"#;
+
+        let message: RequestControlMessage =
+            serde_json::from_str(json).expect("control message should deserialize");
+
+        assert_eq!(message.id, "request-123");
+        assert!(matches!(message.request_type, RequestType::SingleIn));
+        assert!(matches!(message.response_type, ResponseType::ManyOut));
+        assert_eq!(message.connection_info.transport, "tcp");
+        assert_eq!(message.connection_info.info, "{}");
+        assert!(message.metadata.is_empty());
+        assert!(message.frontend_send_ts_ns.is_none());
+    }
+}
+
 #[async_trait]
 impl<T: Data, U: Data> AsyncEngine<SingleIn<T>, ManyOut<U>, Error>
     for Egress<SingleIn<T>, ManyOut<U>>
@@ -256,28 +475,6 @@ where
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
         self.transport_engine.generate(request).await
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RequestType {
-    SingleIn,
-    ManyIn,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ResponseType {
-    SingleOut,
-    ManyOut,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RequestControlMessage {
-    id: String,
-    request_type: RequestType,
-    response_type: ResponseType,
-    connection_info: ConnectionInfo,
 }
 
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
@@ -309,6 +506,18 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     ) -> Result<()> {
         let metrics = WorkHandlerMetrics::from_endpoint(endpoint, metrics_labels)
             .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
+
+        // Register global transport breakdown metrics (idempotent)
+        crate::metrics::work_handler_perf::ensure_work_handler_perf_metrics_registered(
+            endpoint.get_metrics_registry(),
+        );
+
+        // Register worker-pool saturation metrics (idempotent). These are
+        // process-global and shared across all endpoints attached to the
+        // same shared TCP server.
+        crate::metrics::work_handler_pool::ensure_work_handler_pool_metrics_registered(
+            endpoint.get_metrics_registry(),
+        );
 
         self.metrics
             .set(Arc::new(metrics))
@@ -348,7 +557,11 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
 
 #[async_trait]
 pub trait PushWorkHandler: Send + Sync {
-    async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError>;
+    async fn handle_payload(
+        &self,
+        payload: Bytes,
+        request_id: Option<String>,
+    ) -> Result<(), PipelineError>;
 
     /// Add metrics to the handler
     fn add_metrics(

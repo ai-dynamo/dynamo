@@ -10,21 +10,17 @@
 use std::{
     fmt,
     io::{IsTerminal as _, Read as _},
-    path::PathBuf,
     str::FromStr,
 };
 
-pub mod batch;
 mod common;
-pub use common::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
+pub use common::{PreprocessedRouting, build_preprocessed_routing};
 pub mod endpoint;
 pub mod grpc;
 pub mod http;
 pub mod text;
 
 use dynamo_runtime::protocols::ENDPOINT_SCHEME;
-
-const BATCH_PREFIX: &str = "batch:";
 
 /// The various ways of connecting prompts to an engine
 #[derive(PartialEq)]
@@ -40,9 +36,6 @@ pub enum Input {
 
     /// Pull requests from a namespace/component/endpoint path.
     Endpoint(String),
-
-    /// Batch mode. Run all the prompts, write the outputs, exit.
-    Batch(PathBuf),
 
     // Run an KServe compatible gRPC server
     Grpc,
@@ -68,10 +61,6 @@ impl TryFrom<&str> for Input {
             endpoint_path if endpoint_path.starts_with(ENDPOINT_SCHEME) => {
                 Ok(Input::Endpoint(endpoint_path.to_string()))
             }
-            batch_patch if batch_patch.starts_with(BATCH_PREFIX) => {
-                let path = batch_patch.strip_prefix(BATCH_PREFIX).unwrap();
-                Ok(Input::Batch(PathBuf::from(path)))
-            }
             e => Err(anyhow::anyhow!("Invalid in= option '{e}'")),
         }
     }
@@ -85,7 +74,6 @@ impl fmt::Display for Input {
             Input::Text => "text",
             Input::Stdin => "stdin",
             Input::Endpoint(path) => path,
-            Input::Batch(path) => &path.display().to_string(),
         };
         write!(f, "{s}")
     }
@@ -110,15 +98,22 @@ pub async fn run_input(
     in_opt: Input,
     engine_config: super::EngineConfig,
 ) -> anyhow::Result<()> {
-    // Initialize audit bus + sink workers (off hot path; fan-out supported)
-    if crate::audit::config::policy().enabled {
-        let cap: usize = std::env::var("DYN_AUDIT_CAPACITY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1024);
-        crate::audit::bus::init(cap);
-        crate::audit::sink::spawn_workers_from_env().await?;
-        tracing::info!(cap, "Audit initialized");
+    if let Err(e) = crate::request_trace::init_from_env_with_shutdown(drt.child_token()).await {
+        tracing::warn!(error = %e, "Request trace initialization failed; continuing without trace sink");
+    }
+    if let Err(e) = crate::request_trace::start_tool_event_ingest_from_policy(
+        drt.clone(),
+        engine_config.local_model(),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "Request trace tool event ingest initialization failed; continuing without request trace tool events");
+    }
+
+    // Initialize audit bus + sink workers (off hot path; fan-out supported).
+    // Soft-fail like trace: a failed audit sink should not bring the server down.
+    if let Err(e) = crate::audit::init_from_env_with_shutdown(drt.child_token()).await {
+        tracing::warn!(error = %e, "Audit initialization failed; continuing without audit sink");
     }
 
     match in_opt {
@@ -135,9 +130,6 @@ pub async fn run_input(
             let mut prompt = String::new();
             std::io::stdin().read_to_string(&mut prompt).unwrap();
             text::run(drt, Some(prompt), engine_config).await?;
-        }
-        Input::Batch(path) => {
-            batch::run(drt, path, engine_config).await?;
         }
         Input::Endpoint(path) => {
             endpoint::run(drt, path, engine_config).await?;

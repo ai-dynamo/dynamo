@@ -11,13 +11,19 @@ from typing import List
 def _build_aiperf_cmd(
     model: str,
     port: int,
-    concurrency: int,
-    request_count: int,
+    sweep_mode: str,
+    sweep_value: int,
+    conversation_num: int,
     warmup_count: int,
     input_file: str,
     osl: int,
     artifact_dir: Path,
 ) -> List[str]:
+    if sweep_mode == "concurrency":
+        sweep_flag = "--concurrency"
+    else:
+        sweep_flag = "--request-rate"
+
     return [
         "aiperf",
         "profile",
@@ -25,10 +31,10 @@ def _build_aiperf_cmd(
         model,
         "-u",
         f"http://localhost:{port}",
-        "--concurrency",
-        str(concurrency),
-        "--request-count",
-        str(request_count),
+        sweep_flag,
+        str(sweep_value),
+        "--conversation-num",
+        str(conversation_num),
         "--warmup-request-count",
         str(warmup_count),
         "--input-file",
@@ -55,8 +61,9 @@ def _build_aiperf_cmd(
 def run_aiperf_single(
     model: str,
     port: int,
-    concurrency: int,
-    request_count: int,
+    sweep_mode: str,
+    sweep_value: int,
+    conversation_num: int,
     warmup_count: int,
     input_file: str,
     osl: int,
@@ -67,15 +74,16 @@ def run_aiperf_single(
     cmd = _build_aiperf_cmd(
         model=model,
         port=port,
-        concurrency=concurrency,
-        request_count=request_count,
+        sweep_mode=sweep_mode,
+        sweep_value=sweep_value,
+        conversation_num=conversation_num,
         warmup_count=warmup_count,
         input_file=input_file,
         osl=osl,
         artifact_dir=artifact_dir,
     )
 
-    print(f"  aiperf concurrency={concurrency} -> {artifact_dir}", flush=True)
+    print(f"  aiperf {sweep_mode}={sweep_value} -> {artifact_dir}", flush=True)
     proc = subprocess.run(cmd, capture_output=True, text=True)
 
     if proc.returncode != 0:
@@ -88,32 +96,34 @@ def run_aiperf_single(
             proc.returncode, cmd, output=proc.stdout, stderr=proc.stderr
         )
 
-    print(f"  aiperf concurrency={concurrency} done.", flush=True)
+    print(f"  aiperf {sweep_mode}={sweep_value} done.", flush=True)
 
 
-def run_concurrency_sweep(
+def run_sweep(
     model: str,
     port: int,
-    concurrencies: List[int],
-    request_count: int,
+    sweep_mode: str,
+    sweep_values: List[int],
+    conversation_num: int,
     warmup_count: int,
     input_file: str,
     osl: int,
     output_dir: Path,
 ) -> None:
-    """Run aiperf across all concurrency levels, writing results under output_dir/c{N}/."""
+    """Run aiperf across all sweep values, writing results under output_dir/{mode}{N}/."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for c in sorted(concurrencies):
+    for value in sorted(sweep_values):
         run_aiperf_single(
             model=model,
             port=port,
-            concurrency=c,
-            request_count=request_count,
+            sweep_mode=sweep_mode,
+            sweep_value=value,
+            conversation_num=conversation_num,
             warmup_count=warmup_count,
             input_file=input_file,
             osl=osl,
-            artifact_dir=output_dir / f"c{c}",
+            artifact_dir=output_dir / f"{sweep_mode}{value}",
         )
 
     print(f"Sweep complete. Results in {output_dir}", flush=True)

@@ -3,14 +3,19 @@
 
 """Dynamo Snapshot integration for SGLang workers."""
 
+import gc
 import logging
 import time
 
 import sglang as sgl
 
-from dynamo.common.utils.snapshot import CheckpointConfig, EngineSnapshotController
+from dynamo.common.snapshot.lifecycle import (
+    EngineSnapshotController,
+    SnapshotConfig,
+    configure_snapshot_capture_env,
+)
 
-from .request_handlers.handler_base import SGLangEngineQuiesceController
+from .pause import SGLangEnginePauseController
 
 logger = logging.getLogger(__name__)
 
@@ -20,38 +25,49 @@ async def prepare_snapshot_engine(
 ) -> EngineSnapshotController[sgl.Engine] | None:
     """Single entry point for Dynamo Snapshot integration.
 
-    Must be called BEFORE runtime creation so the engine can be checkpointed
+    Must be called BEFORE runtime creation so the engine can be snapshotted
     without active NATS/etcd connections.
 
     Returns:
-        None when not in checkpoint mode.
+        None when not in snapshot mode.
         A snapshot controller when restore completed and the caller should use
         the restored engine.
 
-        If checkpointing completed successfully, this function exits the
+        If snapshotting completed successfully, this function exits the
         process with status 0.
     """
-    checkpoint_cfg = CheckpointConfig.from_env()
-    if checkpoint_cfg is None:
+    snapshot_config = SnapshotConfig.from_env()
+    if snapshot_config is None:
         return None
 
-    logger.info("Checkpoint mode enabled (watcher-driven signals)")
+    configure_snapshot_capture_env()
+    logger.info("Snapshot mode enabled (watcher-driven signals)")
 
-    # Enable memory_saver + weights CPU backup so weights survive CRIU
-    # (mirrors vLLM's enable_sleep_mode = True)
+    # Enable memory_saver so GPU memory can be released for CRIU.
+    # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
+    # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
     server_args.enable_memory_saver = True
-    server_args.enable_weights_cpu_backup = True
+    try:
+        from gpu_memory_service.integrations.sglang import is_gms_active
+
+        _using_gms = is_gms_active()
+    except ImportError:
+        _using_gms = False
+    if not _using_gms:
+        server_args.enable_weights_cpu_backup = True
 
     start_time = time.time()
     engine = sgl.Engine(server_args=server_args)
     logger.info(
-        f"SGLang engine loaded in {time.time() - start_time:.2f}s (checkpoint mode)"
+        f"SGLang engine loaded in {time.time() - start_time:.2f}s (snapshot mode)"
     )
+
+    gc.collect()
 
     snapshot_controller = EngineSnapshotController(
         engine=engine,
-        quiesce_controller=SGLangEngineQuiesceController(engine),
-        checkpoint_config=checkpoint_cfg,
+        pause_controller=SGLangEnginePauseController(engine),
+        snapshot_config=snapshot_config,
     )
     if not await snapshot_controller.wait_for_restore():
         raise SystemExit(0)

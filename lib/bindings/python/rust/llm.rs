@@ -23,6 +23,9 @@
 /// integration between Python tools and the Dynamo runtime.
 use super::*;
 
+pub mod aic_callback;
+#[cfg(feature = "aic-forward-pass")]
+pub mod engine_perf;
 pub mod entrypoint;
 pub mod fpm;
 pub mod kv;
@@ -30,3 +33,5 @@ pub mod local_model;
 pub mod lora;
 pub mod model_card;
 pub mod preprocessor;
+pub mod replay;
+pub mod routed_engine;

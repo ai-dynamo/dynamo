@@ -3,9 +3,8 @@ package dynamo
 import (
 	"fmt"
 	"regexp"
-	"strings"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -27,19 +26,15 @@ func isPythonCommand(cmd string) bool {
 	return matched
 }
 
-func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	// Check for volumeMounts with useAsCompilationCache=true
-	for _, volumeMount := range component.VolumeMounts {
-		if volumeMount.UseAsCompilationCache {
-			logger := log.Log.WithName("sglang-backend")
-			logger.Info("Compilation cache configured for SGLang but not yet fully supported",
-				"backend", "sglang",
-				"status", "partial-support",
-				"cache-dir", volumeMount.MountPoint,
-				"use-as-compilation-cache", true,
-				"env-vars-set", false,
-				"next-steps", "upstream SGLang changes needed")
-		}
+func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+	if component.CompilationCache != nil {
+		logger := log.Log.WithName("sglang-backend")
+		logger.Info("Compilation cache configured for SGLang but not yet fully supported",
+			"backend", "sglang",
+			"status", "partial-support",
+			"cache-dir", component.CompilationCache.MountPath,
+			"env-vars-set", false,
+			"next-steps", "upstream SGLang changes needed")
 	}
 
 	// For single node, nothing to do
@@ -63,7 +58,7 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	injectFlagsIntoContainerCommand(container, flags, needsShell, "sglang")
 }
 
-func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// do nothing
 }
 
@@ -77,7 +72,6 @@ func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, servic
 	if role == RoleLeader {
 		nodeRank = "0"
 		needsShell = false
-		leaderHostname = convertIfShellVar(leaderHostname)
 	} else {
 		nodeRank, needsShell = multinodeDeployer.GetNodeRank()
 	}
@@ -85,20 +79,4 @@ func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, servic
 
 	flags := fmt.Sprintf("--dist-init-addr %s --nnodes %d --node-rank %s", distInitAddr, numberOfNodes, nodeRank)
 	return flags, needsShell
-}
-
-// Match a string representing a shell variable, such as $ABC
-var shellVarRe = regexp.MustCompile(`^\$([A-Za-z_][A-Za-z0-9_]*)$`)
-
-// convertIfShellVar convert shell variable $ABC to $(ABC)
-func convertIfShellVar(s string) string {
-	if strings.HasPrefix(s, "$(") && strings.HasSuffix(s, ")") {
-		return s
-	}
-
-	if match := shellVarRe.FindStringSubmatch(s); len(match) > 1 {
-		return "$(" + match[1] + ")"
-	}
-
-	return s
 }

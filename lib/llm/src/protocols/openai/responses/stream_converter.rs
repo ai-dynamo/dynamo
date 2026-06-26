@@ -9,10 +9,11 @@
 //! `response.output_text.done` -> `response.content_part.done` ->
 //! `response.output_item.done` -> `response.completed` -> `[DONE]`
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
-use dynamo_async_openai::types::responses::{
+use dynamo_protocols::types::responses::{
     AssistantRole, FunctionToolCall, InputTokenDetails, Instructions, OutputContent, OutputItem,
     OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
     Response, ResponseCompletedEvent, ResponseContentPartAddedEvent, ResponseContentPartDoneEvent,
@@ -22,18 +23,25 @@ use dynamo_async_openai::types::responses::{
     ResponseTextDoneEvent, ResponseTextParam, ResponseUsage, ServiceTier, Status,
     TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
 };
+use serde::{
+    Serialize,
+    ser::{SerializeMap, Serializer},
+};
 use uuid::Uuid;
 
-use dynamo_async_openai::types::ChatCompletionMessageContent;
+use dynamo_protocols::types::ChatCompletionMessageContent;
 
 use super::ResponseParams;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use crate::protocols::unified::ResponsesContext;
 
 /// State machine that converts a chat completion stream into Responses API events.
 pub struct ResponseStreamConverter {
     response_id: String,
     model: String,
     params: ResponseParams,
+    /// Preserved Responses API-specific request context for faithful response reconstruction.
+    api_context: Option<ResponsesContext>,
     created_at: u64,
     sequence_number: u64,
     // Text message tracking
@@ -72,6 +80,7 @@ impl ResponseStreamConverter {
             response_id: format!("resp_{}", Uuid::new_v4().simple()),
             model,
             params,
+            api_context: None,
             created_at,
             sequence_number: 0,
             message_item_id: format!("msg_{}", Uuid::new_v4().simple()),
@@ -82,6 +91,12 @@ impl ResponseStreamConverter {
             next_output_index: 0,
             usage: None,
         }
+    }
+
+    pub fn with_context(model: String, params: ResponseParams, context: ResponsesContext) -> Self {
+        let mut converter = Self::new(model, params);
+        converter.api_context = Some(context);
+        converter
     }
 
     fn next_seq(&mut self) -> u64 {
@@ -111,12 +126,8 @@ impl ResponseStreamConverter {
             output,
             // Echo request params with spec-required defaults for omitted fields
             background: Some(false),
-            frequency_penalty: Some(0.0),
-            metadata: Some(serde_json::Value::Object(Default::default())),
-            parallel_tool_calls: Some(true),
-            presence_penalty: Some(0.0),
-            // store: false because this branch does not persist responses.
-            store: self.params.store.or(Some(false)),
+            metadata: Some(HashMap::new()),
+            parallel_tool_calls: self.params.parallel_tool_calls.or(Some(true)),
             temperature: self.params.temperature.or(Some(1.0)),
             text: Some(self.params.text.clone().unwrap_or(ResponseTextParam {
                 format: TextResponseFormatConfiguration::Text,
@@ -143,13 +154,15 @@ impl ResponseStreamConverter {
             incomplete_details: None,
             instructions: self.params.instructions.clone().map(Instructions::Text),
             max_output_tokens: self.params.max_output_tokens,
-            max_tool_calls: None,
-            previous_response_id: None,
+            previous_response_id: self
+                .api_context
+                .as_ref()
+                .and_then(|ctx| ctx.previous_response_id.clone()),
             prompt: None,
-            prompt_cache_key: None,
-            prompt_cache_retention: None,
+            prompt_cache_key: self.params.prompt_cache_key.clone(),
+            prompt_cache_retention: self.params.prompt_cache_retention,
             reasoning: self.params.reasoning.clone(),
-            safety_identifier: None,
+            safety_identifier: self.params.safety_identifier.clone(),
             service_tier: Some(self.params.service_tier.unwrap_or(ServiceTier::Auto)),
             top_logprobs: Some(0),
             usage: self.usage.clone(),
@@ -159,20 +172,23 @@ impl ResponseStreamConverter {
     /// Emit the initial lifecycle events: created + in_progress.
     pub fn emit_start_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::with_capacity(2);
+        self.append_start_events(&mut events);
+        events
+    }
 
+    /// Append the initial lifecycle events: created + in_progress.
+    pub fn append_start_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
         let created = ResponseStreamEvent::ResponseCreated(ResponseCreatedEvent {
             sequence_number: self.next_seq(),
             response: self.make_response(Status::InProgress, vec![]),
         });
-        events.push(make_sse_event(&created));
+        events.push(self.make_sse_event(&created));
 
         let in_progress = ResponseStreamEvent::ResponseInProgress(ResponseInProgressEvent {
             sequence_number: self.next_seq(),
             response: self.make_response(Status::InProgress, vec![]),
         });
-        events.push(make_sse_event(&in_progress));
-
-        events
+        events.push(self.make_sse_event(&in_progress));
     }
 
     /// Process a single chat completion stream chunk and return zero or more SSE events.
@@ -181,9 +197,18 @@ impl ResponseStreamConverter {
         chunk: &NvCreateChatCompletionStreamResponse,
     ) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
+        self.append_chunk_events(chunk, &mut events);
+        events
+    }
 
+    /// Process a single chat completion stream chunk and append zero or more SSE events.
+    pub fn append_chunk_events(
+        &mut self,
+        chunk: &NvCreateChatCompletionStreamResponse,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) {
         // Capture usage stats from the final chunk (sent when stream_options.include_usage=true)
-        if let Some(ref u) = chunk.usage {
+        if let Some(ref u) = chunk.inner.usage {
             self.usage = Some(ResponseUsage {
                 input_tokens: u.prompt_tokens,
                 input_tokens_details: InputTokenDetails {
@@ -205,7 +230,7 @@ impl ResponseStreamConverter {
             });
         }
 
-        for choice in &chunk.choices {
+        for choice in &chunk.inner.choices {
             let delta = &choice.delta;
 
             // Handle text content deltas — extract text from the enum
@@ -232,14 +257,15 @@ impl ResponseStreamConverter {
                             sequence_number: self.next_seq(),
                             output_index,
                             item: OutputItem::Message(OutputMessage {
-                                id: Some(self.message_item_id.clone()),
+                                id: self.message_item_id.clone(),
                                 content: vec![],
                                 role: AssistantRole::Assistant,
-                                status: Some(OutputStatus::InProgress),
+                                phase: None,
+                                status: OutputStatus::InProgress,
                             }),
                         },
                     );
-                    events.push(make_sse_event(&item_added));
+                    events.push(self.make_sse_event(&item_added));
 
                     let part_added = ResponseStreamEvent::ResponseContentPartAdded(
                         ResponseContentPartAddedEvent {
@@ -254,7 +280,7 @@ impl ResponseStreamConverter {
                             }),
                         },
                     );
-                    events.push(make_sse_event(&part_added));
+                    events.push(self.make_sse_event(&part_added));
                 }
 
                 // Emit text delta
@@ -268,7 +294,7 @@ impl ResponseStreamConverter {
                         delta: content.to_string(),
                         logprobs: Some(vec![]),
                     });
-                events.push(make_sse_event(&text_delta));
+                events.push(self.make_sse_event(&text_delta));
             }
 
             // Handle tool call deltas
@@ -315,13 +341,14 @@ impl ResponseStreamConverter {
                                         item: OutputItem::FunctionCall(FunctionToolCall {
                                             id: Some(item_id),
                                             call_id,
+                                            namespace: None,
                                             name: fc_name,
                                             arguments: String::new(),
                                             status: Some(OutputStatus::InProgress),
                                         }),
                                     },
                                 );
-                                events.push(make_sse_event(&item_added));
+                                events.push(self.make_sse_event(&item_added));
                             }
 
                             self.function_call_items[tc_index]
@@ -344,7 +371,7 @@ impl ResponseStreamConverter {
                                         delta: args.clone(),
                                     },
                                 );
-                            events.push(make_sse_event(&args_delta));
+                            events.push(self.make_sse_event(&args_delta));
 
                             // Emit done + output_item.done immediately if the tool call
                             // arrived complete in a single chunk (id + name + args all present).
@@ -371,7 +398,7 @@ impl ResponseStreamConverter {
                                             name: Some(fc_name.clone()),
                                         },
                                     );
-                                events.push(make_sse_event(&args_done));
+                                events.push(self.make_sse_event(&args_done));
 
                                 let item_done = ResponseStreamEvent::ResponseOutputItemDone(
                                     ResponseOutputItemDoneEvent {
@@ -380,27 +407,31 @@ impl ResponseStreamConverter {
                                         item: OutputItem::FunctionCall(FunctionToolCall {
                                             id: Some(fc_item_id),
                                             call_id: fc_call_id,
+                                            namespace: None,
                                             name: fc_name,
                                             arguments: fc_args,
                                             status: Some(OutputStatus::Completed),
                                         }),
                                     },
                                 );
-                                events.push(make_sse_event(&item_done));
+                                events.push(self.make_sse_event(&item_done));
                             }
                         }
                     }
                 }
             }
         }
-
-        events
     }
 
     /// Emit the final events when the stream ends: done events + completed.
     pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
+        self.append_end_events(&mut events);
+        events
+    }
 
+    /// Append the final events when the stream ends: done events + completed.
+    pub fn append_end_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
         // Close text message if it was started
         if self.message_started {
             let text_done = ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
@@ -411,7 +442,7 @@ impl ResponseStreamConverter {
                 text: self.accumulated_text.clone(),
                 logprobs: Some(vec![]),
             });
-            events.push(make_sse_event(&text_done));
+            events.push(self.make_sse_event(&text_done));
 
             let part_done =
                 ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
@@ -425,24 +456,25 @@ impl ResponseStreamConverter {
                         logprobs: Some(vec![]),
                     }),
                 });
-            events.push(make_sse_event(&part_done));
+            events.push(self.make_sse_event(&part_done));
 
             let item_done =
                 ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
                     sequence_number: self.next_seq(),
                     output_index: self.message_output_index,
                     item: OutputItem::Message(OutputMessage {
-                        id: Some(self.message_item_id.clone()),
+                        id: self.message_item_id.clone(),
                         content: vec![OutputMessageContent::OutputText(OutputTextContent {
                             text: self.accumulated_text.clone(),
                             annotations: vec![],
                             logprobs: Some(vec![]),
                         })],
                         role: AssistantRole::Assistant,
-                        status: Some(OutputStatus::Completed),
+                        phase: None,
+                        status: OutputStatus::Completed,
                     }),
                 });
-            events.push(make_sse_event(&item_done));
+            events.push(self.make_sse_event(&item_done));
         }
 
         // Close any function call items not already done inline
@@ -470,7 +502,7 @@ impl ResponseStreamConverter {
                     name: Some(fc_name.clone()),
                 },
             );
-            events.push(make_sse_event(&args_done));
+            events.push(self.make_sse_event(&args_done));
 
             let item_done =
                 ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
@@ -479,26 +511,28 @@ impl ResponseStreamConverter {
                     item: OutputItem::FunctionCall(FunctionToolCall {
                         id: Some(item_id),
                         call_id,
+                        namespace: None,
                         name: fc_name,
                         arguments: accumulated_args,
                         status: Some(OutputStatus::Completed),
                     }),
                 });
-            events.push(make_sse_event(&item_done));
+            events.push(self.make_sse_event(&item_done));
         }
 
         // Build the final output vector from accumulated state
         let mut output = Vec::new();
         if self.message_started {
             output.push(OutputItem::Message(OutputMessage {
-                id: Some(self.message_item_id.clone()),
+                id: self.message_item_id.clone(),
                 content: vec![OutputMessageContent::OutputText(OutputTextContent {
                     text: self.accumulated_text.clone(),
                     annotations: vec![],
                     logprobs: Some(vec![]),
                 })],
                 role: AssistantRole::Assistant,
-                status: Some(OutputStatus::Completed),
+                phase: None,
+                status: OutputStatus::Completed,
             }));
         }
         for fc in &self.function_call_items {
@@ -506,6 +540,7 @@ impl ResponseStreamConverter {
                 output.push(OutputItem::FunctionCall(FunctionToolCall {
                     id: Some(fc.item_id.clone()),
                     call_id: fc.call_id.clone(),
+                    namespace: None,
                     name: fc.name.clone(),
                     arguments: fc.accumulated_args.clone(),
                     status: Some(OutputStatus::Completed),
@@ -518,29 +553,216 @@ impl ResponseStreamConverter {
             sequence_number: self.next_seq(),
             response: self.make_response(Status::Completed, output),
         });
-        events.push(make_sse_event(&completed));
-
-        events
+        events.push(self.make_sse_event(&completed));
     }
 
     /// Emit error events when the stream ends due to a backend error.
     pub fn emit_error_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
+        self.append_error_events(&mut events);
+        events
+    }
 
+    /// Append error events when the stream ends due to a backend error.
+    pub fn append_error_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
         let failed = ResponseStreamEvent::ResponseFailed(ResponseFailedEvent {
             sequence_number: self.next_seq(),
             response: self.make_response(Status::Failed, vec![]),
         });
-        events.push(make_sse_event(&failed));
-
-        events
+        events.push(self.make_sse_event(&failed));
     }
 }
 
-fn make_sse_event(event: &ResponseStreamEvent) -> Result<Event, anyhow::Error> {
-    let event_type = get_event_type(event);
-    let data = serde_json::to_string(event)?;
-    Ok(Event::default().event(event_type).data(data))
+impl ResponseStreamConverter {
+    /// Serialize a stream event, patching any embedded `response` object to
+    /// satisfy the OpenResponses schema. Takes `&self` so spec-required
+    /// sampling params can be sourced from the originating request via
+    /// `self.params` rather than hardcoded at each emit site.
+    fn make_sse_event(&self, event: &ResponseStreamEvent) -> Result<Event, anyhow::Error> {
+        let event_type = get_event_type(event);
+        let data = self.serialize_event_data(event)?;
+        Ok(Event::default().event(event_type).data(data))
+    }
+
+    fn serialize_event_data(
+        &self,
+        event: &ResponseStreamEvent,
+    ) -> Result<String, serde_json::Error> {
+        let spec = ResponseSpecFields {
+            presence_penalty: self.params.presence_penalty.unwrap_or(0.0),
+            frequency_penalty: self.params.frequency_penalty.unwrap_or(0.0),
+            store: self.params.store.unwrap_or(false),
+        };
+
+        match event {
+            ResponseStreamEvent::ResponseCreated(event) => {
+                serde_json::to_string(&ResponseEventForSpec::new(
+                    "response.created",
+                    event.sequence_number,
+                    &event.response,
+                    spec,
+                ))
+            }
+            ResponseStreamEvent::ResponseInProgress(event) => {
+                serde_json::to_string(&ResponseEventForSpec::new(
+                    "response.in_progress",
+                    event.sequence_number,
+                    &event.response,
+                    spec,
+                ))
+            }
+            ResponseStreamEvent::ResponseCompleted(event) => {
+                serde_json::to_string(&ResponseEventForSpec::new(
+                    "response.completed",
+                    event.sequence_number,
+                    &event.response,
+                    spec,
+                ))
+            }
+            ResponseStreamEvent::ResponseFailed(event) => {
+                serde_json::to_string(&ResponseEventForSpec::new(
+                    "response.failed",
+                    event.sequence_number,
+                    &event.response,
+                    spec,
+                ))
+            }
+            ResponseStreamEvent::ResponseIncomplete(event) => {
+                serde_json::to_string(&ResponseEventForSpec::new(
+                    "response.incomplete",
+                    event.sequence_number,
+                    &event.response,
+                    spec,
+                ))
+            }
+            ResponseStreamEvent::ResponseQueued(event) => {
+                serde_json::to_string(&ResponseEventForSpec::new(
+                    "response.queued",
+                    event.sequence_number,
+                    &event.response,
+                    spec,
+                ))
+            }
+            _ => serde_json::to_string(event),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ResponseSpecFields {
+    presence_penalty: f32,
+    frequency_penalty: f32,
+    store: bool,
+}
+
+struct ResponseEventForSpec<'a> {
+    event_type: &'static str,
+    sequence_number: u64,
+    response: &'a Response,
+    spec: ResponseSpecFields,
+}
+
+impl<'a> ResponseEventForSpec<'a> {
+    fn new(
+        event_type: &'static str,
+        sequence_number: u64,
+        response: &'a Response,
+        spec: ResponseSpecFields,
+    ) -> Self {
+        Self {
+            event_type,
+            sequence_number,
+            response,
+            spec,
+        }
+    }
+}
+
+impl Serialize for ResponseEventForSpec<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry("type", self.event_type)?;
+        map.serialize_entry("sequence_number", &self.sequence_number)?;
+        map.serialize_entry(
+            "response",
+            &ResponseForSpec {
+                response: self.response,
+                spec: self.spec,
+            },
+        )?;
+        map.end()
+    }
+}
+
+struct ResponseForSpec<'a> {
+    response: &'a Response,
+    spec: ResponseSpecFields,
+}
+
+// Mirrors async-openai's `Response` serialization while writing Dynamo's
+// OpenResponses spec fields directly, avoiding a per-stream-event Value tree.
+impl Serialize for ResponseForSpec<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let response = self.response;
+        let mut map = serializer.serialize_map(None)?;
+
+        serialize_optional_entry(&mut map, "background", &response.background)?;
+        map.serialize_entry("billing", &response.billing)?;
+        map.serialize_entry("conversation", &response.conversation)?;
+        map.serialize_entry("created_at", &response.created_at)?;
+        map.serialize_entry("completed_at", &response.completed_at)?;
+        map.serialize_entry("error", &response.error)?;
+        map.serialize_entry("id", &response.id)?;
+        map.serialize_entry("incomplete_details", &response.incomplete_details)?;
+        map.serialize_entry("instructions", &response.instructions)?;
+        map.serialize_entry("max_output_tokens", &response.max_output_tokens)?;
+        map.serialize_entry("max_tool_calls", &None::<u32>)?;
+        serialize_optional_entry(&mut map, "metadata", &response.metadata)?;
+        map.serialize_entry("model", &response.model)?;
+        map.serialize_entry("object", &response.object)?;
+        map.serialize_entry("output", &response.output)?;
+        serialize_optional_entry(
+            &mut map,
+            "parallel_tool_calls",
+            &response.parallel_tool_calls,
+        )?;
+        map.serialize_entry("previous_response_id", &response.previous_response_id)?;
+        map.serialize_entry("prompt", &response.prompt)?;
+        map.serialize_entry("prompt_cache_key", &response.prompt_cache_key)?;
+        map.serialize_entry("prompt_cache_retention", &response.prompt_cache_retention)?;
+        map.serialize_entry("reasoning", &response.reasoning)?;
+        map.serialize_entry("safety_identifier", &response.safety_identifier)?;
+        serialize_optional_entry(&mut map, "service_tier", &response.service_tier)?;
+        map.serialize_entry("status", &response.status)?;
+        serialize_optional_entry(&mut map, "temperature", &response.temperature)?;
+        serialize_optional_entry(&mut map, "text", &response.text)?;
+        serialize_optional_entry(&mut map, "tool_choice", &response.tool_choice)?;
+        serialize_optional_entry(&mut map, "tools", &response.tools)?;
+        serialize_optional_entry(&mut map, "top_logprobs", &response.top_logprobs)?;
+        serialize_optional_entry(&mut map, "top_p", &response.top_p)?;
+        serialize_optional_entry(&mut map, "truncation", &response.truncation)?;
+        map.serialize_entry("usage", &response.usage)?;
+        map.serialize_entry("presence_penalty", &self.spec.presence_penalty)?;
+        map.serialize_entry("frequency_penalty", &self.spec.frequency_penalty)?;
+        map.serialize_entry("store", &self.spec.store)?;
+
+        map.end()
+    }
+}
+
+fn serialize_optional_entry<S, T>(
+    map: &mut S,
+    key: &'static str,
+    value: &Option<T>,
+) -> Result<(), S::Error>
+where
+    S: SerializeMap,
+    T: Serialize,
+{
+    if let Some(value) = value {
+        map.serialize_entry(key, value)?;
+    }
+    Ok(())
 }
 
 fn get_event_type(event: &ResponseStreamEvent) -> &'static str {
@@ -654,27 +876,14 @@ fn get_event_type(event: &ResponseStreamEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_async_openai::types::{
+    use crate::protocols::unified::ResponsesContext;
+    use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
-        ChatCompletionStreamResponseDelta, ChatCompletionToolType, FunctionCallStream,
+        ChatCompletionStreamResponseDelta, FunctionCallStream, FunctionType,
     };
 
     fn default_params() -> ResponseParams {
-        ResponseParams {
-            model: None,
-            temperature: None,
-            top_p: None,
-            max_output_tokens: None,
-            store: None,
-            tools: None,
-            tool_choice: None,
-            instructions: None,
-            reasoning: None,
-            text: None,
-            service_tier: None,
-            include: None,
-            truncation: None,
-        }
+        ResponseParams::default()
     }
 
     fn tool_call_chunk(
@@ -685,64 +894,68 @@ mod tests {
     ) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
-            id: "chat-1".into(),
-            choices: vec![ChatChoiceStream {
-                index: 0,
-                delta: ChatCompletionStreamResponseDelta {
-                    content: None,
-                    function_call: None,
-                    tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
-                        index: tc_index,
-                        id: id.map(String::from),
-                        r#type: Some(ChatCompletionToolType::Function),
-                        function: Some(FunctionCallStream {
-                            name: name.map(String::from),
-                            arguments: args.map(String::from),
-                        }),
-                    }]),
-                    role: None,
-                    refusal: None,
-                    reasoning_content: None,
-                },
-                finish_reason: None,
-                stop_reason: None,
-                logprobs: None,
-            }],
-            created: 0,
-            model: "test".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion.chunk".into(),
-            usage: None,
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "chat-1".into(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: ChatCompletionStreamResponseDelta {
+                        content: None,
+                        function_call: None,
+                        tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
+                            index: tc_index,
+                            id: id.map(String::from),
+                            r#type: Some(FunctionType::Function),
+                            function: Some(FunctionCallStream {
+                                name: name.map(String::from),
+                                arguments: args.map(String::from),
+                            }),
+                        }]),
+                        role: None,
+                        refusal: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                created: 0,
+                model: "test".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".into(),
+                usage: None,
+            },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
     fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
         #[allow(deprecated)]
         NvCreateChatCompletionStreamResponse {
-            id: "chat-1".into(),
-            choices: vec![ChatChoiceStream {
-                index: 0,
-                delta: ChatCompletionStreamResponseDelta {
-                    content: Some(ChatCompletionMessageContent::Text(text.into())),
-                    function_call: None,
-                    tool_calls: None,
-                    role: None,
-                    refusal: None,
-                    reasoning_content: None,
-                },
-                finish_reason: None,
-                stop_reason: None,
-                logprobs: None,
-            }],
-            created: 0,
-            model: "test".into(),
-            service_tier: None,
-            system_fingerprint: None,
-            object: "chat.completion.chunk".into(),
-            usage: None,
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "chat-1".into(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: ChatCompletionStreamResponseDelta {
+                        content: Some(ChatCompletionMessageContent::Text(text.into())),
+                        function_call: None,
+                        tool_calls: None,
+                        role: None,
+                        refusal: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                created: 0,
+                model: "test".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion.chunk".into(),
+                usage: None,
+            },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
@@ -762,6 +975,31 @@ mod tests {
 
     fn event_types(events: &[Result<Event, anyhow::Error>]) -> Vec<String> {
         events.iter().map(event_type).collect()
+    }
+
+    fn legacy_event_json(
+        event: &ResponseStreamEvent,
+        params: &ResponseParams,
+    ) -> serde_json::Value {
+        let mut value = serde_json::to_value(event).unwrap();
+        if let serde_json::Value::Object(ref mut obj) = value
+            && let Some(serde_json::Value::Object(inner)) = obj.get_mut("response")
+        {
+            super::super::patch_response_for_spec(
+                inner,
+                params.presence_penalty.unwrap_or(0.0),
+                params.frequency_penalty.unwrap_or(0.0),
+                params.store.unwrap_or(false),
+            );
+        }
+        value
+    }
+
+    fn optimized_event_json(
+        converter: &ResponseStreamConverter,
+        event: &ResponseStreamEvent,
+    ) -> serde_json::Value {
+        serde_json::from_str(&converter.serialize_event_data(event).unwrap()).unwrap()
     }
 
     /// Complete tool call emits function_call_arguments.done + output_item.done inline.
@@ -907,5 +1145,134 @@ mod tests {
             tool_types.contains(&"response.output_item.done".to_string()),
             "output_item.done inline after text: {tool_types:?}"
         );
+    }
+
+    /// Verify that `with_context` populates `previous_response_id`
+    /// in the generated Response objects.
+    #[test]
+    fn test_with_context_enriches_response() {
+        let ctx = ResponsesContext {
+            previous_response_id: Some("resp_prev_123".to_string()),
+            store: true,
+            ..Default::default()
+        };
+        let params = ResponseParams::default();
+        let mut conv = ResponseStreamConverter::with_context("test-model".into(), params, ctx);
+
+        // Process one text chunk so there's output
+        let _ = conv.emit_start_events();
+        let _ = conv.process_chunk(&text_chunk("Hello"));
+        let _end_events = conv.emit_end_events();
+
+        let response = conv.make_response(Status::Completed, vec![]);
+        assert_eq!(
+            response.previous_response_id.as_deref(),
+            Some("resp_prev_123")
+        );
+    }
+
+    /// Without context, previous_response_id is None.
+    #[test]
+    fn test_without_context_defaults() {
+        let params = ResponseParams::default();
+        let conv = ResponseStreamConverter::new("test-model".into(), params);
+
+        let response = conv.make_response(Status::Completed, vec![]);
+        assert_eq!(response.previous_response_id, None);
+    }
+
+    #[test]
+    fn test_stream_response_echoes_parallel_tool_calls() {
+        let params = ResponseParams {
+            parallel_tool_calls: Some(false),
+            ..Default::default()
+        };
+        let conv = ResponseStreamConverter::new("test-model".into(), params);
+
+        let response = conv.make_response(Status::Completed, vec![]);
+        assert_eq!(response.parallel_tool_calls, Some(false));
+    }
+
+    #[test]
+    fn test_append_chunk_events_preserves_order() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let mut events = Vec::with_capacity(4);
+
+        conv.append_chunk_events(&text_chunk("Hello"), &mut events);
+
+        assert_eq!(
+            event_types(&events),
+            vec![
+                "response.output_item.added".to_string(),
+                "response.content_part.added".to_string(),
+                "response.output_text.delta".to_string(),
+            ]
+        );
+
+        events.clear();
+        conv.append_chunk_events(
+            &tool_call_chunk(0, Some("call-1"), Some("lookup"), Some("{\"q\":\"x\"}")),
+            &mut events,
+        );
+
+        assert_eq!(
+            event_types(&events),
+            vec![
+                "response.output_item.added".to_string(),
+                "response.function_call_arguments.delta".to_string(),
+                "response.function_call_arguments.done".to_string(),
+                "response.output_item.done".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_optimized_stream_event_serializer_matches_patched_json() {
+        let params = ResponseParams {
+            presence_penalty: Some(0.25),
+            frequency_penalty: Some(0.5),
+            store: Some(true),
+            ..Default::default()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params.clone());
+
+        let response_event = ResponseStreamEvent::ResponseCreated(ResponseCreatedEvent {
+            sequence_number: conv.next_seq(),
+            response: conv.make_response(Status::InProgress, vec![]),
+        });
+        let text_event = ResponseStreamEvent::ResponseOutputTextDelta(ResponseTextDeltaEvent {
+            sequence_number: conv.next_seq(),
+            item_id: "msg_1".to_string(),
+            output_index: 0,
+            content_index: 0,
+            delta: "line\nquote\"slash\\ cjk 漢字 emoji 🚀".to_string(),
+            logprobs: Some(vec![]),
+        });
+        let tool_event = ResponseStreamEvent::ResponseFunctionCallArgumentsDone(
+            ResponseFunctionCallArgumentsDoneEvent {
+                name: Some("lookup".to_string()),
+                sequence_number: conv.next_seq(),
+                item_id: "fc_1".to_string(),
+                output_index: 1,
+                arguments: "{\"q\":\"x\"}".to_string(),
+            },
+        );
+        let completed_event = ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
+            sequence_number: conv.next_seq(),
+            response: conv.make_response(Status::Completed, vec![]),
+        });
+
+        for event in [&response_event, &text_event, &tool_event, &completed_event] {
+            assert_eq!(
+                optimized_event_json(&conv, event),
+                legacy_event_json(event, &params)
+            );
+        }
+
+        let response_json = optimized_event_json(&conv, &response_event);
+        assert_eq!(response_json["response"]["presence_penalty"], 0.25);
+        assert_eq!(response_json["response"]["frequency_penalty"], 0.5);
+        assert_eq!(response_json["response"]["store"], true);
+        assert!(response_json["response"]["max_tool_calls"].is_null());
     }
 }

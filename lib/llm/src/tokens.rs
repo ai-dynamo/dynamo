@@ -389,6 +389,8 @@ pub struct TokenBlock {
     block_hash: BlockHash,
     sequence_hash: SequenceHash,
     parent_sequence_hash: Option<SequenceHash>,
+    external_sequence_hash: Option<SequenceHash>,
+    external_parent_sequence_hash: Option<SequenceHash>,
 }
 
 impl TokenBlock {
@@ -425,6 +427,8 @@ impl TokenBlock {
             block_hash: chunk.block_hash,
             sequence_hash,
             parent_sequence_hash,
+            external_sequence_hash: None,
+            external_parent_sequence_hash: None,
         }
     }
 
@@ -451,6 +455,61 @@ impl TokenBlock {
     /// Returns the sequence hash of the preceding block, if any.
     pub fn parent_sequence_hash(&self) -> Option<SequenceHash> {
         self.parent_sequence_hash
+    }
+
+    /// Returns the TRT-LLM/framework sequence hash for this block, if assigned.
+    pub fn external_sequence_hash(&self) -> Option<SequenceHash> {
+        self.external_sequence_hash
+    }
+
+    /// Returns the TRT-LLM/framework parent sequence hash for this block, if assigned.
+    pub fn external_parent_sequence_hash(&self) -> Option<SequenceHash> {
+        self.external_parent_sequence_hash
+    }
+
+    /// Assigns the TRT-LLM/framework hash chain for this block.
+    ///
+    /// Idempotent: calling with the same values on an already-assigned block
+    /// is a no-op, but re-assigning a different chain panics to match the
+    /// invariant `sync_external_sequence_hashes` enforces.
+    pub fn assign_external_hashes(
+        &mut self,
+        external_sequence_hash: SequenceHash,
+        external_parent_sequence_hash: Option<SequenceHash>,
+    ) {
+        if let Some(existing) = self.external_sequence_hash {
+            assert_eq!(
+                existing, external_sequence_hash,
+                "external_sequence_hash re-assignment mismatch",
+            );
+            assert_eq!(
+                self.external_parent_sequence_hash, external_parent_sequence_hash,
+                "external_parent_sequence_hash re-assignment mismatch",
+            );
+            return;
+        }
+        self.external_sequence_hash = Some(external_sequence_hash);
+        self.external_parent_sequence_hash = external_parent_sequence_hash;
+    }
+
+    /// Ensures that this complete block has an assigned TRT-LLM/framework hash chain.
+    pub fn assert_external_hashes_assigned(&self) {
+        assert!(
+            self.external_sequence_hash.is_some(),
+            "complete block is missing external_sequence_hash"
+        );
+
+        if self.parent_sequence_hash.is_some() {
+            assert!(
+                self.external_parent_sequence_hash.is_some(),
+                "non-root complete block is missing external_parent_sequence_hash"
+            );
+        } else {
+            assert!(
+                self.external_parent_sequence_hash.is_none(),
+                "root complete block must not have external_parent_sequence_hash"
+            );
+        }
     }
 
     /// Returns the number of tokens in the block.
@@ -834,6 +893,45 @@ impl TokenBlockSequence {
         }
 
         Tokens::from(result)
+    }
+
+    /// Synchronize the TRT-LLM/framework sequence hash chain onto all completed blocks.
+    ///
+    /// `external_sequence_hashes` must contain exactly one hash per completed block in
+    /// sequence order. Existing assignments are validated and preserved.
+    pub fn sync_external_sequence_hashes(&mut self, external_sequence_hashes: &[SequenceHash]) {
+        assert_eq!(
+            external_sequence_hashes.len(),
+            self.blocks.len(),
+            "external_sequence_hashes length ({}) must match completed block count ({})",
+            external_sequence_hashes.len(),
+            self.blocks.len()
+        );
+
+        for (idx, block) in self.blocks.iter_mut().enumerate() {
+            let external_sequence_hash = external_sequence_hashes[idx];
+            let external_parent_sequence_hash = idx
+                .checked_sub(1)
+                .map(|parent_idx| external_sequence_hashes[parent_idx]);
+
+            match block.external_sequence_hash() {
+                Some(existing) => {
+                    assert_eq!(
+                        existing, external_sequence_hash,
+                        "external_sequence_hash mismatch at block index {}",
+                        idx
+                    );
+                    assert_eq!(
+                        block.external_parent_sequence_hash(),
+                        external_parent_sequence_hash,
+                        "external_parent_sequence_hash mismatch at block index {}",
+                        idx
+                    );
+                }
+                None => block
+                    .assign_external_hashes(external_sequence_hash, external_parent_sequence_hash),
+            }
+        }
     }
 
     /// Splits a [`Tokens`] object into a vector of completed blocks and a final partial block.
@@ -1574,5 +1672,29 @@ mod tests {
         let remaining = partial.push_tokens(tokens);
         assert_eq!(partial.tokens.len(), 4);
         assert_eq!(remaining.len(), 6);
+    }
+
+    #[test]
+    fn test_sync_external_sequence_hashes_assigns_chain() {
+        let mut seq = create_test_sequence(&[1, 2, 3, 4, 5, 6, 7, 8], 4, Some(TEST_SALT_HASH));
+        let external_hashes = vec![100_u64, 200_u64];
+
+        seq.sync_external_sequence_hashes(&external_hashes);
+
+        assert_eq!(seq.blocks[0].external_sequence_hash(), Some(100));
+        assert_eq!(seq.blocks[0].external_parent_sequence_hash(), None);
+        assert_eq!(seq.blocks[1].external_sequence_hash(), Some(200));
+        assert_eq!(seq.blocks[1].external_parent_sequence_hash(), Some(100));
+        seq.blocks[0].assert_external_hashes_assigned();
+        seq.blocks[1].assert_external_hashes_assigned();
+    }
+
+    #[test]
+    #[should_panic(expected = "external_sequence_hash mismatch")]
+    fn test_sync_external_sequence_hashes_rejects_mismatched_existing_chain() {
+        let mut seq = create_test_sequence(&[1, 2, 3, 4, 5, 6, 7, 8], 4, Some(TEST_SALT_HASH));
+
+        seq.sync_external_sequence_hashes(&[100_u64, 200_u64]);
+        seq.sync_external_sequence_hashes(&[100_u64, 201_u64]);
     }
 }

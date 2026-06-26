@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ mod kube;
 pub use kube::{KubeDiscoveryClient, hash_pod_name};
 
 pub mod utils;
-use crate::component::TransportType;
+use crate::component::{DeviceType, TransportType};
 pub use utils::watch_and_extract_field;
 
 /// Transport kind for event plane - used for configuration and env var selection.
@@ -31,22 +31,28 @@ pub use utils::watch_and_extract_field;
 #[serde(rename_all = "snake_case")]
 pub enum EventTransportKind {
     /// NATS Core pub/sub
-    #[default]
     Nats,
     /// ZMQ pub/sub
+    #[default]
     Zmq,
 }
 
 impl EventTransportKind {
     /// Parse from environment variable `DYN_EVENT_PLANE`.
-    /// Returns `Nats` if not set or empty.
-    /// Returns error for invalid values.
+    ///
+    /// Returns `Zmq` if the variable is not set or is empty: ZMQ is the default
+    /// event plane for all backends. NATS remains available as an explicit opt-in
+    /// (`DYN_EVENT_PLANE=nats`). When you have access to a runtime, prefer
+    /// [`DistributedRuntime::default_event_transport_kind`], which resolves the same
+    /// default through the configured discovery backend.
+    ///
+    /// Returns an error for unrecognised values.
     pub fn from_env() -> Result<Self> {
         match std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
             .as_deref()
         {
-            Ok("nats") | Ok("") | Err(_) => Ok(Self::Nats),
-            Ok("zmq") => Ok(Self::Zmq),
+            Ok("nats") => Ok(Self::Nats),
+            Ok("zmq") | Ok("") | Err(_) => Ok(Self::Zmq),
             Ok(other) => anyhow::bail!(
                 "Invalid DYN_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'",
                 other
@@ -54,12 +60,11 @@ impl EventTransportKind {
         }
     }
 
-    /// Parse from environment variable, defaulting to Nats on error.
     /// Logs a warning if an invalid value is encountered.
     pub fn from_env_or_default() -> Self {
         Self::from_env().unwrap_or_else(|e| {
-            tracing::warn!("{e}, defaulting to NATS");
-            Self::Nats
+            tracing::warn!("{e}, defaulting to ZMQ");
+            Self::Zmq
         })
     }
 
@@ -298,6 +303,9 @@ pub enum DiscoverySpec {
         endpoint: String,
         /// Transport type and routing information
         transport: TransportType,
+        /// Optional execution device for this endpoint instance.
+        /// Used by hetero routing to distinguish CPU and CUDA workers.
+        device_type: Option<DeviceType>,
     },
     Model {
         namespace: String,
@@ -368,12 +376,14 @@ impl DiscoverySpec {
                 component,
                 endpoint,
                 transport,
+                device_type,
             } => DiscoveryInstance::Endpoint(crate::component::Instance {
                 namespace,
                 component,
                 endpoint,
                 instance_id,
                 transport,
+                device_type,
             }),
             Self::Model {
                 namespace,
@@ -683,6 +693,74 @@ pub enum DiscoveryEvent {
 /// Stream type for discovery events
 pub type DiscoveryStream = Pin<Box<dyn Stream<Item = Result<DiscoveryEvent>> + Send>>;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ModelRegistrationIdentity {
+    display_name: String,
+    source_path: Option<String>,
+    is_lora: bool,
+}
+
+impl ModelRegistrationIdentity {
+    fn base_identity(&self) -> &str {
+        self.source_path.as_deref().unwrap_or(&self.display_name)
+    }
+
+    fn is_compatible_with(&self, other: &Self) -> bool {
+        if self.is_lora || other.is_lora {
+            self.base_identity() == other.base_identity()
+        } else {
+            self.display_name == other.display_name
+        }
+    }
+}
+
+fn extract_model_registration_identity(
+    card_json: &serde_json::Value,
+    model_suffix: Option<&str>,
+) -> Result<ModelRegistrationIdentity> {
+    let display_name = card_json
+        .get("display_name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            anyhow::anyhow!("failed to deserialize model display_name from card_json")
+        })?;
+    let source_path = card_json
+        .get("source_path")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let is_lora =
+        model_suffix.is_some() || card_json.get("lora").is_some_and(|value| !value.is_null());
+
+    Ok(ModelRegistrationIdentity {
+        display_name,
+        source_path,
+        is_lora,
+    })
+}
+
+fn find_conflicting_model_name(
+    instances: &[DiscoveryInstance],
+    requested_identity: &ModelRegistrationIdentity,
+) -> Result<Option<String>> {
+    for instance in instances {
+        if let DiscoveryInstance::Model {
+            card_json,
+            model_suffix,
+            ..
+        } = instance
+        {
+            let existing_identity =
+                extract_model_registration_identity(card_json, model_suffix.as_deref())?;
+            if !requested_identity.is_compatible_with(&existing_identity) {
+                return Ok(Some(existing_identity.display_name));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 /// Discovery trait for service discovery across different backends
 #[async_trait]
 pub trait Discovery: Send + Sync {
@@ -691,7 +769,65 @@ pub trait Discovery: Send + Sync {
     fn instance_id(&self) -> u64;
 
     /// Registers an object in the discovery plane with the instance id
-    async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance>;
+    async fn register(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+        let (namespace, component, endpoint, requested_identity) = match &spec {
+            DiscoverySpec::Model {
+                namespace,
+                component,
+                endpoint,
+                card_json,
+                model_suffix,
+                ..
+            } => (
+                namespace.clone(),
+                component.clone(),
+                endpoint.clone(),
+                extract_model_registration_identity(card_json, model_suffix.as_deref())?,
+            ),
+            _ => return self.register_internal(spec).await,
+        };
+
+        let query = DiscoveryQuery::EndpointModels {
+            namespace: namespace.clone(),
+            component: component.clone(),
+            endpoint: endpoint.clone(),
+        };
+
+        if let Some(conflicting_name) =
+            find_conflicting_model_name(&self.list(query.clone()).await?, &requested_identity)?
+        {
+            let requested_name = &requested_identity.display_name;
+            anyhow::bail!(
+                "Cannot register model '{requested_name}' on endpoint '{namespace}/{component}/{endpoint}': a different model '{conflicting_name}' is already registered there"
+            );
+        }
+
+        let instance = self.register_internal(spec).await?;
+
+        if let Some(conflicting_name) =
+            find_conflicting_model_name(&self.list(query).await?, &requested_identity)?
+        {
+            let requested_name = &requested_identity.display_name;
+            if let Err(unregister_err) = self.unregister(instance.clone()).await {
+                return Err(anyhow::anyhow!(
+                    "Cannot register model '{requested_name}' on endpoint '{namespace}/{component}/{endpoint}': a different model '{conflicting_name}' is already registered there"
+                ))
+                .context(format!(
+                    "failed to roll back conflicting model registration for instance {instance_id}: {unregister_err}",
+                    instance_id = instance.instance_id()
+                ));
+            }
+
+            anyhow::bail!(
+                "Cannot register model '{requested_name}' on endpoint '{namespace}/{component}/{endpoint}': a different model '{conflicting_name}' is already registered there"
+            );
+        }
+
+        Ok(instance)
+    }
+
+    /// Backend-specific raw registration implementation.
+    async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance>;
 
     /// Unregisters an instance from the discovery plane
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()>;

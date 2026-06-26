@@ -1,0 +1,483 @@
+name: 'Setup Dynamo Operator'
+description: 'Create a vCluster, install the Dynamo platform operator inside it via Helm'
+
+inputs:
+  kubeconfig_base64:
+    description: 'Base64-encoded kubeconfig for host cluster access'
+    required: false
+    default: ''
+  vcluster_name:
+    description: 'Name for the vCluster instance (auto-generated from github.run_id if empty)'
+    required: false
+    default: ''
+  vcluster_namespace:
+    description: 'Host namespace where the vCluster will be created. When empty, aws-dev-01 and aws-dev-02 use the shared deploy-test namespace and other clusters use a per-run namespace.'
+    required: false
+    default: ''
+  registry:
+    description: 'Container registry hostname (e.g. myregistry.azurecr.io). When empty, the Helm chart default image (nvcr.io/nvidia/ai-dynamo/kubernetes-operator) is used.'
+    required: false
+    default: ''
+  operator_tag:
+    description: 'Operator image tag (default: main-operator)'
+    required: false
+    default: 'main-operator'
+  hf_token:
+    description: 'HuggingFace token for model access'
+    required: false
+    default: ''
+  dockerhub_username:
+    description: 'Docker Hub username for helm registry login'
+    required: false
+    default: ''
+  dockerhub_password:
+    description: 'Docker Hub password for helm registry login'
+    required: false
+    default: ''
+  vcluster_k8s_version:
+    description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
+    required: false
+    default: 'v1.32.13'
+  vcluster_host_priority_class:
+    description: 'Host PriorityClass to set on pods synced from the vCluster. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-01 or aws-dev-02; use an empty value to disable.'
+    required: false
+    default: 'auto'
+  checkpoint_enabled:
+    description: 'Enable operator checkpoint/restore injection'
+    required: false
+    default: 'false'
+  checkpoint_storage_pvc_name:
+    description: 'Checkpoint PVC name created in workload namespaces when checkpointing is enabled'
+    required: false
+    default: snapshot-pvc
+  checkpoint_storage_base_path:
+    description: 'Checkpoint PVC mount path inside checkpoint and restore pods'
+    required: false
+    default: /checkpoints
+  checkpoint_storage_size:
+    description: 'Checkpoint PVC size created by the operator'
+    required: false
+    default: 1Gi
+  checkpoint_storage_access_mode:
+    description: 'Checkpoint PVC access mode created by the operator'
+    required: false
+    default: ReadWriteOnce
+
+outputs:
+  namespace:
+    description: 'Host namespace where the vCluster was created'
+    value: ${{ steps.resolve-names.outputs.namespace }}
+  vcluster_name:
+    description: 'Name of the created vCluster'
+    value: ${{ steps.resolve-names.outputs.vcluster_name }}
+  operator_tag:
+    description: 'Resolved operator tag'
+    value: ${{ steps.resolve-names.outputs.operator_tag }}
+  vcluster_host_priority_class:
+    description: 'Resolved host PriorityClass applied to pods synced from the vCluster'
+    value: ${{ steps.resolve-vcluster-priority.outputs.priority_class }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup host kubeconfig
+      if: inputs.kubeconfig_base64 != ''
+      shell: bash
+      run: |
+        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig-host
+        chmod 600 ${{ github.workspace }}/.kubeconfig-host
+        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig-host" >> $GITHUB_ENV
+
+    - name: Resolve names
+      id: resolve-names
+      shell: bash
+      env:
+        INPUT_VCLUSTER_NAME: ${{ inputs.vcluster_name }}
+        INPUT_NAMESPACE: ${{ inputs.vcluster_namespace }}
+        BRANCH: ${{ github.ref_name }}
+      run: |
+        if [ -n "${INPUT_VCLUSTER_NAME}" ]; then
+          echo "vcluster_name=${INPUT_VCLUSTER_NAME}" >> "$GITHUB_OUTPUT"
+        else
+          echo "vcluster_name=ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+        fi
+
+        CURRENT_CONTEXT="${KUBE_CONTEXT:-}"
+        if [ -z "${CURRENT_CONTEXT}" ]; then
+          CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
+        fi
+
+        if [[ -z "${INPUT_NAMESPACE}" && ( "${CURRENT_CONTEXT}" == *aws-dev-01* || "${CURRENT_CONTEXT}" == *aws-dev-02* ) ]]; then
+          echo "namespace=dynamo-deploy-test" >> "$GITHUB_OUTPUT"
+        elif [ -n "${INPUT_NAMESPACE}" ]; then
+          echo "namespace=${INPUT_NAMESPACE}" >> "$GITHUB_OUTPUT"
+        else
+          BRANCH_SANITIZED="${BRANCH//\//-}"
+          BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
+          BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
+          BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
+          echo "namespace=gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt" >> "$GITHUB_OUTPUT"
+          echo "namespace_suffix=${BRANCH_SANITIZED}" >> "$GITHUB_OUTPUT"
+        fi
+        echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
+
+    - name: Install vCluster CLI
+      uses: ./.github/actions/install-vcluster-cli
+
+    - name: Create host namespace
+      shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        NAMESPACE_SUFFIX: ${{ steps.resolve-names.outputs.namespace_suffix }}
+      run: |
+        echo "::group::Create host namespace $NAMESPACE"
+        set -euo pipefail
+        set -x
+        kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+        LABELS=(
+          ngc-api=enabled
+          nvcr-imagepull=enabled
+        )
+        if [[ "${NAMESPACE}" != "dynamo-deploy-test" ]]; then
+          LABELS+=(
+            nscleanup/enabled=true
+            nscleanup/ttl=7200
+            dynamo.github/run-id="${{ github.run_id }}"
+          )
+          if [[ -n "${NAMESPACE_SUFFIX}" ]]; then
+            LABELS+=(dynamo.github/cleanup-key="${NAMESPACE_SUFFIX}")
+          fi
+        fi
+        kubectl label namespaces "${NAMESPACE}" "${LABELS[@]}" --overwrite
+        echo "::endgroup::"
+
+    - name: Delete existing vCluster for this run
+      shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
+      run: |
+        echo "Checking for existing vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
+        # github.run_id is stable across re-runs, so this catches leftovers from
+        # a failed or canceled attempt of the same workflow run.
+        if kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "Deleting existing vCluster: ${VCLUSTER_NAME}"
+          vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" 2>&1 || \
+            kubectl delete statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" --ignore-not-found 2>&1 || true
+          kubectl wait "statefulset/${VCLUSTER_NAME}" -n "${NAMESPACE}" \
+            --for=delete --timeout=120s 2>/dev/null || true
+        else
+          echo "No existing vCluster named ${VCLUSTER_NAME} found."
+        fi
+
+    - name: Resolve vCluster host priority class
+      id: resolve-vcluster-priority
+      shell: bash
+      env:
+        INPUT_PRIORITY_CLASS: ${{ inputs.vcluster_host_priority_class }}
+      run: |
+        echo "::group::Resolve vCluster host priority class"
+        PRIORITY_CLASS="${INPUT_PRIORITY_CLASS}"
+        CURRENT_CONTEXT="${KUBE_CONTEXT:-}"
+        if [ -z "${CURRENT_CONTEXT}" ]; then
+          CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
+        fi
+
+        if [ "${PRIORITY_CLASS}" = "auto" ]; then
+          PRIORITY_CLASS=""
+          if [[ "${CURRENT_CONTEXT}" == *aws-dev-01* || "${CURRENT_CONTEXT}" == *aws-dev-02* ]]; then
+            PRIORITY_CLASS="ci-nightly-high-priority"
+          fi
+        fi
+
+        if [ -n "${PRIORITY_CLASS}" ]; then
+          kubectl get priorityclass "${PRIORITY_CLASS}" >/dev/null
+          echo "Using host PriorityClass for vCluster synced pods: ${PRIORITY_CLASS}"
+        else
+          echo "No host PriorityClass override for vCluster synced pods."
+        fi
+
+        echo "priority_class=${PRIORITY_CLASS}" >> "$GITHUB_OUTPUT"
+        echo "::endgroup::"
+
+    - name: Create vCluster
+      shell: bash
+      env:
+        VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        VCLUSTER_HOST_PRIORITY_CLASS: ${{ steps.resolve-vcluster-priority.outputs.priority_class }}
+        CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
+      run: |
+        echo "::group::Create vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
+        set -euo pipefail
+        set -x
+        VCLUSTER_HELM_ARGS=()
+        if [ -n "${VCLUSTER_HOST_PRIORITY_CLASS}" ]; then
+          VCLUSTER_HELM_ARGS+=(--set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}")
+        fi
+        if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
+          VCLUSTER_CHECKPOINT_VALUES="$(mktemp)"
+          cat > "${VCLUSTER_CHECKPOINT_VALUES}" <<'EOF'
+        sync:
+          fromHost:
+            nodes:
+              enabled: true
+              clearImageStatus: true
+              selector:
+                labels:
+                  kubernetes.azure.com/mode: "user"
+            runtimeClasses:
+              enabled: true
+        EOF
+          VCLUSTER_HELM_ARGS+=(--values "${VCLUSTER_CHECKPOINT_VALUES}")
+        fi
+
+        # The K8s version must be supported by the kr8s Python library used in deploy tests.
+        # This is independent of the host cluster version.
+        vcluster create "${VCLUSTER_NAME}" \
+          --namespace "${NAMESPACE}" \
+          --connect=false \
+          --upgrade \
+          --set controlPlane.distro.k8s.enabled=true \
+          --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }} \
+          "${VCLUSTER_HELM_ARGS[@]}"
+        echo "::endgroup::"
+
+    - name: Wait for vCluster pod to be ready
+      shell: bash
+      env:
+        VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        echo "::group::Wait for vCluster pod"
+        # Give the API server a moment to register the new pod
+        sleep 20
+        kubectl wait --for=condition=ready pod \
+          -l app=vcluster,release=${VCLUSTER_NAME} \
+          -n ${NAMESPACE} \
+          --timeout=900s
+        echo "::endgroup::"
+
+    - name: Install vCluster HostPath Mapper
+      if: inputs.checkpoint_enabled == 'true'
+      shell: bash
+      env:
+        VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        echo "::group::Install vCluster HostPath Mapper"
+        set -euo pipefail
+
+        HPM_VALUES="$(mktemp)"
+        cat > "${HPM_VALUES}" <<'EOF'
+        nodeSelector:
+          nvidia.com/gpu.present: "true"
+        tolerations:
+          - operator: Exists
+        EOF
+
+        helm upgrade --install vcluster-hpm vcluster-hpm \
+          --repo https://charts.loft.sh \
+          --namespace "${NAMESPACE}" \
+          --wait \
+          --timeout 10m \
+          --set VclusterReleaseName="${VCLUSTER_NAME}" \
+          --values "${HPM_VALUES}" \
+          --debug
+
+        kubectl rollout status daemonset/vcluster-hpm-hostpath-mapper \
+          -n "${NAMESPACE}" \
+          --timeout=600s
+        echo "::endgroup::"
+
+    - name: Connect to vCluster
+      id: connect-vcluster
+      uses: ./.github/actions/connect-vcluster
+      with:
+        host_kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
+        vcluster_name: ${{ steps.resolve-names.outputs.vcluster_name }}
+        vcluster_namespace: ${{ steps.resolve-names.outputs.namespace }}
+
+    - name: Create HF token secret
+      if: inputs.hf_token != ''
+      shell: bash
+      env:
+        HF_TOKEN: ${{ inputs.hf_token }}
+      run: |
+        echo "::group::Create HF token secret inside vCluster"
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          create secret generic hf-token-secret \
+          --from-literal=HF_TOKEN=${HF_TOKEN} \
+          -n default || true
+        echo "::endgroup::"
+
+    - name: Login to Docker Hub for Helm
+      if: inputs.dockerhub_username != '' && inputs.dockerhub_password != ''
+      shell: bash
+      env:
+        DOCKERHUB_USER: ${{ inputs.dockerhub_username }}
+        DOCKERHUB_PASS: ${{ inputs.dockerhub_password }}
+      run: |
+        echo "${DOCKERHUB_PASS}" | helm registry login registry-1.docker.io -u "${DOCKERHUB_USER}" --password-stdin
+
+    - name: Install Dynamo platform via Helm
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        OPERATOR_TAG: ${{ inputs.operator_tag }}
+        CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
+        CHECKPOINT_STORAGE_PVC_NAME: ${{ inputs.checkpoint_storage_pvc_name }}
+        CHECKPOINT_STORAGE_BASE_PATH: ${{ inputs.checkpoint_storage_base_path }}
+        CHECKPOINT_STORAGE_SIZE: ${{ inputs.checkpoint_storage_size }}
+        CHECKPOINT_STORAGE_ACCESS_MODE: ${{ inputs.checkpoint_storage_access_mode }}
+      run: |
+        echo "::group::Install Dynamo platform via Helm (inside vCluster)"
+        set -euo pipefail
+        set -x
+        helm repo add bitnami https://charts.bitnami.com/bitnami
+        cd deploy/helm/charts/platform/
+        helm dep build .
+
+        IMAGE_ARGS=()
+        if [ -n "${REGISTRY}" ]; then
+          OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
+          echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
+          IMAGE_ARGS+=(
+            --set dynamo-operator.controllerManager.manager.image.repository="${OPERATOR_REPO}"
+            --set dynamo-operator.controllerManager.manager.image.tag="${OPERATOR_TAG}"
+          )
+        else
+          echo "Using default operator image from Helm chart (nvcr.io/nvidia/ai-dynamo/kubernetes-operator)"
+        fi
+
+        CHECKPOINT_HELM_ARGS=(
+          --set dynamo-operator.checkpoint.enabled="${CHECKPOINT_ENABLED}"
+        )
+        if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
+          CHECKPOINT_HELM_ARGS+=(
+            --set dynamo-operator.checkpoint.storage.type=pvc
+            --set dynamo-operator.checkpoint.storage.pvc.pvcName="${CHECKPOINT_STORAGE_PVC_NAME}"
+            --set dynamo-operator.checkpoint.storage.pvc.basePath="${CHECKPOINT_STORAGE_BASE_PATH}"
+            --set dynamo-operator.checkpoint.storage.pvc.create=true
+            --set dynamo-operator.checkpoint.storage.pvc.size="${CHECKPOINT_STORAGE_SIZE}"
+            --set dynamo-operator.checkpoint.storage.pvc.accessMode="${CHECKPOINT_STORAGE_ACCESS_MODE}"
+          )
+        fi
+
+        KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
+        helm upgrade --install dynamo-platform . --namespace default \
+          "${IMAGE_ARGS[@]}" \
+          --set dynamo-operator.gpuDiscovery.enabled=false \
+          "${CHECKPOINT_HELM_ARGS[@]}" \
+          --set global.grove.install=true \
+          --set global.kai-scheduler.install=false \
+          --set 'nats.container.merge.resources.requests.cpu=100m' \
+          --set 'nats.container.merge.resources.requests.memory=128Mi' \
+          --set 'nats.container.merge.resources.limits.cpu=500m' \
+          --set 'nats.container.merge.resources.limits.memory=512Mi' \
+          --set 'nats.reloader.merge.resources.requests.cpu=10m' \
+          --set 'nats.reloader.merge.resources.requests.memory=32Mi' \
+          --set 'nats.reloader.merge.resources.limits.cpu=100m' \
+          --set 'nats.reloader.merge.resources.limits.memory=64Mi' \
+          --debug
+        echo "::endgroup::"
+
+    - name: Wait for operator CRDs to be established
+      shell: bash
+      run: |
+        echo "::group::Wait for Dynamo operator CRDs inside vCluster"
+        # CRDs live in the chart's crds/ directory so Helm installs them before any pod
+        # starts. Waiting for Established is independent of vCluster syncer pod-Ready
+        # latency, which is unreliable on some clusters (e.g. AWS with LimitRange QoS mismatch).
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          wait --for=condition=established \
+          crd/dynamographdeployments.nvidia.com \
+          --timeout=1800s
+        echo "::endgroup::"
+
+    - name: Wait for operator pod to be ready
+      shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        echo "::group::Wait for operator pod Ready (host namespace)"
+        # Poll the host namespace instead of the vCluster API. The vCluster syncer
+        # on AWS stalls pod-Ready propagation due to a NATS qosClass reconciliation
+        # loop, so kubectl wait against the virtual cluster never returns. The host
+        # pod status is always accurate.
+        end=$((SECONDS + 1800))
+        while true; do
+          STATUS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+            | grep 'dynamo-platform-dynamo-operator-controller-manager' \
+            | awk '{print $2}' | head -1)
+          if [ "${STATUS}" = "1/1" ]; then
+            echo "Operator pod Ready"
+            break
+          fi
+          if [ $SECONDS -ge $end ]; then
+            echo "::error::Operator pod not Ready after 1800s (last status: ${STATUS:-not found})"
+            exit 1
+          fi
+          echo "Waiting for operator pod... status=${STATUS:-not found}"
+          sleep 15
+        done
+        echo "::endgroup::"
+
+    - name: Wait for CRDs to be established
+      shell: bash
+      run: |
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          wait --for=condition=established \
+          crd/dynamographdeployments.nvidia.com \
+          --timeout=120s
+
+    - name: Debug deployment failure
+      if: failure()
+      shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        set +eo pipefail
+        VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
+
+        echo "### VCLUSTER OPERATOR DEPLOYMENT FAILED" | tee -a $GITHUB_STEP_SUMMARY
+
+        echo "::group::Pod status (host namespace)"
+        kubectl get pods -n ${NAMESPACE} -o wide 2>&1 || true
+        echo "::endgroup::"
+
+        echo "::group::Events (host namespace)"
+        kubectl get events -n ${NAMESPACE} --sort-by='.lastTimestamp' 2>&1 || true
+        echo "::endgroup::"
+
+        echo "::group::Describe pods (host namespace)"
+        kubectl describe pods -n ${NAMESPACE} 2>&1 || true
+        echo "::endgroup::"
+
+        if [ ! -f "${VKUBECONFIG}" ]; then
+          echo "::warning::vCluster kubeconfig not found — vCluster never connected successfully"
+          echo "- **vCluster kubeconfig missing** — connect-vcluster step failed before writing .kubeconfig-vcluster" >> $GITHUB_STEP_SUMMARY
+          exit 0
+        fi
+
+        echo "::group::Pod status (vCluster)"
+        kubectl --kubeconfig=${VKUBECONFIG} get pods -A -o wide 2>&1 || true
+        echo "::endgroup::"
+
+        NOT_READY=$(kubectl --kubeconfig=${VKUBECONFIG} get pods -n default --no-headers 2>/dev/null \
+          | awk -F'[/ ]+' '$2 != $3 || ($4 != "Running" && $4 != "Completed")')
+        if [ -n "$NOT_READY" ]; then
+          echo "$NOT_READY" | awk '{print "- **" $1 "** | Ready: `" $2 "` | Status: `" $3 "`"}' >> $GITHUB_STEP_SUMMARY
+          echo "$NOT_READY" | awk '{print $1}' | while read POD; do
+            echo "::group::describe pod/$POD"
+            kubectl --kubeconfig=${VKUBECONFIG} describe pod "$POD" -n default 2>&1
+            echo "::endgroup::"
+            echo "::group::logs pod/$POD"
+            kubectl --kubeconfig=${VKUBECONFIG} logs "$POD" -n default --all-containers --tail=80 2>&1
+            echo "::endgroup::"
+          done
+        fi
+
+        echo "::group::Events (vCluster default namespace)"
+        kubectl --kubeconfig=${VKUBECONFIG} get events -n default --sort-by='.lastTimestamp' 2>&1
+        echo "::endgroup::"

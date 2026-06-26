@@ -3,8 +3,8 @@
 
 # Base stage - Common setup for all stages
 ARG DOCKER_PROXY
-ARG BASE_IMAGE="golang"
-ARG BASE_IMAGE_TAG="1.25"
+ARG BASE_IMAGE="library/golang"
+ARG BASE_IMAGE_TAG="1.26.3"
 FROM ${DOCKER_PROXY}${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
 # Docker buildx automatically provides these
@@ -21,10 +21,12 @@ WORKDIR /workspace
 
 # Copy go mod and sum files first for better layer caching
 COPY go.mod go.sum ./
+COPY --from=snapshot go.mod go.sum /snapshot/
 RUN go mod download
 
 # Copy source code
 COPY . .
+COPY --from=snapshot . /snapshot/
 
 # Lint stage
 FROM base AS linter
@@ -51,7 +53,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o manager ./cm
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o crd-apply ./cmd/crd-apply/main.go
 
 # Runtime stage
-FROM nvcr.io/nvidia/distroless/go:v3.1.13
+FROM nvcr.io/nvidia/distroless/go:v4.0.3
 WORKDIR /
 COPY --from=builder /workspace/manager .
 COPY --from=builder /workspace/crd-apply .

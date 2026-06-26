@@ -175,6 +175,96 @@ func TestDynamoGraphDeploymentRequestValidator_Validate(t *testing.T) {
 			isClusterWide: true,
 			errMsg:        "spec.searchStrategy",
 		},
+
+		// SLA.OptimizationType validation
+		{
+			name: "sla.optimizationType latency is valid",
+			request: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+					SLA: &nvidiacomv1beta1.SLASpec{
+						OptimizationType: ptrOT(nvidiacomv1beta1.OptimizationTypeLatency),
+					},
+				},
+			},
+			isClusterWide: true,
+		},
+		{
+			name: "sla.optimizationType throughput is valid",
+			request: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+					SLA: &nvidiacomv1beta1.SLASpec{
+						OptimizationType: ptrOT(nvidiacomv1beta1.OptimizationTypeThroughput),
+					},
+				},
+			},
+			isClusterWide: true,
+		},
+		{
+			name: "sla.optimizationType cost is invalid",
+			request: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+					SLA: &nvidiacomv1beta1.SLASpec{
+						OptimizationType: ptrOT(nvidiacomv1beta1.OptimizationType("cost")),
+					},
+				},
+			},
+			isClusterWide: true,
+			errMsg:        `spec.sla.optimizationType "cost" is invalid: must be "latency" or "throughput"`,
+		},
+		{
+			name: "sla.optimizationType empty string is invalid",
+			request: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+					SLA: &nvidiacomv1beta1.SLASpec{
+						OptimizationType: ptrOT(nvidiacomv1beta1.OptimizationType("")),
+					},
+				},
+			},
+			isClusterWide: true,
+			errMsg:        `spec.sla.optimizationType "" is invalid`,
+		},
+		{
+			name: "nil sla is valid (field is optional)",
+			request: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+					SLA:     nil,
+				},
+			},
+			isClusterWide: true,
+		},
+		{
+			name: "sla without optimizationType is valid",
+			request: &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgdr", Namespace: "default"},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "llama-3-8b",
+					Backend: nvidiacomv1beta1.BackendTypeVllm,
+					Image:   "profiler:latest",
+					SLA:     &nvidiacomv1beta1.SLASpec{},
+				},
+			},
+			isClusterWide: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -378,3 +468,5 @@ func TestDynamoGraphDeploymentRequestValidator_ValidateUpdate(t *testing.T) {
 		})
 	}
 }
+
+func ptrOT(v nvidiacomv1beta1.OptimizationType) *nvidiacomv1beta1.OptimizationType { return &v }

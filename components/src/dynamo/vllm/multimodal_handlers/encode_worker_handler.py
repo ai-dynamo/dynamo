@@ -18,6 +18,7 @@ from dynamo.common.multimodal import (
     NixlReadEmbeddingSender,
     NixlWriteEmbeddingSender,
 )
+from dynamo.common.multimodal.embedding_transfer import AbstractEmbeddingSender
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.runtime import DistributedRuntime
@@ -31,7 +32,7 @@ from ..multimodal_utils import (
     vLLMMultimodalRequest,
 )
 from ..multimodal_utils.embedding_cache import EmbeddingCache
-from ..multimodal_utils.model import is_qwen_vl_model
+from ..multimodal_utils.model import ModelFamily, resolve_model_family
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ class EncodeWorkerHandler:
         self._processed_requests = 0
         self.readables: list[Any] = []
         self.embedding_cache = EmbeddingCache() if ENABLE_ENCODER_CACHE else None
+        self.embedding_sender: AbstractEmbeddingSender
         if embedding_transfer_mode == EmbeddingTransferMode.LOCAL:
             self.embedding_sender = LocalEmbeddingSender()
         elif embedding_transfer_mode == EmbeddingTransferMode.NIXL_WRITE:
@@ -127,7 +129,6 @@ class EncodeWorkerHandler:
     async def generate(
         self, request: vLLMMultimodalRequest, context
     ) -> AsyncIterator[str]:
-        logger.debug(f"Got raw request: {request}")
         if not isinstance(request, vLLMMultimodalRequest):
             if isinstance(request, str):
                 request = vLLMMultimodalRequest.model_validate_json(request)
@@ -136,6 +137,9 @@ class EncodeWorkerHandler:
         logger.debug(f"Received encode request: {{ id: {request.request_id} }}.")
 
         request_id = request.request_id
+        assert (
+            request.multimodal_inputs is not None
+        ), "multimodal_inputs must not be None for encode worker"
 
         # The following steps encode the requested image and provided useful embeddings.
         # 1. Open the image from the provided URL.
@@ -157,12 +161,11 @@ class EncodeWorkerHandler:
                     request.multimodal_inputs
                 )
                 for idx in range(len(request.multimodal_inputs)):
-                    if not request.multimodal_inputs[idx].multimodal_input.image_url:
+                    group_input = request.multimodal_inputs[idx].multimodal_input
+                    if group_input is None or not group_input.image_url:
                         raise ValueError("image_url is required for the encode worker.")
 
-                    image_url = request.multimodal_inputs[
-                        idx
-                    ].multimodal_input.image_url
+                    image_url = group_input.image_url
                     # see if we have local cache
                     embedding_key = EmbeddingCache.generate_hash_key(image_url)
                     if (
@@ -189,7 +192,10 @@ class EncodeWorkerHandler:
                 image_tasks = []
                 image_to_load = []
                 for idx, _ in need_encode_indexes:
-                    url = request.multimodal_inputs[idx].multimodal_input.image_url
+                    group_mm_input = request.multimodal_inputs[idx].multimodal_input
+                    assert group_mm_input is not None
+                    assert group_mm_input.image_url is not None
+                    url: str = group_mm_input.image_url
                     image_tasks.append(
                         asyncio.create_task(self.image_loader.load_image(url))
                     )
@@ -236,11 +242,14 @@ class EncodeWorkerHandler:
                         vision_encoder=self.vision_encoder,
                         projector=self.projector,
                     )
+                    # Sync XPU to ensure kernels complete before NIXL transfer.
+                    if embeddings.device.type == "xpu":
+                        torch.xpu.synchronize()
 
                 with _nvtx.annotate("mm:enc:split_embeddings", color="orange"):
                     # [gluo FIXME] This is specific to qwen vision processing..
                     # Split concatenated embeddings for each image item.
-                    if is_qwen_vl_model(self.model):
+                    if resolve_model_family(self.model) is ModelFamily.QWEN_VL:
                         merge_size = self.vision_encoder.spatial_merge_size
                         sizes = (
                             image_embeds["image_grid_thw"].prod(-1)
@@ -305,23 +314,19 @@ class EncodeWorkerHandler:
                         f"{embedding_item.embeddings.shape} prepared for transfer."
                     )
                     # Update request for transfer metadata
-                    request.multimodal_inputs[idx].multimodal_input.image_url = None
-                    request.multimodal_inputs[
-                        idx
-                    ].image_grid_thw = embedding_item.image_grid_thw
-                    request.multimodal_inputs[idx].embeddings_shape = tuple(
-                        embedding_item.embeddings.shape
-                    )
-                    request.multimodal_inputs[
-                        idx
-                    ].serialized_request = transfer_request[0]
+                    group = request.multimodal_inputs[idx]
+                    assert group.multimodal_input is not None
+                    group.multimodal_input.image_url = None
+                    group.image_grid_thw = embedding_item.image_grid_thw
+                    group.embeddings_shape = tuple(embedding_item.embeddings.shape)  # type: ignore[assignment]
+                    group.serialized_request = transfer_request[0]
 
                     # Keep a reference of the embedding and only drop reference when the transfer is done
                     self.send_complete_queue.put_nowait(
                         (transfer_request[1], embedding_item.embeddings)
                     )
 
-            logger.debug(f"Request: {request.model_dump_json()}")
+            payload = request.model_dump_json()
 
             time_end = time.perf_counter()
             self._accumulated_time += time_end - time_start
@@ -335,7 +340,7 @@ class EncodeWorkerHandler:
             )
 
             # Yield transformed request back
-            yield request.model_dump_json()
+            yield payload
 
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")

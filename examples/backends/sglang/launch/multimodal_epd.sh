@@ -9,7 +9,8 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
+source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 # Default values
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
@@ -18,8 +19,7 @@ PROVIDED_CHAT_TEMPLATE=""
 
 # --single-gpu: Packs both workers (encode, PD) onto a single GPU.
 # This is intended for functional testing with small models (e.g. 2B) where CI
-# only has 1 GPU available. It uses lower mem-fraction-static values to share the GPU
-# and enables memory-saving options.
+# only has 1 GPU available. It enables memory-saving caps to share the GPU.
 SINGLE_GPU=false
 
 # Parse command line arguments
@@ -71,19 +71,37 @@ if [[ -n "$SERVED_MODEL_NAME" ]]; then
 fi
 
 # GPU assignments (override via environment variables)
-DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
-DYN_WORKER_GPU=${DYN_WORKER_GPU:-1}
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
+    DYN_WORKER_GPU=${DYN_WORKER_GPU:-0}
+else
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
+    DYN_WORKER_GPU=${DYN_WORKER_GPU:-1}
+fi
 
-# GPU memory fractions for workers (used with --mem-fraction-static)
-DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
-DYN_WORKER_GPU_MEM=${DYN_WORKER_GPU_MEM:-0.9}
+# Per-worker CUDA_VISIBLE_DEVICES pinning. In single-gpu mode, inherit from parent
+# (the parallel test runner sets CUDA_VISIBLE_DEVICES); overriding would defeat GPU assignment.
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    _ENCODE_CUDA_PIN=""
+    _WORKER_CUDA_PIN=""
+else
+    _ENCODE_CUDA_PIN="CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU"
+    _WORKER_CUDA_PIN="CUDA_VISIBLE_DEVICES=$DYN_WORKER_GPU"
+fi
 
-ENCODE_EXTRA_ARGS=""
-WORKER_EXTRA_ARGS=""
+# Worker KV is sized by --max-total-tokens (build_sglang_gpu_mem_args reads
+# _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS), so this script is portable across
+# 24 / 48 / 80 GiB GPUs. No --mem-fraction-static — fractions don't translate.
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
+
+ENCODE_EXTRA_ARGS="$GPU_MEM_ARGS"
+WORKER_EXTRA_ARGS="$GPU_MEM_ARGS"
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    ENCODE_EXTRA_ARGS="--mem-fraction-static ${DYN_ENCODE_GPU_MEM}"
-    WORKER_EXTRA_ARGS="--mem-fraction-static ${DYN_WORKER_GPU_MEM} --delete-ckpt-after-loading --max-running-requests 2 --chunked-prefill-size 4096 --max-prefill-tokens 4096"
+    # Both workers share one GPU; cap activations tightly.
+    SHARED_CAPS="--max-running-requests 2 --chunked-prefill-size 4096 --max-prefill-tokens 4096"
+    ENCODE_EXTRA_ARGS="$ENCODE_EXTRA_ARGS $SHARED_CAPS"
+    WORKER_EXTRA_ARGS="$WORKER_EXTRA_ARGS $SHARED_CAPS --delete-ckpt-after-loading"
 fi
 
 # Prevent port collisions: the test framework exports DYN_SYSTEM_PORT which all
@@ -102,13 +120,17 @@ print_launch_banner --multimodal "Launching Multimodal E/PD ($GPU_LABEL)" "$MODE
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
 
-# run SGLang multimodal processor
-python3 -m dynamo.sglang --multimodal-processor --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" &
-
-# run SGLang multimodal encode worker
-echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
+# run SGLang multimodal encode worker (frontend-facing: encodes images, routes to worker)
+echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU python3 -m dynamo.sglang --multimodal-encode-worker --model-path "$MODEL_NAME" $SERVED_MODEL_ARG --chat-template "$CHAT_TEMPLATE" $ENCODE_EXTRA_ARGS &
+env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang \
+  --enable-multimodal \
+  --disaggregation-mode encode \
+  --model-path "$MODEL_NAME" \
+  $SERVED_MODEL_ARG \
+  --chat-template "$CHAT_TEMPLATE" \
+  --skip-tokenizer-init \
+  $ENCODE_EXTRA_ARGS &
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Wait for encode worker to initialize before starting PD worker.
@@ -118,12 +140,17 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
 fi
 
 # run SGLang multimodal inference worker
+# NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
+# This has a TOCTOU race — the port can be grabbed before init_process_group binds it,
+# causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
 # TODO: Remove disable-radix-cache once the issue is fixed.
 # See https://github.com/sgl-project/sglang/pull/11203.
-echo "Starting PD worker on GPU $DYN_WORKER_GPU (GPU mem: $DYN_WORKER_GPU_MEM)..."
+echo "Starting PD worker on GPU $DYN_WORKER_GPU..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-CUDA_VISIBLE_DEVICES=$DYN_WORKER_GPU python3 -m dynamo.sglang \
-  --multimodal-worker \
+env ${_WORKER_CUDA_PIN:+"$_WORKER_CUDA_PIN"} python3 -m dynamo.sglang \
+  --enable-multimodal \
+  --dedicated-mm-encoder \
+  --disaggregation-mode pd \
   --model-path "$MODEL_NAME" \
   $SERVED_MODEL_ARG \
   --page-size 16 \

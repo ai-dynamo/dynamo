@@ -59,6 +59,10 @@ python3 -m dynamo.frontend \
     --router-mode kv \
     --router-reset-states &
 
+# NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
+# This has a TOCTOU race — the port can be grabbed before init_process_group binds it,
+# causing sporadic EADDRINUSE.  Pass --nccl-port <unique_port> per worker to avoid this.
+
 # run prefill worker
 OTEL_SERVICE_NAME=dynamo-worker-prefill-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 python3 -m dynamo.sglang \
@@ -72,6 +76,7 @@ python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   "${TRACE_ARGS[@]}" &
 
 # run prefill worker
@@ -87,6 +92,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   "${TRACE_ARGS[@]}" &
 
 # run decode worker
@@ -102,6 +108,7 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5560"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   "${TRACE_ARGS[@]}" &
 
 # run decode worker
@@ -117,6 +124,7 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
+  --disable-piecewise-cuda-graph \
   "${TRACE_ARGS[@]}" &
 
 # Wait for any worker to exit (keeps script running)

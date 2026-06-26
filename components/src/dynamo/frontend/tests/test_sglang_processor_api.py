@@ -10,6 +10,17 @@ upgrades that break our integration surface are caught immediately.
 import inspect
 import pickle
 
+import pytest
+
+# Needs sglang packages (gpu_1 container), but does not allocate GPU VRAM.
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.sglang,
+    pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
+]
+
 # ---------------------------------------------------------------------------
 # Import tests -- verify all required modules and symbols exist
 # ---------------------------------------------------------------------------

@@ -13,6 +13,10 @@
         {% include "templates/dynamo_base.Dockerfile" %}
         {% include "templates/wheel_builder.Dockerfile" %}
         {% include "templates/frontend.Dockerfile" %}
+    {% elif target == "planner" %}
+        {% include "templates/dynamo_base.Dockerfile" %}
+        {% include "templates/wheel_builder.Dockerfile" %}
+        {% include "templates/planner.Dockerfile" %}
     {% elif target == "runtime" or target == "dev" or target == "local-dev" %}
         {% include "templates/dynamo_base.Dockerfile" %}
         {% include "templates/wheel_builder.Dockerfile" %}
@@ -27,7 +31,10 @@
 
 # --- SGLang Stages
 {% if framework == "sglang" %}
-    # SGLang is the only framework without a `framework` target currently, needs special treatment
+    {% if device == "xpu" %}
+        {% include "templates/sglang_xpu_framework.Dockerfile" %}
+    {% endif %}
+    # SGLang builds directly from its upstream runtime image.
     {% include "templates/sglang_runtime.Dockerfile" %}
 {% else %}
 # --- No SGLANG stages included
@@ -35,20 +42,14 @@
 
 # --- VLLM Stages
 {% if framework == "vllm" %}
-    {% include "templates/vllm_framework.Dockerfile" %}
-    {% if target != "framework" %}
-        {% include "templates/vllm_runtime.Dockerfile" %}
-    {% endif %}
+    {% include "templates/vllm_runtime.Dockerfile" %}
 {% else %}
 # --- No VLLM stages included
 {% endif %}
 
 # --- TRTLLM Stages
 {% if framework == "trtllm" %}
-    {% include "templates/trtllm_framework.Dockerfile" %}
-    {% if target != "framework" %}
-        {% include "templates/trtllm_runtime.Dockerfile" %}
-    {% endif %}
+    {% include "templates/trtllm_runtime.Dockerfile" %}
 {% else %}
 # --- No TRTLLM stages included
 {% endif %}

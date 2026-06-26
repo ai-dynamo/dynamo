@@ -7,7 +7,7 @@ import argparse
 from typing import List
 
 
-def _parse_concurrencies(value: str) -> List[int]:
+def _parse_int_list(value: str) -> List[int]:
     return [int(x.strip()) for x in value.split(",")]
 
 
@@ -37,12 +37,21 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="Override model name from config.",
     )
-    parser.add_argument(
-        "--concurrencies",
-        type=_parse_concurrencies,
+
+    sweep_group = parser.add_mutually_exclusive_group()
+    sweep_group.add_argument(
+        "--request-rates",
+        type=_parse_int_list,
         default=None,
-        help="Override concurrency levels (comma-separated, e.g. '1,2,4,8').",
+        help="Override request rates (comma-separated, e.g. '4,8,16,32').",
     )
+    sweep_group.add_argument(
+        "--concurrencies",
+        type=_parse_int_list,
+        default=None,
+        help="Override concurrency levels (comma-separated, e.g. '16,32,64,128').",
+    )
+
     parser.add_argument(
         "--osl",
         type=int,
@@ -50,10 +59,14 @@ def parse_args(argv=None) -> argparse.Namespace:
         help="Override output sequence length.",
     )
     parser.add_argument(
-        "--request-count",
+        "--conversation-num",
         type=int,
         default=None,
-        help="Override request count per concurrency level.",
+        help=(
+            "Override number of conversations (sessions) per sweep value. "
+            "If unset, derived from the input JSONL's unique session_id count "
+            "(flat JSONLs count each row as a 1-turn conversation)."
+        ),
     )
     parser.add_argument(
         "--skip-plots",
@@ -61,5 +74,4 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="Skip plot generation.",
     )
-
     return parser.parse_args(argv)
