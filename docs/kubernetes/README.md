@@ -16,7 +16,7 @@ path for shared GPU clusters and multi-node serving.
 > [!NOTE]
 > **Request entry.** This quickstart uses Dynamo-native Frontend routing: the Dynamo Frontend
 > receives requests and the integrated Dynamo Router selects workers. Dynamo can also integrate
-> Kubernetes-natively with [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/),
+> Kubernetes-natively with [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension),
 > where Gateway API receives requests and calls the Dynamo EPP for endpoint selection. See the
 > [GAIE guide](gateway-api/README.mdx) for the Gateway API path.
 

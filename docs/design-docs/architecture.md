@@ -137,7 +137,7 @@ The diagram labels such as `PodClique A/B`, `ScalingGroup "Prefill"`, `ScalingGr
 The request plane can be exposed in two ways:
 
 - **Dynamo-native Frontend routing** -- the Dynamo Frontend is the request entry point and the integrated Dynamo Router selects workers using KV-aware scoring.
-- **Gateway API routing with GAIE** -- a Kubernetes [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway calls the Dynamo Endpoint Picker Plugin (EPP), then forwards to the selected worker's Frontend sidecar in `--router-mode direct`.
+- **Gateway API routing with GAIE** -- a Kubernetes [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension) gateway calls the Dynamo Endpoint Picker Plugin (EPP), then forwards to the selected worker's Frontend sidecar in `--router-mode direct`.
 
 Both patterns share the same control plane, storage/events plane, and backend integrations; only the request entry point and Gateway API integration boundary differ. See the [Gateway API Inference Extension (GAIE) guide](../kubernetes/gateway-api/README.mdx) for setup and configuration.
 

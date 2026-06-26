@@ -11,7 +11,7 @@ Dynamo supports two request-entry patterns on Kubernetes:
 - **Dynamo-native Frontend routing.** The Dynamo Frontend receives HTTP requests and the integrated
   Dynamo Router selects workers.
 - **Gateway API routing with GAIE.** A Kubernetes `Gateway` receives HTTP requests, the
-  [Gateway API Inference Extension (GAIE)](https://gateway-api-inference-extension.sigs.k8s.io/)
+  [Gateway API Inference Extension (GAIE)](https://github.com/kubernetes-sigs/gateway-api-inference-extension)
   calls the Dynamo Endpoint Picker Plugin (EPP) for endpoint selection, and the selected worker's
   Frontend sidecar forwards the request in direct mode.
 
@@ -65,13 +65,13 @@ by this quickstart path.
 
 - A Kubernetes cluster with GPU nodes. For the baseline Gateway API environment, start with the
   upstream [Gateway API getting started guide](https://gateway-api.sigs.k8s.io/guides/getting-started/introduction/)
-  and the upstream [GAIE guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
+  and the upstream [GAIE guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/index.md).
 - `kubectl`, [Helm](https://helm.sh/docs/intro/install/), and
   [jq](https://jqlang.org/download/) configured for the cluster.
 - Gateway API and GAIE CRDs installed. The quickstart installs them explicitly from pinned upstream
   release manifests.
 - A Gateway API implementation that supports GAIE. The quickstart shows agentgateway and Istio. See
-  the upstream [GAIE gateway implementation list](https://gateway-api-inference-extension.sigs.k8s.io/implementations/gateways/)
+  the upstream [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
   for the broader ecosystem.
 - Dynamo platform installed with the operator. See the [Kubernetes Quickstart](../README.md) and
   [Installation Guide](../installation-guide.md).

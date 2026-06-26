@@ -114,7 +114,7 @@ enters the system and where worker selection is integrated.
 
 - **Dynamo-native Frontend routing** -- The Dynamo Frontend serves HTTP requests directly, and the integrated Dynamo Router makes KV-aware routing decisions before dispatching to workers. No external gateway is required. Request flow: `client -> Frontend -> Router -> workers`.
 
-- **Gateway API routing with GAIE** -- A Kubernetes [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway calls the Dynamo Endpoint Picker Plugin (EPP) before forwarding to the selected worker's Frontend sidecar in `--router-mode direct`. Use this pattern when your platform standardizes on Gateway API, or when you want gateway-level policy, auth, rate limiting, and observability at the cluster edge. Request flow: `client -> Gateway -> EPP -> Frontend sidecar (direct) -> workers`.
+- **Gateway API routing with GAIE** -- A Kubernetes [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension) gateway calls the Dynamo Endpoint Picker Plugin (EPP) before forwarding to the selected worker's Frontend sidecar in `--router-mode direct`. Use this pattern when your platform standardizes on Gateway API, or when you want gateway-level policy, auth, rate limiting, and observability at the cluster edge. Request flow: `client -> Gateway -> EPP -> Frontend sidecar (direct) -> workers`.
 
 Both patterns support disaggregated serving, multimodal, and the same set of backends (vLLM, SGLang, TensorRT-LLM). For setup and configuration of the Gateway API path, see the [Gateway API Inference Extension (GAIE) guide](../kubernetes/gateway-api/README.mdx).
 
