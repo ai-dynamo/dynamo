@@ -2529,7 +2529,14 @@ impl OpenAIPreprocessor {
     fn skips_guided_json_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
         matches!(
             reasoning_parser,
-            Some("deepseek_v4" | "deepseek-v4" | "deepseekv4" | "glm45")
+            Some(
+                "deepseek_v4"
+                    | "deepseek-v4"
+                    | "deepseekv4"
+                    | "glm45"
+                    | "minimax_m3"
+                    | "minimax-m3"
+            )
         )
     }
 

@@ -400,6 +400,9 @@ def _normalize_openai_thinking_template_kwargs(
         # Different SGLang model families consult different template toggles.
         chat_template_kwargs.setdefault("thinking", enabled)
         chat_template_kwargs.setdefault("enable_thinking", enabled)
+        chat_template_kwargs.setdefault(
+            "thinking_mode", "thinking" if enabled else "disabled"
+        )
 
     thinking = request.get("thinking")
     if isinstance(thinking, bool):
