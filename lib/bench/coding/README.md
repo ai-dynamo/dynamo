@@ -96,3 +96,14 @@ The exporter:
 - Every export runs a source-to-output fidelity verifier. Request cardinality/order/timing, usage, tool classes/errors, child links, cached-prefix hashes, and forward causal references fail the export on mismatch.
 - The verifier always prints non-fatal source limitations: synthetic KV hashes, unmatched tools, missing background completions, unresolved child sessions, and `ai-title` rows that lack enough timing/usage data to replay as requests.
 - `tool.claude` is exporter-only replay evidence, not a requirement for live request-trace or ZMQ tool-event producers. Data-gen consumes it during lowering and retains timestamp-based inference when it is absent.
+
+## Replay Metadata Flow
+
+```mermaid
+flowchart LR
+    A["Claude JSONL"] --> B["Claude exporter<br/>request events + tool.claude"]
+    B --> C["Data-gen<br/>exact launch/join + tool waits"]
+    D["Live or ZMQ tool events"] --> E["No tool.claude<br/>timestamp fallback"]
+    E --> C
+    C --> F["Agentic Mooncake<br/>Claude metadata discarded"]
+```
