@@ -201,28 +201,3 @@ GMS does **not** detect the dead rank, decide to serve degraded (N−1), re-spaw
 the rank, or rejoin the collective (back to N). That detect / serve-degraded /
 respawn / rejoin loop is your control plane — the same four steps as above. GMS
 alone does **not** "fail over many servers."
-
-## What the GMS wheel must expose
-
-An engine integrating GMS itself (e.g. TensorRT-LLM) builds against these import
-surfaces, so the **published wheel must include them**:
-
-- `gpu_memory_service.client.torch.{allocator, module, tensor}`
-- `gpu_memory_service.common.{locks, utils}` — including `get_socket_path`
-- `gpu_memory_service.server` and `gpu_memory_service.cli` — the server
-  entrypoint is `python -m gpu_memory_service.cli.server`
-- `gpu_memory_service.failover_lock` — the `flock` lock used for promotion
-- `gpu_memory_service.integrations.common.{patches, utils}` — e.g.
-  `patch_empty_cache`, `finalize_gms_write`
-
-> The framework-specific subpackages
-> `gpu_memory_service.integrations.{vllm, sglang, trtllm}` are **Dynamo-runtime
-> glue and are NOT part of the standalone surface.** An external engine
-> implements its own integration against the primitives above.
-
-> **Caveat:** `finalize_gms_write` (in `integrations.common.utils`) returns a
-> `GMSCommittedMemoryStats` dataclass, so external callers must read
-> `.committed_bytes` rather than `int(...)`.
-
-(The exact extras / packaging mechanism is being decided separately; this only
-describes the surface that must be importable.)
