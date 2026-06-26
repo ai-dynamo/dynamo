@@ -12,6 +12,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Sequence,
     Set,
     Tuple,
 )
@@ -2401,7 +2402,7 @@ async def run_input(runtime: DistributedRuntime, input: str, engine_config: Engi
     ...
 
 def run_mocker_trace_replay(
-    trace_file: str | os.PathLike[str],
+    trace_files: Sequence[str | os.PathLike[str]],
     extra_engine_args: Optional[MockEngineArgs] = None,
     prefill_engine_args: Optional[MockEngineArgs] = None,
     decode_engine_args: Optional[MockEngineArgs] = None,
@@ -2414,8 +2415,16 @@ def run_mocker_trace_replay(
     replay_mode: Literal["offline", "online"] = "offline",
     router_mode: Literal["round_robin", "kv_router"] = "round_robin",
     arrival_speedup_ratio: float = 1.0,
-    trace_block_size: int = 512,
-    trace_format: Literal["mooncake", "applied_compute_agentic"] = "mooncake",
+    trace_block_size: Optional[int] = None,
+    trace_format: Literal[
+        "mooncake",
+        "mooncake-delta",
+        "mooncake_delta",
+        "agentic_mooncake",
+        "agentic-mooncake",
+        "applied_compute_agentic",
+        "dynamo",
+    ] = "mooncake",
     trace_shared_prefix_ratio: float = 0.0,
     trace_num_prefix_groups: int = 0,
     report_jsonl_path: Optional[str | os.PathLike[str]] = None,
@@ -2425,7 +2434,9 @@ def run_mocker_trace_replay(
     sla_itl_ms: Optional[float] = None,
     sla_e2e_ms: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Replay a mocker trace file and return the simulation report for aggregated vLLM or SGLang configs.
+    """Replay mocker trace files and return the simulation report.
+
+    Supports aggregated or disaggregated engine configurations.
 
     When ``report_jsonl_path`` is provided (offline disagg replay only), one
     JSON object per request is written to that path. Each line includes

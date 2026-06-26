@@ -49,6 +49,7 @@ fn create_mock_response_chunk(
             service_tier: None,
         },
         nvext: None,
+        llm_metrics: None,
     };
 
     Annotated {

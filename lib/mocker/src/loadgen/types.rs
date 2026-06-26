@@ -11,16 +11,22 @@ use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Trace {
     pub block_size: usize,
     pub sessions: Vec<SessionTrace>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgenticTrace {
     pub block_size: usize,
     pub turns: Vec<AgenticTurnTrace>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DynamoRequestTrace {
+    Standard(Trace),
+    Agentic(AgenticTrace),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,16 +43,29 @@ pub enum TraceFileFormat {
     /// authored delay/tool wait.
     AgenticMooncake,
     AppliedComputeAgentic,
+    Dynamo,
 }
 
-#[derive(Debug, Clone)]
+impl TraceFileFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mooncake => "mooncake",
+            Self::MooncakeDelta => "mooncake-delta",
+            Self::AgenticMooncake => "agentic_mooncake",
+            Self::AppliedComputeAgentic => "applied_compute_agentic",
+            Self::Dynamo => "dynamo",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionTrace {
     pub session_id: String,
     pub first_arrival_timestamp_ms: Option<f64>,
     pub turns: Vec<TurnTrace>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TurnTrace {
     pub input_length: usize,
     pub max_output_tokens: usize,
@@ -57,7 +76,7 @@ pub struct TurnTrace {
     pub policy_class: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AgenticTurnTrace {
     pub request_id: String,
     pub session_id: String,

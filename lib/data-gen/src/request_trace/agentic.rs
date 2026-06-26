@@ -1,19 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Agentic lowering: infer the workflow DAG, attribute tool spans to the LLM
-//! row that consumed them, and produce the convert-time tool summary.
+//! Agentic lowering: infer the workflow DAG and attribute tool spans to the LLM
+//! row that consumed them.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashMap;
 
+use crate::{AgenticMooncakeRow, AgenticToolEvent, RollingHashIdMapper};
 use anyhow::{Context, Result, anyhow, bail};
-use dynamo_data_gen::{AgenticMooncakeRow, AgenticToolEvent, RollingHashIdMapper};
 
 use super::load::{LoadedAgentTrace, RequestEntry, ToolEntry};
 
-pub fn build_agentic_mooncake_rows(
-    mut loaded: LoadedAgentTrace,
-) -> Result<(usize, Vec<AgenticMooncakeRow>)> {
+/// Emits agentic Mooncake rows in replay order without retaining them.
+pub fn lower_agentic_mooncake_rows<F>(mut loaded: LoadedAgentTrace, mut emit: F) -> Result<usize>
+where
+    F: FnMut(usize, AgenticMooncakeRow) -> Result<()>,
+{
     loaded.ensure_agentic_compatible()?;
     let global_start_ms = loaded
         .requests
@@ -164,7 +166,6 @@ pub fn build_agentic_mooncake_rows(
     }
 
     let mut mapper = RollingHashIdMapper::new(trace_block_size);
-    let mut rows = Vec::with_capacity(loaded.requests.len());
     for (idx, request) in loaded.requests.iter().enumerate() {
         let hash_ids = mapper.ids_for_sequence_hashes(&request.replay.input_sequence_hashes);
         let output_length = request.request.output_tokens.ok_or_else(|| {
@@ -200,26 +201,30 @@ pub fn build_agentic_mooncake_rows(
             (None, None, Vec::new())
         };
 
-        rows.push(AgenticMooncakeRow {
-            request_id: request.request.request_id.clone(),
-            session_id: Some(session_id),
-            input_length: Some(request.replay.input_length),
-            output_length: Some(
-                usize::try_from(output_length).context("output length does not fit in usize")?,
-            ),
-            hash_ids: Some(hash_ids),
-            timestamp: Some((request.start_ms - global_start_ms) as f64),
-            delay,
-            wait_for: std::mem::take(&mut wait_for[idx]),
-            branches: std::mem::take(&mut branches[idx]),
-            prefix_reset: Some(prefix_reset[idx]),
-            tool_wait_ms,
-            tool_events,
-            ..Default::default()
-        });
+        emit(
+            trace_block_size,
+            AgenticMooncakeRow {
+                request_id: request.request.request_id.clone(),
+                session_id: Some(session_id),
+                input_length: Some(request.replay.input_length),
+                output_length: Some(
+                    usize::try_from(output_length)
+                        .context("output length does not fit in usize")?,
+                ),
+                hash_ids: Some(hash_ids),
+                timestamp: Some((request.start_ms - global_start_ms) as f64),
+                delay,
+                wait_for: std::mem::take(&mut wait_for[idx]),
+                branches: std::mem::take(&mut branches[idx]),
+                prefix_reset: Some(prefix_reset[idx]),
+                tool_wait_ms,
+                tool_events,
+                ..Default::default()
+            },
+        )?;
     }
 
-    Ok((trace_block_size, rows))
+    Ok(trace_block_size)
 }
 
 fn session_id_for(request: &RequestEntry) -> String {
@@ -318,71 +323,6 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct ToolSummary {
-    pub total_spans: usize,
-    pub sessions: usize,
-    pub by_status: BTreeMap<String, usize>,
-    pub by_class: BTreeMap<String, usize>,
-    pub total_wall_ms: f64,
-}
-
-impl ToolSummary {
-    pub fn render(&self) -> String {
-        let mut out = String::new();
-        out.push_str(&format!(
-            "Tool events: {} spans across {} sessions\n",
-            self.total_spans, self.sessions
-        ));
-        out.push_str(&format!(
-            "  Status:    {}\n",
-            format_counts(&self.by_status)
-        ));
-        out.push_str(&format!("  Class:     {}\n", format_counts(&self.by_class)));
-        out.push_str(&format!(
-            "  Wall-time: {:.2}s\n",
-            self.total_wall_ms / 1000.0,
-        ));
-        out
-    }
-}
-
-fn format_counts(counts: &BTreeMap<String, usize>) -> String {
-    if counts.is_empty() {
-        return "(none)".to_string();
-    }
-    let mut pairs: Vec<(&String, &usize)> = counts.iter().collect();
-    pairs.sort_by(|left, right| right.1.cmp(left.1).then_with(|| left.0.cmp(right.0)));
-    pairs
-        .iter()
-        .map(|(name, count)| format!("{name}={count}"))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-pub fn summarize_tools(tools: &[ToolEntry]) -> ToolSummary {
-    let mut summary = ToolSummary::default();
-    if tools.is_empty() {
-        return summary;
-    }
-    summary.total_spans = tools.len();
-
-    let mut sessions: HashSet<&str> = HashSet::new();
-    for tool in tools {
-        let status_key = if tool.status.is_empty() {
-            tool.terminal_event.clone()
-        } else {
-            tool.status.clone()
-        };
-        *summary.by_status.entry(status_key).or_insert(0) += 1;
-        *summary.by_class.entry(tool.tool_class.clone()).or_insert(0) += 1;
-        summary.total_wall_ms += tool.duration_ms;
-        sessions.insert(tool.session_id.as_str());
-    }
-    summary.sessions = sessions.len();
-    summary
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,12 +390,20 @@ mod tests {
             output_bytes: None,
             output_tokens: None,
             error_type: None,
-            terminal_event: "tool_end".to_string(),
         }
     }
 
+    fn lower_rows(loaded: LoadedAgentTrace) -> Result<Vec<AgenticMooncakeRow>> {
+        let mut rows = Vec::with_capacity(loaded.requests.len());
+        lower_agentic_mooncake_rows(loaded, |_, row| {
+            rows.push(row);
+            Ok(())
+        })?;
+        Ok(rows)
+    }
+
     #[test]
-    fn agentic_converter_builds_sequential_waits_and_tool_wait_components() {
+    fn agentic_lowering_builds_sequential_waits_and_tool_wait_components() {
         let loaded = LoadedAgentTrace {
             requests: vec![
                 contextual_request("r1", "root", None, 1_000, 1_100, vec![11]),
@@ -464,7 +412,7 @@ mod tests {
             tools: vec![tool("root", "call-1", "ls", 1_150, 1_250)],
         };
 
-        let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
+        let rows = lower_rows(loaded).unwrap();
 
         assert_eq!(rows.len(), 2);
         assert!(rows[0].wait_for.is_empty());
@@ -482,22 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn agentic_converter_rejects_context_free_request_trace() {
-        let loaded = LoadedAgentTrace {
-            requests: vec![request("r1", 1_000, 1_100, vec![11])],
-            tools: Vec::new(),
-        };
-
-        let error = build_agentic_mooncake_rows(loaded).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("without agent_context cannot be converted with --agentic")
-        );
-    }
-
-    #[test]
-    fn agentic_converter_attaches_parallel_tool_events_with_union_wait() {
+    fn agentic_lowering_attaches_parallel_tool_events_with_union_wait() {
         let loaded = LoadedAgentTrace {
             requests: vec![
                 contextual_request("r1", "root", None, 1_000, 1_100, vec![11]),
@@ -512,7 +445,7 @@ mod tests {
             ],
         };
 
-        let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
+        let rows = lower_rows(loaded).unwrap();
 
         assert_eq!(rows[1].tool_wait_ms, Some(200.0));
         assert_eq!(rows[1].tool_events.len(), 3);
@@ -526,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn agentic_converter_adds_subagent_launch_and_join_dependencies() {
+    fn agentic_lowering_adds_subagent_launch_and_join_dependencies() {
         let loaded = LoadedAgentTrace {
             requests: vec![
                 contextual_request("parent-1", "root", None, 1_000, 1_100, vec![11]),
@@ -536,7 +469,7 @@ mod tests {
             tools: Vec::new(),
         };
 
-        let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
+        let rows = lower_rows(loaded).unwrap();
         let by_id = rows
             .iter()
             .map(|row| (row.request_id.as_str(), row))
@@ -549,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn agentic_converter_rejects_conflicting_session_parents() {
+    fn agentic_lowering_rejects_conflicting_session_parents() {
         let loaded = LoadedAgentTrace {
             requests: vec![
                 contextual_request("child-1", "child", Some("root-a"), 1_000, 1_100, vec![11]),
@@ -558,12 +491,12 @@ mod tests {
             tools: Vec::new(),
         };
 
-        let err = build_agentic_mooncake_rows(loaded).unwrap_err();
+        let err = lower_rows(loaded).unwrap_err();
         assert!(err.to_string().contains("conflicting parent_session_id"));
     }
 
     #[test]
-    fn agentic_converter_joins_on_last_finishing_child_request() {
+    fn agentic_lowering_joins_on_last_finishing_child_request() {
         let loaded = LoadedAgentTrace {
             requests: vec![
                 contextual_request("parent-1", "root", None, 1_000, 1_100, vec![11]),
@@ -575,7 +508,7 @@ mod tests {
             tools: Vec::new(),
         };
 
-        let (_, rows) = build_agentic_mooncake_rows(loaded).unwrap();
+        let rows = lower_rows(loaded).unwrap();
         let by_id = rows
             .iter()
             .map(|row| (row.request_id.as_str(), row))

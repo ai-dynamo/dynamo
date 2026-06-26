@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::hint::black_box;
 use std::sync::Arc;
 
 use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
@@ -301,7 +302,7 @@ async fn apply_entry(
             isl,
             output_length,
         } => {
-            let _ = multi.project_worker_loads(Some(&block_hashes), decay_now);
+            black_box(multi.project_worker_loads(Some(&block_hashes), decay_now));
             let _ = multi.add_request(
                 SequenceRequest {
                     request_id,

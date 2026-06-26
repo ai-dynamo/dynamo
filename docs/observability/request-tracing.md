@@ -164,34 +164,23 @@ Skipped requests produce a structured warning and no partial replay row.
 Header-derived session context enriches supported request trace rows; it does not bypass
 these shape checks or create an agent-only fallback row.
 
-## Convert And Replay
+## Replay Request Traces
 
-The converter accepts `dynamo.request.trace.v1` captures:
-
-```bash
-cargo run -p dynamo-bench --bin request_trace_to_mooncake -- \
-  --input-path /tmp/dynamo-request-trace.*.jsonl.gz \
-  --output-file /tmp/dynamo-request-trace.mooncake.jsonl
-```
-
-Pass `--agentic` only when every request row has `agent_context`. Context-free
-request traces still convert to ordinary Mooncake rows and are rejected with
-`--agentic`. The converter rejects unknown schema versions.
-
-Use the trace block size printed by the converter for both trace parsing and
-the mock engine:
+Pass `dynamo.request.trace.v1` JSONL or JSONL.GZ shards directly to replay:
 
 ```bash
-TRACE_BLOCK_SIZE=64
-.venv/bin/python -m dynamo.replay /tmp/dynamo-request-trace.mooncake.jsonl \
-  --trace-format mooncake \
-  --trace-block-size "${TRACE_BLOCK_SIZE}" \
+python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
+  --trace-format dynamo \
   --replay-mode offline \
   --router-mode kv_router \
   --num-workers 4 \
-  --extra-engine-args "{\"block_size\":${TRACE_BLOCK_SIZE}}" \
   --report-json /tmp/dynamo-request-trace.replay-report.json
 ```
+
+Replay derives and validates the trace block size across all shards.
+Context-free rows use standard replay. If every request has `agent_context`,
+replay preserves session dependencies and tool waits. Mixed traces are
+rejected.
 
 `DYN_REQUEST_TRACE` is the switch for replay and agent-aware capture. Agent
 context does not require a separate trace flag; if session headers are

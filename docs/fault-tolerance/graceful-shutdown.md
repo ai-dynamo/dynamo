@@ -77,10 +77,30 @@ generate_endpoint.serve_endpoint(
 
 | Component | Default Behavior | Rationale |
 |-----------|------------------|-----------|
-| **Frontend** | N/A (HTTP server) | HTTP server handles its own shutdown |
+| **Frontend** | HTTP draining | Stop admitting new requests while existing response bodies complete |
 | **Prefill Workers** | `graceful_shutdown=True` | Prefill operations must complete to avoid wasted computation |
 | **Decode Workers** | `graceful_shutdown=True` | Decode operations should complete to avoid wasted computation |
 | **Router** | `graceful_shutdown=True` | Ensure routing decisions complete |
+
+### Frontend HTTP Draining
+
+During frontend HTTP shutdown, Dynamo first marks the frontend as draining. While
+draining:
+
+- `/health` returns `503 Service Unavailable`, allowing Kubernetes or ingress
+  controllers to remove the frontend from ready endpoints.
+- `/live` continues to return `200 OK` so liveness checks do not restart the
+  frontend while admitted responses are still draining.
+- New OpenAI-compatible requests are rejected with `503 Service Unavailable`.
+- Requests that have already been admitted continue until their response body
+  completes, including streaming responses.
+- Accepted `/v1/realtime` WebSocket sessions remain tracked until the WebSocket
+  task exits, even though the HTTP upgrade response has already completed.
+
+The frontend waits for admitted inference requests to finish until
+`DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` expires. The default timeout is 5
+seconds. After the timeout, the frontend enters stopping and cancels runtime
+state.
 
 ### Migration Integration
 
