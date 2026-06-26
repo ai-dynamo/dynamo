@@ -87,7 +87,7 @@ Both replay paths build a graph from the same trace fields:
 - `request_received_ms` determines the recorded arrival schedule
 - `replay.input_length`, `output_tokens`, and `input_sequence_hashes` reproduce the request shape and complete-block prompt-prefix relationships
 
-DynoSim reads the original request trace directly. Live AIPerf replay requires one conversion step.
+DynoSim reads the original request trace directly without an intermediate Mooncake file. Live AIPerf replay requires one conversion step into AIPerf's replay graph format.
 
 ### Convert for live replay
 
