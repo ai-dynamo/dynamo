@@ -54,12 +54,12 @@ navigation:
       # ==================== Getting Started ====================
       - section: Getting Started
         contents:
-          - page: About
+          - page: Introduction
             path: getting-started/introduction.mdx
+          - page: About Dynamo
+            path: getting-started/about.md
           - section: Deploy your first Model in Kubernetes
-            collapsed: true
-            #TODO: condense this section into installation and model deployment guides.
-            # Note: moved the K8s cloud provider and other detailed usage docs to the knowledge base section.
+            path: kubernetes/README.md
             contents:
               - page: Overview
                 path: getting-started/kubernetes-deployment.md
@@ -69,8 +69,40 @@ navigation:
                 path: kubernetes/model-deployment-guide.md
               - page: DGDR Reference
                 path: kubernetes/dgdr.md
+              - section: Cloud Provider Guides
+                collapsed: true
+                contents:
+                - section: AWS
+                  collapsed: true
+                  contents:
+                    - page: EKS Setup
+                      path: kubernetes/cloud-providers/eks/eks.md
+                    - page: EFA (RDMA over AWS Fabric)
+                      path: kubernetes/cloud-providers/eks/efa.md
+                    - page: EFS
+                      path: kubernetes/cloud-providers/eks/efs.md
+                    - page: ECS
+                      path: kubernetes/cloud-providers/ecs/ecs.md
+                - section: Azure
+                  collapsed: true
+                  contents:
+                    - page: AKS Setup
+                      path: kubernetes/cloud-providers/aks/aks.md
+                    - page: RDMA / InfiniBand
+                      path: kubernetes/cloud-providers/aks/rdma-infiniband.md
+                    - page: AKS Storage
+                      path: kubernetes/cloud-providers/aks/storage.md
+                    - page: Azure Lustre CSI Driver
+                      path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
+                    - page: Spot VMs
+                      path: kubernetes/cloud-providers/aks/spot-vms.md
+                - section: GCP
+                  collapsed: true
+                  contents:
+                    - page: GKE Setup
+                      path: kubernetes/cloud-providers/gke/gke.md
           - section: Deploy your first Model Locally
-            collapsed: true
+            path: getting-started/quickstart.mdx
             contents:
               - page: Installation
                 path: getting-started/local-installation.md
@@ -102,6 +134,8 @@ navigation:
                 path: integrations/flexkv-integration.md
               - page: Custom KV Events
                 path: integrations/kv-events-custom-engines.md
+          - page: Benchmarking
+            path: benchmarks/benchmarking.md
           - section: Set up Observability
             path: observability/README.md
             collapsed: true
@@ -122,6 +156,8 @@ navigation:
                 path: agents/README.md
               - page: Multimodal Serving
                 path: features/multimodal/README.md
+          - page: Compatibility
+            path: getting-started/compatibility.md
 
   - tab: recipes
     layout:
@@ -550,6 +586,31 @@ navigation:
                 path: features/speculative-decoding/README.md
               - page: Speculative Decoding with vLLM
                 path: features/speculative-decoding/speculative-decoding-vllm.md
+
+  - tab: blog
+    layout:
+      - section: Blog
+        path: digest/index.mdx
+        slug: digest
+        contents:
+          - page: "NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
+            path: digest/snapshot/dynamo-snapshot-fast-startup.md
+            slug: dynamo-snapshot-fast-startup
+          - page: "DynoSim: Simulating the Pareto Frontier"
+            path: digest/dynosim/dynosim-pareto-frontier.md
+            slug: dynosim-pareto-frontier
+          - page: "Dynamo Day 0 support for TokenSpeed"
+            path: digest/tokenspeed/tokenspeed-day-0.md
+            slug: tokenspeed-day-0
+          - page: "Multi-Turn Agentic Harnesses"
+            path: digest/agentic-inference/agentic-harnesses.md
+            slug: agentic-harnesses
+          - page: "Full-Stack Optimizations for Agentic Inference"
+            path: digest/agentic-inference/agentic-inference.md
+            slug: agentic-inference
+          - page: "Flash Indexer: Inter-Galactic KV Routing"
+            path: digest/flash-indexer/flash-indexer.md
+            slug: flash-indexer
 
   - tab: community
     layout:
