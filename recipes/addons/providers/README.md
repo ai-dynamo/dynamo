@@ -5,7 +5,7 @@ Dynamo `DynamoGraphDeployment`'s disaggregated workers onto that provider's RDMA
 
 These are **agent-materialized specs**, not `kustomize` artifacts. An agent reads a
 profile plus your base recipe, resolves the parameters, and adds the fabric layer to the
-worker services. (We started with kustomize Components but dropped them: kustomize is
+worker services. **Step-by-step procedure: [AGENTS.md](AGENTS.md).** (We started with kustomize Components but dropped them: kustomize is
 template-free and schema-blind, so it can't derive the EFA count from the GPU count,
 target workers by role, or reach the backend selection that lives in a vLLM arg string /
 a TRT-LLM ConfigMap. One agent-applied format does all of it.)
