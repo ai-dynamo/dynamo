@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GKE A4X RoCEv2 fabric profile (UCX over RoCE).
+#
+# An agent materializes this onto a base DynamoGraphDeployment, resolving every
+# {{ ... }} @param. NOT a kustomize artifact — see ./README.md.
+provider: gke-roce
+fabric: roce
+
+target:
+  by: subComponentType
+  match: [prefill, decode]
+
+image:
+  rule: "{base_tag}"             # keep the base image; RoCE NCCL comes from host-mounted GKE GIB libs (see skip)
+
+# @param rdma-networks = this A4X pool's RDMA network-attachment names + count (default rdma-0..3).
+#   `device` and `annotations` must list the SAME networks. Derive from the pool's
+#   GKENetworkParamSet / NetworkAttachmentDefinitions.
+device:                          # added to resources.limits.custom AND requests.custom
+  networking.gke.io.networks/rdma-0: "1"
+  networking.gke.io.networks/rdma-1: "1"
+  networking.gke.io.networks/rdma-2: "1"
+  networking.gke.io.networks/rdma-3: "1"
+  networking.gke.io.networks/rdma-0.IP: "1"
+  networking.gke.io.networks/rdma-1.IP: "1"
+  networking.gke.io.networks/rdma-2.IP: "1"
+  networking.gke.io.networks/rdma-3.IP: "1"
+
+annotations:                     # added to extraPodMetadata.annotations; the webhook reads this to attach NICs
+  networking.gke.io/default-interface: "eth0"
+  networking.gke.io/interfaces: |
+    [{"interfaceName":"eth0","network":"default"},
+     {"interfaceName":"eth2","network":"rdma-0"},
+     {"interfaceName":"eth3","network":"rdma-1"},
+     {"interfaceName":"eth4","network":"rdma-2"},
+     {"interfaceName":"eth5","network":"rdma-3"}]
+
+securityContext:
+  privileged: true
+  capabilities: { add: [IPC_LOCK, SYS_PTRACE] }
+
+env:
+  # No UCX_NET_DEVICES: on A4X, UCX auto-probe binds the RoCE NICs (rc_mlx5 over mlx5_0..3).
+  NCCL_SOCKET_IFNAME: eth0
+  NCCL_CROSS_NIC: "0"
+
+kv_backend: UCX                  # default for both engines
+backend: {}                      # nothing to select
+
+skip: [base_image_choice, storage_pvc, gke_gib_driver_host_mounts]   # /usr/local/gib, /usr/local/nvidia
