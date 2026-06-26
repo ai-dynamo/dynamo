@@ -166,6 +166,7 @@ impl Router {
             Some(prefill_config),
             None,
             enforce_disagg,
+            None,
             model_name.clone(),
             actual_namespace.to_string(),
             enable_eagle,
@@ -328,18 +329,12 @@ impl Router {
         match outcome {
             // Advisory only: the gateway owns dispatch and lifecycle state.
             PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
-            // Surface backpressure as an error so the caller's
-            // enforce_disagg / aggregated-fallback logic in `pick()` can
-            // decide whether to fail the request or fall back to decode-only.
-            PrefillQueryOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => Err(anyhow::anyhow!(
-                "Prefill router backpressure: {:?} (queued_isl_tokens={}, max={:?})",
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens
+            PrefillQueryOutcome::QueueRejected { rejection } => Err(anyhow::anyhow!(
+                "Prefill router policy-class queue rejection: policy_class={}, limit_kind={}, current={}, limit={}",
+                rejection.policy_class,
+                rejection.limit_kind,
+                rejection.current,
+                rejection.limit
             )),
         }
     }
@@ -1028,14 +1023,17 @@ impl EndpointPicker for Router {
         }
 
         // Build routing headers matching the Go EPP's disagg plugin:
-        // x-worker-instance-id, x-dp-rank, x-prefill-instance-id,
-        // x-prefill-dp-rank, x-dynamo-routing-mode
+        // x-dynamo-worker-instance-id, x-dynamo-dp-rank,
+        // x-dynamo-prefill-instance-id, x-dynamo-prefill-dp-rank, x-dynamo-routing-mode
         let mut headers = vec![
             (
-                "x-worker-instance-id".to_string(),
+                "x-dynamo-worker-instance-id".to_string(),
                 format!("{}", decode_worker.worker_id),
             ),
-            ("x-dp-rank".to_string(), decode_worker.dp_rank.to_string()),
+            (
+                "x-dynamo-dp-rank".to_string(),
+                decode_worker.dp_rank.to_string(),
+            ),
         ];
 
         if let Ok((prefill_worker_id, prefill_dp_rank)) = &prefill_result {
@@ -1044,11 +1042,11 @@ impl EndpointPicker for Router {
                 "disaggregated".to_string(),
             ));
             headers.push((
-                "x-prefill-instance-id".to_string(),
+                "x-dynamo-prefill-instance-id".to_string(),
                 format!("{}", prefill_worker_id),
             ));
             if let Some(rank) = prefill_dp_rank {
-                headers.push(("x-prefill-dp-rank".to_string(), rank.to_string()));
+                headers.push(("x-dynamo-prefill-dp-rank".to_string(), rank.to_string()));
             }
         } else {
             headers.push((

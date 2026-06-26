@@ -21,8 +21,12 @@ from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.model_fetch import fetch_model
+from dynamo.common.snapshot.lifecycle import (
+    configure_snapshot_capture_env,
+    is_snapshot_enabled,
+)
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.llm import fetch_model
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import enable_disjoint_streaming_output
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
@@ -152,9 +156,14 @@ def _set_cli_flag_value(args: list[str], flag: str, value: str) -> list[str]:
 def _normalize_multimodal_disaggregation_args(
     unknown: list[str], dynamo_config: "DynamoConfig"
 ) -> list[str]:
-    """Map Dynamo's canonical multimodal EPD args to SGLang's current flags."""
+    """Map Dynamo's canonical multimodal args to SGLang's current flags."""
     disaggregation_mode = _get_last_cli_flag_value(unknown, "--disaggregation-mode")
     if disaggregation_mode is None:
+        if dynamo_config.dedicated_mm_encoder and not dynamo_config.multimodal_worker:
+            raise ValueError(
+                "--dedicated-mm-encoder requires --disaggregation-mode=pd, "
+                "--disaggregation-mode=prefill, or --disaggregation-mode=decode."
+            )
         return unknown
 
     requested_disaggregation_mode = disaggregation_mode
@@ -166,6 +175,12 @@ def _normalize_multimodal_disaggregation_args(
         disaggregation_mode = "null"
 
     if disaggregation_mode == DisaggregationMode.ENCODE.value:
+        if dynamo_config.dedicated_mm_encoder:
+            raise ValueError(
+                "--dedicated-mm-encoder is for PD/P/D workers that consume or "
+                "forward embeddings from a separate encode worker. Do not "
+                "combine it with --disaggregation-mode=encode."
+            )
         if not dynamo_config.enable_multimodal:
             logging.warning(
                 "--disaggregation-mode=encode is only valid for SGLang "
@@ -176,14 +191,22 @@ def _normalize_multimodal_disaggregation_args(
         dynamo_config.multimodal_encode_worker = True
         return _remove_cli_flag_and_value(unknown, "--disaggregation-mode")
 
+    internal_multimodal_role = (
+        requested_disaggregation_mode == PREFILL_DECODE_DISAGGREGATION_MODE
+        or disaggregation_mode in {"prefill", "decode"}
+    )
+    if dynamo_config.dedicated_mm_encoder and not internal_multimodal_role:
+        raise ValueError(
+            "--dedicated-mm-encoder only applies to --disaggregation-mode=pd, "
+            "--disaggregation-mode=prefill, or --disaggregation-mode=decode."
+        )
+
     if (
         dynamo_config.enable_multimodal
+        and dynamo_config.dedicated_mm_encoder
         and not dynamo_config.multimodal_encode_worker
         and not dynamo_config.multimodal_worker
-        and (
-            requested_disaggregation_mode == PREFILL_DECODE_DISAGGREGATION_MODE
-            or disaggregation_mode in {"prefill", "decode"}
-        )
+        and internal_multimodal_role
     ):
         dynamo_config.multimodal_worker = True
 
@@ -417,6 +440,9 @@ async def parse_args(args: list[str]) -> Config:
     # that path (ideally via a shared folder).
     if should_fetch_model(parsed_args, model_path):
         await fetch_model(model_path)
+
+    if is_snapshot_enabled():
+        configure_snapshot_capture_env()
 
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to
     # fetch_model (download the model) here, in `parse_args`. `parse_args` should not

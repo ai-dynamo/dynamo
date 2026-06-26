@@ -1168,6 +1168,9 @@ func dgdrAlphaDeploymentNeedsSave(state DGDRState, deployment *DeploymentStatus)
 	if deployment == nil {
 		return false
 	}
+	if apiequality.Semantic.DeepEqual(*deployment, DeploymentStatus{}) {
+		return true
+	}
 	if deployment.Namespace != "" || deployment.State != "" || deployment.Created {
 		return true
 	}

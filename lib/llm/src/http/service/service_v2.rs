@@ -6,11 +6,14 @@ use std::env::var;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::Response;
+use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
@@ -37,6 +40,7 @@ use dynamo_runtime::metrics::{
     transport_metrics::ensure_transport_metrics_registered_prometheus,
 };
 use std::net::SocketAddr;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
@@ -54,14 +58,209 @@ async fn echo_request_id_header(
     response
 }
 
+async fn track_inflight_inference(
+    axum::extract::State(state): axum::extract::State<Arc<State>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use futures::StreamExt;
+
+    // Requests rejected during draining should not extend the drain window.
+    if !state.is_ready() {
+        return super::openai::ErrorMessage::_service_unavailable().into_response();
+    }
+
+    let permit = state.acquire_inflight();
+    // Close the race where shutdown starts after the readiness check but
+    // before this request is counted as inflight.
+    if !state.is_ready() {
+        drop(permit);
+        return super::openai::ErrorMessage::_service_unavailable().into_response();
+    }
+
+    let response = next.run(request).await;
+    let (parts, body) = response.into_parts();
+    // Keep the permit alive until the full response body, including streams,
+    // finishes or is dropped.
+    let stream = body.into_data_stream().map(move |result| {
+        let _permit = &permit;
+        result
+    });
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
 /// HTTP service shared state
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     discovery_client: Arc<dyn Discovery>,
+    service_observer: Arc<ServiceObserver>,
     flags: StateFlags,
     cancel_token: CancellationToken,
     nvext_enabled: bool,
+}
+
+/// Lifecycle stage for the HTTP frontend.
+///
+/// The stage gates readiness and request admission separately from the runtime
+/// cancellation token so the frontend can stop accepting new requests before
+/// tearing down discovery and transport state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceStage {
+    /// The frontend is ready to admit new inference requests.
+    Ready = 0,
+    /// The frontend is rejecting new requests while admitted responses drain.
+    Draining = 1,
+    /// The frontend is cancelling runtime state and shutting down.
+    Stopping = 2,
+}
+
+impl ServiceStage {
+    fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Ready,
+            1 => Self::Draining,
+            _ => Self::Stopping,
+        }
+    }
+}
+
+impl std::fmt::Display for ServiceStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready => f.write_str("ready"),
+            Self::Draining => f.write_str("draining"),
+            Self::Stopping => f.write_str("stopping"),
+        }
+    }
+}
+
+/// Shared HTTP frontend lifecycle and inflight request tracker.
+///
+/// `ServiceObserver` is shared by HTTP handlers, health endpoints, and the
+/// shutdown path. It lets shutdown first mark the frontend as draining, then
+/// wait for admitted inference response bodies to complete before cancelling
+/// runtime state.
+#[derive(Debug)]
+pub struct ServiceObserver {
+    stage: AtomicU8,
+    inflight_inference: AtomicU64,
+    inflight_zero: Notify,
+}
+
+impl Default for ServiceObserver {
+    fn default() -> Self {
+        Self {
+            stage: AtomicU8::new(ServiceStage::Ready.as_u8()),
+            inflight_inference: AtomicU64::new(0),
+            inflight_zero: Notify::new(),
+        }
+    }
+}
+
+impl ServiceObserver {
+    /// Return the current frontend lifecycle stage.
+    pub fn stage(&self) -> ServiceStage {
+        ServiceStage::from_u8(self.stage.load(Ordering::Acquire))
+    }
+
+    /// Return true when the frontend should admit new inference requests.
+    pub fn is_ready(&self) -> bool {
+        self.stage() == ServiceStage::Ready
+    }
+
+    /// Mark the frontend as draining.
+    ///
+    /// Draining makes readiness fail and causes request admission checks to
+    /// reject new inference requests while existing response bodies continue.
+    pub fn start_draining(&self) {
+        tracing::info!(
+            previous_stage = ?self.stage(),
+            inflight_requests = self.inflight_count(),
+            "frontend service entering draining stage"
+        );
+        self.stage
+            .store(ServiceStage::Draining.as_u8(), Ordering::Release);
+    }
+
+    /// Mark the frontend as stopping.
+    ///
+    /// Stopping is entered after inflight requests drain or the graceful
+    /// shutdown timeout expires.
+    pub fn start_stopping(&self) {
+        tracing::info!(
+            previous_stage = ?self.stage(),
+            inflight_requests = self.inflight_count(),
+            "frontend service entering stopping stage"
+        );
+        self.stage
+            .store(ServiceStage::Stopping.as_u8(), Ordering::Release);
+    }
+
+    /// Track one admitted inference response body.
+    ///
+    /// The returned permit must live for the full HTTP response body lifetime,
+    /// including streaming responses. Dropping the permit decrements the
+    /// inflight count and wakes shutdown waiters when the count reaches zero.
+    pub fn acquire_inflight(self: &Arc<Self>) -> InflightPermit {
+        self.inflight_inference.fetch_add(1, Ordering::Relaxed);
+        InflightPermit {
+            observer: self.clone(),
+        }
+    }
+
+    /// Return the number of admitted inference requests still in flight.
+    pub fn inflight_count(&self) -> u64 {
+        self.inflight_inference.load(Ordering::Acquire)
+    }
+
+    /// Wait until all admitted inference requests drain or `timeout` expires.
+    ///
+    /// Returns `true` when inflight work drained before the timeout and `false`
+    /// when shutdown should proceed because the timeout expired.
+    pub async fn wait_inflight_zero_or_timeout(&self, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.inflight_zero.notified();
+                tokio::pin!(notified);
+                // Register before reading the count so a final permit drop
+                // cannot notify between the count check and the await.
+                notified.as_mut().enable();
+                if self.inflight_count() == 0 {
+                    break;
+                }
+                notified.as_mut().await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+}
+
+/// RAII guard for one admitted inference response.
+///
+/// This permit is held by a response-body wrapper so it is released only when
+/// the client response body finishes or is dropped.
+pub struct InflightPermit {
+    observer: Arc<ServiceObserver>,
+}
+
+impl Drop for InflightPermit {
+    fn drop(&mut self) {
+        if self
+            .observer
+            .inflight_inference
+            .fetch_sub(1, Ordering::AcqRel)
+            == 1
+            && self.observer.stage() != ServiceStage::Ready
+        {
+            self.observer.inflight_zero.notify_waiters();
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -146,6 +345,7 @@ impl State {
             manager,
             metrics: Arc::new(Metrics::default()),
             discovery_client,
+            service_observer: Arc::new(ServiceObserver::default()),
             nvext_enabled,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
@@ -177,6 +377,40 @@ impl State {
 
     pub fn discovery(&self) -> Arc<dyn Discovery> {
         self.discovery_client.clone()
+    }
+
+    pub fn service_observer(&self) -> Arc<ServiceObserver> {
+        self.service_observer.clone()
+    }
+
+    pub fn service_stage(&self) -> ServiceStage {
+        self.service_observer.stage()
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.service_observer.is_ready()
+    }
+
+    pub fn start_draining(&self) {
+        self.service_observer.start_draining();
+    }
+
+    pub fn start_stopping(&self) {
+        self.service_observer.start_stopping();
+    }
+
+    pub fn acquire_inflight(&self) -> InflightPermit {
+        self.service_observer.acquire_inflight()
+    }
+
+    pub fn inflight_count(&self) -> u64 {
+        self.service_observer.inflight_count()
+    }
+
+    pub async fn wait_inflight_zero_or_timeout(&self, timeout: Duration) -> bool {
+        self.service_observer
+            .wait_inflight_zero_or_timeout(timeout)
+            .await
     }
 
     /// Check if the service is shutting down
@@ -393,7 +627,8 @@ impl HttpService {
         let router = self.router.clone();
         let observer = cancel_token.child_token();
 
-        let state_cancel = self.state.cancel_token().clone();
+        let state = self.state.clone();
+        let state_cancel = state.cancel_token().clone();
 
         if self.enable_tls {
             if listener.is_some() {
@@ -438,15 +673,24 @@ impl HttpService {
             tokio::select! {
                 result = server => {
                     let result = result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e));
+                    state.start_stopping();
                     cancel_token.cancel();
                     result?;
                 }
                 _ = observer.cancelled() => {
-                    state_cancel.cancel();
+                    state.start_draining();
                     tracing::info!("HTTPS server shutdown requested");
-                    // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
-                    handle.graceful_shutdown(Some(Duration::from_secs(get_graceful_shutdown_timeout() as u64)));
-                    // no longer accepting requests, draining all existing connections
+                    let shutdown_timeout =
+                        Duration::from_secs(get_graceful_shutdown_timeout() as u64);
+                    handle.graceful_shutdown(Some(shutdown_timeout));
+                    if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
+                        tracing::warn!(
+                            inflight_requests = state.inflight_count(),
+                            "Timed out waiting for inflight inference requests to drain"
+                        );
+                    }
+                    state.start_stopping();
+                    state_cancel.cancel();
                 }
             }
         } else {
@@ -485,18 +729,29 @@ impl HttpService {
             // Spawn canary after all fallible startup so it won't leak on early errors
             tokio::spawn(tokio_metrics_and_canary_loop(cancel_token.clone()));
 
+            let state = self.state.clone();
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move {
                     observer.cancelled_owned().await;
-                    state_cancel.cancel();
+                    state.start_draining();
                     tracing::info!("HTTP server shutdown requested");
-                    // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
-                    tokio::time::sleep(Duration::from_secs(get_graceful_shutdown_timeout() as u64))
-                        .await;
-                    // no longer accepting requests, draining all existing connections
+                    let shutdown_timeout =
+                        Duration::from_secs(get_graceful_shutdown_timeout() as u64);
+                    if !state.wait_inflight_zero_or_timeout(shutdown_timeout).await {
+                        tracing::warn!(
+                            inflight_requests = state.inflight_count(),
+                            "Timed out waiting for inflight inference requests to drain"
+                        );
+                    }
+                    state.start_stopping();
+                    state_cancel.cancel();
                 })
                 .await
-                .inspect_err(|_| cancel_token.cancel())?;
+                .inspect_err(|_| {
+                    self.state.start_stopping();
+                    cancel_token.cancel()
+                })?;
+            self.state.start_stopping();
             cancel_token.cancel();
         }
 
@@ -727,6 +982,10 @@ impl HttpServiceConfigBuilder {
                 .make_span_with(make_inference_request_span)
                 .on_response(on_response),
         );
+        inference_router = inference_router.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            track_inflight_inference,
+        ));
 
         // OpenAPI documentation routes (system)
         let (openapi_docs, openapi_route) =
@@ -869,47 +1128,139 @@ mod tests {
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
+    async fn wait_for_service_stage(state: &State, expected: ServiceStage) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            if state.service_stage() == expected {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "service did not enter {expected} before timeout; current stage is {}",
+                state.service_stage()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     #[tokio::test]
-    async fn test_liveness_endpoint_reflects_cancellation() {
-        // 1. Setup service & token. Pre-bind to a random loopback port and hand the
-        //    listener to `run_with_listener` to avoid colliding with parallel tests.
-        let cancel_token = Arc::new(CancellationToken::new());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("failed to bind ephemeral port");
-        let port = listener.local_addr().unwrap().port();
-        let service = HttpService::builder().port(port).build().unwrap();
+    #[serial_test::serial]
+    async fn test_liveness_endpoint_stays_live_while_draining() {
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
+            async {
+                let cancel_token = Arc::new(CancellationToken::new());
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind ephemeral port");
+                let port = listener.local_addr().unwrap().port();
+                let service = HttpService::builder().port(port).build().unwrap();
+                let state = service.state_clone();
+                let inflight = state.acquire_inflight();
 
-        // 2. Spawn service with shared token
-        let service_token = cancel_token.clone();
-        let handle = tokio::spawn(async move {
-            service
-                .run_with_listener((*service_token).clone(), listener)
+                let service_token = cancel_token.clone();
+                let handle = tokio::spawn(async move {
+                    service
+                        .run_with_listener((*service_token).clone(), listener)
+                        .await
+                        .unwrap();
+                });
+
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                cancel_token.cancel();
+                wait_for_service_stage(&state, ServiceStage::Draining).await;
+
+                let resp = reqwest::Client::new()
+                    .get(format!("http://localhost:{}/live", port))
+                    .send()
+                    .await
+                    .expect("Request failed");
+
+                assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+                drop(inflight);
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn test_health_endpoint_reflects_draining_before_cancellation() {
+        temp_env::async_with_vars(
+            [(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("1"))],
+            async {
+                let cancel_token = Arc::new(CancellationToken::new());
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind ephemeral port");
+                let port = listener.local_addr().unwrap().port();
+                let service = HttpService::builder().port(port).build().unwrap();
+                let state = service.state_clone();
+                let inflight = state.acquire_inflight();
+
+                let service_token = cancel_token.clone();
+                let handle = tokio::spawn(async move {
+                    service
+                        .run_with_listener((*service_token).clone(), listener)
+                        .await
+                        .unwrap();
+                });
+
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                cancel_token.cancel();
+                wait_for_service_stage(&state, ServiceStage::Draining).await;
+
+                assert_eq!(state.service_stage(), ServiceStage::Draining);
+
+                let client = reqwest::Client::new();
+                let health = client
+                    .get(format!("http://localhost:{}/health", port))
+                    .send()
+                    .await
+                    .expect("health request failed");
+                assert_eq!(health.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+                let live = client
+                    .get(format!("http://localhost:{}/live", port))
+                    .send()
+                    .await
+                    .expect("live request failed");
+                assert_eq!(live.status(), reqwest::StatusCode::OK);
+
+                drop(inflight);
+                handle.abort();
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_service_observer_waits_for_inflight_requests() {
+        let observer = Arc::new(ServiceObserver::default());
+        let permit = observer.acquire_inflight();
+
+        observer.start_draining();
+        assert_eq!(observer.inflight_count(), 1);
+        assert!(
+            !observer
+                .wait_inflight_zero_or_timeout(Duration::from_millis(1))
                 .await
-                .unwrap();
-        });
+        );
 
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-
-        // 3. Cancel the token
-        cancel_token.cancel();
-
-        // 4. Wait a tiny bit for propagation
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-
-        // 5. Hit the endpoint
-        let client = reqwest::Client::new();
-        let resp = client
-            .get(format!("http://localhost:{}/live", port))
-            .send()
-            .await
-            .expect("Request failed");
-
-        // 6. ASSERTION: Should be 503 Service Unavailable
-        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-
-        // Clean up
-        handle.abort();
+        let waiter = {
+            let observer = observer.clone();
+            tokio::spawn(async move {
+                observer
+                    .wait_inflight_zero_or_timeout(Duration::from_secs(1))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        drop(permit);
+        assert!(waiter.await.unwrap());
+        assert_eq!(observer.inflight_count(), 0);
     }
 
     /// `enable_admin_api=false` ⇒ `GET /busy_threshold` is not registered and

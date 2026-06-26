@@ -21,6 +21,16 @@ source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 
 MODEL="Qwen/Qwen3-0.6B"
 
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
+# Strip --unified via the shared helper, then parse the remaining flags.
+# `--unified` routes workers through dynamo.sglang.unified_main (the Rust
+# backend-common Worker, which owns the prefill drain loop); default stays
+# on the legacy main. Done before the arg loop so it isn't rejected as an
+# unknown option.
+pick_worker_module dynamo.sglang dynamo.sglang.unified_main "$@"
+set -- "${REMAINING_ARGS[@]}"
+
 # --model overrides the default (e.g. a VLM for the multimodal P/D test).
 # --single-gpu is a no-op kept for parity with the other launch scripts.
 while [[ $# -gt 0 ]]; do
@@ -38,9 +48,10 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--model <name>] [--single-gpu]"
+            echo "Usage: $0 [--model <name>] [--single-gpu] [--unified]"
             echo "  --model <name>  Model to serve (default: $MODEL)"
             echo "  --single-gpu    Accepted no-op; both workers already share GPU 0"
+            echo "  --unified       Use the unified_main entry point (Rust Worker)"
             exit 0
             ;;
         *)
@@ -71,13 +82,6 @@ if [[ "${DYN_SGLANG_DISABLE_MEMORY_SAVER:-0}" == "1" ]]; then
     MEM_SAVER_ARGS=""
 fi
 
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
-
-# Select legacy vs unified worker entry point. `--unified` routes workers
-# through dynamo.sglang.unified_main (the Rust backend-common Worker, which
-# owns the prefill drain loop); default stays on the legacy main.
-pick_worker_module dynamo.sglang dynamo.sglang.unified_main "$@"
-
 DISAGG_BOOTSTRAP_PORT="${DYN_DISAGG_BOOTSTRAP_PORT:-12345}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -104,6 +108,7 @@ CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT=${DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT:-60} \
 python3 -m "$WORKER_MODULE" \
+  --enable-multimodal \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \
@@ -132,6 +137,7 @@ wait_for_ready "http://localhost:${PREFILL_SYSTEM_PORT}/health" 45 || true
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 python3 -m "$WORKER_MODULE" \
+  --enable-multimodal \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \

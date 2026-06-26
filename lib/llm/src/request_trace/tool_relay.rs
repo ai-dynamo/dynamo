@@ -6,7 +6,7 @@
 //! Dynamo binds a local PULL socket so any number of external harness processes
 //! can connect with PUSH sockets, validate domain records, then publish them to
 //! the Dynamo event plane. The ZMQ wire format is multipart:
-//! `[topic, seq_be_u64, msgpack(RequestTraceRecord)]`.
+//! `[topic, seq_be_u64, msgpack(RequestTraceToolEventIngress)]`.
 
 use anyhow::Result;
 use dynamo_runtime::component::Component;
@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::utils::zmq::{PullSocket, bind_pull_socket, multipart_message};
 
 use super::DEFAULT_TOOL_EVENTS_TOPIC;
-use crate::request_trace::RequestTraceRecord;
+use crate::request_trace::{RequestTraceRecord, RequestTraceToolEventIngress};
 
 /// Relay from local tool-event ZMQ PUSH producers to the Dynamo event plane.
 pub struct ToolEventRelay {
@@ -95,13 +95,14 @@ impl ToolEventRelay {
                             }
 
                             let payload = frames.swap_remove(2);
-                            let record = match rmp_serde::from_slice::<RequestTraceRecord>(&payload) {
-                                Ok(record) => record,
+                            let ingress = match rmp_serde::from_slice::<RequestTraceToolEventIngress>(&payload) {
+                                Ok(ingress) => ingress,
                                 Err(error) => {
-                                    tracing::warn!(%error, bytes = payload.len(), "request trace tool relay: failed to decode record");
+                                    tracing::warn!(%error, bytes = payload.len(), "request trace tool relay: failed to decode ingress payload");
                                     continue;
                                 }
                             };
+                            let record = RequestTraceRecord::from(ingress);
 
                             if let Err(error) = crate::request_trace::validate_tool_record(&record) {
                                 tracing::warn!(%error, "request trace tool relay: dropping invalid record");
@@ -145,11 +146,10 @@ mod tests {
     use tokio::time::timeout;
 
     use super::*;
-    use crate::protocols::common::extensions::AgentContext;
     use crate::request_trace::{
-        RequestTraceEventSource, RequestTraceToolEvent, RequestTraceToolStatus,
+        RequestTraceEventSource, RequestTraceEventType, RequestTraceSchema, RequestTraceToolEvent,
+        RequestTraceToolStatus,
     };
-    use crate::request_trace::{RequestTraceEventType, RequestTraceSchema};
     use crate::utils::zmq::{connect_push_socket, send_multipart_direct};
 
     fn reserve_open_port() -> TcpListener {
@@ -166,21 +166,14 @@ mod tests {
         )
     }
 
-    fn valid_record() -> RequestTraceRecord {
-        RequestTraceRecord {
+    fn valid_ingress() -> RequestTraceToolEventIngress {
+        RequestTraceToolEventIngress {
             schema: RequestTraceSchema::V1,
             event_type: RequestTraceEventType::ToolEnd,
             event_time_unix_ms: 1,
-            event_source: Some(RequestTraceEventSource::Harness),
-            agent_context: Some(AgentContext {
-                session_type_id: Some("agent_harness".to_string()),
-                session_id: Some("run-1".to_string()),
-                trajectory_id: "run-1:agent".to_string(),
-                parent_trajectory_id: None,
-                trajectory_final: None,
-            }),
-            request: None,
-            tool: Some(RequestTraceToolEvent {
+            session_id: "run-1:agent".to_string(),
+            parent_session_id: None,
+            tool: RequestTraceToolEvent {
                 tool_call_id: "tool-123".to_string(),
                 tool_class: "web_search".to_string(),
                 started_at_unix_ms: None,
@@ -191,13 +184,13 @@ mod tests {
                 output_bytes: Some(64),
                 tool_name_hash: None,
                 error_type: None,
-            }),
+            },
         }
     }
 
-    fn valid_record_with_tool_call_id(tool_call_id: &str) -> RequestTraceRecord {
-        let mut record = valid_record();
-        record.tool.as_mut().expect("tool event").tool_call_id = tool_call_id.to_string();
+    fn valid_ingress_with_tool_call_id(tool_call_id: &str) -> RequestTraceToolEventIngress {
+        let mut record = valid_ingress();
+        record.tool.tool_call_id = tool_call_id.to_string();
         record
     }
 
@@ -229,7 +222,7 @@ mod tests {
 
                 tokio::time::sleep(Duration::from_millis(150)).await;
 
-                let payload = rmp_serde::to_vec_named(&valid_record())?;
+                let payload = rmp_serde::to_vec_named(&valid_ingress())?;
                 for _ in 0..5 {
                     send_multipart_direct(
                         &mut push_socket,
@@ -247,7 +240,7 @@ mod tests {
                 assert_eq!(record.event_source, Some(RequestTraceEventSource::Harness));
                 assert_eq!(
                     record.agent_context.expect("agent context").session_id,
-                    Some("run-1".to_string())
+                    "run-1:agent"
                 );
                 assert_eq!(record.tool.unwrap().tool_call_id, "tool-123");
 
@@ -289,9 +282,9 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(150)).await;
 
                 let first_payload =
-                    rmp_serde::to_vec_named(&valid_record_with_tool_call_id("tool-first"))?;
+                    rmp_serde::to_vec_named(&valid_ingress_with_tool_call_id("tool-first"))?;
                 let second_payload =
-                    rmp_serde::to_vec_named(&valid_record_with_tool_call_id("tool-second"))?;
+                    rmp_serde::to_vec_named(&valid_ingress_with_tool_call_id("tool-second"))?;
                 send_multipart_direct(
                     &mut first_push,
                     vec![Vec::new(), 1u64.to_be_bytes().to_vec(), first_payload],
@@ -386,9 +379,9 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(150)).await;
 
                 let dropped_payload =
-                    rmp_serde::to_vec_named(&valid_record_with_tool_call_id("tool-dropped"))?;
+                    rmp_serde::to_vec_named(&valid_ingress_with_tool_call_id("tool-dropped"))?;
                 let accepted_payload =
-                    rmp_serde::to_vec_named(&valid_record_with_tool_call_id("tool-accepted"))?;
+                    rmp_serde::to_vec_named(&valid_ingress_with_tool_call_id("tool-accepted"))?;
 
                 send_multipart_direct(
                     &mut push_socket,

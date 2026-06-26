@@ -130,6 +130,13 @@ RUN git init /tmp/criu \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
+COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
+RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
+    && gcc -O2 -Wall -Wextra -fPIC -shared \
+      -idirafter /tmp/criu/criu/include \
+      -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
+      /tmp/snapshot_inet_remap.c
+
 RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
 # =============================================================================

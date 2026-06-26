@@ -202,6 +202,7 @@ fn make_stream_chunk(chunk: &CaptureChunk) -> Annotated<NvCreateChatCompletionSt
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }),
         event: None,
         comment: None,

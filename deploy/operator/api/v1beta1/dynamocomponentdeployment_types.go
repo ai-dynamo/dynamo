@@ -69,6 +69,8 @@ type DynamoComponentDeploymentSpec struct {
 // semantics. Users can add sidecars, init containers, and pod-level configuration
 // directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 type DynamoComponentDeploymentSharedSpec struct {
 	// name is the stable logical identifier for this component within its
 	// DynamoGraphDeployment. It must be unique within the parent's
@@ -122,6 +124,23 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// minAvailable maps to Grove PodClique minAvailable for single-node and
+	// Grove PodCliqueScalingGroup minAvailable for multi-node components.
+	// This field determines 1) the minimum number of replicas guaranteed to be
+	// gang-scheduled, and 2) when violating minAvailable replicas triggers gang
+	// termination.
+	//
+	// For Grove-backed DynamoGraphDeployment components, minAvailable defaults to
+	// 1 when omitted and is immutable after creation. Positive replica counts must
+	// be greater than or equal to minAvailable. Replicas may be scaled to 0 as a
+	// special scale-to-zero state; minAvailable remains configured but is not
+	// enforced again until replicas is scaled back to a positive value.
+	//
+	// For non-Grove deployments, setting this field will result in a validation error.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MinAvailable *int32 `json:"minAvailable,omitempty"`
 
 	// multinode configures multinode components.
 	// +optional

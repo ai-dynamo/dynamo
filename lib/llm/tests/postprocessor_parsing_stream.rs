@@ -304,6 +304,7 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
             service_tier: None,
         },
         nvext: None,
+        llm_metrics: None,
     }
 }
 
@@ -346,6 +347,7 @@ fn mock_multi_choice_content_chunk(
             service_tier: None,
         },
         nvext: None,
+        llm_metrics: None,
     }
 }
 
@@ -385,6 +387,7 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
             service_tier: None,
         },
         nvext: None,
+        llm_metrics: None,
     }
 }
 
@@ -419,6 +422,7 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
             service_tier: None,
         },
         nvext: None,
+        llm_metrics: None,
     }
 }
 

@@ -498,7 +498,7 @@ impl KvWorkerMonitor {
     /// Returns true iff the user explicitly configured at least one threshold.
     ///
     /// When false, all three per-field checks are skipped in `is_overloaded` and
-    /// rejection is fully disabled. Callers that gate 503 responses on overload
+    /// rejection is fully disabled. Callers that gate 529 responses on overload
     /// detection should check this before enabling the gate.
     pub fn is_configured(&self) -> bool {
         self.thresholds.read().unwrap().is_configured()

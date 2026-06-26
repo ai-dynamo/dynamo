@@ -234,6 +234,25 @@ trtllm_configs = {
             "DYN_SDK_DISABLE_ANSI_LOGGING": "1",
         },
     ),
+    "aggregated_router_approx": TRTLLMConfig(
+        name="aggregated_router_approx",
+        directory=trtllm_dir,
+        script_name="agg_router_approx.sh",
+        marks=[
+            pytest.mark.router,
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.nightly,
+            pytest.mark.profiled_vram_gib(3.6),  # actual nvidia-smi peak
+            pytest.mark.requested_trtllm_kv_tokens(
+                2592
+            ),  # KV cache cap (2x safety over min=1296)
+            pytest.mark.timeout(300),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[chat_payload_default()],
+    ),
     "disaggregated_router": TRTLLMConfig(
         name="disaggregated_router",
         directory=trtllm_dir,
