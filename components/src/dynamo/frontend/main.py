@@ -248,7 +248,7 @@ async def async_main():
         "kv_cache_block_size": config.kv_cache_block_size,
         "router_config": router_config,
         "migration_limit": config.migration_limit,
-        "metrics_prefix": metrics_prefix ,
+        "metrics_prefix": metrics_prefix,
         "enable_anthropic_api": config.enable_anthropic_api,
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
