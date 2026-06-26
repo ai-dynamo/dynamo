@@ -3701,7 +3701,9 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}`thinking.type` must be `enabled` or `disabled`")
+                format!(
+                    "{VALIDATION_PREFIX}`thinking.type` must be `enabled`, `disabled`, or `adaptive`"
+                )
             );
         }
     }

@@ -412,6 +412,7 @@ class SglangProcessor:
             ),
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
+            eos_token_ids=[self.eos_token_id] if self.eos_token_id is not None else [],
         )
 
         async for item in self._generate_and_stream(
@@ -468,6 +469,7 @@ class SglangProcessor:
             ),
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
+            eos_token_ids=[self.eos_token_id] if self.eos_token_id is not None else [],
         )
 
         async for item in self._generate_and_stream(
@@ -578,6 +580,7 @@ class SglangProcessor:
                         }
                         if pending_usage:
                             dynamo_out["usage"] = pending_usage
+                            pending_usage = None
                         response_nvext: dict[str, Any] = {}
                         if stop_reason is not None and nvext_extra_field_requested(
                             request, "stop_reason"
