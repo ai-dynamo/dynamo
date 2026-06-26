@@ -4412,7 +4412,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llm-multimodal"
 version = "1.5.0"
-source = "git+https://github.com/lightseekorg/smg?rev=e3eccacf96bc6e041a7ec6623e2251dba1129f28#e3eccacf96bc6e041a7ec6623e2251dba1129f28"
+source = "git+https://github.com/lightseekorg/smg?rev=5b3174c34cc2a0db5517d6f2237934a6cb137707#5b3174c34cc2a0db5517d6f2237934a6cb137707"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4436,7 +4436,7 @@ dependencies = [
 [[package]]
 name = "llm-tokenizer"
 version = "1.3.2"
-source = "git+https://github.com/lightseekorg/smg?rev=e3eccacf96bc6e041a7ec6623e2251dba1129f28#e3eccacf96bc6e041a7ec6623e2251dba1129f28"
+source = "git+https://github.com/lightseekorg/smg?rev=5b3174c34cc2a0db5517d6f2237934a6cb137707#5b3174c34cc2a0db5517d6f2237934a6cb137707"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -4453,7 +4453,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tiktoken-rs",
- "tokenizers 0.22.2",
+ "tokenizers 0.23.1",
  "tokio",
  "tracing",
  "uuid",
@@ -7989,13 +7989,13 @@ dependencies = [
 
 [[package]]
 name = "tokenizers"
-version = "0.22.2"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b238e22d44a15349529690fb07bd645cf58149a1b1e44d6cb5bd1641ff1a6223"
+checksum = "44e5bea67576e04b6ff8564c5d9e09c2ef0cf476502245f2f120e497769d3112"
 dependencies = [
  "ahash",
- "aho-corasick",
  "compact_str",
+ "daachorse",
  "dary_heap",
  "derive_builder",
  "esaxx-rs",
