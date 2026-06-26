@@ -68,6 +68,10 @@ pub enum Indexer {
 }
 
 impl Indexer {
+    pub(crate) fn supports_overlap_refresh(&self) -> bool {
+        matches!(self, Self::KvIndexer { .. } | Self::Concurrent { .. })
+    }
+
     pub async fn new(
         component: &Component,
         kv_router_config: &KvRouterConfig,
@@ -471,6 +475,13 @@ mod tests {
             approx: None,
             primary_records_routing_decisions: true,
         }
+    }
+
+    #[test]
+    fn overlap_refresh_is_limited_to_local_indexers() {
+        assert!(make_test_indexer().supports_overlap_refresh());
+        assert!(make_test_concurrent_indexer().supports_overlap_refresh());
+        assert!(!Indexer::None.supports_overlap_refresh());
     }
 
     async fn flush_indexer(indexer: &Indexer) {

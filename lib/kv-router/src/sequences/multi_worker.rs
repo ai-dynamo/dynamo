@@ -780,10 +780,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     pub(super) fn ensure_worker_registered(&self, worker: WorkerWithDpRank) {
-        if self.workers.read().index.contains_key(&worker) {
-            return;
+        {
+            let table = self.workers.read();
+            if table.index.contains_key(&worker) {
+                return;
+            }
         }
 
+        self.ensure_worker_registered_after_miss(worker);
+    }
+
+    fn ensure_worker_registered_after_miss(&self, worker: WorkerWithDpRank) {
+        // Called only after any read guard has been dropped.
         let mut table = self.workers.write();
         if table.index.contains_key(&worker) {
             return;
@@ -812,16 +820,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             lora_name,
         } = req;
 
-        if lazily_register_worker {
-            self.ensure_worker_registered(worker);
-        }
+        let mut attempted_lazy_registration = false;
 
-        let (expired_request_ids, load) = {
+        let (expired_request_ids, load) = loop {
             let table = self.workers.read();
-            let &idx = table
-                .index
-                .get(&worker)
-                .ok_or(SequenceError::WorkerNotFound { worker })?;
+            let Some(&idx) = table.index.get(&worker) else {
+                drop(table);
+                if !lazily_register_worker || attempted_lazy_registration {
+                    return Err(SequenceError::WorkerNotFound { worker });
+                }
+                attempted_lazy_registration = true;
+                self.ensure_worker_registered_after_miss(worker);
+                continue;
+            };
             if let Err(existing_worker) =
                 self.request_index
                     .try_insert_request(request_id.clone(), worker, lora_name)
@@ -848,7 +859,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 outcome.membership_delta,
                 load,
             );
-            (outcome.expired_request_ids, load)
+            break (outcome.expired_request_ids, load);
         };
 
         self.request_index
