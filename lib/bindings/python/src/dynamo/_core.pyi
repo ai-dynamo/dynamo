@@ -3177,6 +3177,7 @@ class backend:
         Aggregated: "backend.DisaggregationMode"
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
+        Encode: "backend.DisaggregationMode"
 
     class LlmRegistration:
         def __init__(
@@ -3258,6 +3259,7 @@ class backend:
             structural_tag_mode: str = ...,
             structural_tag_scope: str = ...,
             structural_tag_schema: str = ...,
+            route_to_encoder: bool = ...,
         ) -> None: ...
 
     class Worker:

@@ -30,7 +30,7 @@ export DYN_REQUEST_TRACE_OUTPUT_PATH=/mnt/captures/run-42/request-trace
 
 ## Dynamo `request_end` Record
 
-Dynamo emits `request_end` after the response stream finishes or is dropped. The record carries session identity, `output_tokens`, and autodetected `finish_reason_metadata` such as tool-call names and finish reasons. `request_id` correlates with audit rows. The `replay` block feeds Mooncake replay when Dynamo can represent the request as one replay row. Tool-call metadata is IDs and names only; arguments are intentionally not stored.
+Dynamo emits `request_end` after the response stream finishes or is dropped. The record carries session identity, `output_tokens`, and autodetected `finish_reason_metadata` such as tool-call names and finish reasons. `request_id` correlates with audit rows. The `replay` block lets DynoSim load the original request trace directly when Dynamo can represent the request as one replay request. Tool-call metadata is IDs and names only; arguments are intentionally not stored.
 
 <details>
 <summary>Full <code>request_end</code> record</summary>
