@@ -321,6 +321,9 @@ terminal.
       -l gateway.networking.k8s.io/gateway-name=inference-gateway \
       -o jsonpath='{.items[*].spec.containers[*].name}'
     ```
+
+    See [GAIE Reference](./reference.mdx#agentgateway-and-istio-injection) for the sidecar
+    injection contract.
   </Tab>
   <Tab title="Istio" language="bash">
     ```bash
@@ -335,8 +338,14 @@ terminal.
     Confirm Istio was installed with `ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true`, and confirm the
     EPP service has a `DestinationRule` when Istio sidecars enforce TLS policy for gateway-to-EPP
     traffic.
+
+    See [GAIE Reference](./reference.mdx#service-mesh-integration) for the generated
+    `DestinationRule` behavior.
   </Tab>
 </Tabs>
+
+For startup probe tuning on slow model loads, see
+[GAIE Reference](./reference.mdx#startup-probes).
 
 ## Clean Up
 

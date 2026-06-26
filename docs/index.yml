@@ -151,6 +151,8 @@ navigation:
                     path: kubernetes/gateway-api/README.mdx
                   - page: Quickstart
                     path: kubernetes/gateway-api/quickstart.mdx
+                  - page: Reference
+                    path: kubernetes/gateway-api/reference.mdx
           - section: Model Loading
             contents:
               - page: Model Caching
