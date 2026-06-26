@@ -18,7 +18,7 @@ ARG DOCKER_PROXY
 ARG GO_VERSION=1.26.3
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
-#   --build-arg CRIU_REPO=<git-remote-url>
+#   --build-arg CRIU_REPO=<git-remote-url-or-owner/repo>
 #   --build-arg CRIU_REF=<fork-branch-or-sha>
 ARG CRIU_REPO=https://github.com/checkpoint-restore/criu.git
 ARG CRIU_REF=criu-dev
@@ -122,10 +122,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git init /tmp/criu \
+RUN set -eux; \
+    criu_repo="${CRIU_REPO}"; \
+    case "${criu_repo}" in \
+        *://*|git@*) ;; \
+        *) criu_repo="https://github.com/${criu_repo}.git" ;; \
+    esac; \
+    git init /tmp/criu \
     && cd /tmp/criu \
-    && git remote add origin ${CRIU_REPO} \
-    && git fetch --depth 1 origin ${CRIU_REF} \
+    && git remote add origin "${criu_repo}" \
+    && git fetch --depth 1 origin "${CRIU_REF}" \
     && git checkout FETCH_HEAD \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin

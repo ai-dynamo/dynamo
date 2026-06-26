@@ -99,6 +99,16 @@ ARG MAX_JOBS={{ context.vllm.max_jobs }}
 {% if device == "cuda" -%}
 # FlashInfer cubin/jit-cache version used by the vLLM installer.
 ARG FLASHINF_REF={{ context.vllm.flashinf_ref }}
+ARG FLASHINFER_GIT_URL={{ context.vllm.flashinfer_git_url }}
+ARG FLASHINFER_GIT_REF={{ context.vllm.flashinfer_git_ref }}
+ARG FLASHINFER_GIT_SHA={{ context.vllm.flashinfer_git_sha }}
+ARG VLLM_GIT_URL={{ context.vllm.vllm_git_url }}
+ARG VLLM_GIT_REF={{ context.vllm.vllm_git_ref }}
+ARG VLLM_GIT_SHA={{ context.vllm.vllm_git_sha }}
+ARG NCCL_CHECKPOINT_GIT_URL={{ context.vllm.nccl_checkpoint_git_url }}
+ARG NCCL_CHECKPOINT_GIT_REF={{ context.vllm.nccl_checkpoint_git_ref }}
+ARG NCCL_CHECKPOINT_GIT_SHA={{ context.vllm.nccl_checkpoint_git_sha }}
+ARG NCCL_CHECKPOINT_VERSION={{ context.vllm.nccl_checkpoint_version }}
 {% endif %}
 ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
 
