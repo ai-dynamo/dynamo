@@ -1965,18 +1965,43 @@ impl OpenAIPreprocessor {
                 .collect()
         });
 
+        // When DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is set, supported families
+        // (Qwen3-Coder, DeepSeek-V4) stream through the dynamo-parsers-v2 parser
+        // instead of the jail, which is never built for them on this path.
+        // tool_choice=required/named and structural-tag still use the jail's
+        // Immediate mode, since those rely on guided-decoded JSON rather than the
+        // native markup the v2 parser reads. See tool_parser_v2::apply_stream.
+        use crate::protocols::openai::chat_completions::tool_parser_v2;
+        let parser_name = self.tool_call_parser.as_deref();
+        let use_parsers_v2 = tool_parser_v2::enabled()
+            && parser_name.is_some_and(tool_parser_v2::supports_family)
+            && !uses_tool_call_structural_tag
+            && matches!(
+                request.inner.tool_choice.as_ref(),
+                None | Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto)
+            );
+
         // Apply jail conditionally
-        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
-            Box::pin(Self::apply_tool_calling_jail(
-                self.tool_call_parser.clone(),
-                request.inner.tool_choice.clone(),
-                tool_definitions,
-                uses_tool_call_structural_tag,
-                stream,
-            ))
-        } else {
-            Box::pin(stream)
-        };
+        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> =
+            if should_jail && use_parsers_v2 {
+                Box::pin(tool_parser_v2::apply_stream(
+                    stream,
+                    tool_definitions,
+                    parser_name
+                        .expect("use_parsers_v2 implies a parser name")
+                        .to_string(),
+                ))
+            } else if should_jail {
+                Box::pin(Self::apply_tool_calling_jail(
+                    self.tool_call_parser.clone(),
+                    request.inner.tool_choice.clone(),
+                    tool_definitions,
+                    uses_tool_call_structural_tag,
+                    stream,
+                ))
+            } else {
+                Box::pin(stream)
+            };
 
         Ok(transformed_stream)
     }

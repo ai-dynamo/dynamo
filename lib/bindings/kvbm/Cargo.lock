@@ -1594,6 +1594,7 @@ dependencies = [
  "dynamo-memory",
  "dynamo-mocker",
  "dynamo-parsers",
+ "dynamo-parsers-v2",
  "dynamo-protocols",
  "dynamo-renderer",
  "dynamo-rl",
@@ -1718,6 +1719,22 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "dynamo-parsers-v2"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94ed5c413c09fd40cfb214a1e8cdcc8c7f536186f3bc5e433accfe24721b927c"
+dependencies = [
+ "anyhow",
+ "dynamo-parsers",
+ "openai-harmony",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tracing",
 ]
 
 [[package]]
