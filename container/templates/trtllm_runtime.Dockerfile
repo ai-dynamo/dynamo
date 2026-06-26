@@ -117,23 +117,14 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # this path and runs in dev-derived test images.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
-{# dev/local-dev create the venv later in the shared dev stage, so install
-   third-party deps into system Python. Runtime targets use the active venv. #}
-{% if target in ("dev", "local-dev") %}
-{% set trtllm_pip_flags = "--system --break-system-packages" %}
-{% else %}
-{% set trtllm_pip_flags = "" %}
-{% endif %}
-
-# Install TRT-LLM third-party deps for all targets. dev/local-dev build Dynamo
-# wheels from source later, but still need these packages available through the
-# shared dev venv's system-site-packages. --no-deps preserves upstream's solve.
+{% if target not in ("dev", "local-dev") %}
+# Install TRT-LLM third-party deps before the Dynamo wheels. Dev targets install
+# the same requirements later, after the shared dev stage creates its venv.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     --mount=type=bind,source=./container/deps/requirements.trtllm.txt,target=/tmp/requirements.trtllm.txt \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install {{ trtllm_pip_flags }} --no-deps --requirement /tmp/requirements.trtllm.txt
+    uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt
 
-{% if target not in ("dev", "local-dev") %}
 # Dynamo's own wheels — built from source in dev/local-dev, so install only for
 # runtime targets. --no-deps preserves upstream's solve.
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
