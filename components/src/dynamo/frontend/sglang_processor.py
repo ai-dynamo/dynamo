@@ -554,6 +554,7 @@ class SglangProcessor:
                 # First chunk flushes immediately (si=1) to minimize TTFT.
                 flush_threshold = 1 if first_chunk else stream_interval
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
+                    usage_for_metrics = pending_usage
                     mapped_response = {
                         "token_ids": pending_token_ids,
                         "finish_reason": finish_reason,
@@ -600,7 +601,7 @@ class SglangProcessor:
                         "output_tokens": cumulative_output_tokens,
                         "chunk_tokens": len(pending_token_ids),
                     }
-                    cached_tokens = _cached_tokens_from_usage(pending_usage)
+                    cached_tokens = _cached_tokens_from_usage(usage_for_metrics)
                     if cached_tokens is not None:
                         metrics["cached_tokens"] = cached_tokens
                     envelope["event"] = "llm_metrics"
