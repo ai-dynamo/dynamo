@@ -545,6 +545,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "For intra-node NVLink, typical value is ~450.",
     )
     parser.add_argument(
+        "--kv-transfer-timing-mode",
+        choices=("full_prompt", "destination_missing"),
+        default="full_prompt",
+        help="Physical KV footprint used for coordinated disaggregated transfer timing.",
+    )
+    parser.add_argument(
         "--kv-cache-dtype",
         type=str,
         default="auto",

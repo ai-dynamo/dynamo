@@ -357,6 +357,11 @@ pub struct ConnectionInfo {
     pub info: String,
 }
 
+/// Default number of frames buffered between the data-plane socket task and the
+/// engine consumer/producer for a single stream. Preserves the historically
+/// hard-coded mpsc channel capacity used by the TCP transport.
+pub const DEFAULT_SEND_BUFFER_COUNT: usize = 64;
+
 /// When registering a new TransportStream on the server, the caller specifies if the
 /// stream is a sender, receiver or both.
 ///
@@ -378,8 +383,10 @@ pub struct StreamOptions {
     /// that can be picked up by the Response/Reverse pipeline
     pub enable_response_stream: bool,
 
-    /// The number of messages to buffer before blocking
-    #[builder(default = "8")]
+    /// The number of frames buffered between the data-plane socket task and the
+    /// engine consumer/producer before backpressure kicks in. Drives the mpsc
+    /// channel capacity for the per-stream buffer in the TCP transport.
+    #[builder(default = "DEFAULT_SEND_BUFFER_COUNT")]
     pub send_buffer_count: usize,
 
     /// The number of messages to buffer before blocking
@@ -399,7 +406,39 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RequestControlMessage, RequestType, ResponseType};
+    use super::{
+        DEFAULT_SEND_BUFFER_COUNT, RequestControlMessage, RequestType, ResponseType, StreamOptions,
+    };
+    use crate::engine::AsyncEngineContextProvider;
+    use crate::pipeline::Context;
+
+    #[test]
+    fn stream_options_send_buffer_count_defaults_to_64() {
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .build()
+            .expect("stream options should build");
+
+        assert_eq!(DEFAULT_SEND_BUFFER_COUNT, 64);
+        assert_eq!(options.send_buffer_count, DEFAULT_SEND_BUFFER_COUNT);
+    }
+
+    #[test]
+    fn stream_options_send_buffer_count_overrides_default() {
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .send_buffer_count(128)
+            .build()
+            .expect("stream options should build");
+
+        assert_eq!(options.send_buffer_count, 128);
+    }
 
     #[test]
     fn request_control_message_defaults_missing_metadata() {

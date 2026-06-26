@@ -92,6 +92,12 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
 
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()>;
 
+    /// Reset KVBM-managed prefix cache state.
+    ///
+    /// Returns `Ok(false)` when KVBM rejects the reset so vLLM can propagate
+    /// connector reset failure through its `reset_cache` boolean contract.
+    fn reset_cache(&mut self) -> anyhow::Result<bool>;
+
     fn slot_manager(&self) -> &ConnectorSlotManager<String>;
 }
 
@@ -634,6 +640,20 @@ impl Leader for KvConnectorLeader {
 
         Ok(())
     }
+
+    fn reset_cache(&mut self) -> anyhow::Result<bool> {
+        match self.slot_manager().reset_prefix_cache() {
+            Ok(()) => {
+                self.inflight_requests.clear();
+                self.onboarding_slots.clear();
+                Ok(true)
+            }
+            Err(error) => {
+                tracing::warn!("failed to reset KVBM connector prefix cache: {error:?}");
+                Ok(false)
+            }
+        }
+    }
 }
 
 #[pyclass]
@@ -726,6 +746,11 @@ impl PyKvConnectorLeader {
     fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()> {
         self.connector_leader
             .create_slot(request, tokens)
+            .map_err(to_pyerr)
+    }
+
+    fn reset_cache(&mut self, py: Python<'_>) -> PyResult<bool> {
+        py.allow_threads(|| self.connector_leader.reset_cache())
             .map_err(to_pyerr)
     }
 }

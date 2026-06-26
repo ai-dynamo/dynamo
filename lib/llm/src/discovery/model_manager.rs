@@ -1727,6 +1727,7 @@ mod tests {
             std::sync::Arc::new(ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
             enforce_disagg,
+            None,
         );
         pr.mark_active_for_test();
         ws.prefill_router = Some(pr);

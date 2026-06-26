@@ -7,8 +7,7 @@ Benchmarks and trace-export entrypoints for Dynamo. Hosts:
 - `offline_replay_bench` — Rust-native replay loop using the mocker's perf
   model, for profiling replay overhead.
 - `kv_router/{mooncake,active_sequences}_bench` — kv-router microbenchmarks.
-- `claude_trace_export` and `request_trace_to_mooncake` binaries — convert
-  Claude / request traces into Mooncake JSONL for replay.
+- `claude_trace_export` — converts Claude traces into Mooncake JSONL for replay.
 
 ## Guardrails
 

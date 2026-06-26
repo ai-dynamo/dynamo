@@ -6,10 +6,11 @@ mod trace;
 mod types;
 
 pub use driver::WorkloadDriver;
+pub use trace::validate_trace_files;
 pub use types::{
-    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, LengthSpec, ReadyTurn,
-    ReplayRequestHashes, RouterSequence, SequenceHashMode, SessionPartitionSpec, SessionTrace,
-    SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace,
+    AgenticTrace, AgenticTurnTrace, ArrivalSpec, DelaySpec, DynamoRequestTrace, LengthSpec,
+    ReadyTurn, ReplayRequestHashes, RouterSequence, SequenceHashMode, SessionPartitionSpec,
+    SessionTrace, SyntheticTraceSpec, Trace, TraceFileFormat, TurnTrace,
 };
 
 #[cfg(test)]

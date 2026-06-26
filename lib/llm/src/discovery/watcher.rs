@@ -959,6 +959,7 @@ impl ModelWatcher {
                             Some(prefill_config),
                             self.prefill_load_estimator.clone(),
                             router_config.enforce_disagg,
+                            router_config.session_affinity_ttl_secs,
                             model_name.clone(),
                             namespace.clone(),
                             prefill_enable_eagle,
@@ -989,6 +990,7 @@ impl ModelWatcher {
                         prefill_chooser.clone(),
                         uses_multimodal_cache_routing(card),
                         router_config.enforce_disagg,
+                        router_config.session_affinity_ttl_secs,
                     )
                     .await
                     .context("build_preprocessed_routing")?,

@@ -1826,7 +1826,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def clear_kv_blocks(self, request=None):
         try:
-            await self.engine_client.reset_prefix_cache()
+            reset_successful = await self.engine_client.reset_prefix_cache(
+                reset_connector=True
+            )
+            if reset_successful is False:
+                yield {"status": "error", "message": "KV cache reset failed"}
+                return
             yield {"status": "success", "message": "KV cache cleared"}
         except Exception as e:
             yield {"status": "error", "message": str(e)}

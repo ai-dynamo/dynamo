@@ -38,6 +38,8 @@ use super::{
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
+        process_chat_response_and_observe_metrics,
+        process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
@@ -46,8 +48,8 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, agent_context_from_headers,
-    apply_header_routing_overrides,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+    agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -79,7 +81,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
 
-use super::error::SanitizedError;
+use super::error::{SanitizedError, overload_status_code};
 
 pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
@@ -108,11 +110,14 @@ pub(crate) struct ErrorMessage {
     #[serde(rename = "type")]
     error_type: String,
     code: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<Box<serde_json::Value>>,
 }
 
 fn map_error_code_to_error_type(code: StatusCode) -> String {
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
+        None if code.as_u16() == 529 => "Overloaded".to_string(),
         // 499 is not IANA-registered (nginx convention for client-closed-request),
         // so canonical_reason() returns None. Use the de facto standard name.
         None if code.as_u16() == 499 => "Client Closed Request".to_string(),
@@ -134,8 +139,9 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
         StatusCode::NOT_FOUND => ErrorType::NotFound, // 404
         StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented, // 501
         StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload, // 429
-        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload, // 503
+        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Unavailable, // 503
         StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal, // 500
+        _ if code.as_u16() == 529 => ErrorType::Overload, // 529
         _ if code.as_u16() == 499 => ErrorType::Cancelled, // 499 Client Closed Request
         _ if code.is_client_error() => ErrorType::Validation, // other 4xx
         _ => ErrorType::Internal,                     // everything else
@@ -169,6 +175,21 @@ fn find_invalid_argument_in_chain<'a>(
     None
 }
 
+fn find_queue_rejection_in_chain<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a dynamo_kv_router::scheduling::QueueRejection> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(rejection) =
+            error.downcast_ref::<dynamo_kv_router::scheduling::QueueRejection>()
+        {
+            return Some(rejection);
+        }
+        current = error.source();
+    }
+    None
+}
+
 impl ErrorMessage {
     /// Not Found Error
     pub fn model_not_found() -> ErrorResponse {
@@ -180,6 +201,7 @@ impl ErrorMessage {
                 message: "Model not found".to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -195,6 +217,7 @@ impl ErrorMessage {
                 message: "Model temporarily unavailable".to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -218,6 +241,7 @@ impl ErrorMessage {
                 message: "Service is not ready".to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -234,6 +258,7 @@ impl ErrorMessage {
                 message,
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -252,6 +277,7 @@ impl ErrorMessage {
                 message: msg.to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -274,6 +300,7 @@ impl ErrorMessage {
                 message: public_msg.to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -299,6 +326,7 @@ impl ErrorMessage {
                 message: err.to_string(),
                 error_type: map_error_code_to_error_type(status),
                 code: status.as_u16(),
+                details: None,
             }),
         )
     }
@@ -316,6 +344,7 @@ impl ErrorMessage {
                 message: msg.to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -329,6 +358,7 @@ impl ErrorMessage {
                 message: msg.to_string(),
                 error_type,
                 code: code.as_u16(),
+                details: None,
             }),
         )
     }
@@ -338,10 +368,31 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
-        // Check for ResourceExhausted anywhere in the error chain → HTTP 503
+        if let Some(rejection) = find_queue_rejection_in_chain(err.as_ref()) {
+            let code = overload_status_code();
+            return (
+                code,
+                Json(ErrorMessage {
+                    message: rejection.to_string(),
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
+                    details: serde_json::to_value(rejection).ok().map(Box::new),
+                }),
+            );
+        }
+
+        // Check for ResourceExhausted anywhere in the error chain → HTTP 529
         if super::metrics::request_was_rejected(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Overloaded,
+                format!("{err:#}"),
+            );
+        }
+
+        // No backend workers are currently routable → HTTP 503.
+        if super::metrics::request_was_unavailable(err.as_ref()) {
+            return ErrorMessage::sanitized_with_details(
+                SanitizedError::Unavailable,
                 format!("{err:#}"),
             );
         }
@@ -354,6 +405,7 @@ impl ErrorMessage {
                     message: dynamo_err.message().to_string(),
                     error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                     code: StatusCode::BAD_REQUEST.as_u16(),
+                    details: None,
                 }),
             );
         }
@@ -395,6 +447,7 @@ impl ErrorMessage {
                     message: err.message,
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
+                    details: None,
                 }),
             ),
             Err(_) => ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message),
@@ -410,6 +463,7 @@ impl From<HttpError> for ErrorMessage {
                 StatusCode::from_u16(err.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             ),
             code: err.code,
+            details: None,
         }
     }
 }
@@ -432,6 +486,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
                 message: error_message,
                 error_type: map_error_code_to_error_type(StatusCode::BAD_REQUEST),
                 code: StatusCode::BAD_REQUEST.as_u16(),
+                details: None,
             }),
         )
             .into_response()
@@ -504,6 +559,9 @@ fn context_from_headers<T: Send + Sync + 'static>(
     if let Some(agent_context) = agent_context_from_headers(headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
+    if let Some(session_affinity) = session_affinity_from_headers(headers) {
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+    }
     Ok(request)
 }
 
@@ -524,21 +582,33 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     if let Ok(agent_context) = source.get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY) {
         target.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.as_ref().clone());
     }
+    if let Ok(session_affinity) = source.get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY) {
+        target.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            session_affinity.as_ref().clone(),
+        );
+    }
 }
 
 /// Warn (once per request) when nvext data is dropped because the extension is
 /// disabled. Only called from the disabled branch, so the default path is free.
 fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
     use crate::protocols::common::extensions::{
-        HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
-        HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, HEADER_WORKER_INSTANCE_ID,
+        HEADER_DATA_PARALLEL_RANK_ALIAS, HEADER_DP_RANK, HEADER_DP_RANK_ALIAS,
+        HEADER_PREFILL_DP_RANK, HEADER_PREFILL_DP_RANK_ALIAS, HEADER_PREFILL_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID_ALIAS, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY,
+        HEADER_WORKER_INSTANCE_ID, HEADER_WORKER_INSTANCE_ID_ALIAS,
     };
     let header_present = [
         HEADER_WORKER_INSTANCE_ID,
+        HEADER_WORKER_INSTANCE_ID_ALIAS,
         HEADER_PREFILL_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID_ALIAS,
         HEADER_DP_RANK,
         HEADER_DP_RANK_ALIAS,
+        HEADER_DATA_PARALLEL_RANK_ALIAS,
         HEADER_PREFILL_DP_RANK,
+        HEADER_PREFILL_DP_RANK_ALIAS,
         HEADER_REQUEST_PRIORITY,
         HEADER_REQUEST_STRICT_PRIORITY,
     ]
@@ -1360,6 +1430,7 @@ pub(super) async fn check_for_backend_error(
                         message: error_msg,
                         error_type: map_error_code_to_error_type(status_code),
                         code: status_code.as_u16(),
+                        details: None,
                     }),
                 ),
             });
@@ -1634,6 +1705,14 @@ async fn chat_completions(
             err_response
         })?;
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -1719,7 +1798,7 @@ async fn chat_completions(
 
                 // Convert to SSE event (this consumes the response).
                 // EventConverter will detect `event: "error"` and convert to SSE error events.
-                let sse_result = process_response_using_event_converter_and_observe_metrics(
+                let sse_result = process_chat_response_using_event_converter_and_observe_metrics(
                     EventConverter::from(response),
                     &mut response_collector,
                     &mut http_queue_guard,
@@ -1761,7 +1840,7 @@ async fn chat_completions(
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
-            process_response_and_observe_metrics(
+            process_chat_response_and_observe_metrics(
                 response,
                 &mut response_collector,
                 &mut http_queue_guard,
@@ -2105,6 +2184,14 @@ async fn responses(
             err_response
         })?;
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -2156,7 +2243,7 @@ async fn responses(
             let mut saw_error = false;
 
             while let Some(annotated_chunk) = engine_stream.next().await {
-                process_response_and_observe_metrics(
+                process_chat_response_and_observe_metrics(
                     &annotated_chunk,
                     &mut response_collector,
                     &mut http_queue_guard,
@@ -2212,7 +2299,7 @@ async fn responses(
 
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
-            process_response_and_observe_metrics(
+            process_chat_response_and_observe_metrics(
                 response,
                 &mut response_collector,
                 &mut http_queue_guard,
@@ -2300,11 +2387,10 @@ pub fn validate_response_unsupported_fields(
 }
 
 // todo - abstract this to the top level lib.rs to be reused
-// todo - move the service_observer to its own state/arc
-pub(crate) fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
-    // if state.service_observer.stage() != ServiceStage::Ready {
-    //     return Err(ErrorMessage::service_unavailable());
-    // }
+pub(crate) fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
+    if !state.is_ready() {
+        return Err(ErrorMessage::_service_unavailable());
+    }
     Ok(())
 }
 
@@ -2719,6 +2805,7 @@ async fn images_edits(
                 message: "input_reference is required for /v1/images/edits".to_string(),
                 error_type: map_error_code_to_error_type(code),
                 code: code.as_u16(),
+                details: None,
             }),
         ));
     }
@@ -3234,11 +3321,41 @@ mod tests {
     }
 
     #[test]
+    fn test_context_metadata_preserves_session_affinity() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
+        let source = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        let affinity = source
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity attached");
+        assert_eq!(affinity.as_str(), "session-123");
+
+        let mut target = Context::new(());
+        copy_context_metadata(&source, &mut target);
+        let affinity = target
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity copied");
+        assert_eq!(affinity.as_str(), "session-123");
+    }
+
+    #[test]
     fn test_http_error_response_from_anyhow() {
         let err = http_error_from_engine(400).unwrap_err();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.message, "custom error message");
+    }
+
+    #[test]
+    fn test_check_ready_rejects_draining_service() {
+        let service = service_v2::HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        assert!(check_ready(&state).is_ok());
+
+        state.start_draining();
+        let response = check_ready(&state).unwrap_err();
+        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
@@ -3303,11 +3420,56 @@ mod tests {
             .build()
             .into();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.code, 529);
+        assert_eq!(response.1.error_type, "Overloaded");
         assert_eq!(response.1.message, "Service temporarily overloaded");
         assert!(
             !response.1.message.contains("All workers are busy"),
             "client response must not include the underlying engine message"
+        );
+    }
+
+    #[test]
+    fn unavailable_error_response_from_anyhow() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Unavailable)
+            .message("No workers available for endpoint test/worker/generate")
+            .build()
+            .into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+        assert_eq!(response.1.message, "Service temporarily unavailable");
+    }
+
+    #[test]
+    fn queue_rejection_maps_to_structured_http_529() {
+        use dynamo_kv_router::scheduling::{QueueLimitKind, QueueRejection};
+
+        let rejection = QueueRejection {
+            policy_class: "latency".to_string(),
+            limit_kind: QueueLimitKind::CachedTokens,
+            current: 2048,
+            limit: 1024,
+        };
+        let response =
+            ErrorMessage::from_anyhow(anyhow::Error::new(rejection), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.code, 529);
+        assert_eq!(response.1.error_type, "Overloaded");
+        assert_eq!(
+            response.1.details.as_deref(),
+            Some(&serde_json::json!({
+                "policy_class": "latency",
+                "limit_kind": "cached_tokens",
+                "current": 2048,
+                "limit": 1024,
+            }))
         );
     }
 
@@ -4247,6 +4409,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -4286,6 +4449,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -4381,7 +4545,11 @@ mod tests {
             ErrorType::Overload
         );
         assert_eq!(
-            classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Overloaded"),
+            classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Unavailable"),
+            ErrorType::Unavailable
+        );
+        assert_eq!(
+            classify_error_for_metrics(overload_status_code(), "Overloaded"),
             ErrorType::Overload
         );
         assert_eq!(
@@ -4429,7 +4597,7 @@ mod tests {
         let response = ErrorMessage::model_unavailable();
         assert_eq!(
             extract_error_type_from_response(&response),
-            ErrorType::Overload
+            ErrorType::Unavailable
         );
     }
 
@@ -4585,6 +4753,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         };
         Annotated {
             id: Some("test-id".to_string()),
@@ -5218,6 +5387,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
