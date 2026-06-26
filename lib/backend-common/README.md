@@ -279,6 +279,20 @@ async fn my_engine_passes_conformance() {
 }
 ```
 
+Encode-role engines use the narrower handoff contract:
+
+```rust
+#[tokio::test]
+async fn my_encoder_passes_conformance() {
+    dynamo_backend_common::testing::run_encode_conformance(MyEncoder::new_for_test)
+        .await
+        .expect("encode conformance");
+}
+```
+
+`run_encode_conformance` requires one terminal `FinishReason::Stop` chunk,
+empty `token_ids`, and an object-shaped `encoder_result`.
+
 The kit asserts:
 
 | Check | Failure mode |

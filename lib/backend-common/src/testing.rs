@@ -4,8 +4,8 @@
 //! Conformance test kit for [`LLMEngine`] and [`RawEngine`] implementations.
 //!
 //! Engines wire themselves into the test suite with one call —
-//! [`run_conformance`] for token engines, [`run_raw_conformance`] for raw
-//! media engines:
+//! [`run_conformance`] for token engines, [`run_encode_conformance`] for
+//! Encode-role engines, and [`run_raw_conformance`] for raw media engines:
 //!
 //! ```ignore
 //! #[tokio::test]
@@ -91,6 +91,18 @@ pub enum ConformanceFailure {
         chunked: usize,
         reported: u32,
     },
+    /// Encode conformance requires exactly one terminal handoff chunk.
+    EncodeChunkCount {
+        count: usize,
+    },
+    /// Encode terminals use the standard `Stop` finish reason.
+    EncodeTerminalExpected,
+    /// Encode workers produce a handoff payload, not generated tokens.
+    EncodeTokensNotEmpty {
+        count: usize,
+    },
+    /// The encoder handoff contract is object-shaped at every boundary.
+    EncoderResultExpectedObject,
 }
 
 impl std::fmt::Display for ConformanceFailure {
@@ -147,6 +159,23 @@ impl std::fmt::Display for ConformanceFailure {
                 "engine emitted {chunked} tokens across the stream but reported \
                  completion_usage.completion_tokens = {reported} on the terminal \
                  (engine bookkeeping diverges from streamed output)"
+            ),
+            EncodeChunkCount { count } => write!(
+                f,
+                "encode generate() must yield exactly one terminal chunk; got {count}"
+            ),
+            EncodeTerminalExpected => write!(
+                f,
+                "encode generate() must yield a terminal chunk with \
+                 finish_reason = FinishReason::Stop"
+            ),
+            EncodeTokensNotEmpty { count } => write!(
+                f,
+                "encode terminal chunk must have empty token_ids; got {count} tokens"
+            ),
+            EncoderResultExpectedObject => write!(
+                f,
+                "encode terminal chunk must carry an object-shaped encoder_result"
             ),
         }
     }
@@ -214,6 +243,77 @@ where
         .await
         .map_err(|e| CleanupWithoutStartFailed(e.to_string()))?;
 
+    Ok(())
+}
+
+/// Run the Encode-role conformance suite against an [`LLMEngine`].
+///
+/// Encode engines have a deliberately smaller streaming contract than token
+/// generators: one terminal `Stop` chunk, no generated tokens, and an
+/// object-shaped `encoder_result` handoff payload.
+pub async fn run_encode_conformance<E, F>(mut factory: F) -> Result<(), ConformanceFailure>
+where
+    E: LLMEngine,
+    F: FnMut() -> E,
+{
+    let engine = factory();
+    let config = engine
+        .start(0)
+        .await
+        .map_err(|e| StartFailed(e.to_string()))?;
+    if config.model.is_empty() {
+        return Err(EmptyModelInConfig);
+    }
+
+    check_encode_generate(&engine, &config.model).await?;
+
+    engine
+        .cleanup()
+        .await
+        .map_err(|e| CleanupFailed(e.to_string()))?;
+    engine
+        .cleanup()
+        .await
+        .map_err(|e| SecondCleanupFailed(e.to_string()))?;
+
+    let fresh = factory();
+    fresh
+        .cleanup()
+        .await
+        .map_err(|e| CleanupWithoutStartFailed(e.to_string()))?;
+
+    Ok(())
+}
+
+async fn check_encode_generate<E: LLMEngine>(
+    engine: &E,
+    model: &str,
+) -> Result<(), ConformanceFailure> {
+    let stream = engine
+        .generate(request(model), GenerateContext::new(mock_context(), None))
+        .await
+        .map_err(|e| GenerateFailed(e.to_string()))?;
+    let items: Vec<_> = stream.collect().await;
+    if items.len() != 1 {
+        return Err(EncodeChunkCount { count: items.len() });
+    }
+    let chunk = items
+        .into_iter()
+        .next()
+        .expect("length checked")
+        .map_err(|e| StreamYieldedError(e.to_string()))?;
+
+    if !matches!(chunk.finish_reason, Some(FinishReason::Stop)) {
+        return Err(EncodeTerminalExpected);
+    }
+    if !chunk.token_ids.is_empty() {
+        return Err(EncodeTokensNotEmpty {
+            count: chunk.token_ids.len(),
+        });
+    }
+    if !chunk.encoder_result.as_ref().is_some_and(|v| v.is_object()) {
+        return Err(EncoderResultExpectedObject);
+    }
     Ok(())
 }
 
@@ -556,7 +656,7 @@ async fn check_cancellation_raw<E: RawEngine>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{EngineConfig, PreprocessedRequest};
+    use crate::engine::{EngineConfig, LLMEngineOutput, PreprocessedRequest};
     use crate::error::DynamoError;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
@@ -616,6 +716,61 @@ mod tests {
             dp_ranks: vec![0, 1, 2],
         };
         assert!(check_setup_metrics(&engine).await.is_ok());
+    }
+
+    struct EncodeConformanceMock {
+        omit_encoder_result: bool,
+    }
+
+    #[async_trait]
+    impl LLMEngine for EncodeConformanceMock {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig {
+                model: "encode-mock".to_string(),
+                ..EngineConfig::default()
+            })
+        }
+
+        async fn generate(
+            &self,
+            _request: PreprocessedRequest,
+            _ctx: GenerateContext,
+        ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+            let chunk = if self.omit_encoder_result {
+                LLMEngineOutput::stop()
+            } else {
+                LLMEngineOutput::encode_terminal(serde_json::Map::from_iter([(
+                    "handle".to_string(),
+                    serde_json::json!("sample-encoder:test"),
+                )]))
+            };
+            Ok(Box::pin(futures::stream::iter([Ok(chunk)])))
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn encode_mock_satisfies_conformance() {
+        run_encode_conformance(|| EncodeConformanceMock {
+            omit_encoder_result: false,
+        })
+        .await
+        .expect("encode conformance");
+    }
+
+    #[tokio::test]
+    async fn encode_conformance_rejects_missing_encoder_result() {
+        let result = run_encode_conformance(|| EncodeConformanceMock {
+            omit_encoder_result: true,
+        })
+        .await;
+        assert!(
+            matches!(result, Err(EncoderResultExpectedObject)),
+            "expected EncoderResultExpectedObject, got {result:?}"
+        );
     }
 
     /// Minimal `RawEngine` for exercising the raw conformance kit itself.

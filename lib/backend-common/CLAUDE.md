@@ -510,6 +510,10 @@ async fn my_engine_satisfies_contract() {
 constructs one engine for the main lifecycle test and a second
 pristine engine for the "cleanup before start" check.
 
+Encode-role engines call `run_encode_conformance`. It checks the narrower
+handoff stream contract: one terminal `Stop` chunk, no generated tokens, and
+an object-shaped `encoder_result`, plus the same cleanup lifecycle guarantees.
+
 The kit asserts:
 
 - `start()` returns a non-empty `EngineConfig.model`.
