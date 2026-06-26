@@ -473,7 +473,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       container_workspace: /__w/dynamo/dynamo
-      pytest_extra_args: tests/kvbm_integration -p no:cacheprovider
+      pytest_extra_args: tests/kvbm_integration
       hf_home: /scratch/hf
       extra_test_env: |
         KVBM_MLA_BACKEND=FLASH_ATTN_MLA
