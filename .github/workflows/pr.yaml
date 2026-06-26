@@ -892,41 +892,6 @@ jobs:
       - name: Install vCluster CLI
         uses: ./.github/actions/install-vcluster-cli
 
-      - name: Clean stale checkpoint vClusters
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl create namespace "${VCLUSTER_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-
-          mapfile -t EXISTING_VCLUSTERS < <(
-            kubectl get statefulsets -n "${VCLUSTER_NAMESPACE}" -l app=vcluster \
-              -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
-              | sort -u
-          )
-
-          for existing in "${EXISTING_VCLUSTERS[@]}"; do
-            case "${existing}" in
-              ci-*-checkpoint-vllm|ci-*-checkpoint-sglang)
-                ;;
-              *)
-                continue
-                ;;
-            esac
-
-            echo "Deleting stale checkpoint vCluster before smoke test: ${existing}"
-            if ! vcluster delete "${existing}" --namespace "${VCLUSTER_NAMESPACE}" 2>&1; then
-              kubectl delete statefulset "${existing}" \
-                -n "${VCLUSTER_NAMESPACE}" \
-                --ignore-not-found 2>&1 || true
-              kubectl delete pvc,secret,svc,configmap \
-                -n "${VCLUSTER_NAMESPACE}" \
-                -l "release=${existing}" \
-                --ignore-not-found 2>&1 || true
-            fi
-            kubectl wait "statefulset/${existing}" -n "${VCLUSTER_NAMESPACE}" \
-              --for=delete --timeout=120s 2>/dev/null || true
-          done
-
       - name: Create and verify vCluster
         shell: bash
         run: |
@@ -996,7 +961,7 @@ jobs:
             --print > "${VKUBECONFIG}"
           kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s get ns
 
-          PROBE_NAME="priority-auto-probe"
+          PROBE_NAME="${VCLUSTER_NAME}-priority-auto-probe"
           kubectl --kubeconfig="${VKUBECONFIG}" -n default delete job "${PROBE_NAME}" \
             --ignore-not-found=true --wait=true
           cat <<EOF | kubectl --kubeconfig="${VKUBECONFIG}" apply -f -
@@ -1151,41 +1116,6 @@ jobs:
       - name: Install vCluster CLI
         uses: ./.github/actions/install-vcluster-cli
 
-      - name: Clean stale checkpoint vClusters
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl create namespace "${VCLUSTER_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-
-          mapfile -t EXISTING_VCLUSTERS < <(
-            kubectl get statefulsets -n "${VCLUSTER_NAMESPACE}" -l app=vcluster \
-              -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
-              | sort -u
-          )
-
-          for existing in "${EXISTING_VCLUSTERS[@]}"; do
-            case "${existing}" in
-              ci-*-checkpoint-vllm|ci-*-checkpoint-sglang)
-                ;;
-              *)
-                continue
-                ;;
-            esac
-
-            echo "Deleting stale checkpoint vCluster before smoke test: ${existing}"
-            if ! vcluster delete "${existing}" --namespace "${VCLUSTER_NAMESPACE}" 2>&1; then
-              kubectl delete statefulset "${existing}" \
-                -n "${VCLUSTER_NAMESPACE}" \
-                --ignore-not-found 2>&1 || true
-              kubectl delete pvc,secret,svc,configmap \
-                -n "${VCLUSTER_NAMESPACE}" \
-                -l "release=${existing}" \
-                --ignore-not-found 2>&1 || true
-            fi
-            kubectl wait "statefulset/${existing}" -n "${VCLUSTER_NAMESPACE}" \
-              --for=delete --timeout=120s 2>/dev/null || true
-          done
-
       - name: Create and verify vCluster
         shell: bash
         run: |
@@ -1255,7 +1185,7 @@ jobs:
             --print > "${VKUBECONFIG}"
           kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s get ns
 
-          PROBE_NAME="priority-auto-probe"
+          PROBE_NAME="${VCLUSTER_NAME}-priority-auto-probe"
           kubectl --kubeconfig="${VKUBECONFIG}" -n default delete job "${PROBE_NAME}" \
             --ignore-not-found=true --wait=true
           cat <<EOF | kubectl --kubeconfig="${VKUBECONFIG}" apply -f -
