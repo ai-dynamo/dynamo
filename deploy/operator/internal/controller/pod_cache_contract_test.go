@@ -16,7 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -134,7 +134,7 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 		reconciler := &DynamoGraphDeploymentRequestReconciler{
 			Client:   client,
-			Recorder: record.NewFakeRecorder(1),
+			Recorder: events.NewFakeRecorder(1),
 		}
 		dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace}}
 		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "profiling-job", Namespace: pod.Namespace}}

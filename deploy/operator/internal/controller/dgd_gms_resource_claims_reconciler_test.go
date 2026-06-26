@@ -37,7 +37,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -134,7 +134,7 @@ func TestDGDGMSResourceClaimsReconciler_ToleratesNonGMSComponents(t *testing.T) 
 			WithScheme(s).
 			WithObjects(dgd).
 			Build(),
-		Recorder:      record.NewFakeRecorder(100),
+		Recorder:      events.NewFakeRecorder(100),
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
 	}
 
@@ -169,7 +169,7 @@ func TestDGDGMSResourceClaimsReconciler_CleansStaleNonGMSResourceClaimTemplate(t
 		Build()
 	r := &DynamoGraphDeploymentReconciler{
 		Client:        cl,
-		Recorder:      record.NewFakeRecorder(100),
+		Recorder:      events.NewFakeRecorder(100),
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
 	}
 
@@ -285,7 +285,7 @@ func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteCheckpointTemplate(t *testi
 	r := &DynamoGraphDeploymentReconciler{
 		Client:        cl,
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      record.NewFakeRecorder(100),
+		Recorder:      events.NewFakeRecorder(100),
 		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
 	}
 
