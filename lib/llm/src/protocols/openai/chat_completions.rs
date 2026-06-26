@@ -23,6 +23,7 @@ use crate::protocols::common::extensions::{
 pub mod aggregator;
 mod delta;
 pub mod jail;
+pub mod tool_parser_v2;
 
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
@@ -201,6 +202,10 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+    /// Internal frontend metrics payload. This must never be serialized to
+    /// client-facing OpenAI-compatible streams.
+    #[serde(skip)]
+    pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
 }
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,

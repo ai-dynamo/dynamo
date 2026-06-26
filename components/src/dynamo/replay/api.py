@@ -2,11 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
+
+
+def _normalize_trace_files(trace_files):
+    if isinstance(trace_files, (str, os.PathLike)):
+        return [trace_files]
+    return list(trace_files)
 
 
 def _planner_config_arg(planner_config):
@@ -18,7 +25,7 @@ def _planner_config_arg(planner_config):
 
 
 def run_trace_replay(
-    trace_file,
+    trace_files,
     *,
     extra_engine_args=None,
     prefill_engine_args=None,
@@ -32,7 +39,7 @@ def run_trace_replay(
     replay_mode="offline",
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
-    trace_block_size=512,
+    trace_block_size=None,
     trace_format="mooncake",
     trace_shared_prefix_ratio=0.0,
     trace_num_prefix_groups=0,
@@ -45,6 +52,7 @@ def run_trace_replay(
     planner_config=None,
     benchmark_granularity=8,
 ):
+    trace_files = _normalize_trace_files(trace_files)
     if planner_config is not None:
         # Planner replay is offline-only and Mooncake-only; reject controls the
         # planner path ignores so callers fail fast instead of silently getting an
@@ -61,13 +69,15 @@ def run_trace_replay(
             raise ValueError("report_jsonl_path is not supported with planner_config")
         if max_sim_time_ms is not None:
             raise ValueError("max_sim_time_ms is not supported with planner_config")
+        if len(trace_files) != 1:
+            raise ValueError("planner_config replay requires exactly one trace file")
         # Planner-in-the-loop: the Rust bridge owns the sim loop and calls back into
         # the Python planner adapter once per PlannerTick (main._run_planner_replay),
         # returning a ReplayPlannerReport (its .trace_report matches the static dict).
         from dynamo.replay.main import _run_planner_replay
 
         return _run_planner_replay(
-            trace_file=trace_file,
+            trace_file=trace_files[0],
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
@@ -77,7 +87,9 @@ def run_trace_replay(
             num_decode_workers=num_decode_workers,
             router_mode=router_mode,
             arrival_speedup_ratio=arrival_speedup_ratio,
-            trace_block_size=trace_block_size,
+            trace_block_size=(
+                trace_block_size if trace_block_size is not None else 512
+            ),
             model_name=model_name,
             planner_config_arg=_planner_config_arg(planner_config),
             benchmark_granularity=benchmark_granularity,
@@ -87,7 +99,7 @@ def run_trace_replay(
             replay_concurrency=replay_concurrency,
         )
     return _run_mocker_trace_replay(
-        trace_file,
+        trace_files,
         extra_engine_args=extra_engine_args,
         prefill_engine_args=prefill_engine_args,
         decode_engine_args=decode_engine_args,

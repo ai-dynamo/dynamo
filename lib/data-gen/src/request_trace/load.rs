@@ -3,7 +3,7 @@
 
 //! Source-format records and JSONL/gz loader.
 //!
-//! Local subset of Dynamo request trace rows consumed by the Mooncake exporter.
+//! Local subset of Dynamo request trace rows consumed by replay.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -66,6 +66,8 @@ pub(crate) struct RequestTraceToolEventMetrics {
     pub(crate) tool_call_id: String,
     pub(crate) tool_class: String,
     #[serde(default)]
+    pub(crate) claude: Option<ClaudeToolReplayMetrics>,
+    #[serde(default)]
     pub(crate) started_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub(crate) ended_at_unix_ms: Option<u64>,
@@ -79,6 +81,25 @@ pub(crate) struct RequestTraceToolEventMetrics {
     pub(crate) output_tokens: Option<u64>,
     #[serde(default)]
     pub(crate) error_type: Option<String>,
+}
+
+/// Claude-only evidence used to disambiguate an offline replay DAG.
+///
+/// A completed session reveals the future request that consumed a tool result;
+/// live ZMQ tool producers do not have that information. Missing metadata is
+/// expected and leaves agentic lowering on its timestamp-based fallback.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ClaudeToolReplayMetrics {
+    /// Request that emitted the tool call.
+    pub(crate) source_request_id: String,
+    /// Later request that consumed the terminal result.
+    #[serde(default)]
+    pub(crate) consumer_request_id: Option<String>,
+    /// Child agent session launched by the tool, when present in the export.
+    #[serde(default)]
+    pub(crate) child_session_id: Option<String>,
+    /// Whether parent execution blocked or continued in the background.
+    pub(crate) execution_mode: String,
 }
 
 #[derive(Debug, Clone)]
@@ -97,12 +118,12 @@ pub struct ToolEntry {
     pub(crate) end_ms: i64,
     pub(crate) tool_call_id: String,
     pub(crate) tool_class: String,
+    pub(crate) claude: Option<ClaudeToolReplayMetrics>,
     pub(crate) status: String,
     pub(crate) duration_ms: f64,
     pub(crate) output_bytes: Option<u64>,
     pub(crate) output_tokens: Option<u64>,
     pub(crate) error_type: Option<String>,
-    pub(crate) terminal_event: String,
 }
 
 #[derive(Debug, Default)]
@@ -111,14 +132,36 @@ pub struct LoadedAgentTrace {
     pub tools: Vec<ToolEntry>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestTraceMode {
+    Standard,
+    Agentic,
+}
+
 impl LoadedAgentTrace {
+    pub fn mode(&self) -> Result<RequestTraceMode> {
+        if self.requests.is_empty() {
+            bail!("Dynamo request trace contains no requests");
+        }
+        let contextual_requests = self
+            .requests
+            .iter()
+            .filter(|request| request.agent_context.is_some())
+            .count();
+        match contextual_requests {
+            0 => Ok(RequestTraceMode::Standard),
+            count if count == self.requests.len() => Ok(RequestTraceMode::Agentic),
+            _ => bail!("Dynamo request trace cannot mix requests with and without agent_context"),
+        }
+    }
+
     pub fn ensure_agentic_compatible(&self) -> Result<()> {
         if self
             .requests
             .iter()
             .any(|request| request.agent_context.is_none())
         {
-            bail!("trace records without agent_context cannot be converted with --agentic");
+            bail!("agentic lowering requires agent_context on every request");
         }
         Ok(())
     }
@@ -280,12 +323,12 @@ fn tool_entry(record: RequestTraceRecord, terminal_event: String) -> Option<Tool
         end_ms,
         tool_call_id: tool.tool_call_id,
         tool_class: tool.tool_class,
+        claude: tool.claude,
         status,
         duration_ms,
         output_bytes: tool.output_bytes,
         output_tokens: tool.output_tokens,
         error_type: tool.error_type,
-        terminal_event,
     })
 }
 
@@ -407,38 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn request_trace_is_rejected_for_agentic_conversion() {
-        let request = RequestTraceRequestMetrics {
-            request_id: "req-1".to_string(),
-            output_tokens: Some(1),
-            request_received_ms: Some(1_000),
-            total_time_ms: None,
-            replay: None,
-        };
-        let loaded = LoadedAgentTrace {
-            requests: vec![RequestEntry {
-                start_ms: 1_000,
-                end_ms: 1_100,
-                agent_context: None,
-                request,
-                replay: RequestTraceReplayMetrics {
-                    trace_block_size: 2,
-                    input_length: 2,
-                    input_sequence_hashes: vec![11],
-                },
-            }],
-            tools: Vec::new(),
-        };
-
-        let error = loaded.ensure_agentic_compatible().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("without agent_context cannot be converted with --agentic")
-        );
-    }
-
-    #[test]
     fn loads_agentic_request_trace_rows_and_tool_events() {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(
@@ -448,7 +459,7 @@ mod tests {
         .unwrap();
         writeln!(
             file,
-            r#"{{"schema":"dynamo.request.trace.v1","event_type":"tool_end","event_time_unix_ms":1200,"event_source":"harness","agent_context":{{"session_id":"root"}},"tool":{{"tool_call_id":"tool-1","tool_class":"search","started_at_unix_ms":1110,"ended_at_unix_ms":1200,"status":"succeeded","duration_ms":90}}}}"#
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"tool_end","event_time_unix_ms":1200,"event_source":"harness","agent_context":{{"session_id":"root"}},"tool":{{"tool_call_id":"tool-1","tool_class":"search","claude":{{"source_request_id":"req-1","consumer_request_id":"req-2","child_session_id":"child","execution_mode":"background"}},"started_at_unix_ms":1110,"ended_at_unix_ms":1200,"status":"succeeded","duration_ms":90}}}}"#
         )
         .unwrap();
 
@@ -466,5 +477,10 @@ mod tests {
         assert_eq!(loaded.tools.len(), 1);
         assert_eq!(loaded.tools[0].tool_call_id, "tool-1");
         assert_eq!(loaded.tools[0].tool_class, "search");
+        let claude = loaded.tools[0].claude.as_ref().expect("Claude metadata");
+        assert_eq!(claude.source_request_id, "req-1");
+        assert_eq!(claude.consumer_request_id.as_deref(), Some("req-2"));
+        assert_eq!(claude.child_session_id.as_deref(), Some("child"));
+        assert_eq!(claude.execution_mode, "background");
     }
 }

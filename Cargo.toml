@@ -54,6 +54,10 @@ dynamo-mocker = { path = "lib/mocker", version = "1.3.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.3.0", features = ["metrics", "runtime-protocols"] }
 dynamo-protocols = { version = "=2.0.0" }
 dynamo-parsers = { version = "2.1.2" }
+# Published on crates.io. To see all available versions:
+#   web:          https://crates.io/crates/dynamo-parsers-v2/versions
+#   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
+dynamo-parsers-v2 = { version = "0.1.10" }
 dynamo-backend-common = { path = "lib/backend-common", version = "1.3.0" }
 fastokens = { version = "0.2.0" }
 
@@ -122,6 +126,7 @@ reqwest = { version = "0.12.24", default-features = false, features = [
 ] }
 rmp-serde = { version = "1" }
 serde_bytes = { version = "0.11" }
+seqlock = { version = "0.2.0" }
 # "rc" is for async-openai. Allows serializing Rc and Arc. Generally avoid doing that.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1" }

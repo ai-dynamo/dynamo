@@ -13,7 +13,9 @@ use dynamo_kv_router::protocols::{
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
 };
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
-use dynamo_kv_router::scheduling::{PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot};
+use dynamo_kv_router::scheduling::{
+    OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, ScheduleMode,
+};
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, SchedulingRequest,
@@ -157,16 +159,19 @@ impl PendingRequest {
             .map(|(worker, overlap)| (*worker, *overlap as usize * block_size))
             .collect();
         SchedulingRequest {
-            maybe_request_id: Some(self.request_id()),
+            mode: ScheduleMode::Tracked {
+                request_id: self.request_id(),
+            },
             token_seq: self.token_seq.clone(),
             isl_tokens: self.isl_tokens,
-            tier_overlap_blocks: TierOverlapBlocks::default(),
-            effective_overlap_blocks,
-            effective_cached_tokens,
+            overlap: OverlapSignals {
+                tier_overlap_blocks: TierOverlapBlocks::default(),
+                effective_overlap_blocks,
+                effective_cached_tokens,
+            },
             worker_loads,
             track_prefill_tokens: self.track_prefill_tokens,
             router_config_override: None,
-            update_states: true,
             lora_name: None,
             priority_jump: self.priority_jump,
             strict_priority: self.strict_priority,
@@ -745,6 +750,7 @@ mod tests {
         DirectRequest {
             tokens: vec![token; input_tokens],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),
