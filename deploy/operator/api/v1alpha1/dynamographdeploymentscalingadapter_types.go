@@ -101,10 +101,6 @@ type DynamoGraphDeploymentScalingAdapterList struct {
 	Items           []DynamoGraphDeploymentScalingAdapter `json:"items"`
 }
 
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeploymentScalingAdapter{}, &DynamoGraphDeploymentScalingAdapterList{})
-}
-
 // IsReady returns true if the adapter has active replicas and a selector
 func (d *DynamoGraphDeploymentScalingAdapter) IsReady() (bool, string) {
 	if d.Status.Selector == "" {

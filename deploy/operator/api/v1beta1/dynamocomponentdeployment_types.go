@@ -267,10 +267,6 @@ type DynamoComponentDeploymentList struct {
 	Items           []DynamoComponentDeployment `json:"items"`
 }
 
-func init() {
-	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
-}
-
 // IsReady returns true if the component has processed its latest spec and is `Available`.
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
 	if s.Status.ObservedGeneration < s.Generation {

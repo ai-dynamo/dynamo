@@ -19,13 +19,11 @@ package validation
 
 import (
 	"context"
-	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -47,13 +45,8 @@ func NewDynamoModelHandler() *DynamoModelHandler {
 }
 
 // ValidateCreate validates a DynamoModel create request.
-func (h *DynamoModelHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoModelHandler) ValidateCreate(ctx context.Context, model *nvidiacomv1alpha1.DynamoModel) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoModelWebhookName)
-
-	model, err := castToDynamoModel(obj)
-	if err != nil {
-		return nil, err
-	}
 
 	logger.Info("validate create", "name", model.Name, "namespace", model.Namespace)
 
@@ -63,13 +56,8 @@ func (h *DynamoModelHandler) ValidateCreate(ctx context.Context, obj runtime.Obj
 }
 
 // ValidateUpdate validates a DynamoModel update request.
-func (h *DynamoModelHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoModelHandler) ValidateUpdate(ctx context.Context, oldModel, newModel *nvidiacomv1alpha1.DynamoModel) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoModelWebhookName)
-
-	newModel, err := castToDynamoModel(newObj)
-	if err != nil {
-		return nil, err
-	}
 
 	logger.Info("validate update", "name", newModel.Name, "namespace", newModel.Namespace)
 
@@ -77,11 +65,6 @@ func (h *DynamoModelHandler) ValidateUpdate(ctx context.Context, oldObj, newObj 
 	if !newModel.DeletionTimestamp.IsZero() {
 		logger.Info("skipping validation for resource being deleted", "name", newModel.Name)
 		return nil, nil
-	}
-
-	oldModel, err := castToDynamoModel(oldObj)
-	if err != nil {
-		return nil, err
 	}
 
 	// Create validator and perform validation
@@ -105,13 +88,8 @@ func (h *DynamoModelHandler) ValidateUpdate(ctx context.Context, oldObj, newObj 
 }
 
 // ValidateDelete validates a DynamoModel delete request.
-func (h *DynamoModelHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoModelHandler) ValidateDelete(ctx context.Context, model *nvidiacomv1alpha1.DynamoModel) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoModelWebhookName)
-
-	model, err := castToDynamoModel(obj)
-	if err != nil {
-		return nil, err
-	}
 
 	logger.Info("validate delete", "name", model.Name, "namespace", model.Namespace)
 
@@ -129,17 +107,8 @@ func (h *DynamoModelHandler) RegisterWithManager(mgr manager.Manager) error {
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoModel)
 
 	webhook := admission.
-		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoModel{}, observedValidator).
+		WithValidator(mgr.GetScheme(), observedValidator).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dynamoModelWebhookPath, webhook)
 	return nil
-}
-
-// castToDynamoModel attempts to cast a runtime.Object to a DynamoModel.
-func castToDynamoModel(obj runtime.Object) (*nvidiacomv1alpha1.DynamoModel, error) {
-	model, ok := obj.(*nvidiacomv1alpha1.DynamoModel)
-	if !ok {
-		return nil, fmt.Errorf("expected DynamoModel but got %T", obj)
-	}
-	return model, nil
 }

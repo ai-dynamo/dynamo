@@ -30,7 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,11 +53,11 @@ type CheckpointReconciler struct {
 	client.Client
 	Config        *configv1alpha1.OperatorConfiguration
 	RuntimeConfig *commonController.RuntimeConfig
-	Recorder      record.EventRecorder
+	Recorder      events.EventRecorder
 }
 
 // GetRecorder returns the event recorder (implements controller_common.Reconciler interface)
-func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
+func (r *CheckpointReconciler) GetRecorder() events.EventRecorder {
 	return r.Recorder
 }
 
@@ -363,7 +363,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		return ctrl.Result{RequeueAfter: time.Second}, nil
 	case snapshotprotocol.CheckpointObservationPhaseReady:
 		logger.Info("Checkpoint Job succeeded", "job", job.Name)
-		r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", observation.Message)
+		r.Recorder.Eventf(ckpt, job, corev1.EventTypeNormal, "CheckpointReady", "Update", "%s", observation.Message)
 
 		now := metav1.Now()
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
@@ -381,7 +381,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		return ctrl.Result{}, nil
 	case snapshotprotocol.CheckpointObservationPhaseFailed:
 		logger.Info("Checkpoint Job failed", "job", job.Name, "message", observation.Message)
-		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "CheckpointFailed", observation.Message)
+		r.Recorder.Eventf(ckpt, job, corev1.EventTypeWarning, "CheckpointFailed", "Update", "%s", observation.Message)
 
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
 		ckpt.Status.Message = observation.Message

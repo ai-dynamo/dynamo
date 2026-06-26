@@ -19,13 +19,11 @@ package validation
 
 import (
 	"context"
-	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -55,15 +53,10 @@ func NewDynamoGraphDeploymentRequestHandler(isClusterWide bool, gpuDiscoveryEnab
 }
 
 // ValidateCreate validates a DynamoGraphDeploymentRequest create request.
-func (h *DynamoGraphDeploymentRequestHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoGraphDeploymentRequestHandler) ValidateCreate(ctx context.Context, request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentRequestWebhookName)
 
 	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK); err != nil {
-		return nil, err
-	}
-
-	request, err := castToDynamoGraphDeploymentRequest(obj)
-	if err != nil {
 		return nil, err
 	}
 
@@ -75,15 +68,10 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateCreate(ctx context.Context
 }
 
 // ValidateUpdate validates a DynamoGraphDeploymentRequest update request.
-func (h *DynamoGraphDeploymentRequestHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoGraphDeploymentRequestHandler) ValidateUpdate(ctx context.Context, oldRequest, newRequest *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentRequestWebhookName)
 
 	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK); err != nil {
-		return nil, err
-	}
-
-	newRequest, err := castToDynamoGraphDeploymentRequest(newObj)
-	if err != nil {
 		return nil, err
 	}
 
@@ -95,26 +83,16 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateUpdate(ctx context.Context
 		return nil, nil
 	}
 
-	oldRequest, err := castToDynamoGraphDeploymentRequest(oldObj)
-	if err != nil {
-		return nil, err
-	}
-
 	// Create validator and perform validation
 	validator := NewDynamoGraphDeploymentRequestValidator(newRequest, h.isClusterWideOperator, h.gpuDiscoveryEnabled)
 	return validator.ValidateUpdate(oldRequest)
 }
 
 // ValidateDelete validates a DynamoGraphDeploymentRequest delete request.
-func (h *DynamoGraphDeploymentRequestHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoGraphDeploymentRequestHandler) ValidateDelete(ctx context.Context, request *nvidiacomv1beta1.DynamoGraphDeploymentRequest) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentRequestWebhookName)
 
 	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK); err != nil {
-		return nil, err
-	}
-
-	request, err := castToDynamoGraphDeploymentRequest(obj)
-	if err != nil {
 		return nil, err
 	}
 
@@ -134,17 +112,8 @@ func (h *DynamoGraphDeploymentRequestHandler) RegisterWithManager(mgr manager.Ma
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoGraphDeploymentRequest)
 
 	webhook := admission.
-		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}, observedValidator).
+		WithValidator(mgr.GetScheme(), observedValidator).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dynamoGraphDeploymentRequestWebhookPath, webhook)
 	return nil
-}
-
-// castToDynamoGraphDeploymentRequest attempts to cast a runtime.Object to a DynamoGraphDeploymentRequest.
-func castToDynamoGraphDeploymentRequest(obj runtime.Object) (*nvidiacomv1beta1.DynamoGraphDeploymentRequest, error) {
-	request, ok := obj.(*nvidiacomv1beta1.DynamoGraphDeploymentRequest)
-	if !ok {
-		return nil, fmt.Errorf("expected DynamoGraphDeploymentRequest but got %T", obj)
-	}
-	return request, nil
 }

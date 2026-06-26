@@ -240,7 +240,3 @@ type DynamoCheckpointList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoCheckpoint `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&DynamoCheckpoint{}, &DynamoCheckpointList{})
-}

@@ -51,7 +51,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/scale"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -381,7 +381,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 			// Create reconciler
 			r := &DynamoGraphDeploymentReconciler{
 				Client:   fakeClient,
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 			}
 
 			// Run reconcileScalingAdapters
@@ -578,7 +578,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileResources_ValidatesGMSResource
 			WithScheme(s).
 			WithObjects(dgd).
 			Build(),
-		Recorder: record.NewFakeRecorder(100),
+		Recorder: events.NewFakeRecorder(100),
 		Config: &configv1alpha1.OperatorConfiguration{
 			Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"},
 		},
@@ -614,7 +614,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Tole
 			WithScheme(s).
 			WithObjects(dgd).
 			Build(),
-		Recorder:      record.NewFakeRecorder(100),
+		Recorder:      events.NewFakeRecorder(100),
 		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: true},
 	}
 
@@ -647,7 +647,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Clea
 		Build()
 	r := &DynamoGraphDeploymentReconciler{
 		Client:        cl,
-		Recorder:      record.NewFakeRecorder(100),
+		Recorder:      events.NewFakeRecorder(100),
 		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: true},
 	}
 
@@ -760,7 +760,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileGMSResourceClaimTemplates_Does
 	r := &DynamoGraphDeploymentReconciler{
 		Client:        cl,
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		Recorder:      record.NewFakeRecorder(100),
+		Recorder:      events.NewFakeRecorder(100),
 		RuntimeConfig: &controller_common.RuntimeConfig{DRAEnabled: true},
 	}
 
@@ -823,7 +823,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRDoesNotReuseExistingC
 			WithObjects(existing).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -947,7 +947,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRDoesNotAdoptLegacyIde
 			WithObjects(existing, dgd, template).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "worker",
@@ -1002,7 +1002,7 @@ func TestDynamoGraphDeploymentReconciler_createCheckpointCRPreservesGMSSaverClie
 			WithObjects(deviceClass).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -1500,7 +1500,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefSkips
 			WithStatusSubresource(referenced).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	ref := friendlyCheckpointName
@@ -1591,7 +1591,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_checkpointRefUsesR
 			WithStatusSubresource(referenced).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	ref := friendlyCheckpointName
@@ -1676,7 +1676,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_overlaysServiceGMS
 			WithStatusSubresource(referenced).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	ref := friendlyCheckpointName
@@ -1750,7 +1750,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_rejectsServiceGMSW
 			WithStatusSubresource(referenced).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	ref := friendlyCheckpointName
@@ -1834,7 +1834,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_createsCheckpointS
 				},
 			},
 		},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	ref := friendlyCheckpointName
@@ -1920,7 +1920,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileCheckpoints_autoModeWaitsForEx
 			WithStatusSubresource(existing).
 			Build(),
 		Config:   &configv1alpha1.OperatorConfiguration{},
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	dgd := betaDGD(t, &v1alpha1.DynamoGraphDeployment{
@@ -2557,7 +2557,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				WithStatusSubresource(objects...).
 				Build()
 
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
@@ -2630,7 +2630,7 @@ func Test_reconcileGroveResources_UsesPreservedAlphaServiceIngress(t *testing.T)
 
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        fakeKubeClient,
-		Recorder:      record.NewFakeRecorder(100),
+		Recorder:      events.NewFakeRecorder(100),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
 		ScaleClient:   &mockScaleClient{},
@@ -3787,7 +3787,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				WithStatusSubresource(objects...).
 				Build()
 
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:   fakeKubeClient,
 				Recorder: recorder,
@@ -4424,7 +4424,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				WithStatusSubresource(objects...).
 				Build()
 
-			recorder := record.NewFakeRecorder(100)
+			recorder := events.NewFakeRecorder(100)
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
@@ -4627,7 +4627,7 @@ func TestPropagateTopologyCondition(t *testing.T) {
 			}
 
 			fakeClient := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).Build()
-			recorder := record.NewFakeRecorder(10)
+			recorder := events.NewFakeRecorder(10)
 
 			reconciler := &DynamoGraphDeploymentReconciler{
 				Client:   fakeClient,

@@ -186,7 +186,7 @@ func (r *DynamoGraphDeploymentReconciler) initializeWorkerHashIfNeeded(
 			return fmt.Errorf("failed to set legacy worker hash: %w", err)
 		}
 
-		r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "LegacyMigrationStarted",
+		r.Recorder.Eventf(dgd, nil, corev1.EventTypeNormal, "LegacyMigrationStarted", "Update",
 			"Detected %d legacy worker DCDs, initiating rolling update migration", len(legacyDCDs))
 		return nil
 	}
@@ -254,7 +254,7 @@ func (r *DynamoGraphDeploymentReconciler) migrateCurrentWorkerHashIfNeeded(
 	logger.Info("Migrated worker hash annotations",
 		"v1Hash", next.v1,
 		"v2Hash", next.v2)
-	r.Recorder.Event(dgd, corev1.EventTypeNormal, "WorkerHashMigrated", eventMessage)
+	r.Recorder.Eventf(dgd, nil, corev1.EventTypeNormal, "WorkerHashMigrated", "Update", "%s", eventMessage)
 
 	return nil
 }
@@ -508,7 +508,7 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	rollingUpdateStatus.StartTime = &now
 	rollingUpdateStatus.UpdatedComponents = nil
 
-	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateStarted",
+	r.Recorder.Eventf(dgd, nil, corev1.EventTypeNormal, "RollingUpdateStarted", "Update",
 		"Starting rolling update to worker hash %s", newWorkerHash)
 
 	return nil // deferred function in Reconcile() persists status
@@ -645,7 +645,7 @@ func (r *DynamoGraphDeploymentReconciler) completeRollingUpdate(
 	sort.Strings(allWorkerComponents)
 	rollingUpdateStatus.UpdatedComponents = allWorkerComponents
 
-	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateCompleted",
+	r.Recorder.Eventf(dgd, nil, corev1.EventTypeNormal, "RollingUpdateCompleted", "Update",
 		"Rolling update completed, worker hash %s", newWorkerHash)
 
 	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)

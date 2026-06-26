@@ -160,10 +160,6 @@ type DynamoGraphDeploymentList struct {
 	Items           []DynamoGraphDeployment `json:"items"`
 }
 
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeployment{}, &DynamoGraphDeploymentList{})
-}
-
 // SetState updates the high-level lifecycle state.
 func (s *DynamoGraphDeployment) SetState(state DGDState) {
 	s.Status.State = state

@@ -119,10 +119,6 @@ type DynamoModelList struct {
 	Items           []DynamoModel `json:"items"`
 }
 
-func init() {
-	SchemeBuilder.Register(&DynamoModel{}, &DynamoModelList{})
-}
-
 // IsLoRA returns true if this is a LoRA model (case-insensitive)
 func (m *DynamoModel) IsLoRA() bool {
 	return strings.EqualFold(m.Spec.ModelType, "lora")

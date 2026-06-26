@@ -325,10 +325,6 @@ type DynamoGraphDeploymentList struct {
 	Items           []DynamoGraphDeployment `json:"items"`
 }
 
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeployment{}, &DynamoGraphDeploymentList{})
-}
-
 func (s *DynamoGraphDeployment) GetSpec() any {
 	return s.Spec
 }

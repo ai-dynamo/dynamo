@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -197,7 +197,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 			r := &DynamoGraphDeploymentScalingAdapterReconciler{
 				Client:   fakeClient,
 				Scheme:   scheme.Scheme,
-				Recorder: record.NewFakeRecorder(10),
+				Recorder: events.NewFakeRecorder(10),
 			}
 
 			// Run Reconcile
@@ -295,7 +295,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_NotFound(t *tes
 	r := &DynamoGraphDeploymentScalingAdapterReconciler{
 		Client:   fakeClient,
 		Scheme:   scheme.Scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	ctx := context.Background()
@@ -344,7 +344,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_DGDNotFound(t *
 	r := &DynamoGraphDeploymentScalingAdapterReconciler{
 		Client:   fakeClient,
 		Scheme:   scheme.Scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	ctx := context.Background()
@@ -408,7 +408,7 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_BeingDeleted(t 
 	r := &DynamoGraphDeploymentScalingAdapterReconciler{
 		Client:   fakeClient,
 		Scheme:   scheme.Scheme,
-		Recorder: record.NewFakeRecorder(10),
+		Recorder: events.NewFakeRecorder(10),
 	}
 
 	ctx := context.Background()
