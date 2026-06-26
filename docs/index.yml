@@ -153,6 +153,8 @@ navigation:
                     path: kubernetes/gateway-api/quickstart.mdx
                   - page: Reference
                     path: kubernetes/gateway-api/reference.mdx
+                  - page: "Experimental: Rust EPP"
+                    path: kubernetes/gateway-api/experimental-rust-epp.mdx
           - section: Model Loading
             contents:
               - page: Model Caching
