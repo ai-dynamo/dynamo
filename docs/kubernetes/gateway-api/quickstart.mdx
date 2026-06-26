@@ -52,16 +52,13 @@ kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -
 
 ## Install Dynamo Platform
 
-Install the Dynamo platform and operator. If the platform is already installed on your cluster, keep
-the installed chart and runtime images on the same Dynamo release line.
+Install the Dynamo platform and operator with the [Installation Guide](../installation-guide.md).
+Use the same Dynamo release line for the platform chart, EPP image, and runtime images.
+
+After installation, verify that the Helm release exists in the platform namespace:
 
 ```bash
-helm upgrade -i dynamo-platform \
-  oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
-  --version "$DYNAMO_VERSION" \
-  --namespace "$DYNAMO_SYSTEM_NAMESPACE" \
-  --create-namespace \
-  --wait
+helm status dynamo-platform --namespace "$DYNAMO_SYSTEM_NAMESPACE"
 ```
 
 ## Create Model Credentials
