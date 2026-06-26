@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 import uvloop
 from huggingface_hub import try_to_load_from_cache
+from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -366,13 +367,13 @@ def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional
     # local-path users (where the lookup raises HFValidationError).
     model_dir = None
     try:
-        revision = getattr(vllm_config.model_config, "revision", None)
+        revision = vllm_config.model_config.revision
         cfg = try_to_load_from_cache(
             repo_id=config.model, filename="config.json", revision=revision
         )
         if cfg and isinstance(cfg, str):
             model_dir = os.path.dirname(cfg)
-    except Exception as exc:
+    except (HFValidationError, OSError) as exc:
         logger.debug(
             "HF cache lookup for %s failed (%s); falling back to raw model arg",
             config.model,
