@@ -7,6 +7,7 @@ use axum::http::HeaderMap;
 
 pub(crate) const HEADER_CLAUDE_CODE_SESSION_ID: &str = "x-claude-code-session-id";
 pub(crate) const HEADER_CLAUDE_CODE_AGENT_ID: &str = "x-claude-code-agent-id";
+pub(crate) const HEADER_CLAUDE_CODE_PARENT_AGENT_ID: &str = "x-claude-code-parent-agent-id";
 pub(crate) const HEADER_CODEX_SESSION_ID: &str = "session-id";
 pub(crate) const HEADER_OPENCODE_SESSION_ID: &str = "x-session-id";
 pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id";
@@ -26,7 +27,7 @@ const AGENT_HEADER_MAPPINGS: &[AgentHeaderMapping] = &[
     AgentHeaderMapping {
         root_session_header: HEADER_CLAUDE_CODE_SESSION_ID,
         child_session_header: Some(HEADER_CLAUDE_CODE_AGENT_ID),
-        parent_session_header: None,
+        parent_session_header: Some(HEADER_CLAUDE_CODE_PARENT_AGENT_ID),
         infer_parent_from_session_for_child: true,
     },
     AgentHeaderMapping {
@@ -77,6 +78,9 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
         let parent_session_id = mapping
             .parent_session_header
             .and_then(|parent_header| header_value(headers, parent_header))
+            .filter(|_| {
+                !mapping.infer_parent_from_session_for_child || session_id != root_session_id
+            })
             .or_else(|| {
                 (mapping.infer_parent_from_session_for_child && session_id != root_session_id)
                     .then(|| root_session_id.clone())
@@ -89,6 +93,10 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
         });
     }
     None
+}
+
+pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {
+    header_value(headers, HEADER_DYNAMO_SESSION_ID)
 }
 
 fn header_bool(headers: &HeaderMap, header_name: &str) -> Option<bool> {

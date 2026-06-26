@@ -17,7 +17,8 @@ use super::disagg::DisaggRuntimeStats;
 use super::disagg::{DisaggRuntime, ReplayMode as DisaggReplayMode};
 use super::normalize_trace_requests;
 use super::single::{SingleReplayMode, SingleRuntime};
-use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use crate::common::handoff::NormalizedHandoffConformance;
+use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, SglangArgs, WorkerType};
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::OfflineDisaggReplayConfig;
 use crate::replay::{
@@ -50,6 +51,57 @@ fn finish_with_replay_wall_time(
 
 fn use_single_runtime(num_workers: usize, router_mode: ReplayRouterMode) -> bool {
     num_workers == 1 && router_mode != ReplayRouterMode::KvRouter
+}
+
+/// Run the deterministic offline half of the live/offline handoff conformance
+/// fixture. This is public only for cross-crate conformance tests.
+#[doc(hidden)]
+pub fn run_offline_handoff_conformance(
+    engine_type: EngineType,
+    transfer_timing_mode: crate::common::protocols::KvTransferTimingMode,
+) -> Result<NormalizedHandoffConformance> {
+    if engine_type == EngineType::Trtllm {
+        anyhow::bail!("TRT-LLM does not support destination handoff");
+    }
+
+    let build_args = |worker_type| {
+        let mut builder = MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(2))
+            .worker_type(worker_type)
+            .speedup_ratio(1000.0)
+            .decode_speedup_ratio(1000.0)
+            .kv_transfer_bandwidth(Some(1.0))
+            .kv_bytes_per_token(Some(1_000_000))
+            .kv_transfer_timing_mode(transfer_timing_mode);
+        if engine_type == EngineType::Sglang {
+            builder = builder.sglang(Some(SglangArgs {
+                page_size: Some(4),
+                ..Default::default()
+            }));
+        }
+        builder.build()
+    };
+    let config = OfflineDisaggReplayConfig {
+        prefill_args: build_args(WorkerType::Prefill)?,
+        decode_args: build_args(WorkerType::Decode)?,
+        num_prefill_workers: 1,
+        num_decode_workers: 1,
+    }
+    .normalized()?;
+    let request = DirectRequest {
+        tokens: (0..8).collect(),
+        max_output_tokens: 2,
+        uuid: Some(uuid::Uuid::from_u128(1)),
+        arrival_timestamp_ms: Some(0.0),
+        ..Default::default()
+    };
+
+    DisaggRuntime::new_handoff_conformance(&config, VecDeque::from([request]))?
+        .run_handoff_conformance(engine_type)
 }
 
 pub(crate) fn generate_trace_worker_artifacts(

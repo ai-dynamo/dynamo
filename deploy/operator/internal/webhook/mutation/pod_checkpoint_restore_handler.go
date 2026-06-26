@@ -52,6 +52,9 @@ func (h *PodCheckpointRestoreMutator) RegisterWithManager(mgr manager.Manager) e
 
 func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.Request) admission.Response {
 	logger := log.FromContext(ctx).WithName(podCheckpointRestoreWebhookName)
+
+	// Restore injection changes pod spec fields that are only meaningful before
+	// the pod is created; UPDATE requests are admitted unchanged.
 	if req.Operation != admissionv1.Create {
 		return admission.Allowed("not a pod create")
 	}

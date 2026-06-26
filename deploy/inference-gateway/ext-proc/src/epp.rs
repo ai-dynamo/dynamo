@@ -166,6 +166,7 @@ impl Router {
             Some(prefill_config),
             None,
             enforce_disagg,
+            None,
             model_name.clone(),
             actual_namespace.to_string(),
             enable_eagle,

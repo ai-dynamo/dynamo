@@ -18,6 +18,105 @@ fn write_trace(lines: &[serde_json::Value]) -> NamedTempFile {
     file
 }
 
+fn request_trace_row(
+    request_id: &str,
+    block_size: usize,
+    agent_context: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut row = serde_json::json!({
+        "schema": "dynamo.request.trace.v1",
+        "event_type": "request_end",
+        "event_time_unix_ms": 1_100,
+        "request": {
+            "request_id": request_id,
+            "request_received_ms": 1_000,
+            "output_tokens": 4,
+            "replay": {
+                "trace_block_size": block_size,
+                "input_length": block_size,
+                "input_sequence_hashes": [11],
+            }
+        }
+    });
+    if let Some(agent_context) = agent_context {
+        row["agent_context"] = agent_context;
+    }
+    row
+}
+
+#[test]
+fn dynamo_trace_input_validation_errors_are_clear() {
+    enum ValidationCase {
+        Validate(TraceFileFormat, Vec<std::path::PathBuf>),
+        Load(Vec<std::path::PathBuf>, Option<usize>),
+    }
+
+    let mixed = write_trace(&[
+        request_trace_row(
+            "contextual",
+            2,
+            Some(serde_json::json!({"session_id": "root"})),
+        ),
+        request_trace_row("context-free", 2, None),
+    ]);
+    let inconsistent = write_trace(&[
+        request_trace_row("block-2", 2, None),
+        request_trace_row("block-4", 4, None),
+    ]);
+    let block_size = write_trace(&[request_trace_row("block-2", 2, None)]);
+    let extra = write_trace(&[serde_json::json!({
+        "timestamp": 0,
+        "input_length": 2,
+        "output_length": 1,
+        "hash_ids": [1],
+    })]);
+
+    let cases = [
+        (
+            "empty",
+            ValidationCase::Validate(TraceFileFormat::Dynamo, vec![]),
+            "at least one trace file",
+        ),
+        (
+            "mixed context",
+            ValidationCase::Load(vec![mixed.path().to_path_buf()], None),
+            "cannot mix requests with and without agent_context",
+        ),
+        (
+            "inconsistent block size",
+            ValidationCase::Load(vec![inconsistent.path().to_path_buf()], None),
+            "mixed replay trace_block_size values",
+        ),
+        (
+            "explicit block size mismatch",
+            ValidationCase::Load(vec![block_size.path().to_path_buf()], Some(4)),
+            "does not match embedded Dynamo request trace block size 2",
+        ),
+        (
+            "multiple non-Dynamo files",
+            ValidationCase::Validate(
+                TraceFileFormat::Mooncake,
+                vec![block_size.path().to_path_buf(), extra.path().to_path_buf()],
+            ),
+            "requires exactly one trace file",
+        ),
+    ];
+
+    for (name, case, expected) in cases {
+        let error = match case {
+            ValidationCase::Validate(format, paths) => validate_trace_files(format, &paths),
+            ValidationCase::Load(paths, block_size) => {
+                DynamoRequestTrace::from_request_trace_files(&paths, block_size).map(|_| ())
+            }
+        }
+        .expect_err(name);
+        assert!(
+            error.to_string().contains(expected),
+            "{name}: unexpected error: {error:#}"
+        );
+    }
+}
+
 #[test]
 fn test_from_mooncake_single_turn_preserves_fields() {
     let file = write_trace(&[serde_json::json!({
@@ -39,6 +138,103 @@ fn test_from_mooncake_single_turn_preserves_fields() {
     assert_eq!(session.turns[0].hash_ids, vec![7, 8]);
     assert_eq!(session.turns[0].priority, -3);
     assert_eq!(session.turns[0].strict_priority, 7);
+}
+
+#[test]
+fn test_from_mooncake_preserves_output_token_replay_keys() {
+    let file = write_trace(&[
+        serde_json::json!({
+            "request_id": "explicit",
+            "session_id": "s",
+            "input_length": 4,
+            "output_length": 2,
+            "output_token_ids": [10, 11],
+            "hash_ids": [1],
+        }),
+        serde_json::json!({
+            "session_id": "s",
+            "input_length": 4,
+            "output_length": 1,
+            "output_token_ids": [12],
+            "hash_ids": [2],
+        }),
+        serde_json::json!({
+            "input_length": 4,
+            "output_length": 1,
+            "output_token_ids": [13],
+            "hash_ids": [3],
+        }),
+    ]);
+
+    let trace = Trace::from_mooncake(file.path(), 4).unwrap();
+    assert_eq!(
+        trace.sessions[0].turns[0].replay_key.as_deref(),
+        Some("explicit")
+    );
+    assert_eq!(
+        trace.sessions[0].turns[0].output_token_ids.as_deref(),
+        Some(&[10, 11][..])
+    );
+    assert_eq!(
+        trace.sessions[0].turns[1].replay_key.as_deref(),
+        Some("s:1")
+    );
+    assert_eq!(
+        trace.sessions[0].turns[1].output_token_ids.as_deref(),
+        Some(&[12][..])
+    );
+    assert_eq!(
+        trace.sessions[1].turns[0].replay_key.as_deref(),
+        Some("line:2")
+    );
+
+    let request = trace.sessions[0].turns[0]
+        .to_direct_request(4, Uuid::from_u128(1), None)
+        .unwrap();
+    assert_eq!(request.output_token_ids.as_deref(), Some(&[10, 11][..]));
+}
+
+#[test]
+fn test_from_mooncake_rejects_output_token_length_mismatch() {
+    let file = write_trace(&[serde_json::json!({
+        "input_length": 4,
+        "output_length": 2,
+        "output_token_ids": [10],
+        "hash_ids": [1],
+    })]);
+
+    let err = Trace::from_mooncake(file.path(), 4).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("output_length 2 does not match output_token_ids length 1"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn test_trace_validate_rejects_programmatic_output_token_length_mismatch() {
+    let trace = Trace {
+        block_size: 4,
+        sessions: vec![SessionTrace {
+            session_id: "s".to_string(),
+            first_arrival_timestamp_ms: Some(0.0),
+            turns: vec![TurnTrace {
+                input_length: 4,
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![10]),
+                hash_ids: vec![1],
+                delay_after_previous_ms: 0.0,
+                ..Default::default()
+            }],
+        }],
+    };
+
+    let err = trace.validate_for_trace_mode().unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("max_output_tokens 2 does not match output_token_ids length 1"),
+        "{err:#}"
+    );
 }
 
 #[test]
@@ -238,6 +434,8 @@ fn test_turn_to_direct_request_repeats_hash_ids_by_block_size() {
     let turn = TurnTrace {
         input_length: 6,
         max_output_tokens: 3,
+        output_token_ids: None,
+        replay_key: None,
         hash_ids: vec![1, 2],
         delay_after_previous_ms: 0.0,
         priority: -2,

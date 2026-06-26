@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 from dynamo._internal.aic import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_MEM_FRACTION_STATIC,
+    _normalize_aic_quant_mode,
     estimate_num_gpu_blocks,
 )
 from dynamo.common.forward_pass_metrics import (
@@ -96,6 +97,16 @@ def _resolve_block_size_for_capacity(raw: dict) -> int:
     return _DEFAULT_VLLM_BLOCK_SIZE
 
 
+def _aic_quant_mode(raw: dict, name: str) -> str | None:
+    # Extract + type-check the raw JSON value here; defer the dtype-vocabulary
+    # normalization (`auto` -> default, `int4` -> `int4_wo`, ...) to the single
+    # source of truth shared with the latency engine and the KV-block estimator.
+    value = raw.get(name)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{name} must be a string when set")
+    return _normalize_aic_quant_mode(value)
+
+
 def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     if raw.get("num_gpu_blocks") is not None:
         return
@@ -116,7 +127,7 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
     mem_fraction_static = raw.get("mem_fraction_static")
     free_gpu_memory_fraction = raw.get("free_gpu_memory_fraction")
 
-    raw["num_gpu_blocks"] = estimate_num_gpu_blocks(
+    per_rank_blocks = estimate_num_gpu_blocks(
         backend_name=aic_backend,
         system=raw.get("aic_system") or _DEFAULT_AIC_SYSTEM,
         model_path=aic_model_path,
@@ -146,7 +157,20 @@ def _resolve_aic_num_gpu_blocks(raw: dict) -> None:
         moe_tp_size=raw.get("aic_moe_tp_size"),
         moe_ep_size=raw.get("aic_moe_ep_size"),
         attention_dp_size=raw.get("aic_attention_dp_size"),
+        gemm_dtype=_aic_quant_mode(raw, "aic_gemm_dtype"),
+        moe_dtype=_aic_quant_mode(raw, "aic_moe_dtype"),
+        fmha_dtype=_aic_quant_mode(raw, "aic_fmha_dtype"),
+        kv_cache_dtype=_aic_quant_mode(raw, "aic_kv_cache_dtype"),
+        comm_dtype=_aic_quant_mode(raw, "aic_comm_dtype"),
     )
+    # AIC returns a per-rank (per-GPU) block count. Offline replay models a single KV
+    # pool per engine, so under DP-attention -- where each of the `dp` ranks holds a full
+    # KV replica for its slice of the batch -- the engine-wide pool is per_rank * dp. The
+    # live mocker instead replicates one scheduler per dp rank (lib/llm/src/mocker.rs), so
+    # it keeps the per-rank count; this scaling lives on the offline-replay path, not in
+    # estimate_num_gpu_blocks itself.
+    dp = raw.get("aic_attention_dp_size") or 1
+    raw["num_gpu_blocks"] = per_rank_blocks * dp
 
 
 def _resolve_kv_bytes_per_token(raw: dict) -> None:
@@ -167,7 +191,8 @@ def _resolve_kv_bytes_per_token(raw: dict) -> None:
     if not model_path:
         return
 
-    kv_bytes_per_token = compute_kv_bytes_per_token(model_path, "auto")
+    kv_cache_dtype = _aic_quant_mode(raw, "aic_kv_cache_dtype") or "auto"
+    kv_bytes_per_token = compute_kv_bytes_per_token(model_path, kv_cache_dtype)
     if kv_bytes_per_token is not None:
         raw["kv_bytes_per_token"] = kv_bytes_per_token
 
@@ -219,6 +244,14 @@ def _load_aic_perf_config(args: argparse.Namespace):
         "aic_moe_tp_size": args.aic_moe_tp_size,
         "aic_moe_ep_size": args.aic_moe_ep_size,
         "aic_attention_dp_size": args.aic_attention_dp_size,
+        # Normalize here so `--aic-*-dtype auto` (== model default) doesn't make
+        # the "any AIC value set?" check below think an AIC config was requested
+        # and then demand --aic-backend/--aic-system/--aic-model-path.
+        "aic_gemm_dtype": _normalize_aic_quant_mode(args.aic_gemm_dtype),
+        "aic_moe_dtype": _normalize_aic_quant_mode(args.aic_moe_dtype),
+        "aic_fmha_dtype": _normalize_aic_quant_mode(args.aic_fmha_dtype),
+        "aic_kv_cache_dtype": _normalize_aic_quant_mode(args.aic_kv_cache_dtype),
+        "aic_comm_dtype": _normalize_aic_quant_mode(args.aic_comm_dtype),
         "aic_nextn": args.aic_nextn,
         "aic_nextn_accept_rates": args.aic_nextn_accept_rates,
     }
@@ -243,6 +276,11 @@ def _load_aic_perf_config(args: argparse.Namespace):
         aic_moe_tp_size=values["aic_moe_tp_size"],
         aic_moe_ep_size=values["aic_moe_ep_size"],
         aic_attention_dp_size=values["aic_attention_dp_size"],
+        aic_gemm_dtype=values["aic_gemm_dtype"],
+        aic_moe_dtype=values["aic_moe_dtype"],
+        aic_fmha_dtype=values["aic_fmha_dtype"],
+        aic_kv_cache_dtype=values["aic_kv_cache_dtype"],
+        aic_comm_dtype=values["aic_comm_dtype"],
         aic_nextn=values["aic_nextn"],
         aic_nextn_accept_rates=values["aic_nextn_accept_rates"],
     )
@@ -549,6 +587,12 @@ def _run_planner_replay(
             try:
                 from dynamo._internal.aic import create_session
 
+                # The bootstrap uses one shared AIC identity (model / backend /
+                # quantization, from ref_args) for both prefill and decode FPM
+                # generation. That matches the planner's current model, where
+                # prefill and decode differ only in parallelism — not in model
+                # or quant — so a single AIC session is sufficient here.
+                # Pre-existing behavior.
                 aic_session = create_session(
                     backend_name=aic_backend,
                     system=ref_args.aic_system,
@@ -558,6 +602,16 @@ def _run_planner_replay(
                     moe_tp_size=ref_args.aic_moe_tp_size,
                     moe_ep_size=ref_args.aic_moe_ep_size,
                     attention_dp_size=ref_args.aic_attention_dp_size,
+                    # Same quant overrides the mocker's latency engine and the
+                    # KV-block estimator use, so the planner's throughput
+                    # regression is bootstrapped at the quantized precision
+                    # instead of the model's default dtype. (AicSession
+                    # normalizes the strings via _resolve_quant_mode.)
+                    gemm_dtype=ref_args.aic_gemm_dtype,
+                    moe_dtype=ref_args.aic_moe_dtype,
+                    fmha_dtype=ref_args.aic_fmha_dtype,
+                    kv_cache_dtype=ref_args.aic_kv_cache_dtype,
+                    comm_dtype=ref_args.aic_comm_dtype,
                     nextn=d_args.aic_nextn,
                     # Model the full verification round; real conditional rates
                     # are consumed only by the mocker's burst sampler.
@@ -626,12 +680,24 @@ def _run_planner_replay(
     # gpu_hours (and prefill/decode_gpus_per_worker) are computed in the mocker
     # from its own worker parallelism (aic_tp x aic_attention_dp) and ride the
     # report dict — no per-engine GPU count from the planner config is needed.
-    return adapter.run()
+    #
+    # Unified drive: the Rust bridge owns the loop and calls back into the adapter
+    # (initial_tick_ms / on_tick) once per PlannerTick; `finalize` wraps the returned
+    # trace_report with the adapter's accumulated scaling events / diagnostics.
+    try:
+        trace_report = bridge.run(adapter)
+    except BaseException:
+        # `finalize` (which closes the engine + replay-scoped event loop) is only
+        # reached on success; ensure cleanup also runs when the Rust loop or a
+        # planner callback raises. `close()` is idempotent.
+        adapter.close()
+        raise
+    return adapter.finalize(trace_report)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m dynamo.replay")
-    parser.add_argument("trace_file", nargs="?")
+    parser.add_argument("trace_files", nargs="*")
     parser.add_argument("--extra-engine-args")
     parser.add_argument("--prefill-engine-args")
     parser.add_argument("--decode-engine-args")
@@ -656,6 +722,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--aic-moe-tp-size", type=int)
     parser.add_argument("--aic-moe-ep-size", type=int)
     parser.add_argument("--aic-attention-dp-size", type=int)
+    parser.add_argument(
+        "--aic-gemm-dtype",
+        help="dense-GEMM quant mode for the AIC KV-router prefill-load "
+        "estimator, e.g. fp8, fp8_block, int4, nvfp4; 'auto'/omitted = model "
+        "default. Worker-engine quant is set via --extra-engine-args.",
+    )
+    parser.add_argument(
+        "--aic-moe-dtype",
+        help="MoE quant mode for the AIC prefill-load estimator, e.g. fp8, "
+        "nvfp4, w4a16_mxfp4; 'auto'/omitted = model default",
+    )
+    parser.add_argument(
+        "--aic-fmha-dtype",
+        help="attention (FMHA) quant mode for the AIC prefill-load estimator, "
+        "e.g. fp8; 'auto'/omitted = model default",
+    )
+    parser.add_argument(
+        "--aic-kv-cache-dtype",
+        help="KV-cache quant mode for the AIC prefill-load estimator, e.g. fp8, "
+        "int8; 'auto'/omitted = model default",
+    )
+    parser.add_argument(
+        "--aic-comm-dtype",
+        help="communication (collective) quant mode for the AIC prefill-load "
+        "estimator, e.g. fp8, int8; 'auto'/omitted = model default",
+    )
     parser.add_argument("--aic-nextn", type=int)
     parser.add_argument("--aic-nextn-accept-rates")
     parser.add_argument("--input-tokens", type=int)
@@ -692,10 +784,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "mooncake-delta",
             "agentic_mooncake",
             "applied_compute_agentic",
+            "dynamo",
         ),
         default="mooncake",
         help=(
-            "format of trace_file when replaying from a file; mooncake-delta "
+            "format of trace files when replaying from files; mooncake-delta "
             "accumulates per-session input deltas into cumulative prompts and "
             "can use substantially more memory than mooncake; agentic_mooncake "
             "replays request-level workflow dependencies"
@@ -704,8 +797,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--trace-block-size",
         type=int,
-        default=512,
-        help="tokens represented by each hash_id in the trace file; only used for file replay",
+        help="tokens represented by each hash_id; defaults to 512 for existing formats and is derived from Dynamo request traces",
     )
     parser.add_argument(
         "--trace-shared-prefix-ratio",
@@ -775,7 +867,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
 
-    using_trace_file = args.trace_file is not None
+    using_trace_file = bool(args.trace_files)
     synthetic_args = (args.input_tokens, args.output_tokens, args.request_count)
     using_synthetic = any(value is not None for value in synthetic_args) or any(
         (
@@ -785,6 +877,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.inter_turn_delay_ms != 0.0,
         )
     )
+
+    if args.trace_format == "dynamo" and not using_trace_file:
+        parser.error("--trace-format=dynamo requires at least one trace file")
+    if args.trace_format != "dynamo" and len(args.trace_files) > 1:
+        parser.error(
+            f"--trace-format={args.trace_format} requires exactly one trace file"
+        )
 
     if using_trace_file == using_synthetic:
         parser.error(
@@ -860,7 +959,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
         planner_report = _run_planner_replay(
-            trace_file=args.trace_file if using_trace_file else None,
+            trace_file=args.trace_files[0] if using_trace_file else None,
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
@@ -870,7 +969,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             num_decode_workers=args.num_decode_workers,
             router_mode=args.router_mode,
             arrival_speedup_ratio=args.arrival_speedup_ratio,
-            trace_block_size=args.trace_block_size,
+            trace_block_size=(
+                args.trace_block_size if args.trace_block_size is not None else 512
+            ),
             planner_config_arg=args.planner_config,
             model_name=args.model_name,
             benchmark_granularity=args.benchmark_granularity,
@@ -907,7 +1008,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else None
         )
         report = run_trace_replay(
-            args.trace_file,
+            args.trace_files,
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
