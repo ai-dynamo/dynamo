@@ -178,17 +178,17 @@ Keep the router environment values aligned with the worker runtime:
         - name: main
           env:
             - name: DYN_MODEL_NAME
-              value: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic # Match the worker model name.
+              value: Qwen/Qwen3-0.6B # Match the worker model name.
             - name: DYN_KV_CACHE_BLOCK_SIZE
-              value: "128" # Match the worker backend's --block-size.
+              value: "16" # Match the worker backend's --block-size.
             - name: DYN_ENFORCE_DISAGG
               value: "false" # Use "true" for disaggregated fail-closed behavior.
 ```
 
-See the GAIE recipe manifests for full aggregated and disaggregated EPP configurations:
-[aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml)
+See the GAIE recipe manifests for full EPP configurations:
+[Qwen 0.6B aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-0.6b/vllm/agg/gaie/deploy.yaml)
 and
-[disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/llama-3-70b/vllm/disagg-single-node/gaie/deploy.yaml).
+[Llama 70B disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/llama-3-70b/vllm/disagg-single-node/gaie/deploy.yaml).
 
 ## Routing Behavior
 
@@ -215,7 +215,7 @@ EPP, and runtime images on the same Dynamo release line.
 | GAIE CRDs | `v1.2.1` | Installed from the upstream Gateway API Inference Extension release. |
 | agentgateway | `v1.0.0` | Installed with `inferenceExtension.enabled=true`. |
 | Istio | `1.29.2` | Install with `ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true`. |
-| Dynamo images | `1.3.0` | Use one Dynamo release line for the platform chart, EPP image, and runtime images. |
+| Dynamo images | `1.2.1` | Use one Dynamo release line for the platform chart, EPP image, and runtime images. |
 
 ## Troubleshooting Signals
 

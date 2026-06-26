@@ -35,13 +35,13 @@ flowchart LR
 - Kubernetes cluster with GPU nodes.
 - `kubectl`, Helm, and `jq`.
 - Access to `nvcr.io/nvidia/ai-dynamo` images for the Dynamo release you use.
-- Hugging Face access to `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic`.
+- Hugging Face access to `Qwen/Qwen3-0.6B`.
 - Shared RWX storage for the recipe's `model-cache` PVC.
 
 Set the common variables:
 
 ```bash
-export DYNAMO_VERSION=1.3.0
+export DYNAMO_VERSION=1.2.1
 export NAMESPACE=gaie-dynamo
 export DYNAMO_SYSTEM_NAMESPACE=dynamo-system
 export AGW_NAMESPACE=agentgateway-system
@@ -206,12 +206,12 @@ Keeping the `Gateway` and `HTTPRoute` in the same namespace avoids a cross-names
 
 ## Prepare the Model Cache
 
-The Llama recipe mounts a shared `model-cache` PVC. Edit
-`recipes/llama-3-70b/model-cache/model-cache.yaml` first and set `storageClassName` to a RWX storage
+The Qwen recipe mounts a shared `model-cache` PVC. Edit
+`recipes/qwen3-0.6b/model-cache/model-cache.yaml` first and set `storageClassName` to a RWX storage
 class available in your cluster. For the general pattern, see [Model Caching](../model-caching.md).
 
 ```bash
-kubectl apply -n "$NAMESPACE" -f recipes/llama-3-70b/model-cache/
+kubectl apply -n "$NAMESPACE" -f recipes/qwen3-0.6b/model-cache/
 
 kubectl wait --for=condition=Complete job/model-download \
   -n "$NAMESPACE" --timeout=3600s
@@ -219,61 +219,32 @@ kubectl wait --for=condition=Complete job/model-download \
 
 ## Deploy the Serving Graph
 
-Pick one topology. The aggregated path requires 4 GPUs. The disaggregated path requires 8 GPUs with
-the default recipe replica counts.
+Deploy the Qwen 0.6B aggregated recipe and its route:
 
-<Tabs>
-  <Tab title="Aggregated" language="bash">
-    ```bash
-    kubectl apply -n "$NAMESPACE" \
-      -f recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml
+```bash
+kubectl apply -n "$NAMESPACE" \
+  -f recipes/qwen3-0.6b/vllm/agg/gaie/deploy.yaml
 
-    kubectl apply -n "$NAMESPACE" \
-      -f recipes/llama-3-70b/vllm/agg/gaie/http-route.yaml
-    ```
-  </Tab>
-  <Tab title="Disaggregated" language="bash">
-    ```bash
-    kubectl apply -n "$NAMESPACE" \
-      -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/deploy.yaml
-
-    kubectl apply -n "$NAMESPACE" \
-      -f recipes/llama-3-70b/vllm/disagg-single-node/gaie/http-route.yaml
-    ```
-  </Tab>
-</Tabs>
+kubectl apply -n "$NAMESPACE" \
+  -f recipes/qwen3-0.6b/vllm/agg/gaie/httproute.yaml
+```
 
 Wait for the operator-created resources:
 
-<Tabs>
-  <Tab title="Aggregated" language="bash">
-    ```bash
-    export ROUTE_HOST=llama3-70b-agg.example.com
+```bash
+export ROUTE_MODEL=Qwen/Qwen3-0.6B
 
-    kubectl wait -n "$NAMESPACE" dynamographdeployment/llama3-70b-agg \
-      --for=condition=Ready --timeout=1800s
+kubectl wait -n "$NAMESPACE" dynamographdeployment/qwen3-0-6b-agg \
+  --for=condition=Ready --timeout=1800s
 
-    kubectl get inferencepool llama3-70b-agg-pool -n "$NAMESPACE"
-    kubectl get httproute llama3-70b-agg-route -n "$NAMESPACE"
-    ```
-  </Tab>
-  <Tab title="Disaggregated" language="bash">
-    ```bash
-    export ROUTE_HOST=llama3-70b-disagg.example.com
-
-    kubectl wait -n "$NAMESPACE" dynamographdeployment/llama3-70b-disagg \
-      --for=condition=Ready --timeout=1800s
-
-    kubectl get inferencepool llama3-70b-disagg-pool -n "$NAMESPACE"
-    kubectl get httproute llama3-70b-disagg-route -n "$NAMESPACE"
-    ```
-  </Tab>
-</Tabs>
+kubectl get inferencepool qwen3-0-6b-agg-pool -n "$NAMESPACE"
+kubectl get httproute qwen3-0-6b-agg -n "$NAMESPACE"
+```
 
 ## Verify End-to-End
 
 Use one access mode to set `GATEWAY_URL`, then send a request through the Gateway and EPP. Keep
-`ROUTE_HOST` set to the hostname from the route manifest you applied.
+`ROUTE_MODEL` set to the model name from the route manifest you applied.
 
 <Tabs>
   <Tab title="Port-forward" language="bash">
@@ -303,15 +274,15 @@ Use one access mode to set `GATEWAY_URL`, then send a request through the Gatewa
 <CodeBlocks>
 ```bash title="List models"
 curl --max-time 20 -sS "$GATEWAY_URL/v1/models" \
-  -H "Host: $ROUTE_HOST" | jq .
+  -H "X-Gateway-Model-Name: $ROUTE_MODEL" | jq .
 ```
 
 ```bash title="Send a chat request"
 curl --max-time 180 -sS "$GATEWAY_URL/v1/chat/completions" \
-  -H "Host: $ROUTE_HOST" \
+  -H "X-Gateway-Model-Name: $ROUTE_MODEL" \
   -H "content-type: application/json" \
   -d '{
-    "model": "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic",
+    "model": "Qwen/Qwen3-0.6B",
     "messages": [{"role": "user", "content": "Explain KV cache aware routing in one sentence."}],
     "max_tokens": 96
   }' | jq .
