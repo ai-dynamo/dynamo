@@ -17,13 +17,14 @@ batching scheduler).  Most authors should subclass ``SerializedCustomEncoder``
 (in ``serialized_custom_encoder``), which implements ``encode`` for them —
 running a synchronous forward off the event loop, serialized — so they only
 write a blocking forward.  Qwen-family authors subclass
-``QwenSerializedCustomEncoder`` (in ``qwen_custom_encoder``), which additionally
+``QwenSerializedCustomEncoder`` (in ``qwen_serialized_custom_encoder``), which
+additionally
 resolves the placeholder id from the model tokenizer.
 
 Usage::
 
     # Qwen-family model: subclass QwenSerializedCustomEncoder
-    from dynamo.vllm.multimodal_utils.qwen_custom_encoder import (
+    from dynamo.vllm.multimodal_utils.qwen_serialized_custom_encoder import (
         QwenSerializedCustomEncoder,
     )
 

@@ -8,7 +8,7 @@ placeholder-id resolution, so customer encoders for Qwen-family models
 (Qwen2-VL / Qwen3-VL / Qwen3-VL-MoE / Qwen3.5) only implement ``load``
 (assigning ``self.tokenizer``) and the synchronous ``_encode_blocking``::
 
-    from dynamo.vllm.multimodal_utils.qwen_custom_encoder import (
+    from dynamo.vllm.multimodal_utils.qwen_serialized_custom_encoder import (
         QwenSerializedCustomEncoder,
     )
 

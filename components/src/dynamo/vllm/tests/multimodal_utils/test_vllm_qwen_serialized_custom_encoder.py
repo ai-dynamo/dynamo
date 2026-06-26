@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for dynamo.vllm.multimodal_utils.qwen_custom_encoder.
+"""Unit tests for dynamo.vllm.multimodal_utils.qwen_serialized_custom_encoder.
 
 QwenSerializedCustomEncoder is a serial (SerializedCustomEncoder) base that
 implements get_image_placeholder_token_id by resolving the Qwen image
@@ -17,7 +17,7 @@ from typing import List
 import pytest
 import torch
 
-from dynamo.vllm.multimodal_utils.qwen_custom_encoder import (
+from dynamo.vllm.multimodal_utils.qwen_serialized_custom_encoder import (
     QWEN_IMAGE_PLACEHOLDER_TOKEN,
     QwenSerializedCustomEncoder,
 )

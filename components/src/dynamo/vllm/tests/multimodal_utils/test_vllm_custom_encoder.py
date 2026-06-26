@@ -7,7 +7,8 @@ The base CustomEncoder defines the *contract* only: subclasses implement
 load / async encode / get_image_placeholder_token_id. How those are realized
 (encode's execution model; the id source) is a subclass detail — the serial
 default is covered in test_vllm_serialized_custom_encoder.py and Qwen resolution
-in test_vllm_qwen_custom_encoder.py. These tests pin the abstract contract,
+in test_vllm_qwen_serialized_custom_encoder.py. These tests pin the abstract
+contract,
 validate()'s fail-fast dispatch to the subclass impl, and the reusable
 placeholder_token_id_from_tokenizer helper.
 """
