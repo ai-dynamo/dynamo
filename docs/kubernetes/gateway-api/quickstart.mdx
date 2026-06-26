@@ -106,9 +106,9 @@ Choose the Gateway implementation for this namespace.
     kubectl get gatewayclass agentgateway
     ```
 
-    Create an `AgentgatewayParameters` resource and a `Gateway` in the model namespace. The
-    parameters resource excludes Istio sidecar injection from `agentgateway-proxy` pods when the
-    namespace has `istio-injection=enabled`.
+    Create the `AgentgatewayParameters` resource in the model namespace. The parameters resource
+    excludes Istio sidecar injection from `agentgateway-proxy` pods when the namespace has
+    `istio-injection=enabled`.
 
     ```bash
     kubectl apply --server-side -n "$NAMESPACE" -f - <<'YAML'
@@ -124,7 +124,11 @@ Choose the Gateway implementation for this namespace.
               annotations:
                 sidecar.istio.io/inject: "false"
     YAML
+    ```
 
+    Create the `Gateway` that uses those parameters.
+
+    ```bash
     kubectl apply -n "$NAMESPACE" -f - <<'YAML'
     apiVersion: gateway.networking.k8s.io/v1
     kind: Gateway
@@ -142,7 +146,11 @@ Choose the Gateway implementation for this namespace.
           port: 80
           protocol: HTTP
     YAML
+    ```
 
+    Wait for the gateway controller to program the gateway.
+
+    ```bash
     kubectl wait gateway/inference-gateway -n "$NAMESPACE" \
       --for=condition=Programmed --timeout=180s
     ```
