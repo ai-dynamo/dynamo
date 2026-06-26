@@ -188,9 +188,13 @@ After installing LWS separately, enable Dynamo integration:
 global:
   lws:
     enabled: true   # Enables the operator's LWS pathway
-lws:
-  enableDisaggregatedSet: true   # Also enables DS (ClusterRoles + validating webhook)
+  disaggregatedset:
+    enabled: true   # Enables the operator's DS pathway (requires DS enabled in the LWS release)
 ```
+
+Note: `lws.enableDisaggregatedSet` is an upstream LWS chart value. If you install
+LWS separately and want DS, enable it on the LWS release (e.g.
+`--set enableDisaggregatedSet=true`).
 
 For **development/testing only**, you can deploy LWS as a bundled subchart:
 

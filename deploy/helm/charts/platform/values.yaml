@@ -64,8 +64,13 @@ global:
 
   disaggregatedset:
     # -- Whether to enable DisaggregatedSet (DS) support on top of LWS.
-    # When true, passes `enableDisaggregatedSet=true` to the LWS subchart, which
-    # installs the DS editor/viewer/admin ClusterRoles and validating webhook.
+    # This chart does not automatically sync DS enablement between the operator
+    # flags under `global` and the upstream LWS chart settings:
+    # - If you install LWS via this chart (`global.lws.install=true`), you must
+    #   also set `lws.enableDisaggregatedSet=true` to enable DS ClusterRoles and
+    #   the validating webhook in the upstream LWS chart.
+    # - If you install LWS separately, `enableDisaggregatedSet` must be set on
+    #   the external LWS release, not here.
     # Requires LWS to be installed (either via `global.lws.install=true` or
     # externally). The DS CRD and bundled controller ship with the LWS chart and
     # are always present once LWS is installed.
@@ -75,7 +80,7 @@ global:
     # -- Whether to enable DS integration in the operator.
     # Set to true to make the operator create DisaggregatedSets for multinode
     # deployments when the DGD carries the `nvidia.com/enable-disaggregatedset:
-    # "true"` annotation. Automatically true when install=true.
+    # "true"` annotation. This is not automatically set when install=true.
     enabled: false
 
 # Subcharts configuration

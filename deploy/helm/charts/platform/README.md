@@ -117,8 +117,8 @@ The chart includes built-in validation to prevent all operator conflicts:
 | global.grove.enabled | bool | `false` | Whether to enable Grove integration (multinode orchestration via PodCliqueSets). Set to true when Grove is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create PodCliqueSets for multinode deployments. |
 | global.lws.install | bool | `false` | Whether this chart should install the bundled LeaderWorkerSet (LWS) subchart. When true, deploys the LWS operator cluster-wide. LWS is the multinode orchestrator used by the operator's LWS pathway. NOTE: For production environments, it is recommended to install LWS separately. |
 | global.lws.enabled | bool | `false` | Whether to enable LWS integration (multinode orchestration via LeaderWorkerSets). Set to true when LWS is available in the cluster (installed externally). Automatically true when install=true. The operator uses this to decide whether to create LeaderWorkerSets for multinode deployments. |
-| global.disaggregatedset.install | bool | `false` | Whether to enable DisaggregatedSet (DS) support on top of LWS. When true, passes `enableDisaggregatedSet=true` to the LWS subchart, which installs the DS editor/viewer/admin ClusterRoles and validating webhook. Requires LWS to be installed (either via `global.lws.install=true` or externally). The DS CRD and bundled controller ship with the LWS chart and are always present once LWS is installed. DS orchestrates N LeaderWorkerSets (one per role) and is the recommended orchestrator for prefill/decode disaggregation. |
-| global.disaggregatedset.enabled | bool | `false` | Whether to enable DS integration in the operator. Set to true to make the operator create DisaggregatedSets for multinode deployments when the DGD carries the `nvidia.com/enable-disaggregatedset: "true"` annotation. Automatically true when install=true. |
+| global.disaggregatedset.install | bool | `false` | Whether to enable DisaggregatedSet (DS) support on top of LWS. This chart does not automatically sync DS enablement between the operator flags under `global` and the upstream LWS chart settings: - If you install LWS via this chart (`global.lws.install=true`), you must   also set `lws.enableDisaggregatedSet=true` to enable DS ClusterRoles and   the validating webhook in the upstream LWS chart. - If you install LWS separately, `enableDisaggregatedSet` must be set on   the external LWS release, not here. Requires LWS to be installed (either via `global.lws.install=true` or externally). The DS CRD and bundled controller ship with the LWS chart and are always present once LWS is installed. DS orchestrates N LeaderWorkerSets (one per role) and is the recommended orchestrator for prefill/decode disaggregation. |
+| global.disaggregatedset.enabled | bool | `false` | Whether to enable DS integration in the operator. Set to true to make the operator create DisaggregatedSets for multinode deployments when the DGD carries the `nvidia.com/enable-disaggregatedset: "true"` annotation. This is not automatically set when install=true. |
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.upgradeCRD | bool | `true` | Whether to manage CRDs via a pre-install/pre-upgrade hook Job. The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply. |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
@@ -280,9 +280,13 @@ After installing LWS separately, enable Dynamo integration:
 global:
   lws:
     enabled: true   # Enables the operator's LWS pathway
-lws:
-  enableDisaggregatedSet: true   # Also enables DS (ClusterRoles + validating webhook)
+  disaggregatedset:
+    enabled: true   # Enables the operator's DS pathway (requires DS enabled in the LWS release)
 ```
+
+Note: `lws.enableDisaggregatedSet` is an upstream LWS chart value. If you install
+LWS separately and want DS, enable it on the LWS release (e.g.
+`--set enableDisaggregatedSet=true`).
 
 For **development/testing only**, you can deploy LWS as a bundled subchart:
 
