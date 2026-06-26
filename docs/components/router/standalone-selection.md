@@ -151,6 +151,9 @@ A zero-overlap response includes the selected `dp_rank` with value `0`.
 The overlap summary is raw observability. `effective_prefill_tokens` is the
 authoritative weighted prefill-load value computed by the same cache-credit
 formula used for scheduler booking. It is not derived from `longest_matched`.
+When a request waits in the scheduler queue, both fields reflect the final
+overlap inputs after any dequeue-time refresh rather than the enqueue-time
+snapshot.
 
 The previous public fields `cached_tokens` and `effective_overlap_blocks` have
 been removed. Their values remain internal scheduler inputs.

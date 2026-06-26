@@ -19,6 +19,10 @@ const (
 
 	CheckpointArtifactVersionAnnotation = "nvidia.com/snapshot-artifact-version"
 
+	// SnapshotNodeLabel mirrors PodSnapshotContent.spec.source.nodeName onto the
+	// object so the per-node agent's cache can label-select work for its node.
+	SnapshotNodeLabel = "nvidia.com/snapshot-node"
+
 	// Required comma-separated checkpoint/restore target container list.
 	TargetContainersAnnotation = "nvidia.com/snapshot-target-containers"
 

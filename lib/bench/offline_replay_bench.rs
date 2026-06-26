@@ -16,7 +16,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
 use dynamo_mocker::loadgen::Trace;
-use dynamo_mocker::replay::{ReplayRouterMode, simulate_trace_workload_with_router_mode};
+use dynamo_mocker::replay::{
+    ReplayRouterMode, SlaThresholds, simulate_trace_workload_with_router_mode,
+};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum RouterModeArg {
@@ -163,6 +165,8 @@ fn main() -> Result<()> {
             trace.clone(),
             args.num_workers,
             args.router_mode.into(),
+            // Bench measures replay overhead, not goodput — default (unset) SLA.
+            SlaThresholds::default(),
         )?);
     }
     let report = last_report.expect("iterations must be at least 1");

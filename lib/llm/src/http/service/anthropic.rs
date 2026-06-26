@@ -32,7 +32,10 @@ use tracing::Instrument;
 use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
+    metrics::{
+        CancellationLabels, Endpoint,
+        process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
+    },
     service_v2,
 };
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
@@ -337,6 +340,14 @@ async fn anthropic_messages(
 
     let request = context.map(|_req| chat_request);
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // Create inflight_guard early to ensure all errors are counted
@@ -354,6 +365,18 @@ async fn anthropic_messages(
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+            inflight_guard.mark_error(super::metrics::ErrorType::Overload);
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Overloaded,
+                format!("{e:#}"),
+            );
+        }
+        if super::metrics::request_was_unavailable(e.as_ref()) {
+            inflight_guard.mark_error(super::metrics::ErrorType::Unavailable);
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Unavailable,
+                format!("{e:#}"),
+            );
         }
         // Check for cancelled request (client disconnected before response was sent)
         if super::metrics::request_was_cancelled(e.as_ref()) {

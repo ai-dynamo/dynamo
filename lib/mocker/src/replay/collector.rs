@@ -344,6 +344,31 @@ struct TraceRequestStats {
     /// single-shot request lists.
     session_id: Option<String>,
     turn_index: Option<usize>,
+    detail: Option<Box<PerRequestDetail>>,
+}
+
+#[derive(Debug, Default)]
+struct PerRequestDetail {
+    prefill_reused_input_tokens: Option<usize>,
+    prefill_admit_ms: Option<f64>,
+    source_held_ms: Option<f64>,
+    destination_reserved_ms: Option<f64>,
+    destination_activated_ms: Option<f64>,
+    decode_admit_ms: Option<f64>,
+    source_released_ms: Option<f64>,
+    decode_reused_input_tokens: Option<usize>,
+    prefill_route_overlap_tokens: Option<usize>,
+    decode_route_overlap_tokens: Option<usize>,
+    terminal_status: Option<ReplayTerminalStatus>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayTerminalStatus {
+    Completed,
+    Rejected,
+    Canceled,
+    Failed,
 }
 
 /// Flat per-request record for `--report-jsonl` emission. One JSON line per
@@ -376,6 +401,16 @@ pub struct PerRequestRecord {
     pub reused_input_tokens: usize,
     pub prefill_worker_idx: Option<usize>,
     pub decode_worker_idx: Option<usize>,
+    pub prefill_admit_ms: Option<f64>,
+    pub source_held_ms: Option<f64>,
+    pub destination_reserved_ms: Option<f64>,
+    pub destination_activated_ms: Option<f64>,
+    pub decode_admit_ms: Option<f64>,
+    pub source_released_ms: Option<f64>,
+    pub decode_reused_input_tokens: Option<usize>,
+    pub prefill_route_overlap_tokens: Option<usize>,
+    pub decode_route_overlap_tokens: Option<usize>,
+    pub terminal_status: ReplayTerminalStatus,
 }
 
 #[cfg(test)]
@@ -561,6 +596,9 @@ impl TraceCollector {
                 session_id: None,
                 turn_index: None,
                 first_admission_reused_input_tokens: 0,
+                detail: self
+                    .capture_per_request
+                    .then(|| Box::new(PerRequestDetail::default())),
             },
         );
     }
@@ -617,6 +655,91 @@ impl TraceCollector {
             }
             stats.reused_input_tokens = stats.reused_input_tokens.max(reused_input_tokens);
         }
+    }
+
+    pub(crate) fn on_prefill_admit(
+        &mut self,
+        uuid: Uuid,
+        admit_time_ms: f64,
+        reused_input_tokens: usize,
+    ) {
+        self.on_admit(uuid, admit_time_ms, reused_input_tokens);
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.prefill_admit_ms.get_or_insert(admit_time_ms);
+            detail.prefill_reused_input_tokens = Some(
+                detail
+                    .prefill_reused_input_tokens
+                    .unwrap_or_default()
+                    .max(reused_input_tokens),
+            );
+        }
+    }
+
+    pub(crate) fn on_decode_admit(
+        &mut self,
+        uuid: Uuid,
+        admit_time_ms: f64,
+        reused_input_tokens: usize,
+    ) {
+        self.on_admit(uuid, admit_time_ms, reused_input_tokens);
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.decode_admit_ms.get_or_insert(admit_time_ms);
+            detail.decode_reused_input_tokens = Some(
+                detail
+                    .decode_reused_input_tokens
+                    .unwrap_or_default()
+                    .max(reused_input_tokens),
+            );
+        }
+    }
+
+    pub(crate) fn on_source_held(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.source_held_ms.get_or_insert(at_ms);
+        }
+    }
+
+    pub(crate) fn on_destination_reserved(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.destination_reserved_ms.get_or_insert(at_ms);
+        }
+    }
+
+    pub(crate) fn on_destination_activated(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.destination_activated_ms.get_or_insert(at_ms);
+        }
+    }
+
+    pub(crate) fn on_source_released(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.source_released_ms.get_or_insert(at_ms);
+        }
+    }
+
+    pub(crate) fn on_prefill_route_overlap(&mut self, uuid: Uuid, tokens: usize) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.prefill_route_overlap_tokens.get_or_insert(tokens);
+        }
+    }
+
+    pub(crate) fn on_decode_route_overlap(&mut self, uuid: Uuid, tokens: usize) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.decode_route_overlap_tokens.get_or_insert(tokens);
+        }
+    }
+
+    pub(crate) fn on_terminal(&mut self, uuid: Uuid, status: ReplayTerminalStatus) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.terminal_status.get_or_insert(status);
+        }
+    }
+
+    fn detail_mut(&mut self, uuid: Uuid) -> Option<&mut PerRequestDetail> {
+        if !self.capture_per_request {
+            return None;
+        }
+        self.requests.get_mut(&uuid)?.detail.as_deref_mut()
     }
 
     pub(crate) fn on_token(&mut self, uuid: Uuid, token_time_ms: f64) {
@@ -788,42 +911,48 @@ impl TraceCollector {
     /// Used by the `--report-jsonl` CLI path to emit one JSON object per
     /// request to the JSONL file, mirroring AIPerf's per-request output shape.
     ///
-    /// Only fully-completed requests (admitted, first token observed, last
-    /// token observed) are emitted, so the JSONL row count matches the
-    /// completed-request count in the aggregate report. Incomplete requests
-    /// (e.g. truncated by a sim-time cap) appear in the summary's incomplete
-    /// counters but not here.
+    /// Only requests with a terminal outcome are emitted. Requests truncated
+    /// by a simulation-time cap have no terminal outcome and remain omitted.
     pub fn per_request_records(&self) -> Vec<PerRequestRecord> {
         let mut records = Vec::with_capacity(self.requests.len());
         for (uuid, stats) in &self.requests {
-            let Some(first_admit_ms) = stats.first_admit_ms else {
+            let Some(detail) = stats.detail.as_deref() else {
                 continue;
             };
-            let Some(first_token_ms) = stats.first_token_ms() else {
+            let Some(terminal_status) = detail.terminal_status else {
                 continue;
             };
-            let Some(last_token_ms) = stats.last_token_ms() else {
-                continue;
-            };
-            let ttft_ms = (first_token_ms - stats.arrival_time_ms).max(0.0);
-            let e2e_latency_ms = (last_token_ms - stats.arrival_time_ms).max(0.0);
+            let first_token_ms = stats.first_token_ms();
+            let last_token_ms = stats.last_token_ms();
             records.push(PerRequestRecord {
                 session_id: stats.session_id.clone(),
                 turn_index: stats.turn_index,
                 uuid: uuid.to_string(),
                 arrival_time_ms: stats.arrival_time_ms,
-                first_admit_ms: Some(first_admit_ms),
-                first_token_ms: Some(first_token_ms),
-                last_token_ms: Some(last_token_ms),
-                ttft_ms: Some(ttft_ms),
+                first_admit_ms: stats.first_admit_ms,
+                first_token_ms,
+                last_token_ms,
+                ttft_ms: first_token_ms.map(|time| (time - stats.arrival_time_ms).max(0.0)),
                 ttst_ms: stats.ttst_ms(),
-                e2e_latency_ms: Some(e2e_latency_ms),
+                e2e_latency_ms: last_token_ms.map(|time| (time - stats.arrival_time_ms).max(0.0)),
                 itl_ms: stats.mean_tpot_ms(),
                 input_length: stats.input_length,
                 output_length: stats.output_length,
-                reused_input_tokens: stats.reused_input_tokens,
+                reused_input_tokens: detail
+                    .prefill_reused_input_tokens
+                    .unwrap_or(stats.reused_input_tokens),
                 prefill_worker_idx: stats.prefill_worker_idx,
                 decode_worker_idx: stats.decode_worker_idx,
+                prefill_admit_ms: detail.prefill_admit_ms,
+                source_held_ms: detail.source_held_ms,
+                destination_reserved_ms: detail.destination_reserved_ms,
+                destination_activated_ms: detail.destination_activated_ms,
+                decode_admit_ms: detail.decode_admit_ms,
+                source_released_ms: detail.source_released_ms,
+                decode_reused_input_tokens: detail.decode_reused_input_tokens,
+                prefill_route_overlap_tokens: detail.prefill_route_overlap_tokens,
+                decode_route_overlap_tokens: detail.decode_route_overlap_tokens,
+                terminal_status,
             });
         }
         // Stable ordering: by arrival_time_ms (with uuid as tiebreaker) so the
@@ -1009,13 +1138,21 @@ mod tests {
         collector.set_capture_per_request(true);
         let uuid = Uuid::from_u128(1);
         collector.on_arrival(uuid, 0.0, 100, 4);
-        collector.on_admit(uuid, 5.0, 30);
+        collector.on_prefill_route_overlap(uuid, 64);
+        collector.on_prefill_admit(uuid, 5.0, 30);
+        collector.on_source_held(uuid, 10.0);
+        collector.on_destination_reserved(uuid, 12.0);
+        collector.on_destination_activated(uuid, 20.0);
+        collector.on_source_released(uuid, 21.0);
+        collector.on_decode_route_overlap(uuid, 32);
+        collector.on_decode_admit(uuid, 25.0, 40);
         collector.on_prefill_assigned(uuid, 2);
         collector.on_decode_assigned(uuid, 7);
         collector.on_token(uuid, 50.0);
         collector.on_token(uuid, 60.0);
         collector.on_token(uuid, 75.0);
         collector.on_token(uuid, 95.0);
+        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
         assert_eq!(report.per_request.len(), 1);
@@ -1035,6 +1172,16 @@ mod tests {
         assert_eq!(rec.reused_input_tokens, 30);
         assert_eq!(rec.prefill_worker_idx, Some(2));
         assert_eq!(rec.decode_worker_idx, Some(7));
+        assert_eq!(rec.prefill_admit_ms, Some(5.0));
+        assert_eq!(rec.source_held_ms, Some(10.0));
+        assert_eq!(rec.destination_reserved_ms, Some(12.0));
+        assert_eq!(rec.destination_activated_ms, Some(20.0));
+        assert_eq!(rec.source_released_ms, Some(21.0));
+        assert_eq!(rec.decode_admit_ms, Some(25.0));
+        assert_eq!(rec.decode_reused_input_tokens, Some(40));
+        assert_eq!(rec.prefill_route_overlap_tokens, Some(64));
+        assert_eq!(rec.decode_route_overlap_tokens, Some(32));
+        assert_eq!(rec.terminal_status, ReplayTerminalStatus::Completed);
     }
 
     /// A conditional-prefill bypass is reflected by `prefill_worker_idx ==
@@ -1051,6 +1198,7 @@ mod tests {
         collector.on_decode_assigned(uuid, 1);
         collector.on_token(uuid, 30.0);
         collector.on_token(uuid, 45.0);
+        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
         assert_eq!(report.per_request.len(), 1);
@@ -1074,6 +1222,8 @@ mod tests {
         collector.on_decode_assigned(uuid, 0);
         collector.on_token(uuid, 50.0);
         collector.on_token(uuid, 60.0);
+
+        assert!(collector.requests[&uuid].detail.is_none());
 
         let report = collector.finish();
         assert!(report.per_request.is_empty());
@@ -1217,6 +1367,7 @@ mod tests {
             collector.on_admit(uuid, arrival + 1.0, 0);
             collector.on_decode_assigned(uuid, 0);
             collector.on_token(uuid, arrival + 5.0);
+            collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
         }
         let report = collector.finish();
         let arrivals: Vec<f64> = report
@@ -1241,6 +1392,7 @@ mod tests {
         collector.on_decode_assigned(uuid, 1);
         collector.on_token(uuid, 20.0);
         collector.on_token(uuid, 25.0);
+        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
         let line = serde_json::to_string(&report.per_request[0])
@@ -1255,6 +1407,46 @@ mod tests {
         assert_eq!(parsed["prefill_worker_idx"], 0);
         assert_eq!(parsed["decode_worker_idx"], 1);
         assert!(parsed["itl_ms"].is_number());
+        assert_eq!(parsed["terminal_status"], "completed");
+    }
+
+    #[test]
+    fn terminal_failures_emit_nullable_latencies_and_unfinished_requests_are_omitted() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        for (uuid_n, status) in [
+            (1, ReplayTerminalStatus::Rejected),
+            (2, ReplayTerminalStatus::Canceled),
+            (3, ReplayTerminalStatus::Failed),
+        ] {
+            let uuid = Uuid::from_u128(uuid_n);
+            collector.on_arrival(uuid, uuid_n as f64, 64, 2);
+            collector.on_terminal(uuid, status);
+        }
+        collector.on_arrival(Uuid::from_u128(4), 4.0, 64, 2);
+
+        let report = collector.finish();
+
+        assert_eq!(report.per_request.len(), 3);
+        assert_eq!(
+            report
+                .per_request
+                .iter()
+                .map(|record| record.terminal_status)
+                .collect::<Vec<_>>(),
+            vec![
+                ReplayTerminalStatus::Rejected,
+                ReplayTerminalStatus::Canceled,
+                ReplayTerminalStatus::Failed,
+            ]
+        );
+        assert!(report.per_request.iter().all(|record| {
+            record.first_admit_ms.is_none()
+                && record.first_token_ms.is_none()
+                && record.last_token_ms.is_none()
+                && record.ttft_ms.is_none()
+                && record.e2e_latency_ms.is_none()
+        }));
     }
 
     #[test]
