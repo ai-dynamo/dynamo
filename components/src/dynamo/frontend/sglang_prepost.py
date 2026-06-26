@@ -583,11 +583,11 @@ def build_response_format_guided_decoding(
         schema = response_format.get("schema")
     if schema is None:
         raise PreprocessError(
-            "schema_ is required for json_schema response format request."
+            "schema is required for json_schema response format request."
         )
     if not isinstance(schema, dict):
         raise PreprocessError(
-            "schema_ must be a JSON object for json_schema response format request."
+            "schema must be a JSON object for json_schema response format request."
         )
     if not isinstance(json_schema, dict):
         # This only the effective schema mutation from SGLang's

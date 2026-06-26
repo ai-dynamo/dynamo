@@ -594,7 +594,7 @@ class TestBuildResponseFormatGuidedDecoding:
     def test_json_schema_requires_schema(self):
         with pytest.raises(
             PreprocessError,
-            match="schema_ is required for json_schema response format request",
+            match="schema is required for json_schema response format request",
         ):
             build_response_format_guided_decoding(
                 {"model": "test", "response_format": {"type": "json_schema"}}
