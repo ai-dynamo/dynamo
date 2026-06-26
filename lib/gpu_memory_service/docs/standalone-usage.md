@@ -84,11 +84,11 @@ On one node with one (or a few) GPUs:
      starts serving; the others wait. When the active engine's process dies —
      even on `SIGKILL` — **the kernel releases the lock automatically**, a
      waiting standby acquires it and takes over. No health-checker required for
-     the promotion itself.
+     the promotion itself. This is what the runnable
+     [recipe](../examples/shadow_failover/README.md) does.
    - **Manual.** Drive the engine's `/engine/control/sleep` and `wake_up`
-     endpoints yourself and decide when to promote. This is what the runnable
-     [recipe](../examples/shadow_failover/README.md) does so the steps are
-     visible.
+     endpoints yourself and decide when to promote — useful if you want an
+     external controller to own promotion instead of the kernel `flock`.
 
 **What you must provide on a single node:**
 
