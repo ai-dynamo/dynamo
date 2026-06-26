@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_tokens::SequenceHash;
+use indexmap::IndexMap;
 use parking_lot::RwLock;
 #[cfg(test)]
 use rustc_hash::FxHashSet;
 use rustc_hash::{FxBuildHasher, FxHashMap};
+use seqlock::SeqLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(test)]
@@ -75,82 +77,93 @@ impl WorkerLoadSnapshot {
 
 #[derive(Debug)]
 struct WorkerLoadSlot {
-    worker: WorkerWithDpRank,
-    load: RwLock<WorkerLoadSnapshot>,
+    // SeqLock gives the hot projection path a lock-free read of the latest
+    // whole-worker snapshot. Writers mark the sequence odd, replace the
+    // snapshot, then mark the sequence even. Readers only return after seeing
+    // the same even sequence before and after copying the `Copy` payload, so a
+    // copy that overlaps a write is retried instead of exposing a mixed
+    // snapshot. Writers still serialize with each other, but they do not wait
+    // for readers.
+    //
+    // The upstream crate implements the copy with `read_volatile`, which is
+    // technically UB under Rust/LLVM if a writer mutates the same memory at the
+    // same time: volatile is not atomic and does not by itself legalize a data
+    // race. See https://github.com/Amanieu/seqlock/issues/2#issuecomment-473606523.
+    //
+    // `WorkerLoadSnapshot` is a small `Copy` value with no references or drop
+    // state. The sequence check is what makes the read logically race-free for
+    // this slot: a reader either observes a stable whole snapshot or retries.
+    // In practice this is the same seqlock/READ_ONCE pattern the crate is
+    // designed for, while avoiding the per-worker RwLock read on every request.
+    load: SeqLock<WorkerLoadSnapshot>,
 }
 
 impl WorkerLoadSlot {
-    fn new(worker: WorkerWithDpRank, load: WorkerLoadSnapshot) -> Self {
+    fn new(load: WorkerLoadSnapshot) -> Self {
         Self {
-            worker,
-            load: RwLock::new(load),
+            load: SeqLock::new(load),
         }
     }
 
     fn snapshot(&self) -> WorkerLoadSnapshot {
-        *self.load.read()
+        self.load.read()
     }
 
     fn replace(&self, load: WorkerLoadSnapshot) {
-        *self.load.write() = load;
+        *self.load.lock_write() = load;
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct WorkerLoadTable {
-    // Admission projects every registered worker's load. Keep that hot scan as a dense Vec walk;
-    // the hash index is only for point updates/removes when worker state changes.
-    slots: Vec<WorkerLoadSlot>,
-    index: FxHashMap<WorkerWithDpRank, usize>,
+    // IndexMap gives us the dense full-worker scan plus point lookup shape that was previously
+    // hand-rolled as Vec<WorkerLoadSlot> + FxHashMap<WorkerWithDpRank, usize>.
+    entries: IndexMap<WorkerWithDpRank, WorkerLoadSlot, FxBuildHasher>,
+}
+
+impl Default for WorkerLoadTable {
+    fn default() -> Self {
+        Self {
+            entries: IndexMap::with_hasher(FxBuildHasher),
+        }
+    }
 }
 
 impl WorkerLoadTable {
     fn len(&self) -> usize {
-        self.slots.len()
+        self.entries.len()
     }
 
-    fn iter(&self) -> impl Iterator<Item = &WorkerLoadSlot> + '_ {
-        self.slots.iter()
+    fn iter(&self) -> impl Iterator<Item = (WorkerWithDpRank, WorkerLoadSnapshot)> + '_ {
+        self.entries
+            .iter()
+            .map(|(&worker, slot)| (worker, slot.snapshot()))
     }
 
     fn ensure_worker(&mut self, worker: WorkerWithDpRank) {
-        if self.index.contains_key(&worker) {
-            return;
-        }
-        self.insert(worker, WorkerLoadSnapshot::default());
+        self.entries
+            .entry(worker)
+            .or_insert_with(|| WorkerLoadSlot::new(WorkerLoadSnapshot::default()));
     }
 
     fn update(&self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) -> bool {
-        let Some(&idx) = self.index.get(&worker) else {
+        let Some(slot) = self.entries.get(&worker) else {
             return false;
         };
-        self.slots[idx].replace(load);
+        slot.replace(load);
         true
     }
 
     fn upsert(&mut self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) {
-        if let Some(&idx) = self.index.get(&worker) {
-            self.slots[idx].replace(load);
+        if let Some(slot) = self.entries.get(&worker) {
+            slot.replace(load);
         } else {
-            self.insert(worker, load);
+            self.entries.insert(worker, WorkerLoadSlot::new(load));
         }
     }
 
     fn remove(&mut self, worker: WorkerWithDpRank) {
-        let Some(idx) = self.index.remove(&worker) else {
-            return;
-        };
-
-        self.slots.swap_remove(idx);
-        if idx < self.slots.len() {
-            self.index.insert(self.slots[idx].worker, idx);
-        }
-    }
-
-    fn insert(&mut self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) {
-        let idx = self.slots.len();
-        self.slots.push(WorkerLoadSlot::new(worker, load));
-        self.index.insert(worker, idx);
+        self.entries.swap_remove(&worker);
     }
 }
 
@@ -269,9 +282,7 @@ impl PromptRegistry {
         let mut active_requests = INCLUDE_ACTIVE_REQUESTS
             .then(|| FxHashMap::with_capacity_and_hasher(loads.len(), FxBuildHasher));
 
-        for entry in loads.iter() {
-            let worker = entry.worker;
-            let load = entry.snapshot();
+        for (worker, load) in loads.iter() {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
             let new_blocks = query_len.saturating_sub(overlap_depth);
             let active_tokens = load.active_tokens(decay_now);
@@ -313,9 +324,7 @@ impl PromptRegistry {
         let loads = self.loads.read();
         let mut projections = FxHashMap::with_capacity_and_hasher(loads.len(), FxBuildHasher);
 
-        for entry in loads.iter() {
-            let worker = entry.worker;
-            let load = entry.snapshot();
+        for (worker, load) in loads.iter() {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
             projections.insert(
                 worker,
@@ -334,7 +343,7 @@ impl PromptRegistry {
         self.loads
             .read()
             .iter()
-            .map(|entry| (entry.worker, entry.snapshot().active_blocks))
+            .map(|(worker, load)| (worker, load.active_blocks))
             .collect()
     }
 
@@ -342,7 +351,7 @@ impl PromptRegistry {
         self.loads
             .read()
             .iter()
-            .map(|entry| (entry.worker, entry.snapshot().active_requests))
+            .map(|(worker, load)| (worker, load.active_requests))
             .collect()
     }
 
@@ -350,7 +359,7 @@ impl PromptRegistry {
         self.loads
             .read()
             .iter()
-            .map(|entry| (entry.worker, entry.snapshot().active_tokens(decay_now)))
+            .map(|(worker, load)| (worker, load.active_tokens(decay_now)))
             .collect()
     }
 
@@ -361,10 +370,7 @@ impl PromptRegistry {
         self.loads
             .read()
             .iter()
-            .map(|entry| {
-                let load = entry.snapshot();
-                (entry.worker, load.modeled_remaining_prefill_time_ms(now))
-            })
+            .map(|(worker, load)| (worker, load.modeled_remaining_prefill_time_ms(now)))
             .collect()
     }
 
@@ -376,7 +382,7 @@ impl PromptRegistry {
         self.loads
             .read()
             .iter()
-            .any(|entry| predicate(entry.worker, entry.snapshot().active_tokens(decay_now)))
+            .any(|(worker, load)| predicate(worker, load.active_tokens(decay_now)))
     }
 
     #[cfg(test)]
@@ -385,12 +391,7 @@ impl PromptRegistry {
         expected_loads: &FxHashMap<WorkerWithDpRank, WorkerLoadSnapshot>,
         expected_blocks: &FxHashMap<WorkerWithDpRank, FxHashSet<SequenceHash>>,
     ) {
-        let actual_loads: FxHashMap<_, _> = self
-            .loads
-            .read()
-            .iter()
-            .map(|entry| (entry.worker, entry.snapshot()))
-            .collect();
+        let actual_loads: FxHashMap<_, _> = self.loads.read().iter().collect();
         let actual_blocks = self.membership.worker_hashes();
         assert_eq!(
             actual_loads, *expected_loads,
