@@ -1545,6 +1545,50 @@ async fn tool_choice_deepseek_v4_required_prompt_injected_bare_json_recovers() {
     );
 }
 
+/// Exercises the experimental parsers-v2 gate end-to-end. `tool_choice=Auto` + a v2
+/// family (`qwen3_coder`) is the only combination the gate routes to
+/// `tool_parser_v2::apply_stream`; `required`/`named` (above) always stay on the v1
+/// jail. The flag is read once at process startup, so a single test covers BOTH
+/// paths via the startup switch: run with `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` unset
+/// and this goes through the v1 jail; set it and the identical stream goes through
+/// the v2 parser. A complete tool call must extract cleanly with no raw markup
+/// leaking into content on either path, so the same assertion validates both.
+#[tokio::test]
+async fn tool_calls_qwen3_coder_auto_routes_through_experimental_gate() {
+    let xml = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
+    let preprocessor = build_preprocessor(None, Some("qwen3_coder"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(xml), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        content,
+        tool_calls,
+        finish_reasons,
+        ..
+    } = drain_stream(output_stream).await;
+
+    let path = if std::env::var("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2")
+        .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+    {
+        "qwen3_coder auto -> dynamo-parsers-v2 (DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 on)"
+    } else {
+        "qwen3_coder auto -> v1 jail (flag off)"
+    };
+    assert_clean_tool_call(path, &content, &tool_calls, "San Francisco");
+    // Both paths must honor the OpenAI contract: a tool-call stream terminates with
+    // finish_reason=ToolCalls — v1 via the jail's fix_finish_reason, v2 via apply_stream.
+    assert!(
+        finish_reasons.contains(&FinishReason::ToolCalls),
+        "{path}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
+    );
+}
+
 /// DeepSeek V4/GLM + required + `prompt_injected_reasoning=true` +
 /// reasoning-close-marker JSON. This is not bare JSON; the reasoning parser
 /// must strip the pre-`</think>` prefix before the immediate jail sees JSON.
