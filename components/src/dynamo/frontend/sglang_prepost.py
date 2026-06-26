@@ -867,7 +867,9 @@ class SglangStreamingPostProcessor:
         self.reasoning_parser = reasoning_parser
         self.history_tool_calls_count = history_tool_calls_count
         self._sglang_tools = sglang_tools or []
-        self._tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
+        self._tool_call_parser_name = _normalize_sglang_parser_name(
+            tool_call_parser_name
+        )
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a tool call parser is active so
         # delimiter tokens (e.g. <|tool_call|>) remain visible to the parser.
