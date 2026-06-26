@@ -144,10 +144,10 @@ func DiscoverGPUUUIDs(ctx context.Context, clientset kubernetes.Interface, podNa
 }
 
 // FilterProcesses returns the subset of candidate PIDs that hold actual CUDA contexts.
-// Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead of
-// --get-state, because --get-state incorrectly matches coordinator processes like
-// cuda-checkpoint --launch-job that share a /proc namespace with CUDA processes but
-// don't hold CUDA contexts themselves.
+// Uses --get-restore-tid (the same technique as the CRIU CUDA plugin) instead
+// of --get-state, because --get-state can incorrectly match coordinator
+// processes that share a /proc namespace with CUDA processes but don't hold
+// CUDA contexts themselves.
 func FilterProcesses(ctx context.Context, allPIDs []int, log logr.Logger) []int {
 	cudaPIDs := make([]int, 0, len(allPIDs))
 	for _, pid := range allPIDs {

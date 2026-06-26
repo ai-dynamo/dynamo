@@ -329,6 +329,7 @@ class VllmEnginePauseController:
         await self._engine_client.pause_generation()
         self._generation_paused = True
         try:
+            await self._checkpoint_prepare()
             if level is None:
                 await self._engine_client.sleep()
             else:
@@ -354,6 +355,7 @@ class VllmEnginePauseController:
                 await self._engine_client.wake_up()
             else:
                 await self._engine_client.wake_up(tags)
+            await self._checkpoint_restore()
         if self._generation_paused:
             await self._engine_client.resume_generation()
             self._generation_paused = False
@@ -362,6 +364,12 @@ class VllmEnginePauseController:
     def mark_resumed(self) -> None:
         self._is_paused = False
         self._generation_paused = False
+
+    async def _checkpoint_prepare(self) -> None:
+        await self._engine_client.collective_rpc("checkpoint_prepare", kwargs={})
+
+    async def _checkpoint_restore(self) -> None:
+        await self._engine_client.collective_rpc("checkpoint_restore", kwargs={})
 
 
 def _pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:

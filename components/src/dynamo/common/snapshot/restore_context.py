@@ -11,8 +11,10 @@ from pathlib import Path
 from typing import Awaitable, Callable, Mapping, TypeVar
 
 from dynamo.common.snapshot.constants import (
+    DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV,
     KUBERNETES_OPTIONAL_ENV_NAMES,
     KUBERNETES_REQUIRED_ENV_NAMES,
+    NCCL_CHECKPOINT_KVS_PATH_ENV,
     RESTORE_RUNTIME_ENV_NAMES,
     SNAPSHOT_CONTROL_DIR,
     SNAPSHOT_CONTROL_DIR_ENV,
@@ -240,4 +242,67 @@ def maybe_run_restore_standby_mode() -> None:
         return
 
     write_snapshot_restore_context()
+    write_nccl_checkpoint_kvs_endpoint()
     os.execvp("sleep", ["sleep", "infinity"])
+
+
+def write_nccl_checkpoint_kvs_endpoint() -> None:
+    """Write the NCCL checkpoint KVS endpoint file when configured."""
+
+    has_kvs_path = NCCL_CHECKPOINT_KVS_PATH_ENV in os.environ
+    has_endpoint = DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV in os.environ
+    kvs_path = os.environ.get(NCCL_CHECKPOINT_KVS_PATH_ENV)
+    endpoint = os.environ.get(DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV)
+    if not kvs_path or not endpoint:
+        if has_kvs_path != has_endpoint:
+            logger.warning(
+                "NCCL checkpoint KVS endpoint writer requires both %s and %s; "
+                "skipping because only one is set.",
+                NCCL_CHECKPOINT_KVS_PATH_ENV,
+                DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV,
+            )
+        return
+
+    _validate_nccl_checkpoint_kvs_endpoint(endpoint)
+    path = Path(kvs_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(endpoint + "\n", encoding="utf-8")
+    tmp_path.replace(path)
+    logger.info("Wrote NCCL checkpoint KVS endpoint %s to %s", endpoint, path)
+
+
+def _validate_nccl_checkpoint_kvs_endpoint(endpoint: str) -> None:
+    """Validate endpoint format consumed by NCCLCheckpoint.
+
+    The NCCLCheckpoint KVS client parses this file as
+    ``<host>:<port>[/<prefix>]``. It does not accept URI schemes such as
+    ``redis://``.
+    """
+
+    def fail() -> None:
+        raise RuntimeError(
+            "NCCL checkpoint KVS endpoint must use "
+            "<host>:<port>[/<prefix>] format"
+        )
+
+    if not endpoint or endpoint.strip() != endpoint or any(
+        char.isspace() for char in endpoint
+    ):
+        fail()
+    if "://" in endpoint:
+        fail()
+
+    address, separator, prefix = endpoint.partition("/")
+    if separator and not prefix:
+        fail()
+
+    colon_index = address.rfind(":")
+    if colon_index <= 0 or colon_index == len(address) - 1:
+        fail()
+
+    port = address[colon_index + 1 :]
+    if not port.isdecimal():
+        fail()
+    if not 1 <= int(port) <= 65535:
+        fail()

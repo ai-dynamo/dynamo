@@ -2,14 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import logging
 import os
 from types import SimpleNamespace
 
 import pytest
 
 from dynamo.common.snapshot.constants import (
+    DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV,
     KUBERNETES_OPTIONAL_ENV_NAMES,
     KUBERNETES_REQUIRED_ENV_NAMES,
+    NCCL_CHECKPOINT_KVS_PATH_ENV,
     RESTORE_RUNTIME_ENV_NAMES,
     SNAPSHOT_CONTROL_DIR_ENV,
     SNAPSHOT_RESTORE_CONTEXT_FILE,
@@ -18,6 +21,7 @@ from dynamo.common.snapshot.constants import (
 from dynamo.common.snapshot.restore_context import (
     apply_snapshot_restore_env,
     refresh_snapshot_restore_config,
+    write_nccl_checkpoint_kvs_endpoint,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -29,6 +33,8 @@ def clean_restore_env(monkeypatch):
         *KUBERNETES_REQUIRED_ENV_NAMES,
         *KUBERNETES_OPTIONAL_ENV_NAMES,
         *RESTORE_RUNTIME_ENV_NAMES,
+        NCCL_CHECKPOINT_KVS_PATH_ENV,
+        DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV,
         SNAPSHOT_CONTROL_DIR_ENV,
         SNAPSHOT_RESTORE_STANDBY_ENV,
     }
@@ -44,6 +50,58 @@ def write_restore_context(monkeypatch, tmp_path, env):
     context_path.write_text(json.dumps({"env": env}), encoding="utf-8")
     monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
     return context_path
+
+
+def test_write_nccl_checkpoint_kvs_endpoint_writes_endpoint(monkeypatch, tmp_path):
+    kvs_path = tmp_path / "nested" / "kvs-endpoint"
+    monkeypatch.setenv(NCCL_CHECKPOINT_KVS_PATH_ENV, str(kvs_path))
+    monkeypatch.setenv(DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV, "redis:6379/dynamo")
+
+    write_nccl_checkpoint_kvs_endpoint()
+
+    assert kvs_path.read_text(encoding="utf-8") == "redis:6379/dynamo\n"
+
+
+def test_write_nccl_checkpoint_kvs_endpoint_rejects_uri(monkeypatch, tmp_path):
+    kvs_path = tmp_path / "kvs-endpoint"
+    monkeypatch.setenv(NCCL_CHECKPOINT_KVS_PATH_ENV, str(kvs_path))
+    monkeypatch.setenv(DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV, "redis://redis:6379/0")
+
+    with pytest.raises(RuntimeError, match="<host>:<port>"):
+        write_nccl_checkpoint_kvs_endpoint()
+
+    assert not kvs_path.exists()
+
+
+def test_write_nccl_checkpoint_kvs_endpoint_noops_without_env(tmp_path):
+    write_nccl_checkpoint_kvs_endpoint()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("env", "unexpected_path"),
+    [
+        ({NCCL_CHECKPOINT_KVS_PATH_ENV: "only-path"}, "only-path"),
+        ({DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV: "redis:6379/dynamo"}, None),
+    ],
+)
+def test_write_nccl_checkpoint_kvs_endpoint_warns_with_partial_env(
+    monkeypatch, tmp_path, caplog, env, unexpected_path
+):
+    for name, value in env.items():
+        if name == NCCL_CHECKPOINT_KVS_PATH_ENV:
+            value = str(tmp_path / value)
+        monkeypatch.setenv(name, value)
+
+    with caplog.at_level(logging.WARNING):
+        write_nccl_checkpoint_kvs_endpoint()
+
+    assert NCCL_CHECKPOINT_KVS_PATH_ENV in caplog.text
+    assert DYN_SNAPSHOT_NCCL_KVS_ENDPOINT_ENV in caplog.text
+    if unexpected_path is not None:
+        assert not (tmp_path / unexpected_path).exists()
+    assert not list(tmp_path.rglob("*.tmp"))
 
 
 def test_apply_snapshot_restore_env_applies_and_clears_values(monkeypatch, tmp_path):

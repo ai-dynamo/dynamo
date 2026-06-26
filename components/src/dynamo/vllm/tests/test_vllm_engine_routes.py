@@ -28,6 +28,7 @@ def _make_engine(include_scale: bool = False) -> VllmLLMEngine:
         sleep=AsyncMock(),
         wake_up=AsyncMock(),
         resume_generation=AsyncMock(),
+        collective_rpc=AsyncMock(),
         start_profile=AsyncMock(),
         stop_profile=AsyncMock(),
     )
@@ -61,6 +62,10 @@ async def test_sleep_and_wake_delegate_to_engine_client():
     assert sleep_result["status"] == "ok"
     assert wake_result["status"] == "ok"
     engine.engine_client.pause_generation.assert_awaited_once()
+    assert engine.engine_client.collective_rpc.await_args_list == [
+        (("checkpoint_prepare",), {"kwargs": {}}),
+        (("checkpoint_restore",), {"kwargs": {}}),
+    ]
     engine.engine_client.sleep.assert_awaited_once_with(2)
     engine.engine_client.wake_up.assert_awaited_once_with(["weights"])
     engine.engine_client.resume_generation.assert_awaited_once()
@@ -78,6 +83,10 @@ async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
     assert sleep_result["status"] == "error"
     assert engine._pause_controller.is_paused is False
     assert engine._pause_controller.needs_resume_recovery is True
+    engine.engine_client.collective_rpc.assert_awaited_once_with(
+        "checkpoint_prepare",
+        kwargs={},
+    )
     failed_resume.assert_awaited_once()
 
     engine.engine_client.resume_generation = AsyncMock()

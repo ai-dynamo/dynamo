@@ -21,13 +21,12 @@ import (
 const defaultGeneratedCheckpointIDPrefix = "manual-snapshot"
 
 type checkpointOptions struct {
-	ManifestPath                 string
-	Namespace                    string
-	KubeContext                  string
-	CheckpointID                 string
-	Container                    string
-	DisableCudaCheckpointJobFile bool
-	Timeout                      time.Duration
+	ManifestPath string
+	Namespace    string
+	KubeContext  string
+	CheckpointID string
+	Container    string
+	Timeout      time.Duration
 }
 
 type result struct {
@@ -91,7 +90,6 @@ func runCheckpointFlow(ctx context.Context, opts checkpointOptions) (*result, er
 		ArtifactVersion: snapshotprotocol.DefaultCheckpointArtifactVersion,
 		SeccompProfile:  snapshotprotocol.DefaultSeccompLocalhostProfile,
 		Name:            checkpointJobName,
-		WrapLaunchJob:   !opts.DisableCudaCheckpointJobFile,
 	})
 	if err != nil {
 		return nil, err

@@ -57,6 +57,10 @@ func ApplySharedMemoryVolumeAndMount(
 	mainContainer *corev1.Container,
 	sharedMemory *nvidiacomv1alpha1.SharedMemorySpec,
 ) {
+	if sharedMemory == nil && hasSharedMemoryVolumeAndMount(podSpec, mainContainer) {
+		return
+	}
+
 	volume, volumeMount := buildSharedMemoryVolumeAndMount(sharedMemorySize(sharedMemory))
 	if volume == nil || volumeMount == nil {
 		return
@@ -77,4 +81,25 @@ func ApplySharedMemoryVolumeAndMount(
 		}
 	}
 	mainContainer.VolumeMounts = append(mounts, *volumeMount)
+}
+
+func hasSharedMemoryVolumeAndMount(podSpec *corev1.PodSpec, mainContainer *corev1.Container) bool {
+	hasVolume := false
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == commonconsts.KubeValueNameSharedMemory {
+			hasVolume = true
+			break
+		}
+	}
+	if !hasVolume {
+		return false
+	}
+
+	for _, mount := range mainContainer.VolumeMounts {
+		if mount.Name == commonconsts.KubeValueNameSharedMemory ||
+			mount.MountPath == commonconsts.DefaultSharedMemoryMountPath {
+			return true
+		}
+	}
+	return false
 }

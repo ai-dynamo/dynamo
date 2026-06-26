@@ -38,6 +38,7 @@ async def prepare_snapshot_engine(
     config.engine_args.enable_sleep_mode = True
 
     engine = setup_vllm_engine(config)
+
     gc.collect()
     snapshot_controller = EngineSnapshotController(
         engine=engine,
