@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::Display;
+use std::{env, fmt::Display, sync::OnceLock};
 
 //
 // Hyperparameter Contraints
@@ -106,6 +106,17 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "bad_words_token_ids",
 ];
 
+static ALLOW_UNSUPPORTED_FIELDS: OnceLock<bool> = OnceLock::new();
+
+fn allow_unsupported_fields() -> bool {
+    *ALLOW_UNSUPPORTED_FIELDS.get_or_init(|| {
+        env::var("DYN_ALLOW_UNSUPPORTED_FIELDS")
+            .ok()
+            .and_then(|value| value.parse::<bool>().ok())
+            .unwrap_or(false)
+    })
+}
+
 /// Validates that no unsupported fields are present in the request.
 ///
 /// Fields in `PASSTHROUGH_EXTRA_FIELDS` are validated by downstream handlers.
@@ -117,7 +128,7 @@ pub fn validate_no_unsupported_fields(
         .filter(|k| !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str()))
         .map(|s| format!("`{}`", s))
         .collect();
-    if !unknown.is_empty() {
+    if !unknown.is_empty() && !allow_unsupported_fields() {
         anyhow::bail!("Unsupported parameter(s): {}", unknown.join(", "));
     }
     if let Some(value) = unsupported_fields.get("cache_salt")
