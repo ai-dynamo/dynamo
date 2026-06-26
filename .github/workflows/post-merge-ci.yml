@@ -474,7 +474,7 @@ jobs:
       platform: '["amd64"]'
       container_workspace: /__w/dynamo/dynamo
       pytest_extra_args: tests/kvbm_integration
-      hf_home: /scratch/hf
+      hf_home: /models
       extra_test_env: |
         KVBM_MLA_BACKEND=FLASH_ATTN_MLA
       run_cpu_only_tests: false
