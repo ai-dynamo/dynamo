@@ -108,6 +108,7 @@ CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT=${DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT:-60} \
 python3 -m "$WORKER_MODULE" \
+  --enable-multimodal \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \
@@ -136,6 +137,7 @@ wait_for_ready "http://localhost:${PREFILL_SYSTEM_PORT}/health" 45 || true
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 python3 -m "$WORKER_MODULE" \
+  --enable-multimodal \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   --page-size 16 \

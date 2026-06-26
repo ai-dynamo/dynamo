@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: SGLang
+subtitle: SGLang engines run in Dynamo's distributed runtime with disaggregated serving, KV-aware routing, and request cancellation.
 ---
 
 ## Use the Latest Release
@@ -52,6 +53,8 @@ git clone https://github.com/sgl-project/sglang.git
 # you can optionally checkout any sglang branch
 cd sglang && uv pip install -e "python"
 ```
+
+[Maturin](https://github.com/PyO3/maturin) is the Rust-Python bindings build tool. The `patchelf` extra lets maturin patch native extension library paths during the build.
 
 This is the ideal way for agents to develop. You can provide the path to both repos and the virtual environment and have it rerun these commands as it makes changes
 </Accordion>

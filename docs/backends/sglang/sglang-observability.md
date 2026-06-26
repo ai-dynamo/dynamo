@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Observability
+subtitle: Prometheus metrics, forward pass telemetry, distributed tracing, and Grafana dashboards for SGLang workers in Dynamo.
 ---
 
 This guide covers metrics, tracing, and visualization for SGLang deployments running through Dynamo.

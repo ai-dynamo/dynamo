@@ -105,6 +105,14 @@ pub struct TrafficStats {
     /// returns the arithmetic mean of those samples, independent of
     /// per-request ISL size.
     pub avg_kv_hit_rate: f64,
+    /// Number of samples behind `avg_kv_hit_rate` (its denominator: router
+    /// admissions with `isl_blocks > 0`). Carried so a consumer that merges
+    /// several drained windows can reconstruct the exact sample-weighted mean
+    /// rather than approximating it with `num_req`.
+    pub hit_rate_count: usize,
+    /// Number of decode request-forwards behind `avg_accept_length` (its
+    /// denominator). Same purpose as `hit_rate_count` for cross-window merges.
+    pub accept_length_forward_count: usize,
 }
 
 /// Accumulates traffic statistics between planner ticks for deriving
@@ -254,6 +262,10 @@ impl TrafficAccumulator {
         } else {
             None
         };
+        // Capture the sample counts before the reset so a consumer that merges
+        // several drained windows can reconstruct exact count-weighted means.
+        let hit_rate_count = self.hit_rate_count;
+        let accept_length_forward_count = self.accept_length_forward_count;
         self.window_start_ms = now_ms;
         self.num_req = 0;
         self.total_isl = 0;
@@ -275,6 +287,8 @@ impl TrafficAccumulator {
             avg_itl_ms,
             avg_accept_length,
             avg_kv_hit_rate,
+            hit_rate_count,
+            accept_length_forward_count,
         }
     }
 }

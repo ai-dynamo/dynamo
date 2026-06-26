@@ -9,11 +9,13 @@ pub(crate) mod core;
 pub(crate) mod disagg;
 mod entrypoints;
 pub(crate) mod events;
+pub(crate) mod planner_hook;
 mod progress;
 pub(crate) mod runtime_utils;
 pub(crate) mod single;
 pub(crate) mod state;
 
+pub use entrypoints::run_offline_handoff_conformance;
 pub(crate) use entrypoints::{
     generate_trace_worker_artifacts, generate_trace_worker_artifacts_with_visibility,
     simulate_agentic_trace_workload, simulate_concurrency, simulate_concurrency_disagg,

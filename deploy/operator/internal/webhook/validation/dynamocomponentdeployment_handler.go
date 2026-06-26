@@ -50,6 +50,10 @@ func NewDynamoComponentDeploymentHandler() *DynamoComponentDeploymentHandler {
 func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoComponentDeploymentWebhookName)
 
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoComponentDeploymentGVK); err != nil {
+		return nil, err
+	}
+
 	deployment, err := castToDynamoComponentDeployment(obj)
 	if err != nil {
 		return nil, err
@@ -65,6 +69,10 @@ func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, o
 // ValidateUpdate validates a DynamoComponentDeployment update request.
 func (h *DynamoComponentDeploymentHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoComponentDeploymentWebhookName)
+
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoComponentDeploymentGVK); err != nil {
+		return nil, err
+	}
 
 	newDeployment, err := castToDynamoComponentDeployment(newObj)
 	if err != nil {
@@ -107,6 +115,10 @@ func (h *DynamoComponentDeploymentHandler) ValidateUpdate(ctx context.Context, o
 // ValidateDelete validates a DynamoComponentDeployment delete request.
 func (h *DynamoComponentDeploymentHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoComponentDeploymentWebhookName)
+
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoComponentDeploymentGVK); err != nil {
+		return nil, err
+	}
 
 	deployment, err := castToDynamoComponentDeployment(obj)
 	if err != nil {

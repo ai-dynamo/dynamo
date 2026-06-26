@@ -128,7 +128,9 @@ python -m dynamo.sglang \
 
 Dynamo reads session identity from agent headers such as `X-Dynamo-Session-ID` and passes it to SGLang on every generate request. `X-Dynamo-Session-Final: true` is normalized into an internal KV eviction hint and forwarded with the agent context, but the SGLang backend does not act on that hint in this release.
 
-The radix entries remain normally evictable. Sending `X-Dynamo-Session-ID` does not enable sticky sessions, and `--enable-session-radix-cache` does not create router affinity. Configure any session-aware routing policy separately.
+The radix entries remain normally evictable. `--enable-session-radix-cache` does
+not create router affinity; a configured router can independently use
+`X-Dynamo-Session-ID` for router-local affinity.
 
 ## Quickstart
 
