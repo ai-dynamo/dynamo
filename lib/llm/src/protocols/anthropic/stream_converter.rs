@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 
 use axum::response::sse::Event;
-use dynamo_protocols::types::ChatCompletionMessageContent;
+use dynamo_protocols::types::{ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk};
 use uuid::Uuid;
 
 use super::types::{
@@ -40,6 +40,7 @@ pub struct AnthropicStreamConverter {
     cached_token_count: Option<u32>,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
+    tool_blocks_flushed: bool,
     // Block index counter
     next_block_index: u32,
     // Stop reason
@@ -50,8 +51,13 @@ struct ToolCallState {
     id: String,
     name: String,
     argument_fragments: Vec<String>,
-    block_index: u32,
     started: bool,
+}
+
+impl ToolCallState {
+    fn is_emit_ready(&self) -> bool {
+        self.started && !self.id.is_empty() && !self.name.is_empty()
+    }
 }
 
 impl AnthropicStreamConverter {
@@ -70,6 +76,7 @@ impl AnthropicStreamConverter {
             output_token_count: 0,
             cached_token_count: None,
             tool_call_states: Vec::new(),
+            tool_blocks_flushed: false,
             next_block_index: 0,
             stop_reason: None,
         }
@@ -86,6 +93,90 @@ impl AnthropicStreamConverter {
         let mut converter = Self::new(model, estimated_input_tokens);
         converter.api_context = Some(context);
         converter
+    }
+
+    fn record_tool_call(&mut self, tool_call: &ChatCompletionMessageToolCallChunk) {
+        let tool_call_index = tool_call.index as usize;
+        while self.tool_call_states.len() <= tool_call_index {
+            self.tool_call_states.push(ToolCallState {
+                id: String::new(),
+                name: String::new(),
+                argument_fragments: Vec::new(),
+                started: false,
+            });
+        }
+
+        let state = &mut self.tool_call_states[tool_call_index];
+        if let Some(id) = &tool_call.id {
+            state.started = true;
+            state.id = id.clone();
+        }
+        if let Some(function) = &tool_call.function {
+            if let Some(name) = &function.name {
+                state.started = true;
+                state.name = name.clone();
+            }
+            if let Some(arguments) = &function.arguments {
+                state.started = true;
+                state.argument_fragments.push(arguments.clone());
+            }
+        }
+    }
+
+    fn drain_buffered_tool_events(&mut self) -> Vec<(&'static str, AnthropicStreamEvent)> {
+        if self.tool_blocks_flushed {
+            return Vec::new();
+        }
+        self.tool_blocks_flushed = true;
+
+        let mut events = Vec::new();
+        let mut sent_tool_call_ids = HashSet::new();
+        let mut block_index = self.next_block_index;
+
+        for tool_call in &self.tool_call_states {
+            if !tool_call.is_emit_ready() || !sent_tool_call_ids.insert(tool_call.id.clone()) {
+                continue;
+            }
+
+            events.push((
+                "content_block_start",
+                AnthropicStreamEvent::ContentBlockStart {
+                    index: block_index,
+                    content_block: AnthropicResponseContentBlock::ToolUse {
+                        id: tool_call.id.clone(),
+                        name: tool_call.name.clone(),
+                        input: serde_json::json!({}),
+                    },
+                },
+            ));
+
+            for arguments in &tool_call.argument_fragments {
+                events.push((
+                    "content_block_delta",
+                    AnthropicStreamEvent::ContentBlockDelta {
+                        index: block_index,
+                        delta: AnthropicDelta::InputJsonDelta {
+                            partial_json: arguments.clone(),
+                        },
+                    },
+                ));
+            }
+
+            events.push((
+                "content_block_stop",
+                AnthropicStreamEvent::ContentBlockStop { index: block_index },
+            ));
+            block_index += 1;
+        }
+
+        self.next_block_index = block_index;
+        events
+    }
+
+    fn append_buffered_tool_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        for (event_type, event) in self.drain_buffered_tool_events() {
+            events.push(make_sse_event(event_type, &event));
+        }
     }
 
     /// Emit the initial `message_start` event.
@@ -147,11 +238,17 @@ impl AnthropicStreamConverter {
                 .and_then(|d| d.cached_tokens);
         }
 
+        let mut should_flush_tool_blocks = false;
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
 
             // Track finish reason
             if let Some(ref fr) = choice.finish_reason {
+                should_flush_tool_blocks |= matches!(
+                    fr,
+                    dynamo_protocols::types::FinishReason::ToolCalls
+                        | dynamo_protocols::types::FinishReason::FunctionCall
+                );
                 self.stop_reason = Some(match fr {
                     dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
                     dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
@@ -286,38 +383,17 @@ impl AnthropicStreamConverter {
                     events.push(make_sse_event("content_block_stop", &block_stop));
                 }
 
-                for tc in tool_calls {
-                    let tc_index = tc.index as usize;
-
-                    // Ensure we have state for this tool call index
-                    while self.tool_call_states.len() <= tc_index {
-                        let block_index = self.next_block_index;
-                        self.next_block_index += 1;
-                        self.tool_call_states.push(ToolCallState {
-                            id: String::new(),
-                            name: String::new(),
-                            argument_fragments: Vec::new(),
-                            block_index,
-                            started: false,
-                        });
-                    }
-
-                    // Update id and name if provided
-                    if let Some(id) = &tc.id {
-                        self.tool_call_states[tc_index].id = id.clone();
-                    }
-                    if let Some(func) = &tc.function {
-                        if let Some(name) = &func.name {
-                            self.tool_call_states[tc_index].name = name.clone();
-                        }
-                        if let Some(args) = &func.arguments {
-                            let state = &mut self.tool_call_states[tc_index];
-                            state.started = true;
-                            state.argument_fragments.push(args.clone());
-                        }
-                    }
+                for tool_call in tool_calls {
+                    self.record_tool_call(tool_call);
                 }
             }
+        }
+
+        // A tool-call finish reason is the first explicit guarantee that all
+        // argument fragments in this choice are complete. Flush only after every
+        // choice and delta in the terminal chunk has been recorded.
+        if should_flush_tool_blocks {
+            self.append_buffered_tool_events(events);
         }
     }
 
@@ -354,38 +430,9 @@ impl AnthropicStreamConverter {
             events.push(make_sse_event("content_block_stop", &block_stop));
         }
 
-        // Chat-completions tool calls may be fragmented and interleaved. Anthropic
-        // requires each content block to complete before the next block starts, so
-        // buffer tool fragments and emit complete block lifecycles in index order.
-        let mut sent_tool_call_ids = HashSet::new();
-        for tc in &self.tool_call_states {
-            if tc.started && (tc.id.is_empty() || sent_tool_call_ids.insert(tc.id.clone())) {
-                let block_start = AnthropicStreamEvent::ContentBlockStart {
-                    index: tc.block_index,
-                    content_block: AnthropicResponseContentBlock::ToolUse {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        input: serde_json::json!({}),
-                    },
-                };
-                events.push(make_sse_event("content_block_start", &block_start));
-
-                for args in &tc.argument_fragments {
-                    let block_delta = AnthropicStreamEvent::ContentBlockDelta {
-                        index: tc.block_index,
-                        delta: AnthropicDelta::InputJsonDelta {
-                            partial_json: args.clone(),
-                        },
-                    };
-                    events.push(make_sse_event("content_block_delta", &block_delta));
-                }
-
-                let block_stop = AnthropicStreamEvent::ContentBlockStop {
-                    index: tc.block_index,
-                };
-                events.push(make_sse_event("content_block_stop", &block_stop));
-            }
-        }
+        // EOF remains a fallback for backends that omit a terminal finish reason.
+        // If a finish chunk already flushed these blocks, this is a no-op.
+        self.append_buffered_tool_events(events);
 
         // Emit message_delta with stop_reason and real token usage from engine
         let message_delta = AnthropicStreamEvent::MessageDelta {
@@ -466,10 +513,16 @@ impl AnthropicStreamConverter {
                 .and_then(|d| d.cached_tokens);
         }
 
+        let mut should_flush_tool_blocks = false;
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
 
             if let Some(ref fr) = choice.finish_reason {
+                should_flush_tool_blocks |= matches!(
+                    fr,
+                    dynamo_protocols::types::FinishReason::ToolCalls
+                        | dynamo_protocols::types::FinishReason::FunctionCall
+                );
                 self.stop_reason = Some(match fr {
                     dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
                     dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
@@ -587,33 +640,15 @@ impl AnthropicStreamConverter {
                     events.push(make_tagged_event("content_block_stop", &ev));
                 }
 
-                for tc in tool_calls {
-                    let tc_index = tc.index as usize;
-                    while self.tool_call_states.len() <= tc_index {
-                        let block_index = self.next_block_index;
-                        self.next_block_index += 1;
-                        self.tool_call_states.push(ToolCallState {
-                            id: String::new(),
-                            name: String::new(),
-                            argument_fragments: Vec::new(),
-                            block_index,
-                            started: false,
-                        });
-                    }
-                    if let Some(id) = &tc.id {
-                        self.tool_call_states[tc_index].id = id.clone();
-                    }
-                    if let Some(func) = &tc.function {
-                        if let Some(name) = &func.name {
-                            self.tool_call_states[tc_index].name = name.clone();
-                        }
-                        if let Some(args) = &func.arguments {
-                            let state = &mut self.tool_call_states[tc_index];
-                            state.started = true;
-                            state.argument_fragments.push(args.clone());
-                        }
-                    }
+                for tool_call in tool_calls {
+                    self.record_tool_call(tool_call);
                 }
+            }
+        }
+
+        if should_flush_tool_blocks {
+            for (event_type, event) in self.drain_buffered_tool_events() {
+                events.push(make_tagged_event(event_type, &event));
             }
         }
 
@@ -647,35 +682,9 @@ impl AnthropicStreamConverter {
             events.push(make_tagged_event("content_block_stop", &ev));
         }
 
-        // Emit buffered tool blocks sequentially at stream end.
-        let mut sent_tool_call_ids = HashSet::new();
-        for tc in &self.tool_call_states {
-            if tc.started && (tc.id.is_empty() || sent_tool_call_ids.insert(tc.id.clone())) {
-                let ev = AnthropicStreamEvent::ContentBlockStart {
-                    index: tc.block_index,
-                    content_block: AnthropicResponseContentBlock::ToolUse {
-                        id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        input: serde_json::json!({}),
-                    },
-                };
-                events.push(make_tagged_event("content_block_start", &ev));
-
-                for args in &tc.argument_fragments {
-                    let ev = AnthropicStreamEvent::ContentBlockDelta {
-                        index: tc.block_index,
-                        delta: AnthropicDelta::InputJsonDelta {
-                            partial_json: args.clone(),
-                        },
-                    };
-                    events.push(make_tagged_event("content_block_delta", &ev));
-                }
-
-                let ev = AnthropicStreamEvent::ContentBlockStop {
-                    index: tc.block_index,
-                };
-                events.push(make_tagged_event("content_block_stop", &ev));
-            }
+        // EOF fallback; a finish-triggered drain leaves no events here.
+        for (event_type, event) in self.drain_buffered_tool_events() {
+            events.push(make_tagged_event(event_type, &event));
         }
 
         let ev = AnthropicStreamEvent::MessageDelta {
@@ -704,7 +713,7 @@ mod tests {
     use super::*;
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
-        ChatCompletionStreamResponseDelta, FunctionCallStream, FunctionType,
+        ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, FunctionType,
     };
 
     fn text_chunk(text: &str) -> NvCreateChatCompletionStreamResponse {
@@ -780,6 +789,13 @@ mod tests {
         }
     }
 
+    fn finish_chunk(finish_reason: FinishReason) -> NvCreateChatCompletionStreamResponse {
+        let mut chunk = tool_call_chunk(0, None, None, None);
+        chunk.inner.choices[0].delta.tool_calls = None;
+        chunk.inner.choices[0].finish_reason = Some(finish_reason);
+        chunk
+    }
+
     fn event_types(events: &[TaggedEvent]) -> Vec<&str> {
         events.iter().map(|e| e.event_type.as_str()).collect()
     }
@@ -815,8 +831,14 @@ mod tests {
         assert!(events.iter().all(Result::is_ok));
 
         events.clear();
+        conv.append_chunk_events(&finish_chunk(FinishReason::ToolCalls), &mut events);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events.capacity(), capacity);
+        assert!(events.iter().all(Result::is_ok));
+
+        events.clear();
         conv.append_end_events(&mut events);
-        assert_eq!(events.len(), 5);
+        assert_eq!(events.len(), 2);
         assert_eq!(events.capacity(), capacity);
         assert!(events.iter().all(Result::is_ok));
 
@@ -864,18 +886,16 @@ mod tests {
             other => panic!("expected ContentBlockStop, got {other:?}"),
         }
 
-        let end_events = conv.emit_end_events_tagged();
+        let finish_events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
         assert_eq!(
-            event_types(&end_events),
+            event_types(&finish_events),
             vec![
                 "content_block_start",
                 "content_block_delta",
-                "content_block_stop",
-                "message_delta",
-                "message_stop"
+                "content_block_stop"
             ]
         );
-        match &end_events[0].data {
+        match &finish_events[0].data {
             AnthropicStreamEvent::ContentBlockStart {
                 index,
                 content_block,
@@ -890,11 +910,15 @@ mod tests {
             }
             other => panic!("expected ContentBlockStart, got {other:?}"),
         }
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"]
+        );
     }
 
-    /// Tool-only response (no preceding text): no spurious stop events.
+    /// EOF remains a fallback when the backend omits a finish reason.
     #[test]
-    fn test_tool_only_response_no_text_block() {
+    fn test_tool_only_response_flushes_at_eof_without_finish_reason() {
         let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
 
         let tool_events = conv.process_chunk_tagged(&tool_call_chunk(
@@ -919,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_initial_tool_arguments_do_not_stop_block_early() {
+    fn test_fragmented_tool_arguments_flush_on_tool_calls_finish() {
         let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
 
         let first =
@@ -933,18 +957,122 @@ mod tests {
         let last = conv.process_chunk_tagged(&tool_call_chunk(0, None, None, Some("\"}")));
         assert!(last.is_empty());
 
-        let end = conv.emit_end_events_tagged();
+        let finish = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
         assert_eq!(
-            event_types(&end),
+            event_types(&finish),
             vec![
                 "content_block_start",
                 "content_block_delta",
                 "content_block_delta",
                 "content_block_delta",
                 "content_block_stop",
-                "message_delta",
-                "message_stop"
             ]
+        );
+
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"],
+            "EOF must not repeat finish-triggered tool events"
+        );
+    }
+
+    #[test]
+    fn test_id_and_name_only_tool_call_is_emitted() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let mut chunk = tool_call_chunk(0, Some("call-1"), Some("Read"), None);
+        chunk.inner.choices[0].finish_reason = Some(FinishReason::FunctionCall);
+
+        let finish = conv.process_chunk_tagged(&chunk);
+        assert_eq!(
+            event_types(&finish),
+            vec!["content_block_start", "content_block_stop"]
+        );
+        assert!(matches!(
+            &finish[0].data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { id, name, input },
+                ..
+            } if id == "call-1" && name == "Read" && input == &serde_json::json!({})
+        ));
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"]
+        );
+    }
+
+    #[test]
+    fn test_terminal_chunk_records_arguments_before_flushing() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut chunk = tool_call_chunk(0, Some("call-1"), Some("Read"), Some("{}"));
+        chunk.inner.choices[0].finish_reason = Some(FinishReason::ToolCalls);
+
+        let finish = conv.process_chunk_tagged(&chunk);
+        assert_eq!(
+            event_types(&finish),
+            vec![
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop"
+            ]
+        );
+        assert!(matches!(
+            &finish[1].data,
+            AnthropicStreamEvent::ContentBlockDelta {
+                delta: AnthropicDelta::InputJsonDelta { partial_json },
+                ..
+            } if partial_json == "{}"
+        ));
+    }
+
+    #[test]
+    fn test_incomplete_tool_call_identity_is_not_emitted() {
+        for chunk in [
+            tool_call_chunk(0, Some("call-1"), None, None),
+            tool_call_chunk(0, None, Some("Read"), None),
+            tool_call_chunk(0, None, None, Some("{}")),
+        ] {
+            let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+            assert!(conv.process_chunk_tagged(&chunk).is_empty());
+            assert!(
+                conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls))
+                    .is_empty()
+            );
+            assert_eq!(
+                event_types(&conv.emit_end_events_tagged()),
+                vec!["message_delta", "message_stop"]
+            );
+        }
+    }
+
+    #[test]
+    fn test_incomplete_tool_call_does_not_create_block_index_gap() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        conv.process_chunk_tagged(&tool_call_chunk(0, Some("incomplete"), None, None));
+        conv.process_chunk_tagged(&tool_call_chunk(
+            1,
+            Some("call-1"),
+            Some("Read"),
+            Some("{}"),
+        ));
+
+        let finish = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        assert!(matches!(
+            &finish[0].data,
+            AnthropicStreamEvent::ContentBlockStart { index: 0, .. }
+        ));
+        assert!(matches!(
+            &finish[1].data,
+            AnthropicStreamEvent::ContentBlockDelta { index: 0, .. }
+        ));
+        assert!(matches!(
+            &finish[2].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 0 }
+        ));
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"]
         );
     }
 
@@ -1084,9 +1212,9 @@ mod tests {
         );
     }
 
-    /// Multiple tool calls close in index order when the stream ends.
+    /// Parallel tool calls flush as non-overlapping blocks at the finish signal.
     #[test]
-    fn test_multiple_tool_calls_each_stopped_at_stream_end() {
+    fn test_parallel_tool_calls_flush_sequentially_on_finish() {
         let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
 
         let events1 = conv.process_chunk_tagged(&tool_call_chunk(
@@ -1105,9 +1233,9 @@ mod tests {
         ));
         assert!(events2.is_empty());
 
-        let end_events = conv.emit_end_events_tagged();
+        let finish_events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
         assert_eq!(
-            event_types(&end_events),
+            event_types(&finish_events),
             vec![
                 "content_block_start",
                 "content_block_delta",
@@ -1115,9 +1243,27 @@ mod tests {
                 "content_block_start",
                 "content_block_delta",
                 "content_block_stop",
-                "message_delta",
-                "message_stop"
             ]
+        );
+        assert!(matches!(
+            &finish_events[0].data,
+            AnthropicStreamEvent::ContentBlockStart { index: 0, .. }
+        ));
+        assert!(matches!(
+            &finish_events[2].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 0 }
+        ));
+        assert!(matches!(
+            &finish_events[3].data,
+            AnthropicStreamEvent::ContentBlockStart { index: 1, .. }
+        ));
+        assert!(matches!(
+            &finish_events[5].data,
+            AnthropicStreamEvent::ContentBlockStop { index: 1 }
+        ));
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"]
         );
     }
 
@@ -1138,16 +1284,18 @@ mod tests {
             Some("{\"path\":\"/tmp/a.txt\"}"),
         ));
 
-        let end_events = conv.emit_end_events_tagged();
+        let finish_events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
         assert_eq!(
-            event_types(&end_events),
+            event_types(&finish_events),
             vec![
                 "content_block_start",
                 "content_block_delta",
                 "content_block_stop",
-                "message_delta",
-                "message_stop"
             ]
+        );
+        assert_eq!(
+            event_types(&conv.emit_end_events_tagged()),
+            vec!["message_delta", "message_stop"]
         );
     }
 

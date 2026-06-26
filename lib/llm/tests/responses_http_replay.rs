@@ -4,12 +4,14 @@
 //! Full-HTTP integration coverage for the OpenAI Responses compatibility surface.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
     ChatCompletionRequestUserMessageContent,
 };
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS;
+use futures::StreamExt;
 use serde_json::{Value, json};
 use serial_test::serial;
 
@@ -20,7 +22,9 @@ mod ports;
 #[path = "common/scripted_chat_engine.rs"]
 mod scripted_chat_engine;
 
-use http_harness::{HarnessService, MODEL, canonicalize, load_agent_fixture, parse_json_sse};
+use http_harness::{
+    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture, parse_json_sse,
+};
 
 const ENV: [(&str, Option<&str>); 1] = [(DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))];
 
@@ -179,6 +183,87 @@ async fn empty_first_arguments_do_not_finish_function_call_early() {
         assert_eq!(output.len(), 1);
         assert_eq!(output[0]["id"], added.data["item"]["id"]);
         assert_eq!(output[0]["arguments"], r#"{"path":"/tmp"}"#);
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn finish_signal_publishes_function_call_before_usage_tail() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
+        let split_at = script
+            .iter()
+            .position(|chunk| chunk.inner.usage.is_some())
+            .expect("fragmented-tool fixture has no usage chunk");
+        let (svc, gate) = HarnessService::start_with_gated_tail(script, split_at).await;
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": "List /tmp",
+                "stream": true,
+                "max_output_tokens": 128,
+                "tools": [tool("list_directory")]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let mut body = response.bytes_stream();
+        let mut parser = IncrementalSseParser::default();
+        let mut saw_arguments_done = false;
+        let mut saw_item_done = false;
+        let mut saw_response_completed = false;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !(saw_arguments_done && saw_item_done) {
+                let bytes = body
+                    .next()
+                    .await
+                    .expect("response ended before function-call completion")
+                    .expect("failed to read response SSE bytes");
+                for event in parser.push(&bytes).expect("failed to parse response SSE") {
+                    saw_arguments_done |= event == "response.function_call_arguments.done";
+                    saw_item_done |= event == "response.output_item.done";
+                    saw_response_completed |= event == "response.completed";
+                }
+            }
+        })
+        .await
+        .expect("function-call completion did not arrive before the gated usage tail");
+
+        assert!(!saw_response_completed);
+        gate.release();
+        while let Some(bytes) = body.next().await {
+            let bytes = bytes.expect("failed to drain response SSE bytes");
+            parser.push(&bytes).expect("failed to parse response SSE");
+        }
+
+        let raw = parser.into_body().expect("response SSE was not UTF-8");
+        assert_eq!(raw.matches("data: [DONE]").count(), 1);
+        let events = parse_json_sse(&raw).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "response.function_call_arguments.done")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "response.output_item.done")
+                .count(),
+            1
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event == "response.completed")
+        );
 
         svc.shutdown().await;
     })

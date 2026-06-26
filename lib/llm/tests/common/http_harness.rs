@@ -19,7 +19,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::ports::bind_random_port;
-use super::scripted_chat_engine::{Script, ScriptedChatEngine};
+use super::scripted_chat_engine::{Script, ScriptGate, ScriptedChatEngine};
 
 pub const MODEL: &str = "harness-model";
 
@@ -43,6 +43,15 @@ pub struct HarnessService {
 impl HarnessService {
     pub async fn start(scripts: impl IntoIterator<Item = Script>) -> Self {
         let engine = Arc::new(ScriptedChatEngine::new(scripts));
+        Self::start_with_engine(engine).await
+    }
+
+    pub async fn start_with_gated_tail(script: Script, split_at: usize) -> (Self, ScriptGate) {
+        let (engine, gate) = ScriptedChatEngine::with_gated_tail(script, split_at);
+        (Self::start_with_engine(Arc::new(engine)).await, gate)
+    }
+
+    async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -172,6 +181,54 @@ fn validate_terminal_data(text: &str, description: &str) -> Result<()> {
 pub struct JsonSseEvent {
     pub event: String,
     pub data: Value,
+}
+
+#[derive(Default)]
+pub struct IncrementalSseParser {
+    raw: Vec<u8>,
+    parsed_through: usize,
+}
+
+impl IncrementalSseParser {
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>> {
+        self.raw.extend_from_slice(bytes);
+        let mut events = Vec::new();
+
+        while let Some((frame_len, separator_len)) =
+            find_sse_frame_separator(&self.raw[self.parsed_through..])
+        {
+            let frame_start = self.parsed_through;
+            let frame_end = frame_start + frame_len;
+            let frame = std::str::from_utf8(&self.raw[frame_start..frame_end])
+                .context("response SSE frame was not UTF-8")?;
+            events.push(
+                frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix("event:").map(str::trim))
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+            self.parsed_through = frame_end + separator_len;
+        }
+
+        Ok(events)
+    }
+
+    pub fn into_body(self) -> Result<String> {
+        String::from_utf8(self.raw).context("response SSE stream was not UTF-8")
+    }
+}
+
+fn find_sse_frame_separator(bytes: &[u8]) -> Option<(usize, usize)> {
+    for index in 0..bytes.len() {
+        if bytes[index..].starts_with(b"\r\n\r\n") {
+            return Some((index, 4));
+        }
+        if bytes[index..].starts_with(b"\n\n") {
+            return Some((index, 2));
+        }
+    }
+    None
 }
 
 pub async fn parse_json_sse(body: &str) -> Result<Vec<JsonSseEvent>> {

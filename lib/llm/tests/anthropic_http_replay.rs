@@ -4,6 +4,7 @@
 //! Full-HTTP integration coverage for the Anthropic Messages compatibility surface.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use dynamo_protocols::types::{
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
@@ -12,6 +13,7 @@ use dynamo_protocols::types::{
 use dynamo_runtime::config::environment_names::llm::{
     DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
 };
+use futures::StreamExt;
 use serde_json::{Value, json};
 use serial_test::serial;
 
@@ -22,7 +24,9 @@ mod ports;
 #[path = "common/scripted_chat_engine.rs"]
 mod scripted_chat_engine;
 
-use http_harness::{HarnessService, MODEL, canonicalize, load_agent_fixture, parse_json_sse};
+use http_harness::{
+    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture, parse_json_sse,
+};
 use scripted_chat_engine::Script;
 
 const ENV: [(&str, Option<&str>); 2] = [
@@ -180,6 +184,80 @@ async fn fragmented_tool_arguments_close_after_all_deltas() {
                 .unwrap()
                 .data["delta"]["stop_reason"],
             "tool_use"
+        );
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn finish_signal_publishes_tool_block_before_usage_tail() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
+        let split_at = script
+            .iter()
+            .position(|chunk| chunk.inner.usage.is_some())
+            .expect("fragmented-tool fixture has no usage chunk");
+        let (svc, gate) = HarnessService::start_with_gated_tail(script, split_at).await;
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 128,
+                "stream": true,
+                "tools": [tool("list_directory")],
+                "messages": [{"role": "user", "content": "List /tmp"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let mut body = response.bytes_stream();
+        let mut parser = IncrementalSseParser::default();
+        let mut saw_tool_stop = false;
+        let mut saw_message_delta = false;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !saw_tool_stop {
+                let bytes = body
+                    .next()
+                    .await
+                    .expect("response ended before tool block completion")
+                    .expect("failed to read response SSE bytes");
+                for event in parser.push(&bytes).expect("failed to parse response SSE") {
+                    saw_tool_stop |= event == "content_block_stop";
+                    saw_message_delta |= event == "message_delta";
+                }
+            }
+        })
+        .await
+        .expect("tool block completion did not arrive before the gated usage tail");
+
+        assert!(!saw_message_delta);
+        gate.release();
+        while let Some(bytes) = body.next().await {
+            let bytes = bytes.expect("failed to drain response SSE bytes");
+            parser.push(&bytes).expect("failed to parse response SSE");
+        }
+
+        let raw = parser.into_body().expect("response SSE was not UTF-8");
+        assert_eq!(raw.matches("data: [DONE]").count(), 1);
+        let events = parse_json_sse(&raw).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "content_block_stop")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "message_delta")
+                .count(),
+            1
         );
 
         svc.shutdown().await;
