@@ -67,10 +67,12 @@ pub struct CommonArgs {
     )]
     pub exclude_tools_when_tool_choice_none: bool,
 
-    /// Disaggregation role: `agg` (default), `prefill`, or `decode`.
+    /// Disaggregation role: `agg` (default), `prefill`, `decode`, or `encode`.
     /// Prefill workers register with `ModelType::empty()` and
-    /// `WorkerType::Prefill` regardless of `endpoint_types`; decode workers
-    /// do not advertise a local KV indexer.
+    /// `WorkerType::Prefill` regardless of `endpoint_types`; decode and encode
+    /// workers do not advertise a local KV indexer. Encode workers register as
+    /// `WorkerType::Encode` and are not exposed on the public chat/completions
+    /// surface.
     #[arg(
         long,
         value_enum,
@@ -78,4 +80,14 @@ pub struct CommonArgs {
         env = "DYN_DISAGGREGATION_MODE",
     )]
     pub disaggregation_mode: DisaggregationMode,
+
+    /// Declare an upstream Encode peer in this worker's topology `needs`.
+    /// Meaningful only on `--disaggregation-mode agg` and `prefill`.
+    /// Setting it on `decode` or `encode` is rejected at startup.
+    ///
+    /// Scope: Rust backends consuming `CommonArgs` via clap. Python
+    /// backends populate this from their own runtime config -- the Python
+    /// shim does not read this env var.
+    #[arg(long, default_value_t = false, env = "DYN_ROUTE_TO_ENCODER")]
+    pub route_to_encoder: bool,
 }

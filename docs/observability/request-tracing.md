@@ -1,8 +1,8 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Replay Tracing
-subtitle: Capture live chat and completion traffic for Mooncake replay
+subtitle: Capture live chat and completion traffic for direct DynoSim replay
 ---
 
 Request replay tracing records one `request_end` row for each eligible Rust OpenAI
@@ -142,9 +142,9 @@ Optional harness tool events use the `RequestTraceToolEventIngress` payload belo
 }
 ```
 
-`input_sequence_hashes` are Dynamo's sequence-aware rolling hashes. The
-Mooncake converter maps them to compact `hash_ids`; they are not copied
-verbatim into the Mooncake output.
+`input_sequence_hashes` are Dynamo's sequence-aware rolling hashes. Replay maps
+them to compact internal IDs while loading the original request trace; it does
+not write an intermediate Mooncake file.
 
 For a canceled response stream, `output_tokens` is the final partial OSL
 observed after the inner response stream has been dropped.
@@ -152,7 +152,7 @@ observed after the inner response stream has been dropped.
 ## Supported Requests
 
 Initial coverage is the Rust OpenAI chat-completions and completions paths.
-Context-free replay rows must represent one Mooncake request, so tracing skips:
+Each context-free replay row must represent one model request, so tracing skips:
 
 - `n > 1`
 - `best_of > 1`
@@ -176,6 +176,8 @@ python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
   --num-workers 4 \
   --report-json /tmp/dynamo-request-trace.replay-report.json
 ```
+
+No format conversion or intermediate Mooncake file is required.
 
 Replay derives and validates the trace block size across all shards.
 Context-free rows use standard replay. If every request has `agent_context`,

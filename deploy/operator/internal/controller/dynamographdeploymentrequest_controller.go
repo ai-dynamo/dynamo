@@ -34,6 +34,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
+	runtimejson "k8s.io/apimachinery/pkg/runtime/serializer/json"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/tools/record"
@@ -795,7 +797,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 		return r.createDGD(ctx, dgdr)
 	}
 
-	dgd := &dgdv1alpha1.DynamoGraphDeployment{}
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	err := r.Get(ctx, types.NamespacedName{
 		Name:      dgdr.Status.DGDName,
 		Namespace: dgdr.Namespace,
@@ -822,7 +824,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 	var condStatus metav1.ConditionStatus
 	var condReason, condMessage string
 
-	if dgd.Status.State == dgdv1alpha1.DGDStateSuccessful {
+	if dgd.Status.State == nvidiacomv1beta1.DGDStateSuccessful {
 		logger.Info("DGD is Ready, transitioning to Deployed phase")
 		dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeployed
 		setSucceededCondition(dgdr, nvidiacomv1beta1.DGDRPhaseDeployed)
@@ -862,7 +864,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployedPhase(ctx context
 	logger.Info("DGDR is deployed", "name", dgdr.Name)
 
 	// Check if DGD still exists and monitor its status
-	dgd := &dgdv1alpha1.DynamoGraphDeployment{}
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	err := r.Get(ctx, types.NamespacedName{
 		Name:      dgdr.Status.DGDName,
 		Namespace: dgdr.Namespace,
@@ -882,7 +884,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployedPhase(ctx context
 	}
 
 	// Check if DGD degraded from Ready
-	if dgd.Status.State != dgdv1alpha1.DGDStateSuccessful {
+	if dgd.Status.State != nvidiacomv1beta1.DGDStateSuccessful {
 		logger.Info("DGD degraded, transitioning back to Deploying",
 			"dgdState", dgd.Status.State)
 
@@ -946,8 +948,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 		return ctrl.Result{}, fmt.Errorf("generated DGD spec not found in annotation nvidia.com/generated-dgd-spec")
 	}
 
-	generatedDGD := &dgdv1alpha1.DynamoGraphDeployment{}
-	if err := yaml.Unmarshal([]byte(dgdSpecYAML), generatedDGD); err != nil {
+	generatedDGD, err := r.extractDGDFromYAML([]byte(dgdSpecYAML))
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to unmarshal generated deployment from annotation: %w", err)
 	}
 
@@ -976,7 +978,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	}
 
 	// Create DGD from generated deployment
-	dgd := &dgdv1alpha1.DynamoGraphDeployment{
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        dgdName,
 			Namespace:   dgdNamespace,
@@ -995,7 +997,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	if err := r.Create(ctx, dgd); err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			logger.Info("DGD already exists, updating status")
-			existingDGD := &dgdv1alpha1.DynamoGraphDeployment{}
+			existingDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			if getErr := r.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: dgdNamespace}, existingDGD); getErr != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to get existing DGD %s: %w", dgdName, getErr)
 			}
@@ -1053,7 +1055,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 }
 
 // adoptAdditionalResources makes profiling-generated ConfigMaps follow the DGD lifecycle.
-func (r *DynamoGraphDeploymentRequestReconciler) adoptAdditionalResources(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, dgd *dgdv1alpha1.DynamoGraphDeployment) error {
+func (r *DynamoGraphDeploymentRequestReconciler) adoptAdditionalResources(ctx context.Context, dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, dgd *nvidiacomv1beta1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
 
 	configMaps := &corev1.ConfigMapList{}
@@ -1113,10 +1115,10 @@ func removeDGDROwnerReferences(ownerReferences []metav1.OwnerReference, dgdr *nv
 	return filtered, removed
 }
 
-func isControlledByDGD(ownerReferences []metav1.OwnerReference, dgd *dgdv1alpha1.DynamoGraphDeployment) bool {
+func isControlledByDGD(ownerReferences []metav1.OwnerReference, dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
 	controller := metav1.GetControllerOf(&metav1.ObjectMeta{OwnerReferences: ownerReferences})
 	return controller != nil &&
-		controller.Kind == "DynamoGraphDeployment" &&
+		controller.Kind == consts.ResourceTypeDynamoGraphDeployment &&
 		controller.Name == dgd.Name &&
 		controller.UID == dgd.UID
 }
@@ -2082,27 +2084,56 @@ func (r *DynamoGraphDeploymentRequestReconciler) generateDGDSpec(ctx context.Con
 		}
 	}
 
-	// Store the generated DGD in ProfilingResults.SelectedConfig
-	dgdJSON, err := json.Marshal(dgd)
+	// Store manifest bytes with apiVersion/kind in status/annotation without
+	// setting TypeMeta on the typed object submitted through the Kubernetes client.
+	dgdJSON, dgdYAML, err := r.encodeBetaDGDManifest(dgd)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to marshal generated DGD to JSON: %w", err)
+		return nil, "", fmt.Errorf("failed to encode generated DGD manifest: %w", err)
 	}
 	profilingResults.SelectedConfig = &runtime.RawExtension{Raw: dgdJSON}
 
 	// Serialize the DGD spec to an annotation so createDGD can retrieve it
-	dgdBytes, err := sigsyaml.Marshal(dgd)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to marshal generated DGD: %w", err)
-	}
 	if dgdr.Annotations == nil {
 		dgdr.Annotations = make(map[string]string)
 	}
-	dgdr.Annotations["nvidia.com/generated-dgd-spec"] = string(dgdBytes)
+	dgdr.Annotations["nvidia.com/generated-dgd-spec"] = string(dgdYAML)
 
 	if err := r.Update(ctx, dgdr); err != nil {
 		return nil, "", fmt.Errorf("failed to update DGDR with generated DGD annotation: %w", err)
 	}
 	return profilingResults, dgd.Name, nil
+}
+
+// encodeBetaDGDManifest returns JSON/YAML manifest bytes for a beta DGD.
+// The Kubernetes versioning encoder temporarily supplies apiVersion/kind from
+// the scheme during serialization and restores the typed object's TypeMeta after.
+func (r *DynamoGraphDeploymentRequestReconciler) encodeBetaDGDManifest(dgd *nvidiacomv1beta1.DynamoGraphDeployment) ([]byte, []byte, error) {
+	scheme := r.Scheme()
+	codecs := serializer.NewCodecFactory(scheme)
+
+	jsonSerializer := runtimejson.NewSerializerWithOptions(
+		runtimejson.DefaultMetaFactory,
+		scheme,
+		scheme,
+		runtimejson.SerializerOptions{},
+	)
+	jsonBytes, err := runtime.Encode(codecs.EncoderForVersion(jsonSerializer, nvidiacomv1beta1.GroupVersion), dgd)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	yamlSerializer := runtimejson.NewSerializerWithOptions(
+		runtimejson.DefaultMetaFactory,
+		scheme,
+		scheme,
+		runtimejson.SerializerOptions{Yaml: true},
+	)
+	yamlBytes, err := runtime.Encode(codecs.EncoderForVersion(yamlSerializer, nvidiacomv1beta1.GroupVersion), dgd)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return jsonBytes, yamlBytes, nil
 }
 
 // extractParetoFromWebUIData parses webui_data.json and returns all Pareto-optimal
@@ -2212,10 +2243,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) storeAdditionalResources(ctx co
 
 // extractResourcesFromYAML parses multi-document YAML from profiling output,
 // extracting the DynamoGraphDeployment and any ConfigMaps that should be deployed with it.
-func (r *DynamoGraphDeploymentRequestReconciler) extractResourcesFromYAML(yamlContent []byte) (*dgdv1alpha1.DynamoGraphDeployment, []*unstructured.Unstructured, error) {
+func (r *DynamoGraphDeploymentRequestReconciler) extractResourcesFromYAML(yamlContent []byte) (*nvidiacomv1beta1.DynamoGraphDeployment, []*unstructured.Unstructured, error) {
 	decoder := yaml.NewYAMLOrJSONDecoder(bytes.NewReader(yamlContent), 4096)
 
-	var dgd *dgdv1alpha1.DynamoGraphDeployment
+	var dgd *nvidiacomv1beta1.DynamoGraphDeployment
 	var additionalResources []*unstructured.Unstructured
 
 	for {
@@ -2233,11 +2264,12 @@ func (r *DynamoGraphDeploymentRequestReconciler) extractResourcesFromYAML(yamlCo
 			continue
 		}
 
-		if obj.GetKind() == "DynamoGraphDeployment" {
-			dgd = &dgdv1alpha1.DynamoGraphDeployment{}
-			if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, dgd); err != nil {
+		if obj.GetKind() == consts.ResourceTypeDynamoGraphDeployment {
+			converted, err := dgdFromUnstructured(obj)
+			if err != nil {
 				return nil, nil, fmt.Errorf("failed to convert to DynamoGraphDeployment: %w", err)
 			}
+			dgd = converted
 		} else {
 			// Store ConfigMaps or other resources for deployment
 			additionalResources = append(additionalResources, obj)
@@ -2251,19 +2283,46 @@ func (r *DynamoGraphDeploymentRequestReconciler) extractResourcesFromYAML(yamlCo
 	return dgd, additionalResources, nil
 }
 
+func dgdFromUnstructured(obj *unstructured.Unstructured) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
+	if obj.GetKind() != consts.ResourceTypeDynamoGraphDeployment {
+		return nil, fmt.Errorf("expected kind %s, got %q", consts.ResourceTypeDynamoGraphDeployment, obj.GetKind())
+	}
+
+	switch obj.GetAPIVersion() {
+	case dgdv1alpha1.GroupVersion.String():
+		alphaDGD := &dgdv1alpha1.DynamoGraphDeployment{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, alphaDGD); err != nil {
+			return nil, err
+		}
+		betaDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
+		if err := alphaDGD.ConvertTo(betaDGD); err != nil {
+			return nil, err
+		}
+		return betaDGD, nil
+	case nvidiacomv1beta1.GroupVersion.String():
+		betaDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, betaDGD); err != nil {
+			return nil, err
+		}
+		return betaDGD, nil
+	default:
+		return nil, fmt.Errorf("unsupported DynamoGraphDeployment apiVersion %q", obj.GetAPIVersion())
+	}
+}
+
 // extractDGDFromYAML is a convenience wrapper that extracts only the DGD (used by tests)
-func (r *DynamoGraphDeploymentRequestReconciler) extractDGDFromYAML(yamlContent []byte) (*dgdv1alpha1.DynamoGraphDeployment, error) {
+func (r *DynamoGraphDeploymentRequestReconciler) extractDGDFromYAML(yamlContent []byte) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
 	dgd, _, err := r.extractResourcesFromYAML(yamlContent)
 	return dgd, err
 }
 
-// updateDeploymentInfo populates status.deploymentInfo from DGD service replica counts.
-func updateDeploymentInfo(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, dgd *dgdv1alpha1.DynamoGraphDeployment) bool {
+// updateDeploymentInfo populates status.deploymentInfo from DGD component replica counts.
+func updateDeploymentInfo(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest, dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
 	var totalReplicas, totalAvailable int32
-	for _, svc := range dgd.Status.Services {
-		totalReplicas += svc.Replicas
-		if svc.AvailableReplicas != nil {
-			totalAvailable += *svc.AvailableReplicas
+	for _, component := range dgd.Status.Components {
+		totalReplicas += component.Replicas
+		if component.AvailableReplicas != nil {
+			totalAvailable += *component.AvailableReplicas
 		}
 	}
 
@@ -2386,10 +2445,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 		})). // Watch Jobs created by this controller (via ownerReference)
 		// Watch DGDs created by this controller (via label)
 		Watches(
-			&dgdv1alpha1.DynamoGraphDeployment{},
+			&nvidiacomv1beta1.DynamoGraphDeployment{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
 				// Find DGDR by label instead of owner reference
-				dgd := obj.(*dgdv1alpha1.DynamoGraphDeployment)
+				dgd := obj.(*nvidiacomv1beta1.DynamoGraphDeployment)
 				dgdrName, hasName := dgd.Labels[nvidiacomv1beta1.LabelDGDRName]
 				dgdrNamespace, hasNamespace := dgd.Labels[nvidiacomv1beta1.LabelDGDRNamespace]
 				if !hasName || !hasNamespace {

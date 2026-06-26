@@ -27,7 +27,8 @@ For more background on the snapshot architecture and startup improvements, see
 
 - x86_64 (`amd64`) GPU nodes
 - NVIDIA driver 580.xx or newer on the target GPU nodes (590.xx or newer if testing multi-GPU snapshots)
-- vLLM or SGLang backend today
+- vLLM or SGLang backend today; TensorRT-LLM is supported only for the
+  experimental single-GPU aggregated text worker path.
 - Checkpoint storage. `ReadWriteMany` is the safest default for cross-node or
   concurrent multi-node access, but `podMount` mode can also use suitable
   `ReadWriteOnce` storage for sequential checkpoint/restore workflows.
@@ -632,7 +633,7 @@ If the manifest already carries snapshot target metadata, it must agree with the
 ## Planned Features
 
 - Stable multi-GPU and multinode support
-- TensorRT-LLM support
+- Broader TensorRT-LLM coverage beyond the current single-GPU aggregated text path
 
 ## Related Documentation
 

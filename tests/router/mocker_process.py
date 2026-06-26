@@ -114,6 +114,13 @@ def _build_mocker_command(
         command.extend(["--zmq-kv-events-ports", mocker_args["zmq_kv_events_ports"]])
     if "zmq_replay_ports" in mocker_args:
         command.extend(["--zmq-replay-ports", mocker_args["zmq_replay_ports"]])
+    if "response_replay_trace_path" in mocker_args:
+        command.extend(
+            [
+                "--response-replay-trace-path",
+                str(mocker_args["response_replay_trace_path"]),
+            ]
+        )
 
     return command
 

@@ -262,6 +262,7 @@ mod tests {
         DirectRequest {
             tokens: vec![1; 8],
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms,
@@ -325,6 +326,7 @@ mod tests {
                 completed_requests: 1,
                 output_signals: vec![OutputSignal {
                     uuid: Uuid::from_u128(7),
+                    token_id: None,
                     completed: true,
                     rejected: false,
                     handoff_delay_ms: None,
@@ -346,6 +348,7 @@ mod tests {
                 completed_requests: 2,
                 output_signals: vec![OutputSignal {
                     uuid: Uuid::from_u128(8),
+                    token_id: None,
                     completed: false,
                     rejected: false,
                     handoff_delay_ms: None,
