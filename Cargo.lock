@@ -5057,8 +5057,9 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "llm-multimodal"
-version = "1.6.0"
-source = "git+https://github.com/lightseekorg/smg?tag=v1.5.0#df9824b415d8ec94c1de71f594d30f953155de22"
+version = "1.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd7a7376b9308e4a34c4626e7e96de5173a75ba11703b2181bc463e303cd4817"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5074,15 +5075,18 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "url",
 ]
 
 [[package]]
 name = "llm-tokenizer"
-version = "1.4.0"
-source = "git+https://github.com/lightseekorg/smg?tag=v1.5.0#df9824b415d8ec94c1de71f594d30f953155de22"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7e66c065fba12ae39766881bdda1acb51188a2a7141972182bb4f00b4ff8652"
 dependencies = [
  "aho-corasick",
  "anyhow",
