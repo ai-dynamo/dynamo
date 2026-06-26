@@ -97,12 +97,17 @@ accounting assumes it owns the whole GPU. A GMS shadow engine needs:
 - **Hold until promoted:** boot, initialize, then wait (on the `flock` or your
   signal) and serve only once promoted.
 
-`dynamo.vllm` implements all of this; integrating another engine means doing this
-list (the `flock`, scratch managers, and unmap/remap primitives are in the wheel).
+In Dynamo's vLLM these are split across two layers: the **vLLM patches for GMS
+integration** (`gpu_memory_service.integrations.vllm`) provide the weight load,
+GMS-aware sleep/wake, memory-accounting fixes, and scratch KV; the **Dynamo vLLM
+wrapper** (`components/src/dynamo/vllm`) drives the hold-until-promoted
+activation (the `flock` gate and deferred discovery registration) and wires the
+two together. Integrating a different engine means providing this list yourself;
+the low-level primitives (`flock`, scratch managers, unmap/remap) are in the wheel.
 
 | Engine | Shadow lifecycle today |
 | --- | --- |
-| **vLLM** (`dynamo.vllm`) | **Full:** load, sleep/wake, scratch KV, `flock` activation. See the [recipe](../examples/shadow_failover/README.md). |
+| **vLLM** | **Full:** the vLLM patches for GMS integration plus the Dynamo vLLM wrapper provide load, sleep/wake, scratch KV, and `flock` activation. See the [recipe](../examples/shadow_failover/README.md). |
 | **TensorRT-LLM** | **Weight load only (prototype):** `LoadFormat.GMS` RW/RO; no sleep/wake, scratch KV, or `flock` activation yet. |
 | **SGLang** | GMS weight / memory-saver integration via the Dynamo runtime. |
 
