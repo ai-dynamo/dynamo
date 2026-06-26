@@ -39,6 +39,7 @@ from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 
 from .prepost import StreamingPostProcessor, preprocess_chat_request
+from .thinking import runtime_default_thinking_mode
 from .utils import (
     extract_mm_urls,
     handle_engine_error,
@@ -144,6 +145,7 @@ class VllmProcessor:
         routed_engine: RoutedEngine,
         block_size: int = 16,
         enable_auto_tool_choice: bool = False,
+        default_thinking_mode: str | None = None,
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
@@ -154,6 +156,7 @@ class VllmProcessor:
         self.exclude_tools_when_tool_choice_none = True
         self.block_size = block_size
         self.enable_auto_tool_choice = enable_auto_tool_choice
+        self.default_thinking_mode = default_thinking_mode
         # Sender for mm_kwargs transfer — instantiated lazily on first MM request.
         # MmKwargsShmSender for same-node transfers (default), MmKwargsNixlSender
         # for cross-node RDMA. Controlled by DYNAMO_MM_TRANSFER env var.
@@ -340,6 +343,7 @@ class VllmProcessor:
                 tool_parser_class=self.tool_parser_class,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
+                default_thinking_mode=self.default_thinking_mode,
             )
 
         request_for_sampling = pre.request_for_sampling
@@ -890,6 +894,7 @@ class EngineFactory:
             )
         else:
             reasoning_parser_class = None
+        default_thinking_mode = runtime_default_thinking_mode(mdc.runtime_config())
 
         block_size = self.config.kv_cache_block_size or 16
 
@@ -902,6 +907,7 @@ class EngineFactory:
             routed_engine,
             block_size=block_size,
             enable_auto_tool_choice=enable_auto_tool_choice,
+            default_thinking_mode=default_thinking_mode,
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none

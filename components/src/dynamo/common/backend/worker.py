@@ -117,6 +117,7 @@ class WorkerConfig:
     custom_jinja_template: Optional[str] = None
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
+    default_thinking_mode: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
     enable_local_indexer: bool = True
     # Operator-level kill switch for KV-aware-routing publishers. When False,
@@ -169,6 +170,9 @@ class WorkerConfig:
             ),
             "tool_call_parser": getattr(runtime_cfg, "dyn_tool_call_parser", None),
             "reasoning_parser": getattr(runtime_cfg, "dyn_reasoning_parser", None),
+            "default_thinking_mode": getattr(
+                runtime_cfg, "dyn_default_thinking_mode", None
+            ),
             "exclude_tools_when_tool_choice_none": getattr(
                 runtime_cfg, "exclude_tools_when_tool_choice_none", True
             ),
@@ -250,6 +254,7 @@ class Worker:
             custom_jinja_template=self.config.custom_jinja_template,
             tool_call_parser=self.config.tool_call_parser,
             reasoning_parser=self.config.reasoning_parser,
+            default_thinking_mode=self.config.default_thinking_mode,
             exclude_tools_when_tool_choice_none=(
                 self.config.exclude_tools_when_tool_choice_none
             ),

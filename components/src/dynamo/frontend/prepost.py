@@ -22,6 +22,8 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
+from .thinking import apply_default_thinking_mode_to_template_kwargs
+
 
 class _Renderer(Protocol):
     """Structural type for vLLM's chat-template renderer."""
@@ -90,6 +92,7 @@ def _prepare_request(
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
+    default_thinking_mode: str | None = None,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
@@ -134,6 +137,13 @@ def _prepare_request(
         else None
     )
     chat_template_kwargs = dict(request_for_sampling.chat_template_kwargs or {})
+    chat_template_kwargs = apply_default_thinking_mode_to_template_kwargs(
+        chat_template_kwargs,
+        default_thinking_mode,
+        request_has_root_thinking=(
+            isinstance(request, dict) and "thinking" in request
+        ),
+    )
     chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
 
     # Mistral warns that tokenize=False is unsafe for chat templates.
@@ -178,6 +188,7 @@ async def preprocess_chat_request(
     tool_parser_class: type[ToolParser] | None,
     exclude_tools_when_tool_choice_none: bool = True,
     enable_auto_tool_choice: bool = False,
+    default_thinking_mode: str | None = None,
 ) -> PreprocessResult:
     (
         request_for_sampling,
@@ -191,6 +202,7 @@ async def preprocess_chat_request(
         tool_parser_class=tool_parser_class,
         exclude_tools_when_tool_choice_none=exclude_tools_when_tool_choice_none,
         enable_auto_tool_choice=enable_auto_tool_choice,
+        default_thinking_mode=default_thinking_mode,
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
