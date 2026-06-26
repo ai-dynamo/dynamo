@@ -353,7 +353,7 @@ impl EventPublisher {
         // Use Msgpack codec for all transports
         enum TransportSetup {
             Nats(Arc<dyn EventTransportTx>, Arc<Codec>),
-            ZmqDirect(Arc<dyn EventTransportTx>, Arc<Codec>, String, u16), // public endpoint + bound port
+            ZmqDirect(Arc<dyn EventTransportTx>, Arc<Codec>, String), // public endpoint
             ZmqBroker(Arc<dyn EventTransportTx>, Arc<Codec>),
         }
 
@@ -417,7 +417,6 @@ impl EventPublisher {
                         Arc::new(pub_transport) as Arc<dyn EventTransportTx>,
                         codec,
                         public_endpoint,
-                        actual_port,
                     )
                 }
             }
@@ -432,9 +431,6 @@ impl EventPublisher {
                     component: scope.component().unwrap_or("").to_string(),
                     topic: topic.clone(),
                     transport: transport_config,
-                    // NATS publishers all share one subject, so the process-level
-                    // instance_id is a sufficient (and intentionally shared) key.
-                    discriminator: None,
                 };
 
                 let registered_instance = drt.discovery().register(spec).await?;
@@ -446,21 +442,13 @@ impl EventPublisher {
                 );
                 (tx, codec, Some(registered_instance))
             }
-            TransportSetup::ZmqDirect(tx, codec, public_endpoint, bound_port) => {
+            TransportSetup::ZmqDirect(tx, codec, public_endpoint) => {
                 let transport_config = EventTransport::zmq(public_endpoint);
                 let spec = DiscoverySpec::EventChannel {
                     namespace: scope.namespace().to_string(),
                     component: scope.component().unwrap_or("").to_string(),
                     topic: topic.clone(),
                     transport: transport_config,
-                    // Each direct-mode publisher binds its own PUB socket on a
-                    // distinct OS-assigned port. Multiple publishers in one
-                    // process (e.g. one per dp_rank) share the process-level
-                    // instance_id, so without this discriminator they collapse
-                    // onto a single discovery key and overwrite each other. The
-                    // bound port is unique per publisher within the process and
-                    // path-safe (numeric), giving each its own discoverable key.
-                    discriminator: Some(u64::from(bound_port)),
                 };
 
                 let registered_instance = drt.discovery().register(spec).await?;

@@ -46,21 +46,20 @@ impl KVStoreDiscovery {
 
     /// Build the key path for an event channel (relative to bucket, not absolute).
     ///
-    /// When `discriminator` is `Some`, it is appended as a fifth segment so that
-    /// multiple publishers in the same process (sharing one `instance_id`) for the
-    /// same `(namespace, component, topic)` get distinct keys instead of
-    /// overwriting one another. Matches [`EventChannelInstanceId::to_path`].
+    /// When `endpoint_port` is `Some` (ZMQ direct), it is appended as a fifth segment so
+    /// publishers sharing one process `instance_id` get distinct keys. Matches
+    /// [`EventChannelInstanceId::to_path`].
     fn event_channel_key(
         namespace: &str,
         component: &str,
         topic: &str,
         instance_id: u64,
-        discriminator: Option<u64>,
+        endpoint_port: Option<u64>,
     ) -> String {
-        match discriminator {
-            Some(discriminator) => format!(
+        match endpoint_port {
+            Some(endpoint_port) => format!(
                 "{}/{}/{}/{:x}/{:x}",
-                namespace, component, topic, instance_id, discriminator
+                namespace, component, topic, instance_id, endpoint_port
             ),
             None => format!("{}/{}/{}/{:x}", namespace, component, topic, instance_id),
         }
@@ -235,7 +234,7 @@ impl Discovery for KVStoreDiscovery {
                 component,
                 topic,
                 instance_id,
-                discriminator,
+                endpoint_port,
                 ..
             } => {
                 let key = Self::event_channel_key(
@@ -243,7 +242,7 @@ impl Discovery for KVStoreDiscovery {
                     component,
                     topic,
                     *instance_id,
-                    *discriminator,
+                    *endpoint_port,
                 );
                 // TODO: bis - remove this info log
                 tracing::info!(
@@ -360,7 +359,7 @@ impl Discovery for KVStoreDiscovery {
                 component,
                 topic,
                 instance_id,
-                discriminator,
+                endpoint_port,
                 ..
             } => {
                 let key = Self::event_channel_key(
@@ -368,7 +367,7 @@ impl Discovery for KVStoreDiscovery {
                     component,
                     topic,
                     *instance_id,
-                    *discriminator,
+                    *endpoint_port,
                 );
                 tracing::debug!(
                     "KVStoreDiscovery::unregister: Unregistering event channel instance_id={}, namespace={}, component={}, topic={}, key={}",
@@ -516,7 +515,7 @@ impl Discovery for KVStoreDiscovery {
                         // - Models: "namespace/component/endpoint/{instance_id:x}"
                         // - LoRA models: "namespace/component/endpoint/{instance_id:x}/{lora_slug}"
                         // - EventChannels: "namespace/component/topic/{instance_id:x}"
-                        // - EventChannels (ZMQ direct): "namespace/component/topic/{instance_id:x}/{discriminator:x}"
+                        // - EventChannels (ZMQ direct): "namespace/component/topic/{instance_id:x}/{endpoint_port:x}"
                         //
                         // Use strip_bucket_prefix for consistency with matches_prefix().
                         let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
@@ -544,19 +543,19 @@ impl Discovery for KVStoreDiscovery {
                         let id = if bucket_name == EVENT_CHANNELS_BUCKET {
                             // EventChannel keys:
                             //   namespace/component/topic/{instance_id:x}
-                            //   namespace/component/topic/{instance_id:x}/{discriminator:x}
+                            //   namespace/component/topic/{instance_id:x}/{endpoint_port:x}
                             let topic = key_parts[2].to_string();
                             let instance_id_hex = key_parts[3];
-                            // Optional 5th part is the per-publisher discriminator (ZMQ direct).
-                            let discriminator = match key_parts.get(4) {
+                            // Optional 5th part is the per-publisher endpoint_port (ZMQ direct).
+                            let endpoint_port = match key_parts.get(4) {
                                 Some(d) => match u64::from_str_radix(d, 16) {
-                                    Ok(discriminator) => Some(discriminator),
+                                    Ok(endpoint_port) => Some(endpoint_port),
                                     Err(e) => {
                                         tracing::warn!(
                                             key = %key_str,
                                             error = %e,
-                                            discriminator_hex = %d,
-                                            "Failed to parse event channel discriminator hex"
+                                            endpoint_port_hex = %d,
+                                            "Failed to parse event channel endpoint_port hex"
                                         );
                                         continue;
                                     }
@@ -570,7 +569,7 @@ impl Discovery for KVStoreDiscovery {
                                         component,
                                         topic,
                                         instance_id,
-                                        discriminator,
+                                        endpoint_port,
                                     })
                                 }
                                 Err(e) => {
@@ -688,7 +687,8 @@ mod tests {
         let client = KVStoreDiscovery::new(store, cancel_token);
 
         // All four share the client's (process) instance_id; only the
-        // discriminator (bound port) differs, mirroring one publisher per dp_rank.
+        // endpoint_port (bound port, derived from the transport) differs,
+        // mirroring one publisher per dp_rank.
         let ports = [40001u16, 40002, 40003, 40004];
         let mut registered = Vec::new();
         for port in ports {
@@ -697,7 +697,6 @@ mod tests {
                 component: "mocker".to_string(),
                 topic: "kv-events".to_string(),
                 transport: EventTransport::zmq(format!("tcp://10.0.0.1:{port}")),
-                discriminator: Some(u64::from(port)),
             };
             registered.push(client.register(spec).await.unwrap());
         }

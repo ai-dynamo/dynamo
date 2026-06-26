@@ -210,7 +210,7 @@ impl DynamicSubscriber {
     /// Build the per-publisher tracking key used for `active_endpoints`.
     ///
     /// Uses the full discovery path (which, for EventChannels, includes the
-    /// optional per-publisher discriminator) so that multiple publishers from
+    /// optional per-publisher endpoint_port) so that multiple publishers from
     /// the same process — sharing one `instance_id` — are tracked and torn down
     /// independently. The same key is derived from both `Added` and `Removed`
     /// events, so cancellation-on-removal still targets the correct stream.

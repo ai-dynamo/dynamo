@@ -335,17 +335,19 @@ pub enum DiscoverySpec {
         topic: String,
         /// Event transport type (NATS subject prefix or ZMQ endpoint)
         transport: EventTransport,
-        /// Optional per-publisher discriminator that disambiguates multiple
-        /// publishers created in the same process (which share one process-level
-        /// `instance_id`). Without it, multiple ZMQ-direct publishers in one
-        /// worker (e.g. one per dp_rank) collapse onto the same discovery key
-        /// `{namespace}/{component}/{topic}/{instance_id}` and overwrite each
-        /// other, so the router discovers only one endpoint per worker. ZMQ
-        /// direct mode sets this to the bound port (unique per publisher within
-        /// the process); NATS and ZMQ broker mode leave it `None`, preserving
-        /// their original single-key behaviour.
-        discriminator: Option<u64>,
     },
+}
+
+/// ZMQ-direct publishers each bind a unique PUB port; that port disambiguates
+/// multiple publishers that share one process-level `instance_id`. NATS and
+/// ZMQ-broker share a channel, so they need no per-publisher key segment.
+fn event_channel_endpoint_port(transport: &EventTransport) -> Option<u64> {
+    match transport {
+        EventTransport::Zmq { endpoint } => {
+            endpoint.rsplit(':').next().and_then(|p| p.parse().ok())
+        }
+        _ => None,
+    }
 }
 
 impl DiscoverySpec {
@@ -421,15 +423,17 @@ impl DiscoverySpec {
                 component,
                 topic,
                 transport,
-                discriminator,
-            } => DiscoveryInstance::EventChannel {
-                namespace,
-                component,
-                topic,
-                instance_id,
-                transport,
-                discriminator,
-            },
+            } => {
+                let endpoint_port = event_channel_endpoint_port(&transport);
+                DiscoveryInstance::EventChannel {
+                    namespace,
+                    component,
+                    topic,
+                    instance_id,
+                    transport,
+                    endpoint_port,
+                }
+            }
         }
     }
 }
@@ -462,11 +466,9 @@ pub enum DiscoveryInstance {
         instance_id: u64,
         /// Event transport type (NATS subject prefix or ZMQ endpoint)
         transport: EventTransport,
-        /// Optional per-publisher discriminator (see [`DiscoverySpec::EventChannel`]).
-        /// Older registrations and other transports omit it, hence `Option` + serde
-        /// default so existing serialized instances continue to deserialize.
+        /// ZMQ-direct bound port; disambiguates publishers sharing one process instance_id. None for NATS/broker.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        discriminator: Option<u64>,
+        endpoint_port: Option<u64>,
     },
 }
 
@@ -526,14 +528,14 @@ impl DiscoveryInstance {
                 component,
                 topic,
                 instance_id,
-                discriminator,
+                endpoint_port,
                 ..
             } => DiscoveryInstanceId::EventChannel(EventChannelInstanceId {
                 namespace: namespace.clone(),
                 component: component.clone(),
                 topic: topic.clone(),
                 instance_id: *instance_id,
-                discriminator: *discriminator,
+                endpoint_port: *endpoint_port,
             }),
         }
     }
@@ -588,13 +590,10 @@ pub struct ModelCardInstanceId {
     pub model_suffix: Option<String>,
 }
 
-/// Unique identifier for an event channel instance
+/// Unique identifier for an event channel instance.
 ///
-/// The process-level `instance_id` alone is not unique when a single process
-/// creates multiple publishers for the same `(namespace, component, topic)` —
-/// e.g. one ZMQ-direct `KvEventPublisher` per dp_rank. The optional
-/// `discriminator` (the bound ZMQ port for direct mode) restores uniqueness so
-/// every publisher gets its own discovery key and is independently discoverable.
+/// The optional `endpoint_port` (ZMQ-direct bound port) disambiguates multiple
+/// publishers that share one process-level `instance_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EventChannelInstanceId {
     pub namespace: String,
@@ -602,23 +601,18 @@ pub struct EventChannelInstanceId {
     /// Topic name for this channel (e.g., "kv-events", "kv-metrics")
     pub topic: String,
     pub instance_id: u64,
-    /// Optional per-publisher discriminator (see [`DiscoverySpec::EventChannel`]).
+    /// ZMQ-direct bound port; disambiguates publishers sharing one process instance_id. None for NATS/broker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discriminator: Option<u64>,
+    pub endpoint_port: Option<u64>,
 }
 
 impl EventChannelInstanceId {
-    /// Converts to a path string.
-    ///
-    /// - Without a discriminator: `{namespace}/{component}/{topic}/{instance_id:x}`
-    ///   (NATS / ZMQ broker — unchanged from the original format).
-    /// - With a discriminator: `{namespace}/{component}/{topic}/{instance_id:x}/{discriminator:x}`
-    ///   (ZMQ direct — one key per publisher in the process).
+    /// Converts to a path string; appends `/{endpoint_port:x}` when present (ZMQ direct).
     pub fn to_path(&self) -> String {
-        match self.discriminator {
-            Some(discriminator) => format!(
+        match self.endpoint_port {
+            Some(endpoint_port) => format!(
                 "{}/{}/{}/{:x}/{:x}",
-                self.namespace, self.component, self.topic, self.instance_id, discriminator
+                self.namespace, self.component, self.topic, self.instance_id, endpoint_port
             ),
             None => format!(
                 "{}/{}/{}/{:x}",
@@ -627,10 +621,7 @@ impl EventChannelInstanceId {
         }
     }
 
-    /// Parses from a path string produced by [`Self::to_path`].
-    ///
-    /// Accepts both the 4-part (no discriminator) and 5-part (with discriminator)
-    /// forms.
+    /// Parses from a path string produced by [`Self::to_path`] (4- or 5-part form).
     pub fn from_path(path: &str) -> Result<Self> {
         let parts: Vec<&str> = path.split('/').collect();
         if parts.len() != 4 && parts.len() != 5 {
@@ -639,10 +630,10 @@ impl EventChannelInstanceId {
                 parts.len()
             );
         }
-        let discriminator = match parts.get(4) {
+        let endpoint_port = match parts.get(4) {
             Some(d) => Some(
                 u64::from_str_radix(d, 16)
-                    .map_err(|e| anyhow::anyhow!("Invalid discriminator hex: {}", e))?,
+                    .map_err(|e| anyhow::anyhow!("Invalid endpoint_port hex: {}", e))?,
             ),
             None => None,
         };
@@ -652,7 +643,7 @@ impl EventChannelInstanceId {
             topic: parts[2].to_string(),
             instance_id: u64::from_str_radix(parts[3], 16)
                 .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
-            discriminator,
+            endpoint_port,
         })
     }
 }
