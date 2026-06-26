@@ -77,8 +77,8 @@ flowchart LR
     Gateway -->|"matches"| Route["HTTPRoute"]
     Route -->|"targets"| Pool["InferencePool"]
     Pool -->|"calls"| EPP["Dynamo EPP<br/>EndpointPicker"]
-    EPP -->|"x-dynamo-worker-instance-id"| Gateway
-    Gateway -->|"forward request"| Sidecar["Frontend sidecar<br/>--router-mode direct"]
+    EPP -->|"returns worker header"| Gateway
+    Gateway -->|"forwards request"| Sidecar["Frontend sidecar<br/>--router-mode direct"]
     Sidecar -->|"forwards"| Worker["Dynamo worker"]
     Worker -. "publishes KV events" .-> Runtime["Dynamo runtime<br/>NATS/JetStream"]
     Runtime -. "updates routing state" .-> EPP
@@ -98,13 +98,13 @@ by this quickstart path.
 
 ```mermaid
 flowchart LR
-    Client["Client"] --> Gateway["Gateway API<br/>Gateway"]
-    Gateway --> Route["HTTPRoute"]
-    Route --> Pool["InferencePool"]
-    Pool --> EPP["Dynamo EPP<br/>router-only mode"]
-    EPP -->|"selected endpoint"| VLLM["stock vLLM pod"]
-    VLLM -. "ZMQ KV events" .-> EPP
-    EPP --> Index["In-memory KV index"]
+    Client["Client"] -->|"sends request"| Gateway["Gateway API<br/>Gateway"]
+    Gateway -->|"matches"| Route["HTTPRoute"]
+    Route -->|"targets"| Pool["InferencePool"]
+    Pool -->|"calls"| EPP["Dynamo EPP<br/>router-only mode"]
+    EPP -->|"selects endpoint"| VLLM["stock vLLM pod"]
+    VLLM -. "publishes ZMQ KV events" .-> EPP
+    EPP -->|"updates"| Index["In-memory KV index"]
 ```
 
 In the on-ramp path, the EPP watches stock vLLM pods and consumes live vLLM ZMQ KV events directly.
