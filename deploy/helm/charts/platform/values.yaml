@@ -60,10 +60,14 @@ global:
     # Set to true when LWS is available in the cluster (installed externally).
     # Automatically true when install=true. The operator uses this to decide whether to
     # create LeaderWorkerSets for multinode deployments.
+    # NOTE: The operator requires both the LWS API group and the Volcano API group
+    # for the LWS pathway. If this value is explicitly set to true, startup will
+    # fail unless both APIs are available.
     enabled: false
 
   disaggregatedset:
     # -- Whether to enable DisaggregatedSet (DS) support on top of LWS.
+    # This is an operator-facing intent flag only.
     # This chart does not automatically sync DS enablement between the operator
     # flags under `global` and the upstream LWS chart settings:
     # - If you install LWS via this chart (`global.lws.install=true`), you must

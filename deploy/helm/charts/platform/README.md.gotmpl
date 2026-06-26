@@ -176,6 +176,11 @@ always installed once LWS is; `enableDisaggregatedSet=true` only
 adds the DS editor/viewer/admin `ClusterRoles` and the validating
 webhook entry.
 
+The operator's LWS pathway also requires the Volcano API group. In
+auto-detect mode, LWS is considered available only when both LWS and
+Volcano are detected. If `global.lws.enabled=true` is set explicitly,
+the operator will fail at startup unless both APIs are present.
+
 **Compatibility Matrix:**
 
 | dynamo-platform | lws (appVersion) |
