@@ -10,16 +10,18 @@ Dynamo splices the encoder's image embeds at the placeholder positions,
 submitting the result as a mixed ``EmbedsPrompt`` (``prompt_token_ids`` +
 ``prompt_is_token_ids`` + ``prompt_embeds``).
 
-The image placeholder token is identified by its **token string** (e.g.
-``<|image_pad|>`` for the Qwen family); the numeric id is resolved from the
-model's own tokenizer, which the encoder loads. Qwen-family encoders subclass
-``QwenBaseEncoder`` (the token string is preset); other models subclass
-``CustomEncoder`` directly and set ``image_placeholder_token``.
+The image placeholder token is identified by its **token string**; the numeric
+id is resolved from the model's own tokenizer, which the encoder loads.
+Qwen-family encoders subclass ``QwenCustomEncoder`` (in ``qwen_custom_encoder``,
+the token string is preset); other models subclass ``CustomEncoder`` directly
+and set ``image_placeholder_token``.
 
 Usage::
 
     # customer_encoder.py (in their private Docker image)
-    class MyEncoder(QwenBaseEncoder):
+    from dynamo.vllm.multimodal_utils.qwen_custom_encoder import QwenCustomEncoder
+
+    class MyEncoder(QwenCustomEncoder):
         def load(self, model_id, device):
             # load ViT + projector + tokenizer; set self.tokenizer
             ...
@@ -40,14 +42,6 @@ from abc import ABC, abstractmethod
 from typing import ClassVar, List, Optional
 
 import torch
-
-# Image placeholder token *string* for the Qwen family (Qwen2-VL / Qwen3-VL /
-# Qwen3-VL-MoE / Qwen3.5). The numeric id is always resolved from the encoder's
-# tokenizer (placeholder_token_id_from_tokenizer); the family-specific knowledge
-# is just this string. The same string maps to different ids across Qwen
-# versions (e.g. 151655 for Qwen3-VL vs 248056 for Qwen3.5), which is exactly
-# why the tokenizer — not a static id table — is authoritative.
-QWEN_IMAGE_PLACEHOLDER_TOKEN = "<|image_pad|>"
 
 
 def placeholder_token_id_from_tokenizer(
@@ -90,13 +84,15 @@ class CustomEncoder(ABC):
 
     Subclasses set ``image_placeholder_token`` to their model's image
     placeholder token string (Qwen-family encoders inherit it from
-    ``QwenBaseEncoder``) and assign ``self.tokenizer`` in ``load`` so the
+    ``QwenCustomEncoder``) and assign ``self.tokenizer`` in ``load`` so the
     numeric id can be resolved.
 
     Usage::
 
-        # Qwen-family model: subclass QwenBaseEncoder (token string preset)
-        class MyEncoder(QwenBaseEncoder):
+        # Qwen-family model: subclass QwenCustomEncoder (token string preset)
+        from dynamo.vllm.multimodal_utils.qwen_custom_encoder import QwenCustomEncoder
+
+        class MyEncoder(QwenCustomEncoder):
             def load(self, model_id, device):
                 # load ViT + projector + tokenizer; set self.tokenizer
                 ...
@@ -116,7 +112,7 @@ class CustomEncoder(ABC):
     """
 
     # Subclasses set their model's image placeholder token string. Subclass
-    # QwenBaseEncoder for Qwen-family models, or set this directly for others.
+    # QwenCustomEncoder for Qwen-family models, or set this directly for others.
     image_placeholder_token: ClassVar[Optional[str]] = None
 
     @abstractmethod
@@ -164,7 +160,7 @@ class CustomEncoder(ABC):
         token = self.image_placeholder_token
         if token is None:
             raise ValueError(
-                "image_placeholder_token is not set. Subclass QwenBaseEncoder for "
+                "image_placeholder_token is not set. Subclass QwenCustomEncoder for "
                 "Qwen-family models, or set image_placeholder_token to your model's "
                 "image placeholder token string."
             )
@@ -196,16 +192,3 @@ class CustomEncoder(ABC):
             ValueError: propagated from ``get_image_placeholder_token_id``.
         """
         self.get_image_placeholder_token_id()
-
-
-class QwenBaseEncoder(CustomEncoder):
-    """Semi-abstract base for Qwen-family encoders (Qwen2-VL / Qwen3-VL / Qwen3.5).
-
-    Presets the Qwen image placeholder token string; the numeric id is resolved
-    from the model tokenizer at runtime (the same string maps to different ids
-    across Qwen versions, so the tokenizer is authoritative). Subclasses
-    implement ``load`` (assigning ``self.tokenizer``) and ``encode``; both stay
-    abstract, so this class cannot be instantiated directly.
-    """
-
-    image_placeholder_token = QWEN_IMAGE_PLACEHOLDER_TOKEN
