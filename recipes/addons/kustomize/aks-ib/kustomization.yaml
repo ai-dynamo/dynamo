@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Azure AKS InfiniBand addon (Kustomize Component) for a Dynamo DynamoGraphDeployment.
+#
+# Adds the IB KV-transfer layer (UCX over InfiniBand) to the disaggregated workers:
+#   - rdma/ib device request (RDMA shared-device-plugin slot → /dev/infiniband/*)
+#   - UCX_NET_DEVICES pinned to the compute fabric + NCCL_SOCKET_IFNAME
+#   - privileged securityContext + IPC_LOCK (required to register CUDA VRAM with the HCA)
+#
+# Usage — wrap your DGD and pull this component in:
+#   # my-deploy/kustomization.yaml
+#   resources:
+#     - my-dgd.yaml
+#   components:
+#     - <path-or-git-url>/recipes/addons/kustomize/aks-ib
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# SERVICE NAMES: targets `VllmPrefillWorker` / `VllmDecodeWorker` (the vLLM disagg
+# recipes). For other worker names (TRT-LLM uses `prefill`/`decode`), copy this dir
+# and retarget:
+#   sed -i 's/VllmPrefillWorker/prefill/g; s/VllmDecodeWorker/decode/g' kustomization.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# UCX_NET_DEVICES pins KV transfer to the compute-fabric NICs (mlx5_0..3 on
+# Standard_ND96isr_H100_v5). Without it, UCX auto-probe can bind a side-fabric NIC,
+# which degrades KV-transfer bandwidth and zeroes the NIXL KV-bandwidth counter. The
+# list is cluster-specific — derive yours from `ibv_devinfo` (compute-fabric HCAs only).
+#
+# AKS IB partitions are per-agentpool (each pool has its own pkey), so prefill and
+# decode must land in the SAME agentpool or NIXL wireup crashes (NIXL_ERR_BACKEND).
+# Pin both workers to one pool with a nodeSelector in your base DGD.
+#
+# NOT included (set these in your base DGD):
+#   - an RDMA-capable image,
+#   - the engine's NIXL UCX backend (vLLM default; or `"backends":["UCX"]`),
+#   - the single-agentpool nodeSelector (cluster-specific).
+
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+patches:
+  # --- rdma/ib device resource + privileged securityContext (strategic merge) ---
+  - target:
+      group: nvidia.com
+      kind: DynamoGraphDeployment
+    patch: |-
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      metadata:
+        name: aks-ib-addon  # ignored — selection is via `target`
+      spec:
+        services:
+          VllmPrefillWorker:
+            resources:
+              limits:
+                custom:
+                  rdma/ib: "1"
+              requests:
+                custom:
+                  rdma/ib: "1"
+            extraPodSpec:
+              mainContainer:
+                securityContext:
+                  privileged: true
+                  capabilities:
+                    add: [IPC_LOCK, SYS_PTRACE]
+          VllmDecodeWorker:
+            resources:
+              limits:
+                custom:
+                  rdma/ib: "1"
+              requests:
+                custom:
+                  rdma/ib: "1"
+            extraPodSpec:
+              mainContainer:
+                securityContext:
+                  privileged: true
+                  capabilities:
+                    add: [IPC_LOCK, SYS_PTRACE]
+
+  # --- UCX compute-fabric pin + NCCL iface (JSON6902 append — preserves existing env) ---
+  - target:
+      group: nvidia.com
+      kind: DynamoGraphDeployment
+    patch: |-
+      - op: add
+        path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-
+        value: { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
+      - op: add
+        path: /spec/services/VllmPrefillWorker/extraPodSpec/mainContainer/env/-
+        value: { name: NCCL_SOCKET_IFNAME, value: "eth0" }
+      - op: add
+        path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-
+        value: { name: UCX_NET_DEVICES, value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1" }
+      - op: add
+        path: /spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/env/-
+        value: { name: NCCL_SOCKET_IFNAME, value: "eth0" }
