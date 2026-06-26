@@ -211,6 +211,8 @@ pub enum MoveBlockResponse {
 pub struct DirectRequest {
     pub tokens: Vec<Token>,
     pub max_output_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_ids: Option<Vec<Token>>,
     pub uuid: Option<Uuid>,
     pub dp_rank: u32,
     pub arrival_timestamp_ms: Option<f64>,
@@ -269,6 +271,8 @@ impl PrefillCost {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSignal {
     pub uuid: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<Token>,
     /// Terminal flag: the request's lifecycle has ended. Replay drivers free
     /// resources and advance/notify on this.
     pub completed: bool,
@@ -563,6 +567,7 @@ struct MockEngineArgsSerde {
     bandwidth_g2_to_g4_gbps: OptionalConfigValue<f64>,
     bandwidth_g4_to_g2_gbps: OptionalConfigValue<f64>,
     reasoning: OptionalConfigValue<ReasoningConfig>,
+    response_replay_trace_path: OptionalConfigValue<PathBuf>,
     zmq_kv_events_port: OptionalConfigValue<u16>,
     zmq_replay_port: OptionalConfigValue<u16>,
     preemption_mode: OptionalConfigValue<String>,
@@ -864,6 +869,12 @@ pub struct MockEngineArgs {
     /// When set, the mocker wraps output in thinking boundary tokens.
     #[builder(default = "None")]
     pub reasoning: Option<ReasoningConfig>,
+
+    /// Optional Mooncake trace with exact output token IDs keyed by
+    /// `output_replay_id` annotations. Direct replay paths carry the same token
+    /// IDs on `DirectRequest` and do not need this lookup.
+    #[builder(default = "None")]
+    pub response_replay_trace_path: Option<PathBuf>,
 
     /// ZMQ port for publishing KV events in vLLM's native wire format.
     /// When set, the scheduler publishes to a ZMQ PUB socket instead of directly to NATS.
@@ -1192,6 +1203,10 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(reasoning) = compat.reasoning.into_nullable() {
             builder = builder.reasoning(reasoning);
+        }
+        if let Some(response_replay_trace_path) = compat.response_replay_trace_path.into_nullable()
+        {
+            builder = builder.response_replay_trace_path(response_replay_trace_path);
         }
         if let Some(zmq_kv_events_port) = compat.zmq_kv_events_port.into_nullable() {
             builder = builder.zmq_kv_events_port(zmq_kv_events_port);

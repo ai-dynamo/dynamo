@@ -34,6 +34,7 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
+    local_model::runtime_config::TokenizerBackend,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -150,6 +151,8 @@ pub struct ModelWatcher {
     /// `file://` slots can fall back here when the worker's path is
     /// unreachable on this host.
     local_model_path: Option<PathBuf>,
+    /// Frontend-level tokenizer backend override for discovered model cards.
+    tokenizer_backend: Option<TokenizerBackend>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -230,6 +233,7 @@ impl ModelWatcher {
             registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
             local_model_path: None,
+            tokenizer_backend: None,
         }
     }
 
@@ -239,6 +243,16 @@ impl ModelWatcher {
 
     pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
         self.local_model_path = path;
+    }
+
+    pub fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) {
+        self.tokenizer_backend = tokenizer_backend;
+    }
+
+    fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
+        if let Some(tokenizer_backend) = self.tokenizer_backend {
+            card.runtime_config.tokenizer_backend = Some(tokenizer_backend);
+        }
     }
 
     /// Wait until we have at least one chat completions model and return it's name.
@@ -316,6 +330,8 @@ impl ModelWatcher {
                         );
                         continue;
                     }
+
+                    self.apply_tokenizer_backend_override(&mut card);
 
                     // If a WorkerSet already exists for this (model, namespace, type),
                     // validate that the new worker's checksum matches. Different
@@ -1280,7 +1296,8 @@ impl ModelWatcher {
         let mut results = Vec::with_capacity(instances.len());
         for instance in instances {
             match instance.deserialize_model::<ModelDeploymentCard>() {
-                Ok(card) => {
+                Ok(mut card) => {
+                    self.apply_tokenizer_backend_override(&mut card);
                     let endpoint_id = match &instance {
                         dynamo_runtime::discovery::DiscoveryInstance::Model {
                             namespace,

@@ -793,6 +793,18 @@ impl VllmCore {
     ) -> VllmRequestState {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         let mut max_output_tokens = request.max_output_tokens;
+        let planned_output_ids = request.output_token_ids;
+        if let Some(planned_output_ids) = planned_output_ids.as_ref()
+            && planned_output_ids.len() != max_output_tokens
+        {
+            tracing::warn!(
+                %uuid,
+                requested = max_output_tokens,
+                planned = planned_output_ids.len(),
+                "planned output token count differs from max_output_tokens; using planned count"
+            );
+            max_output_tokens = planned_output_ids.len();
+        }
         if let Some(clamped) = policy::normalize_max_output_tokens(
             self.args.scheduling_policy(),
             request.tokens.len(),
@@ -809,12 +821,13 @@ impl VllmCore {
         // The `None` case (a TRT-LLM prompt alone leaves no decode room) is
         // unchanged here. The waiting-admission policy owns terminal rejection
         // because that path can emit the lifecycle signal.
-        let sequence = ActiveSequence::new(
+        let sequence = ActiveSequence::new_with_planned_output_ids(
             request.tokens,
             max_output_tokens,
             Some(self.args.block_size),
             self.args.enable_prefix_caching,
             self.args.zmq_kv_events_port.is_some(),
+            planned_output_ids,
         );
         VllmRequestState {
             sequence,
@@ -1442,6 +1455,7 @@ impl VllmCore {
         for uuid in rejected_uuids {
             output_signals.push(OutputSignal {
                 uuid,
+                token_id: None,
                 completed: true,
                 rejected: true,
                 handoff_delay_ms: None,
@@ -1824,6 +1838,7 @@ impl VllmCore {
         let mut running_changed = false;
         for uuid in ready {
             let mut emitted = false;
+            let mut emitted_token_id = None;
             let mut completed = false;
             let mut deferred_deref = Vec::new();
             loop {
@@ -1831,7 +1846,7 @@ impl VllmCore {
                 let Some(sequence) = self.state.running_sequence_mut(uuid) else {
                     break;
                 };
-                let signals = sequence.generate();
+                let (token_id, signals) = sequence.generate_token();
                 completed = sequence.generated_tokens() >= sequence.max_output_tokens();
                 let effects = if completed {
                     split_terminal_effects(signals)
@@ -1848,6 +1863,7 @@ impl VllmCore {
                         sequence.commit_allocation(sequence.len());
                     }
                     emitted = true;
+                    emitted_token_id = Some(token_id);
                     deferred_deref = effects.cleanup;
                     break;
                 }
@@ -1880,6 +1896,7 @@ impl VllmCore {
             });
             let output_signal = OutputSignal {
                 uuid,
+                token_id: emitted_token_id,
                 completed,
                 rejected: false,
                 handoff_delay_ms,
@@ -2029,16 +2046,16 @@ impl VllmCore {
             let mut completed = false;
             let mut deferred_deref = Vec::new();
             for _ in 0..burst {
-                let (signals, is_complete) = {
+                let (token_id, signals, is_complete) = {
                     let request = self
                         .state
                         .requests
                         .get_mut(&uuid)
                         .expect("sampled request must remain active");
-                    let signals = request.sequence.generate();
+                    let (token_id, signals) = request.sequence.generate_token();
                     let is_complete =
                         request.sequence.generated_tokens() >= request.sequence.max_output_tokens();
-                    (signals, is_complete)
+                    (token_id, signals, is_complete)
                 };
                 let effects = if is_complete {
                     split_terminal_effects(signals)
@@ -2053,21 +2070,20 @@ impl VllmCore {
                         .process_decode_signal(signal, &mut reservation);
                 }
 
-                let (is_complete, prompt_tokens) = {
+                let prompt_tokens = {
                     let request = self
                         .state
                         .requests
                         .get_mut(&uuid)
                         .expect("sampled request must remain active");
-                    let is_complete =
-                        request.sequence.generated_tokens() >= request.sequence.max_output_tokens();
                     if !is_complete {
                         request.sequence.commit_allocation(request.sequence.len());
                     }
-                    (is_complete, request.sequence.num_input_tokens())
+                    request.sequence.num_input_tokens()
                 };
                 output_signals.push(OutputSignal {
                     uuid,
+                    token_id: Some(token_id),
                     completed: is_complete,
                     rejected: false,
                     handoff_delay_ms: compute_prefill_handoff_delay_ms(
