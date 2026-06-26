@@ -91,14 +91,12 @@ impl OpenEngine for FakeOpenEngine {
             match cfg.role {
                 pb::EngineRole::Prefill => {
                     // Prefill returns a single KV handoff and no decoded tokens.
-                    // Mirror real SGLang prefill: typed params via attributes_struct,
-                    // legacy string map left empty.
+                    // Mirror real SGLang prefill: typed params via attributes_struct.
                     let kv = pb::KvSessionRef {
                         session_id: request_id.clone(),
                         transfer_backend: "NixlConnector".to_string(),
                         endpoints: Vec::new(),
                         dp_rank: 0,
-                        attributes: Default::default(),
                         attributes_struct: json_to_prost_struct(&serde_json::json!({
                             "remote_engine_id": "engine-fake",
                             "remote_block_ids": [1, 2, 3],
@@ -897,7 +895,6 @@ fn disagg_json_round_trips_through_kv_session() {
         transfer_backend: "NixlConnector".to_string(),
         endpoints: Vec::new(),
         dp_rank: 3,
-        attributes: Default::default(),
         attributes_struct: json_to_prost_struct(&attrs),
     };
 
@@ -914,34 +911,11 @@ fn disagg_json_round_trips_through_kv_session() {
 }
 
 #[test]
-fn disagg_json_round_trips_legacy_string_attributes() {
-    // Back-compat: a peer that still sends the string-map `attributes` (no
-    // attributes_struct) round-trips through the legacy path unchanged.
-    let original = pb::KvSessionRef {
-        session_id: "sess-2".to_string(),
-        transfer_backend: "NixlConnector".to_string(),
-        endpoints: Vec::new(),
-        dp_rank: 1,
-        attributes: [("remote_engine_id".to_string(), "engine-9".to_string())]
-            .into_iter()
-            .collect(),
-        attributes_struct: None,
-    };
-
-    let json = kv_session_to_disagg_json(original.clone());
-    let restored = disagg_json_to_kv_session(&json, "fallback-id");
-
-    assert!(restored.attributes_struct.is_none());
-    assert_eq!(restored.attributes, original.attributes);
-}
-
-#[test]
 fn disagg_json_falls_back_to_request_id_when_session_id_absent() {
     let restored = disagg_json_to_kv_session(&serde_json::json!({}), "req-42");
     assert_eq!(restored.session_id, "req-42");
     assert!(restored.transfer_backend.is_empty());
     assert_eq!(restored.dp_rank, 0);
-    assert!(restored.attributes.is_empty());
 }
 
 // ============================================================================
