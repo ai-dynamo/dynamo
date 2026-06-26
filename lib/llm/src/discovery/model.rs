@@ -1111,8 +1111,9 @@ mod tests {
 
     // -- Encode-set visibility --
     //
-    // Encode workers ride the EncoderRouter, not the public chat/completions
-    // surface. Tests below verify is_displayable correctly hides Encode-only
+    // Encode workers are reached through encoder routing, not the public
+    // chat/completions surface. Tests below verify is_displayable correctly
+    // hides Encode-only
     // deployments from /v1/models and continues to surface mixed
     // Aggregated+Encode deployments via the Aggregated set only.
 
@@ -1136,7 +1137,7 @@ mod tests {
         // skips pipeline construction) and is_prefill_set excludes Encode,
         // so an Encode-only model has no displayable WorkerSet and stays
         // hidden from /v1/models. The frontend's chat/completions surface
-        // is not where users hit Encode workers; the EncoderRouter is.
+        // is not where users reach Encode workers; encoder routing is.
         let model = Model::new("llava".to_string());
         model.add_worker_set(
             "dynamo:encode".to_string(),

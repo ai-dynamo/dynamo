@@ -220,9 +220,9 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_result: Option<PrefillResult>,
 
-    /// Multimodal encoder handoff payload, set by the frontend's
-    /// EncoderRouter on requests forwarded from an Encode worker to a
-    /// downstream Prefill/Aggregated peer. Engine-opaque JSON object;
+    /// Multimodal encoder handoff payload, set by the frontend when
+    /// forwarding a request from an Encode worker to a downstream
+    /// Prefill/Aggregated peer. Engine-opaque JSON object;
     /// the framework neither inspects nor mutates the contents. Object-
     /// only by contract (see Python `require_encoder_result` and the
     /// Rust `LLMEngineOutput::encode_terminal` constructor).
@@ -447,7 +447,7 @@ mod tests {
     }
 
     /// `encoder_result` is the multimodal encoder handoff payload set by
-    /// the frontend's EncoderRouter on requests forwarded to a downstream
+    /// the frontend when forwarding a request to a downstream
     /// Prefill/Aggregated worker. The wire shape is engine-opaque -- the
     /// framework must round-trip the value byte-identical without
     /// inspecting or wrapping it.

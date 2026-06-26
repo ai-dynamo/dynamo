@@ -11,7 +11,7 @@ Three small helpers, parallel to the prefill/decode pair in
   suitable for engine APIs that accept those names.
 * :func:`require_encoder_result` — read ``encoder_result`` off a
   downstream Prefill/Aggregated request; raise when missing or wrongly
-  shaped (the EncoderRouter handoff contract).
+  shaped (the encoder handoff contract).
 * :func:`encoder_terminal_chunk` — build the terminal ``GenerateChunk``
   an Encode worker yields.
 
@@ -60,10 +60,10 @@ def require_encoder_result(
     or wrongly shaped.
 
     Analog of :func:`dynamo.common.backend.disagg.require_prefill_result`.
-    The EncoderRouter is expected to forward the Encode worker's
-    terminal-chunk ``encoder_result`` onto the downstream
+    The frontend is expected to forward the Encode worker's terminal-chunk
+    ``encoder_result`` onto the downstream
     ``PreprocessedRequest.encoder_result``; missing means the request
-    bypassed the router (or the engine is misconfigured).
+    bypassed encoder routing (or the engine is misconfigured).
 
     Raises:
         ValueError: when ``encoder_result`` is absent.
@@ -74,8 +74,8 @@ def require_encoder_result(
     if encoder_result is None:
         raise ValueError(
             f"{mode.value} worker received request with no encoder_result; "
-            "expected the frontend's EncoderRouter to forward the encoder "
-            "handoff payload from an Encode peer"
+            "expected the frontend to forward the encoder handoff payload "
+            "from an Encode peer"
         )
     if not isinstance(encoder_result, dict):
         raise ValueError(

@@ -210,7 +210,7 @@ def test_encoder_result_no_wrapper_end_to_end():
         "processed_token_ids": [128_000, 200_001, 200_002],
     }
     terminal = encoder_terminal_chunk(original)
-    # Forwarded by the EncoderRouter onto the downstream request:
+    # Forwarded by the frontend onto the downstream request:
     downstream_request = {
         "token_ids": [1],
         "encoder_result": terminal["encoder_result"],

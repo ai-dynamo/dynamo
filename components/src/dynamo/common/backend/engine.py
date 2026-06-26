@@ -46,7 +46,7 @@ class GenerateRequest(TypedDict, total=False):
     Multimodal keys (``multi_modal_data``, ``mm_processor_kwargs``,
     ``mm_routing_info``) are populated by the frontend preprocessor when
     the request carries media. ``encoder_result`` is set by the
-    frontend's EncoderRouter on requests forwarded from an Encode worker
+    frontend when forwarding a request from an Encode worker
     to a downstream Prefill/Aggregated peer; engines read it via
     :func:`dynamo.common.backend.multimodal.require_encoder_result`. All
     four are object-shaped (``dict``) by contract.
@@ -87,7 +87,7 @@ class GenerateChunk(TypedDict, total=False):
     :mod:`dynamo.common.backend.logprobs`.
 
     Encode terminals carry ``encoder_result`` (an opaque object the
-    EncoderRouter forwards onto the downstream
+    frontend forwards onto the downstream
     ``PreprocessedRequest.encoder_result``). Construct with
     :func:`dynamo.common.backend.multimodal.encoder_terminal_chunk`.
     """

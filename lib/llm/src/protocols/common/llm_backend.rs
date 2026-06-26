@@ -127,8 +127,8 @@ pub struct BackendOutput {
 
     /// Multimodal encoder handoff payload (object-only by contract).
     /// Set by Encode workers on their terminal chunk; consumed by the
-    /// frontend's EncoderRouter and threaded onto the downstream
-    /// PreprocessedRequest. Engine-opaque; framework does not inspect.
+    /// frontend and threaded onto the downstream PreprocessedRequest.
+    /// Engine-opaque; framework does not inspect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoder_result: Option<serde_json::Value>,
 

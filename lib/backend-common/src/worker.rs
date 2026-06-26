@@ -1434,8 +1434,9 @@ fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> O
 /// still routes disaggregated traffic during the cross-version rollout. A new
 /// frontend ignores it and dispatches off `worker_type`.
 ///
-/// Encode workers also expose no public OpenAI surface — they are reached via
-/// the EncoderRouter, not the frontend. They register surface-less
+/// Encode workers also expose no public OpenAI surface — they are reached
+/// through encoder routing, not the frontend's public serving surface. They
+/// register surface-less
 /// (`ModelType::empty()`) so the discovery watcher registers them for
 /// serving-readiness only and hides them from `/v1/models`; the role is
 /// carried by `WorkerType::Encode`.
@@ -2014,8 +2015,8 @@ mod tests {
 
     #[test]
     fn resolve_model_type_encode_is_surface_less() {
-        // Encode workers expose no public OpenAI surface: they are reached via
-        // the EncoderRouter, not the frontend. --disaggregation-mode encode
+        // Encode workers expose no public OpenAI surface: they are reached
+        // through encoder routing, not the frontend. --disaggregation-mode encode
         // forces ModelType::empty() (even when endpoint_types is left at the
         // "chat,completions" default) so the discovery watcher registers them
         // for serving-readiness only and hides them from /v1/models. The role
