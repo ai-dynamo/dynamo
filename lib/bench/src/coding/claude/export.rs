@@ -345,7 +345,7 @@ impl FidelityVerifier {
                     );
                 }
                 self.causal_references.push((
-                    turn.export_session_id.clone(),
+                    turn.session_id.clone(),
                     consumer_turn_index,
                     tool.tool_call_id.clone(),
                 ));
@@ -1252,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn request_trace_preserves_claude_child_identity_and_converts_to_agentic() {
+    fn request_trace_preserves_child_identity_and_anonymized_causality() {
         use dynamo_data_gen::request_trace::{
             agentic::lower_agentic_mooncake_rows, load::load_request_trace_records,
         };
@@ -1342,19 +1342,31 @@ mod tests {
             ],
         );
 
+        let config = ExportConfig {
+            block_size: 2,
+            delta_overlap_words: 50,
+            tokenizer_workers: 2,
+        };
         let stats = write_streamed_request_trace_rows(
             &output_path,
             &sidecar_path,
-            sessions,
+            sessions.clone(),
             true,
             StubFactory::default(),
-            ExportConfig {
-                block_size: 2,
-                delta_overlap_words: 50,
-                tokenizer_workers: 2,
-            },
+            config,
         )
         .unwrap();
+
+        let anonymous_stats = write_streamed_request_trace_rows(
+            &temp.path().join("anonymous.jsonl"),
+            &temp.path().join("anonymous.sidecar.jsonl"),
+            sessions,
+            false,
+            StubFactory::default(),
+            config,
+        )
+        .unwrap();
+        assert_eq!(anonymous_stats.fidelity.requests_verified, 4);
 
         assert_eq!(stats.fidelity.requests_verified, 4);
         assert_eq!(stats.fidelity.tools_verified, 1);

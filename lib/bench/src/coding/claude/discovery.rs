@@ -42,7 +42,7 @@ pub fn discover_trace_files(explicit_inputs: &[String], start_dir: &Path) -> Res
             let input_path = expand_user_path(raw_path);
             let input_path = input_path.canonicalize().unwrap_or(input_path);
             if input_path.is_file() {
-                if !is_trace_path(&input_path) || is_ignored_path(&input_path) {
+                if !is_trace_path(&input_path) {
                     bail!("not a Claude session trace file: {}", input_path.display());
                 }
                 discovered.push(input_path.clone());
@@ -119,7 +119,7 @@ fn scan_trace_dir(root: &Path) -> Result<Vec<PathBuf>> {
                 queue.push_back(path);
                 continue;
             }
-            if file_type.is_file() && is_trace_path(&path) && !is_ignored_path(&path) {
+            if file_type.is_file() && is_trace_path(&path) {
                 discovered.push(path);
             }
         }
@@ -134,12 +134,6 @@ fn is_trace_path(path: &Path) -> bool {
         && !IGNORED_FILENAMES
             .iter()
             .any(|ignored| path.file_name().and_then(|value| value.to_str()) == Some(ignored))
-}
-
-fn is_ignored_path(path: &Path) -> bool {
-    IGNORED_FILENAMES
-        .iter()
-        .any(|ignored| path.file_name().and_then(|value| value.to_str()) == Some(ignored))
 }
 
 #[cfg(test)]

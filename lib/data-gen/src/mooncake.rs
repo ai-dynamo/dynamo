@@ -440,18 +440,12 @@ mod tests {
     }
 
     #[test]
-    fn token_blocks_derive_ids_from_shared_kv_hashing_contract() {
+    fn exact_token_blocks_match_shared_kv_hashing_contract() {
         let tokens = vec![7u32, 8, 9, 10, 11, 12, 13, 14];
         let request = Request::builder().tokens(tokens.clone()).build().unwrap();
-        let sequence_hashes = request.sequence_hashes(4).unwrap();
+        let expected = request.into_sequence_hashes(4).unwrap();
 
-        let mut token_mapper = RollingHashIdMapper::new(4);
-        let mut sequence_mapper = RollingHashIdMapper::new(4);
-
-        let token_ids = token_mapper.hash_token_blocks(&tokens);
-        let sequence_ids = sequence_mapper.ids_for_sequence_hashes(&sequence_hashes);
-
-        assert_eq!(token_ids, sequence_ids);
+        assert_eq!(sequence_hashes_for_tokens(&tokens, 4).unwrap(), expected);
     }
 
     #[test]
@@ -472,23 +466,16 @@ mod tests {
     fn trailing_partial_block_uses_shared_chain_contract() {
         let tokens = vec![1u32, 2, 3, 4, 5, 6];
         let request = Request::builder().tokens(tokens.clone()).build().unwrap();
-        let complete_sequence_hashes = request.sequence_hashes(4).unwrap();
+        let salt_hash = request.salt_hash().unwrap();
+        let mut expected = request.into_sequence_hashes(4).unwrap();
         let mut tail_bytes = Vec::new();
         for token in &tokens[4..] {
             tail_bytes.extend_from_slice(&token.to_ne_bytes());
         }
-        let tail_block_hash = compute_hash_v2(&tail_bytes, request.salt_hash().unwrap());
-        let expected_tail_hash =
-            compute_next_sequence_hash(complete_sequence_hashes[0], tail_block_hash);
+        let tail_block_hash = compute_hash_v2(&tail_bytes, salt_hash);
+        expected.push(compute_next_sequence_hash(expected[0], tail_block_hash));
 
-        let mut token_mapper = RollingHashIdMapper::new(4);
-        let mut sequence_mapper = RollingHashIdMapper::new(4);
-        let token_ids = token_mapper.hash_token_blocks(&tokens);
-        let mut expected_hashes = complete_sequence_hashes;
-        expected_hashes.push(expected_tail_hash);
-        let sequence_ids = sequence_mapper.ids_for_sequence_hashes(&expected_hashes);
-
-        assert_eq!(token_ids, sequence_ids);
+        assert_eq!(sequence_hashes_for_tokens(&tokens, 4).unwrap(), expected);
     }
 
     #[test]
