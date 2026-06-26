@@ -1279,6 +1279,10 @@ class VllmLLMEngine(LLMEngine):
             await self.engine_client.abort(request_id)
             logger.debug("Aborted request %s", request_id)
 
+    # No is_quiescent() override: vLLM's NixlConnector exposes no idle signal,
+    # so it inherits the base None and the framework drains prefill workers for
+    # the full budget.
+
     async def health_check_payload(self) -> Optional[dict[str, Any]]:
         if self.disaggregation_mode == DisaggregationMode.DECODE:
             logger.warning(

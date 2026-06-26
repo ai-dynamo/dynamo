@@ -36,6 +36,7 @@ class DynamoRuntimeConfig(ConfigBase):
     endpoint_types: str
     dump_config_to: Optional[str] = None
     multimodal_embedding_cache_capacity_gb: float
+    multimodal_embedding_cache_publisher: bool = False
     output_modalities: List[str]
     media_output_fs_url: str = "file:///tmp/dynamo_media"
     media_output_http_url: Optional[str] = None
@@ -121,9 +122,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
             default=None,
-            help="Determines how events are published. If unset, auto-detected from "
-            "--discovery-backend: 'zmq' for file/mem (no external services), 'nats' "
-            "for etcd/kubernetes.",
+            help="Determines how events are published. If unset, defaults to 'zmq' for "
+            "all discovery backends. Set to 'nats' to use a NATS-based event plane.",
             choices=["nats", "zmq"],
         )
         add_argument(
@@ -235,6 +235,15 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default=0,
             arg_type=float,
             help="Capacity of the multimodal embedding cache in GB. 0 = disabled.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--multimodal-embedding-cache-publisher",
+            env_var="DYN_MULTIMODAL_EMBEDDING_CACHE_PUBLISHER",
+            default=False,
+            help="Enable the multimodal embedding cache publisher. Useful when using KV-aware routing. "
+            "Not needed for round-robin routing or single-GPU / aggregated deployments.",
         )
 
         add_argument(

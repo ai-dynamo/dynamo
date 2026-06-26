@@ -45,6 +45,58 @@ def resolve_backend_version(backend_name: str, backend_version: str | None) -> s
     return DEFAULT_BACKEND_VERSIONS.get(backend_name, DEFAULT_BACKEND_VERSIONS["vllm"])
 
 
+def _normalize_aic_quant_mode(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value or value.lower() in {"auto", "none", "null"}:
+        return None
+    if value == "int4":
+        return "int4_wo"
+    return value
+
+
+def _resolve_quant_mode(field: str, value: str | None):
+    """Resolve a dtype-override string to aiconfigurator's per-field quant-mode
+    enum, or ``None`` to use the model default.
+
+    The four quant fields accept *different* value sets (e.g. KV cache only
+    supports ``bfloat16``/``int8``/``fp8``), so the string -> enum lookup is per
+    field. On an unsupported value, raise a clear ``ValueError`` naming the
+    field and its allowed values instead of letting an opaque ``KeyError``
+    escape from deep inside aiconfigurator. ``field`` is one of ``gemm``,
+    ``moe``, ``fmha``, ``kvcache``, ``comm``.
+    """
+    normalized = _normalize_aic_quant_mode(value)
+    if normalized is None:
+        return None
+    from aiconfigurator.sdk import common
+
+    enum_cls = {
+        "gemm": common.GEMMQuantMode,
+        "moe": common.MoEQuantMode,
+        "fmha": common.FMHAQuantMode,
+        "kvcache": common.KVCacheQuantMode,
+        "comm": common.CommQuantMode,
+    }[field]
+    try:
+        return enum_cls[normalized]
+    except KeyError:
+        allowed = ", ".join(member.name for member in enum_cls)
+        raise ValueError(
+            f"unsupported AIC {field} quant mode {value!r} "
+            f"(normalized to {normalized!r}); supported values: {allowed}"
+        ) from None
+
+
+def _resolve_quant_mode_name(field: str, value: str | None) -> str | None:
+    """Like :func:`_resolve_quant_mode` but return the canonical quant-mode
+    *name* (the string aiconfigurator's string-keyed APIs expect), validated
+    against the field's enum. ``None`` means "use the model default"."""
+    mode = _resolve_quant_mode(field, value)
+    return mode.name if mode is not None else None
+
+
 def _pad_nextn_accept_rates(
     nextn_accept_rates: list[float] | str | None,
 ) -> list[float]:
@@ -122,6 +174,11 @@ class AicSession:
         moe_tp_size: int | None = None,
         moe_ep_size: int | None = None,
         attention_dp_size: int | None = None,
+        gemm_dtype: str | None = None,
+        moe_dtype: str | None = None,
+        fmha_dtype: str | None = None,
+        kv_cache_dtype: str | None = None,
+        comm_dtype: str | None = None,
         nextn: int | None = None,
         nextn_accept_rates: list[float] | str | None = None,
     ):
@@ -148,6 +205,20 @@ class AicSession:
             moe_ep_size=moe_ep_size,
             attention_dp_size=attention_dp_size or 1,
         )
+        # Quantization overrides drive the per-op perf-DB lookups (GEMM/MoE/FMHA
+        # precision) and the KV-cache element size, so predicted latency tracks
+        # the quantized deployment instead of the model's default dtype. Omit
+        # unset fields so ModelConfig keeps its own defaults.
+        for cfg_key, field, dtype in (
+            ("gemm_quant_mode", "gemm", gemm_dtype),
+            ("moe_quant_mode", "moe", moe_dtype),
+            ("fmha_quant_mode", "fmha", fmha_dtype),
+            ("kvcache_quant_mode", "kvcache", kv_cache_dtype),
+            ("comm_quant_mode", "comm", comm_dtype),
+        ):
+            quant_mode = _resolve_quant_mode(field, dtype)
+            if quant_mode is not None:
+                model_config_kwargs[cfg_key] = quant_mode
         if nextn:
             # Mirror the Rust 1..=5 contract; AIC indexes accept_rates up to
             # nextn, so >5 would IndexError in calc_expectation.
@@ -297,6 +368,11 @@ def create_session(
     moe_tp_size: int | None = None,
     moe_ep_size: int | None = None,
     attention_dp_size: int | None = None,
+    gemm_dtype: str | None = None,
+    moe_dtype: str | None = None,
+    fmha_dtype: str | None = None,
+    kv_cache_dtype: str | None = None,
+    comm_dtype: str | None = None,
     nextn: int | None = None,
     nextn_accept_rates: list[float] | str | None = None,
 ) -> AicSession:
@@ -310,6 +386,11 @@ def create_session(
         moe_tp_size,
         moe_ep_size,
         attention_dp_size,
+        gemm_dtype=gemm_dtype,
+        moe_dtype=moe_dtype,
+        fmha_dtype=fmha_dtype,
+        kv_cache_dtype=kv_cache_dtype,
+        comm_dtype=comm_dtype,
         nextn=nextn,
         nextn_accept_rates=nextn_accept_rates,
     )
@@ -329,6 +410,11 @@ def estimate_num_gpu_blocks(
     moe_tp_size: int | None = None,
     moe_ep_size: int | None = None,
     attention_dp_size: int | None = None,
+    gemm_dtype: str | None = None,
+    moe_dtype: str | None = None,
+    fmha_dtype: str | None = None,
+    kv_cache_dtype: str | None = None,
+    comm_dtype: str | None = None,
 ) -> int:
     """Estimate rank-local KV cache blocks for mocker/replay AIC configs.
 
@@ -403,5 +489,10 @@ def estimate_num_gpu_blocks(
             ),
             moe_tp_size=moe_tp_size,
             moe_ep_size=moe_ep_size,
+            gemm_quant_mode=_resolve_quant_mode_name("gemm", gemm_dtype),
+            moe_quant_mode=_resolve_quant_mode_name("moe", moe_dtype),
+            fmha_quant_mode=_resolve_quant_mode_name("fmha", fmha_dtype),
+            kvcache_quant_mode=_resolve_quant_mode_name("kvcache", kv_cache_dtype),
+            comm_quant_mode=_resolve_quant_mode_name("comm", comm_dtype),
         )
     )

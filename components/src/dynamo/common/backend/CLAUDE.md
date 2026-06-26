@@ -11,7 +11,7 @@ out; `DiffusionEngine` is a domain subclass). See `README.md` for full docs.
 ## Engine Lifecycle
 
 ```
-from_args -> start -> register_prometheus -> component_metrics_dp_ranks -> attach_snapshot_publisher -> generate/abort -> drain -> cleanup
+from_args -> start -> register_prometheus -> component_metrics_dp_ranks -> attach_snapshot_publisher -> generate/abort -> is_quiescent -> cleanup
      |          |              |                       |                              |                          |             |        |
   parse args, start engine, vendor registry      declare dp_ranks            engine stashes publisher,   serve requests  drain in-flight,
   return     return        bridge (optional)     for component gauges        pushes ComponentSnapshot    (concurrent)    then cleanup,
@@ -52,9 +52,12 @@ Python engine authors keep the split API.)
    written); `0.0` is a legitimate zero-hit measurement.
 6. `generate(request, context)` -- streaming inference, called concurrently.
 7. `abort(context)` -- cancel an in-flight request (optional, default no-op).
-8. `drain()` -- backend-side drain before cleanup (optional, default no-op).
-   Called after the discovery unregister + grace period; use it for in-flight
-   NIXL transfers (issue #7319) that must complete while the runtime is alive.
+8. `is_quiescent()` -- whether in-flight KV transfers are done so GPU memory
+   can be released (default `None`). Polled only on **prefill workers**,
+   between the grace period and cleanup: `True` exits the drain early, `False`
+   and `None` (default) keep polling until the budget expires. Override only if
+   the engine can observe transfer completion; aggregated/decode are never
+   polled.
 9. `cleanup()` -- called exactly once. Runs after `start()` succeeded
    on shutdown, **and** after `start()` raised — so implementations
    must be null-safe against partial state (inner engine handle,
@@ -148,6 +151,11 @@ What the **runtime** does with the mode (Rust `Worker` in `lib/backend-common`):
 - `Decode` → keep `endpoint_types`, but force-disable
   `enable_local_indexer` (decode workers don't host the indexer endpoint).
 - `Aggregated` → register with the parsed `endpoint_types`.
+- `Encode` → register **surface-less** (`ModelType.empty()`) with
+  `WorkerType.Encode` and topology needs `[[Prefill, Decode], [Aggregated]]`,
+  so the discovery layer registers the worker for readiness only and hides it
+  from `/v1/models`. The Encode role is a multimodal encoder upstream of
+  P/D/Agg; backend-specific encoder implementations land separately.
 
 What the **engine** does with the mode (consumed in each backend's
 `generate()`):
@@ -161,11 +169,19 @@ What the **engine** does with the mode (consumed in each backend's
   loudly if missing (`require_prefill_result`), feed it into the
   engine's resume-from-KV-transfer call.
 - `Aggregated`: existing path, no branching.
+- `Encode`: produce the encoder handoff payload on the terminal chunk's
+  `encoder_result` (object-only) via `encoder_terminal_chunk`. The native
+  vLLM backend is text-only and rejects this role at startup.
 
-`drain()` is the prefill-shutdown hook: prefill engines should poll
-their scheduler until in-flight NIXL transfers finish before GPU
-memory is released (issue #7319). Aggregated/decode engines leave the
-default no-op.
+`route_to_encoder` (on `WorkerConfig`; CLI `--route-to-encoder` / env
+`DYN_ROUTE_TO_ENCODER`) makes an `Aggregated` or `Prefill` worker advertise an
+upstream `Encode` peer in its topology `needs`. It is meaningful only for
+agg/prefill — setting it on `Decode` or `Encode` is rejected at startup with
+`BackendError::InvalidArgument`.
+
+`is_quiescent()` lets a prefill worker exit the drain early once its KV
+transfers finish, before GPU memory is released. Engines that can't introspect
+leave the default `None` (wait the budget); aggregated/decode are never drained.
 
 `disagg.py` ships `enforce_prefill_max_tokens`, `extract_prefill_result`,
 and `require_prefill_result` — small helpers backends call from inside

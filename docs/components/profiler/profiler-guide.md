@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Profiler Guide
+subtitle: Runs the AI Configurator-driven profiling pipeline that turns a model, SLA targets, and backend into a ready-to-deploy DGD.
 ---
 
 ## Overview

@@ -43,6 +43,14 @@ class GenerateRequest(TypedDict, total=False):
     are set by the frontend's PrefillRouter on decode requests; engines
     read them via ``dynamo.common.backend.disagg`` helpers.
 
+    Multimodal keys (``multi_modal_data``, ``mm_processor_kwargs``,
+    ``mm_routing_info``) are populated by the frontend preprocessor when
+    the request carries media. ``encoder_result`` is set by the
+    frontend when forwarding a request from an Encode worker
+    to a downstream Prefill/Aggregated peer; engines read it via
+    :func:`dynamo.common.backend.multimodal.require_encoder_result`. All
+    four are object-shaped (``dict``) by contract.
+
     ``model`` carries the requested model name (set by the Rust
     preprocessor). Engines that support dynamic LoRA read it to route a
     request to a loaded adapter.
@@ -55,6 +63,10 @@ class GenerateRequest(TypedDict, total=False):
     output_options: dict[str, Any]
     prefill_result: dict[str, Any]
     bootstrap_info: dict[str, Any]
+    multi_modal_data: dict[str, Any]
+    mm_processor_kwargs: dict[str, Any]
+    mm_routing_info: dict[str, Any]
+    encoder_result: dict[str, Any]
     extra_args: dict[str, Any]
 
 
@@ -63,12 +75,21 @@ class GenerateChunk(TypedDict, total=False):
 
     Every chunk must include ``token_ids`` and ``index``.
     Use ``index=0`` for single-choice responses. The final chunk must
-    additionally include ``finish_reason`` and ``completion_usage``.
+    additionally include ``finish_reason``; ``completion_usage`` is
+    optional (the OpenAI frontend aggregates it when present, and
+    matches the Rust ``Option<CompletionUsage>`` /
+    ``skip_serializing_if = "Option::is_none"`` semantics).
+
     Prefill terminals carry ``disaggregated_params`` for the
     PrefillRouter to forward to the decode peer. When the caller
     requested logprobs, chunks may also carry ``log_probs`` and
     ``top_logprobs`` aligned to ``token_ids`` — see
     :mod:`dynamo.common.backend.logprobs`.
+
+    Encode terminals carry ``encoder_result`` (an opaque object the
+    frontend forwards onto the downstream
+    ``PreprocessedRequest.encoder_result``). Construct with
+    :func:`dynamo.common.backend.multimodal.encoder_terminal_chunk`.
     """
 
     token_ids: Required[list[int]]
@@ -76,6 +97,7 @@ class GenerateChunk(TypedDict, total=False):
     finish_reason: str
     completion_usage: dict[str, int]
     disaggregated_params: dict[str, Any]
+    encoder_result: dict[str, Any]
     log_probs: list[float]
     top_logprobs: list[list[dict[str, Any]]]
     # Forwarded verbatim to Rust `LLMEngineOutput.engine_data` as a
@@ -193,18 +215,20 @@ class BaseEngine(ABC):
         ``context.metadata`` during :meth:`generate` are not visible here.
         """
 
-    async def drain(self) -> None:
-        """Drain in-flight engine work before cleanup (optional, default no-op).
+    async def is_quiescent(self) -> Optional[bool]:
+        """Whether in-flight KV transfers are done, so :meth:`cleanup` may
+        release GPU memory. The Rust ``Worker`` polls this on prefill workers
+        between the grace period and :meth:`cleanup`:
 
-        Called once during graceful shutdown after the discovery unregister
-        + grace-period sleep, but before :meth:`cleanup`.  Use it for
-        backend-side draining that must complete while the distributed
-        runtime (NATS / etcd) is still alive — e.g. waiting for in-flight
-        NIXL KV transfers on prefill workers (issue #7319), so downstream
-        decode workers don't observe a use-after-free on freed GPU memory.
+        - ``True``  — quiescent; exit the drain loop now.
+        - ``False`` — busy; poll again next tick.
+        - ``None``  — no introspection (default); poll until the drain budget
+          (``DYN_PREFILL_DRAIN_TIMEOUT_S``) expires. Never frees KV early.
 
-        Failures are logged and swallowed; shutdown proceeds regardless.
+        Aggregated/decode workers are never polled. Override only if the engine
+        can observe transfer completion.
         """
+        return None
 
     @abstractmethod
     async def cleanup(self) -> None:
