@@ -236,13 +236,19 @@ async def async_main():
     router_config = RouterConfig(
         router_mode, kv_router_config, **config.router_kwargs()
     )
+
+    metrics_prefix = (
+        config.metrics_prefix
+        if config.metrics_prefix is not None and config.metrics_prefix.strip()
+        else None
+    )
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,
         "http_port": config.http_port,
         "kv_cache_block_size": config.kv_cache_block_size,
         "router_config": router_config,
         "migration_limit": config.migration_limit,
-        "metrics_prefix": config.metrics_prefix,
+        "metrics_prefix": metrics_prefix ,
         "enable_anthropic_api": config.enable_anthropic_api,
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
