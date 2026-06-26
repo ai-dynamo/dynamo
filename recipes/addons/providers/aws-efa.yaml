@@ -42,8 +42,12 @@ backend:                         # only the base recipe's engine applies
       DYN_KVBM_NIXL_BACKEND_UCX: "false"
     arg: 'append "LIBFABRIC" to --kv-transfer-config .kv_connector_extra_config.backends'
   trtllm:
-    configmap: 'set cache_transceiver_config.backend: NIXL in prefill.yaml + decode.yaml (NIXL rides libfabric on EFA)'
+    # NOT currently achievable: cache_transceiver_config.backend: NIXL makes TRT-LLM use
+    # NIXL, but NIXL then instantiates UCX (not libfabric), and TRT-LLM exposes no knob to
+    # force libfabric — so TRT-LLM disagg would ride UCX -> TCP on EFA, not the EFA NIC.
+    status: 'EFA unsupported for TRT-LLM via recipe config'
   sglang:
-    note: 'UNVERIFIED — confirm SGLang disagg transfer backend for libfabric/EFA before use'
+    env: { SGLANG_DISAGGREGATION_NIXL_BACKEND: LIBFABRIC }   # else NIXL defaults to UCX -> TCP fallback
+    arg: '--disaggregation-transfer-backend nixl (usually already in the base)'
 
 skip: [base_image_choice, storage_pvc, volume_mounts]
