@@ -38,9 +38,10 @@ MODEL=Qwen/Qwen3-0.6B GMS_SOCKET_DIR=/tmp/gms-demo \
 CUDA_VISIBLE_DEVICES=0 ./run.sh
 ```
 
-`run.sh` starts etcd + nats + the GMS server + both engines, waits for them to
-warm up, then SIGKILLs the primary and leaves the shadow running. Watch the
-takeover in `/tmp/gms-demo-shadow.log` (the shadow acquires the lock and wakes).
+`run.sh` starts etcd + nats + the GMS server + both engines, waits until the
+shadow is parked on the lock, then SIGKILLs the primary and leaves the shadow
+running. Watch the takeover in `/tmp/gms-demo-shadow.log` (the shadow acquires
+the lock and wakes).
 
 ## What it shows
 

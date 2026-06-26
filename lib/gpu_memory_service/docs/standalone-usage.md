@@ -106,7 +106,7 @@ On one node with one (or a few) GPUs:
   should relaunch a fresh standby to restore redundancy.
 
 That's the whole single-node story, and it is genuinely simple: a GMS server, a
-writer, one or more readers sharing a lock file, plus a way to route and a way
+primary, one or more shadows sharing a lock file, plus a way to route and a way
 to relaunch.
 
 ## What the engine itself must support
@@ -191,9 +191,9 @@ relaunch loop is yours.
 
 The same applies to wide expert parallelism (WideEP) — it is just a large
 multi-node deployment. When a rank/server dies, its replacement imports *that
-rank's* weight shard from GMS instead of reloading from disk (TRT-LLM's
-`weight_sharing/source_identity.py` provides the per-rank identity that keeps
-"rank N imports the shard produced for rank N" correct). GMS still does **not**
+rank's* weight shard from GMS instead of reloading from disk (the engine
+provides the per-rank identity that keeps "rank N imports the shard produced for
+rank N" correct). GMS still does **not**
 detect the dead rank, serve degraded (N−1), re-spawn it, or rejoin the
 collective — that's the same detect / tear-down / promote / relaunch loop above,
 just across more processes.

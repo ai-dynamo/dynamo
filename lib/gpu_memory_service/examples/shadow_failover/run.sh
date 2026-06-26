@@ -20,7 +20,16 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 LOCK="${FAILOVER_LOCK_PATH:-$GMS_SOCKET_DIR/failover.lock}"
 
 PIDS=()
-trap 'kill -KILL -"${PRIMARY_PGID:-0}" -"${SHADOW_PGID:-0}" 2>/dev/null; kill "${PIDS[@]}" 2>/dev/null' EXIT
+# Tear everything down on exit. Guard the group-kills: an unset PGID must NOT
+# become `kill -0` (that targets our own process group).
+cleanup() {
+  local g
+  for g in "${PRIMARY_PGID:-}" "${SHADOW_PGID:-}"; do
+    [ -n "$g" ] && kill -KILL "-$g" 2>/dev/null || true
+  done
+  [ "${#PIDS[@]}" -gt 0 ] && kill "${PIDS[@]}" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 mkdir -p "$GMS_SOCKET_DIR"
 
@@ -50,8 +59,12 @@ engine 0 >/tmp/gms-demo-primary.log 2>&1 & PRIMARY_PGID=$!
 engine 1 >/tmp/gms-demo-shadow.log 2>&1 & SHADOW_PGID=$!
 
 # Wait until the shadow has loaded weights and parked on the flock (the standby
-# is only "warm" once it is blocked waiting for the lock).
-until grep -q "waiting for lock" /tmp/gms-demo-shadow.log 2>/dev/null; do sleep 2; done
+# is only "warm" once it is blocked waiting for the lock). Abort if it dies
+# first (check /tmp/gms-demo-shadow.log for the cause).
+until grep -q "waiting for lock" /tmp/gms-demo-shadow.log 2>/dev/null; do
+  kill -0 "$SHADOW_PGID" 2>/dev/null || exit 1
+  sleep 2
+done
 
 # Crash the primary's process group; the kernel releases its flock and the
 # shadow takes over without reloading weights (see /tmp/gms-demo-shadow.log).
