@@ -4411,8 +4411,8 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "llm-multimodal"
-version = "1.5.0"
-source = "git+https://github.com/lightseekorg/smg?rev=5b3174c34cc2a0db5517d6f2237934a6cb137707#5b3174c34cc2a0db5517d6f2237934a6cb137707"
+version = "1.6.0"
+source = "git+https://github.com/lightseekorg/smg?tag=v1.5.0#df9824b415d8ec94c1de71f594d30f953155de22"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4435,8 +4435,8 @@ dependencies = [
 
 [[package]]
 name = "llm-tokenizer"
-version = "1.3.2"
-source = "git+https://github.com/lightseekorg/smg?rev=5b3174c34cc2a0db5517d6f2237934a6cb137707#5b3174c34cc2a0db5517d6f2237934a6cb137707"
+version = "1.4.0"
+source = "git+https://github.com/lightseekorg/smg?tag=v1.5.0#df9824b415d8ec94c1de71f594d30f953155de22"
 dependencies = [
  "aho-corasick",
  "anyhow",
