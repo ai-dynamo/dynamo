@@ -23,6 +23,7 @@ use crate::pipeline::network::NetworkStreamWrapper;
 use crate::pipeline::network::PendingConnections;
 use crate::pipeline::network::RegisteredStream;
 use crate::pipeline::network::RequestControlMessage;
+use crate::pipeline::network::RequestPlanePayloadCodec;
 use crate::pipeline::network::RequestType;
 use crate::pipeline::network::ResponseType;
 use crate::pipeline::network::StreamOptions;
@@ -54,6 +55,7 @@ fn decode_response_stream<U>(
     queue_start: Instant,
     tx_start: Instant,
     inflight_guard: InflightGuard,
+    payload_codec: RequestPlanePayloadCodec,
 ) -> ManyOut<U>
 where
     U: Data + for<'de> Deserialize<'de> + MaybeError,
@@ -76,7 +78,7 @@ where
                 );
                 return Some(U::from_err(err));
             }
-            match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
+            match payload_codec.decode::<NetworkStreamWrapper<U>>(&res_bytes) {
                 Ok(item) => {
                     is_complete_final = item.complete_final;
                     if let Some(data) = item.data {
@@ -90,8 +92,13 @@ where
                     }
                 }
                 Err(err) => {
-                    let json_str = String::from_utf8_lossy(&res_bytes);
-                    tracing::warn!(%err, %json_str, "Failed deserializing JSON to response");
+                    let response_bytes_len = res_bytes.len();
+                    tracing::warn!(
+                        %err,
+                        codec = payload_codec.name(),
+                        response_bytes_len,
+                        "failed deserializing request-plane response"
+                    );
                     Some(U::from_err(DynamoError::msg(err.to_string())))
                 }
             }
@@ -143,8 +150,9 @@ fn build_request_envelope<T>(
     request: Option<&T>,
 ) -> Result<bytes::Bytes, Error>
 where
-    T: serde::Serialize + ?Sized,
+    T: serde::Serialize,
 {
+    let payload_codec = RequestPlanePayloadCodec::configured();
     let request_id = context.id();
     let request_type = if send_conn_info.is_some() {
         RequestType::ManyIn
@@ -155,6 +163,7 @@ where
         id: request_id.to_string(),
         request_type,
         response_type: ResponseType::ManyOut,
+        payload_codec,
         connection_info: recv_conn_info,
         metadata: context.metadata().clone(),
         frontend_send_ts_ns: None,
@@ -163,7 +172,7 @@ where
 
     let ctrl = serialize_control_message(&control_message)?;
     let data: Option<Vec<u8>> = match request {
-        Some(req) => Some(serde_json::to_vec(req)?),
+        Some(req) => Some(payload_codec.encode(req)?),
         None => None,
     };
 
@@ -200,6 +209,7 @@ async fn spawn_request_stream_forwarder<T>(
     request_stream_provider: Option<StreamProvider<StreamSender>>,
     mut input_stream: crate::engine::DataStream<T>,
     engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
+    payload_codec: RequestPlanePayloadCodec,
 ) -> Result<(), Error>
 where
     T: serde::Serialize + Send + 'static,
@@ -244,7 +254,7 @@ where
                     None => break,
                 },
             };
-            let bytes = match serde_json::to_vec(&item) {
+            let bytes = match payload_codec.encode(&item) {
                 Ok(b) => b,
                 Err(e) => {
                     // Stream-side framing failure: the engine sees a
@@ -253,6 +263,7 @@ where
                     // dropping frames.
                     tracing::error!(
                         error = %e,
+                        codec = payload_codec.name(),
                         "failed to serialize bidirectional request frame; killing context"
                     );
                     engine_ctx.kill();
@@ -470,6 +481,7 @@ impl AddressedPushRouter {
         let inflight_guard = InflightGuard::new();
 
         let enable_request_stream = input_stream.is_some();
+        let payload_codec = RequestPlanePayloadCodec::configured();
 
         // Hold the `RegisteredStream` as their RAII cleanup stays armed while held,
         // which simplifies the cancellation of registration on error. Each side is
@@ -543,8 +555,13 @@ impl AddressedPushRouter {
                 let (_conn_info, provider) = r.into_parts();
                 provider
             });
-            spawn_request_stream_forwarder(request_stream_provider, stream, engine_ctx.clone())
-                .await?;
+            spawn_request_stream_forwarder(
+                request_stream_provider,
+                stream,
+                engine_ctx.clone(),
+                payload_codec,
+            )
+            .await?;
         }
 
         let _nvtx_wait = dynamo_nvtx_range!("transport.tcp.wait_backend");
@@ -592,6 +609,7 @@ impl AddressedPushRouter {
             queue_start,
             tx_start,
             inflight_guard,
+            payload_codec,
         ))
     }
 
@@ -747,8 +765,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestType,
-        ResponseType, serialize_control_message,
+        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestPlanePayloadCodec,
+        RequestType, ResponseType, serialize_control_message,
     };
     use std::collections::BTreeMap;
 
@@ -757,6 +775,7 @@ mod tests {
             id: "request-123".to_string(),
             request_type: RequestType::SingleIn,
             response_type: ResponseType::ManyOut,
+            payload_codec: RequestPlanePayloadCodec::Json,
             connection_info: ConnectionInfo {
                 transport: "tcp".to_string(),
                 info: "{}".to_string(),
