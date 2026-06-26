@@ -92,12 +92,6 @@ On one node with one (or a few) GPUs:
 
 **What you must provide on a single node:**
 
-- **GPU memory headroom for co-residency.** The weights are shared (one copy in
-  GMS), but each engine still has its own CUDA context, activations, and — for
-  the active one — KV cache. Size `--gpu-memory-utilization` (or your engine's
-  equivalent) so a primary and a standby fit on the device. CUDA processes share
-  a GPU natively, so you do **not** need anything like MPS for this to work
-  (MPS can improve sharing but is optional).
 - **A shared lock file path** reachable by all the engines (a normal local path;
   `flock` is a kernel lock on that file).
 - **Routing to the active engine.** Whatever fronts your engines (a load
