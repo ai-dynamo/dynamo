@@ -152,6 +152,11 @@ class SampleLLMEngine(LLMEngine):
             action="store_true",
             help="Require an upstream Encode worker (valid for agg/prefill).",
         )
+        parser.add_argument(
+            "--disable-kv-routing",
+            action="store_true",
+            help="Disable KV event and load publishers (useful for isolated smokes).",
+        )
         args = parser.parse_args(argv)
 
         mode = DisaggregationMode(args.disaggregation_mode)
@@ -174,6 +179,7 @@ class SampleLLMEngine(LLMEngine):
             event_plane=args.event_plane,
             disaggregation_mode=mode,
             route_to_encoder=args.route_to_encoder,
+            enable_kv_routing=not args.disable_kv_routing,
         )
         return engine, worker_config
 
@@ -298,7 +304,31 @@ class SampleLLMEngine(LLMEngine):
     ) -> AsyncGenerator[GenerateChunk, None]:
         if self.disaggregation_mode == DisaggregationMode.ENCODE:
             prompt_len = len(request.get("token_ids", []))
+            if context.is_stopped():
+                yield {
+                    "token_ids": [],
+                    "index": 0,
+                    "finish_reason": "cancelled",
+                    "completion_usage": {
+                        "prompt_tokens": prompt_len,
+                        "completion_tokens": 0,
+                        "total_tokens": prompt_len,
+                    },
+                }
+                return
             encoder_result = await self._encode_multimodal(request)
+            if context.is_stopped():
+                yield {
+                    "token_ids": [],
+                    "index": 0,
+                    "finish_reason": "cancelled",
+                    "completion_usage": {
+                        "prompt_tokens": prompt_len,
+                        "completion_tokens": 0,
+                        "total_tokens": prompt_len,
+                    },
+                }
+                return
             yield encoder_terminal_chunk(
                 encoder_result,
                 completion_usage={

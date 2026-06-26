@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from typing import Any
 
 from dynamo.runtime import DistributedRuntime
@@ -107,9 +108,13 @@ async def run_epd(runtime: DistributedRuntime, args: argparse.Namespace) -> None
         args.timeout,
     )
     assert (
-        prefill_terminal["engine_data"]["sample_multimodal"]["handle"]
-        == encode_terminal["encoder_result"]["handle"]
+        prefill_terminal["engine_data"]["sample_multimodal"]
+        == encode_terminal["encoder_result"]
     )
+    assert encode_terminal["encoder_result"]["multimodal_kwargs"] == {
+        "multi_modal_data": request["multi_modal_data"],
+        "mm_processor_kwargs": request["mm_processor_kwargs"],
+    }
 
     decode_request = {
         "model": args.model_name,
@@ -127,12 +132,18 @@ async def run_epd(runtime: DistributedRuntime, args: argparse.Namespace) -> None
 
 async def main() -> None:
     args = parse_args()
+    # Launch scripts assign DYN_SYSTEM_PORT to workers. The direct client is a
+    # separate runtime and must allocate its own system-server port.
+    os.environ.pop("DYN_SYSTEM_PORT", None)
     runtime = DistributedRuntime(asyncio.get_running_loop(), "etcd", "tcp")
     try:
-        if args.mode == "aggregated":
-            await run_aggregated(runtime, args)
-        else:
-            await run_epd(runtime, args)
+        # Bound the whole smoke, rather than granting each sequential EPD stage
+        # a fresh timeout that can exceed the outer test harness deadline.
+        async with asyncio.timeout(args.timeout):
+            if args.mode == "aggregated":
+                await run_aggregated(runtime, args)
+            else:
+                await run_epd(runtime, args)
     finally:
         runtime.shutdown()
 

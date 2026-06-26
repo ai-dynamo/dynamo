@@ -1,9 +1,10 @@
 # Dynamo Python Backend
 
-**Supported today:** aggregated and disaggregated (prefill/decode)
-inference, metrics + Prometheus bridging, KV event publishing,
-KV-aware (DP-rank) routing, health-check canaries, OpenTelemetry
-tracing, and request-side guided decoding / structural tag.
+**Supported today:** aggregated and disaggregated (prefill/decode/encode)
+inference, the shared multimodal request and encoder-handoff contract,
+metrics + Prometheus bridging, KV event publishing, KV-aware (DP-rank)
+routing, health-check canaries, OpenTelemetry tracing, and request-side
+guided decoding / structural tag.
 
 > **Work in progress.** Multimodal, diffusion (image/video/DLLM),
 > LoRA (SGLang / TRT-LLM — vLLM is supported),
@@ -143,9 +144,11 @@ def main():
 
 See `sample_engine.py` for a complete, runnable reference implementation.
 The sample engine includes synthetic multimodal handling for aggregated and
-Encode/Prefill/Decode deployments. CPU-only worker-handoff smokes live in
+Encode/Prefill/Decode deployments. CPU-only direct worker-handoff smokes live in
 `examples/backends/sample/launch/multimodal_agg.sh` and
-`examples/backends/sample/launch/multimodal_disagg.sh`.
+`examples/backends/sample/launch/multimodal_disagg.sh`. These smokes exercise
+distinct worker processes and TCP request transport; they intentionally bypass
+the frontend and do not claim frontend routing coverage.
 
 ## Request / Response Types
 

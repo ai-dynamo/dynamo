@@ -163,6 +163,36 @@ async def test_encode_mode_emits_single_terminal_with_encoder_result():
     )
 
 
+@pytest.mark.parametrize("stop_checks", [[True], [False, True]])
+async def test_encode_mode_observes_cancellation(stop_checks):
+    engine = SampleLLMEngine(
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.ENCODE,
+    )
+    context = _ctx()
+    context.is_stopped.side_effect = stop_checks
+
+    chunks = [
+        chunk
+        async for chunk in engine.generate(
+            {"token_ids": [1, 2, 3], "multi_modal_data": {"image": []}}, context
+        )
+    ]
+
+    assert chunks == [
+        {
+            "token_ids": [],
+            "index": 0,
+            "finish_reason": "cancelled",
+            "completion_usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 0,
+                "total_tokens": 3,
+            },
+        }
+    ]
+
+
 async def test_encoder_routed_worker_requires_encoder_result():
     engine = SampleLLMEngine(
         max_tokens=1,
@@ -235,6 +265,10 @@ async def test_multimodal_epd_handoff_contract():
     )
 
     assert prefill_terminal["finish_reason"] == "length"
+    assert (
+        prefill_terminal["engine_data"]["sample_multimodal"]
+        == encode_terminal["encoder_result"]
+    )
     assert len(decode_chunks) == 2
     assert decode_chunks[-1]["finish_reason"] == "length"
 
@@ -246,6 +280,12 @@ async def test_from_args_propagates_encode_routing():
 
     assert engine.route_to_encoder is True
     assert worker_config.route_to_encoder is True
+
+
+async def test_from_args_can_disable_kv_routing():
+    _, worker_config = await SampleLLMEngine.from_args(["--disable-kv-routing"])
+
+    assert worker_config.enable_kv_routing is False
 
 
 async def test_encode_mode_opts_out_of_kv_publishers():

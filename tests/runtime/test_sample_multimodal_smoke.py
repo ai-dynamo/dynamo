@@ -32,17 +32,16 @@ LAUNCH_DIR = REPO_ROOT / "examples" / "backends" / "sample" / "launch"
 )
 def test_sample_multimodal_smoke(script_name, request, runtime_services_dynamic_ports):
     del runtime_services_dynamic_ports
-    ports = allocate_ports(4, 18000)
+    ports = allocate_ports(3, 18000)
     request.addfinalizer(lambda: deallocate_ports(ports))
 
     env = os.environ.copy()
     env.update(
         {
-            "DYN_HTTP_PORT": str(ports[0]),
-            "DYN_SYSTEM_PORT": str(ports[1]),
-            "DYN_SYSTEM_PORT1": str(ports[1]),
-            "DYN_SYSTEM_PORT2": str(ports[2]),
-            "DYN_SYSTEM_PORT3": str(ports[3]),
+            "DYN_SYSTEM_PORT": str(ports[0]),
+            "DYN_SYSTEM_PORT1": str(ports[0]),
+            "DYN_SYSTEM_PORT2": str(ports[1]),
+            "DYN_SYSTEM_PORT3": str(ports[2]),
             "NAMESPACE": f"sample-mm-{uuid.uuid4().hex}",
         }
     )
@@ -59,7 +58,11 @@ def test_sample_multimodal_smoke(script_name, request, runtime_services_dynamic_
         output, _ = process.communicate(timeout=90)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGTERM)
-        output, _ = process.communicate(timeout=10)
+        try:
+            output, _ = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            output, _ = process.communicate(timeout=5)
         pytest.fail(f"{script_name} timed out\n{output}")
 
     assert process.returncode == 0, f"{script_name} failed\n{output}"

@@ -8,15 +8,15 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../../../..")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-MODEL_NAME="${MODEL_NAME:-sample-model}"
+MODEL_NAME="${MODEL_NAME:-$REPO_ROOT/lib/llm/tests/data/sample-models/TinyLlama_v1.1}"
 NAMESPACE="${NAMESPACE:-dynamo}"
 ENCODE_COMPONENT="${ENCODE_COMPONENT:-sample-multimodal-encode}"
 PREFILL_COMPONENT="${PREFILL_COMPONENT:-sample-multimodal-prefill}"
 DECODE_COMPONENT="${DECODE_COMPONENT:-sample-multimodal-decode}"
-HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 
 EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -40,10 +40,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-print_launch_banner --no-curl "Sample Encode/Prefill/Decode Multimodal Smoke (CPU-only)" "$MODEL_NAME" "$HTTP_PORT" \
-    "Validation:  direct Encode -> Prefill -> Decode worker handoff"
-
-python3 -m dynamo.frontend &
+echo "Running direct Encode -> Prefill -> Decode multimodal handoff smoke with $MODEL_NAME"
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 python3 -m dynamo.common.backend.sample_main \
@@ -51,6 +48,7 @@ python3 -m dynamo.common.backend.sample_main \
   --namespace "$NAMESPACE" \
   --component "$ENCODE_COMPONENT" \
   --disaggregation-mode encode \
+  --disable-kv-routing \
   "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
@@ -60,6 +58,7 @@ python3 -m dynamo.common.backend.sample_main \
   --component "$PREFILL_COMPONENT" \
   --disaggregation-mode prefill \
   --route-to-encoder \
+  --disable-kv-routing \
   "${EXTRA_ARGS[@]}" &
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \
@@ -68,6 +67,7 @@ python3 -m dynamo.common.backend.sample_main \
   --namespace "$NAMESPACE" \
   --component "$DECODE_COMPONENT" \
   --disaggregation-mode decode \
+  --disable-kv-routing \
   "${EXTRA_ARGS[@]}" &
 
 python3 "$SCRIPT_DIR/multimodal_smoke_client.py" \
