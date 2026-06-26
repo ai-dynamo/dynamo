@@ -287,6 +287,7 @@ webhooks:
     - v1beta1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - dynamocomponentdeployments
   sideEffects: None
@@ -320,6 +321,7 @@ webhooks:
     - v1beta1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - dynamographdeploymentrequests
   sideEffects: None
@@ -353,6 +355,7 @@ webhooks:
     - v1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - pods
   sideEffects: None
