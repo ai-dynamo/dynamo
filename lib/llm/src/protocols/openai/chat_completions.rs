@@ -151,25 +151,29 @@ impl NvCreateChatCompletionRequest {
         if let Some(mode) = thinking_mode {
             match mode {
                 OpenAiThinkingMode::Enabled => {
-                    args.entry("thinking".to_string())
-                        .or_insert(serde_json::Value::Bool(true));
-                    args.entry("thinking_mode".to_string())
-                        .or_insert(serde_json::Value::String("enabled".to_string()));
+                    args.insert("thinking".to_string(), serde_json::Value::Bool(true));
+                    args.insert(
+                        "thinking_mode".to_string(),
+                        serde_json::Value::String("enabled".to_string()),
+                    );
                 }
                 OpenAiThinkingMode::Disabled => {
-                    args.entry("thinking".to_string())
-                        .or_insert(serde_json::Value::Bool(false));
-                    args.entry("thinking_mode".to_string())
-                        .or_insert(serde_json::Value::String("disabled".to_string()));
+                    args.insert("thinking".to_string(), serde_json::Value::Bool(false));
+                    args.insert(
+                        "thinking_mode".to_string(),
+                        serde_json::Value::String("disabled".to_string()),
+                    );
                 }
                 OpenAiThinkingMode::Adaptive => {
-                    args.entry("thinking_mode".to_string())
-                        .or_insert(serde_json::Value::String("adaptive".to_string()));
+                    args.insert(
+                        "thinking_mode".to_string(),
+                        serde_json::Value::String("adaptive".to_string()),
+                    );
                 }
             }
         }
         if let Some(effort) = reasoning_effort {
-            args.entry("reasoning_effort".to_string()).or_insert(effort);
+            args.insert("reasoning_effort".to_string(), effort);
         }
 
         // The raw `thinking` payload has been folded into `chat_template_args`;
@@ -1083,6 +1087,38 @@ mod tests {
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(false)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
+    }
+
+    #[test]
+    fn test_openai_thinking_top_level_overrides_stale_template_args() {
+        let json_str = json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "chat_template_args": {
+                "thinking": true,
+                "thinking_mode": "thinking",
+                "reasoning_effort": "high"
+            },
+            "reasoning_effort": "none",
+            "thinking": {"type": "disabled"}
+        });
+
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+        request
+            .normalize_reasoning_template_args()
+            .expect("top-level thinking payload should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
+        assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
+        assert!(request.thinking.is_none());
     }
 
     #[test]
