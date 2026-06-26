@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use std::{collections::HashMap, pin::Pin};
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures::StreamExt;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event};
+use notify::{event, Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +35,7 @@ const MIN_KEEP_ALIVE: Duration = Duration::from_secs(1);
 /// Prefix for temporary files used in atomic writes.
 /// Files with this prefix are ignored by the watcher.
 const TEMP_FILE_PREFIX: &str = ".tmp_";
+const TEMP_FILE_CREATE_ATTEMPTS: usize = 16;
 
 /// Treat as a singleton
 #[derive(Clone)]
@@ -286,6 +287,21 @@ impl Directory {
         }
         Ok(())
     }
+
+    fn write_temp_file(&self, value: &[u8]) -> Result<PathBuf, StoreError> {
+        for _ in 0..TEMP_FILE_CREATE_ATTEMPTS {
+            let temp_name = format!("{TEMP_FILE_PREFIX}{:016x}", rand::random::<u64>());
+            let temp_path = self.p.join(&temp_name);
+            if write_temp_file_at(&temp_path, value)? {
+                return Ok(temp_path);
+            }
+        }
+
+        Err(StoreError::FilesystemError(format!(
+            "failed to create unique FileStore temp file in {} after {TEMP_FILE_CREATE_ATTEMPTS} attempts",
+            self.p.display()
+        )))
+    }
 }
 
 impl fmt::Display for Directory {
@@ -298,6 +314,9 @@ impl fmt::Display for Directory {
 impl Bucket for Directory {
     /// Write a file to the directory by publishing a completed temp file.
     /// This ensures watchers never see a partially written file.
+    /// Revision-zero inserts provide create-if-absent publication for this
+    /// FileStore path, but not leases, fencing, crash durability, or strict
+    /// runtime-wide cardinality guarantees.
     async fn insert(
         &self,
         key: &Key,
@@ -308,12 +327,7 @@ impl Bucket for Directory {
         let full_path = self.p.join(safe_key.as_ref());
         let str_path = full_path.display().to_string();
 
-        let temp_name = format!("{TEMP_FILE_PREFIX}{:016x}", rand::random::<u64>());
-        let temp_path = self.p.join(&temp_name);
-
-        fs::write(&temp_path, &value)
-            .with_context(|| format!("writing temp file {}", temp_path.display()))
-            .map_err(a_to_fs_err)?;
+        let temp_path = self.write_temp_file(&value)?;
 
         if revision == 0 {
             // No-clobber publish for revision-zero inserts: the link fails if another
@@ -544,6 +558,37 @@ impl Bucket for Directory {
     }
 }
 
+fn write_temp_file_at(temp_path: &Path, value: &[u8]) -> Result<bool, StoreError> {
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp_path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => return Ok(false),
+        Err(err) => {
+            let err = anyhow::Error::new(err)
+                .context(format!("creating temp file {}", temp_path.display()));
+            return Err(a_to_fs_err(err));
+        }
+    };
+
+    if let Err(err) = file.write_all(value) {
+        if let Err(remove_err) = fs::remove_file(temp_path) {
+            tracing::warn!(
+                path = %temp_path.display(),
+                error = %remove_err,
+                "Failed to remove FileStore temp file after write error"
+            );
+        }
+        let err =
+            anyhow::Error::new(err).context(format!("writing temp file {}", temp_path.display()));
+        return Err(a_to_fs_err(err));
+    }
+
+    Ok(true)
+}
+
 // For anyhow preserve the context
 fn a_to_fs_err(err: anyhow::Error) -> StoreError {
     StoreError::FilesystemError(format!("{err:#}"))
@@ -556,6 +601,7 @@ fn to_fs_err<E: std::error::Error>(err: E) -> StoreError {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::fs;
 
     use tokio_util::sync::CancellationToken;
 
@@ -582,6 +628,18 @@ mod tests {
 
         assert!(keys.contains(&Key::new("v1/tests/key1/multi/part".to_string())));
         assert!(keys.contains(&Key::new("v1/tests/key2".to_string())));
+    }
+
+    #[test]
+    fn test_temp_file_creation_does_not_overwrite_existing_path() {
+        let t = tempfile::tempdir().unwrap();
+        let temp_path = t.path().join(".tmp_existing");
+
+        fs::write(&temp_path, b"sentinel").unwrap();
+        let created = super::write_temp_file_at(&temp_path, b"new").unwrap();
+
+        assert!(!created);
+        assert_eq!(fs::read(&temp_path).unwrap(), b"sentinel");
     }
 
     #[tokio::test]
