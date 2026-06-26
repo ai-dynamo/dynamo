@@ -16,11 +16,9 @@ asserts it does not raise.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
-from dynamo.mocker import MockEngineArgs, PlannerReplayBridge
+from dynamo.mocker import MockEngineArgs
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import (
     EngineCapabilities,
@@ -30,6 +28,7 @@ from dynamo.planner.core.types import (
 from dynamo.planner.offline.replay_adapter import (
     ReplayPlannerAdapter,
     _build_fpm_from_dict,
+    _merge_traffic,
 )
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.replay.main import _engine_caps
@@ -132,9 +131,16 @@ def test_get_regression_uses_orchestrator_scaling_state_without_aic_install():
     )
 
 
-class _TrafficBridge:
-    def drain_traffic(self):
-        return {
+def test_build_tick_input_maps_replay_accept_length():
+    # The Rust simulation drains the per-tick traffic window into
+    # ``result["traffic"]``; a need_traffic_metrics tick maps it onto
+    # ``TickInput.traffic`` (accept_length, isl/osl, kv-hit, latency).
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+
+    tick = ScheduledTick(at_s=60.0, need_traffic_metrics=True)
+    result = {
+        "now_ms": 1_000.0,
+        "traffic": {
             "duration_s": 60.0,
             "num_req": 4,
             "avg_isl": 512.0,
@@ -143,15 +149,9 @@ class _TrafficBridge:
             "avg_accept_length": 2.5,
             "avg_ttft_ms": 10.0,
             "avg_itl_ms": 5.0,
-        }
-
-
-def test_build_tick_input_maps_replay_accept_length():
-    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
-    adapter._bridge = _TrafficBridge()
-
-    tick = ScheduledTick(at_s=60.0, need_traffic_metrics=True)
-    ti = adapter._build_tick_input(tick, {"now_ms": 1_000.0})
+        },
+    }
+    ti = adapter._build_tick_input(tick, result)
 
     assert ti.now_s == 60.0
     assert ti.traffic is not None
@@ -164,7 +164,6 @@ def test_build_tick_input_buffers_fpm_until_fpm_tick():
     adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
     adapter._config = cfg
     adapter._is_disagg = False
-    adapter._bridge = _TrafficBridge()
     adapter._prefill_fpm_cache = {}
     adapter._decode_fpm_cache = {}
     adapter._pending_prefill_fpm_snaps = []
@@ -210,78 +209,46 @@ def test_build_tick_input_buffers_fpm_until_fpm_tick():
     assert ("1", 0) in second.fpm_observations.decode
 
 
-def test_planner_bridge_drains_mtp_accept_length(tmp_path):
-    trace_path = tmp_path / "mtp_trace.jsonl"
-    records = [
-        {
-            "timestamp": 0.0,
-            "session_id": f"req-{i}",
-            "input_length": 128,
-            "output_length": 12,
-            "hash_ids": [100 + i * 2, 101 + i * 2],
-        }
-        for i in range(2)
-    ]
-    trace_path.write_text(
-        "\n".join(json.dumps(record) for record in records) + "\n",
-        encoding="utf-8",
-    )
-    agg_args = MockEngineArgs(
-        block_size=64,
-        num_gpu_blocks=512,
-        max_num_batched_tokens=2048,
-        max_num_seqs=16,
-        speedup_ratio=1000.0,
-        aic_nextn=2,
-        aic_nextn_accept_rates="1,1",
-    )
-
-    bridge = PlannerReplayBridge(
-        trace_file=trace_path,
-        extra_engine_args=agg_args,
-        num_workers=1,
-        trace_block_size=64,
-    )
-    bridge.advance_to(1000.0)
-
-    traffic = bridge.drain_traffic()
-    assert traffic["avg_osl"] == 12.0
-    assert traffic["avg_accept_length"] == pytest.approx(3.0)
-
-    prefill_args = MockEngineArgs(
-        block_size=64,
-        num_gpu_blocks=512,
-        max_num_batched_tokens=2048,
-        max_num_seqs=16,
-        speedup_ratio=1000.0,
-        worker_type="prefill",
-    )
-    decode_args = MockEngineArgs(
-        block_size=64,
-        num_gpu_blocks=512,
-        max_num_batched_tokens=2048,
-        max_num_seqs=16,
-        speedup_ratio=1000.0,
-        worker_type="decode",
-        aic_nextn=2,
-        aic_nextn_accept_rates="1,1",
-    )
-    bridge = PlannerReplayBridge.create_disagg(
-        trace_file=trace_path,
-        prefill_engine_args=prefill_args,
-        decode_engine_args=decode_args,
-        num_prefill_workers=1,
-        num_decode_workers=1,
-        trace_block_size=64,
-    )
-    bridge.advance_to(1000.0)
-
-    traffic = bridge.drain_traffic()
-    assert traffic["avg_osl"] == 12.0
-    assert traffic["avg_accept_length"] == pytest.approx(3.0)
-
-
 def test_replay_engine_caps_exposes_aic_nextn():
     caps = _engine_caps(MockEngineArgs(aic_nextn=2))
 
     assert caps.speculative_nextn == 2
+
+
+def test_merge_traffic_weights_ratio_fields_by_native_counts():
+    # kv_hit_rate and accept_length must merge by their true denominators
+    # (hit_rate_count / accept_length_forward_count), not num_req, so a window
+    # whose ratio-sample count is disproportionate to its request count still
+    # contributes its exact share. Here num_req-weighting would give the wrong
+    # answer (0.9 and 1.2); count-weighting reconstructs the exact mean.
+    a = {
+        "num_req": 1,
+        "duration_s": 1.0,
+        "avg_isl": 100.0,
+        "avg_osl": 50.0,
+        "avg_kv_hit_rate": 0.0,
+        "hit_rate_count": 90,
+        "avg_accept_length": 3.0,
+        "accept_length_forward_count": 90,
+    }
+    b = {
+        "num_req": 9,
+        "duration_s": 1.0,
+        "avg_isl": 100.0,
+        "avg_osl": 50.0,
+        "avg_kv_hit_rate": 1.0,
+        "hit_rate_count": 10,
+        "avg_accept_length": 1.0,
+        "accept_length_forward_count": 10,
+    }
+    merged = _merge_traffic(a, b)
+    assert merged["avg_kv_hit_rate"] == pytest.approx(
+        (0.0 * 90 + 1.0 * 10) / 100
+    )  # 0.1
+    assert merged["avg_accept_length"] == pytest.approx(
+        (3.0 * 90 + 1.0 * 10) / 100
+    )  # 2.8
+    assert merged["num_req"] == 10
+    assert merged["hit_rate_count"] == 100
+    assert merged["accept_length_forward_count"] == 100
+    assert merged["avg_isl"] == pytest.approx(100.0)

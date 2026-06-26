@@ -17,7 +17,11 @@ use crate::{
     },
 };
 
-/// Owns resources that must be released even when routing setup or streaming is cancelled.
+/// Post-selection owner of scheduler bookkeeping.
+///
+/// `KvPushRouter` installs this through [`RequestGuard`] before its next
+/// fallible await. At that point the scheduling response channel has completed
+/// its admission handoff and no longer represents request lifetime.
 struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
@@ -239,7 +243,10 @@ impl OutputBlockTracker {
     }
 }
 
-/// Coordinates scheduler/session cleanup, observability, and streamed load tracking.
+/// Coordinates scheduler cleanup, observability, and streamed load tracking.
+///
+/// Session-affinity lifetime is separate: `AffinityAcquire` and
+/// `AffinityLease` own binding commit, release, and invalidation.
 pub(super) struct RequestGuard {
     cleanup: RequestCleanup,
     observability: RequestObservability,

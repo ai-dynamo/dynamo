@@ -10,7 +10,6 @@ mod catalog;
 mod core;
 mod error;
 mod input;
-mod scoring;
 mod server;
 mod types;
 
@@ -24,5 +23,6 @@ pub use types::{
     ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest, OverlapScoresResponse,
     PotentialLoadsRequest, ReadyResponse, ReservationRequest, ReservationResponse,
     SelectAndReserveRequest, SelectRequest, SelectResponse, SelectionKey, SelectionWorkerConfig,
-    WorkerCatalogRecord, WorkerLifecycle, WorkerOverlapScore, WorkerPatchRequest, WorkerRequest,
+    SharedCacheOverlapScore, WorkerCatalogRecord, WorkerLifecycle, WorkerOverlapScore,
+    WorkerPatchRequest, WorkerRequest,
 };

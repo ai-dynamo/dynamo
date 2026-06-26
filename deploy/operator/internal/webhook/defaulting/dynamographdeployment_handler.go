@@ -20,6 +20,7 @@ package defaulting
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -42,17 +43,22 @@ const (
 // for version-gated behavior changes in the controller.
 type DGDDefaulter struct {
 	OperatorVersion string
+	GroveEnabled    bool
 }
 
 // NewDGDDefaulter creates a new DGDDefaulter with the given operator version.
-func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
+func NewDGDDefaulter(operatorVersion string, groveEnabled bool) *DGDDefaulter {
 	return &DGDDefaulter{
 		OperatorVersion: operatorVersion,
+		GroveEnabled:    groveEnabled,
 	}
 }
 
 // Default implements admission.CustomDefaulter.
 // On every operation: defaults nil Replicas to 1 for all services.
+// On every Grove-pathway operation: defaults nil MinAvailable to 1. Scaling to
+// replicas=0 does not rewrite MinAvailable; it remains the component's
+// configured minimum viable unit.
 // On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.
 // On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
@@ -78,10 +84,16 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	// default the controller panics on a nil pointer dereference in
 	// expandRolesForService(). Apply on every operation so that services
 	// added via UPDATE also get the default.
-	for name, svc := range dgd.Spec.Services {
-		if svc != nil && svc.Replicas == nil {
+	grovePathway := d.isGrovePathway(dgd)
+	for _, svc := range dgd.Spec.Services {
+		if svc == nil {
+			continue
+		}
+		if svc.Replicas == nil {
 			svc.Replicas = ptr.To(int32(1))
-			logger.V(1).Info("defaulted nil replicas to 1", "service", name)
+		}
+		if grovePathway && svc.MinAvailable == nil {
+			svc.MinAvailable = ptr.To(int32(1))
 		}
 	}
 
@@ -100,6 +112,11 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	}
 
 	return nil
+}
+
+func (d *DGDDefaulter) isGrovePathway(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
+	return d.GroveEnabled && (dgd.Annotations == nil ||
+		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
 }
 
 // RegisterWithManager registers the defaulting webhook with the manager.

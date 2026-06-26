@@ -116,6 +116,70 @@ jobs:
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
 
+# ============================================================================
+# Power Agent
+# ============================================================================
+
+  power-agent:
+    name: Power Agent
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push power agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: power-agent
+          target: runtime  # push the slim shipped stage, not the test stage
+          image_tag: ${{ github.sha }}-power-agent
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-power-agent
+      - name: Refresh BuildKit builder
+        # The runtime build above can leave the remote BuildKit connection stale;
+        # re-establish it (re-routing only if unhealthy) before the test build.
+        uses: ./.github/actions/builder-refresher
+        with:
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          flavor: general
+          arch: linux/amd64
+      - name: Run unit tests inside the container image
+        # Build the Dockerfile `test` stage (FROM runtime): its RUN pytest runs
+        # the suite against the exact shipped image (Python 3.12 + baked deps),
+        # validating the container itself rather than a pip-installed runner env.
+        # Reuses the builder + ECR Docker Hub mirror the build step set up above
+        # (runtime layers are a cache hit); no --push/--load runs pytest without
+        # exporting the never-shipped test image.
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker buildx build --builder b-${{ github.run_id }}-${{ github.run_attempt }} \
+            --target test \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            -f deploy/power-agent/Dockerfile deploy/power-agent
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
+        with:
+          version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
+      - name: Lint and render (production + dev)
+        run: |
+          CHART=deploy/helm/charts/power-agent
+          helm lint "$CHART" --set image.tag=ci-test
+          # Production DaemonSet render (default daemonset.enabled=true).
+          helm template power-agent "$CHART" --set image.tag=ci-test >/dev/null
+          # Dev-pod render: uses dev.image.* and must NOT require the production
+          # image.tag (regression guard for the daemonset-gated validation).
+          helm template power-agent "$CHART" \
+            --set daemonset.enabled=false \
+            --set dev.enabled=true \
+            --set dev.nodeName=ci-node >/dev/null
+
   # ============================================================================
   # BUILD JOBS
   # ============================================================================
@@ -131,10 +195,12 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   vllm-dev-build:
@@ -167,10 +233,12 @@ jobs:
       cuda_version: '["13.0"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   sglang-build:
@@ -184,10 +252,12 @@ jobs:
       cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   sglang-dev-build:
@@ -220,10 +290,12 @@ jobs:
       cuda_version: '["13.0"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-efa-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   trtllm-build:
@@ -237,10 +309,12 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   trtllm-dev-build:
@@ -273,10 +347,12 @@ jobs:
       cuda_version: '["13.1"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   planner-build:
@@ -504,45 +580,18 @@ jobs:
       pytest_markers: '(pre_merge or post_merge) and vllm and xpu_1'
 
   # ============================================================================
-  # IMAGE COMPLIANCE JOBS
+  # IMAGE COMPLIANCE
   # ============================================================================
-
-  vllm-compliance:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: vllm
-      target: runtime
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  sglang-compliance:
-    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: sglang
-      target: runtime
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["13.0"]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  trtllm-compliance:
-    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: trtllm
-      target: runtime
-      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
+  # vllm/sglang/trtllm: compliance extract + verify runs as an inline step
+  # INSIDE each shipped framework build job (inline_compliance: true above), on
+  # the same warm builder — a cache hit + small scratch export instead of a cold
+  # full-image rebuild on a separate fresh builder. archive_sources is currently
+  # false (source archival temporarily disabled), so release branches do not emit
+  # the /sources.zip OSRB artifact; EFA images are covered (make_efa flows to the
+  # extract). A compliance failure fails the build.
+  #
+  # planner/frontend stay on the legacy shared-compliance scan until they
+  # migrate to the inline system.
   planner-compliance:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [planner-build]
@@ -1177,7 +1226,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-agent, snapshot-placeholder-vllm, snapshot-placeholder-sglang, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-agent, snapshot-placeholder-vllm, snapshot-placeholder-sglang, power-agent, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

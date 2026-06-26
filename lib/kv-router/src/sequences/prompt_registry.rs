@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dashmap::DashMap;
 use dynamo_tokens::SequenceHash;
+use indexmap::IndexMap;
+use parking_lot::RwLock;
 #[cfg(test)]
 use rustc_hash::FxHashSet;
 use rustc_hash::{FxBuildHasher, FxHashMap};
+use seqlock::SeqLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(test)]
@@ -73,6 +75,98 @@ impl WorkerLoadSnapshot {
     }
 }
 
+#[derive(Debug)]
+struct WorkerLoadSlot {
+    // SeqLock gives the hot projection path a lock-free read of the latest
+    // whole-worker snapshot. Writers mark the sequence odd, replace the
+    // snapshot, then mark the sequence even. Readers only return after seeing
+    // the same even sequence before and after copying the `Copy` payload, so a
+    // copy that overlaps a write is retried instead of exposing a mixed
+    // snapshot. Writers still serialize with each other, but they do not wait
+    // for readers.
+    //
+    // The upstream crate implements the copy with `read_volatile`, which is
+    // technically UB under Rust/LLVM if a writer mutates the same memory at the
+    // same time: volatile is not atomic and does not by itself legalize a data
+    // race. See https://github.com/Amanieu/seqlock/issues/2#issuecomment-473606523.
+    //
+    // `WorkerLoadSnapshot` is a small `Copy` value with no references or drop
+    // state. The sequence check is what makes the read logically race-free for
+    // this slot: a reader either observes a stable whole snapshot or retries.
+    // In practice this is the same seqlock/READ_ONCE pattern the crate is
+    // designed for, while avoiding the per-worker RwLock read on every request.
+    load: SeqLock<WorkerLoadSnapshot>,
+}
+
+impl WorkerLoadSlot {
+    fn new(load: WorkerLoadSnapshot) -> Self {
+        Self {
+            load: SeqLock::new(load),
+        }
+    }
+
+    fn snapshot(&self) -> WorkerLoadSnapshot {
+        self.load.read()
+    }
+
+    fn replace(&self, load: WorkerLoadSnapshot) {
+        *self.load.lock_write() = load;
+    }
+}
+
+#[derive(Debug)]
+struct WorkerLoadTable {
+    // IndexMap gives us the dense full-worker scan plus point lookup shape that was previously
+    // hand-rolled as Vec<WorkerLoadSlot> + FxHashMap<WorkerWithDpRank, usize>.
+    entries: IndexMap<WorkerWithDpRank, WorkerLoadSlot, FxBuildHasher>,
+}
+
+impl Default for WorkerLoadTable {
+    fn default() -> Self {
+        Self {
+            entries: IndexMap::with_hasher(FxBuildHasher),
+        }
+    }
+}
+
+impl WorkerLoadTable {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (WorkerWithDpRank, WorkerLoadSnapshot)> + '_ {
+        self.entries
+            .iter()
+            .map(|(&worker, slot)| (worker, slot.snapshot()))
+    }
+
+    fn ensure_worker(&mut self, worker: WorkerWithDpRank) {
+        self.entries
+            .entry(worker)
+            .or_insert_with(|| WorkerLoadSlot::new(WorkerLoadSnapshot::default()));
+    }
+
+    fn update(&self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) -> bool {
+        let Some(slot) = self.entries.get(&worker) else {
+            return false;
+        };
+        slot.replace(load);
+        true
+    }
+
+    fn upsert(&mut self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) {
+        if let Some(slot) = self.entries.get(&worker) {
+            slot.replace(load);
+        } else {
+            self.entries.insert(worker, WorkerLoadSlot::new(load));
+        }
+    }
+
+    fn remove(&mut self, worker: WorkerWithDpRank) {
+        self.entries.swap_remove(&worker);
+    }
+}
+
 pub(super) struct PromptRegistry {
     // WARNING: prompt membership and worker load are only eventually consistent.
     // Each mutation still starts from one worker-local source of truth: we mutate the chosen
@@ -81,7 +175,7 @@ pub(super) struct PromptRegistry {
     // after the write finishes, but reads can still observe a mixed membership/load state that
     // never existed atomically and make a suboptimal routing choice.
     membership: PromptMembershipTrie,
-    loads: DashMap<WorkerWithDpRank, WorkerLoadSnapshot, FxBuildHasher>,
+    loads: RwLock<WorkerLoadTable>,
     #[cfg(test)]
     cleanup_attempts: AtomicUsize,
 }
@@ -90,7 +184,7 @@ impl Default for PromptRegistry {
     fn default() -> Self {
         Self {
             membership: PromptMembershipTrie::new(),
-            loads: DashMap::with_hasher(FxBuildHasher),
+            loads: RwLock::new(WorkerLoadTable::default()),
             #[cfg(test)]
             cleanup_attempts: AtomicUsize::new(0),
         }
@@ -100,9 +194,11 @@ impl Default for PromptRegistry {
 impl PromptRegistry {
     pub(super) fn new(workers: impl IntoIterator<Item = WorkerWithDpRank>) -> Self {
         let registry = Self::default();
+        let mut loads = registry.loads.write();
         for worker in workers {
-            registry.loads.entry(worker).or_default();
+            loads.ensure_worker(worker);
         }
+        drop(loads);
         registry
     }
 
@@ -111,7 +207,7 @@ impl PromptRegistry {
         worker: WorkerWithDpRank,
         load: WorkerLoadSnapshot,
     ) {
-        self.loads.insert(worker, load);
+        self.upsert_worker_load(worker, load);
     }
 
     pub(super) fn apply_membership_delta_and_load(
@@ -139,7 +235,14 @@ impl PromptRegistry {
             self.membership
                 .store_chain(worker, lookup, store.parent, &store.hashes);
         }
-        self.loads.insert(worker, load);
+        self.upsert_worker_load(worker, load);
+    }
+
+    fn upsert_worker_load(&self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) {
+        if self.loads.read().update(worker, load) {
+            return;
+        }
+        self.loads.write().upsert(worker, load);
     }
 
     pub(super) fn maybe_cleanup(&self) {
@@ -157,11 +260,11 @@ impl PromptRegistry {
         for removed in change.removed {
             self.membership
                 .remove_worker(removed.worker, &removed.trie_lookup);
-            self.loads.remove(&removed.worker);
+            self.loads.write().remove(removed.worker);
         }
 
         for worker in change.added {
-            self.loads.entry(worker).or_default();
+            self.loads.write().ensure_worker(worker);
         }
         self.membership.maybe_cleanup();
     }
@@ -173,16 +276,13 @@ impl PromptRegistry {
         prefill_token_deltas: &PrefillTokenDeltas,
         decay_now: Instant,
     ) -> PotentialLoadMaps {
-        let mut potential_blocks =
-            FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher);
-        let mut potential_tokens =
-            FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher);
+        let loads = self.loads.read();
+        let mut potential_blocks = FxHashMap::with_capacity_and_hasher(loads.len(), FxBuildHasher);
+        let mut potential_tokens = FxHashMap::with_capacity_and_hasher(loads.len(), FxBuildHasher);
         let mut active_requests = INCLUDE_ACTIVE_REQUESTS
-            .then(|| FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher));
+            .then(|| FxHashMap::with_capacity_and_hasher(loads.len(), FxBuildHasher));
 
-        for entry in &self.loads {
-            let worker = *entry.key();
-            let load = *entry.value();
+        for (worker, load) in loads.iter() {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
             let new_blocks = query_len.saturating_sub(overlap_depth);
             let active_tokens = load.active_tokens(decay_now);
@@ -221,11 +321,10 @@ impl PromptRegistry {
     ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
         let query_len = token_sequence.map_or(0, |query| query.len());
         let matched_depth = self.membership.compute_overlap_depths(token_sequence);
-        let mut projections = FxHashMap::with_capacity_and_hasher(self.loads.len(), FxBuildHasher);
+        let loads = self.loads.read();
+        let mut projections = FxHashMap::with_capacity_and_hasher(loads.len(), FxBuildHasher);
 
-        for entry in &self.loads {
-            let worker = *entry.key();
-            let load = *entry.value();
+        for (worker, load) in loads.iter() {
             let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
             projections.insert(
                 worker,
@@ -242,22 +341,25 @@ impl PromptRegistry {
 
     pub(super) fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
         self.loads
+            .read()
             .iter()
-            .map(|entry| (*entry.key(), entry.value().active_blocks))
+            .map(|(worker, load)| (worker, load.active_blocks))
             .collect()
     }
 
     pub(super) fn active_request_counts(&self) -> HashMap<WorkerWithDpRank, usize> {
         self.loads
+            .read()
             .iter()
-            .map(|entry| (*entry.key(), entry.value().active_requests))
+            .map(|(worker, load)| (worker, load.active_requests))
             .collect()
     }
 
     pub(super) fn active_tokens(&self, decay_now: Instant) -> HashMap<WorkerWithDpRank, usize> {
         self.loads
+            .read()
             .iter()
-            .map(|entry| (*entry.key(), entry.value().active_tokens(decay_now)))
+            .map(|(worker, load)| (worker, load.active_tokens(decay_now)))
             .collect()
     }
 
@@ -266,13 +368,9 @@ impl PromptRegistry {
         now: Instant,
     ) -> HashMap<WorkerWithDpRank, Result<u64, PrefillTimeLoadError>> {
         self.loads
+            .read()
             .iter()
-            .map(|entry| {
-                (
-                    *entry.key(),
-                    entry.value().modeled_remaining_prefill_time_ms(now),
-                )
-            })
+            .map(|(worker, load)| (worker, load.modeled_remaining_prefill_time_ms(now)))
             .collect()
     }
 
@@ -282,8 +380,9 @@ impl PromptRegistry {
         mut predicate: impl FnMut(WorkerWithDpRank, usize) -> bool,
     ) -> bool {
         self.loads
+            .read()
             .iter()
-            .any(|entry| predicate(*entry.key(), entry.value().active_tokens(decay_now)))
+            .any(|(worker, load)| predicate(worker, load.active_tokens(decay_now)))
     }
 
     #[cfg(test)]
@@ -292,11 +391,7 @@ impl PromptRegistry {
         expected_loads: &FxHashMap<WorkerWithDpRank, WorkerLoadSnapshot>,
         expected_blocks: &FxHashMap<WorkerWithDpRank, FxHashSet<SequenceHash>>,
     ) {
-        let actual_loads: FxHashMap<_, _> = self
-            .loads
-            .iter()
-            .map(|entry| (*entry.key(), *entry.value()))
-            .collect();
+        let actual_loads: FxHashMap<_, _> = self.loads.read().iter().collect();
         let actual_blocks = self.membership.worker_hashes();
         assert_eq!(
             actual_loads, *expected_loads,

@@ -131,7 +131,8 @@ async def init_multimodal_worker(
 
     This worker is always an internal component that should not register with
     the Frontend. Public registration is handled by the Encode Worker component
-    (--multimodal-encode-worker). For standalone serving, use init() (default).
+    (--enable-multimodal --disaggregation-mode encode). For standalone serving,
+    use init() (default).
     """
     server_args, dynamo_args = config.server_args, config.dynamo_args
 

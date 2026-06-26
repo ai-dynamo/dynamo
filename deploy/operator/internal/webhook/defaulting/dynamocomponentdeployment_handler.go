@@ -45,6 +45,8 @@ func NewDCDDefaulter() *DCDDefaulter {
 
 // Default implements admission.CustomDefaulter.
 // On CREATE, standalone v1beta1 DCDs default spec.name from metadata.name.
+// UPDATE requests are admitted unchanged because renaming an existing component
+// from metadata would rewrite user intent.
 func (d *DCDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dcdDefaultingWebhookName)
 
