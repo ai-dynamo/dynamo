@@ -1321,7 +1321,8 @@ jobs:
           RESPONSE=$(curl -fsSL \
             --request POST \
             --form "token=<${TOKEN_FILE}" \
-            --form "ref=main" \
+            --form "ref=pvijayakrish/on-demand-release" \
+
             --form "variables[PIPELINE_TYPE]=${PIPELINE_TYPE}" \
             --form "variables[RELEASE_TYPE]=${RELEASE_TYPE}" \
             --form "variables[DRY_RUN]=false" \
