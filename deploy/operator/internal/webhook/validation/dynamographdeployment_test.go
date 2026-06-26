@@ -338,6 +338,74 @@ func TestDynamoGraphDeploymentValidator_ValidateAlphaCompatibility(t *testing.T)
 	}
 }
 
+func TestDynamoGraphDeploymentValidator_ValidateAlphaCompatibilityAdditionalEdges(t *testing.T) {
+	t.Run("valid preserved alpha-only fields are accepted", func(t *testing.T) {
+		deployment := betaDGDFromAlpha(t, func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+			host := "worker.example.com"
+			dgd.Spec.PVCs = []nvidiacomv1alpha1.PVC{
+				{
+					Name:   k8sptr.To("cache"),
+					Create: k8sptr.To(false),
+				},
+			}
+			service := dgd.Spec.Services["worker"]
+			service.Ingress = &nvidiacomv1alpha1.IngressSpec{
+				Enabled: true,
+				Host:    host,
+			}
+			service.Annotations = map[string]string{
+				consts.KubeAnnotationVLLMDistributedExecutorBackend: "ray",
+			}
+			service.VolumeMounts = []nvidiacomv1alpha1.VolumeMount{
+				{
+					Name:                  "cache",
+					UseAsCompilationCache: true,
+				},
+			}
+			service.SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{Disabled: true}
+			service.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+				Enabled:               false,
+				ExtraClientContainers: []string{"metrics"},
+			}
+		})
+
+		validator := NewDynamoGraphDeploymentValidator(nil, true)
+		_, err := validator.Validate(context.Background(), deployment)
+		assertBetaValidationError(t, err, "")
+	})
+
+	t.Run("missing alpha PVC name is rejected", func(t *testing.T) {
+		deployment := betaDGDFromAlpha(t, func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+			dgd.Spec.PVCs = []nvidiacomv1alpha1.PVC{{}}
+		})
+
+		validator := NewDynamoGraphDeploymentValidator(nil, true)
+		_, err := validator.Validate(context.Background(), deployment)
+		assertBetaValidationError(t, err, "spec.pvcs[0].name is required")
+	})
+
+	t.Run("multiple alpha PVC errors are returned together", func(t *testing.T) {
+		deployment := betaDGDFromAlpha(t, func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+			dgd.Spec.PVCs = []nvidiacomv1alpha1.PVC{
+				{
+					Create: k8sptr.To(true),
+				},
+			}
+		})
+
+		validator := NewDynamoGraphDeploymentValidator(nil, true)
+		_, err := validator.Validate(context.Background(), deployment)
+		for _, wantErr := range []string{
+			"spec.pvcs[0].name is required",
+			"spec.pvcs[0].storageClass is required when create is true",
+			"spec.pvcs[0].size is required when create is true",
+			"spec.pvcs[0].volumeAccessMode is required when create is true",
+		} {
+			assertBetaValidationError(t, err, wantErr)
+		}
+	})
+}
+
 func TestDynamoGraphDeploymentValidator_ValidateAlphaCompatibilityWarnings(t *testing.T) {
 	legacyNamespace := "legacy-namespace"
 	deployment := betaDGDFromAlpha(t, func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
@@ -354,6 +422,92 @@ func TestDynamoGraphDeploymentValidator_ValidateAlphaCompatibilityWarnings(t *te
 	}
 	assertWarningsContain(t, warnings, "spec.services[worker].dynamoNamespace is deprecated and ignored")
 	assertWarningsContain(t, warnings, "spec.services[worker].autoscaling is deprecated and ignored")
+}
+
+func TestDynamoGraphDeploymentValidator_ValidateConvertedAlphaResourceSemantics(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*nvidiacomv1alpha1.DynamoGraphDeployment)
+		wantErr string
+	}{
+		{
+			name: "GMS accepts GPU from alpha dedicated resources",
+			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				service := dgd.Spec.Services["worker"]
+				service.Resources = &nvidiacomv1alpha1.Resources{
+					Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
+				}
+				service.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				}
+			},
+		},
+		{
+			name: "GMS accepts GPU from alpha extraPodSpec main container resources",
+			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				service := dgd.Spec.Services["worker"]
+				service.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
+							},
+						},
+					},
+				}
+				service.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				}
+			},
+		},
+		{
+			name: "GMS accepts alpha GPUType resource after conversion",
+			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				service := dgd.Spec.Services["worker"]
+				service.Resources = &nvidiacomv1alpha1.Resources{
+					Limits: &nvidiacomv1alpha1.ResourceItem{
+						GPU:     "1",
+						GPUType: "example.com/gpu",
+					},
+				}
+				service.GPUMemoryService = &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				}
+			},
+		},
+		{
+			name: "converted alpha extraPodMetadata annotations get beta podTemplate validation",
+			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["worker"].ExtraPodMetadata = &nvidiacomv1alpha1.ExtraPodMetadata{
+					Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "typo",
+					},
+				}
+			},
+			wantErr: `spec.components[worker].podTemplate.metadata.annotations[nvidia.com/vllm-distributed-executor-backend] has invalid value "typo"`,
+		},
+		{
+			name: "converted alpha service names collide case-insensitively",
+			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["WORKER"] = &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypeWorker,
+				}
+			},
+			wantErr: "duplicates component",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deployment := betaDGDFromAlpha(t, tt.mutate)
+			validator := NewDynamoGraphDeploymentValidator(nil, true)
+			_, err := validator.Validate(context.Background(), deployment)
+			assertBetaValidationError(t, err, tt.wantErr)
+		})
+	}
 }
 
 func TestDynamoGraphDeploymentValidator_RestartMatrix(t *testing.T) {
@@ -902,6 +1056,15 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 			wantErr: "spec.topologyConstraint is immutable and cannot be added, removed, or changed after creation",
 		},
 		{
+			name: "unchanged topology constraints are allowed",
+			oldDGD: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
+			}),
+			newDGD: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
+			}),
+		},
+		{
 			name:   "component topology constraint is immutable",
 			oldDGD: newBetaDGDForValidation(),
 			newDGD: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -917,6 +1080,18 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 				Domain:   "zone",
 			}),
 			wantErr: "spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation",
+		},
+		{
+			name: "unchanged kv transfer policy is allowed",
+			oldDGD: betaDGDWithKvTransferPolicy(&nvidiacomv1beta1.KvTransferPolicy{
+				LabelKey: "topology.kubernetes.io/zone",
+				Domain:   "zone",
+			}),
+			newDGD: betaDGDWithKvTransferPolicy(&nvidiacomv1beta1.KvTransferPolicy{
+				LabelKey:    "topology.kubernetes.io/zone",
+				Domain:      "zone",
+				Enforcement: nvidiacomv1beta1.KvTransferEnforcementRequired,
+			}),
 		},
 		{
 			name:   "inter-pod GMS layout is immutable",
@@ -962,6 +1137,19 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 			userInfo: &authenticationv1.UserInfo{
 				Username: "system:serviceaccount:default:regular-user",
 			},
+			principal: operatorPrincipal,
+			wantErr:   "spec.components[worker].replicas cannot be modified directly when scaling adapter is enabled",
+		},
+		{
+			name: "scaling adapter fails closed without user info",
+			oldDGD: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(2))
+			}),
+			newDGD: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				worker.Replicas = k8sptr.To(int32(3))
+			}),
 			principal: operatorPrincipal,
 			wantErr:   "spec.components[worker].replicas cannot be modified directly when scaling adapter is enabled",
 		},
@@ -1015,6 +1203,38 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 				spec.Restart = &nvidiacomv1beta1.Restart{ID: "new"}
 			}),
 			wantErr: "spec.restart.id cannot be changed while a rolling update is InProgress",
+		},
+		{
+			name: "restart id can stay unchanged during active rolling update",
+			oldDGD: betaDGDWithStatus(
+				func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+					spec.Restart = &nvidiacomv1beta1.Restart{ID: "same"}
+				},
+				func(status *nvidiacomv1beta1.DynamoGraphDeploymentStatus) {
+					status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
+						Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
+					}
+				},
+			),
+			newDGD: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+				spec.Restart = &nvidiacomv1beta1.Restart{ID: "same"}
+			}),
+		},
+		{
+			name: "restart id can change after completed rolling update",
+			oldDGD: betaDGDWithStatus(
+				func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+					spec.Restart = &nvidiacomv1beta1.Restart{ID: "old"}
+				},
+				func(status *nvidiacomv1beta1.DynamoGraphDeploymentStatus) {
+					status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
+						Phase: nvidiacomv1beta1.RollingUpdatePhaseCompleted,
+					}
+				},
+			),
+			newDGD: betaDGDWithSpec(func(spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec) {
+				spec.Restart = &nvidiacomv1beta1.Restart{ID: "new"}
+			}),
 		},
 	}
 

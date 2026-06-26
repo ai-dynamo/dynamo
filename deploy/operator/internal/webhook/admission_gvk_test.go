@@ -35,12 +35,19 @@ func TestValidateAdmissionGVK(t *testing.T) {
 		name        string
 		expected    schema.GroupVersionKind
 		got         schema.GroupVersionKind
+		requestKind *schema.GroupVersionKind
 		wantErrText string
 	}{
 		{
 			name:     "allows supported DGD",
 			expected: nvidiacomv1beta1.DynamoGraphDeploymentGVK,
 			got:      nvidiacomv1beta1.DynamoGraphDeploymentGVK,
+		},
+		{
+			name:        "allows DGD converted from alpha request shape",
+			expected:    nvidiacomv1beta1.DynamoGraphDeploymentGVK,
+			got:         nvidiacomv1beta1.DynamoGraphDeploymentGVK,
+			requestKind: &nvidiacomv1alpha1.DynamoGraphDeploymentGVK,
 		},
 		{
 			name:     "allows converted DCD",
@@ -74,14 +81,22 @@ func TestValidateAdmissionGVK(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := admission.NewContextWithRequest(context.Background(), admission.Request{
-				AdmissionRequest: admissionv1.AdmissionRequest{
-					Kind: metav1.GroupVersionKind{
-						Group:   tt.got.Group,
-						Version: tt.got.Version,
-						Kind:    tt.got.Kind,
-					},
+			req := admissionv1.AdmissionRequest{
+				Kind: metav1.GroupVersionKind{
+					Group:   tt.got.Group,
+					Version: tt.got.Version,
+					Kind:    tt.got.Kind,
 				},
+			}
+			if tt.requestKind != nil {
+				req.RequestKind = &metav1.GroupVersionKind{
+					Group:   tt.requestKind.Group,
+					Version: tt.requestKind.Version,
+					Kind:    tt.requestKind.Kind,
+				}
+			}
+			ctx := admission.NewContextWithRequest(context.Background(), admission.Request{
+				AdmissionRequest: req,
 			})
 
 			err := ValidateAdmissionGVK(ctx, tt.expected)
