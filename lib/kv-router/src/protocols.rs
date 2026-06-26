@@ -343,7 +343,7 @@ impl StorageTier {
     pub fn from_kv_medium(medium: &str) -> Option<Self> {
         match medium {
             "GPU" | "DEVICE" => Some(Self::Device),
-            "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
+            "CPU" | "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
             "CPU_TIER2" | "DISK" | "NVME" => Some(Self::Disk),
             "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
             _ => None,
@@ -484,13 +484,6 @@ fn is_zero(value: &u32) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RouterBackpressureReason {
-    /// The configured cap on total queued ISL tokens has been reached.
-    MaxQueuedIslTokensExceeded,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PotentialLoad {
     pub worker_id: WorkerId,
     pub dp_rank: DpRank,
@@ -509,11 +502,8 @@ pub enum RouterResponse {
         dp_rank: DpRank,
         overlap_blocks: u32,
     },
-    Backpressure {
-        reason: RouterBackpressureReason,
-        queued_isl_tokens: usize,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_queued_isl_tokens: Option<usize>,
+    QueueRejected {
+        rejection: crate::scheduling::QueueRejection,
     },
     PrefillMarked {
         success: bool,
@@ -641,6 +631,8 @@ pub enum ActiveSequenceEventData {
         #[serde(default)]
         prefill_load_hint: Option<PrefillLoadHint>,
     },
+    // NOTE: Output-block growth is intentionally not a replica-sync event. It can occur
+    // at high frequency, and broadcasting it would consume disproportionate network bandwidth.
     Free,
     MarkPrefillCompleted,
 }

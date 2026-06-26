@@ -182,6 +182,15 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 				serviceName,
 			))
 		}
+
+		if v.isGrovePathway() && oldService.MinAvailable != nil {
+			if newService.MinAvailable == nil || *newService.MinAvailable != *oldService.MinAvailable {
+				errs = append(errs, fmt.Errorf(
+					"spec.services[%s].minAvailable is immutable after creation",
+					serviceName,
+				))
+			}
+		}
 	}
 
 	// Validate inter-pod GMS layout and failover immutability.
@@ -338,6 +347,21 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 			"spec.services[%s]: gpuMemoryService.mode=%q",
 			serviceName, nvidiacomv1alpha1.GMSModeInterPod))
 	}
+	if service.MinAvailable != nil && !v.isGrovePathway() {
+		return nil, v.grovePathwayRequiredError(fmt.Sprintf("spec.services[%s].minAvailable", serviceName))
+	}
+	if service.MinAvailable != nil && v.isGrovePathway() {
+		if *service.MinAvailable <= 0 {
+			return nil, fmt.Errorf("spec.services[%s].minAvailable must be greater than 0", serviceName)
+		}
+		replicas := int32(1)
+		if service.Replicas != nil {
+			replicas = *service.Replicas
+		}
+		if replicas > 0 && replicas < *service.MinAvailable {
+			return nil, fmt.Errorf("spec.services[%s].replicas must be 0 or greater than or equal to minAvailable", serviceName)
+		}
+	}
 
 	// The inter-pod GMS layout is currently implemented only for vLLM (the
 	// engine relies on vLLM-specific runtime hooks like --load-format gms; the
@@ -372,9 +396,9 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 
 	var sharedValidator *SharedSpecValidator
 	if v.mgr != nil {
-		sharedValidator = NewSharedSpecValidatorWithManager(service, fieldPath, calculatedNamespace, v.mgr)
+		sharedValidator = NewSharedSpecValidatorWithManager(service, fieldPath, calculatedNamespace, v.mgr, v.isGrovePathway())
 	} else {
-		sharedValidator = NewSharedSpecValidator(service, fieldPath, calculatedNamespace)
+		sharedValidator = NewSharedSpecValidator(service, fieldPath, calculatedNamespace, v.isGrovePathway())
 	}
 
 	return sharedValidator.Validate(ctx)
@@ -464,11 +488,8 @@ func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName s
 // Grove requires both operator-level enablement and the per-DGD annotation not
 // being explicitly set to "false".
 func (v *DynamoGraphDeploymentValidator) isGrovePathway() bool {
-	if !v.groveEnabled {
-		return false
-	}
-	return v.deployment.Annotations == nil ||
-		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse
+	return v.groveEnabled && (v.deployment.Annotations == nil ||
+		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
 }
 
 func (v *DynamoGraphDeploymentValidator) grovePathwayRequiredError(subject string) error {

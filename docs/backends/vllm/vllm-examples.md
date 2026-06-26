@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Examples
+subtitle: Launch scripts cover aggregated, disaggregated, KV-routed, and expert-parallel deployment patterns for the vLLM backend.
 ---
 
 For quick start instructions, see the [vLLM README](README.md). This document provides all deployment patterns for running vLLM with Dynamo, including aggregated, disaggregated, KV-routed, and expert-parallel configurations.
