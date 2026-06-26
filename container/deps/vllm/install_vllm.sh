@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-VLLM_VER="0.19.1"
+VLLM_VER="0.23.0"
 VLLM_REF="v${VLLM_VER}"
 DEVICE="cuda"
 
@@ -27,7 +27,7 @@ DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
 FLASHINF_REF="v0.6.6"
 LMCACHE_REF="0.4.2"
-VLLM_OMNI_REF="v0.16.0"
+VLLM_OMNI_REF="e500c00545b80446d58c4ade4cbc831a26932042"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -152,7 +152,10 @@ if [ -n "$VLLM_OMNI_REF" ] && [ "$ARCH" = "amd64" ]; then
         echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from PyPI"
     else
         echo "⚠ PyPI install failed, building from source..."
-        git clone --depth 1 --branch ${VLLM_OMNI_REF} https://github.com/vllm-project/vllm-omni.git $INSTALLATION_DIR/vllm-omni
+        git clone https://github.com/vllm-project/vllm-omni.git $INSTALLATION_DIR/vllm-omni
+        cd $INSTALLATION_DIR/vllm-omni
+        git checkout $VLLM_OMNI_REF
+        cd $INSTALLATION_DIR/vllm
         uv pip install $INSTALLATION_DIR/vllm-omni
         rm -rf $INSTALLATION_DIR/vllm-omni
         echo "✓ vLLM-Omni ${VLLM_OMNI_REF} installed from source"

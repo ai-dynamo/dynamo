@@ -46,6 +46,25 @@ async def init_omni(
 
     shutdown_endpoints[:] = [generate_endpoint]
 
+    lora_enabled = bool(getattr(config.engine_args, "enable_lora", False))
+    if lora_enabled:
+        load_lora_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.load_lora"
+        )
+        unload_lora_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.unload_lora"
+        )
+        list_loras_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.list_loras"
+        )
+        shutdown_endpoints.extend(
+            [
+                load_lora_endpoint,
+                unload_lora_endpoint,
+                list_loras_endpoint,
+            ]
+        )
+
     media_fs = (
         get_fs(config.media_output_fs_url) if config.media_output_fs_url else None
     )
@@ -57,6 +76,7 @@ async def init_omni(
         shutdown_event=shutdown_event,
         media_output_fs=media_fs,
         media_output_http_url=config.media_output_http_url,
+        generate_endpoint=generate_endpoint,
     )
 
     logger.info("Omni worker initialized for model: %s", config.model)
@@ -102,22 +122,46 @@ async def init_omni(
         await VllmOmniHealthCheckPayload.create(handler.engine_client)
     ).to_dict()
 
+    model_metrics_labels = [
+        (
+            prometheus_names.labels.MODEL,
+            config.served_model_name or config.model,
+        ),
+        (
+            prometheus_names.labels.MODEL_NAME,
+            config.served_model_name or config.model,
+        ),
+    ]
+
     try:
-        await generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=[
-                (
-                    prometheus_names.labels.MODEL,
-                    config.served_model_name or config.model,
-                ),
-                (
-                    prometheus_names.labels.MODEL_NAME,
-                    config.served_model_name or config.model,
-                ),
-            ],
-            health_check_payload=health_check_payload,
-        )
+        serve_tasks = [
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=model_metrics_labels,
+                health_check_payload=health_check_payload,
+            )
+        ]
+
+        if lora_enabled:
+            serve_tasks.extend(
+                [
+                    load_lora_endpoint.serve_endpoint(
+                        handler.load_lora,
+                        metrics_labels=model_metrics_labels,
+                    ),
+                    unload_lora_endpoint.serve_endpoint(
+                        handler.unload_lora,
+                        metrics_labels=model_metrics_labels,
+                    ),
+                    list_loras_endpoint.serve_endpoint(
+                        handler.list_loras,
+                        metrics_labels=model_metrics_labels,
+                    ),
+                ]
+            )
+
+        await asyncio.gather(*serve_tasks)
     except Exception as e:
         logger.error("Failed to serve Omni endpoint: %s", e)
         raise
