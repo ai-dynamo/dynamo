@@ -28,20 +28,23 @@ For the supported operator-managed GAIE path, use the
 | `agg.yaml` | Aggregated | Stock vLLM pods plus a Dynamo EPP that selects a decode endpoint. |
 | `disagg.yaml` | Disaggregated | Experimental. Requires a decode-side P/D routing sidecar image before applying. |
 
-Both manifests are namespace-neutral. Apply them with `kubectl apply -n <namespace> -f ...` after
-creating the namespace, Gateway API resources, GAIE CRDs, a Gateway, and any model credentials.
+Both manifests are namespace-neutral. Before applying one, replace `<router-only-epp-image>` with an
+EPP image that implements router-only on-ramp support. Then apply it with
+`kubectl apply -n <namespace> -f ...` after creating the namespace, Gateway API resources, GAIE CRDs,
+a Gateway, and any model credentials.
 
 ## Images and versions
 
-The examples use the Dynamo release-line image convention:
+The examples intentionally use an EPP image placeholder:
 
-```text
-nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+```yaml
+image: "<router-only-epp-image>"
 ```
 
-While router-only on-ramp support is under development, replace that tag if your test branch
-publishes the EPP under a different image. Keep the EPP image, any Dynamo runtime images, and the
-documentation branch on the same release line when possible.
+Router-only on-ramp support is under development and is not implied by the normal Dynamo release
+image. Use an image from the branch or build that implements `DYN_EPP_MODE=router-only`. Keep the
+EPP image, any Dynamo runtime images, and the documentation branch on the same release line when
+possible.
 
 The aggregated on-ramp uses the public `vllm/vllm-openai:latest` image. Replace it with the vLLM
 image your platform standardizes on if you need a pinned or internally mirrored image.

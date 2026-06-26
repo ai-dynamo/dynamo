@@ -54,9 +54,9 @@ no `DynamoGraphDeployment`, no Dynamo worker runtime, and no Dynamo event plane 
   [Kubernetes Quickstart](../README.md#huggingface-token-secret) explains the general secret
   pattern; it is not GAIE-specific.
 - Access to the vLLM image used by the example.
-- Access to a Dynamo EPP image with experimental router-only on-ramp support. The examples use the
-  `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0` release-line convention; replace the image if
-  your test branch publishes router-only support under a different tag.
+- Access to a Dynamo EPP image with experimental router-only on-ramp support. The example manifests
+  use the `<router-only-epp-image>` placeholder because the normal Dynamo release image does not
+  imply this under-development mode.
 - For the disaggregated example only, a decode-side P/D routing sidecar image that your cluster can
   pull. The example keeps this as an explicit image placeholder.
 
@@ -197,8 +197,9 @@ kubectl create secret generic hf-token-secret \
 
 ## Deploy vLLM and the Dynamo EPP
 
-From the repository root, pick one topology. Both examples are namespace-neutral; apply them with
-`-n "$NAMESPACE"`.
+From the repository root, pick one topology. Both examples are namespace-neutral. Before applying
+one, replace `<router-only-epp-image>` in the selected manifest with an EPP image that implements
+router-only on-ramp support.
 
 <Tabs>
   <Tab title="Aggregated" language="bash">
@@ -318,6 +319,8 @@ the EPP container:
 | `DYN_EPP_TARGET_PORT` | All on-ramp deployments | vLLM OpenAI-compatible HTTP port. |
 | `DYN_EPP_KV_EVENTS=true` | KV cache aware routing | Subscribe to each vLLM pod's KV event socket. |
 | `DYN_EPP_KV_EVENT_PORT` | KV cache aware routing | Port from vLLM `--kv-events-config`. |
+| `DYN_EPP_KV_EVENT_TOPIC` | KV cache aware routing | vLLM `--kv-events-config` topic (`""` = no prefix). |
+| `DYN_MODEL_NAME` | All on-ramp deployments | Model name for the tokenizer because there is no Dynamo model card in router-only mode. |
 | `DYN_KV_CACHE_BLOCK_SIZE` | KV cache aware routing | Must match vLLM `--block-size`. |
 | `DYN_ROUTER_PREFILL_LOAD_SCALE` | KV cache aware routing | Weight the prefill-load term in the Dynamo router score. |
 | `DYN_DISCOVERY_BACKEND=mem` | Router-only runtime | Avoid etcd discovery. |

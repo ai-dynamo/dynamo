@@ -107,7 +107,7 @@ subjects:
 ---
 # -----------------------------------------------------------------------------
 # Dynamo EPP in experimental router-only on-ramp mode.
-# Replace the image if your test branch publishes router-only support elsewhere.
+# Replace <router-only-epp-image> with an EPP image that implements this mode.
 # -----------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
@@ -128,7 +128,7 @@ spec:
       serviceAccountName: qwen-epp
       containers:
         - name: epp
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+          image: "<router-only-epp-image>"
           ports:
             - name: grpc
               containerPort: 9002
