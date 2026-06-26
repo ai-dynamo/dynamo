@@ -510,6 +510,7 @@ fn make_text_chunk(
             service_tier: None,
         },
         nvext: None,
+        llm_metrics: None,
     }
 }
 

@@ -25,10 +25,6 @@ harness = false
 name = "claude_trace_export"
 path = "claude_trace_export.rs"
 
-[[bin]]
-name = "request_trace_to_mooncake"
-path = "request_trace_to_mooncake.rs"
-
 [[bench]]
 name = "offline_replay_bench"
 path = "offline_replay_bench.rs"

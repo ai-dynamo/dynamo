@@ -51,7 +51,7 @@ Agent harnesses are increasingly adopting `v1/responses` and `v1/messages` over 
 </tr>
 </table>
 
-We have also invested in day-0 tool call and reasoning parsing support for various open-source models. If you find that a model is not supported, please [open an issue](https://github.com/ai-dynamo/dynamo/issues) or use the [tool-call-parser-generator](../../../.agents/skills/tool-parser-generator/SKILL.md) skill to generate it with your harness of choice.
+We have also invested in day-0 tool call and reasoning parsing support for various open-source models. If you find that a model is not supported, please [open an issue](https://github.com/ai-dynamo/dynamo/issues) or use the tool-call-parser-generator skill in [ai-dynamo/frontend-crates](https://github.com/ai-dynamo/frontend-crates) to generate it with your harness of choice.
 
 ### Agent Hints: The Harness-Orchestrator Interface
 

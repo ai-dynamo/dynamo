@@ -185,6 +185,7 @@ fn make_stream_delta(
             usage: None,
         },
         nvext,
+        llm_metrics: None,
     })
 }
 
