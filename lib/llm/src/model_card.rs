@@ -57,6 +57,10 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
 /// `model_max_length` is only a last resort. Missing fields fall through to the
 /// next source, but malformed present fields return an error so bad model
 /// metadata cannot silently resize request validation and planner limits.
+///
+/// This was added for the MiniMax-M3-VL : its multimodal
+/// Hugging Face config keeps the language model context under
+/// `config.json.text_config.max_position_embeddings`
 fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Result<Option<u32>> {
     let config_path = local_path.join("config.json");
     let config_json = match std::fs::read_to_string(&config_path) {

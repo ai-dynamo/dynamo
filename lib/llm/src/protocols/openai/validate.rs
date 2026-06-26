@@ -445,6 +445,7 @@ pub fn validate_messages(
     }
     // Prior assistant tool-call messages in the request must carry arguments
     // as a JSON object string; reject bad shapes before chat-template rendering.
+    // This was caught in MiniMax-M3 multi-turn tool-call tests
     for (message_index, message) in messages.iter().enumerate() {
         if let dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(assistant) = message
             && let Some(tool_calls) = &assistant.tool_calls
