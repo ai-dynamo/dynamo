@@ -116,6 +116,7 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.gpu_1,
     pytest.mark.h100,
+    pytest.mark.nightly,
     pytest.mark.post_merge,
 ]
 

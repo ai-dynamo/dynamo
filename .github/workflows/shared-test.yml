@@ -30,6 +30,21 @@ on:
         description: 'Target platforms to test as a JSON array'
         required: true
         type: string
+      container_workspace:
+        description: 'Workspace path inside the container where pytest should run'
+        required: false
+        type: string
+        default: '/workspace'
+      pytest_extra_args:
+        description: 'Additional pytest arguments, such as a test path or plugin flags'
+        required: false
+        type: string
+        default: ''
+      extra_test_env:
+        description: 'Additional KEY=VALUE environment lines exported before test steps'
+        required: false
+        type: string
+        default: ''
       enable_coverage:
         description: 'Enable coverage collection (true/false)'
         required: false
@@ -83,6 +98,11 @@ on:
         required: false
         type: string
         default: ''
+      hf_home:
+        description: 'Preferred Hugging Face cache path inside the test container'
+        required: false
+        type: string
+        default: '/models'
       source_ref:
         description: 'Git ref/SHA to checkout and to resolve image tags against. Empty = caller SHA (github.sha).'
         required: false
@@ -159,6 +179,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+      - name: Export extra test environment
+        if: ${{ inputs.extra_test_env != '' }}
+        shell: bash
+        env:
+          EXTRA_TEST_ENV: ${{ inputs.extra_test_env }}
+        run: |
+          printf '%s\n' "$EXTRA_TEST_ENV" >> "$GITHUB_ENV"
       # Experimental: trialing Datadog Test Visibility. Remove if not kept.
       - name: Configure Datadog Test Visibility
         continue-on-error: true
@@ -189,12 +216,14 @@ jobs:
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: ./.github/actions/pytest-local
         with:
-          container_workspace: /workspace
+          container_workspace: ${{ inputs.container_workspace }}
+          pytest_extra_args: ${{ inputs.pytest_extra_args }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          hf_home: ${{ inputs.hf_home }}
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'false'
@@ -203,12 +232,14 @@ jobs:
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
         uses: ./.github/actions/pytest-local
         with:
-          container_workspace: /workspace
+          container_workspace: ${{ inputs.container_workspace }}
+          pytest_extra_args: ${{ inputs.pytest_extra_args }}
           pytest_marks: ${{ inputs.gpu_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_gpu_parallel"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          hf_home: ${{ inputs.hf_home }}
           # parallel_mode=auto + max_vram_gib hands off to the VRAM-aware
           # orchestrator (tests/utils/pytest_parallel_gpu.py via tests/conftest.py)
           parallel_mode: 'auto'
@@ -221,13 +252,15 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
         uses: ./.github/actions/pytest-local
         with:
-          container_workspace: /workspace
+          container_workspace: ${{ inputs.container_workspace }}
+          pytest_extra_args: ${{ inputs.pytest_extra_args }}
           # When the parallel stage runs, exclude profiled tests here so they don't run twice.
           pytest_marks: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
           test_type: "pre_merge_gpu"
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
+          hf_home: ${{ inputs.hf_home }}
           parallel_mode: 'none'
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'

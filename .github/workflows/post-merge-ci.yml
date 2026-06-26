@@ -453,6 +453,7 @@ jobs:
     name: kvbm (${{ matrix.name }})
     needs: [config, vllm-build]
     if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    uses: ./.github/workflows/shared-test.yml
     strategy:
       fail-fast: false
       matrix:
@@ -463,45 +464,24 @@ jobs:
             pytest_markers: post_merge and h100 and kvbm and kvbm_determinism and gpu_1
           - name: determinism-concurrency
             pytest_markers: post_merge and h100 and kvbm_concurrency and kvbm_determinism and gpu_1
-    runs-on: aws-dev-02-tester-amd-gpu-v2
-    container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ github.sha }}-${{ needs.vllm-build.outputs.target_tag_plain }}-test
-      env:
-        # Required: dynamo image user is UID 1000, runner job pod runs as UID 1001.
-        HOME: /__w/dynamo/dynamo
-        USER: dynamo
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Environment
-        run: |
-          id
-          nvidia-smi -L
-          df -h "$GITHUB_WORKSPACE"
-      - name: KVBM integration test (${{ matrix.name }})
-        env:
-          HF_HOME: /scratch/hf
-          # These post-merge jobs run on H100 nodes; use the deterministic MLA
-          # backend for DeepSeek-V2-Lite instead of the portable fallback.
-          KVBM_MLA_BACKEND: FLASH_ATTN_MLA
-        run: |
-          cd "$GITHUB_WORKSPACE"
-          python -m pytest tests/kvbm_integration -m "${{ matrix.pytest_markers }}" -v -s -p no:cacheprovider
-      - name: Dump per-process test logs
-        if: always()
-        run: |
-          root="${DYN_TEST_OUTPUT_PATH:-/tmp/dynamo_tests}"
-          echo "===== worker error scan under $root ====="
-          find "$root" -type f -name 'python.log.txt' \
-            \( -path '*/vllm/*' -o -path '*/trtllm/*' \) 2>/dev/null \
-            | while read -r f; do
-                echo ""
-                echo "######################## $f ########################"
-                echo "----- error / traceback lines -----"
-                grep -nE 'Error|Traceback|Exception|raise |CUDA|out of memory|max_model_len|KV cache|num_gpu_blocks|num_blocks|ValueError|RuntimeError|assert|panic|Caused by' "$f" \
-                  || echo "(no error-pattern lines matched)"
-                echo "----- last 80 lines -----"
-                tail -n 80 "$f"
-              done || true
+    with:
+      dd_env: post-merge
+      test_suite_name: kvbm
+      test_type: ${{ matrix.name }}
+      amd_runner: aws-dev-02-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      container_workspace: /__w/dynamo/dynamo
+      pytest_extra_args: tests/kvbm_integration -p no:cacheprovider
+      hf_home: /scratch/hf
+      extra_test_env: |
+        KVBM_MLA_BACKEND=FLASH_ATTN_MLA
+      run_cpu_only_tests: false
+      run_gpu_tests: true
+      gpu_test_markers: ${{ matrix.pytest_markers }}
+      gpu_test_timeout_minutes: 120
+    secrets: inherit
 
   sglang-test:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
