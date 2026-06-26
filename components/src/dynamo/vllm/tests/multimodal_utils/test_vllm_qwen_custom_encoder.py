@@ -3,13 +3,13 @@
 
 """Unit tests for dynamo.vllm.multimodal_utils.qwen_custom_encoder.
 
-QwenCustomEncoder implements get_image_placeholder_token_id by resolving the
-Qwen image placeholder token string against the model tokenizer (assigned by the
-subclass in load()). These tests pin the preset string, per-version id
-resolution (151655 for Qwen3-VL, 248056 for Qwen3.5 — why the tokenizer is
-authoritative rather than a static id table), the fail-fast errors (unset
-tokenizer, token the tokenizer does not define), and that the class stays
-abstract.
+QwenSerializedCustomEncoder is a serial (SerializedCustomEncoder) base that
+implements get_image_placeholder_token_id by resolving the Qwen image
+placeholder token string against the model tokenizer (assigned by the subclass
+in load()). These tests pin the preset string, per-version id resolution (151655
+for Qwen3-VL, 248056 for Qwen3.5 — why the tokenizer is authoritative rather
+than a static id table), the fail-fast errors (unset tokenizer, token the
+tokenizer does not define), and that the class stays abstract.
 """
 
 from typing import List
@@ -19,7 +19,7 @@ import torch
 
 from dynamo.vllm.multimodal_utils.qwen_custom_encoder import (
     QWEN_IMAGE_PLACEHOLDER_TOKEN,
-    QwenCustomEncoder,
+    QwenSerializedCustomEncoder,
 )
 
 pytestmark = [
@@ -42,16 +42,16 @@ class _FakeTokenizer:
         return self._mapping.get(token, self.unk_token_id)
 
 
-class _ConcreteQwen(QwenCustomEncoder):
-    def load(self, model_id: str, device: str) -> None:  # pragma: no cover - stub
+class _ConcreteQwen(QwenSerializedCustomEncoder):
+    def load(self, model_id: str, device: str) -> None:
         ...
 
-    def encode(self, image_urls: List[str]) -> List[torch.Tensor]:  # pragma: no cover
+    def _encode_blocking(self, image_urls: List[str]) -> List[torch.Tensor]:
         return []
 
 
 def test_preset_token_string():
-    """QwenCustomEncoder presets the Qwen placeholder token string."""
+    """QwenSerializedCustomEncoder presets the Qwen placeholder token string."""
     assert QWEN_IMAGE_PLACEHOLDER_TOKEN == "<|image_pad|>"
 
 
@@ -80,7 +80,7 @@ def test_token_not_defined_raises():
         enc.get_image_placeholder_token_id()
 
 
-def test_qwen_custom_encoder_is_abstract():
-    """load/encode stay abstract -> QwenCustomEncoder cannot be instantiated."""
+def test_qwen_serialized_custom_encoder_is_abstract():
+    """load / _encode_blocking stay abstract -> cannot be instantiated."""
     with pytest.raises(TypeError):
-        QwenCustomEncoder()
+        QwenSerializedCustomEncoder()

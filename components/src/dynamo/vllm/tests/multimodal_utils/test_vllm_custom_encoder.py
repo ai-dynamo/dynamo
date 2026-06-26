@@ -4,11 +4,12 @@
 """Unit tests for dynamo.vllm.multimodal_utils.custom_encoder.
 
 The base CustomEncoder defines the *contract* only: subclasses implement
-load/encode/get_image_placeholder_token_id. How the placeholder id is obtained
-(tokenizer, token string, constant) is a subclass implementation detail — Qwen
-resolution is covered in test_vllm_qwen_custom_encoder.py. These tests pin the
-abstract contract, validate()'s fail-fast dispatch to the subclass impl, and the
-reusable placeholder_token_id_from_tokenizer helper.
+load / async encode / get_image_placeholder_token_id. How those are realized
+(encode's execution model; the id source) is a subclass detail — the serial
+default is covered in test_vllm_serialized_custom_encoder.py and Qwen resolution
+in test_vllm_qwen_custom_encoder.py. These tests pin the abstract contract,
+validate()'s fail-fast dispatch to the subclass impl, and the reusable
+placeholder_token_id_from_tokenizer helper.
 """
 
 from typing import List
@@ -46,10 +47,10 @@ class _FakeTokenizer:
 class _Encoder(CustomEncoder):
     """Concrete encoder returning a fixed placeholder id."""
 
-    def load(self, model_id: str, device: str) -> None:  # pragma: no cover - stub
+    def load(self, model_id: str, device: str) -> None:
         ...
 
-    def encode(self, image_urls: List[str]) -> List[torch.Tensor]:  # pragma: no cover
+    async def encode(self, image_urls: List[str]) -> List[torch.Tensor]:
         return []
 
     def get_image_placeholder_token_id(self) -> int:
@@ -59,10 +60,10 @@ class _Encoder(CustomEncoder):
 class _MisconfiguredEncoder(CustomEncoder):
     """Encoder whose id resolution fails, to exercise validate() propagation."""
 
-    def load(self, model_id: str, device: str) -> None:  # pragma: no cover - stub
+    def load(self, model_id: str, device: str) -> None:
         ...
 
-    def encode(self, image_urls: List[str]) -> List[torch.Tensor]:  # pragma: no cover
+    async def encode(self, image_urls: List[str]) -> List[torch.Tensor]:
         return []
 
     def get_image_placeholder_token_id(self) -> int:
@@ -86,6 +87,20 @@ def test_helper_returns_none_without_convert_method():
     assert placeholder_token_id_from_tokenizer(object(), _TOKEN) is None
 
 
+def test_encode_is_abstract():
+    """A subclass that omits encode cannot instantiate."""
+
+    class _NoEncode(CustomEncoder):
+        def load(self, model_id: str, device: str) -> None:
+            ...
+
+        def get_image_placeholder_token_id(self) -> int:
+            return 1
+
+    with pytest.raises(TypeError):
+        _NoEncode()
+
+
 def test_get_image_placeholder_token_id_is_abstract():
     """A subclass that omits get_image_placeholder_token_id cannot instantiate."""
 
@@ -93,7 +108,7 @@ def test_get_image_placeholder_token_id_is_abstract():
         def load(self, model_id: str, device: str) -> None:
             ...
 
-        def encode(self, image_urls: List[str]) -> List[torch.Tensor]:
+        async def encode(self, image_urls: List[str]) -> List[torch.Tensor]:
             return []
 
     with pytest.raises(TypeError):

@@ -10,26 +10,29 @@ Dynamo splices the encoder's image embeds at the placeholder positions,
 submitting the result as a mixed ``EmbedsPrompt`` (``prompt_token_ids`` +
 ``prompt_is_token_ids`` + ``prompt_embeds``).
 
-The base class defines the *contract* only — ``load``, ``encode``, and
-``get_image_placeholder_token_id``.  How the placeholder id is obtained is an
-encoder implementation detail: Qwen-family encoders subclass
-``QwenCustomEncoder`` (in ``qwen_custom_encoder``), which resolves it from the
-model tokenizer; other models implement ``get_image_placeholder_token_id``
-however their model defines the image placeholder.  The reusable
-``placeholder_token_id_from_tokenizer`` helper covers the common
-tokenizer-resolution case.
+The base class defines the *contract* only — ``load``, async ``encode``, and
+``get_image_placeholder_token_id``.  ``encode`` is async and the worker simply
+``await``s it; the encoder owns its own execution model (serial, or its own
+batching scheduler).  Most authors should subclass ``SerializedCustomEncoder``
+(in ``serialized_custom_encoder``), which implements ``encode`` for them —
+running a synchronous forward off the event loop, serialized — so they only
+write a blocking forward.  Qwen-family authors subclass
+``QwenSerializedCustomEncoder`` (in ``qwen_custom_encoder``), which additionally
+resolves the placeholder id from the model tokenizer.
 
 Usage::
 
-    # Qwen-family model: subclass QwenCustomEncoder (resolution provided)
-    from dynamo.vllm.multimodal_utils.qwen_custom_encoder import QwenCustomEncoder
+    # Qwen-family model: subclass QwenSerializedCustomEncoder
+    from dynamo.vllm.multimodal_utils.qwen_custom_encoder import (
+        QwenSerializedCustomEncoder,
+    )
 
-    class MyEncoder(QwenCustomEncoder):
+    class MyEncoder(QwenSerializedCustomEncoder):
         def load(self, model_id, device):
             # load ViT + projector + tokenizer; set self.tokenizer
             ...
-        def encode(self, image_urls):
-            # encode each image, return one (n_tokens, lm_hidden_dim) tensor per URL
+        def _encode_blocking(self, image_urls):
+            # synchronous forward: one (n_tokens, lm_hidden_dim) tensor per URL
             ...
 
     # launch
@@ -85,29 +88,31 @@ class CustomEncoder(ABC):
     where ``n_visual_tokens`` is determined by the encoder (e.g. number of
     ViT patches after merging).
 
-    Subclasses implement ``load``, ``encode``, and
-    ``get_image_placeholder_token_id``.  How the placeholder id is produced is
-    up to the subclass — Qwen-family models subclass ``QwenCustomEncoder``,
-    which resolves it from the model tokenizer.
+    Subclasses implement ``load``, async ``encode``, and
+    ``get_image_placeholder_token_id``.  For the common case, subclass
+    ``SerializedCustomEncoder`` instead of implementing ``encode`` directly: it
+    runs a synchronous forward off the event loop, serialized, so you only write
+    ``_encode_blocking``.  Qwen-family models subclass
+    ``QwenSerializedCustomEncoder``, which also resolves the placeholder id from
+    the model tokenizer.
 
     Usage::
 
-        # Qwen-family model: subclass QwenCustomEncoder (resolution provided)
-        from dynamo.vllm.multimodal_utils.qwen_custom_encoder import QwenCustomEncoder
+        # Common case: subclass SerializedCustomEncoder (write the sync forward)
+        from dynamo.vllm.multimodal_utils.serialized_custom_encoder import (
+            SerializedCustomEncoder,
+        )
 
-        class MyEncoder(QwenCustomEncoder):
-            def load(self, model_id, device):
-                # load ViT + projector + tokenizer; set self.tokenizer
-                ...
-            def encode(self, image_urls):
-                # encode each image, return one tensor per URL
-                ...
-
-        # other model: subclass CustomEncoder and implement all three methods
-        class OtherEncoder(CustomEncoder):
+        class MyEncoder(SerializedCustomEncoder):
             def load(self, model_id, device): ...
-            def encode(self, image_urls): ...
             def get_image_placeholder_token_id(self): ...
+            def _encode_blocking(self, image_urls): ...   # sync forward
+
+        # Advanced: implement async encode directly to run your own batching
+        class MyBatchedEncoder(CustomEncoder):
+            def load(self, model_id, device): ...
+            def get_image_placeholder_token_id(self): ...
+            async def encode(self, image_urls): ...        # owns its scheduler
 
         python -m dynamo.vllm \\
             --model /weights/my_lm \\
@@ -127,13 +132,21 @@ class CustomEncoder(ABC):
         ...
 
     @abstractmethod
-    def encode(self, image_urls: List[str]) -> List[torch.Tensor]:
+    async def encode(self, image_urls: List[str]) -> List[torch.Tensor]:
         """Encode images, returning per-image visual token embeddings.
 
-        Called off the event loop via ``asyncio.to_thread``. Dynamo serializes
-        calls on a single encoder instance with a lock, so implementations need
-        not be re-entrant; but any state shared *across* encoder instances must
-        still be guarded by the implementation.
+        Async: the worker ``await``s it. The encoder owns its execution model —
+        the worker holds no lock and does not offload to a thread, so:
+
+        - It **may be called concurrently** (multiple in-flight requests). The
+          encoder owns any serialization or cross-request batching.
+        - It **must not block the event loop**: offload the (blocking) forward
+          via ``asyncio.to_thread`` or run it on the encoder's own scheduler.
+
+        Most authors should not implement this directly — subclass
+        ``SerializedCustomEncoder`` and implement ``_encode_blocking`` to get a
+        safe serial, off-loop default. Implement ``encode`` directly only to run
+        your own batching scheduler.
 
         Args:
             image_urls: URLs of images to encode.
@@ -150,11 +163,11 @@ class CustomEncoder(ABC):
 
         Dynamo uses it to locate the image span and splice the encoder tensors
         into the mixed ``EmbedsPrompt``.  How the id is obtained is the
-        encoder's choice: Qwen-family encoders subclass ``QwenCustomEncoder``,
-        which resolves it from the model tokenizer; other encoders resolve it
-        however their model defines the image placeholder (e.g. via
-        ``placeholder_token_id_from_tokenizer`` with their token string, or a
-        known constant).
+        encoder's choice: Qwen-family encoders subclass
+        ``QwenSerializedCustomEncoder``, which resolves it from the model
+        tokenizer; other encoders resolve it however their model defines the
+        image placeholder (e.g. via ``placeholder_token_id_from_tokenizer`` with
+        their token string, or a known constant).
 
         Raises:
             ValueError: if the encoder cannot resolve a valid id. Surfaced at
