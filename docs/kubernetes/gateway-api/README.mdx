@@ -40,15 +40,15 @@ from the `DynamoGraphDeployment`.
 
 ```mermaid
 flowchart LR
-    Client["Client<br/>/v1/chat/completions"] --> Gateway["Gateway API<br/>Gateway"]
-    Gateway --> Route["HTTPRoute"]
-    Route --> Pool["InferencePool"]
-    Pool --> EPP["Dynamo EPP<br/>EndpointPicker"]
+    Client["Client<br/>/v1/chat/completions"] -->|"sends request"| Gateway["Gateway API<br/>Gateway"]
+    Gateway -->|"matches"| Route["HTTPRoute"]
+    Route -->|"targets"| Pool["InferencePool"]
+    Pool -->|"calls"| EPP["Dynamo EPP<br/>EndpointPicker"]
     EPP -->|"x-dynamo-worker-instance-id"| Gateway
     Gateway -->|"forward request"| Sidecar["Frontend sidecar<br/>--router-mode direct"]
-    Sidecar --> Worker["Dynamo worker"]
-    Worker -. "KV events" .-> Runtime["Dynamo runtime<br/>NATS/JetStream"]
-    Runtime -. "routing state" .-> EPP
+    Sidecar -->|"forwards"| Worker["Dynamo worker"]
+    Worker -. "publishes KV events" .-> Runtime["Dynamo runtime<br/>NATS/JetStream"]
+    Runtime -. "updates routing state" .-> EPP
 ```
 
 Gateway API owns the external request path. Dynamo still owns the serving graph: the operator
@@ -97,12 +97,12 @@ matches your platform, then point its `HTTPRoute` and generated `InferencePool` 
 
 ```mermaid
 flowchart TB
-    GatewayNS["Gateway namespace"] --> Gateway["Gateway<br/>listener and address"]
-    ModelNS["Model namespace"] --> Route["HTTPRoute"]
-    ModelNS --> Pool["InferencePool"]
-    Route -->|"spec.parentRefs"| Gateway
-    Route -->|"rules.backendRefs"| Pool
-    Pool -->|"endpointPickerRef"| EPP["Dynamo EPP Service"]
+    GatewayNS["Gateway namespace"] -->|"contains"| Gateway["Gateway<br/>listener and address"]
+    ModelNS["Model namespace"] -->|"contains"| Route["HTTPRoute"]
+    ModelNS -->|"contains"| Pool["InferencePool"]
+    Route -->|"attaches with spec.parentRefs"| Gateway
+    Route -->|"routes with rules.backendRefs"| Pool
+    Pool -->|"selects with endpointPickerRef"| EPP["Dynamo EPP Service"]
 ```
 
 `HTTPRoute.spec.parentRefs` attaches a route to a `Gateway`. If the `HTTPRoute` and `Gateway` live
