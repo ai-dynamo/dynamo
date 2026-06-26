@@ -431,9 +431,11 @@ class TestVllmRendererApi:
             "routed_experts",
             "num_nans_in_logits",
         )
-        # vllm-omni extends EngineCoreOutput with streaming segment metadata
-        # (only installed on amd64, not arm64).
+        # vllm-omni extends EngineCoreOutput with a multimodal output channel
+        # and streaming segment metadata (only installed on amd64, not arm64).
+        # Declaration order in OmniEngineCoreOutput determines wire position.
         omni_output_extra_fields = (
+            "multimodal_output",
             "is_segment_finished",
             "new_prompt_len_snapshot",
         )
