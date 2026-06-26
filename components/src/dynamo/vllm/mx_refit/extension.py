@@ -281,7 +281,7 @@ class MxRefitWorkerExtension:
             # role-aware translation (QKV un-interleave, gated-MLP split,
             # per-expert grouped split) rather than the DTensor path's
             # bulk-pull-of-HF-tensors. Route to the Megatron handler.
-            if any(c.megatron_meta is not None for c in candidates):
+            if any(getattr(c, "megatron_meta", None) is not None for c in candidates):
                 return self._update_weights_via_mx_megatron(
                     candidates=candidates,
                     version=int(version),
