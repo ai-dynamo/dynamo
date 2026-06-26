@@ -154,6 +154,13 @@ class VLLMProcess(ManagedEngineProcessMixin):
         # can't collide on the bind (which is fatal: there is no try/except
         # around it). Non-DP workers use a block of 1, matching the per-worker
         # port arrays above.
+        #
+        # The relay subscribes ``base + dp_rank`` for dp_rank in
+        # get_dp_range_for_worker() == (data_parallel_rank, dp_size). This
+        # harness launches internal-LB DP (only --data-parallel-size, no
+        # --data-parallel-rank), so data_parallel_rank == 0 and each worker owns
+        # local ranks [0, dp_size) -- fully inside its block. (The one DP test
+        # uses num_workers=1.) External/hybrid LB, where dp_start > 0, isn't used.
         self._fpm_block = max(1, data_parallel_size or 1)
         self._fpm_ports = allocate_contiguous_ports(
             num_workers, self._fpm_block, DefaultPort.SYSTEM1.value
