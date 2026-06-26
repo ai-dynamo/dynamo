@@ -53,6 +53,22 @@ primitive**. It does not decide who is active — that's the engine and you.
    releases the lock and a standby takes over — no health-check needed. (Or drive
    `/engine/control/{sleep,wake_up}` yourself if you'd rather control promotion.)
 
+```mermaid
+sequenceDiagram
+    participant P as Primary (ENGINE_ID=0)
+    participant S as Shadow (ENGINE_ID=1)
+    participant G as GMS server
+    participant L as flock (lock file)
+    P->>G: load from disk, publish weights (RW)
+    S->>G: import weights (RO, zero-copy, no reload)
+    P->>L: acquire lock, start serving
+    S->>L: blocked, waiting for lock
+    Note over P,L: Primary process killed; kernel auto-releases the lock
+    S->>L: acquire lock
+    S->>G: remap resident weights (no reload)
+    Note over S: Shadow now serving
+```
+
 So on one node you supply: a shared lock file, a way to **route traffic to the
 current lock holder** (with `dynamo.vllm` the engine registers with discovery only
 *after* acquiring the lock, so a router sees only the active one), and — to restore
@@ -91,25 +107,50 @@ list (the `flock`, scratch managers, and unmap/remap primitives are in the wheel
 
 ## Multiple nodes: what's extra
 
-Everything above still holds. The only new fact is that a multi-node engine is one
-**distributed group** — a leader plus workers across the nodes, joined by a
-rendezvous (master address/port). That changes three things:
+Everything above still holds. A multi-node engine is just one **distributed
+group** — a leader plus workers across the nodes — which you already know how to
+launch (a shared master address/port, `--node-rank`, etc.). Standing up such a
+group, and the second/standby copy of it, is ordinary multi-node deployment and
+is *not* GMS-specific. Only three things are special to GMS shadow failover:
 
 - **A standby is a whole group, not a process.** Run the active group plus one or
   more complete standby groups; each spans all the nodes and imports the same
-  per-node GMS weights (RO), so standby groups add no weight memory.
-- **Each group needs its own rendezvous.** Give every group its own leader
-  address/port so its workers pair with *their* leader, not another group's. This
-  per-group wiring is the one genuinely new thing to set up.
-- **Promotion is still one `flock`, and failover is whole-group.** Only leaders
-  serve, so co-locate the groups' leaders on one node and let them share a single
-  lock file — the same single-node election; workers just follow their own leader.
-  Because a distributed collective can't be partially recovered, the unit you fail
-  over is the whole group: when you kill the active leader, also tear down that
-  group's orphaned workers and start a fresh standby group to restore redundancy.
+  per-node GMS weights (RO), so the standby groups add **no** weight memory — the
+  whole point of GMS here.
+- **Promotion is still one `flock`.** Only the leaders serve, so co-locate the
+  groups' leaders on a single node and let them share one lock file — the exact
+  same election as single node. Workers just follow their own group's leader and
+  never touch the lock.
+- **Failover is whole-group.** A distributed collective can't be partially
+  recovered, so the unit you fail over is the entire group: when you kill the
+  active leader, also tear down that group's orphaned workers and start a fresh
+  standby group to restore redundancy.
+
+```mermaid
+flowchart LR
+    subgraph N0["Node 0 (leader node)"]
+        G0[GMS server]
+        LA["Active leader (ENGINE_ID=0)"]
+        LS["Standby leader (ENGINE_ID=1)"]
+        LOCK([shared flock])
+        LA -- holds --> LOCK
+        LS -. waiting .-> LOCK
+        LA --> G0
+        LS --> G0
+    end
+    subgraph N1["Node 1"]
+        G1[GMS server]
+        WA["Active worker"]
+        WS["Standby worker"]
+        WA --> G1
+        WS --> G1
+    end
+    LA == active group ==> WA
+    LS -. standby group .-> WS
+```
 
 The failover trigger is still yours (you kill the primary); GMS just gives each
 replacement fast per-rank weight re-materialization (it imports its shard from GMS
 instead of reloading from disk). **Wide expert parallelism (WideEP) is simply a
-large instance of this** — same per-group rendezvous, same leader `flock`, same
-whole-group failover.
+large instance of this** — more groups, same leader `flock`, same whole-group
+failover.
