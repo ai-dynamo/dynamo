@@ -573,9 +573,14 @@ async fn fetch_preprocessor_from_discovery(
         discovered_namespaces.len()
     );
 
+    let namespace_prefix_mode = dynamo_llm::namespace::namespace_prefix_mode_from_env();
     for instance in instances {
         if let DiscoveryInstance::Model { namespace, .. } = &instance {
-            if !namespace.starts_with(target_namespace) {
+            if !dynamo_llm::namespace::namespace_matches_prefix(
+                namespace,
+                target_namespace,
+                namespace_prefix_mode,
+            ) {
                 continue;
             }
 

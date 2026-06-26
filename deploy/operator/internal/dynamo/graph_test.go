@@ -2027,6 +2027,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 														Value: "test-namespace-test-dynamo-graph-deployment",
 													},
 													{
+														Name:  commonconsts.DynamoNamespacePrefixStrictEnvVar,
+														Value: "true",
+													},
+													{
 														Name:  commonconsts.DynamoComponentEnvVar,
 														Value: commonconsts.ComponentTypeFrontend,
 													},
@@ -3010,6 +3014,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  commonconsts.DynamoNamespacePrefixEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoNamespacePrefixStrictEnvVar,
+														Value: "true",
 													},
 													{
 														Name:  commonconsts.DynamoComponentEnvVar,
@@ -4019,6 +4027,10 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													{
 														Name:  commonconsts.DynamoNamespacePrefixEnvVar,
 														Value: "test-namespace-test-dynamo-graph-deployment",
+													},
+													{
+														Name:  commonconsts.DynamoNamespacePrefixStrictEnvVar,
+														Value: "true",
 													},
 													{
 														Name:  commonconsts.DynamoComponentEnvVar,
@@ -8733,14 +8745,20 @@ func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
 		ComponentType:   commonconsts.ComponentTypeFrontend,
 	})
 	assert.NoError(t, err)
-	found := false
+	foundPrefix := false
+	foundStrict := false
 	for _, env := range container.Env {
 		if env.Name == commonconsts.DynamoNamespacePrefixEnvVar {
 			assert.Equal(t, "myns-mydgd", env.Value)
-			found = true
+			foundPrefix = true
+		}
+		if env.Name == commonconsts.DynamoNamespacePrefixStrictEnvVar {
+			assert.Equal(t, "true", env.Value)
+			foundStrict = true
 		}
 	}
-	assert.True(t, found, "DYN_NAMESPACE_PREFIX should be set on frontend")
+	assert.True(t, foundPrefix, "DYN_NAMESPACE_PREFIX should be set on frontend")
+	assert.True(t, foundStrict, "DYN_NAMESPACE_PREFIX_STRICT should be set on frontend")
 }
 
 func TestBaseComponentDefaults_ContainerNameOnlyInContainerDiscoveryMode(t *testing.T) {

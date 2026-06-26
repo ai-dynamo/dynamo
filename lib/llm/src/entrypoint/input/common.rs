@@ -16,7 +16,7 @@ use crate::{
     kv_router::{KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics},
     migration::Migration,
     model_card::ModelDeploymentCard,
-    namespace::NamespaceFilter,
+    namespace::{NamespaceFilter, namespace_prefix_mode_from_env},
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
     protocols::common::{
         llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
@@ -275,9 +275,10 @@ pub async fn prepare_engine(
                 )
                 .await?;
             let inner_watch_obj = watch_obj.clone();
-            let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
+            let namespace_filter = NamespaceFilter::from_namespace_and_prefix_with_mode(
                 local_model.namespace(),
                 local_model.namespace_prefix(),
+                namespace_prefix_mode_from_env(),
             );
             let _watcher_task = tokio::spawn(async move {
                 inner_watch_obj

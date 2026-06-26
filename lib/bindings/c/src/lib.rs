@@ -1529,13 +1529,21 @@ async fn fetch_preprocessor_from_discovery(
     // owns the OpenAI surface (tokenizer + chat/completions), which is
     // Decode or Aggregated — Prefill and Encode workers register cards with
     // no engine and an empty OpenAI surface and must be skipped.
-    // Use prefix matching because workers may append a rolling-update hash
-    // suffix to the base namespace (e.g. "ns-dgd-58908edc" vs "ns-dgd").
+    // In operator-managed deployments, match the base namespace and managed
+    // rolling-update hash namespaces (e.g. "ns-dgd-58908edc" vs "ns-dgd")
+    // without crossing into unrelated DGDs that happen to share the same string
+    // prefix. Keep manual EPP deployments on the historic prefix behavior unless
+    // the operator sets the strict-mode env var.
     let mut model_card: Option<(ModelDeploymentCard, String)> = None;
+    let namespace_prefix_mode = dynamo_llm::namespace::namespace_prefix_mode_from_env();
 
     for instance in instances {
         if let DiscoveryInstance::Model { namespace, .. } = &instance {
-            if !namespace.starts_with(target_namespace) {
+            if !dynamo_llm::namespace::namespace_matches_prefix(
+                namespace,
+                target_namespace,
+                namespace_prefix_mode,
+            ) {
                 continue;
             }
 

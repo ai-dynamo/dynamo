@@ -103,6 +103,10 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Name:  commonconsts.DynamoNamespacePrefixEnvVar,
 			Value: context.DynamoNamespace,
 		},
+		{
+			Name:  commonconsts.DynamoNamespacePrefixStrictEnvVar,
+			Value: "true",
+		},
 	}...)
 
 	// EPP default args

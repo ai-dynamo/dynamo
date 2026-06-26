@@ -80,6 +80,10 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 			Name:  commonconsts.DynamoNamespacePrefixEnvVar,
 			Value: context.DynamoNamespace,
 		},
+		{
+			Name:  commonconsts.DynamoNamespacePrefixStrictEnvVar,
+			Value: "true",
+		},
 	}...)
 
 	return container, nil
