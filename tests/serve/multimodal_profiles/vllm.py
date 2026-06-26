@@ -274,16 +274,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     ),
                 ],
             ),
-            # Pre_merge gater for the MM-routing path. Uses Qwen3.5-0.8B (the
-            # smallest VL in the qwen3_5 family) so the gate is fast. Larger
-            # variants cover the same path on post_merge. The qwen3_5 spec
-            # uses a coarse routing block_size (~544), capping hit rate at
-            # (N-1)/N where N is the routing-block count; threshold is set
-            # at 0.4 to catch silent degradation to 0 while accepting the
-            # ~0.5 floor a 2-block prompt produces under this spec. Filler
-            # of 12 keeps the prompt small (~1100 tokens, fits the launcher's
-            # default 4096-token max-model-len). Fine-grained assertions live
-            # in tests/mm_router/test_router_rust_mm_router_e2e.py (post_merge).
+            # qwen3_5 hybrid GDN: routing block_size ~544 (Mamba page-aligned),
+            # hit-rate ceiling (N-1)/N. Filler 120 → ~6 blocks → ceiling ≈0.83;
+            # threshold 0.7 fires on real degradation, tolerates variance.
             "agg_router": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
@@ -295,8 +288,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         payload=make_image_payload_cached_tokens(
                             ["green"],
                             require_rust_processor_init=True,
-                            min_avg_kv_hit_rate=0.4,
-                            prompt_filler_repeats=12,
+                            min_avg_kv_hit_rate=0.7,
+                            prompt_filler_repeats=120,
                         )
                     )
                 ],
