@@ -135,9 +135,9 @@ async def _run_multi_turn_replay(
     returned_first_ids, _ = await _collect_output_token_ids(router, first_request)
     assert returned_first_ids == first_output_token_ids
 
-    block_aligned_suffix = list(range(400_001, 400_001 + BLOCK_SIZE))
+    second_turn_suffix_token_ids = list(range(400_001, 400_001 + BLOCK_SIZE - 1))
     second_input_token_ids = (
-        first_input_token_ids + returned_first_ids + block_aligned_suffix
+        first_input_token_ids + returned_first_ids + second_turn_suffix_token_ids
     )
     assert len(second_input_token_ids) % BLOCK_SIZE == 0
 
@@ -183,7 +183,9 @@ def test_mocker_output_replay_generate_from_request_multi_turn(
     tmp_path,
 ):
     replay_trace_path = tmp_path / "response-replay.jsonl"
-    first_output_token_ids = list(range(200_001, 200_001 + BLOCK_SIZE))
+    # The final generated token does not have KV yet. Generate one extra token
+    # so the first full output block is actually cached for the next turn.
+    first_output_token_ids = list(range(200_001, 200_001 + BLOCK_SIZE + 1))
     second_output_token_ids = [300_001, 300_002, 300_003, 300_004]
     _write_response_replay_trace(
         replay_trace_path,
