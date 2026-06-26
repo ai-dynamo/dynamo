@@ -136,20 +136,56 @@ the matching `InferencePool`, so users apply the DGD and the route instead of ha
 
 ### EPP Component Configuration
 
-The DGD's EPP component configures the EndpointPicker plugins and the runtime values required by the
-embedded router. Start from the recipe manifests unless you are intentionally changing routing
-behavior:
+Start from the recipe EPP component and change the plugin profile only when you want different
+routing behavior.
 
-- `eppConfig.config.plugins` defines filters, scorers, and pickers.
-- `eppConfig.config.schedulingProfiles` composes those plugins and assigns weights. Changing weights
-  changes endpoint scoring; keep the filter, scorer, and picker chain consistent with the topology.
-- `DYN_MODEL_NAME` must match the served model name used by the workers so the EPP tokenizes prompts
-  with the same model context.
-- `DYN_KV_CACHE_BLOCK_SIZE` must match the worker backend's `--block-size`.
-- `DYN_ENFORCE_DISAGG=true` is used by disaggregated deployments to fail closed when the expected
-  prefill/decode topology is not present.
+```yaml
+- name: Epp
+  type: epp
+  eppConfig:
+    config:
+      plugins:
+        - type: disagg-profile-handler
+        - name: decode-filter
+          type: label-filter
+          parameters:
+            label: nvidia.com/dynamo-component-type
+            validValues: [decode]
+            allowsNoLabel: true # Aggregated recipes can route unlabeled decode pods.
+        - name: dyn-decode
+          type: dyn-decode-scorer
+        - name: picker
+          type: max-score-picker
+      schedulingProfiles:
+        - name: decode
+          plugins:
+            - pluginRef: decode-filter
+              weight: 1 # Keep topology filters aligned with the worker labels.
+            - pluginRef: dyn-decode
+              weight: 1 # Tune scorer weights to change endpoint scoring.
+            - pluginRef: picker
+              weight: 1
+```
 
-See the GAIE recipe manifests for concrete aggregated and disaggregated EPP configurations:
+Keep the router environment values aligned with the worker runtime:
+
+```yaml
+- name: Epp
+  type: epp
+  podTemplate:
+    spec:
+      containers:
+        - name: main
+          env:
+            - name: DYN_MODEL_NAME
+              value: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic # Match the worker model name.
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "128" # Match the worker backend's --block-size.
+            - name: DYN_ENFORCE_DISAGG
+              value: "false" # Use "true" for disaggregated fail-closed behavior.
+```
+
+See the GAIE recipe manifests for full aggregated and disaggregated EPP configurations:
 [aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/llama-3-70b/vllm/agg/gaie/deploy.yaml)
 and
 [disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/llama-3-70b/vllm/disagg-single-node/gaie/deploy.yaml).
