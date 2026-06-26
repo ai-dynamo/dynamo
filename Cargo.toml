@@ -194,9 +194,10 @@ inherits = "release"
 debug = true
 strip = false
 
-# Pin llm-multimodal + llm-tokenizer to the smg commit that switches
-# hf-hub from native-tls to rustls-tls (PR #1459, merged 2026-05-05).
-# Remove this block once llm-multimodal ≥1.6.0 is published on crates.io.
+# Pin llm-multimodal + llm-tokenizer to the smg v1.5.0 release tag for
+# Qwen3.5 family routing (qwen3_5 → Qwen3-VL multimodal processor) and
+# Kimi-K2.5 / K2.6 tokenizer (tiktoken). Remove this block once
+# llm-multimodal ≥1.6.0 is published on crates.io.
 [patch.crates-io]
-llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
-llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
+llm-multimodal = { git = "https://github.com/lightseekorg/smg", tag = "v1.5.0" }
+llm-tokenizer = { git = "https://github.com/lightseekorg/smg", tag = "v1.5.0" }

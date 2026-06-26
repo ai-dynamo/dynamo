@@ -119,5 +119,5 @@ strip = false
 # [patch.crates-io] from the root, so re-declare here. Remove once
 # llm-multimodal >=1.6.0 is published on crates.io.
 [patch.crates-io]
-llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
-llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
+llm-multimodal = { git = "https://github.com/lightseekorg/smg", tag = "v1.5.0" }
+llm-tokenizer = { git = "https://github.com/lightseekorg/smg", tag = "v1.5.0" }
