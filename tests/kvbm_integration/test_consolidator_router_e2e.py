@@ -769,9 +769,11 @@ class TestConsolidatorRouterE2E:
             model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", "Qwen/Qwen3-0.6B")
 
             # Fixed cache tier sizes
+            block_size = 16
             g1_gpu_blocks = 10  # Very small GPU cache to force evictions
             g2_cpu_blocks = 5  # Smaller than GPU but large enough to retain blocks
             g3_disk_blocks = 5  # Smaller than GPU but large enough to retain blocks
+            max_model_len = g1_gpu_blocks * block_size
 
             # Compute optimal test parameters for this configuration
             test_params = compute_deduplication_test_params(
@@ -796,6 +798,10 @@ class TestConsolidatorRouterE2E:
                     "--enable-prefix-caching",
                     "--num-gpu-blocks-override",
                     str(g1_gpu_blocks),
+                    "--block-size",
+                    str(block_size),
+                    "--max-model-len",
+                    str(max_model_len),
                 ]
             else:  # trtllm
                 # Create TensorRT-LLM config file with KVBM connector
