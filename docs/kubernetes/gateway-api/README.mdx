@@ -224,7 +224,6 @@ EPP, and runtime images on the same Dynamo release line.
 | `HTTPRoute` is not accepted | `parentRefs` points at the wrong Gateway name or namespace. | `kubectl describe httproute -n <model-namespace>` and compare `spec.parentRefs` with the Gateway. |
 | Requests reach a model but EPP logs stay quiet | The route bypasses the `InferencePool`, or the pool points at the wrong EPP service. | Verify `rules.backendRefs` points at the `InferencePool` and `endpointPickerRef` points at the Dynamo EPP service. |
 | EPP does not receive routing state | Dynamo event-plane components are not ready, or image tags do not match. | Check Dynamo platform pods, DGD status, EPP logs, and image tags against the compatibility table. |
-| Model pods restart during load | A Kubernetes startup probe expired before the model finished loading. | Increase the affected component's `startupProbe.failureThreshold` if the long load time is expected. |
 | Istio path cannot call the EPP | Istio was installed without GAIE enabled, or mesh TLS policy blocks the EPP call. | Confirm `ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true` and configure the EPP `DestinationRule`. |
 
 ## Next Step
@@ -232,5 +231,5 @@ EPP, and runtime images on the same Dynamo release line.
 Run the [GAIE Quickstart](./quickstart.mdx) to deploy a `DynamoGraphDeployment`, expose it through
 Gateway API, and verify an end-to-end request through the Dynamo EPP.
 
-Use [GAIE Reference](./reference.mdx) for resource contracts, routing knobs, service mesh settings,
-and startup probe tuning.
+Use [GAIE Reference](./reference.mdx) for resource contracts, routing knobs, and service mesh
+settings.

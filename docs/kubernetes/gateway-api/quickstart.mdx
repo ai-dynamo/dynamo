@@ -344,8 +344,9 @@ terminal.
   </Tab>
 </Tabs>
 
-For startup probe tuning on slow model loads, see
-[GAIE Reference](./reference.mdx#startup-probes).
+If model pods restart while loading, inspect the pod events. When events show startup probe failures
+and the model load time is expected, increase `startupProbe.failureThreshold` on the affected DGD
+component. This is general Kubernetes probe tuning, not a GAIE-specific setting.
 
 ## Clean Up
 
