@@ -81,11 +81,11 @@ flowchart LR
       W2["vLLM pod B<br/>KV PUB :5557"]
     end
 
-    W1 -. "ZMQ KV events" .-> Subscribers["EPP ZMQ subscribers"]
-    W2 -. "ZMQ KV events" .-> Subscribers
-    Subscribers --> Normalize["Normalize events"]
-    Normalize --> Index["In-memory KV index"]
-    Index --> Picker["Endpoint picker"]
+    W1 -. "publishes ZMQ KV events" .-> Subscribers["EPP ZMQ subscribers"]
+    W2 -. "publishes ZMQ KV events" .-> Subscribers
+    Subscribers -->|"receive"| Normalize["Normalize events"]
+    Normalize -->|"updates"| Index["In-memory KV index"]
+    Index -->|"scores"| Picker["Endpoint picker"]
 ```
 
 ## What Dynamo-managed GAIE adds

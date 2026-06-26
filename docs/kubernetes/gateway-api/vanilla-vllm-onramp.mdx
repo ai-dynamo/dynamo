@@ -20,13 +20,13 @@ where the Dynamo operator creates the EPP, workers, Services, and `InferencePool
 
 ```mermaid
 flowchart LR
-    Client["Client"] --> Gateway["Gateway API<br/>Gateway"]
-    Gateway --> Route["HTTPRoute"]
-    Route --> Pool["InferencePool"]
-    Pool --> EPP["Dynamo EPP<br/>router-only mode"]
-    EPP -->|"selected endpoint"| VLLM["stock vLLM pod"]
-    VLLM -. "KV cache events<br/>ZMQ :5557" .-> EPP
-    EPP --> Index["In-memory KV index"]
+    Client["Client"] -->|"sends request"| Gateway["Gateway API<br/>Gateway"]
+    Gateway -->|"matches"| Route["HTTPRoute"]
+    Route -->|"targets"| Pool["InferencePool"]
+    Pool -->|"calls"| EPP["Dynamo EPP<br/>router-only mode"]
+    EPP -->|"selects endpoint"| VLLM["stock vLLM pod"]
+    VLLM -. "publishes KV events<br/>ZMQ :5557" .-> EPP
+    EPP -->|"updates"| Index["In-memory KV index"]
 ```
 
 The example manifests create stock vLLM pods, a Dynamo EPP Deployment, an EPP Service, an
@@ -341,11 +341,11 @@ flowchart LR
       W2["vLLM pod B<br/>KV PUB :5557"]
     end
 
-    W1 -. "ZMQ KV events" .-> Subscribers["EPP ZMQ subscribers"]
-    W2 -. "ZMQ KV events" .-> Subscribers
-    Subscribers --> Normalize["Normalize events"]
-    Normalize --> Index["In-memory KV index"]
-    Index --> Picker["Endpoint picker"]
+    W1 -. "publishes ZMQ KV events" .-> Subscribers["EPP ZMQ subscribers"]
+    W2 -. "publishes ZMQ KV events" .-> Subscribers
+    Subscribers -->|"receive"| Normalize["Normalize events"]
+    Normalize -->|"updates"| Index["In-memory KV index"]
+    Index -->|"scores"| Picker["Endpoint picker"]
 ```
 
 On startup, the EPP begins with an empty KV index. It has no snapshot of prefixes that were already
