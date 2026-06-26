@@ -84,11 +84,11 @@ uv pip install -e lib/gpu_memory_service
 Install Dynamo with a backend extra to pull the inference engine and its CUDA dependencies. Choose the backend you intend to run:
 
 ```bash
-uv pip install -e ".[vllm]"   # or [sglang] / [trtllm]
+uv pip install -e ".[vllm]"   # or [sglang]
 ```
 
 > [!NOTE]
-> The base `uv pip install -e .` installs only the Dynamo runtime and frontend. A backend extra (`[vllm]`, `[sglang]`, or `[trtllm]`) is required to run an inference worker.
+> The base `uv pip install -e .` installs only the Dynamo runtime and frontend. A backend extra (`[vllm]`, `[sglang]`, or `[trtllm]`) will install the relevant framework dependencies to run an inference worker. TensorRT-LLM cannot be installed with `uv` — it needs `pip` with the NVIDIA package index (`uv` cannot resolve a transitive Git URL dependency). See [Local Installation](local-installation.md) or the [TRT-LLM backend guide](../backends/trtllm/README.md).
 
 ## 8. Verify the Build
 

@@ -85,11 +85,11 @@ uv pip install -e lib/gpu_memory_service
 请安装带有后端附加依赖（backend extra）的 Dynamo，以拉取推理引擎及其 CUDA 依赖。选择你要运行的后端：
 
 ```bash
-uv pip install -e ".[vllm]"   # 或 [sglang] / [trtllm]
+uv pip install -e ".[vllm]"   # 或 [sglang]
 ```
 
 > [!NOTE]
-> 仅执行基础的 `uv pip install -e .` 只会安装 Dynamo 运行时和前端。运行推理 worker 需要后端附加依赖（`[vllm]`、`[sglang]` 或 `[trtllm]`）。
+> 仅执行基础的 `uv pip install -e .` 只会安装 Dynamo 运行时和前端。后端附加依赖（`[vllm]`、`[sglang]` 或 `[trtllm]`）会安装运行推理 worker 所需的相应框架依赖。TensorRT-LLM 无法使用 `uv` 安装——它需要配合 NVIDIA 包索引使用 `pip`（`uv` 无法解析其传递性的 Git URL 依赖）。请参阅[本地安装](local-installation.zh-CN.md)或 [TRT-LLM 后端指南](../backends/trtllm/README.md)。
 
 ## 8. 验证构建
 
