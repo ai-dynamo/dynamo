@@ -3867,6 +3867,7 @@ These are injected into all components when the corresponding infrastructure ser
 | --- | --- | --- | --- |
 | `USE_STREAMING` | Enables streaming mode for inference request proxying | `true` | `string` (boolean) |
 | `RUST_LOG` | Rust log level and filter configuration | `debug,dynamo_llm::kv_router=trace` | `string` |
+| `DYN_NAMESPACE_PREFIX` | Namespace prefix used for EPP request routing | Same as `DYN_NAMESPACE` | `string` |
 | `DYN_NAMESPACE_PREFIX_STRICT` | Restricts prefix matching to the base namespace plus operator-managed worker-generation namespaces | `true` | `string` (boolean) |
 
 ### VLLM Backend

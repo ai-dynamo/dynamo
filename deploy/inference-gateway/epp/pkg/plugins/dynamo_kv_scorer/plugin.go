@@ -60,6 +60,7 @@ typedef struct {
 
 // Router bindings API
 query_router_result_t create_routers(const char *namespace_c_str,
+                                     bool namespace_is_prefix,
                                      const char *component_c_str,
                                      bool enforce_disagg,
                                      RouterHandles **out_handle);
@@ -114,9 +115,10 @@ var (
 	ffiOnce sync.Once
 	ffiErr  error
 
-	ffiNamespace     string
-	ffiComponent     string
-	ffiEnforceDisagg bool
+	ffiNamespace         string
+	ffiNamespaceIsPrefix bool
+	ffiComponent         string
+	ffiEnforceDisagg     bool
 
 	routerInitialized bool
 
@@ -130,11 +132,18 @@ var (
 const UnsetDpRank = ^uint32(0)
 
 func loadDynamoConfig() {
-	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE_PREFIX", getEnvOrDefault("DYN_NAMESPACE", "vllm-agg"))
+	if namespacePrefix := os.Getenv("DYN_NAMESPACE_PREFIX"); namespacePrefix != "" {
+		ffiNamespace = namespacePrefix
+		ffiNamespaceIsPrefix = true
+	} else {
+		ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
+		ffiNamespaceIsPrefix = false
+	}
 	ffiComponent = "backend" // This is not the same as DYN_COMPONENT=epp (in this case)
 	ffiEnforceDisagg = getEnvBoolOrDefault("DYN_ENFORCE_DISAGG", false)
 	logger.Info("Dynamo KV Scorer config loaded",
 		"namespace", ffiNamespace,
+		"namespaceIsPrefix", ffiNamespaceIsPrefix,
 		"component", ffiComponent,
 		"enforce_disagg", ffiEnforceDisagg,
 		"kvCacheBlockSize", getEnvOrDefault("DYN_KV_CACHE_BLOCK_SIZE", "(from discovery)"),
@@ -175,6 +184,7 @@ func initFFI() error {
 
 		rc := C.create_routers(
 			ns,
+			C.bool(ffiNamespaceIsPrefix),
 			cm,
 			C.bool(ffiEnforceDisagg),
 			&routerHandles,

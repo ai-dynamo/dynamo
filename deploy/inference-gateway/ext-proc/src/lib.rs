@@ -18,6 +18,6 @@ pub mod picker;
 pub mod proto;
 pub mod server;
 
-pub use epp::Router;
+pub use epp::{NamespaceMatchKind, Router};
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo};
 pub use server::ExtProcServer;

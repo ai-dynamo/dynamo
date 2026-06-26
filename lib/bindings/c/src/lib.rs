@@ -27,6 +27,7 @@ use dynamo_runtime::Runtime;
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
+use dynamo_llm::namespace::{NamespaceFilter, namespace_prefix_mode_from_env};
 use dynamo_runtime::pipeline::RouterMode;
 
 use std::collections::HashSet;
@@ -649,6 +650,7 @@ pub enum QueryRouterResult {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_routers(
     namespace: *const c_char,
+    namespace_is_prefix: bool,
     component: *const c_char,
     enforce_disagg: bool,
     out_handle: *mut RouterHandlesPtr,
@@ -698,7 +700,7 @@ pub unsafe extern "C" fn create_routers(
             preprocessor,
             card,
             actual_namespace,
-        } = match init_preprocessor(&drt, &namespace_str).await {
+        } = match init_preprocessor(&drt, &namespace_str, namespace_is_prefix).await {
             Ok(result) => result,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to initialize preprocessor");
@@ -1401,6 +1403,7 @@ pub unsafe extern "C" fn route_decode_request(
 async fn init_preprocessor(
     drt: &DistributedRuntime,
     target_namespace: &str,
+    target_namespace_is_prefix: bool,
 ) -> anyhow::Result<DiscoveredModelBootstrap> {
     let instance_count = wait_for_discovery_sync(drt).await;
     if instance_count == 0 {
@@ -1414,12 +1417,15 @@ async fn init_preprocessor(
     // Retry fetching the preprocessor: model card metadata may arrive after
     // worker endpoints are registered.
     let bootstrap = loop {
-        match fetch_preprocessor_from_discovery(drt, target_namespace).await {
+        match fetch_preprocessor_from_discovery(drt, target_namespace, target_namespace_is_prefix)
+            .await
+        {
             Ok(result) => break result,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     target_namespace,
+                    target_namespace_is_prefix,
                     "Model card not available yet, retrying in 5s..."
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -1517,6 +1523,7 @@ fn spawn_prefill_discovery_watcher(
 async fn fetch_preprocessor_from_discovery(
     drt: &DistributedRuntime,
     target_namespace: &str,
+    target_namespace_is_prefix: bool,
 ) -> anyhow::Result<DiscoveredModelBootstrap> {
     use dynamo_runtime::discovery::DiscoveryInstance;
 
@@ -1535,15 +1542,23 @@ async fn fetch_preprocessor_from_discovery(
     // prefix. Keep manual EPP deployments on the historic prefix behavior unless
     // the operator sets the strict-mode env var.
     let mut model_card: Option<(ModelDeploymentCard, String)> = None;
-    let namespace_prefix_mode = dynamo_llm::namespace::namespace_prefix_mode_from_env();
+    let namespace_filter = if target_namespace_is_prefix {
+        NamespaceFilter::from_namespace_and_prefix_with_mode(
+            None,
+            Some(target_namespace),
+            namespace_prefix_mode_from_env(),
+        )
+    } else {
+        NamespaceFilter::from_namespace_and_prefix_with_mode(
+            Some(target_namespace),
+            None,
+            namespace_prefix_mode_from_env(),
+        )
+    };
 
     for instance in instances {
         if let DiscoveryInstance::Model { namespace, .. } = &instance {
-            if !dynamo_llm::namespace::namespace_matches_prefix(
-                namespace,
-                target_namespace,
-                namespace_prefix_mode,
-            ) {
+            if !namespace_filter.matches(namespace) {
                 continue;
             }
 

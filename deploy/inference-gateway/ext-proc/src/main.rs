@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_ext_proc::{ExtProcServer, Router};
+use dynamo_ext_proc::{ExtProcServer, NamespaceMatchKind, Router};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -34,18 +34,26 @@ const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 
 struct Config {
     namespace: String,
+    namespace_match_kind: NamespaceMatchKind,
     component: String,
     enforce_disagg: bool,
 }
 
 impl Config {
     fn from_env() -> Self {
-        let namespace = env_or("DYN_NAMESPACE_PREFIX", "")
-            .or_else(|| env_or("DYN_NAMESPACE", ""))
-            .unwrap_or_else(|| "vllm-agg".to_string());
+        let (namespace, namespace_match_kind) =
+            if let Some(namespace_prefix) = env_or("DYN_NAMESPACE_PREFIX", "") {
+                (namespace_prefix, NamespaceMatchKind::Prefix)
+            } else {
+                (
+                    env_or("DYN_NAMESPACE", "").unwrap_or_else(|| "vllm-agg".to_string()),
+                    NamespaceMatchKind::Exact,
+                )
+            };
 
         Self {
             namespace,
+            namespace_match_kind,
             component: env_or("DYN_COMPONENT_NAME", "").unwrap_or_else(|| "backend".to_string()),
             enforce_disagg: parse_env("DYN_ENFORCE_DISAGG", false),
         }
@@ -125,6 +133,7 @@ async fn main() -> Result<()> {
         port = GRPC_PORT,
         health_port = HEALTH_PORT,
         namespace = %config.namespace,
+        ?config.namespace_match_kind,
         component = %config.component,
         enforce_disagg = config.enforce_disagg,
         "Starting Dynamo Rust EPP"
@@ -145,8 +154,13 @@ async fn main() -> Result<()> {
     );
 
     tracing::info!("Initializing KV-aware router from discovery...");
-    let router =
-        Router::from_discovery(&config.namespace, &config.component, config.enforce_disagg).await?;
+    let router = Router::from_discovery_with_namespace_match(
+        &config.namespace,
+        config.namespace_match_kind,
+        &config.component,
+        config.enforce_disagg,
+    )
+    .await?;
 
     // Gate SERVING on pod-reflector readiness. `from_discovery` returns once
     // worker discovery and the model card are ready, but the K8s pod reflector's
