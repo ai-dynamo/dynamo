@@ -140,9 +140,7 @@ def _prepare_request(
     chat_template_kwargs = apply_default_thinking_mode_to_template_kwargs(
         chat_template_kwargs,
         default_thinking_mode,
-        request_has_root_thinking=(
-            isinstance(request, dict) and "thinking" in request
-        ),
+        request_has_root_thinking=(isinstance(request, dict) and "thinking" in request),
     )
     chat_template_kwargs["reasoning_effort"] = request_for_sampling.reasoning_effort
 
