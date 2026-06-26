@@ -39,3 +39,26 @@ def test_spec_decode_runtime_data_ignores_invalid_nextn(speculative_num_steps):
     )
 
     assert get_spec_decode_runtime_data(server_args) is None
+
+
+@pytest.mark.parametrize(
+    "speculative_algorithm, expected",
+    [
+        ("EAGLE", True),
+        ("EAGLE3", True),
+        ("FROZEN_KV_MTP", True),
+        ("DFLASH", False),
+        ("NGRAM", False),
+        ("STANDALONE", False),
+        ("NONE", False),
+        (None, False),
+    ],
+)
+def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected):
+    # enable_eagle must equal sglang's SpeculativeAlgorithm.is_eagle() -- the SAME predicate the
+    # radix cache uses to bigram-key its KV events -- so the KV-router frontend's block-hash window
+    # matches the worker's events. EAGLE3 + FROZEN_KV_MTP were previously omitted -> cache-blind.
+    # (NEXTN/EAGLE are normalized to EAGLE/FROZEN_KV_MTP in ServerArgs before register sees them.)
+    from dynamo.sglang.register import _eagle_enabled_for
+
+    assert _eagle_enabled_for(speculative_algorithm) is expected
