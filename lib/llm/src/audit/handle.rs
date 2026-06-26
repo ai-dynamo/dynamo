@@ -5,29 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use axum::http::HeaderMap;
-
 use super::{bus, config};
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
-
-pub const OTEL_HTTP_HEADERS_CONTEXT_KEY: &str = "audit.otel.http.request.headers";
-
-#[derive(Clone)]
-pub struct AuditHttpRequestHeaders {
-    headers: HeaderMap,
-}
-
-impl AuditHttpRequestHeaders {
-    pub fn new(headers: HeaderMap) -> Self {
-        Self { headers }
-    }
-
-    pub fn headers(&self) -> &HeaderMap {
-        &self.headers
-    }
-}
 
 /// One audit record per chat completion, carrying the request and — when the
 /// response completed — the response. On client cancel / gateway timeout /
@@ -52,8 +33,6 @@ pub struct AuditRecord {
     pub request: Option<Arc<NvCreateChatCompletionRequest>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<Arc<NvCreateChatCompletionResponse>>,
-    #[serde(skip)]
-    pub otel_http_headers: Option<Arc<AuditHttpRequestHeaders>>,
 }
 
 pub struct AuditHandle {
@@ -62,7 +41,6 @@ pub struct AuditHandle {
     model: String,
     event_time: SystemTime,
     request: Arc<NvCreateChatCompletionRequest>,
-    otel_http_headers: Option<Arc<AuditHttpRequestHeaders>>,
 }
 
 impl AuditHandle {
@@ -87,28 +65,17 @@ impl AuditHandle {
             event_time: self.event_time,
             request: Some(self.request),
             response,
-            otel_http_headers: self.otel_http_headers,
         };
         bus::publish(rec);
     }
 }
 
-pub fn create_handle(
-    req: &NvCreateChatCompletionRequest,
-    request_id: &str,
-    otel_http_headers: Option<Arc<AuditHttpRequestHeaders>>,
-) -> Option<AuditHandle> {
+pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> Option<AuditHandle> {
     let policy = config::policy();
     // `capture_enabled()` is `policy.enabled && CAPTURE_ACTIVE`: it additionally
     // requires the audit subsystem to have been initialized, so a stale handle
     // can't be created before/after the audit lifecycle.
-    create_handle_with_config(
-        req,
-        request_id,
-        config::capture_enabled(),
-        policy.force_logging,
-        otel_http_headers,
-    )
+    create_handle_with_config(req, request_id, config::capture_enabled(), policy.force_logging)
 }
 
 fn create_handle_with_config(
@@ -116,7 +83,6 @@ fn create_handle_with_config(
     request_id: &str,
     enabled: bool,
     force_logging: bool,
-    otel_http_headers: Option<Arc<AuditHttpRequestHeaders>>,
 ) -> Option<AuditHandle> {
     if !enabled {
         return None;
@@ -137,7 +103,6 @@ fn create_handle_with_config(
         // thread, so the record reflects what the client sent and when.
         event_time: SystemTime::now(),
         request: Arc::new(req.clone()),
-        otel_http_headers,
     })
 }
 
@@ -211,7 +176,7 @@ mod tests {
                 let _reset_guard = AuditPolicyResetGuard;
 
                 let request = create_test_request("test-model", false);
-                let handle = create_handle(&request, "test-id", None);
+                let handle = create_handle(&request, "test-id");
 
                 assert!(
                     handle.is_some(),
@@ -231,7 +196,6 @@ mod tests {
             event_time: SystemTime::now(),
             request: Some(Arc::new(create_test_request_with_nvext())),
             response: Some(Arc::new(create_test_response("final answer"))),
-            otel_http_headers: None,
         };
 
         let value = serde_json::to_value(record).unwrap();
@@ -241,9 +205,8 @@ mod tests {
             value["response"]["choices"][0]["message"]["content"],
             "final answer"
         );
-        // No event_type discriminator anymore; headers are serde-skipped.
+        // No event_type discriminator anymore.
         assert!(value.get("event_type").is_none());
-        assert!(value.get("otel_http_headers").is_none());
     }
 
     #[test]
@@ -258,7 +221,6 @@ mod tests {
             event_time: SystemTime::now(),
             request: Some(Arc::new(create_test_request("test-model", true))),
             response: None,
-            otel_http_headers: None,
         };
 
         let value = serde_json::to_value(&record).unwrap();
@@ -276,7 +238,6 @@ mod tests {
                 model: model.to_string(),
                 event_time: SystemTime::now(),
                 request: Arc::new(create_test_request(model, true)),
-                otel_http_headers: None,
             }
         }
     }

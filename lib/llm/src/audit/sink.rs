@@ -283,7 +283,6 @@ mod tests {
             event_time: std::time::SystemTime::now(),
             request: None,
             response: None,
-            otel_http_headers: None,
         }
     }
 

@@ -345,7 +345,7 @@ Audit is **opt-in** and independent of `OTEL_EXPORT_ENABLED` (which controls app
 
 - **One** audit record is published per request, carrying the request and — when the response completes — the response.
 - On client cancellation, gateway timeout, or aggregation failure, the record is still emitted with the **`response` field omitted** (not an empty placeholder), so those cases remain auditable. A hard process crash before emission is the only case that loses a record.
-- Each record maps to one OTLP `LogRecord`: scope `dynamo.payload`, body `openai.chat_completion`, with attributes `rid`, `endpoint`, `model`, `streaming`, `audit_complete`, and `payload` (the audit record serialized as a JSON string). Redacted HTTP request headers are included inside `payload.http.request.headers` for the `otel` sink only — other sinks never serialize headers.
+- Each record maps to one OTLP `LogRecord`: scope `dynamo.payload`, body `openai.chat_completion`, with attributes `rid`, `endpoint`, `model`, `streaming`, `audit_complete`, and `payload` (the audit record serialized as a JSON string).
 
 ### Configuration
 
@@ -356,7 +356,6 @@ Audit-specific variables:
 | `DYN_AUDIT_SINKS` | Comma-separated sinks: `stderr`, `nats`, `jsonl`, `jsonl_gz`, `otel`. Audit is enabled when non-empty. Leave **unset** to disable (do not use an empty string). | unset (disabled) |
 | `DYN_AUDIT_FORCE_LOGGING` | Audit every request regardless of the OpenAI `store` flag. Without it, only `store=true` requests are audited. | `false` |
 | `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` | Max serialized OTLP payload size. Oversized records emit a marker with `audit_complete=false` and `audit_drop_reason` instead of being silently dropped. | `4194304` (4 MiB) |
-| `DYN_AUDIT_OTEL_HTTP_HEADER_REDACT_LIST` | Extra header names (comma/whitespace separated) to redact, on top of the default credential list. Does not enable header capture by itself. | none |
 
 The `otel` sink ships over OTLP using the **standard** `OTEL_EXPORTER_OTLP_*` variables — the same ones the runtime log/trace exporter uses, resolved identically:
 
@@ -378,7 +377,7 @@ export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4317
 export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=grpc
 ```
 
-To also write audit JSON to the process's stderr (headers are `otel`-only, so the stderr copy has none):
+To also write audit JSON to the process's stderr:
 
 ```bash
 export DYN_AUDIT_SINKS=stderr,otel

@@ -413,11 +413,6 @@ pub mod llm {
         /// Maximum serialized OTEL audit payload bytes. Oversized records emit
         /// an incomplete marker payload instead of the full request/response.
         pub const DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES: &str = "DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES";
-
-        /// Comma-separated HTTP header names whose values are redacted in the
-        /// OTEL audit payload. Defaults always redact common credential headers.
-        pub const DYN_AUDIT_OTEL_HTTP_HEADER_REDACT_LIST: &str =
-            "DYN_AUDIT_OTEL_HTTP_HEADER_REDACT_LIST";
     }
 
     /// Per-request replay trace configuration
@@ -728,7 +723,6 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
-            llm::audit::DYN_AUDIT_OTEL_HTTP_HEADER_REDACT_LIST,
             // Model
             model::model_express::MODEL_EXPRESS_URL,
             model::model_express::MODEL_EXPRESS_CACHE_PATH,

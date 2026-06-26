@@ -141,7 +141,3 @@ pub(crate) fn capture_enabled() -> bool {
     let policy = policy();
     policy.enabled && CAPTURE_STATE.load(Ordering::Acquire) == CAPTURE_ACTIVE
 }
-
-pub(crate) fn otel_sink_capture_enabled() -> bool {
-    capture_enabled() && policy().sinks.iter().any(|sink| sink == "otel")
-}

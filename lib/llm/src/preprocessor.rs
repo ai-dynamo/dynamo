@@ -2968,17 +2968,7 @@ impl
         // The handle snapshots the pristine request and its arrival time here;
         // the single combined record is published once at stream completion
         // (or with an empty response on cancel/timeout), off the request path.
-        let audit_http_headers = if crate::audit::config::otel_sink_capture_enabled() {
-            context
-                .get::<crate::audit::handle::AuditHttpRequestHeaders>(
-                    crate::audit::handle::OTEL_HTTP_HEADERS_CONTEXT_KEY,
-                )
-                .ok()
-        } else {
-            None
-        };
-        let audit_handle =
-            crate::audit::handle::create_handle(&request, &request_id, audit_http_headers);
+        let audit_handle = crate::audit::handle::create_handle(&request, &request_id);
 
         // For non-streaming requests (stream=false), enable usage by default
         // This ensures compliance with OpenAI API spec where non-streaming responses

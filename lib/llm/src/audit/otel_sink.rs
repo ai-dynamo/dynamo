@@ -15,17 +15,11 @@
 //! exporter (`lib/runtime/src/logging.rs`), so audit logs and application
 //! telemetry resolve the same protocol/endpoint from the shared env vars.
 
-use std::{
-    collections::{BTreeMap, HashSet},
-    time::SystemTime,
-};
+use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use axum::http::HeaderValue;
-use dynamo_runtime::config::environment_names::{
-    llm::audit as env_audit, logging::otlp as env_otlp,
-};
+use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use opentelemetry::Context;
 use opentelemetry::logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity};
 use opentelemetry_otlp::{Protocol, WithExportConfig};
@@ -34,34 +28,11 @@ use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
 use serde_json::json;
 
 use super::config::AuditPolicy;
-use super::handle::{AuditHttpRequestHeaders, AuditRecord};
+use super::handle::AuditRecord;
 use super::sink::AuditSink;
 
 const DEFAULT_OTLP_HTTP_LOGS_ENDPOINT: &str = "http://localhost:4318/v1/logs";
 const DEFAULT_OTLP_GRPC_ENDPOINT: &str = "http://localhost:4317";
-const DEFAULT_HTTP_HEADER_VALUE_MAX_BYTES: usize = 4 * 1024;
-const DEFAULT_HTTP_HEADERS_MAX_BYTES: usize = 64 * 1024;
-const REDACTED_HEADER_VALUE: &str = "[REDACTED]";
-
-const DEFAULT_REDACTED_HTTP_HEADERS: &[&str] = &[
-    "authorization",
-    "proxy-authorization",
-    "cookie",
-    "set-cookie",
-    "api-key",
-    "apikey",
-    "x-api-key",
-    "openai-api-key",
-    "x-openai-api-key",
-    "x-auth-token",
-    "x-access-token",
-    "x-csrf-token",
-    "x-xsrf-token",
-    "x-amz-security-token",
-];
-
-const SENSITIVE_HTTP_HEADER_NAME_FRAGMENTS: &[&str] =
-    &["token", "secret", "password", "credential"];
 
 /// Logical endpoint label so phase 2 (completions / responses) can be
 /// distinguished without changing the body.
@@ -79,51 +50,6 @@ pub struct OtelSink {
     provider: SdkLoggerProvider,
     logger: SdkLogger,
     max_payload_bytes: usize,
-    header_policy: OtelHeaderPolicy,
-}
-
-#[derive(Clone, Debug)]
-struct OtelHeaderPolicy {
-    redact_names: HashSet<String>,
-    max_value_bytes: usize,
-    max_total_bytes: usize,
-}
-
-impl Default for OtelHeaderPolicy {
-    fn default() -> Self {
-        Self {
-            redact_names: DEFAULT_REDACTED_HTTP_HEADERS
-                .iter()
-                .map(|name| (*name).to_string())
-                .collect(),
-            max_value_bytes: DEFAULT_HTTP_HEADER_VALUE_MAX_BYTES,
-            max_total_bytes: DEFAULT_HTTP_HEADERS_MAX_BYTES,
-        }
-    }
-}
-
-impl OtelHeaderPolicy {
-    fn from_env() -> Self {
-        let mut policy = Self::default();
-        if let Ok(raw) = std::env::var(env_audit::DYN_AUDIT_OTEL_HTTP_HEADER_REDACT_LIST) {
-            for name in raw.split(|c: char| c == ',' || c.is_whitespace()) {
-                let name = name.trim().to_ascii_lowercase();
-                if !name.is_empty() {
-                    policy.redact_names.insert(name);
-                }
-            }
-        }
-        policy
-    }
-
-    fn should_redact(&self, name: &str) -> bool {
-        // No prefix is exempt from the fragment heuristic: `nvcf-session-token`
-        // is redacted, while fragment-free routing headers (`nvcf-function-id`) are not.
-        self.redact_names.contains(name)
-            || SENSITIVE_HTTP_HEADER_NAME_FRAGMENTS
-                .iter()
-                .any(|fragment| name.contains(fragment))
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -192,78 +118,13 @@ fn logs_endpoint_from_env(protocol: OtlpLogsProtocol) -> String {
     protocol.default_endpoint().to_string()
 }
 
-fn render_header_value(name: &str, value: &HeaderValue, policy: &OtelHeaderPolicy) -> String {
-    if policy.should_redact(name) {
-        return REDACTED_HEADER_VALUE.to_string();
-    }
-
-    let raw = value.as_bytes();
-    if raw.len() > policy.max_value_bytes {
-        return format!("[TRUNCATED: bytes={}]", raw.len());
-    }
-
-    match value.to_str() {
-        Ok(value) => value.to_string(),
-        Err(_) => format!("[NON_UTF8: bytes={}]", raw.len()),
-    }
-}
-
-fn otel_http_request_value(
-    headers: &AuditHttpRequestHeaders,
-    policy: &OtelHeaderPolicy,
-) -> serde_json::Value {
-    let mut out = BTreeMap::new();
-    let mut bytes_used = 0usize;
-    let mut is_truncated = false;
-    let header_map = headers.headers();
-
-    'headers: for name in header_map.keys() {
-        let name = name.as_str().to_ascii_lowercase();
-        let mut values = Vec::new();
-
-        for value in header_map.get_all(name.as_str()).iter() {
-            let rendered = render_header_value(&name, value, policy);
-            let next_bytes = name.len().saturating_add(rendered.len());
-            if bytes_used.saturating_add(next_bytes) > policy.max_total_bytes {
-                // Stop collecting once the budget is hit, but fall through so the
-                // values already gathered for this header are still inserted
-                // rather than dropped along with the header.
-                is_truncated = true;
-                break;
-            }
-            bytes_used = bytes_used.saturating_add(next_bytes);
-            values.push(serde_json::Value::String(rendered));
-        }
-
-        if values.len() == 1 {
-            out.insert(name, values.remove(0));
-        } else if !values.is_empty() {
-            out.insert(name, serde_json::Value::Array(values));
-        }
-
-        if is_truncated {
-            break 'headers;
-        }
-    }
-
-    json!({
-        "headers": out,
-        "headers_truncated": is_truncated,
-    })
-}
-
 impl OtelSink {
-    fn new(
-        provider: SdkLoggerProvider,
-        max_payload_bytes: usize,
-        header_policy: OtelHeaderPolicy,
-    ) -> Self {
+    fn new(provider: SdkLoggerProvider, max_payload_bytes: usize) -> Self {
         let logger = provider.logger(AUDIT_INSTRUMENTATION_SCOPE);
         Self {
             provider,
             logger,
             max_payload_bytes,
-            header_policy,
         }
     }
 
@@ -297,35 +158,7 @@ impl OtelSink {
             .with_resource(resource)
             .build();
 
-        let header_policy = OtelHeaderPolicy::from_env();
-
-        Ok(Self::new(
-            provider,
-            policy.otel_max_payload_bytes,
-            header_policy,
-        ))
-    }
-
-    fn serialize_payload(
-        rec: &AuditRecord,
-        header_policy: &OtelHeaderPolicy,
-    ) -> serde_json::Result<String> {
-        if rec.otel_http_headers.is_none() {
-            return serde_json::to_string(rec);
-        }
-
-        let mut payload = serde_json::to_value(rec)?;
-        if let Some(obj) = payload.as_object_mut()
-            && let Some(headers) = &rec.otel_http_headers
-        {
-            obj.insert(
-                "http".to_string(),
-                json!({
-                    "request": otel_http_request_value(headers, header_policy),
-                }),
-            );
-        }
-        serde_json::to_string(&payload)
+        Ok(Self::new(provider, policy.otel_max_payload_bytes))
     }
 
     /// Serialize an `AuditRecord` into the `payload` attribute string.
@@ -335,9 +168,8 @@ impl OtelSink {
     fn payload_for_limit(
         rec: &AuditRecord,
         max_payload_bytes: usize,
-        header_policy: &OtelHeaderPolicy,
     ) -> Option<(String, bool, Option<String>)> {
-        let payload = match Self::serialize_payload(rec, header_policy) {
+        let payload = match serde_json::to_string(rec) {
             Ok(s) => s,
             Err(err) => {
                 tracing::warn!(target: "dynamo_llm::audit", error = %err, "audit otel: serialize failed");
@@ -405,8 +237,7 @@ impl AuditSink for OtelSink {
         // it does not block the request hot path. The OTEL SDK emit below only
         // enqueues to the BatchLogProcessor.
         let start = std::time::Instant::now();
-        let payload_result =
-            Self::payload_for_limit(rec, self.max_payload_bytes, &self.header_policy);
+        let payload_result = Self::payload_for_limit(rec, self.max_payload_bytes);
         tracing::debug!(
             target: "dynamo.audit.otel.serde",
             request_id = %rec.request_id,
@@ -461,7 +292,6 @@ mod tests {
     use crate::protocols::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     };
-    use axum::http::{HeaderMap, HeaderValue};
     use serial_test::serial;
     use std::sync::Arc;
 
@@ -474,7 +304,6 @@ mod tests {
             event_time: SystemTime::now(),
             request: None,
             response: None,
-            otel_http_headers: None,
         }
     }
 
@@ -532,7 +361,6 @@ mod tests {
             event_time: SystemTime::now(),
             request: Some(Arc::new(request)),
             response: None,
-            otel_http_headers: None,
         }
     }
 
@@ -575,7 +403,6 @@ mod tests {
             event_time: SystemTime::now(),
             request: None,
             response: Some(Arc::new(response)),
-            otel_http_headers: None,
         }
     }
 
@@ -588,10 +415,8 @@ mod tests {
     #[test]
     fn payload_for_limit_round_trips_a_full_request() {
         let rec = sample_record_with_request();
-        let header_policy = OtelHeaderPolicy::default();
         let (payload, complete, drop_reason) =
-            OtelSink::payload_for_limit(&rec, usize::MAX, &header_policy)
-                .expect("payload serializes");
+            OtelSink::payload_for_limit(&rec, usize::MAX).expect("payload serializes");
         assert!(complete);
         assert!(drop_reason.is_none());
 
@@ -638,10 +463,8 @@ mod tests {
     fn payload_for_limit_preserves_response_content_reasoning_and_tool_calls() {
         for requested_streaming in [false, true] {
             let rec = sample_record_with_response(requested_streaming);
-            let header_policy = OtelHeaderPolicy::default();
             let (payload, complete, drop_reason) =
-                OtelSink::payload_for_limit(&rec, usize::MAX, &header_policy)
-                    .expect("payload serializes");
+                OtelSink::payload_for_limit(&rec, usize::MAX).expect("payload serializes");
             assert!(complete);
             assert!(drop_reason.is_none());
 
@@ -667,94 +490,10 @@ mod tests {
     }
 
     #[test]
-    fn payload_for_limit_injects_redacted_http_headers_only_for_otel_payload() {
-        let mut headers = HeaderMap::new();
-        headers.insert("accept", HeaderValue::from_static("application/json"));
-        headers.insert("authorization", HeaderValue::from_static("Bearer secret"));
-        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
-        headers.insert(
-            "x-custom-token-name",
-            HeaderValue::from_static("also-secret"),
-        );
-
-        let mut rec = sample_record();
-        rec.otel_http_headers = Some(Arc::new(AuditHttpRequestHeaders::new(headers)));
-
-        let normal_sink_value = serde_json::to_value(&rec).expect("record serializes");
-        assert!(normal_sink_value.get("http").is_none());
-        assert!(normal_sink_value.get("otel_http_headers").is_none());
-
-        let header_policy = OtelHeaderPolicy::default();
-        let (payload, complete, drop_reason) =
-            OtelSink::payload_for_limit(&rec, usize::MAX, &header_policy)
-                .expect("payload serializes");
-        assert!(complete);
-        assert!(drop_reason.is_none());
-
-        let decoded: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        let decoded_headers = &decoded["http"]["request"]["headers"];
-        assert_eq!(decoded_headers["accept"], "application/json");
-        assert_eq!(decoded_headers["authorization"], REDACTED_HEADER_VALUE);
-        assert_eq!(decoded_headers["x-forwarded-for"], "203.0.113.7");
-        assert_eq!(
-            decoded_headers["x-custom-token-name"],
-            REDACTED_HEADER_VALUE
-        );
-        assert_eq!(decoded["http"]["request"]["headers_truncated"], false);
-    }
-
-    #[test]
-    fn payload_for_limit_omits_http_when_no_headers_captured() {
-        // When header capture is inactive (otel_http_headers = None) the payload
-        // must not carry an `http` object — non-otel sinks and header-disabled
-        // requests never emit headers.
-        let rec = sample_record_with_request();
-        assert!(rec.otel_http_headers.is_none());
-
-        let header_policy = OtelHeaderPolicy::default();
-        let (payload, complete, drop_reason) =
-            OtelSink::payload_for_limit(&rec, usize::MAX, &header_policy)
-                .expect("payload serializes");
-        assert!(complete);
-        assert!(drop_reason.is_none());
-
-        let decoded: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        assert!(decoded.get("http").is_none());
-    }
-
-    #[test]
-    #[serial]
-    fn custom_redact_list_redacts_named_headers() {
-        temp_env::with_vars(
-            [(
-                env_audit::DYN_AUDIT_OTEL_HTTP_HEADER_REDACT_LIST,
-                Some("x-title"),
-            )],
-            || {
-                let policy = OtelHeaderPolicy::from_env();
-                assert!(policy.should_redact("x-title"));
-            },
-        );
-    }
-
-    #[test]
-    fn default_policy_preserves_nvcf_routing_headers_but_redacts_sensitive_ones() {
-        let policy = OtelHeaderPolicy::default();
-        // Routing headers carry no sensitive fragment and are preserved.
-        assert!(!policy.should_redact("nvcf-function-id"));
-        assert!(!policy.should_redact("nvcf-function-name"));
-        assert!(!policy.should_redact("nvcf-ncaid"));
-        assert!(!policy.should_redact("nvcf-sub"));
-        // A credential-bearing nvcf header is still redacted (no prefix exemption).
-        assert!(policy.should_redact("nvcf-session-token"));
-    }
-
-    #[test]
     fn payload_over_limit_emits_incomplete_marker() {
         let rec = sample_record();
-        let header_policy = OtelHeaderPolicy::default();
         let (payload, audit_complete, audit_drop_reason) =
-            OtelSink::payload_for_limit(&rec, 1, &header_policy).unwrap();
+            OtelSink::payload_for_limit(&rec, 1).unwrap();
 
         assert!(!audit_complete);
         assert!(
@@ -780,20 +519,16 @@ mod tests {
         // Lock the `payload.len() <= max_payload_bytes` boundary: a payload that
         // exactly fits is emitted complete; one byte tighter forces the marker.
         let rec = sample_record_with_request();
-        let header_policy = OtelHeaderPolicy::default();
-        let exact = OtelSink::serialize_payload(&rec, &header_policy)
-            .expect("serializes")
-            .len();
+        let exact = serde_json::to_string(&rec).expect("serializes").len();
 
         let (payload, complete, drop_reason) =
-            OtelSink::payload_for_limit(&rec, exact, &header_policy).expect("fits at boundary");
+            OtelSink::payload_for_limit(&rec, exact).expect("fits at boundary");
         assert!(complete, "payload exactly at the limit must be complete");
         assert!(drop_reason.is_none());
         assert_eq!(payload.len(), exact);
 
         let (_marker, complete, drop_reason) =
-            OtelSink::payload_for_limit(&rec, exact - 1, &header_policy)
-                .expect("marker serializes");
+            OtelSink::payload_for_limit(&rec, exact - 1).expect("marker serializes");
         assert!(!complete, "one byte over the limit must emit the marker");
         assert!(drop_reason.unwrap().starts_with("otel_payload_too_large:"));
     }
@@ -803,9 +538,8 @@ mod tests {
         // Oversized records must stay identifiable (not silently dropped): the
         // marker keeps schema_version / request_id / model / streaming.
         let rec = sample_record();
-        let header_policy = OtelHeaderPolicy::default();
         let (payload, _complete, _reason) =
-            OtelSink::payload_for_limit(&rec, 1, &header_policy).expect("marker serializes");
+            OtelSink::payload_for_limit(&rec, 1).expect("marker serializes");
 
         let decoded: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(decoded["schema_version"], rec.schema_version);
