@@ -353,9 +353,10 @@ webhooks:
     - ""
     apiVersions:
     - v1
+    # Pod checkpoint restore injects pod spec fields before creation. It is
+    # intentionally CREATE-only because pod UPDATE cannot apply that mutation.
     operations:
     - CREATE
-    - UPDATE
     resources:
     - pods
   sideEffects: None
