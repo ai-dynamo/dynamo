@@ -343,6 +343,8 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Whether the router currently has a worker/dp_rank registered (1 = registered)
+    WORKER_REGISTERED = "router_worker_registered"
 
 
 class router_request:
@@ -423,6 +425,12 @@ class trtllm_additional:
     KV_TRANSFER_BYTES = "trtllm_kv_transfer_bytes"
     # KV cache transfer speed per request in GB/s
     KV_TRANSFER_SPEED_GB_S = "trtllm_kv_transfer_speed_gb_s"
+    # Configured maximum number of TRT-LLM KV events buffered before older events are dropped
+    KV_EVENT_BUFFER_CAPACITY = "trtllm_kv_event_buffer_capacity"
+    # Number of TRT-LLM KV events returned to Dynamo in one polling drain
+    KV_EVENT_DRAIN_BATCH_SIZE = "trtllm_kv_event_drain_batch_size"
+    # Total number of missing TRT-LLM KV event IDs detected by Dynamo
+    KV_EVENT_ID_GAP_EVENTS_TOTAL = "trtllm_kv_event_id_gap_events_total"
 
 
 class work_handler:

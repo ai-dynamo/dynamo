@@ -14,7 +14,7 @@ use std::time::Duration;
 use aiconfigurator_core::{
     BackendKind, DataType, ENGINE_CONFIG_SCHEMA_VERSION, EngineConfig, FPM_VERSION,
     ForwardPassMetrics, ForwardPassPerfDiagnostics, ForwardPassPerfModel, ForwardPassPerfOptions,
-    QueuedRequestMetrics, ScheduledRequestMetrics,
+    ParallelMapping, QuantizationConfig, QueuedRequestMetrics, ScheduledRequestMetrics,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,9 @@ use crate::common::protocols::{ForwardPassSnapshot, MockEngineArgs, WorkerType};
 const DEFAULT_AIC_SYSTEM: &str = "h200_sxm";
 const MAX_CAPACITY_SEARCH_CANDIDATES: u32 = 128;
 const MAX_KV_HIT_RATE_DISCOUNT: f64 = 0.95;
+const AIC_NEXTN_KEY: &str = "nextn";
+const AIC_NEXTN_ACCEPT_RATES_KEY: &str = "nextn_accept_rates";
+const RAW_AIC_NEXTN_ACCEPT_RATES: &str = "0,0,0,0,0";
 
 /// Engine limits needed by planner/router-level queries.
 ///
@@ -63,38 +66,58 @@ pub struct AicEngineConfig {
 
 impl AicEngineConfig {
     pub fn into_aic_config(self) -> Result<EngineConfig> {
+        // `model_arch` is intentionally not forwarded: aiconfigurator main
+        // dropped it from `EngineConfig` (architecture is inferred from the HF
+        // model_path) and its deserializer ignores a stray `model_arch` key.
         Ok(EngineConfig {
             schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
             model_name: self.model_name,
-            model_arch: self.model_arch,
             system_name: self.system_name,
+            systems_path: None,
             backend: parse_backend_kind(&self.backend)?,
             backend_version: self.backend_version,
-            tp_size: self.tp_size,
-            pp_size: self.pp_size,
-            moe_tp_size: self.moe_tp_size,
-            moe_ep_size: self.moe_ep_size,
-            attention_dp_size: self.attention_dp_size,
-            weight_dtype: self
-                .weight_dtype
-                .as_deref()
-                .map(parse_data_type)
-                .transpose()?,
-            moe_dtype: self.moe_dtype.as_deref().map(parse_data_type).transpose()?,
-            activation_dtype: self
-                .activation_dtype
-                .as_deref()
-                .map(parse_data_type)
-                .transpose()?,
-            kv_cache_dtype: self
-                .kv_cache_dtype
-                .as_deref()
-                .map(parse_data_type)
-                .transpose()?,
             kv_block_size: self.kv_block_size,
+            parallel: ParallelMapping {
+                tp_size: self.tp_size,
+                pp_size: self.pp_size,
+                attention_dp_size: self.attention_dp_size,
+                moe_tp_size: self.moe_tp_size,
+                moe_ep_size: self.moe_ep_size,
+            },
+            quantization: QuantizationConfig {
+                weight_dtype: self
+                    .weight_dtype
+                    .as_deref()
+                    .map(parse_data_type)
+                    .transpose()?,
+                moe_dtype: self.moe_dtype.as_deref().map(parse_data_type).transpose()?,
+                activation_dtype: self
+                    .activation_dtype
+                    .as_deref()
+                    .map(parse_data_type)
+                    .transpose()?,
+                kv_cache_dtype: self
+                    .kv_cache_dtype
+                    .as_deref()
+                    .map(parse_data_type)
+                    .transpose()?,
+            },
+            speculative: None,
             extra: self.extra,
         })
     }
+}
+
+fn aic_config_for_raw_iteration_time(mut config: EngineConfig) -> EngineConfig {
+    config.extra.insert(
+        AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
+        RAW_AIC_NEXTN_ACCEPT_RATES.to_string(),
+    );
+    config
+}
+
+fn aic_engine_config_for_raw_iteration_time(config: AicEngineConfig) -> Result<EngineConfig> {
+    Ok(aic_config_for_raw_iteration_time(config.into_aic_config()?))
 }
 
 impl EnginePerfLimits {
@@ -148,6 +171,12 @@ pub struct EngineCapacityRequest {
     pub ttft_sla: Option<Duration>,
     pub itl_sla: Option<Duration>,
     pub e2e_latency_sla: Option<Duration>,
+    /// Average accepted tokens per decode forward, including the base token.
+    ///
+    /// Values below one or non-finite values are treated as one so existing raw
+    /// decode capacity requests keep their historical behavior.
+    #[serde(default = "default_accept_length")]
+    pub accept_length: f64,
     /// Prefix-cache hit rate used to discount prefill compute only.
     ///
     /// Decode context/KV residency still uses the raw `isl`, because prefix
@@ -333,7 +362,7 @@ impl EnginePerfModel {
         let options = resolve_options(inputs.options, &limits);
         let load_averages = AggLoadAverages::new(options.max_observations);
         let aic_config = match inputs.aic_config {
-            Some(config) => Some(config.into_aic_config()?),
+            Some(config) => Some(aic_engine_config_for_raw_iteration_time(config)?),
             None => inputs
                 .engine_args
                 .as_ref()
@@ -343,7 +372,7 @@ impl EnginePerfModel {
         };
         let attention_dp_size = if let Some(size) = aic_config
             .as_ref()
-            .and_then(|config| config.attention_dp_size)
+            .and_then(|config| config.parallel.attention_dp_size)
         {
             size
         } else {
@@ -387,8 +416,8 @@ impl EnginePerfModel {
         limits: EnginePerfLimits,
         options: Option<ForwardPassPerfOptions>,
     ) -> Result<Self> {
-        let aic_config = aic_config.into_aic_config()?;
-        let attention_dp_size = aic_config.attention_dp_size.unwrap_or(1).max(1) as usize;
+        let aic_config = aic_engine_config_for_raw_iteration_time(aic_config)?;
+        let attention_dp_size = aic_config.parallel.attention_dp_size.unwrap_or(1).max(1) as usize;
         limits.validate().context("invalid engine perf limits")?;
         let resolved_options = resolve_options(options, &limits);
         let load_averages = AggLoadAverages::new(resolved_options.max_observations);
@@ -669,6 +698,7 @@ impl EnginePerfModel {
         if request.osl == 0 {
             return Ok(None);
         }
+        let accept_length = normalized_accept_length(request.accept_length);
         let context_length = decode_context_length(request);
         let max_batch = self.decode_max_batch(context_length);
         if max_batch == 0 {
@@ -676,9 +706,14 @@ impl EnginePerfModel {
         }
         let mut best = None;
         for batch_size in capacity_batch_sizes(max_batch) {
-            let Some(itl) = self.decode_time_for_batch(batch_size, context_length)? else {
+            let Some(forward_wall_time) = self.decode_time_for_batch(batch_size, context_length)?
+            else {
                 return Ok(None);
             };
+            if forward_wall_time.is_zero() {
+                continue;
+            }
+            let itl = div_duration_by_f64(forward_wall_time, accept_length, "decode ITL")?;
             if itl.is_zero() {
                 continue;
             }
@@ -703,6 +738,7 @@ impl EnginePerfModel {
         }
 
         let prefill_isl = effective_prefill_isl(request)?;
+        let accept_length = normalized_accept_length(request.accept_length);
         let context_length = decode_context_length(request);
         let kv_cap = self.decode_max_batch(context_length);
         let hard_cap = cmp::min(
@@ -720,18 +756,25 @@ impl EnginePerfModel {
                 request.osl,
                 batch_size,
                 self.limits.max_num_batched_tokens,
-            ) {
+                accept_length,
+            )? {
                 continue;
             }
 
             let decode_kv = batch_size.saturating_mul(context_length);
             let prefill_per_iter = cmp::min(
                 self.limits.max_num_batched_tokens,
-                ceil_div_u32(batch_size.saturating_mul(prefill_isl), request.osl.max(1)),
+                aggregate_prefill_per_iter(prefill_isl, request.osl, batch_size, accept_length)?,
             );
-            let Some(itl) = self.mixed_time(prefill_per_iter, batch_size, decode_kv)? else {
+            let Some(forward_wall_time) =
+                self.mixed_time(prefill_per_iter, batch_size, decode_kv)?
+            else {
                 return Ok(None);
             };
+            if forward_wall_time.is_zero() {
+                continue;
+            }
+            let itl = div_duration_by_f64(forward_wall_time, accept_length, "aggregate ITL")?;
             if itl.is_zero() {
                 continue;
             }
@@ -990,37 +1033,73 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
     let Some(model_name) = args.aic_model_path.clone() else {
         bail!("aic_model_path is required when aic_backend is set");
     };
-    Ok(Some(EngineConfig {
+    let mut extra = BTreeMap::new();
+    if let Some(nextn) = args.aic_nextn {
+        extra.insert(AIC_NEXTN_KEY.to_string(), nextn.to_string());
+    }
+    extra.insert(
+        AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
+        RAW_AIC_NEXTN_ACCEPT_RATES.to_string(),
+    );
+    Ok(Some(aic_config_for_raw_iteration_time(EngineConfig {
         schema_version: ENGINE_CONFIG_SCHEMA_VERSION,
         model_name,
-        model_arch: None,
         system_name: args
             .aic_system
             .clone()
             .unwrap_or_else(|| DEFAULT_AIC_SYSTEM.to_string()),
+        systems_path: None,
         backend: parse_backend_kind(backend)?,
         backend_version: args.aic_backend_version.clone(),
-        tp_size: to_u32(args.aic_tp_size.unwrap_or(1), "aic_tp_size")?,
-        pp_size: 1,
-        moe_tp_size: args
-            .aic_moe_tp_size
-            .map(|value| to_u32(value, "aic_moe_tp_size"))
-            .transpose()?,
-        moe_ep_size: args
-            .aic_moe_ep_size
-            .map(|value| to_u32(value, "aic_moe_ep_size"))
-            .transpose()?,
-        attention_dp_size: args
-            .aic_attention_dp_size
-            .map(|value| to_u32(value, "aic_attention_dp_size"))
-            .transpose()?,
-        weight_dtype: None,
-        moe_dtype: None,
-        activation_dtype: None,
-        kv_cache_dtype: None,
         kv_block_size: Some(to_u32(args.block_size, "block_size")?),
-        extra: BTreeMap::new(),
-    }))
+        parallel: ParallelMapping {
+            tp_size: to_u32(args.aic_tp_size.unwrap_or(1), "aic_tp_size")?,
+            pp_size: 1,
+            attention_dp_size: args
+                .aic_attention_dp_size
+                .map(|value| to_u32(value, "aic_attention_dp_size"))
+                .transpose()?,
+            moe_tp_size: args
+                .aic_moe_tp_size
+                .map(|value| to_u32(value, "aic_moe_tp_size"))
+                .transpose()?,
+            moe_ep_size: args
+                .aic_moe_ep_size
+                .map(|value| to_u32(value, "aic_moe_ep_size"))
+                .transpose()?,
+        },
+        // Native analytics path: quant dtypes are parsed by `parse_data_type`
+        // into `aiconfigurator_core::DataType` (accepted: bfloat16, float16,
+        // fp8, fp8_static, fp8_block, nvfp4, int8, int4, w4afp8, w4a16_mxfp4,
+        // w4a8_mxfp4_mxfp8) -- a separate vocabulary from the Python callback
+        // path's per-field AIC quant-mode names. This path also does not model
+        // communication dtype (`QuantizationConfig` has no comm field), so
+        // `aic_comm_dtype` is intentionally not applied here.
+        quantization: QuantizationConfig {
+            weight_dtype: args
+                .aic_gemm_dtype
+                .as_deref()
+                .map(parse_data_type)
+                .transpose()?,
+            moe_dtype: args
+                .aic_moe_dtype
+                .as_deref()
+                .map(parse_data_type)
+                .transpose()?,
+            activation_dtype: args
+                .aic_fmha_dtype
+                .as_deref()
+                .map(parse_data_type)
+                .transpose()?,
+            kv_cache_dtype: args
+                .aic_kv_cache_dtype
+                .as_deref()
+                .map(parse_data_type)
+                .transpose()?,
+        },
+        speculative: None,
+        extra,
+    })))
 }
 
 fn resolve_worker_type(
@@ -1178,6 +1257,18 @@ fn effective_prefill_isl(request: &EngineCapacityRequest) -> Result<u32> {
     Ok(tokens.max(1))
 }
 
+fn default_accept_length() -> f64 {
+    1.0
+}
+
+fn normalized_accept_length(value: f64) -> f64 {
+    if value.is_finite() && value > 1.0 {
+        value
+    } else {
+        1.0
+    }
+}
+
 fn clamp_kv_hit_rate(kv_hit_rate: Option<f64>) -> f64 {
     let Some(value) = kv_hit_rate else {
         return 0.0;
@@ -1193,9 +1284,26 @@ fn prefill_decode_balanced(
     osl: u32,
     batch_size: u32,
     max_num_batched_tokens: u32,
-) -> bool {
+    accept_length: f64,
+) -> Result<bool> {
     let prefill_budget = max_num_batched_tokens.saturating_sub(batch_size);
-    prefill_budget > 0 && isl <= osl.saturating_mul(prefill_budget)
+    if prefill_budget == 0 {
+        return Ok(false);
+    }
+    Ok(aggregate_prefill_per_iter(isl, osl, batch_size, accept_length)? <= prefill_budget)
+}
+
+fn aggregate_prefill_per_iter(
+    isl: u32,
+    osl: u32,
+    batch_size: u32,
+    accept_length: f64,
+) -> Result<u32> {
+    ceil_positive_f64_to_u32(
+        f64::from(batch_size) * normalized_accept_length(accept_length) * f64::from(isl)
+            / f64::from(osl.max(1)),
+        "aggregate prefill per iteration",
+    )
 }
 
 fn capacity_batch_sizes(max_batch: u32) -> Vec<u32> {
@@ -1211,13 +1319,6 @@ fn capacity_batch_sizes(max_batch: u32) -> Vec<u32> {
     (0..MAX_CAPACITY_SEARCH_CANDIDATES)
         .map(|index| 1 + ((u64::from(index) * span) / denominator) as u32)
         .collect()
-}
-
-fn ceil_div_u32(numerator: u32, denominator: u32) -> u32 {
-    if denominator == 0 {
-        return 0;
-    }
-    numerator / denominator + u32::from(numerator % denominator != 0)
 }
 
 fn sla_ok(value: Option<Duration>, sla: Option<Duration>) -> bool {
@@ -1271,6 +1372,15 @@ fn select_capacity(
 fn checked_add_duration(lhs: Duration, rhs: Duration, context: &str) -> Result<Duration> {
     lhs.checked_add(rhs)
         .ok_or_else(|| anyhow!("{context} overflow"))
+}
+
+fn div_duration_by_f64(duration: Duration, divisor: f64, context: &str) -> Result<Duration> {
+    ensure!(
+        divisor.is_finite() && divisor > 0.0,
+        "{context} divisor must be a positive finite value, got {divisor}"
+    );
+    Duration::try_from_secs_f64(duration.as_secs_f64() / divisor)
+        .with_context(|| format!("{context} overflow dividing {duration:?} by {divisor}"))
 }
 
 fn mul_duration(duration: Duration, factor: u64) -> Result<Duration> {
@@ -1445,6 +1555,89 @@ mod tests {
             extra: extra.clone(),
         };
         assert_eq!(config.into_aic_config().unwrap().extra, extra);
+    }
+
+    #[test]
+    fn raw_iteration_time_aic_config_forces_zero_accept_rates() {
+        let mut extra = BTreeMap::new();
+        extra.insert(AIC_NEXTN_KEY.to_string(), "3".to_string());
+        extra.insert(
+            AIC_NEXTN_ACCEPT_RATES_KEY.to_string(),
+            "0.85,0.3,0,0,0".to_string(),
+        );
+        let config = AicEngineConfig {
+            model_name: "model".to_string(),
+            model_arch: Some("arch".to_string()),
+            system_name: "h200_sxm".to_string(),
+            backend: "vllm".to_string(),
+            backend_version: None,
+            tp_size: 1,
+            pp_size: 1,
+            moe_tp_size: None,
+            moe_ep_size: None,
+            attention_dp_size: Some(1),
+            weight_dtype: None,
+            moe_dtype: None,
+            activation_dtype: None,
+            kv_cache_dtype: None,
+            kv_block_size: None,
+            extra,
+        };
+
+        let config = aic_engine_config_for_raw_iteration_time(config).unwrap();
+
+        assert_eq!(config.extra.get(AIC_NEXTN_KEY), Some(&"3".to_string()));
+        assert_eq!(
+            config.extra.get(AIC_NEXTN_ACCEPT_RATES_KEY),
+            Some(&RAW_AIC_NEXTN_ACCEPT_RATES.to_string())
+        );
+    }
+
+    #[test]
+    fn mock_engine_args_aic_config_forces_zero_accept_rates() {
+        let args = MockEngineArgs::builder()
+            .aic_backend(Some("vllm".to_string()))
+            .aic_model_path(Some("model".to_string()))
+            .aic_nextn(Some(2))
+            .aic_nextn_accept_rates(Some("0.85,0.3,0,0,0".to_string()))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+
+        let config = aic_config_from_mock_engine_args(&args).unwrap().unwrap();
+
+        assert_eq!(config.extra.get(AIC_NEXTN_KEY), Some(&"2".to_string()));
+        assert_eq!(
+            config.extra.get(AIC_NEXTN_ACCEPT_RATES_KEY),
+            Some(&RAW_AIC_NEXTN_ACCEPT_RATES.to_string())
+        );
+    }
+
+    #[test]
+    fn mock_engine_args_json_forwards_aic_quantization() {
+        let args = MockEngineArgs::from_json_str(
+            &serde_json::json!({
+                "aic_backend": "vllm",
+                "aic_model_path": "model",
+                "aic_gemm_dtype": "fp8_block",
+                "aic_moe_dtype": "w4a16_mxfp4",
+                "aic_fmha_dtype": "bfloat16",
+                "aic_kv_cache_dtype": "fp8",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let config = aic_config_from_mock_engine_args(&args).unwrap().unwrap();
+
+        assert_eq!(config.quantization.weight_dtype, Some(DataType::Fp8Block));
+        assert_eq!(config.quantization.moe_dtype, Some(DataType::W4a16Mxfp4));
+        assert_eq!(
+            config.quantization.activation_dtype,
+            Some(DataType::Bfloat16)
+        );
+        assert_eq!(config.quantization.kv_cache_dtype, Some(DataType::Fp8));
     }
 
     #[test]
@@ -1820,12 +2013,99 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                accept_length: 1.0,
                 kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Latency,
             })
             .unwrap()
             .unwrap();
         assert!(capacity.ttft.unwrap().as_secs_f64() > 0.08);
+    }
+
+    #[test]
+    fn decode_capacity_accept_length_discounts_itl_and_rps() {
+        let mut model =
+            EnginePerfModel::from_regression(WorkerType::Decode, limits(), Some(fast_options()))
+                .unwrap();
+        model
+            .tune_with_fpms(&vec![
+                vec![decode_observation(1, 100, 0.010)],
+                vec![decode_observation(2, 200, 0.020)],
+            ])
+            .unwrap();
+
+        let base = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 100,
+                osl: 10,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                accept_length: 1.0,
+                kv_hit_rate: None,
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+        let spec = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 100,
+                osl: 10,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                accept_length: 2.0,
+                kv_hit_rate: None,
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+
+        assert!(spec.rps > base.rps);
+        assert!(spec.itl.unwrap() < base.itl.unwrap());
+    }
+
+    #[test]
+    fn aggregated_capacity_accept_length_tightens_prefill_balance() {
+        assert!(prefill_decode_balanced(100, 100, 33, 100, 2.0).unwrap());
+        assert!(!prefill_decode_balanced(100, 100, 34, 100, 2.0).unwrap());
+        assert_eq!(aggregate_prefill_per_iter(100, 100, 33, 2.0).unwrap(), 66);
+
+        let small_limits = EnginePerfLimits {
+            max_num_batched_tokens: 100,
+            max_num_seqs: 100,
+            max_kv_tokens: 1_000_000,
+        };
+        let mut model = EnginePerfModel::from_regression(
+            WorkerType::Aggregated,
+            small_limits,
+            Some(fast_options()),
+        )
+        .unwrap();
+        model
+            .tune_with_fpms(&vec![
+                vec![mixed_observation(10, 1, 150, 0.010)],
+                vec![mixed_observation(50, 1, 150, 0.050)],
+                vec![mixed_observation(100, 1, 150, 0.100)],
+            ])
+            .unwrap();
+
+        let capacity = model
+            .find_engine_capacity_rps(EngineCapacityRequest {
+                isl: 100,
+                osl: 100,
+                ttft_sla: None,
+                itl_sla: None,
+                e2e_latency_sla: None,
+                accept_length: 2.0,
+                kv_hit_rate: None,
+                optimization_target: OptimizationTarget::Throughput,
+            })
+            .unwrap()
+            .unwrap();
+
+        let inferred_batch = capacity.rps * 100.0 * capacity.itl.unwrap().as_secs_f64();
+        assert!(inferred_batch <= 34.0);
     }
 
     #[test]
@@ -1855,6 +2135,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                accept_length: 1.0,
                 kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
@@ -1890,6 +2171,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                accept_length: 1.0,
                 kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
@@ -1929,6 +2211,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                accept_length: 1.0,
                 kv_hit_rate: Some(0.0),
                 optimization_target: OptimizationTarget::Throughput,
             })
@@ -1941,6 +2224,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                accept_length: 1.0,
                 kv_hit_rate: Some(0.5),
                 optimization_target: OptimizationTarget::Throughput,
             })
@@ -1989,6 +2273,7 @@ mod tests {
             ttft_sla: None,
             itl_sla: None,
             e2e_latency_sla: None,
+            accept_length: 1.0,
             kv_hit_rate: Some(0.9),
             optimization_target: OptimizationTarget::Throughput,
         };
@@ -2028,6 +2313,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: None,
                 e2e_latency_sla: None,
+                accept_length: 1.0,
                 kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
@@ -2054,6 +2340,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: Some(Duration::from_secs(1)),
                 e2e_latency_sla: None,
+                accept_length: 1.0,
                 kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
@@ -2077,6 +2364,7 @@ mod tests {
                 ttft_sla: Some(Duration::from_secs(1)),
                 itl_sla: None,
                 e2e_latency_sla: None,
+                accept_length: 1.0,
                 kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })
@@ -2103,6 +2391,7 @@ mod tests {
                 ttft_sla: None,
                 itl_sla: Some(Duration::from_secs_f64(1.0)),
                 e2e_latency_sla: None,
+                accept_length: 1.0,
                 kv_hit_rate: None,
                 optimization_target: OptimizationTarget::Throughput,
             })

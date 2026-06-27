@@ -37,6 +37,11 @@ class PrefillPlanner(NativePlannerBase):
     require_decode = False
 
     async def _bootstrap_regression(self) -> None:
+        # Always drive ``_install_benchmark_fpms`` even on fetch failure
+        # (fpms=None). The orchestrator path needs an empty-but-present
+        # regression installed so runtime FPM observation has somewhere
+        # to accumulate samples.
+        fpms = None
         try:
             fpms = await fetch_pre_deployment_metrics(
                 runtime=self.runtime,
@@ -46,9 +51,9 @@ class PrefillPlanner(NativePlannerBase):
                 component_type=SubComponentType.PREFILL,
                 aic_spec=self.config.aic_interpolation,
             )
-            self.state_machine.load_benchmark_fpms(prefill_fpms=fpms)
         except PreDeploymentMetricsUnavailableError as e:
             _log_missing_pre_deployment_data("prefill", e)
+        await self._install_benchmark_fpms(prefill_fpms=fpms)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_prefill is None:
@@ -74,6 +79,10 @@ class DecodePlanner(NativePlannerBase):
     require_decode = True
 
     async def _bootstrap_regression(self) -> None:
+        # See PrefillPlanner._bootstrap_regression for the rationale:
+        # install empty regression on fetch failure so runtime
+        # observations can still accumulate.
+        fpms = None
         try:
             fpms = await fetch_pre_deployment_metrics(
                 runtime=self.runtime,
@@ -83,9 +92,9 @@ class DecodePlanner(NativePlannerBase):
                 component_type=SubComponentType.DECODE,
                 aic_spec=self.config.aic_interpolation,
             )
-            self.state_machine.load_benchmark_fpms(decode_fpms=fpms)
         except PreDeploymentMetricsUnavailableError as e:
             _log_missing_pre_deployment_data("decode", e)
+        await self._install_benchmark_fpms(decode_fpms=fpms)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_decode is None:
@@ -111,6 +120,8 @@ class AggPlanner(NativePlannerBase):
     require_decode = True
 
     async def _bootstrap_regression(self) -> None:
+        # See PrefillPlanner._bootstrap_regression for rationale.
+        fpms = None
         try:
             fpms = await fetch_pre_deployment_metrics(
                 runtime=self.runtime,
@@ -120,9 +131,9 @@ class AggPlanner(NativePlannerBase):
                 component_type=SubComponentType.DECODE,
                 aic_spec=self.config.aic_interpolation,
             )
-            self.state_machine.load_benchmark_fpms(agg_fpms=fpms)
         except PreDeploymentMetricsUnavailableError as e:
             _log_missing_pre_deployment_data("agg", e)
+        await self._install_benchmark_fpms(agg_fpms=fpms)
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None or effects.scale_to.num_decode is None:
@@ -148,15 +159,18 @@ class DisaggPlanner(NativePlannerBase):
     require_decode = True
 
     async def _bootstrap_regression(self) -> None:
-        for component, kwarg in [
-            (SubComponentType.PREFILL, "prefill_fpms"),
-            (SubComponentType.DECODE, "decode_fpms"),
+        # Collect per-component FPMs first (disagg has both prefill and
+        # decode to fetch independently), then hand the bundle to the
+        # single dual-path installer. Combining the two install calls
+        # lets the orchestrator path do one ``bootstrap_from_fpms``
+        # instead of two — and keeps the try/except granular so one
+        # component's missing benchmark doesn't tank the other.
+        prefill_fpms = None
+        decode_fpms = None
+        for component, worker_info in [
+            (SubComponentType.PREFILL, self.prefill_worker_info),
+            (SubComponentType.DECODE, self.decode_worker_info),
         ]:
-            worker_info = (
-                self.prefill_worker_info
-                if component == SubComponentType.PREFILL
-                else self.decode_worker_info
-            )
             try:
                 fpms = await fetch_pre_deployment_metrics(
                     runtime=self.runtime,
@@ -166,9 +180,15 @@ class DisaggPlanner(NativePlannerBase):
                     component_type=component,
                     aic_spec=self.config.aic_interpolation,
                 )
-                self.state_machine.load_benchmark_fpms(**{kwarg: fpms})
+                if component == SubComponentType.PREFILL:
+                    prefill_fpms = fpms
+                else:
+                    decode_fpms = fpms
             except PreDeploymentMetricsUnavailableError as e:
                 _log_missing_pre_deployment_data(component.value, e)
+        await self._install_benchmark_fpms(
+            prefill_fpms=prefill_fpms, decode_fpms=decode_fpms
+        )
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         if effects.scale_to is None:

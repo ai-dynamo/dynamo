@@ -32,6 +32,7 @@
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
 mod branch_sharded;
+mod compressed_radix;
 mod shard_handle;
 
 use std::any::Any;

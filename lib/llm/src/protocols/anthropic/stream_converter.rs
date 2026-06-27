@@ -95,6 +95,13 @@ impl AnthropicStreamConverter {
 
     /// Emit the initial `message_start` event.
     pub fn emit_start_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+        let mut events = Vec::with_capacity(1);
+        self.append_start_events(&mut events);
+        events
+    }
+
+    /// Append the initial `message_start` event.
+    pub fn append_start_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
         // TODO: When AnthropicMessageResponse gains a `service_tier` field,
         // populate it from `self.api_context` (if the original request specified one).
         let message = AnthropicMessageResponse {
@@ -114,7 +121,7 @@ impl AnthropicStreamConverter {
         };
 
         let event = AnthropicStreamEvent::MessageStart { message };
-        vec![make_sse_event("message_start", &event)]
+        events.push(make_sse_event("message_start", &event));
     }
 
     /// Process a single chat completion stream chunk and return zero or more SSE events.
@@ -123,7 +130,16 @@ impl AnthropicStreamConverter {
         chunk: &NvCreateChatCompletionStreamResponse,
     ) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
+        self.append_chunk_events(chunk, &mut events);
+        events
+    }
 
+    /// Process a single chat completion stream chunk and append zero or more SSE events.
+    pub fn append_chunk_events(
+        &mut self,
+        chunk: &NvCreateChatCompletionStreamResponse,
+        events: &mut Vec<Result<Event, anyhow::Error>>,
+    ) {
         // Capture token usage from engine when available (typically on the final chunk).
         // Only update output_token_count — input_token_count is set once from the
         // estimate in new() and must stay consistent between message_start and
@@ -360,14 +376,17 @@ impl AnthropicStreamConverter {
                 }
             }
         }
-
-        events
     }
 
     /// Emit the final events when the stream ends.
     pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
+        self.append_end_events(&mut events);
+        events
+    }
 
+    /// Append the final events when the stream ends.
+    pub fn append_end_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
         // Close thinking block if started and not already closed mid-stream
         if self.thinking_block_started && !self.thinking_block_closed {
             self.thinking_block_closed = true;
@@ -420,19 +439,24 @@ impl AnthropicStreamConverter {
         // Emit message_stop
         let message_stop = AnthropicStreamEvent::MessageStop {};
         events.push(make_sse_event("message_stop", &message_stop));
-
-        events
     }
 
     /// Emit error events when the stream ends due to a backend error.
     pub fn emit_error_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+        let mut events = Vec::with_capacity(1);
+        self.append_error_events(&mut events);
+        events
+    }
+
+    /// Append error events when the stream ends due to a backend error.
+    pub fn append_error_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
         let error_event = AnthropicStreamEvent::Error {
             error: AnthropicErrorBody {
                 error_type: "api_error".to_string(),
                 message: "An internal error occurred during generation.".to_string(),
             },
         };
-        vec![make_sse_event("error", &error_event)]
+        events.push(make_sse_event("error", &error_event));
     }
 }
 
@@ -766,6 +790,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
@@ -808,11 +833,55 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
     fn event_types(events: &[TaggedEvent]) -> Vec<&str> {
         events.iter().map(|e| e.event_type.as_str()).collect()
+    }
+
+    #[test]
+    fn test_append_events_reuse_caller_storage() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut events = Vec::with_capacity(4);
+
+        conv.append_start_events(&mut events);
+        assert_eq!(events.len(), 1);
+        assert!(events.iter().all(Result::is_ok));
+
+        events.clear();
+        let capacity = events.capacity();
+        conv.append_chunk_events(&text_chunk("I'll edit the file."), &mut events);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.capacity(), capacity);
+        assert!(events.iter().all(Result::is_ok));
+
+        events.clear();
+        conv.append_chunk_events(
+            &tool_call_chunk(
+                0,
+                Some("call-1"),
+                Some("Edit"),
+                Some("{\"file_path\":\"/tmp/test.txt\"}"),
+            ),
+            &mut events,
+        );
+        assert_eq!(events.len(), 4);
+        assert_eq!(events.capacity(), capacity);
+        assert!(events.iter().all(Result::is_ok));
+
+        events.clear();
+        conv.append_end_events(&mut events);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events.capacity(), capacity);
+        assert!(events.iter().all(Result::is_ok));
+
+        events.clear();
+        conv.append_error_events(&mut events);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events.capacity(), capacity);
+        assert!(events.iter().all(Result::is_ok));
     }
 
     /// Regression test: text block must be closed (content_block_stop)
@@ -954,6 +1023,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 

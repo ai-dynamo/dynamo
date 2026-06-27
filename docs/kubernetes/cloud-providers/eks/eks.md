@@ -2,11 +2,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Amazon Elastic Kubernetes Service (EKS)
+subtitle: Deploys the Dynamo platform on Amazon EKS, including cluster creation, GPU node groups, and add-ons.
 ---
 
-# Steps to create an EKS cluster
-
 This guide demonstrates the Dynamo platform on Amazon Elastic Kubernetes Service (EKS).
+
+## Clone the repository and set working directory
+
+Manifest and template paths in this guide are relative to `examples/deployments/EKS/` in the Dynamo repository.
+
+```bash
+git clone https://github.com/ai-dynamo/dynamo.git
+cd dynamo/examples/deployments/EKS
+```
 
 ## Setup environment variables
 
@@ -17,7 +25,7 @@ If you would like to use a different region, modify the `AWS_REGION` variable
 export AWS_REGION="us-east-1"
 export CLUSTER_NAME="ai-dynamo"
 export DYNAMO_NAMESPACE="dynamo-system"
-export DYNAMO_RELEASE_VERSION="1.0.0"
+export DYNAMO_RELEASE_VERSION="1.2.1"
 ```
 
 
@@ -228,7 +236,7 @@ Then copy the new recipe's manifest and apply again.
 
 This example deploys a disaggregated prefill/decode Dynamo Inference Graph that uses NIXL with the LIBFABRIC backend using [Elastic Fabric Adapter (EFA)](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) for high-throughput KV-cache transfer between workers.
 
-It targets `g7e.12xlarge` instances, which support GPUDirect RDMA, and uses the Dynamo EFA-enabled vLLM container `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.0-efa-amd64` that ships with the [EFA Installer](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-changelog.html) pre-installed.
+It targets `g7e.12xlarge` instances, which support GPUDirect RDMA, and uses the Dynamo EFA-enabled vLLM container `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1-efa-amd64` that ships with the [EFA Installer](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-changelog.html) pre-installed.
 
 *Note: For a full list of EFA-supported instance types, see [the AWS EC2 Docs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html#efa-instance-types).*
 

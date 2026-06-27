@@ -15,7 +15,7 @@ use dynamo_kv_router::{
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
-use super::{KvWorkerMonitor, Model, RuntimeConfigWatch, WorkerSet, runtime_config_watch};
+use super::{Model, RuntimeConfigWatch, WorkerSet, runtime_config_watch};
 
 use dynamo_runtime::{
     component::{Endpoint, build_transport_type},
@@ -248,6 +248,23 @@ impl ModelManager {
             .collect()
     }
 
+    /// Display names filtered to models that can actually serve a request right
+    /// now — displayable AND with a complete worker set in at least one
+    /// namespace ([`Model::has_ready_workers`]). This is the gate the HTTP
+    /// listing/default-model paths should apply so a registered-but-incomplete
+    /// deployment (e.g. decode-only with no prefill peer) is neither advertised
+    /// nor chosen as an implicit default.
+    pub fn serving_ready_display_names(&self) -> HashSet<String> {
+        self.models
+            .iter()
+            .filter(|entry| {
+                let model = entry.value();
+                model.is_displayable() && model.has_ready_workers()
+            })
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn list_chat_completions_models(&self) -> Vec<String> {
         self.models
             .iter()
@@ -436,9 +453,21 @@ impl ModelManager {
 
     // -- Convenience methods for in-process models (http.rs, grpc.rs) --
     // These create a WorkerSet with a default namespace for local models.
+    // Synthetic in-process worker sets are always `Aggregated` (they own
+    // their engine inline and don't depend on a peer worker), so we stamp
+    // that role onto the card here. The `Prefill` helper, in contrast,
+    // tags itself with `WorkerType::Prefill` so the serving-readiness
+    // gate sees it correctly.
     // TODO: These methods use ModelDeploymentCard::default() for the WorkerSet, which means
     // parsing_options() returns defaults (no tool_call_parser/reasoning_parser). Pass the real
     // MDC from callers so ParsingOptions reflect the model's actual configuration.
+
+    fn aggregated_local_card() -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.needs = Vec::new();
+        card
+    }
 
     pub fn add_chat_completions_model(
         &self,
@@ -454,7 +483,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -475,7 +504,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.completions_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -496,7 +525,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.embeddings_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -517,7 +546,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.tensor_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -538,7 +567,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.images_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -559,7 +588,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.videos_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -580,7 +609,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.audios_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -601,7 +630,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.realtime_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -618,11 +647,10 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_prefill_{}", model);
-        let ws = WorkerSet::new(
-            namespace.clone(),
-            card_checksum.to_string(),
-            ModelDeploymentCard::default(),
-        );
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Prefill);
+        card.needs = vec![vec![crate::worker_type::WorkerType::Decode]];
+        let ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
@@ -1010,16 +1038,6 @@ impl ModelManager {
     ) -> Option<LoadThresholdConfig> {
         let model_entry = self.models.get(model)?;
         model_entry.load_threshold_config(config)
-    }
-
-    /// Gets an existing worker monitor for a specific namespace of a model.
-    pub fn get_worker_monitor_for_namespace(
-        &self,
-        model: &str,
-        namespace: &str,
-    ) -> Option<KvWorkerMonitor> {
-        let model_entry = self.models.get(model)?;
-        model_entry.get_worker_monitor_for_namespace(namespace)
     }
 
     /// Lists all models with worker monitors configured.
@@ -1709,8 +1727,9 @@ mod tests {
             std::sync::Arc::new(ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
             enforce_disagg,
+            None,
         );
-        pr.mark_activated_for_test();
+        pr.mark_active_for_test();
         ws.prefill_router = Some(pr);
         ws
     }
@@ -1834,12 +1853,13 @@ mod tests {
             "model must be hidden after prefill death"
         );
 
-        // Prefill rejoins -> reactivate via the WorkerSet's PrefillRouter.
+        // Prefill rejoins -> mark the synthetic test router active again. A real
+        // PrefillRouter has an initialized inner router for reactivate() to reuse.
         if let Some(model) = mm.get_model("llama")
             && let Some(ws) = model.get_worker_set("decode-ns")
             && let Some(ref pr) = ws.prefill_router
         {
-            pr.reactivate();
+            pr.mark_active_for_test();
         } else {
             panic!("decode WorkerSet or prefill_router not found");
         }
@@ -1932,5 +1952,88 @@ mod tests {
         assert!(mm.has_any_ready_model());
         assert!(mm.is_model_ready_to_serve("ready-llama"));
         assert!(!mm.is_model_ready_to_serve("pending-llama"));
+    }
+
+    /// A decode-only WorkerSet that needs a prefill peer (absent here), with a
+    /// live worker and a chat engine attached: displayable, but its namespace
+    /// is not serving-ready.
+    fn incomplete_decode_chat_ws(namespace: &str, mdcsum: &str) -> WorkerSet {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Decode);
+        card.needs = vec![vec![crate::worker_type::WorkerType::Prefill]];
+        // Watch receiver keeps its last value after the sender drops, so
+        // worker_count stays 1 without holding the sender.
+        let (_tx, rx) = tokio::sync::watch::channel(vec![1u64]);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        ws.chat_engine = Some(make_chat_engine());
+        ws
+    }
+
+    /// Verifies the readiness gate the review (PR #10503) flagged for the
+    /// listing, default-model, and error-shape paths. A registered-but-incomplete
+    /// deployment (decode-only, no prefill peer) is displayable but must be:
+    ///   - excluded from `serving_ready_display_names` (OpenAI/Anthropic listing
+    ///     and the audio default-model fallback),
+    ///   - reported not-ready by `is_model_ready_to_serve` (KServe), and
+    ///   - surfaced as `ModelUnavailable` (503) by the engine getter, not
+    ///     `ModelNotFound` (404).
+    #[test]
+    fn serving_ready_excludes_incomplete_namespace() {
+        let mm = ModelManager::new();
+
+        // Complete, serving-ready model (aggregated, live).
+        mm.add_chat_completions_model("ready", "mdc-r", make_chat_engine())
+            .unwrap();
+
+        // Incomplete model: decode-only, needs a prefill peer that never joins.
+        mm.add_worker_set(
+            "broken",
+            "decode-ns",
+            incomplete_decode_chat_ws("decode-ns", "mdc-b"),
+        );
+
+        // The incomplete model is still *displayable* (it has a live engine)...
+        let displayable = mm.model_display_names();
+        assert!(displayable.contains("ready"));
+        assert!(
+            displayable.contains("broken"),
+            "incomplete model is displayable (has a live engine)"
+        );
+
+        // ...but only the complete model is *serving-ready* — the gate the
+        // listing endpoints and the audio default-model fallback now apply.
+        let serving = mm.serving_ready_display_names();
+        assert!(serving.contains("ready"));
+        assert!(
+            !serving.contains("broken"),
+            "incomplete model must be excluded from serving_ready_display_names"
+        );
+
+        // Point 3: the audio-speech implicit default-model fallback resolves to
+        // `serving_ready_display_names().into_iter().next()`. With an incomplete
+        // model present, that set excludes it, so the default can only ever
+        // resolve to the complete/ready model — never the incomplete one.
+        let audio_default = mm.serving_ready_display_names().into_iter().next();
+        assert_eq!(
+            audio_default.as_deref(),
+            Some("ready"),
+            "audio default-model fallback must pick the ready model, not the incomplete one"
+        );
+
+        // KServe readiness agrees.
+        assert!(mm.is_model_ready_to_serve("ready"));
+        assert!(!mm.is_model_ready_to_serve("broken"));
+
+        // The engine getter yields ModelUnavailable (mapped to 503 by both the
+        // OpenAI and the Anthropic handlers), not ModelNotFound (404), because
+        // the engine exists but the namespace is incomplete.
+        assert!(
+            matches!(
+                mm.get_chat_completions_engine("broken"),
+                Err(ModelManagerError::ModelUnavailable(_))
+            ),
+            "incomplete-but-engine-present model must be ModelUnavailable (503), not 404"
+        );
     }
 }

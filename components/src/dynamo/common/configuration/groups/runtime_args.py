@@ -36,6 +36,7 @@ class DynamoRuntimeConfig(ConfigBase):
     endpoint_types: str
     dump_config_to: Optional[str] = None
     multimodal_embedding_cache_capacity_gb: float
+    multimodal_embedding_cache_publisher: bool = False
     output_modalities: List[str]
     media_output_fs_url: str = "file:///tmp/dynamo_media"
     media_output_http_url: Optional[str] = None
@@ -43,6 +44,10 @@ class DynamoRuntimeConfig(ConfigBase):
     # Honored only by the unified backend's `Worker`, where it overrides the engine's
     # default `health_check_payload()` for the runtime canary.
     health_check_payload: Optional[str] = None
+    # Worker-side request admission/rejection knobs. Disabled (None) by
+    # default; when set, these surface env vars that the Rust runtime reads
+    # directly (see lib/runtime/src/pipeline/network/ingress/shared_tcp_endpoint.rs).
+    engine_request_limit: Optional[int] = None
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
@@ -50,6 +55,11 @@ class DynamoRuntimeConfig(ConfigBase):
         # TODO  get a better way for spot fixes like this.
         self.enable_local_indexer = not self.durable_kv_events
         self._validate_output_modalities()
+
+        if self.engine_request_limit is not None and self.engine_request_limit <= 0:
+            raise ValueError(
+                f"--engine-request-limit must be a positive integer, got {self.engine_request_limit}"
+            )
 
     def _validate_output_modalities(self) -> None:
         """Validate --output-modalities values."""
@@ -112,9 +122,8 @@ class DynamoRuntimeArgGroup(ArgGroup):
             flag_name="--event-plane",
             env_var="DYN_EVENT_PLANE",
             default=None,
-            help="Determines how events are published. If unset, auto-detected from "
-            "--discovery-backend: 'zmq' for file/mem (no external services), 'nats' "
-            "for etcd/kubernetes.",
+            help="Determines how events are published. If unset, defaults to 'zmq' for "
+            "all discovery backends. Set to 'nats' to use a NATS-based event plane.",
             choices=["nats", "zmq"],
         )
         add_argument(
@@ -228,6 +237,15 @@ class DynamoRuntimeArgGroup(ArgGroup):
             help="Capacity of the multimodal embedding cache in GB. 0 = disabled.",
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--multimodal-embedding-cache-publisher",
+            env_var="DYN_MULTIMODAL_EMBEDDING_CACHE_PUBLISHER",
+            default=False,
+            help="Enable the multimodal embedding cache publisher. Useful when using KV-aware routing. "
+            "Not needed for round-robin routing or single-GPU / aggregated deployments.",
+        )
+
         add_argument(
             g,
             flag_name="--output-modalities",
@@ -262,4 +280,21 @@ class DynamoRuntimeArgGroup(ArgGroup):
             'object (e.g. \'{"token_ids": [1], "stop_conditions": {"max_tokens": 1}}\') '
             "or '@/path/to/payload.json'. Takes precedence over the engine's "
             "default health_check_payload(). Unified backend only.",
+        )
+
+        # Worker-side request admission/rejection. Defaults to None (disabled);
+        # when unset the worker behaves exactly as before. Surfaces an env var —
+        # the Rust runtime reads DYN_ENGINE_REQUEST_LIMIT directly. The Dynamo-side
+        # overflow queue is a small fixed burst (default 16, hard cap N+16) and is
+        # not a user-facing knob; advanced users may override it via the
+        # DYN_DYNAMO_REQUEST_QUEUE_LIMIT env var.
+        add_argument(
+            g,
+            flag_name="--engine-request-limit",
+            env_var="DYN_ENGINE_REQUEST_LIMIT",
+            default=None,
+            arg_type=int,
+            help="Max requests handled concurrently by the engine (worker-pool "
+            "semaphore size). Enables worker-side request rejection when set. "
+            "Disabled by default.",
         )

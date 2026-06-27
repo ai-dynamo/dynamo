@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Profiler Guide
+subtitle: Runs the AI Configurator-driven profiling pipeline that turns a model, SLA targets, and backend into a ready-to-deploy DGD.
 ---
 
 ## Overview
@@ -198,7 +199,7 @@ Each DGDR requires a container image for profiling and deployment:
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 #### Quick Start: Deploy with DGDR
@@ -215,7 +216,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 **Step 2: Apply the DGDR**
@@ -372,7 +373,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   searchStrategy: rapid  # or thorough
   autoApply: true
@@ -436,13 +437,14 @@ Pass arguments to the SLA planner via the features section:
 ```yaml
 features:
   planner:
-    planner_min_endpoint: 2                    # Minimum endpoints to maintain
-    planner_adjustment_interval: 60            # Adjustment interval (seconds)
-    planner_load_predictor: linear             # Load prediction method
+    min_endpoint: 2                            # Minimum endpoints to maintain
+    load_adjustment_interval_seconds: 5        # Load-scaling interval (seconds)
+    throughput_adjustment_interval_seconds: 60 # Throughput-scaling interval (seconds)
+    load_predictor: linear                     # Load prediction method
 ```
 
 > [!NOTE]
-> Planner arguments use `planner_` prefix. See [SLA Planner documentation](../planner/planner-guide.md) for full list.
+> Planner arguments use the `PlannerConfig` field names consumed by the planner service. See [SLA Planner documentation](../planner/planner-guide.md) for full list.
 
 ### Model Cache PVC (Advanced)
 
@@ -640,14 +642,14 @@ SGLang workers expose profiling endpoints for runtime performance analysis:
 
 ```bash
 # Start profiling
-curl -X POST http://localhost:9090/engine/start_profile \
+curl -X POST http://localhost:9090/engine/control/start_profile \
   -H "Content-Type: application/json" \
   -d '{"output_dir": "/tmp/profiler_output"}'
 
 # Run inference requests...
 
 # Stop profiling
-curl -X POST http://localhost:9090/engine/stop_profile
+curl -X POST http://localhost:9090/engine/control/stop_profile
 ```
 
 View traces using Chrome's `chrome://tracing`, [Perfetto UI](https://ui.perfetto.dev/), or TensorBoard.

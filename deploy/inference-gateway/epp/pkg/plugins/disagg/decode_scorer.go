@@ -37,10 +37,10 @@ const (
 	// DynDecodeScorerType is the plugin type registered in the plugin registry.
 	DynDecodeScorerType = "dyn-decode-scorer"
 
-	WorkerIDHeader        = "x-worker-instance-id"
-	PrefillWorkerIDHeader = "x-prefill-instance-id"
-	DpRankHeader          = "x-dp-rank"
-	PrefillDpRankHeader   = "x-prefill-dp-rank"
+	WorkerIDHeader        = "x-dynamo-worker-instance-id"
+	PrefillWorkerIDHeader = "x-dynamo-prefill-instance-id"
+	DpRankHeader          = "x-dynamo-dp-rank"
+	PrefillDpRankHeader   = "x-dynamo-prefill-dp-rank"
 	RoutingModeHeader     = "x-dynamo-routing-mode"
 
 	decodeStateKey = "dynamo-decode-routing-state"
@@ -177,7 +177,7 @@ func (s *DynDecodeScorer) Score(ctx context.Context, cycleState *schedtypes.Cycl
 				"DynDecodeScorer: prefill worker header missing and enforce_disagg=true")
 		} else {
 			logger.V(logutil.DEFAULT).Error(nil,
-				"DynDecodeScorer: x-prefill-instance-id header missing — DynPrefillScorer did not set it")
+				"DynDecodeScorer: x-dynamo-prefill-instance-id header missing — DynPrefillScorer did not set it")
 		}
 	} else {
 		req.Headers[RoutingModeHeader] = "aggregated"

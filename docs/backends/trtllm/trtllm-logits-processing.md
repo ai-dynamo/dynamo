@@ -18,11 +18,11 @@ Logits processors let you modify the next-token logits at every decoding step (e
 
 ### Quick test: HelloWorld processor
 
-`DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1` is a built-in test hook (not a production processor loader) that forces the model to respond with "Hello world!". It is useful to verify the callback path without modifying your model or engine code. It works on both the legacy and the unified TRT-LLM aggregated launchers:
+`DYN_ENABLE_TEST_LOGITS_PROCESSOR=1` is a built-in test hook (not a production processor loader) that forces the model to respond with "Hello world!". It is useful to verify the callback path without modifying your model or engine code. It works on both the legacy and the unified TRT-LLM aggregated launchers:
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/trtllm
-export DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1
+export DYN_ENABLE_TEST_LOGITS_PROCESSOR=1
 
 # legacy aggregated
 ./launch/agg.sh
@@ -50,7 +50,7 @@ The unified TRT-LLM engine threads logits processors through a shared, backend-a
 - `start()` resolves a `LogitsProcessorSpec` once via `resolve_test_logits_processor_spec(get_tokenizer)`, but only on generation roles — `logits_processor_spec()` returns `None` for PREFILL/ENCODE before any tokenizer access, so a prefill worker never resolves a spec or touches a tokenizer. The lambda is invoked lazily after the env check, so engines started with `skip_tokenizer_init=True` and the hook off don't crash. The spec carries a `ForcedTokenSequenceSpec` with token IDs already resolved at startup — no per-request tokenizer access. `None` when the env var is off.
 - `generate()` calls `logits_processors_for_request(spec, disaggregation_mode=...)` to get the spec entry list (empty on non-generation workers such as PREFILL/ENCODE, or when spec is `None`), then `attach_logits_processors(sampling_params, entries)` to plug them into TRT-LLM. The TRT-LLM realizer materializes each spec entry into a fresh `BaseLogitsProcessor` (e.g. `ForcedSequenceLogitsProcessor`) and wraps in `TrtllmDynamoLogitsAdapter`.
 
-The same shared layer will host the vLLM and SGLang slices when those land. vLLM loads a batch-level adapter class at engine init and activates it per request via `SamplingParams.extra_args`; SGLang flips `--enable-custom-logit-processor` at startup and passes a serialized class spec + `custom_params` per request. Each backend translates the same `LogitsProcessorSpec` differently. The public config-driven loader (when it lands) plugs in by resolving a `LogitsProcessorSpec` from CLI/config instead of from this env var; no engine code changes.
+The same shared layer hosts the vLLM and SGLang slices. vLLM loads a batch-level adapter class at engine init and activates it per request via `SamplingParams.extra_args` (see [vLLM Logits Processing](../vllm/vllm-logits-processing.md)); SGLang flips `--enable-custom-logit-processor` at startup and passes a serialized class spec + `custom_params` per request (see [SGLang Logits Processing](../sglang/sglang-logits-processing.md)). Each backend translates the same `LogitsProcessorSpec` differently. The public config-driven loader (when it lands) plugs in by resolving a `LogitsProcessorSpec` from CLI/config instead of from this env var; no engine code changes.
 
 ### Bring your own processor
 

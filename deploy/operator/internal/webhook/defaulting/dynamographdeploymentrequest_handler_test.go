@@ -72,6 +72,11 @@ func makeAdmissionCtx(op admissionv1.Operation) context.Context {
 	req := admission.Request{
 		AdmissionRequest: admissionv1.AdmissionRequest{
 			Operation: op,
+			Kind: metav1.GroupVersionKind{
+				Group:   nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Group,
+				Version: nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Version,
+				Kind:    nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK.Kind,
+			},
 		},
 	}
 	return admission.NewContextWithRequest(context.Background(), req)

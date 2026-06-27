@@ -13,16 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
 import logging
 import math
 import typing
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Optional
 
-import aiohttp
 from prometheus_api_client import PrometheusConnect
-from prometheus_client.parser import text_string_to_metric_families
 from pydantic import BaseModel, ValidationError
 
 from dynamo import prometheus_names
@@ -62,6 +59,7 @@ class Metrics:
     p_load: Optional[float] = None
     d_load: Optional[float] = None
     kv_hit_rate: Optional[float] = None
+    accept_length: Optional[float] = None
 
     def is_valid(self) -> bool:
         """Check if all required metrics are valid (not None and not NaN)."""
@@ -74,24 +72,6 @@ class Metrics:
             self.request_duration,
         ]
         return all(v is not None and not math.isnan(v) for v in required)
-
-
-@dataclass
-class CachedLoadMetrics:
-    """Container for load metrics used by load-based scaling.
-
-    Attributes:
-        recent:              Most recent per-worker metrics (from the latest sample).
-                             Keyed by worker_id -> {metric_name: value}.
-        per_worker_averaged: Per-worker metrics averaged over time (not across workers).
-                             Keyed by worker_id -> {metric_name: value}.
-        cluster_averaged:    Metrics averaged over time and all workers.
-                             Flat dict {metric_name: value}.
-    """
-
-    recent: dict[str, dict[str, float]] = field(default_factory=dict)
-    per_worker_averaged: dict[str, dict[str, float]] = field(default_factory=dict)
-    cluster_averaged: dict[str, float] = field(default_factory=dict)
 
 
 class FrontendMetric(BaseModel):
@@ -272,7 +252,7 @@ class PrometheusAPIClient:
             #       RouterRequestMetrics in lib/llm/src/kv_router/metrics.rs
             #       registers dynamo_component_router_request_duration_seconds.
             #       Until then this queries a non-existent metric and returns 0,
-            #       which causes the decode planner correction factor to use
+            #       which causes throughput planning to see
             #       concurrency=0 (under-estimated), inflating replica recommendations.
             return self._get_average_metric(
                 f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.work_handler.REQUEST_DURATION_SECONDS}",
@@ -368,11 +348,11 @@ class PrometheusAPIClient:
     def get_avg_kv_hit_rate(self, interval: str, model_name: str) -> Optional[float]:
         """Average predicted KV cache hit rate (0.0-1.0) from the router.
 
-        Only available when metrics_source == "router" (the histogram lives on
-        the LocalRouter component). In disagg deployments the scrape is
-        namespace-filtered, so if the planner's ``dynamo_namespace`` matches
-        the prefill pool, the returned value pools only prefill-router
-        observations.
+        The histogram lives on the router component, but it can be exposed on
+        the frontend scrape endpoint when the frontend runs in KV router mode.
+        Query the router component metric regardless of the traffic metrics
+        source so deployments can keep frontend-sourced request/ISL/OSL metrics
+        while still using router-sourced KV hit rate.
 
         Returns ``None`` (not ``0.0``) on missing data — Prometheus scrape
         gaps must not be confused with a real "no reuse" signal: the state
@@ -381,8 +361,6 @@ class PrometheusAPIClient:
         every scrape failure. The caller's ``_clamp_kv_hit_rate(None)``
         falls back to no-discount behavior, which is the safe choice.
         """
-        if self.metrics_source != "router":
-            return None
         full_metric_name = (
             f"{prometheus_names.name_prefix.COMPONENT}_"
             f"{prometheus_names.router.KV_HIT_RATE}"
@@ -405,6 +383,89 @@ class PrometheusAPIClient:
         except Exception as e:
             logger.warning(f"Error getting avg kv hit rate: {e}")
             return None
+
+    @staticmethod
+    def _quote_label_value(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    def _engine_metric_filter(
+        self,
+        component_name: Optional[str],
+        model_name: Optional[str],
+        namespace: Optional[str] = None,
+        endpoint_name: Optional[str] = None,
+    ) -> str:
+        metric_namespace = namespace or self.dynamo_namespace
+        metric_endpoint = endpoint_name or "generate"
+        filters = [
+            f'{prometheus_names.labels.NAMESPACE}="{self._quote_label_value(metric_namespace)}"',
+            f'{prometheus_names.labels.ENDPOINT}="{self._quote_label_value(metric_endpoint)}"',
+        ]
+        if component_name:
+            filters.append(
+                f'{prometheus_names.labels.COMPONENT}="{self._quote_label_value(component_name)}"'
+            )
+        if model_name:
+            filters.append(
+                f'{prometheus_names.labels.MODEL}="{self._quote_label_value(model_name)}"'
+            )
+        return ",".join(filters)
+
+    def _query_single_value(self, query: str, operation_name: str) -> Optional[float]:
+        try:
+            result = self.prom.custom_query(query=query)
+            if not result:
+                logger.info(f"No prometheus data for {operation_name}")
+                return None
+            value = float(result[0]["value"][1])
+            return value if math.isfinite(value) else None
+        except Exception as e:
+            logger.warning(f"Error getting {operation_name}: {e}")
+            return None
+
+    def get_avg_spec_decode_accept_length(
+        self,
+        interval: str,
+        backend: str,
+        component_name: Optional[str],
+        model_name: Optional[str],
+        namespace: Optional[str] = None,
+        endpoint_name: Optional[str] = None,
+    ) -> Optional[float]:
+        """Average spec-decode accept length from worker engine metrics.
+
+        Returns tokens produced per decode forward, including the base token.
+        Missing data returns ``None`` so callers can fall back to no discount.
+        """
+        selector = self._engine_metric_filter(
+            component_name, model_name, namespace, endpoint_name
+        )
+        if backend == "vllm":
+            accepted = (
+                f"sum(rate(vllm:spec_decode_num_accepted_tokens_total"
+                f"{{{selector}}}[{interval}]))"
+            )
+            drafts = (
+                f"sum(rate(vllm:spec_decode_num_drafts_total"
+                f"{{{selector}}}[{interval}]))"
+            )
+            return self._query_single_value(
+                f"1 + ({accepted}) / ({drafts})",
+                "vLLM spec decode accept length",
+            )
+        if backend == "sglang":
+            return self._query_single_value(
+                f"avg(avg_over_time(sglang:spec_accept_length"
+                f"{{{selector}}}[{interval}]))",
+                "SGLang spec decode accept length",
+            )
+        if backend == "trtllm":
+            return self._query_single_value(
+                f"avg(avg_over_time(trtllm_spec_decode_acceptance_length"
+                f"{{{selector}}}[{interval}]))",
+                "TRT-LLM spec decode accept length",
+            )
+        return None
 
     def warn_if_router_not_scraped(self) -> None:
         """Warn if Prometheus is not scraping any dynamo_component_router_* series.
@@ -446,181 +507,3 @@ def parse_frontend_metric_containers(
             logger.error(f"Error parsing frontend metric container: {e}")
             continue
     return metrics_containers
-
-
-# Metric names for per-worker load metrics (gauge-type, queried directly from router)
-_WORKER_METRIC_NAMES = {
-    "active_prefill_tokens": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_ACTIVE_PREFILL_TOKENS}",
-    "active_decode_blocks": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_ACTIVE_DECODE_BLOCKS}",
-    "last_ttft": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS}",
-    "last_isl": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_LAST_INPUT_SEQUENCE_TOKENS}",
-    "last_itl": f"{prometheus_names.name_prefix.FRONTEND}_{prometheus_names.frontend_service.WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS}",
-}
-
-
-class DirectRouterMetricsClient:
-    """Query router's /metrics endpoint directly for real-time per-worker metrics.
-
-    Runs a continuous background sampling loop that collects metrics at
-    evenly-spaced intervals (interval / num_samples). At decision time,
-    the load-based loop reads the buffer via get_recent_and_averaged_metrics().
-    """
-
-    def __init__(self, router_metrics_url: str, dynamo_namespace: str):
-        self.router_metrics_url = router_metrics_url
-        self.dynamo_namespace = dynamo_namespace
-        self._sample_buffer: list[dict[str, dict[str, dict[str, float]]]] = []
-        self._num_samples: int = 10
-
-    def _parse_prometheus_text(
-        self, text: str
-    ) -> dict[str, dict[str, dict[str, float]]]:
-        """Parse Prometheus text exposition format and extract per-worker metrics.
-
-        Uses prometheus_client.parser to parse the text exposition format.
-        Groups results by worker_type label (prefill/decode) so callers
-        can access only the workers they care about.
-
-        Args:
-            text: Raw Prometheus text from /metrics endpoint
-
-        Returns:
-            {"prefill": {worker_id: {metric: float, ...}},
-             "decode":  {worker_id: {metric: float, ...}}}
-        """
-        target_metrics = set(_WORKER_METRIC_NAMES.values())
-        reverse_map = {v: k for k, v in _WORKER_METRIC_NAMES.items()}
-        result: dict[str, dict[str, dict[str, float]]] = {}
-
-        for family in text_string_to_metric_families(text):
-            if family.name not in target_metrics:
-                continue
-
-            field_name = reverse_map[family.name]
-
-            for sample in family.samples:
-                labels = sample.labels
-                worker_type = labels.get("worker_type", "unknown")
-                worker_id = labels.get("worker_id", "unknown")
-                value = sample.value
-
-                if worker_type not in result:
-                    result[worker_type] = {}
-                if worker_id not in result[worker_type]:
-                    result[worker_type][worker_id] = {}
-                result[worker_type][worker_id][field_name] = value
-
-        return result
-
-    async def _fetch_and_parse(self) -> dict[str, dict[str, dict[str, float]]]:
-        """Fetch /metrics from router and parse into per-worker metrics."""
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    self.router_metrics_url, timeout=aiohttp.ClientTimeout(total=2)
-                ) as response:
-                    text = await response.text()
-            return self._parse_prometheus_text(text)
-        except Exception as e:
-            logger.warning(f"Failed to fetch router metrics: {e}")
-            return {}
-
-    async def run_sampling_loop(self, num_samples: int, interval: float) -> None:
-        """Background coroutine: continuously sample at evenly-spaced intervals.
-
-        Runs alongside the load-based loop via asyncio.gather().
-        sample_interval = interval / num_samples (e.g., 5s / 10 = 0.5s)
-        Keeps only the last num_samples in the buffer (rolling window).
-        """
-        self._num_samples = num_samples
-        sample_interval = interval / num_samples
-        while True:
-            metrics = await self._fetch_and_parse()
-            if metrics:
-                self._sample_buffer.append(metrics)
-                if len(self._sample_buffer) > num_samples:
-                    self._sample_buffer.pop(0)
-            await asyncio.sleep(sample_interval)
-
-    def get_recent_and_averaged_metrics(
-        self, worker_type: str
-    ) -> typing.Optional[
-        tuple[
-            dict[str, dict[str, float]],
-            dict[str, dict[str, float]],
-            dict[str, float],
-        ]
-    ]:
-        """Return recent, per-worker time-averaged, and cluster-averaged metrics.
-
-        Called by the load-based loop at decision time. Non-blocking.
-
-        Args:
-            worker_type: "prefill" or "decode" — only workers matching
-                         the worker_type label are included.
-
-        Returns:
-            A tuple of (recent, per_worker_averaged, cluster_averaged):
-            - recent:              {worker_id: {metric: float}} from the latest sample
-            - per_worker_averaged: {worker_id: {metric: float}} averaged over time per worker
-            - cluster_averaged:    {metric: float} averaged over all samples and all workers
-            Returns None if the sample buffer is empty.
-        """
-        if not self._sample_buffer:
-            return None
-
-        # --- Recent: last sample only ---
-        latest_sample = self._sample_buffer[-1]
-        recent: dict[str, dict[str, float]] = {}
-        for worker_id, metrics in latest_sample.get(worker_type, {}).items():
-            recent[worker_id] = dict(metrics)
-
-        # --- Per-worker averaged: across time, grouped by worker_id ---
-        pw_sums: dict[str, dict[str, float]] = {}
-        pw_counts: dict[str, dict[str, int]] = {}
-
-        for sample in self._sample_buffer:
-            typed_workers = sample.get(worker_type, {})
-            for worker_id, metrics in typed_workers.items():
-                if worker_id not in pw_sums:
-                    pw_sums[worker_id] = {}
-                    pw_counts[worker_id] = {}
-                for metric_name, value in metrics.items():
-                    pw_sums[worker_id][metric_name] = (
-                        pw_sums[worker_id].get(metric_name, 0.0) + value
-                    )
-                    pw_counts[worker_id][metric_name] = (
-                        pw_counts[worker_id].get(metric_name, 0) + 1
-                    )
-
-        if not pw_sums and not recent:
-            return None
-
-        per_worker_averaged: dict[str, dict[str, float]] = {}
-        for worker_id in pw_sums:
-            per_worker_averaged[worker_id] = {}
-            for metric_name in pw_sums[worker_id]:
-                per_worker_averaged[worker_id][metric_name] = (
-                    pw_sums[worker_id][metric_name] / pw_counts[worker_id][metric_name]
-                )
-
-        # --- Cluster averaged: across time AND worker_id ---
-        cluster_sums: dict[str, float] = {}
-        cluster_counts: dict[str, int] = {}
-        for worker_id in pw_sums:
-            for metric_name in pw_sums[worker_id]:
-                cluster_sums[metric_name] = (
-                    cluster_sums.get(metric_name, 0.0) + pw_sums[worker_id][metric_name]
-                )
-                cluster_counts[metric_name] = (
-                    cluster_counts.get(metric_name, 0)
-                    + pw_counts[worker_id][metric_name]
-                )
-
-        cluster_averaged: dict[str, float] = {}
-        for metric_name in cluster_sums:
-            cluster_averaged[metric_name] = (
-                cluster_sums[metric_name] / cluster_counts[metric_name]
-            )
-
-        return recent, per_worker_averaged, cluster_averaged
