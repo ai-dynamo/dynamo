@@ -90,10 +90,15 @@ pub(super) struct WorkerSlot {
 }
 
 impl WorkerSlot {
-    fn new(worker: WorkerWithDpRank, block_size: usize) -> Self {
+    fn new(worker: WorkerWithDpRank, block_size: usize, expiry_enabled: bool) -> Self {
+        let sequences = if expiry_enabled {
+            ActiveSequences::new(block_size)
+        } else {
+            ActiveSequences::new_without_expiry(block_size)
+        };
         Self {
             worker,
-            sequences: RwLock::new(ActiveSequences::new(block_size)),
+            sequences: RwLock::new(sequences),
             trie_lookup: Arc::new(RwLock::new(WorkerLookup::default())),
         }
     }
@@ -103,10 +108,26 @@ pub(super) struct WorkerTable {
     pub(super) slots: Vec<WorkerSlot>,
     pub(super) index: FxHashMap<WorkerWithDpRank, usize>,
     worker_ranges: HashMap<WorkerId, WorkerDpRange>,
+    expiry_enabled: bool,
 }
 
 impl WorkerTable {
     pub(super) fn new(block_size: usize, dp_range: &HashMap<u64, (u32, u32)>) -> Self {
+        Self::new_with_expiry(block_size, dp_range, true)
+    }
+
+    pub(super) fn new_without_expiry(
+        block_size: usize,
+        dp_range: &HashMap<u64, (u32, u32)>,
+    ) -> Self {
+        Self::new_with_expiry(block_size, dp_range, false)
+    }
+
+    fn new_with_expiry(
+        block_size: usize,
+        dp_range: &HashMap<u64, (u32, u32)>,
+        expiry_enabled: bool,
+    ) -> Self {
         let worker_ranges: HashMap<WorkerId, WorkerDpRange> = dp_range
             .iter()
             .map(|(&worker_id, &(dp_start, dp_size))| {
@@ -121,13 +142,14 @@ impl WorkerTable {
         let mut index = FxHashMap::default();
         for worker in workers_from_ranges(worker_ranges.values().copied()) {
             let idx = slots.len();
-            slots.push(WorkerSlot::new(worker, block_size));
+            slots.push(WorkerSlot::new(worker, block_size, expiry_enabled));
             index.insert(worker, idx);
         }
         Self {
             slots,
             index,
             worker_ranges,
+            expiry_enabled,
         }
     }
 
@@ -229,7 +251,7 @@ impl WorkerTable {
         for worker in target_workers {
             let slot = old.remove(&worker).unwrap_or_else(|| {
                 added.push(worker);
-                WorkerSlot::new(worker, block_size)
+                WorkerSlot::new(worker, block_size, self.expiry_enabled)
             });
             self.slots.push(slot);
         }
@@ -259,7 +281,7 @@ impl WorkerTable {
             let idx = self.slots.len();
             let slot = old
                 .remove(&worker)
-                .unwrap_or_else(|| WorkerSlot::new(worker, block_size));
+                .unwrap_or_else(|| WorkerSlot::new(worker, block_size, self.expiry_enabled));
             self.slots.push(slot);
             self.index.insert(worker, idx);
         }
@@ -295,7 +317,8 @@ impl WorkerTable {
         }
 
         let idx = self.slots.len();
-        self.slots.push(WorkerSlot::new(worker, block_size));
+        self.slots
+            .push(WorkerSlot::new(worker, block_size, self.expiry_enabled));
         self.index.insert(worker, idx);
         WorkerTopologyChange {
             added: vec![worker],

@@ -108,11 +108,20 @@ pub struct ActiveSequences {
     prefill: PrefillLoadTracker,
     blocks: BlockTracker,
     last_expiry_check_time: Instant,
+    expiry_duration: Option<Duration>,
 }
 
 impl ActiveSequences {
     /// Create a new SharedSequenceManager instance
     pub(super) fn new(block_size: usize) -> Self {
+        Self::new_with_expiry(block_size, Some(EXPIRY_DURATION))
+    }
+
+    pub(super) fn new_without_expiry(block_size: usize) -> Self {
+        Self::new_with_expiry(block_size, None)
+    }
+
+    fn new_with_expiry(block_size: usize, expiry_duration: Option<Duration>) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
 
         Self {
@@ -120,6 +129,7 @@ impl ActiveSequences {
             prefill: PrefillLoadTracker::default(),
             blocks: BlockTracker::default(),
             last_expiry_check_time: Instant::now(),
+            expiry_duration,
         }
     }
 
@@ -317,6 +327,9 @@ impl ActiveSequences {
     /// Force expiry of stale requests if the timer has elapsed.
     /// Returns block membership transitions plus the set of expired request IDs that were removed.
     pub(super) fn force_expiry(&mut self) -> SequenceMutationOutcome {
+        let Some(expiry_duration) = self.expiry_duration else {
+            return SequenceMutationOutcome::default();
+        };
         let now = Instant::now();
 
         if now < self.last_expiry_check_time + CHECK_EXPIRY_FREQUENCY {
@@ -324,7 +337,7 @@ impl ActiveSequences {
         }
 
         self.last_expiry_check_time = now;
-        let expired_requests_time = now - EXPIRY_DURATION;
+        let expired_requests_time = now - expiry_duration;
         let expired_request_ids: HashSet<RequestId> = self
             .requests
             .iter()
