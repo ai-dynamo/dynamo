@@ -127,6 +127,8 @@ if os.environ["REQUIRE_EXACT_NATIVE"]:
         "vllm/_C_stable_libtorch.abi3.so",
         "vllm/_moe_C_stable_libtorch.abi3.so",
     )
+    # Do not import native modules during image builds because libcuda is
+    # unavailable. Stable-libtorch modules still require libcuda at GPU runtime.
     for relative_path in required_extensions:
         if relative_path not in distribution_files:
             raise SystemExit(
@@ -165,17 +167,20 @@ if os.environ["REQUIRE_CHECKPOINT_HOOKS"]:
 PY
 }
 
-validate_python_only_changes() {
+validate_exact_native_changes() {
     local base=$1
     local head=$2
     local offending_paths
 
     offending_paths="$(
         git diff --no-renames --name-only "${base}..${head}" |
-            sed -n '\|^vllm/.*\.py$|!p'
+            sed -n \
+                -e '\|^vllm/.*\.py$|b' \
+                -e '\|^requirements/cuda\.txt$|b' \
+                -e p
     )"
     if [[ -n "${offending_paths}" ]]; then
-        echo "Exact-native mode only permits Python changes under vllm/:" >&2
+        echo "Exact-native mode only permits Python changes under vllm/ or requirements/cuda.txt:" >&2
         printf '%s\n' "${offending_paths}" >&2
         return 1
     fi
@@ -233,7 +238,7 @@ if [[ -n "${VLLM_GIT_URL:-}" ]]; then
             exit 1
         fi
 
-        validate_python_only_changes \
+        validate_exact_native_changes \
             "${VLLM_PRECOMPILED_WHEEL_COMMIT}" "${vllm_source_sha}"
 
         uv pip uninstall --system vllm
@@ -273,9 +278,10 @@ fi
     echo "vllm_native_wheel_variant=${native_wheel_variant}"
 } >> "${PROVENANCE_FILE}"
 
-# This override intentionally runs after vLLM's dependency solve. In
-# exact-native mode that prevents the source install's stock FlashInfer
-# requirement from replacing the checkpoint-aware fork.
+# This override intentionally runs after the custom vLLM metadata has selected
+# the exact stock FlashInfer version. Resolve the custom checkout's requirements
+# before replacing that same-version package with checkpoint-aware source and
+# cubin builds using --no-deps.
 if [[ -n "${FLASHINFER_GIT_URL:-}" ]]; then
     require_git_selector \
         FLASHINFER "${FLASHINFER_GIT_REF:-}" "${FLASHINFER_GIT_SHA:-}"
@@ -285,6 +291,7 @@ if [[ -n "${FLASHINFER_GIT_URL:-}" ]]; then
         "${FLASHINFER_GIT_SHA:-}" \
         /tmp/flashinfer-src
     flashinfer_source_sha="${RESOLVED_SOURCE_SHA}"
+    uv pip install --system -r requirements.txt
     uv pip install --system --force-reinstall --no-deps .
     if [[ -d ./flashinfer-cubin ]]; then
         uv pip install --system --force-reinstall --no-deps ./flashinfer-cubin
@@ -305,6 +312,7 @@ distribution = metadata.distribution("flashinfer-python")
 print(f"Installed FlashInfer version: {distribution.version}")
 print(f"Installed FlashInfer location: {distribution.locate_file('').resolve()}")
 PY
+uv pip check --system
 echo "flashinfer_source_sha=${flashinfer_source_sha}" >> "${PROVENANCE_FILE}"
 
 echo "Installed source/native provenance:"

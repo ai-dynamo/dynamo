@@ -61,6 +61,47 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             text=True,
         )
 
+    def initialize_git_repository(
+        self,
+        repository: Path,
+        files: dict[str, str] | None = None,
+    ) -> str:
+        subprocess.run(["git", "init", "-q", repository], check=True)
+        for key, value in (
+            ("user.email", "test@example.com"),
+            ("user.name", "Test User"),
+            ("commit.gpgSign", "false"),
+        ):
+            subprocess.run(
+                ["git", "config", key, value],
+                cwd=repository,
+                check=True,
+            )
+        for relative_path, contents in (files or {}).items():
+            path = repository / relative_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents)
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "base", "--allow-empty"],
+            cwd=repository,
+            check=True,
+        )
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+        ).strip()
+
+    def commit_git_repository(self, repository: Path, message: str) -> str:
+        subprocess.run(["git", "add", "."], cwd=repository, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", message],
+            cwd=repository,
+            check=True,
+        )
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repository, text=True
+        ).strip()
+
     def verify_fixture(
         self,
         extension_names: tuple[str, ...],
@@ -181,13 +222,25 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         vllm_install = installer.index(
             "uv pip install --system '.[flashinfer,runai,otel]'"
         )
+        flashinfer_requirements = installer.index(
+            "uv pip install --system -r requirements.txt"
+        )
         flashinfer_install = installer.index(
             "uv pip install --system --force-reinstall --no-deps ."
         )
-        self.assertLess(vllm_install, flashinfer_install)
+        pip_check = installer.index("uv pip check --system")
+        self.assertLess(vllm_install, flashinfer_requirements)
+        self.assertLess(flashinfer_requirements, flashinfer_install)
+        self.assertLess(flashinfer_install, pip_check)
         self.assertIn("git merge-base --is-ancestor", installer)
-        self.assertIn("Exact-native mode only permits Python changes", installer)
+        self.assertIn("requirements/cuda.txt", installer)
         self.assertIn("source-provenance.txt", installer)
+
+        dockerfile = self.render_runtime("amd64")
+        self.assertLess(
+            dockerfile.index("install_custom_vllm_sources"),
+            dockerfile.index("build_nccl_checkpoint"),
+        )
 
     def test_exact_native_verification_requires_stable_libtorch_extensions(
         self,
@@ -215,48 +268,81 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         result = self.verify_fixture(("_C.abi3.so",), exact_native=False)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+        installer = self.installer.read_text()
+        self.assertIn(
+            "Do not import native modules during image builds because libcuda",
+            installer,
+        )
+        self.assertIn(
+            "Stable-libtorch modules still require libcuda at GPU runtime",
+            installer,
+        )
+
+    def test_exact_native_accepts_python_and_cuda_requirements_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            base = self.initialize_git_repository(repository)
+            for relative_path in ("vllm/checkpoint.py", "requirements/cuda.txt"):
+                path = repository / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# custom source\n")
+            head = self.commit_git_repository(repository, "allowed changes")
+
+            result = self.run_installer_function(
+                "validate_exact_native_changes",
+                base,
+                head,
+                cwd=repository,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_exact_native_rejects_other_metadata_build_and_native_paths(
+        self,
+    ) -> None:
+        rejected_paths = (
+            "requirements/common.txt",
+            "setup.py",
+            "pyproject.toml",
+            "csrc/kernel.cpp",
+        )
+        for rejected_path in rejected_paths:
+            with self.subTest(path=rejected_path):
+                with tempfile.TemporaryDirectory() as directory:
+                    repository = Path(directory)
+                    base = self.initialize_git_repository(repository)
+                    path = repository / rejected_path
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("# disallowed\n")
+                    head = self.commit_git_repository(repository, "disallowed change")
+
+                    result = self.run_installer_function(
+                        "validate_exact_native_changes",
+                        base,
+                        head,
+                        cwd=repository,
+                    )
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(rejected_path, result.stderr)
+
     def test_exact_native_rejects_rename_from_outside_vllm_python(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)
-            subprocess.run(["git", "init", "-q", repository], check=True)
-            subprocess.run(
-                ["git", "config", "user.email", "test@example.com"],
-                cwd=repository,
-                check=True,
+            base = self.initialize_git_repository(
+                repository,
+                {"csrc/kernel.cpp": "// kernel\n"},
             )
-            subprocess.run(
-                ["git", "config", "user.name", "Test User"],
-                cwd=repository,
-                check=True,
-            )
-            subprocess.run(
-                ["git", "config", "commit.gpgSign", "false"],
-                cwd=repository,
-                check=True,
-            )
-            (repository / "csrc").mkdir()
-            (repository / "csrc/kernel.cpp").write_text("// kernel\n")
-            subprocess.run(["git", "add", "."], cwd=repository, check=True)
-            subprocess.run(["git", "commit", "-qm", "base"], cwd=repository, check=True)
-            base = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=repository, text=True
-            ).strip()
-
             (repository / "vllm").mkdir()
             subprocess.run(
                 ["git", "mv", "csrc/kernel.cpp", "vllm/kernel.py"],
                 cwd=repository,
                 check=True,
             )
-            subprocess.run(
-                ["git", "commit", "-qm", "rename"], cwd=repository, check=True
-            )
-            head = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=repository, text=True
-            ).strip()
+            head = self.commit_git_repository(repository, "rename")
 
             result = self.run_installer_function(
-                "validate_python_only_changes",
+                "validate_exact_native_changes",
                 base,
                 head,
                 cwd=repository,
@@ -265,7 +351,8 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("csrc/kernel.cpp", result.stderr)
         self.assertIn(
-            "Exact-native mode only permits Python changes under vllm/",
+            "Exact-native mode only permits Python changes under vllm/ or "
+            "requirements/cuda.txt",
             result.stderr,
         )
 
