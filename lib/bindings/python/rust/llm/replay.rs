@@ -171,7 +171,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, num_g2_blocks=None, num_g3_blocks=None, offload_batch_size=None, bandwidth_g1_to_g2_gbps=None, bandwidth_g2_to_g1_gbps=None, bandwidth_g2_to_g3_gbps=None, bandwidth_g3_to_g2_gbps=None, enable_g4_storage=false, bandwidth_g2_to_g4_gbps=None, bandwidth_g4_to_g2_gbps=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -213,6 +213,7 @@ impl MockEngineArgs {
         kv_transfer_bandwidth: Option<f64>,
         kv_transfer_timing_mode: &str,
         reasoning: Option<ReasoningConfig>,
+        response_replay_trace_path: Option<PathBuf>,
         zmq_kv_events_port: Option<u16>,
         zmq_replay_port: Option<u16>,
         preemption_mode: &str,
@@ -293,6 +294,7 @@ impl MockEngineArgs {
             .bandwidth_g2_to_g4_gbps(bandwidth_g2_to_g4_gbps)
             .bandwidth_g4_to_g2_gbps(bandwidth_g4_to_g2_gbps)
             .reasoning(reasoning.map(|config| config.inner()))
+            .response_replay_trace_path(response_replay_trace_path)
             .zmq_kv_events_port(zmq_kv_events_port)
             .zmq_replay_port(zmq_replay_port)
             .preemption_mode(preemption_mode)
@@ -425,6 +427,11 @@ impl MockEngineArgs {
     #[getter]
     fn kv_bytes_per_token(&self) -> Option<usize> {
         self.inner.kv_bytes_per_token
+    }
+
+    #[getter]
+    fn response_replay_trace_path(&self) -> Option<PathBuf> {
+        self.inner.response_replay_trace_path.clone()
     }
 
     #[getter]
@@ -1721,7 +1728,15 @@ fn materialize_replay_mocker_args(
             model_name,
             backend_version
         );
-        args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
+        // Offline replay runs a single aggregate engine holding the GLOBAL batch
+        // across all attention-DP ranks (it scales num_gpu_blocks by dp above and
+        // forbids scheduler-level dp_size>1). Record attention_dp_size so the perf
+        // model divides the scheduled batch back to the per-rank batch the AIC SDK
+        // expects. The live path keeps the default of 1 (it replicates per rank).
+        args.perf_model = Arc::new(PerfModel::from_aic_callback_with_attention_dp(
+            callback,
+            attention_dp_size.unwrap_or(1).max(1),
+        ));
     }
 
     Ok(args)

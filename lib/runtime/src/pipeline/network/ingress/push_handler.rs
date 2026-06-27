@@ -148,8 +148,12 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     /// classification (client-side disconnect vs. real failure), and the
     /// health-check notifier policy (notify only on non-error chunks and
     /// at clean stream end).
-    async fn pump_response_stream<U>(&self, mut stream: ManyOut<U>, publisher: &StreamSender)
-    where
+    async fn pump_response_stream<U>(
+        &self,
+        mut stream: ManyOut<U>,
+        publisher: &StreamSender,
+        payload_codec: RequestPlanePayloadCodec,
+    ) where
         U: Data + Serialize + MaybeError + std::fmt::Debug,
     {
         let context = stream.context();
@@ -167,8 +171,9 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
                 data: Some(resp),
                 complete_final: false,
             };
-            let resp_bytes = serde_json::to_vec(&resp_wrapper)
-                .expect("fatal error: invalid response object - this should never happen");
+            let resp_bytes = payload_codec
+                .encode(&resp_wrapper)
+                .expect("fatal error: invalid request-plane response object");
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
@@ -210,8 +215,9 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
                 data: None,
                 complete_final: true,
             };
-            let resp_bytes = serde_json::to_vec(&resp_wrapper)
-                .expect("fatal error: invalid response object - this should never happen");
+            let resp_bytes = payload_codec
+                .encode(&resp_wrapper)
+                .expect("fatal error: invalid request-plane response final object");
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
@@ -294,6 +300,7 @@ struct ParsedRequest<Req> {
     request: Req,
     response_connection_info: ConnectionInfo,
     frontend_send_ts_ns: Option<u64>,
+    payload_codec: RequestPlanePayloadCodec,
 }
 
 /// Per-shape strategy for turning a raw payload into a typed engine
@@ -338,7 +345,19 @@ where
                 "unary engine received a header-only envelope; expected a request payload",
             ))
         })?;
-        let request_t: T = serde_json::from_slice(&data)?;
+        let payload_codec = control_msg.payload_codec;
+        let request_t: T = payload_codec.decode(&data).map_err(|err| {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::DESERIALIZATION])
+                    .inc();
+            }
+            PipelineError::DeserializationError(format!(
+                "Failed deserializing {} request payload: {}",
+                payload_codec.name(),
+                err
+            ))
+        })?;
 
         tracing::trace!(
             request_id = %control_msg.id,
@@ -354,6 +373,7 @@ where
             request,
             response_connection_info: control_msg.connection_info,
             frontend_send_ts_ns: control_msg.frontend_send_ts_ns,
+            payload_codec,
         })
     }
 }
@@ -412,6 +432,7 @@ where
             control_msg.id.clone(),
             control_msg.metadata.clone(),
         );
+        let payload_codec = control_msg.payload_codec;
         let context_arc: Arc<dyn AsyncEngineContext> = request_context.context();
 
         // Open the request stream (upstream → worker) up front. The shared
@@ -450,7 +471,7 @@ where
                 if forwarder_ctx.is_killed() || forwarder_ctx.is_stopped() {
                     break;
                 }
-                match serde_json::from_slice::<T>(&bytes) {
+                match payload_codec.decode::<T>(&bytes) {
                     Ok(item) => {
                         if frame_tx.send(item).await.is_err() {
                             tracing::debug!(
@@ -462,6 +483,7 @@ where
                     Err(e) => {
                         tracing::error!(
                             error = %e,
+                            codec = payload_codec.name(),
                             "failed to deserialize bidirectional request frame; killing context"
                         );
                         forwarder_ctx.kill();
@@ -479,6 +501,7 @@ where
             request,
             response_connection_info: control_msg.connection_info,
             frontend_send_ts_ns: control_msg.frontend_send_ts_ns,
+            payload_codec,
         })
     }
 }
@@ -528,6 +551,7 @@ where
             request,
             response_connection_info,
             frontend_send_ts_ns,
+            payload_codec,
         } = self.parse_and_build_request(payload).await?;
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
@@ -600,7 +624,8 @@ where
             }
         };
 
-        self.pump_response_stream(stream, &publisher).await;
+        self.pump_response_stream(stream, &publisher, payload_codec)
+            .await;
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.

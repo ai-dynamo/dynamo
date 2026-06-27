@@ -14,6 +14,7 @@ pub(super) struct SglangRequest {
     pub(super) uuid: Uuid,
     pub(super) prompt_tokens: Vec<u64>,
     pub(super) max_output_tokens: usize,
+    pub(super) planned_output_ids: Option<Vec<u32>>,
     pub(super) output_ids: Vec<u32>,
     pub(super) last_node: Option<NodeId>,
     pub(super) kv_indices: Vec<usize>,
@@ -74,6 +75,14 @@ impl SglangRequest {
     }
 
     pub(super) fn next_output_token(&self) -> u32 {
+        if let Some(token_id) = self
+            .planned_output_ids
+            .as_ref()
+            .and_then(|ids| ids.get(self.output_len()))
+        {
+            return *token_id;
+        }
+
         let mut hasher = DefaultHasher::new();
         self.uuid.hash(&mut hasher);
         self.output_len().hash(&mut hasher);
@@ -162,7 +171,11 @@ impl From<DirectRequest> for SglangRequest {
         Self {
             uuid: req.uuid.unwrap_or_else(Uuid::new_v4),
             prompt_tokens: req.tokens.iter().map(|&t| t as u64).collect(),
-            max_output_tokens: req.max_output_tokens,
+            max_output_tokens: req
+                .output_token_ids
+                .as_ref()
+                .map_or(req.max_output_tokens, Vec::len),
+            planned_output_ids: req.output_token_ids,
             output_ids: Vec::new(),
             last_node: None,
             kv_indices: Vec::new(),

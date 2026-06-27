@@ -155,6 +155,7 @@ mod trtllm {
         core.receive(DirectRequest {
             tokens: tokens.collect(),
             max_output_tokens: max_output,
+            output_token_ids: None,
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
