@@ -1,0 +1,35 @@
+name: Trigger Dynamo Images
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    if: github.repository == 'doublewordai/dynamo'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger dynamo-images build
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.DYNAMO_IMAGES_DISPATCH_TOKEN }}
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: 'doublewordai',
+              repo: 'dynamo-images',
+              event_type: 'dynamo-main-updated',
+              client_payload: {
+                repository: `${context.repo.owner}/${context.repo.repo}`,
+                ref: context.ref.replace('refs/heads/', ''),
+                sha: context.sha,
+                source_workflow: context.workflow,
+                source_run_id: String(context.runId),
+                source_run_attempt: String(context.runAttempt)
+              }
+            })
+
+            core.info(`Triggered dynamo-images for ${context.sha}`)
