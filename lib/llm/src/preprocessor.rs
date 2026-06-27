@@ -432,12 +432,12 @@ impl OpenAIPreprocessor {
         // here; remove once fastokens upstream exposes the mutator.
         #[cfg(feature = "mm-routing")]
         let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
-            let fastokens_active = std::env::var("DYN_TOKENIZER").as_deref() == Ok("fastokens");
+            let fastokens_active = runtime_config.effective_tokenizer_backend().is_fastokens();
             if fastokens_active && model_dir_for_routing.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
-                    "DYN_TOKENIZER=fastokens is set; MM-aware KV routing disabled. \
-                     Unset DYN_TOKENIZER (or set it to 'default') to re-enable."
+                    "fastokens tokenizer backend is active; MM-aware KV routing disabled. \
+                     Use the default tokenizer backend to re-enable."
                 );
                 None
             } else {

@@ -36,11 +36,15 @@ use std::path::Path;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MooncakeRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, alias = "input_tokens")]
     pub input_length: Option<usize>,
     #[serde(default, alias = "output_tokens")]
     pub output_length: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_ids: Option<Vec<u32>>,
     #[serde(default)]
     pub hash_ids: Option<Vec<u64>>,
     #[serde(
@@ -76,6 +80,8 @@ pub struct AgenticMooncakeRow {
     pub input_length: Option<usize>,
     #[serde(default, alias = "output_tokens")]
     pub output_length: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_ids: Option<Vec<u32>>,
     #[serde(default)]
     pub hash_ids: Option<Vec<u64>>,
     #[serde(
@@ -597,6 +603,36 @@ mod tests {
     }
 
     #[test]
+    fn row_replay_fields_round_trip_canonical_and_alias_inputs() {
+        let canonical = r#"{"request_id":"r1","session_id":"s","input_length":8,"output_length":3,"output_token_ids":[101,102,103],"hash_ids":[0,1],"timestamp":12.5,"delay":3.0}"#;
+        let row: MooncakeRow = serde_json::from_str(canonical).unwrap();
+        assert_eq!(row.request_id.as_deref(), Some("r1"));
+        assert_eq!(row.output_length, Some(3));
+        assert_eq!(row.output_token_ids, Some(vec![101, 102, 103]));
+
+        let rendered: Value = serde_json::to_value(&row).unwrap();
+        assert_eq!(rendered["request_id"], json!("r1"));
+        assert_eq!(rendered["output_token_ids"], json!([101, 102, 103]));
+        let decoded: MooncakeRow = serde_json::from_value(rendered).unwrap();
+        assert_eq!(decoded.request_id.as_deref(), Some("r1"));
+        assert_eq!(decoded.output_token_ids, Some(vec![101, 102, 103]));
+
+        let aliased = r#"{"request_id":"r2","input_tokens":4,"output_tokens":2,"output_token_ids":[201,202],"hash_ids":[7],"created_time":1.5,"delay_ms":0.5}"#;
+        let row: MooncakeRow = serde_json::from_str(aliased).unwrap();
+        assert_eq!(row.request_id.as_deref(), Some("r2"));
+        assert_eq!(row.input_length, Some(4));
+        assert_eq!(row.output_length, Some(2));
+        assert_eq!(row.output_token_ids, Some(vec![201, 202]));
+
+        let rendered: Value = serde_json::to_value(&row).unwrap();
+        assert_eq!(rendered["input_length"], json!(4));
+        assert_eq!(rendered["output_length"], json!(2));
+        assert_eq!(rendered["output_token_ids"], json!([201, 202]));
+        assert!(rendered.get("input_tokens").is_none());
+        assert!(rendered.get("output_tokens").is_none());
+    }
+
+    #[test]
     fn row_canonical_input_round_trips_without_renaming() {
         let raw = r#"{"input_length":8,"output_length":2,"timestamp":12.5,"delay":3.0}"#;
         let mut row: MooncakeRow = serde_json::from_str(raw).unwrap();
@@ -634,6 +670,8 @@ mod tests {
         assert!(rendered.get("priority").is_none());
         assert!(rendered.get("strict_priority").is_none());
         assert!(rendered.get("policy_class").is_none());
+        assert!(rendered.get("request_id").is_none());
+        assert!(rendered.get("output_token_ids").is_none());
     }
 
     #[test]
@@ -674,6 +712,37 @@ mod tests {
         assert!(rendered.get("priority").is_none());
         assert!(rendered.get("strict_priority").is_none());
         assert!(rendered.get("policy_class").is_none());
+        assert!(rendered.get("output_token_ids").is_none());
+    }
+
+    #[test]
+    fn agentic_row_replay_fields_round_trip_canonical_and_alias_inputs() {
+        let canonical = r#"{"request_id":"r1","session_id":"s","input_length":8,"output_length":3,"output_token_ids":[101,102,103],"hash_ids":[0,1],"timestamp":12.5,"delay":3.0}"#;
+        let row: AgenticMooncakeRow = serde_json::from_str(canonical).unwrap();
+        assert_eq!(row.request_id, "r1");
+        assert_eq!(row.output_length, Some(3));
+        assert_eq!(row.output_token_ids, Some(vec![101, 102, 103]));
+
+        let rendered: Value = serde_json::to_value(&row).unwrap();
+        assert_eq!(rendered["request_id"], json!("r1"));
+        assert_eq!(rendered["output_token_ids"], json!([101, 102, 103]));
+        let decoded: AgenticMooncakeRow = serde_json::from_value(rendered).unwrap();
+        assert_eq!(decoded.request_id, "r1");
+        assert_eq!(decoded.output_token_ids, Some(vec![101, 102, 103]));
+
+        let aliased = r#"{"request_id":"r2","input_tokens":4,"output_tokens":2,"output_token_ids":[201,202],"hash_ids":[7],"created_time":1.5,"delay_ms":0.5}"#;
+        let row: AgenticMooncakeRow = serde_json::from_str(aliased).unwrap();
+        assert_eq!(row.request_id, "r2");
+        assert_eq!(row.input_length, Some(4));
+        assert_eq!(row.output_length, Some(2));
+        assert_eq!(row.output_token_ids, Some(vec![201, 202]));
+
+        let rendered: Value = serde_json::to_value(&row).unwrap();
+        assert_eq!(rendered["input_length"], json!(4));
+        assert_eq!(rendered["output_length"], json!(2));
+        assert_eq!(rendered["output_token_ids"], json!([201, 202]));
+        assert!(rendered.get("input_tokens").is_none());
+        assert!(rendered.get("output_tokens").is_none());
     }
 
     #[test]
