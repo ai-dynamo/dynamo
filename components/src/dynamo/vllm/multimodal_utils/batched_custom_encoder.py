@@ -177,7 +177,11 @@ class BatchedCustomEncoder(ABC):
 
         Re-raises any build error, then ``validate``s the placeholder id so a
         misconfigured encoder errors at startup instead of on the first request.
+        Single-shot: a second ``load()`` raises rather than orphaning the first
+        batcher's (non-daemon) worker thread and model.
         """
+        if getattr(self, "_batcher", None) is not None:
+            raise RuntimeError("BatchedCustomEncoder.load() called twice")
         self._batcher: ThreadedMicroBatcher = ThreadedMicroBatcher(
             self.forward_batch,
             max_batch_cost=(

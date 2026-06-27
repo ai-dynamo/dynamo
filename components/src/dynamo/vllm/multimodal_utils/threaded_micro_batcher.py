@@ -181,13 +181,17 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 raise RuntimeError("ThreadedMicroBatcher.start() called twice")
             # Non-daemon: a clean stop is via shutdown(); a daemon worker could be
             # torn down mid-fn at interpreter exit. Pin daemon=False explicitly so
-            # it never inherits a daemon creator thread. Start it *under* the lock
-            # so _thread is only published once actually started — a racing
-            # shutdown() can never join() an unstarted thread.
-            self._thread = threading.Thread(
-                target=self._run, name=self._name, daemon=False
-            )
-            self._thread.start()
+            # it never inherits a daemon creator thread. Start under the lock and
+            # publish _thread only after a successful start(), so (a) a racing
+            # shutdown() can never join() an unstarted thread and (b) a failed
+            # thread creation leaves no stale unstarted thread behind.
+            thread = threading.Thread(target=self._run, name=self._name, daemon=False)
+            try:
+                thread.start()
+            except BaseException:
+                self._state = _State.FAILED
+                raise
+            self._thread = thread
         self._ready.wait()
         if self._start_error is not None:
             # on_start ran on the thread, which then exited — mark closed so a

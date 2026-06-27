@@ -130,6 +130,18 @@ def test_validate_failure_reaps_thread():
     assert not enc._batcher._thread.is_alive()  # load() shut the batcher down
 
 
+def test_double_load_raises():
+    """A second load() is rejected rather than orphaning the first batcher's
+    (non-daemon) worker thread + model."""
+    enc = _RecEnc()
+    enc.load("model", "cpu")
+    try:
+        with pytest.raises(RuntimeError, match="twice"):
+            enc.load("model", "cpu")
+    finally:
+        enc.shutdown()
+
+
 def test_encode_before_load_raises():
     enc = _RecEnc()
     with pytest.raises(RuntimeError, match="before load"):
