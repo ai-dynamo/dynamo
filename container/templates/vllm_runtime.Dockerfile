@@ -30,6 +30,8 @@ ARG FLASHINFER_GIT_SHA
 ARG VLLM_GIT_URL
 ARG VLLM_GIT_REF
 ARG VLLM_GIT_SHA
+ARG VLLM_PRECOMPILED_WHEEL_COMMIT
+ARG VLLM_PRECOMPILED_WHEEL_VARIANT
 ARG NCCL_CHECKPOINT_GIT_URL
 ARG NCCL_CHECKPOINT_GIT_REF
 ARG NCCL_CHECKPOINT_GIT_SHA
@@ -85,87 +87,18 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 {% if device == "cuda" %}
-# Build On Demand can pin FlashInfer and vLLM branches/commits while keeping
-# default runtime builds on the upstream vllm/vllm-openai image packages.
+# Build On Demand has two custom vLLM modes:
+# - blank VLLM_PRECOMPILED_WHEEL_COMMIT: legacy Python-only package overlay;
+# - exact 40-character commit: replace vLLM from custom source while reusing
+#   native artifacts from that exact ancestor's official x86_64 wheel.
+# FlashInfer is installed last so a vLLM dependency solve cannot replace a
+# checkpoint-aware FlashInfer fork. The helper records durable provenance under
+# /opt/dynamo for later pod inspection.
+COPY --chmod=755 container/deps/vllm/install_custom_sources.sh /usr/local/bin/install_custom_vllm_sources
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
-    if [ -n "${FLASHINFER_GIT_URL}" ]; then \
-        if [ -z "${FLASHINFER_GIT_REF}" ] && [ -z "${FLASHINFER_GIT_SHA}" ]; then \
-            echo "FLASHINFER_GIT_URL requires FLASHINFER_GIT_REF or FLASHINFER_GIT_SHA" >&2; \
-            exit 1; \
-        fi; \
-        CUDA_VERSION_REST="${CUDA_VERSION#*.}"; \
-        if [ "${CUDA_VERSION_REST}" = "${CUDA_VERSION}" ]; then \
-            echo "CUDA_VERSION must include major.minor for cuda-nvrtc-dev package selection: ${CUDA_VERSION}" >&2; \
-            exit 1; \
-        fi; \
-        CUDA_MINOR_DASH="${CUDA_VERSION%%.*}-${CUDA_VERSION_REST%%.*}"; \
-        apt-get update; \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git \
-            "cuda-nvrtc-dev-${CUDA_MINOR_DASH}"; \
-        rm -rf /var/lib/apt/lists/*; \
-        rm -rf /tmp/flashinfer-src; \
-        if [ -n "${FLASHINFER_GIT_REF}" ]; then \
-            git clone --recurse-submodules --branch "${FLASHINFER_GIT_REF}" \
-                "${FLASHINFER_GIT_URL}" /tmp/flashinfer-src; \
-        else \
-            git clone --recurse-submodules "${FLASHINFER_GIT_URL}" \
-                /tmp/flashinfer-src; \
-        fi; \
-        cd /tmp/flashinfer-src; \
-        if [ -n "${FLASHINFER_GIT_SHA}" ]; then \
-            FLASHINFER_RESOLVED_SHA="$(git rev-parse "${FLASHINFER_GIT_SHA}^{commit}")"; \
-            git checkout --detach "${FLASHINFER_RESOLVED_SHA}"; \
-            test "$(git rev-parse HEAD)" = "${FLASHINFER_RESOLVED_SHA}"; \
-            git submodule update --init --recursive; \
-        fi; \
-        uv pip install --system --force-reinstall --no-deps .; \
-        if [ -d ./flashinfer-cubin ]; then \
-            uv pip install --system --force-reinstall --no-deps ./flashinfer-cubin; \
-        fi; \
-        uv pip uninstall --system flashinfer-jit-cache || true; \
-        rm -rf /tmp/flashinfer-src; \
-    else \
-        echo "Using FlashInfer from the upstream vLLM runtime image (${FLASHINF_REF})."; \
-    fi
-
-# Custom vLLM source overlays are intended for Python-only fork changes. Copy
-# the fork's Python package over the existing install instead of reinstalling a
-# wheel, so the upstream runtime image's prebuilt native extensions (vllm._C,
-# flash-attn kernels, etc.) stay in place.
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    set -eux; \
-    export UV_CACHE_DIR=/root/.cache/uv; \
-    if [ -n "${VLLM_GIT_URL}" ]; then \
-        if [ -z "${VLLM_GIT_REF}" ] && [ -z "${VLLM_GIT_SHA}" ]; then \
-            echo "VLLM_GIT_URL requires VLLM_GIT_REF or VLLM_GIT_SHA" >&2; \
-            exit 1; \
-        fi; \
-        VLLM_PACKAGE_DIR="$(cd / && python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent)')"; \
-        apt-get update; \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git; \
-        rm -rf /var/lib/apt/lists/*; \
-        rm -rf /tmp/vllm-src; \
-        if [ -n "${VLLM_GIT_REF}" ]; then \
-            git clone --recurse-submodules --branch "${VLLM_GIT_REF}" \
-                "${VLLM_GIT_URL}" /tmp/vllm-src; \
-        else \
-            git clone --recurse-submodules "${VLLM_GIT_URL}" /tmp/vllm-src; \
-        fi; \
-        cd /tmp/vllm-src; \
-        if [ -n "${VLLM_GIT_SHA}" ]; then \
-            VLLM_RESOLVED_SHA="$(git rev-parse "${VLLM_GIT_SHA}^{commit}")"; \
-            git checkout --detach "${VLLM_RESOLVED_SHA}"; \
-            test "$(git rev-parse HEAD)" = "${VLLM_RESOLVED_SHA}"; \
-            git submodule update --init --recursive; \
-        fi; \
-        cp -a /tmp/vllm-src/vllm/. "${VLLM_PACKAGE_DIR}/"; \
-        cd /; \
-        python3 -c 'import importlib.util; assert importlib.util.find_spec("vllm._C") is not None; from vllm.v1.worker.gpu_worker import Worker; assert hasattr(Worker, "checkpoint_prepare"); assert hasattr(Worker, "checkpoint_restore")'; \
-        rm -rf /tmp/vllm-src; \
-    fi
+    install_custom_vllm_sources
 {% endif %}
 
 # Create dynamo user with group 0 for OpenShift compatibility.

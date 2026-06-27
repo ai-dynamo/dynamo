@@ -93,6 +93,10 @@ vllm:
   vllm_git_url: ""
   vllm_git_ref: ""
   vllm_git_sha: ""
+  # Blank commit preserves the legacy Python-only package overlay. Supplying
+  # an exact native commit enables an x86_64 source-package installation.
+  vllm_precompiled_wheel_commit: ""
+  vllm_precompiled_wheel_variant: "cu130"
   nccl_checkpoint_git_url: ""
   nccl_checkpoint_git_ref: ""
   nccl_checkpoint_git_sha: ""
