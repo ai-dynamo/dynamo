@@ -24,7 +24,6 @@ use std::time::Duration;
 use anyhow::Result;
 use dynamo_tokens::{BlockHash, SequenceHash as RouterSequenceHash};
 use futures::Stream;
-use futures::stream::{FuturesUnordered, StreamExt};
 use futures::task::noop_waker_ref;
 
 use kvbm_engine::leader::{
@@ -33,8 +32,8 @@ use kvbm_engine::leader::{
 use kvbm_engine::object::ObjectBlockOps;
 use kvbm_engine::offload::{
     ExternalBlock, ObjectPipelineBuilder, ObjectPresenceFilter, OffloadEngine, PendingTracker,
-    PipelineBuilder, PresenceFilter, S3PresenceChecker, SourceBlocks, TransferHandle,
-    TransferProgressCursor, TransferStatus,
+    PipelineBuilder, PipelineLane, PresenceFilter, S3PresenceChecker, SettlementTarget,
+    SettlementToken, SourceBlocks, TransferHandle, TransferProgressCursor, TransferStatus,
 };
 use kvbm_engine::worker::Worker;
 use kvbm_engine::{BlockId, G1 as EngineG1, G2, G3, SequenceHash};
@@ -65,13 +64,6 @@ enum ReservationBlocker {
     LocalOffload,
     SharedG3Offload,
     SharedG4Offload,
-}
-
-#[derive(Clone, Copy)]
-enum TransferLane {
-    G1ToG2,
-    G2ToG3,
-    G2ToG4,
 }
 
 /// Handle returned by [`MockOffloadEngine::start_onboard_prefix`]. Scheduler
@@ -608,6 +600,44 @@ impl MockOffloadEngine {
         }
     }
 
+    async fn with_settlement_timeout<F>(wait: F) -> Result<(), String>
+    where
+        F: Future<Output = Result<(), kvbm_engine::offload::SettlementError>>,
+    {
+        match tokio::time::timeout(PIPELINE_BARRIER_TIMEOUT, wait).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(_) => Err(format!(
+                "pipeline settlement timed out after {:?}",
+                PIPELINE_BARRIER_TIMEOUT
+            )),
+        }
+    }
+
+    fn settle_or_panic(&self, token: SettlementToken, target: SettlementTarget) {
+        let current = tokio::runtime::Handle::try_current().ok();
+        let runtime = self
+            ._runtime
+            .as_ref()
+            .map(tokio::runtime::Runtime::handle)
+            .or(current.as_ref())
+            .expect("pipeline settlement requires a Tokio runtime");
+        let wait = Self::with_settlement_timeout(self.engine.settle_after(token, target));
+        let result = match current.as_ref().map(tokio::runtime::Handle::runtime_flavor) {
+            Some(tokio::runtime::RuntimeFlavor::MultiThread) => {
+                tokio::task::block_in_place(|| runtime.block_on(wait))
+            }
+            Some(tokio::runtime::RuntimeFlavor::CurrentThread) => {
+                panic!("pipeline settlement cannot block a current-thread Tokio runtime")
+            }
+            None => runtime.block_on(wait),
+            _ => unreachable!("Tokio runtime flavor is non-exhaustive"),
+        };
+        if let Err(error) = result {
+            panic!("KVBM pipeline settlement failed: {error}");
+        }
+    }
+
     fn wait_for_policy_evaluation(&self, handle: &TransferHandle) -> bool {
         let mut status = handle.subscribe_status();
         self.wait_on_attached_runtime(async move {
@@ -700,91 +730,6 @@ impl MockOffloadEngine {
             registrations_before.saturating_add(u64::try_from(drained_blocks).unwrap_or(u64::MAX));
         let published = self.wait_for_tier_registrations(manager.clone(), expected);
         (published, Self::tier_registrations(&manager))
-    }
-
-    fn pending_handles(&self, lane: TransferLane) -> Vec<TransferHandle> {
-        match lane {
-            TransferLane::G1ToG2 => {
-                let pending = self
-                    .pending_g1_to_g2
-                    .lock()
-                    .expect("pending G1→G2 handles mutex poisoned");
-                pending
-                    .iter()
-                    .map(|pending| pending.handle.clone())
-                    .collect()
-            }
-            TransferLane::G2ToG3 => {
-                let pending = self
-                    .pending_g2_to_g3
-                    .lock()
-                    .expect("pending G2→G3 handles mutex poisoned");
-                pending
-                    .iter()
-                    .map(|pending| pending.handle.clone())
-                    .collect()
-            }
-            TransferLane::G2ToG4 => {
-                let pending = self
-                    .pending_g2_to_g4
-                    .lock()
-                    .expect("pending G2→G4 handles mutex poisoned");
-                pending
-                    .iter()
-                    .map(|pending| pending.handle.clone())
-                    .collect()
-            }
-        }
-    }
-
-    fn settled_blocks(&self, lane: TransferLane) -> usize {
-        self.pending_handles(lane)
-            .iter()
-            .map(|handle| handle.progress_counts().settled())
-            .sum()
-    }
-
-    fn wait_for_pending_settled_blocks(
-        &self,
-        lane: TransferLane,
-        expected_settled_blocks: usize,
-    ) -> bool {
-        let handles = self.pending_handles(lane);
-        self.wait_on_attached_runtime(async move {
-            let mut progress: Vec<_> = handles
-                .iter()
-                .map(TransferHandle::subscribe_progress)
-                .collect();
-
-            loop {
-                let settled_blocks: usize = handles
-                    .iter()
-                    .map(|handle| handle.progress_counts().settled())
-                    .sum();
-                if settled_blocks >= expected_settled_blocks {
-                    return true;
-                }
-                if handles.is_empty() || handles.iter().all(TransferHandle::is_complete) {
-                    return false;
-                }
-
-                let mut changes = FuturesUnordered::new();
-                for rx in progress.iter_mut() {
-                    changes.push(rx.changed());
-                }
-
-                let mut observed_change = false;
-                while let Some(changed) = changes.next().await {
-                    if changed.is_ok() {
-                        observed_change = true;
-                        break;
-                    }
-                }
-                if !observed_change {
-                    return false;
-                }
-            }
-        })
     }
 
     fn wait_for_find_result_completion(&self, result: &FindMatchesResult) -> bool {
@@ -981,22 +926,10 @@ impl MockOffloadEngine {
     /// Number of G1→G2 transfer batches that an idle pipeline can reserve
     /// immediately for this enqueue.
     ///
-    /// NOTE: The mock pipeline currently combines a real Tokio async
-    /// concurrency gate with synchronous virtual-time driving. After a
-    /// transfer releases its permit, the successor batch may not reserve
-    /// bandwidth until Tokio schedules it, temporarily leaving a nonterminal
-    /// handle without a modeled deadline. This known modeling defect is
-    /// intentionally preserved and deferred in this change. Future work must
-    /// either model permit handoff as deterministic virtual state or
-    /// deliberately remove the concurrency gate. Do not repair this at replay
-    /// level with sleeps, spins, fake completion, or synthetic virtual time.
-    ///
     /// Offline replay needs those immediate reservations to observe the
     /// enqueue's current virtual `now_ms`; otherwise the kvbm-engine task may
     /// first run after the scheduler advances time and stamp the transfer too
-    /// late. We still do *not* wait for the whole burst: any batches beyond
-    /// the pipeline's transfer slots are real queueing work and should start
-    /// only after virtual time advances to an active-transfer deadline.
+    /// late. Subsequent permit handoffs are covered by pipeline settlement.
     fn initial_runnable_transfer_batches(&self, passed_blocks: usize) -> usize {
         if passed_blocks == 0 {
             return 0;
@@ -1169,28 +1102,46 @@ impl MockOffloadEngine {
     pub fn tick(&self, now_ms: f64) -> usize {
         self.worker.set_now_ms(now_ms);
         let g2_registrations_before = Self::tier_registrations(&self.g2_manager);
-        let g3_registrations_before = self
-            .g3_manager
-            .as_ref()
-            .map(|manager| Self::tier_registrations(manager))
-            .unwrap_or_default();
-        let g1_to_g2_settled_before = self.settled_blocks(TransferLane::G1ToG2);
-        let g2_to_g3_settled_before = self.settled_blocks(TransferLane::G2ToG3);
-        let g2_to_g4_settled_before = self.settled_blocks(TransferLane::G2ToG4);
+        let settlement_token = self.engine.settlement_token();
         let drained = self.worker.drain_completions_summary(now_ms);
         let offload_drained = drained.local.offload_transfers;
         let offload_drained_blocks = drained.local.offload_blocks;
         let shared_g3 = drained.shared_g3.counts;
         let shared_g4 = drained.shared_g4.counts;
+        let mut settlement_target = SettlementTarget::new();
+        settlement_target
+            .add_completed_batches(
+                PipelineLane::G1ToG2,
+                u64::try_from(offload_drained).expect("G1→G2 completion count exceeds u64"),
+            )
+            .expect("G1→G2 settlement target overflow");
+        settlement_target
+            .add_completed_batches(
+                PipelineLane::G2ToG3,
+                u64::try_from(shared_g3.offload_transfers)
+                    .expect("G2→G3 completion count exceeds u64"),
+            )
+            .expect("G2→G3 settlement target overflow");
+        settlement_target
+            .add_completed_batches(
+                PipelineLane::G2ToG4,
+                u64::try_from(shared_g4.offload_transfers)
+                    .expect("G2→G4 completion count exceeds u64"),
+            )
+            .expect("G2→G4 settlement target overflow");
+        if offload_drained > 0 || shared_g3.offload_transfers > 0 || shared_g4.offload_transfers > 0
+        {
+            self.settle_or_panic(settlement_token, settlement_target);
+        }
+
         let current_shared_g3_onboard_blocks = shared_g3
             .onboard_blocks
             .saturating_sub(drained.shared_g3.deferred_onboard_blocks);
         let current_shared_g4_onboard_blocks = shared_g4
             .onboard_blocks
             .saturating_sub(drained.shared_g4.deferred_onboard_blocks);
-        let g2_publish_blocks = offload_drained_blocks
-            .saturating_add(current_shared_g3_onboard_blocks)
-            .saturating_add(current_shared_g4_onboard_blocks);
+        let g2_publish_blocks =
+            current_shared_g3_onboard_blocks.saturating_add(current_shared_g4_onboard_blocks);
 
         // Offline replay owns a private runtime for the kvbm-engine
         // pipeline. Once drain fires transfer awaiters, give those
@@ -1240,17 +1191,6 @@ impl MockOffloadEngine {
                 );
             }
         }
-        if offload_drained_blocks > 0 {
-            let expected_settled = g1_to_g2_settled_before.saturating_add(offload_drained_blocks);
-            if !self.wait_for_pending_settled_blocks(TransferLane::G1ToG2, expected_settled) {
-                tracing::debug!(
-                    now_ms,
-                    offload_drained_blocks,
-                    expected_settled,
-                    "kvbm-offload: G1→G2 handle progress not yet visible for lower-tier chaining"
-                );
-            }
-        }
         let track_lower_chain = self.g3_manager.is_some() || self.shared_g4.is_some();
         let (g2_to_lower_chain_blocks, released_after_settlement) =
             if offload_drained_blocks > 0 || track_lower_chain {
@@ -1274,53 +1214,6 @@ impl MockOffloadEngine {
             self.enqueue_lower_tier_background(g2_to_lower_chain_blocks);
         }
 
-        if let (Some(g3_manager), blocks @ 1..) =
-            (self.g3_manager.as_ref(), shared_g3.offload_blocks)
-        {
-            let registration_baseline = drained
-                .shared_g3
-                .offload_registration_baseline
-                .unwrap_or(g3_registrations_before);
-            let (published, registrations_after) = self.wait_for_tier_publish_blocks(
-                g3_manager.clone(),
-                registration_baseline,
-                blocks,
-            );
-            if !published {
-                tracing::warn!(
-                    now_ms,
-                    drained_blocks = blocks,
-                    registration_baseline,
-                    registrations_before = g3_registrations_before,
-                    registrations_after,
-                    "kvbm-offload: G2→G3 pipeline did not publish drained transfers"
-                );
-            }
-            let expected_settled = if registration_baseline < g3_registrations_before {
-                self.settled_blocks(TransferLane::G2ToG3)
-            } else {
-                g2_to_g3_settled_before.saturating_add(blocks)
-            };
-            if !self.wait_for_pending_settled_blocks(TransferLane::G2ToG3, expected_settled) {
-                tracing::debug!(
-                    now_ms,
-                    drained_blocks = blocks,
-                    expected_settled,
-                    "kvbm-offload: G2→G3 handle progress not yet visible after G3 registration"
-                );
-            }
-        }
-        if shared_g4.offload_blocks > 0 {
-            let expected_settled = g2_to_g4_settled_before.saturating_add(shared_g4.offload_blocks);
-            if !self.wait_for_pending_settled_blocks(TransferLane::G2ToG4, expected_settled) {
-                tracing::debug!(
-                    now_ms,
-                    drained_blocks = shared_g4.offload_blocks,
-                    expected_settled,
-                    "kvbm-offload: G2→G4 handle progress not yet visible after object put"
-                );
-            }
-        }
         self.cleanup_g2_to_g3_pending_handles();
         self.cleanup_g2_to_g4_pending_handles();
         self.pump_pending_staged_swap_ins(now_ms);
@@ -1859,6 +1752,18 @@ mod tests {
         assert!(pending[0].g2_to_lower_chain_blocks.is_empty());
         assert!(pending[0].passed_chain_blocks.is_empty());
         assert!(pending[0].ready_lower_chain_blocks.is_empty());
+        drop(pending);
+
+        let final_deadline = engine
+            .earliest_pending_deadline()
+            .expect("the queued successor must start before first-wave settlement returns");
+        assert!(final_deadline >= deadline);
+        assert_eq!(
+            engine.tick(final_deadline),
+            SOURCE_BLOCKS - FIRST_WAVE_BLOCKS
+        );
+        assert_eq!(source_manager.available_blocks(), SOURCE_BLOCKS);
+        assert!(engine.pending_g1_to_g2.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
