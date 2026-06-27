@@ -2084,11 +2084,11 @@ impl VllmCore {
                         transfer_id,
                         deadline_ms,
                     });
-                    for uuid in ready.iter().copied() {
+                    for uuid in &ready {
                         let request = self
                             .state
                             .requests
-                            .get_mut(&uuid)
+                            .get_mut(uuid)
                             .expect("speculative dependency request must remain active");
                         request.offload_dependency = dependency;
                     }
