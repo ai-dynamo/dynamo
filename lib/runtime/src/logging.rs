@@ -376,6 +376,13 @@ fn is_valid_trace_flags(trace_flags: &str) -> bool {
     trace_flags.len() == 2 && trace_flags.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Validate the traceparent version field according to W3C Trace Context.
+/// A valid version is a 2-character hex string other than `ff` (forbidden);
+/// `00`-`fe` parse, matching the OTel propagator and preserving forward-compat.
+fn is_valid_version(version: &str) -> bool {
+    version.len() == 2 && matches!(u8::from_str_radix(version, 16), Ok(v) if v != 0xff)
+}
+
 fn normalize_trace_flags(trace_flags: &str) -> String {
     if is_valid_trace_flags(trace_flags) {
         trace_flags.to_ascii_lowercase()
@@ -413,15 +420,8 @@ pub fn parse_traceparent(traceparent: &str) -> (Option<String>, Option<String>, 
     let parent_id = pieces[2];
     let trace_flags = pieces[3];
 
-    // Reject an invalid version field: W3C forbids `ff`, and a non-hex version
-    // is malformed. Matches the OTel propagator (rejects version > 0xfe); `00`-`fe`
-    // still parse, preserving forward-compatibility.
-    match u8::from_str_radix(version, 16) {
-        Ok(v) if v != 0xff => {}
-        _ => return (None, None, None),
-    }
-
-    if !is_valid_trace_id(trace_id)
+    if !is_valid_version(version)
+        || !is_valid_trace_id(trace_id)
         || !is_valid_span_id(parent_id)
         || !is_valid_trace_flags(trace_flags)
     {
@@ -1975,52 +1975,97 @@ pub mod tests {
         Ok(result)
     }
 
-    #[test]
-    fn parse_traceparent_preserves_trace_flags() {
-        let traceparent = "00-11111111111111111111111111111111-2222222222222222-00";
-        let (trace_id, parent_id, trace_flags) = parse_traceparent(traceparent);
+    // Field validators (W3C Trace Context): each rule is tested directly here.
+    // The parse_traceparent tests below only cover parsing/structure + wiring,
+    // not the per-field rules.
 
+    #[test]
+    fn is_valid_version_accepts_00_to_fe_rejects_ff_and_malformed() {
+        assert!(is_valid_version("00"));
+        assert!(is_valid_version("01"));
+        assert!(is_valid_version("fe")); // highest valid version
+        assert!(!is_valid_version("ff")); // forbidden by W3C
+        assert!(!is_valid_version("FF")); // uppercase ff is still 0xff
+        assert!(!is_valid_version("zz")); // non-hex
+        assert!(!is_valid_version("0")); // too short
+        assert!(!is_valid_version("000")); // too long
+        assert!(!is_valid_version("")); // empty
+    }
+
+    #[test]
+    fn is_valid_trace_id_requires_32_hex() {
+        assert!(is_valid_trace_id(&"a".repeat(32)));
+        assert!(is_valid_trace_id("0123456789abcdefABCDEF0123456789")); // case-insensitive
+        assert!(!is_valid_trace_id(&"1".repeat(31))); // too short
+        assert!(!is_valid_trace_id(&"1".repeat(33))); // too long
+        assert!(!is_valid_trace_id(&format!("{}g", "1".repeat(31)))); // non-hex
+        assert!(!is_valid_trace_id("")); // empty
+    }
+
+    #[test]
+    fn is_valid_span_id_requires_16_hex() {
+        assert!(is_valid_span_id(&"2".repeat(16)));
+        assert!(!is_valid_span_id(&"2".repeat(15))); // too short
+        assert!(!is_valid_span_id(&"2".repeat(17))); // too long
+        assert!(!is_valid_span_id(&format!("{}g", "2".repeat(15)))); // non-hex
+        assert!(!is_valid_span_id("")); // empty
+    }
+
+    #[test]
+    fn is_valid_trace_flags_requires_2_hex() {
+        assert!(is_valid_trace_flags("00"));
+        assert!(is_valid_trace_flags("ff")); // any 2 hex digits are structurally valid
+        assert!(is_valid_trace_flags("0A")); // case-insensitive
+        assert!(!is_valid_trace_flags("0")); // too short
+        assert!(!is_valid_trace_flags("000")); // too long
+        assert!(!is_valid_trace_flags("0x")); // non-hex
+    }
+
+    #[test]
+    fn parse_traceparent_happy_path() {
+        // Fields extracted by position; trace_flags is lowercased.
         assert_eq!(
-            trace_id.as_deref(),
-            Some("11111111111111111111111111111111")
+            parse_traceparent("00-11111111111111111111111111111111-2222222222222222-0A"),
+            (
+                Some("11111111111111111111111111111111".to_string()),
+                Some("2222222222222222".to_string()),
+                Some("0a".to_string()), // lowercased
+            )
         );
-        assert_eq!(parent_id.as_deref(), Some("2222222222222222"));
-        assert_eq!(trace_flags.as_deref(), Some("00"));
-    }
 
-    #[test]
-    fn parse_traceparent_rejects_invalid_trace_flags() {
-        let traceparent = "00-11111111111111111111111111111111-2222222222222222-0x";
-        let (trace_id, parent_id, trace_flags) = parse_traceparent(traceparent);
-
-        assert!(trace_id.is_none());
-        assert!(parent_id.is_none());
-        assert!(trace_flags.is_none());
-    }
-
-    #[test]
-    fn parse_traceparent_rejects_invalid_version() {
-        // `ff` is forbidden by W3C; must be rejected.
-        let (trace_id, parent_id, trace_flags) =
-            parse_traceparent("ff-11111111111111111111111111111111-2222222222222222-01");
-        assert!(trace_id.is_none());
-        assert!(parent_id.is_none());
-        assert!(trace_flags.is_none());
-
-        // Non-hex version is malformed; must be rejected.
-        let (trace_id, _, _) =
-            parse_traceparent("zz-11111111111111111111111111111111-2222222222222222-01");
-        assert!(trace_id.is_none());
-
-        // A future, same-shape version (00-fe) must still parse (forward-compat).
-        let (trace_id, parent_id, trace_flags) =
+        // A future, same-shape version (00-fe) still parses (forward-compat).
+        let (trace_id, _, trace_flags) =
             parse_traceparent("01-11111111111111111111111111111111-2222222222222222-01");
         assert_eq!(
             trace_id.as_deref(),
             Some("11111111111111111111111111111111")
         );
-        assert_eq!(parent_id.as_deref(), Some("2222222222222222"));
         assert_eq!(trace_flags.as_deref(), Some("01"));
+    }
+
+    #[test]
+    fn parse_traceparent_rejects_malformed() {
+        // Wrong number of `-`-separated segments.
+        assert_eq!(parse_traceparent("00-1111-2222"), (None, None, None)); // 3 segments
+        assert_eq!(
+            parse_traceparent("00-11111111111111111111111111111111-2222222222222222-00-extra"),
+            (None, None, None)
+        ); // 5 segments
+
+        // All-or-nothing: any single invalid field rejects the whole parse.
+        // (Per-field rules are covered by the is_valid_* tests above.)
+        for tp in [
+            "ff-11111111111111111111111111111111-2222222222222222-01", // bad version
+            "00-bad-2222222222222222-01",                              // bad trace_id
+            "00-11111111111111111111111111111111-bad-01",              // bad span_id
+            "00-11111111111111111111111111111111-2222222222222222-0x", // bad flags
+        ] {
+            assert_eq!(
+                parse_traceparent(tp),
+                (None, None, None),
+                "should reject: {tp}"
+            );
+        }
     }
 
     #[test]
