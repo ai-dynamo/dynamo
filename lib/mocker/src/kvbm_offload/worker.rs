@@ -502,11 +502,6 @@ impl MockWorker {
             .reduce(f64::min)
     }
 
-    pub(crate) fn earliest_local_offload_finish(&self) -> Option<f64> {
-        let state = self.state.lock().expect("TransferState mutex poisoned");
-        state.earliest_offload_finish()
-    }
-
     pub(crate) fn earliest_local_offload_finish_with_id(&self) -> Option<(TransferId, f64)> {
         let state = self.state.lock().expect("TransferState mutex poisoned");
         state.earliest_offload_finish_with_id()

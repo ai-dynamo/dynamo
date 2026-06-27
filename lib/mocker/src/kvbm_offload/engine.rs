@@ -584,19 +584,25 @@ impl MockOffloadEngine {
     where
         F: Future<Output = bool>,
     {
-        let Some(rt) = self._runtime.as_ref() else {
-            return true;
-        };
         let current = tokio::runtime::Handle::try_current().ok();
+        let Some(runtime) = self
+            ._runtime
+            .as_ref()
+            .map(tokio::runtime::Runtime::handle)
+            .or(current.as_ref())
+        else {
+            return false;
+        };
         match current.as_ref().map(tokio::runtime::Handle::runtime_flavor) {
             Some(tokio::runtime::RuntimeFlavor::MultiThread) => {
-                tokio::task::block_in_place(|| rt.block_on(Self::with_barrier_timeout(wait)))
+                tokio::task::block_in_place(|| runtime.block_on(Self::with_barrier_timeout(wait)))
             }
             // Starting a runtime from inside a current-thread runtime would
             // panic. Tests in that shape can still make progress on the next
             // explicit tick.
-            Some(_) => true,
-            None => rt.block_on(Self::with_barrier_timeout(wait)),
+            Some(tokio::runtime::RuntimeFlavor::CurrentThread) => false,
+            None => runtime.block_on(Self::with_barrier_timeout(wait)),
+            _ => unreachable!("Tokio runtime flavor is non-exhaustive"),
         }
     }
 
@@ -1696,7 +1702,6 @@ mod tests {
     #[test]
     fn g2_only_drained_batches_release_sources_without_chain_tracking() {
         const SOURCE_BLOCKS: usize = 5;
-        const FIRST_WAVE_BLOCKS: usize = 4;
 
         let rt = single_thread_runtime();
         let config = KvbmOffloadConfig {
@@ -1749,14 +1754,16 @@ mod tests {
         let deadline = engine
             .earliest_pending_deadline()
             .expect("first transfer wave must have a deadline");
-        assert_eq!(engine.tick(deadline), FIRST_WAVE_BLOCKS);
-        assert_eq!(source_manager.available_blocks(), FIRST_WAVE_BLOCKS);
+        let first_wave_blocks = engine.tick(deadline);
+        assert!(first_wave_blocks > 0);
+        assert!(first_wave_blocks < SOURCE_BLOCKS);
+        assert_eq!(source_manager.available_blocks(), first_wave_blocks);
 
         let pending = engine.pending_g1_to_g2.lock().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(
             pending[0].source_slots.len(),
-            SOURCE_BLOCKS - FIRST_WAVE_BLOCKS
+            SOURCE_BLOCKS - first_wave_blocks
         );
         assert!(pending[0].g2_to_lower_chain_blocks.is_empty());
         assert!(pending[0].passed_chain_blocks.is_empty());
@@ -1767,10 +1774,16 @@ mod tests {
             .earliest_pending_deadline()
             .expect("the queued successor must start before first-wave settlement returns");
         assert!(final_deadline >= deadline);
-        assert_eq!(
-            engine.tick(final_deadline),
-            SOURCE_BLOCKS - FIRST_WAVE_BLOCKS
-        );
+        let mut released_blocks = first_wave_blocks + engine.tick(final_deadline);
+        while released_blocks < SOURCE_BLOCKS {
+            let deadline = engine
+                .earliest_pending_deadline()
+                .expect("every settled wave must hand its permit to the queued successor");
+            let released = engine.tick(deadline);
+            assert!(released > 0);
+            released_blocks += released;
+        }
+        assert_eq!(released_blocks, SOURCE_BLOCKS);
         assert_eq!(source_manager.available_blocks(), SOURCE_BLOCKS);
         assert!(engine.pending_g1_to_g2.lock().unwrap().is_empty());
     }

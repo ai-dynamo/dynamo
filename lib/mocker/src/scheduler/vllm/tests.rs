@@ -2815,7 +2815,11 @@ mod offload {
             "20 ms transfer applied at t=100 should finish near t=120, got {deadline}"
         );
         core.tick_offload_only(100.0);
-        assert_eq!(core.kv_manager.num_active_blocks(), 1);
+        assert_eq!(
+            core.kv_manager.num_active_blocks(),
+            2,
+            "the active blocker and quarantined offload source both occupy G1"
+        );
         assert_eq!(core.earliest_offload_deadline(), Some(deadline));
 
         let transport = core.tick_offload_transport_only(deadline);
