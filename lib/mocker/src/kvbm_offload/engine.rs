@@ -34,7 +34,7 @@ use kvbm_engine::object::ObjectBlockOps;
 use kvbm_engine::offload::{
     ExternalBlock, ObjectPipelineBuilder, ObjectPresenceFilter, OffloadEngine, PendingTracker,
     PipelineBuilder, PresenceFilter, S3PresenceChecker, SourceBlocks, TransferHandle,
-    TransferStatus,
+    TransferProgressCursor, TransferStatus,
 };
 use kvbm_engine::worker::Worker;
 use kvbm_engine::{BlockId, G1 as EngineG1, G2, G3, SequenceHash};
@@ -231,7 +231,10 @@ pub(crate) enum G1EvictionOutcome {
 
 struct PendingG1ToG2 {
     handle: TransferHandle,
+    progress_cursor: TransferProgressCursor,
     g2_to_lower_chain_blocks: FxHashMap<BlockId, SequenceHash>,
+    passed_chain_blocks: FxHashSet<BlockId>,
+    ready_lower_chain_blocks: Vec<SequenceHash>,
     /// Reset G1 slots held until the simulated source copy completes.
     ///
     /// These tokens do not preserve old bytes — `MockWorker` never reads
@@ -242,75 +245,68 @@ struct PendingG1ToG2 {
 
 impl PendingG1ToG2 {
     fn source_slots_releasable(&self) -> bool {
-        if self.source_slots.is_empty() && self.g2_to_lower_chain_blocks.is_empty() {
+        if self.source_slots.is_empty()
+            && self.g2_to_lower_chain_blocks.is_empty()
+            && self.ready_lower_chain_blocks.is_empty()
+        {
             return true;
         }
-        if !self.g2_to_lower_chain_blocks.is_empty() {
+        if !self.g2_to_lower_chain_blocks.is_empty() || !self.ready_lower_chain_blocks.is_empty() {
             return false;
         }
         if self.handle.is_complete() {
             return true;
         }
-        let passed = self.handle.passed_blocks().len();
-        if passed == 0 {
+        let progress = self.handle.progress_counts();
+        if progress.passed == 0 {
             return !matches!(self.handle.status(), TransferStatus::Evaluating);
         }
-        self.handle.completed_blocks().len() + self.handle.failed_blocks().len() >= passed
+        progress.settled() >= progress.passed
     }
 
-    fn release_completed_source_slots(&mut self) -> usize {
+    fn consume_progress(&mut self) -> usize {
+        let delta = self.handle.consume_progress(&mut self.progress_cursor);
         let mut released = 0usize;
-        for block_id in self
-            .handle
-            .completed_blocks()
-            .into_iter()
-            .chain(self.handle.failed_blocks())
-        {
+        self.passed_chain_blocks.extend(delta.passed_blocks);
+
+        for block_id in delta.completed_blocks {
             if self.source_slots.remove(&block_id).is_some() {
                 released += 1;
             }
-        }
-        released
-    }
-
-    fn collect_completed_chain_blocks(&mut self) -> Vec<SequenceHash> {
-        if self.g2_to_lower_chain_blocks.is_empty() {
-            return Vec::new();
-        }
-
-        let mut chain_blocks = Vec::new();
-        for block_id in self.handle.completed_blocks() {
             if let Some(seq_hash) = self.g2_to_lower_chain_blocks.remove(&block_id) {
-                chain_blocks.push(seq_hash);
+                self.ready_lower_chain_blocks.push(seq_hash);
             }
         }
-
-        for block_id in self.handle.failed_blocks() {
+        for block_id in delta.failed_blocks {
+            if self.source_slots.remove(&block_id).is_some() {
+                released += 1;
+            }
             self.g2_to_lower_chain_blocks.remove(&block_id);
         }
 
         if !matches!(self.handle.status(), TransferStatus::Evaluating) {
-            let passed: FxHashSet<BlockId> = self.handle.passed_blocks().into_iter().collect();
             self.g2_to_lower_chain_blocks
-                .retain(|block_id, _seq_hash| passed.contains(block_id));
+                .retain(|block_id, _seq_hash| self.passed_chain_blocks.contains(block_id));
         }
+        released
+    }
 
-        chain_blocks
+    fn take_ready_chain_blocks(&mut self) -> Vec<SequenceHash> {
+        std::mem::take(&mut self.ready_lower_chain_blocks)
     }
 }
 
 struct PendingG2ToG3 {
     handle: TransferHandle,
-    released_failed_reservations: usize,
+    progress_cursor: TransferProgressCursor,
 }
 
 impl PendingG2ToG3 {
     fn take_unreleased_failed_reservations(&mut self) -> usize {
-        let failed = self.handle.failed_blocks().len();
-        let unreleased = failed.saturating_sub(self.released_failed_reservations);
-        self.released_failed_reservations =
-            self.released_failed_reservations.saturating_add(unreleased);
-        unreleased
+        self.handle
+            .consume_progress(&mut self.progress_cursor)
+            .failed_blocks
+            .len()
     }
 
     fn is_complete(&self) -> bool {
@@ -741,7 +737,7 @@ impl MockOffloadEngine {
     fn settled_blocks(&self, lane: TransferLane) -> usize {
         self.pending_handles(lane)
             .iter()
-            .map(|handle| handle.completed_blocks().len() + handle.failed_blocks().len())
+            .map(|handle| handle.progress_counts().settled())
             .sum()
     }
 
@@ -752,19 +748,15 @@ impl MockOffloadEngine {
     ) -> bool {
         let handles = self.pending_handles(lane);
         self.wait_on_attached_runtime(async move {
-            let mut completed: Vec<_> = handles
+            let mut progress: Vec<_> = handles
                 .iter()
-                .map(TransferHandle::subscribe_completed)
-                .collect();
-            let mut failed: Vec<_> = handles
-                .iter()
-                .map(TransferHandle::subscribe_failed)
+                .map(TransferHandle::subscribe_progress)
                 .collect();
 
             loop {
                 let settled_blocks: usize = handles
                     .iter()
-                    .map(|handle| handle.completed_blocks().len() + handle.failed_blocks().len())
+                    .map(|handle| handle.progress_counts().settled())
                     .sum();
                 if settled_blocks >= expected_settled_blocks {
                     return true;
@@ -774,10 +766,7 @@ impl MockOffloadEngine {
                 }
 
                 let mut changes = FuturesUnordered::new();
-                for rx in completed.iter_mut() {
-                    changes.push(rx.changed());
-                }
-                for rx in failed.iter_mut() {
+                for rx in progress.iter_mut() {
                     changes.push(rx.changed());
                 }
 
@@ -1043,22 +1032,26 @@ impl MockOffloadEngine {
             .lock()
             .expect("pending G1→G2 handles mutex poisoned");
         for pending in pending.iter_mut() {
-            released += pending.release_completed_source_slots();
+            released += pending.consume_progress();
         }
-        pending.retain(|pending| !pending.source_slots_releasable());
         released
     }
 
-    fn collect_g2_to_lower_chain_blocks(&self) -> Vec<SequenceHash> {
+    fn collect_g2_to_lower_chain_blocks(&self) -> (Vec<SequenceHash>, usize) {
+        if self.g3_manager.is_none() && self.shared_g4.is_none() {
+            return (Vec::new(), 0);
+        }
         let mut chain_blocks = Vec::new();
+        let mut released_source_slots = 0usize;
         let mut pending = self
             .pending_g1_to_g2
             .lock()
             .expect("pending G1→G2 handles mutex poisoned");
         for pending in pending.iter_mut() {
-            chain_blocks.extend(pending.collect_completed_chain_blocks());
+            released_source_slots += pending.consume_progress();
+            chain_blocks.extend(pending.take_ready_chain_blocks());
         }
-        chain_blocks
+        (chain_blocks, released_source_slots)
     }
 
     fn enqueue_lower_tier_background(&self, hashes: Vec<SequenceHash>) {
@@ -1109,7 +1102,7 @@ impl MockOffloadEngine {
                 .expect("pending G2→G3 handles mutex poisoned");
             pending.push(PendingG2ToG3 {
                 handle: handle.clone(),
-                released_failed_reservations: 0,
+                progress_cursor: handle.new_progress_cursor(),
             });
             drop(pending);
             self.wait_for_reservations_or_completion(
@@ -1258,7 +1251,9 @@ impl MockOffloadEngine {
                 );
             }
         }
-        let g2_to_lower_chain_blocks = self.collect_g2_to_lower_chain_blocks();
+        let (g2_to_lower_chain_blocks, released_after_settlement) =
+            self.collect_g2_to_lower_chain_blocks();
+        released_g1_source_slots += released_after_settlement;
         released_g1_source_slots += self.prune_releasable_g1_to_g2_sources();
 
         if !g2_to_lower_chain_blocks.is_empty()
@@ -1434,9 +1429,18 @@ impl MockOffloadEngine {
                 .pending_g1_to_g2
                 .lock()
                 .expect("pending G1→G2 handles mutex poisoned");
+            let g2_to_lower_chain_blocks = if self.g3_manager.is_some() || self.shared_g4.is_some()
+            {
+                evicted.iter().copied().collect()
+            } else {
+                FxHashMap::default()
+            };
             pending.push(PendingG1ToG2 {
                 handle: handle.clone(),
-                g2_to_lower_chain_blocks: evicted.iter().copied().collect(),
+                progress_cursor: handle.new_progress_cursor(),
+                g2_to_lower_chain_blocks,
+                passed_chain_blocks: FxHashSet::default(),
+                ready_lower_chain_blocks: Vec::new(),
                 source_slots: source_slots
                     .into_iter()
                     .map(|slot| (slot.block_id(), slot))
@@ -1448,7 +1452,7 @@ impl MockOffloadEngine {
         // run on the current virtual `now_ms`, not a later scheduler tick.
         self.wait_for_policy_evaluation(&handle);
         let target_reservation_count = reservation_count_before
-            + self.initial_runnable_transfer_batches(handle.passed_blocks().len()) as u64;
+            + self.initial_runnable_transfer_batches(handle.progress_counts().passed) as u64;
         if target_reservation_count > reservation_count_before {
             self.wait_for_reservations_or_completion(
                 &handle,
@@ -1457,9 +1461,11 @@ impl MockOffloadEngine {
             );
         }
         if handle.is_complete() {
-            let g2_to_lower_chain_blocks = self.collect_g2_to_lower_chain_blocks();
+            let (g2_to_lower_chain_blocks, released_after_settlement) =
+                self.collect_g2_to_lower_chain_blocks();
             self.enqueue_lower_tier_background(g2_to_lower_chain_blocks);
-            let released_slots = self.prune_releasable_g1_to_g2_sources();
+            let released_slots =
+                released_after_settlement.saturating_add(self.prune_releasable_g1_to_g2_sources());
             return Some(G1EvictionOutcome::RetryNow { released_slots });
         }
 
@@ -1778,6 +1784,23 @@ mod tests {
         assert!(!engine.engine.has_g2_to_g3());
         assert!(!engine.engine.has_g2_to_g4());
         assert_eq!(engine.earliest_pending_deadline(), None);
+    }
+
+    #[test]
+    fn g2_only_eviction_does_not_track_lower_tier_chain_blocks() {
+        let rt = single_thread_runtime();
+        let mut engine = rt
+            .block_on(MockOffloadEngine::new(KvbmOffloadConfig::default()))
+            .expect("engine build");
+        engine.attach_runtime(rt);
+
+        let plh = SequenceHash::new(42, None, 0);
+        engine.enqueue_g1_evictions_holding_sources(&[(0, plh)], Vec::new(), Some(0.0));
+
+        let pending = engine.pending_g1_to_g2.lock().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].g2_to_lower_chain_blocks.is_empty());
+        assert!(pending[0].ready_lower_chain_blocks.is_empty());
     }
 
     #[tokio::test]
