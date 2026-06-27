@@ -25,7 +25,7 @@ If your workload consists entirely of unique images, the cache provides no benef
 |---------|------------|----------------------|-------|
 | **vLLM** | ✅ | ✅ | Aggregated uses vLLM-native `ec_both`; disaggregated uses Dynamo `EmbeddingCacheManager` |
 | **TRT-LLM** | ❌ | ✅ | Dynamo `MultimodalEmbeddingCacheManager` in PD worker |
-| **SGLang** | ❌ | ❌ | Not supported yet |
+| **SGLang** | ❌ | ✅ | Dynamo `MultimodalEmbeddingCacheManager` in the encode worker |
 
 This support requires vLLM `0.17.0` or newer.
 
