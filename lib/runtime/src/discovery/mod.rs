@@ -350,6 +350,11 @@ pub enum DiscoverySpec {
         component: String,
         /// Topic name for this channel (e.g., "kv-events", "kv-metrics")
         topic: String,
+        /// Unique identity of this publisher incarnation.
+        ///
+        /// A process can host multiple publishers for the same topic, so event
+        /// channels cannot use the process-level discovery instance ID.
+        publisher_id: u64,
         /// Event transport type (NATS subject prefix or ZMQ endpoint)
         transport: EventTransport,
     },
@@ -392,8 +397,12 @@ impl DiscoverySpec {
         })
     }
 
-    /// Attaches an instance ID to create a DiscoveryInstance
-    pub fn with_instance_id(self, instance_id: u64) -> DiscoveryInstance {
+    /// Creates a discovery instance owned by the given process.
+    ///
+    /// Endpoint and model instances use the process-level ID. Event channels
+    /// use their publisher-level ID because one process may own multiple
+    /// publishers for the same topic.
+    pub fn with_instance_id(self, owner_instance_id: u64) -> DiscoveryInstance {
         match self {
             Self::Endpoint {
                 namespace,
@@ -405,7 +414,7 @@ impl DiscoverySpec {
                 namespace,
                 component,
                 endpoint,
-                instance_id,
+                instance_id: owner_instance_id,
                 transport,
                 device_type,
             }),
@@ -419,7 +428,7 @@ impl DiscoverySpec {
                 namespace,
                 component,
                 endpoint,
-                instance_id,
+                instance_id: owner_instance_id,
                 card_json,
                 model_suffix,
             },
@@ -427,12 +436,13 @@ impl DiscoverySpec {
                 namespace,
                 component,
                 topic,
+                publisher_id,
                 transport,
             } => DiscoveryInstance::EventChannel {
                 namespace,
                 component,
                 topic,
-                instance_id,
+                instance_id: publisher_id,
                 transport,
             },
         }
@@ -789,7 +799,9 @@ fn find_conflicting_model_name(
 #[async_trait]
 pub trait Discovery: Send + Sync {
     /// Returns a unique identifier for this worker (e.g lease id if using etcd or generated id for memory store)
-    /// Discovery objects created by this worker will be associated with this id.
+    /// Endpoint and model objects created by this worker use this ID. Event
+    /// channels use a publisher-level ID because a worker can own more than one
+    /// publisher for the same topic.
     fn instance_id(&self) -> u64;
 
     /// Registers an object in the discovery plane with the instance id

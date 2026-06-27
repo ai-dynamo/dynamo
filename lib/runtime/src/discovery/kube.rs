@@ -129,13 +129,15 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
-        let instance_id = self.instance_id();
-        let instance = spec.with_instance_id(instance_id);
+        let owner_instance_id = self.instance_id();
+        let instance = spec.with_instance_id(owner_instance_id);
+        let registered_instance_id = instance.instance_id();
 
         tracing::debug!(
-            "Registering instance: {:?} with instance_id={:x}",
+            "Registering instance: {:?} with instance_id={:x}, owner_instance_id={:x}",
             instance,
-            instance_id
+            registered_instance_id,
+            owner_instance_id
         );
 
         // Write to local metadata and persist to CR
@@ -152,7 +154,7 @@ impl Discovery for KubeDiscoveryClient {
                     inst.namespace,
                     inst.component,
                     inst.endpoint,
-                    instance_id
+                    registered_instance_id
                 );
                 metadata.register_endpoint(instance.clone())?;
             }
@@ -167,7 +169,7 @@ impl Discovery for KubeDiscoveryClient {
                     namespace,
                     component,
                     endpoint,
-                    instance_id
+                    registered_instance_id
                 );
                 metadata.register_model_card(instance.clone())?;
             }
@@ -182,7 +184,7 @@ impl Discovery for KubeDiscoveryClient {
                     namespace,
                     component,
                     topic,
-                    instance_id
+                    registered_instance_id
                 );
                 metadata.register_event_channel(instance.clone())?;
             }
@@ -214,7 +216,7 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
-        let instance_id = self.instance_id();
+        let instance_id = instance.instance_id();
 
         // Write to local metadata and persist to CR
         // IMPORTANT: Hold the write lock across the CR write to prevent race conditions

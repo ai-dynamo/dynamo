@@ -416,8 +416,9 @@ impl Discovery for KVStoreDiscovery {
     }
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
-        let instance_id = self.instance_id();
-        let instance = spec.with_instance_id(instance_id);
+        let owner_instance_id = self.instance_id();
+        let instance = spec.with_instance_id(owner_instance_id);
+        let registered_instance_id = instance.instance_id();
 
         let (bucket_name, key_path) = match &instance {
             DiscoveryInstance::Endpoint(inst) => {
@@ -528,8 +529,9 @@ impl Discovery for KVStoreDiscovery {
         // Use revision 0 for initial registration
         let outcome = bucket.insert(&key, instance_json.into(), 0).await?;
         tracing::debug!(
-            "KVStoreDiscovery::register: Successfully registered instance_id={}, key={}, outcome={:?}",
-            instance_id,
+            "KVStoreDiscovery::register: Successfully registered instance_id={}, owner_instance_id={}, key={}, outcome={:?}",
+            registered_instance_id,
+            owner_instance_id,
             key_path,
             outcome
         );

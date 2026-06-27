@@ -30,6 +30,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use lru::LruCache;
+use rand::TryRngCore;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::pin::Pin;
@@ -285,6 +286,8 @@ pub struct EventPublisher {
     tx: Arc<dyn EventTransportTx>,
     codec: Arc<Codec>,
     runtime_handle: tokio::runtime::Handle,
+    // Keeps unregister work in graceful-shutdown Phase 2 when dropped before shutdown.
+    graceful_shutdown_tracker: Arc<crate::utils::GracefulShutdownTracker>,
     /// Discovery client and registered instance for unregistration on drop
     discovery_client: Option<Arc<dyn Discovery>>,
     discovery_instance: Option<crate::discovery::DiscoveryInstance>,
@@ -346,10 +349,17 @@ impl EventPublisher {
         topic: String,
         transport_kind: EventTransportKind,
     ) -> Result<Self> {
-        let publisher_id = drt.discovery().instance_id();
+        // Publishers are discovery objects in their own right. A single process
+        // can host multiple publishers for the same scope/topic, each with its
+        // own ZMQ endpoint and sequence space, so the process ID is not unique
+        // enough here.
+        let publisher_id = rand::rngs::OsRng
+            .try_next_u64()
+            .map_err(|error| anyhow::anyhow!("failed to generate publisher ID: {error}"))?;
         let discovery = Some(drt.discovery());
         let runtime_handle = drt.runtime().secondary();
         let subject = format!("{}.{}", scope.subject_prefix(), topic);
+        let graceful_shutdown_tracker = drt.graceful_shutdown_tracker();
 
         // Use Msgpack codec for all transports
         enum TransportSetup {
@@ -434,6 +444,7 @@ impl EventPublisher {
                     namespace: scope.namespace().to_string(),
                     component: scope.component().unwrap_or("").to_string(),
                     topic: topic.clone(),
+                    publisher_id,
                     transport: transport_config,
                 };
 
@@ -452,6 +463,7 @@ impl EventPublisher {
                     namespace: scope.namespace().to_string(),
                     component: scope.component().unwrap_or("").to_string(),
                     topic: topic.clone(),
+                    publisher_id,
                     transport: transport_config,
                 };
 
@@ -483,6 +495,7 @@ impl EventPublisher {
             tx,
             codec,
             runtime_handle,
+            graceful_shutdown_tracker,
             discovery_client: discovery,
             discovery_instance,
         })
@@ -537,11 +550,13 @@ impl Drop for EventPublisher {
             let topic = self.topic.clone();
             let instance_id = instance.instance_id();
             let runtime_handle = self.runtime_handle.clone();
+            let shutdown_guard = self.graceful_shutdown_tracker.register_task();
 
             // Drop can run outside any Tokio context (notably via PyO3 finalizers), so use
             // the runtime that created the publisher rather than the ambient thread state.
             let spawn_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 runtime_handle.spawn(async move {
+                    let _shutdown_guard = shutdown_guard;
                     match discovery.unregister(instance).await {
                         Ok(()) => {
                             tracing::info!(
@@ -806,7 +821,163 @@ fn current_timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::environment_names::event_plane as env;
+    use crate::config::environment_names::zmq_broker as broker_env;
+
+    #[tokio::test]
+    async fn same_topic_publishers_are_discovered_and_delivered_independently() {
+        temp_env::async_with_vars(
+            [
+                (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
+                (broker_env::DYN_ZMQ_BROKER_ENABLED, None::<&str>),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().expect("create runtime handle");
+                let drt = DistributedRuntime::new(
+                    runtime,
+                    crate::distributed::DistributedConfig::process_local(),
+                )
+                .await
+                .expect("create distributed runtime");
+                let component = drt
+                    .namespace("event-publisher-test")
+                    .expect("create namespace")
+                    .component("worker")
+                    .expect("create component");
+
+                let publisher_a = EventPublisher::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create first publisher");
+                let publisher_b = EventPublisher::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create second publisher");
+                let publisher_a_id = publisher_a.publisher_id();
+                let publisher_b_id = publisher_b.publisher_id();
+
+                assert_ne!(publisher_a_id, publisher_b_id);
+
+                let query = DiscoveryQuery::EventChannels(EventChannelQuery::topic(
+                    "event-publisher-test",
+                    "worker",
+                    "events",
+                ));
+                let instances = drt
+                    .discovery()
+                    .list(query.clone())
+                    .await
+                    .expect("list event publishers");
+                assert_eq!(instances.len(), 2);
+                assert!(
+                    instances
+                        .iter()
+                        .any(|instance| instance.instance_id() == publisher_a_id)
+                );
+                assert!(
+                    instances
+                        .iter()
+                        .any(|instance| instance.instance_id() == publisher_b_id)
+                );
+
+                let mut subscriber = EventSubscriber::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("create subscriber");
+                let mut received_a = false;
+                let mut received_b = false;
+
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !received_a || !received_b {
+                        publisher_a
+                            .publish_bytes(vec![0xa1])
+                            .await
+                            .expect("publish from first publisher");
+                        publisher_b
+                            .publish_bytes(vec![0xb2])
+                            .await
+                            .expect("publish from second publisher");
+
+                        if let Ok(Some(envelope)) = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            subscriber.next(),
+                        )
+                        .await
+                        {
+                            let envelope = envelope.expect("receive event envelope");
+                            if envelope.publisher_id == publisher_a_id {
+                                assert_eq!(envelope.payload.as_ref(), &[0xa1]);
+                                received_a = true;
+                            } else if envelope.publisher_id == publisher_b_id {
+                                assert_eq!(envelope.payload.as_ref(), &[0xb2]);
+                                received_b = true;
+                            } else {
+                                panic!("event from unexpected publisher");
+                            }
+                        }
+
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("subscriber should receive events from both publishers");
+
+                drop(publisher_a);
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    loop {
+                        let instances = drt
+                            .discovery()
+                            .list(query.clone())
+                            .await
+                            .expect("list event publishers after drop");
+                        if instances.len() == 1 {
+                            assert_eq!(instances[0].instance_id(), publisher_b_id);
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("first publisher should unregister without removing the second");
+
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        publisher_b
+                            .publish_bytes(vec![0xb3])
+                            .await
+                            .expect("publish from remaining publisher");
+
+                        if let Ok(Some(envelope)) = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            subscriber.next(),
+                        )
+                        .await
+                        {
+                            let envelope = envelope.expect("receive event envelope after drop");
+                            if envelope.publisher_id == publisher_b_id
+                                && envelope.payload.as_ref() == [0xb3]
+                            {
+                                break;
+                            }
+                        }
+
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("remaining publisher should stay connected after peer removal");
+            },
+        )
+        .await;
+    }
 
     #[test]
     fn test_event_scope_subject_prefix() {
