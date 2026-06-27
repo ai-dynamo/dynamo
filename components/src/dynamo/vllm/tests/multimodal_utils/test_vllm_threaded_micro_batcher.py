@@ -283,3 +283,66 @@ async def test_worker_supervisor_fails_awaiters_on_crash():
             await b.submit(["b"])
     finally:
         b.shutdown()
+
+
+async def test_oversized_cost_is_rejected():
+    """A per-item cost above the batch budget has no batch it can fit → rejected."""
+    b = ThreadedMicroBatcher(lambda items: items, cost=lambda i: i, max_batch_cost=5)
+    b.start()
+    try:
+        with pytest.raises(ValueError, match="exceeds max_batch_cost"):
+            await b.submit([6])
+    finally:
+        b.shutdown()
+
+
+async def test_nonpositive_cost_is_rejected():
+    b = ThreadedMicroBatcher(lambda items: items, cost=lambda i: 0)
+    b.start()
+    try:
+        with pytest.raises(ValueError, match="positive int"):
+            await b.submit([1])
+    finally:
+        b.shutdown()
+
+
+async def test_partial_batch_failure_fails_request_once_and_releases():
+    """A multi-item request split across buckets where one batch raises fails the
+    whole request exactly once and releases all of its admission — no item reaches
+    fn after the request is tombstoned (regression for premature per-request
+    finalize)."""
+
+    def fn(items):
+        if "bad" in items:
+            raise ValueError("boom")
+        return [("r", x) for x in items]
+
+    b = ThreadedMicroBatcher(
+        fn, max_wait_ms=200.0, bucket_key=lambda i: i, max_outstanding_cost=10
+    )
+    b.start()
+    try:
+        with pytest.raises(ValueError, match="boom"):
+            await b.submit(["good", "bad"])  # two buckets → two batches
+        assert b._outstanding == 0
+    finally:
+        b.shutdown()
+
+
+def test_double_start_raises():
+    b = ThreadedMicroBatcher(lambda items: items)
+    b.start()
+    try:
+        with pytest.raises(RuntimeError, match="twice"):
+            b.start()
+    finally:
+        b.shutdown()
+
+
+def test_worker_thread_is_not_daemon():
+    b = ThreadedMicroBatcher(lambda items: items)
+    b.start()
+    try:
+        assert b._thread.daemon is False
+    finally:
+        b.shutdown()

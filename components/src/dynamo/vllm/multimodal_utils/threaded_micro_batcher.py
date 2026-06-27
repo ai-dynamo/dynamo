@@ -26,14 +26,19 @@ Concurrency contract (cross-thread correctness):
 
 - The event-loop bridge is a ``concurrent.futures.Future`` adapted with
   ``asyncio.wrap_future`` — so callers on **any** event loop work, and cancelling
-  an ``await submit(...)`` actually retires the request: its not-yet-dispatched
-  items are tombstoned and its admission released, and the caller only returns
-  once the worker can no longer touch its items (``retired``).
+  an ``await submit(...)`` retires the request: its not-yet-run items are
+  tombstoned (never reach ``fn``) and its admission released, and the caller only
+  returns once the worker is done with every item (``retired``).
+- A request is finalised **per item**: admission release, ``completion``, and
+  ``retired`` fire exactly once, only after *all* of the request's items have been
+  delivered, failed, or tombstoned — never on the first item of a multi-batch
+  request. Every request-state transition is under one short lock, so the worker
+  and a concurrent ``shutdown()`` cannot race on ``remaining``.
 - The worker runs under a **supervisor**: any unexpected crash fails every live
-  request (no hung awaiter) and moves the batcher to ``FAILED`` instead of
-  silently dying.
-- Admission is bounded by an optional ``max_outstanding_cost``; state +
-  admission are mutated together under one short lock.
+  request (no hung awaiter) and moves the batcher to ``FAILED``.
+- Admission is bounded by an optional ``max_outstanding_cost``; state + admission
+  are mutated together under the lock (bookkeeping only — never held across
+  ``fn`` / ``join``).
 """
 
 from __future__ import annotations
@@ -55,6 +60,9 @@ R = TypeVar("R")
 
 # Sentinel pushed onto the queue to stop the worker thread.
 _SHUTDOWN = object()
+# Sentinel distinguishing "no result" (failed / tombstoned item) from a real
+# ``None`` result returned by ``fn``.
+_NO_RESULT = object()
 
 
 class BatcherOverloaded(RuntimeError):
@@ -75,8 +83,8 @@ class _Request(Generic[R]):
     """One ``submit()`` call: its future resolves to one result per item, in order.
 
     ``completion`` and ``retired`` are thread-safe ``concurrent.futures.Future``s.
-    The worker is the sole finaliser (``_finalize``), so every transition is
-    exactly-once.
+    All mutation (``remaining`` / ``done`` / ``error`` / ``results``) happens under
+    the batcher lock, so the worker and a concurrent ``shutdown()`` never race.
     """
 
     completion: "concurrent.futures.Future[List[R]]"
@@ -85,6 +93,7 @@ class _Request(Generic[R]):
     remaining: int
     cost_total: int
     cancelled: bool = False
+    error: Optional[BaseException] = None
     done: bool = False
 
 
@@ -105,9 +114,10 @@ class ThreadedMicroBatcher(Generic[T, R]):
 
     Args:
         fn: Batched work; one result per item, in order. Runs on the worker thread.
-        max_batch_cost: Max summed ``cost`` of a single ``fn`` batch.
+        max_batch_cost: Max summed ``cost`` of a single ``fn`` batch (>= 1).
         max_wait_ms: Window to gather more items after the first arrives.
-        cost: Per-item cost (default 1 → count-based).
+        cost: Per-item cost (default 1 → count-based). Must return an int in
+            ``[1, max_batch_cost]``; out-of-range costs are rejected by ``submit``.
         bucket_key: Items with different keys never share a batch (default: one
             bucket).
         on_start: Optional callable run once on the worker thread before serving
@@ -133,6 +143,8 @@ class ThreadedMicroBatcher(Generic[T, R]):
     ) -> None:
         if max_batch_cost < 1:
             raise ValueError("max_batch_cost must be >= 1")
+        if max_outstanding_cost is not None and max_outstanding_cost < 1:
+            raise ValueError("max_outstanding_cost must be >= 1")
         self._fn = fn
         self._max_batch_cost = max_batch_cost
         self._max_wait_s = max_wait_ms / 1000.0
@@ -148,23 +160,33 @@ class ThreadedMicroBatcher(Generic[T, R]):
         self._terminated = threading.Event()
         self._start_error: Optional[BaseException] = None
         self._terminal_error: Optional[BaseException] = None
-        # Guards _state, _outstanding, _live, and the queue-commit so a state
-        # transition and its work enqueue happen atomically. Bookkeeping only —
-        # never held across fn / join.
+        # Guards _state, _outstanding, _live, every _Request transition, and the
+        # queue-commit so a state change and its work enqueue happen atomically.
+        # Bookkeeping only — never held across fn / join.
         self._lock = threading.Lock()
         self._state = _State.NEW
         self._outstanding = 0
         self._live: set[_Request] = set()
-        # Non-daemon: shutdown() is the contract for a clean stop, and a daemon
-        # thread could be torn down mid-fn at interpreter exit.
         self._thread: Optional[threading.Thread] = None
 
     # ---- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        """Start the worker thread, run ``on_start`` on it, and re-raise its error."""
-        self._thread = threading.Thread(target=self._run, name=self._name)
-        self._thread.start()
+        """Start the worker thread, run ``on_start`` on it, and re-raise its error.
+
+        Single-shot: a second ``start()`` raises rather than spawning a second
+        consumer / orphaning the first thread."""
+        with self._lock:
+            if self._thread is not None:
+                raise RuntimeError("ThreadedMicroBatcher.start() called twice")
+            # Non-daemon: a clean stop is via shutdown(); a daemon worker could be
+            # torn down mid-fn at interpreter exit. Pin daemon=False explicitly so
+            # it never inherits a daemon creator thread.
+            self._thread = threading.Thread(
+                target=self._run, name=self._name, daemon=False
+            )
+            thread = self._thread
+        thread.start()
         self._ready.wait()
         if self._start_error is not None:
             # on_start ran on the thread, which then exited — mark closed so a
@@ -178,15 +200,23 @@ class ThreadedMicroBatcher(Generic[T, R]):
     async def submit(self, items: List[T]) -> List[R]:
         """Submit a group of items; await one result per item, in order.
 
-        Cancellation-safe: cancelling the await tombstones not-yet-dispatched
-        items, releases admission, and returns only once the worker has retired
-        the request (so the caller may then release the items' backing memory).
+        Cancellation-safe: cancelling the await tombstones not-yet-run items,
+        releases admission, and returns only once the worker has retired the
+        request (so the caller may then release the items' backing memory).
         """
         if self._thread is None:
             raise RuntimeError("ThreadedMicroBatcher.submit() called before start()")
         if not items:
             return []
         costs = [self._cost(item) for item in items]
+        for c in costs:
+            if not isinstance(c, int) or isinstance(c, bool) or c < 1:
+                raise ValueError(f"cost(item) must be a positive int, got {c!r}")
+            if c > self._max_batch_cost:
+                raise ValueError(
+                    f"item cost {c} exceeds max_batch_cost {self._max_batch_cost}; "
+                    "it has no batch it can fit"
+                )
         request: _Request = _Request(
             completion=concurrent.futures.Future(),
             retired=concurrent.futures.Future(),
@@ -227,11 +257,12 @@ class ThreadedMicroBatcher(Generic[T, R]):
         try:
             return await asyncio.wrap_future(request.completion)
         except asyncio.CancelledError:
-            # Tombstone: the worker skips not-yet-dispatched items and finalises
-            # (releasing admission). Wait — through repeated cancellation — until
-            # the worker is provably done with this request's items before
-            # propagating, so the caller can safely drop them.
-            request.cancelled = True
+            # Tombstone: the worker skips not-yet-run items and finalises (releasing
+            # admission). Wait — through repeated cancellation — until the worker is
+            # provably done with this request's items before propagating, so the
+            # caller can safely drop them.
+            with self._lock:
+                request.cancelled = True
             retirement = asyncio.wrap_future(request.retired)
             while not retirement.done():
                 try:
@@ -241,7 +272,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
             raise
 
     def shutdown(self) -> None:
-        """Stop the worker, failing not-yet-started items. Idempotent; retries the
+        """Stop the worker, failing not-yet-run items. Idempotent; retries the
         join if a slow ``fn`` is still in flight."""
         if self._thread is None:
             return
@@ -251,7 +282,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 self._state = _State.CLOSING
                 to_fail = self._drain_queue_locked()  # fail queued, then signal stop
                 self._queue.put(_SHUTDOWN)
-        self._fail_works(to_fail, RuntimeError("ThreadedMicroBatcher shut down"))
+        self._consume_all(to_fail, RuntimeError("ThreadedMicroBatcher shut down"))
         self._thread.join(timeout=self._join_timeout_s)
         if self._thread.is_alive():
             logger.warning(
@@ -265,7 +296,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
             if self._state is _State.CLOSING:
                 self._state = _State.CLOSED
             leftover = self._drain_queue_locked()  # belt-and-suspenders
-        self._fail_works(leftover, RuntimeError("ThreadedMicroBatcher shut down"))
+        self._consume_all(leftover, RuntimeError("ThreadedMicroBatcher shut down"))
 
     # ---- worker thread -----------------------------------------------------
 
@@ -294,10 +325,9 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 self._state = _State.FAILED
                 self._terminal_error = exc
                 live = list(self._live)
-                queued = self._drain_queue_locked()
+                self._drain_queue_locked()  # clear queue; those reqs are in `live`
             for req in live:
-                self._finalize(req, exc=exc)
-            self._fail_works(queued, exc)
+                self._abort(req, exc)
         finally:
             self._terminated.set()
 
@@ -323,14 +353,14 @@ class ThreadedMicroBatcher(Generic[T, R]):
         return works
 
     def _dispatch(self, works: List[_Work]) -> None:
-        """Group the drained items by bucket, split by cost budget, run ``fn``.
+        """Group live items by bucket, split by cost budget, run ``fn``.
 
-        Tombstoned (cancelled / already-finalised) items are dropped before
-        batching — a cancelled request never reaches ``fn``."""
+        Tombstoned (cancelled / failed / done) items are dropped before batching —
+        a cancelled or already-failed request never reaches ``fn``."""
         live: List[_Work] = []
         for work in works:
-            if work.request.done or work.request.cancelled:
-                self._retire_tombstoned(work)
+            if self._is_tombstoned(work.request):
+                self._consume(work)  # account the dropped item
             else:
                 live.append(work)
         by_bucket: dict = {}
@@ -349,47 +379,96 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 self._run_batch(batch)
 
     def _run_batch(self, batch: List[_Work]) -> None:
-        items = [w.item for w in batch]
+        # Re-filter immediately before fn: a request may have been cancelled (or
+        # failed by a sibling batch) after grouping, so cancellation is synced to
+        # each fn call rather than only the per-dispatch snapshot.
+        runnable: List[_Work] = []
+        for work in batch:
+            if self._is_tombstoned(work.request):
+                self._consume(work)
+            else:
+                runnable.append(work)
+        if not runnable:
+            return
+        items = [w.item for w in runnable]
         try:
             results = self._fn(items)
         except (
             BaseException
         ) as exc:  # noqa: BLE001 — a bad batch must not hang awaiters
-            for work in batch:
-                self._finalize(work.request, exc=exc)
+            for work in runnable:
+                self._consume(work, error=exc)
             return
         if len(results) != len(items):
             err = RuntimeError(
                 f"batch fn returned {len(results)} results for {len(items)} items; "
                 "it must return one result per item"
             )
-            for work in batch:
-                self._finalize(work.request, exc=err)
+            for work in runnable:
+                self._consume(work, error=err)
             return
-        for work, result in zip(batch, results):
-            self._deliver(work, result)
+        for work, result in zip(runnable, results):
+            self._consume(work, result=result)
 
-    def _deliver(self, work: _Work, result: R) -> None:
-        req = work.request
-        if req.done:
-            return
-        req.results[work.index] = result
-        req.remaining -= 1
-        if req.remaining == 0:
-            self._finalize(req, result=list(req.results))
+    def _is_tombstoned(self, req: _Request) -> bool:
+        """True once the request must not send further items to ``fn``."""
+        return req.done or req.cancelled or req.error is not None
 
-    def _retire_tombstoned(self, work: _Work) -> None:
-        """Account a dropped item of a cancelled/finalised request; finalise at 0."""
+    def _consume(self, work: _Work, result: object = _NO_RESULT, error=None) -> None:
+        """Account one item of a request (delivered / failed / tombstoned).
+
+        Decrements ``remaining`` under the lock and finalises the request only
+        when the last item is consumed — so admission release, ``completion`` and
+        ``retired`` are exactly-once even when items span batches or threads."""
         req = work.request
-        if req.done:
-            return
-        req.remaining -= 1
-        if req.remaining == 0:
-            self._finalize(req)
+        finalize = False
+        with self._lock:
+            if req.done:
+                return
+            if error is not None and req.error is None:
+                req.error = error
+            elif result is not _NO_RESULT and req.error is None and not req.cancelled:
+                req.results[work.index] = result
+            req.remaining -= 1
+            if req.remaining == 0:
+                req.done = True
+                self._live.discard(req)
+                self._outstanding -= req.cost_total
+                finalize = True
+        if finalize:
+            self._complete(req)
+
+    def _abort(self, req: _Request, exc: BaseException) -> None:
+        """Force-finalise a live request (worker crash): items may be lost, so do
+        not wait for ``remaining``."""
+        with self._lock:
+            if req.done:
+                return
+            req.done = True
+            if req.error is None:
+                req.error = exc
+            self._live.discard(req)
+            self._outstanding -= req.cost_total
+        self._complete(req)
+
+    def _complete(self, req: _Request) -> None:
+        """Settle a finalised request's futures (outside the lock; idempotent)."""
+        try:
+            if req.error is not None:
+                req.completion.set_exception(req.error)
+            elif not req.cancelled:
+                req.completion.set_result(list(req.results))
+            # cancelled + no error: leave completion (already cancelled by the waiter)
+        except concurrent.futures.InvalidStateError:
+            pass  # caller already cancelled the future
+        try:
+            req.retired.set_result(None)  # caller's cancel path awaits this
+        except concurrent.futures.InvalidStateError:
+            pass
 
     def _drain_queue_locked(self) -> List[_Work]:
-        """Pop all queued works (caller holds the lock); returns them to fail
-        outside the lock (``_finalize`` takes the lock)."""
+        """Pop all queued works (caller holds the lock); returns them to consume
+        outside the lock (``_consume`` re-takes the lock)."""
         drained: List[_Work] = []
         while True:
             try:
@@ -400,33 +479,6 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 continue
             drained.append(item)
 
-    def _fail_works(self, works: List[_Work], exc: BaseException) -> None:
+    def _consume_all(self, works: List[_Work], exc: BaseException) -> None:
         for work in works:
-            self._finalize(work.request, exc=exc)
-
-    def _finalize(
-        self,
-        req: _Request,
-        result: Optional[List[R]] = None,
-        exc: Optional[BaseException] = None,
-    ) -> None:
-        """Resolve a request exactly once: release admission, settle ``completion``
-        (unless the caller already cancelled it), and signal ``retired``."""
-        with self._lock:
-            if req.done:
-                return
-            req.done = True
-            self._live.discard(req)
-            self._outstanding -= req.cost_total
-        try:
-            if exc is not None:
-                req.completion.set_exception(exc)
-            elif not req.cancelled:
-                req.completion.set_result(result)
-            # cancelled + no error: leave completion (already cancelled by the waiter)
-        except concurrent.futures.InvalidStateError:
-            pass  # caller already cancelled the future
-        try:
-            req.retired.set_result(None)  # caller's cancel path awaits this
-        except concurrent.futures.InvalidStateError:
-            pass
+            self._consume(work, error=exc)
