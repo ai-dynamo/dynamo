@@ -265,9 +265,18 @@ pub fn parse_traceparent(traceparent: &str) -> (Option<String>, Option<String>, 
     if pieces.len() != 4 {
         return (None, None, None);
     }
+    let version = pieces[0];
     let trace_id = pieces[1];
     let parent_id = pieces[2];
     let trace_flags = pieces[3];
+
+    // Reject an invalid version field: W3C forbids `ff`, and a non-hex version
+    // is malformed. Matches the OTel propagator (rejects version > 0xfe); `00`-`fe`
+    // still parse, preserving forward-compatibility.
+    match u8::from_str_radix(version, 16) {
+        Ok(v) if v != 0xff => {}
+        _ => return (None, None, None),
+    }
 
     if !is_valid_trace_id(trace_id)
         || !is_valid_span_id(parent_id)
@@ -1034,6 +1043,9 @@ pub fn get_distributed_tracing_context() -> Option<DistributedTraceContext> {
         })
         .flatten()
         .map(|mut context| {
+            // Propagate this node's live OTel sampling decision (W3C: `sampled`
+            // reflects the immediate caller, not the original client), so a
+            // non-parent sampler overrides the inbound flag downstream.
             if let Some(trace_flags) = current_otel_trace_flags() {
                 context.trace_flags = trace_flags;
             }
@@ -1694,6 +1706,31 @@ pub mod tests {
         assert!(trace_id.is_none());
         assert!(parent_id.is_none());
         assert!(trace_flags.is_none());
+    }
+
+    #[test]
+    fn parse_traceparent_rejects_invalid_version() {
+        // `ff` is forbidden by W3C; must be rejected.
+        let (trace_id, parent_id, trace_flags) =
+            parse_traceparent("ff-11111111111111111111111111111111-2222222222222222-01");
+        assert!(trace_id.is_none());
+        assert!(parent_id.is_none());
+        assert!(trace_flags.is_none());
+
+        // Non-hex version is malformed; must be rejected.
+        let (trace_id, _, _) =
+            parse_traceparent("zz-11111111111111111111111111111111-2222222222222222-01");
+        assert!(trace_id.is_none());
+
+        // A future, same-shape version (00-fe) must still parse (forward-compat).
+        let (trace_id, parent_id, trace_flags) =
+            parse_traceparent("01-11111111111111111111111111111111-2222222222222222-01");
+        assert_eq!(
+            trace_id.as_deref(),
+            Some("11111111111111111111111111111111")
+        );
+        assert_eq!(parent_id.as_deref(), Some("2222222222222222"));
+        assert_eq!(trace_flags.as_deref(), Some("01"));
     }
 
     #[test]
