@@ -15,7 +15,7 @@
 //!
 //! Remote NIXL and cross-instance methods return `bail!` / all-Err futures.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -99,6 +99,20 @@ struct PipelineAwaiter {
     num_blocks: usize,
 }
 
+enum CompletionSink {
+    Pipeline(PipelineAwaiter),
+    SwapIn(Arc<std::sync::atomic::AtomicBool>),
+}
+
+impl CompletionSink {
+    fn direction(&self) -> TransferDirection {
+        match self {
+            Self::Pipeline(awaiter) => awaiter.direction,
+            Self::SwapIn(_) => TransferDirection::G2ToG1,
+        }
+    }
+}
+
 /// Shared state between `MockWorker` and `MockOffloadEngine`. Both hold an
 /// `Arc` clone. The single mutex keeps the two PS models and the
 /// awaiter map consistent under concurrent access between the scheduler
@@ -108,16 +122,8 @@ struct PipelineAwaiter {
 pub(crate) struct TransferState {
     offload_bw: BandwidthSharingModel,
     onboard_bw: BandwidthSharingModel,
-    /// Pending `velo::Event`s keyed by the `TransferId` the model
-    /// issued. When the model drains an id on `advance_to`, we
-    /// `remove` the `Event` from this map and `trigger()` it.
-    awaiters: HashMap<TransferId, PipelineAwaiter>,
-    /// Completion flags for swap-in reservations. Polled synchronously
-    /// by the scheduler via `SwapInHandle::is_complete()` — kept
-    /// separate from `awaiters` because swap-in does not feed a velo
-    /// notification back into a kvbm-engine pipeline; the scheduler
-    /// owns lifecycle directly.
-    swap_in_flags: HashMap<TransferId, Arc<std::sync::atomic::AtomicBool>>,
+    /// Exactly one completion sink for every active transfer.
+    completion_sinks: HashMap<TransferId, CompletionSink>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -207,17 +213,62 @@ pub(crate) struct CompletedTransfer {
 
 impl TransferState {
     pub(crate) fn new(offload_gbps: f64, onboard_gbps: f64) -> Self {
-        // One shared `TransferId` counter across both models so ids
-        // are globally unique. `awaiters` and `swap_in_flags` below are
-        // single maps keyed by TransferId; per-model counters would
-        // hand out overlapping ids and cause completion signals to
-        // cross-fire between unrelated transfers.
+        // One shared `TransferId` counter across both models keeps the
+        // completion-sink keyspace globally unique.
         let id_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
         Self {
             offload_bw: BandwidthSharingModel::new(offload_gbps, id_counter.clone()),
             onboard_bw: BandwidthSharingModel::new(onboard_gbps, id_counter),
-            awaiters: HashMap::new(),
-            swap_in_flags: HashMap::new(),
+            completion_sinks: HashMap::new(),
+        }
+    }
+
+    fn insert_completion_sink(&mut self, id: TransferId, sink: CompletionSink) {
+        match self.completion_sinks.entry(id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(sink);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                panic!("duplicate completion sink for transfer {id}");
+            }
+        }
+        self.assert_sink_bijection();
+    }
+
+    fn assert_sink_bijection(&self) {
+        let offload_ids: HashSet<_> = self.offload_bw.active_ids().collect();
+        let onboard_ids: HashSet<_> = self.onboard_bw.active_ids().collect();
+        assert_eq!(
+            offload_ids.len(),
+            self.offload_bw.active_count(),
+            "duplicate active transfer id on offload lane"
+        );
+        assert_eq!(
+            onboard_ids.len(),
+            self.onboard_bw.active_count(),
+            "duplicate active transfer id on onboard lane"
+        );
+        assert!(
+            offload_ids.is_disjoint(&onboard_ids),
+            "transfer id is active on both bandwidth lanes"
+        );
+        assert_eq!(
+            offload_ids.len() + onboard_ids.len(),
+            self.completion_sinks.len(),
+            "active transfer and completion sink counts diverged"
+        );
+        for (&id, sink) in &self.completion_sinks {
+            let on_offload_lane = offload_ids.contains(&id);
+            let on_onboard_lane = onboard_ids.contains(&id);
+            assert!(
+                on_offload_lane || on_onboard_lane,
+                "completion sink {id} has no active transfer"
+            );
+            assert_eq!(
+                sink.direction().is_offload(),
+                on_offload_lane,
+                "completion sink direction does not match transfer lane for {id}"
+            );
         }
     }
 
@@ -246,7 +297,11 @@ impl TransferState {
         let onboard_drained = self.onboard_bw.advance_to(now_ms);
         let offload_drained_count = offload_drained.len();
         let onboard_drained_count = onboard_drained.len();
-        let drained: Vec<TransferId> = offload_drained.into_iter().chain(onboard_drained).collect();
+        let drained: Vec<(TransferId, bool)> = offload_drained
+            .into_iter()
+            .map(|id| (id, true))
+            .chain(onboard_drained.into_iter().map(|id| (id, false)))
+            .collect();
         tracing::debug!(
             now_ms,
             offload_active_before = offload_before,
@@ -254,7 +309,7 @@ impl TransferState {
             drained_count = drained.len(),
             offload_drained_count,
             onboard_drained_count,
-            awaiter_map_size = self.awaiters.len(),
+            completion_sink_count = self.completion_sinks.len(),
             "kvbm-offload: drain transfer completions"
         );
 
@@ -271,40 +326,52 @@ impl TransferState {
             by_owner: HashMap::new(),
             completed: Vec::new(),
         };
-        for id in drained {
-            if let Some(awaiter) = self.awaiters.remove(&id) {
-                tracing::debug!(
-                    now_ms,
-                    scope,
-                    transfer_id = id,
-                    direction = awaiter.direction.label(),
-                    blocks = awaiter.num_blocks,
-                    "kvbm-offload: mock transfer complete"
-                );
-                if awaiter.direction.is_offload() {
-                    offload_awaiter_blocks += awaiter.num_blocks;
-                } else {
-                    onboard_awaiter_blocks += awaiter.num_blocks;
+        for (id, offload_lane) in drained {
+            let sink = self
+                .completion_sinks
+                .remove(&id)
+                .unwrap_or_else(|| panic!("drained transfer {id} has no completion sink"));
+            assert_eq!(
+                sink.direction().is_offload(),
+                offload_lane,
+                "completion sink direction does not match drained lane for {id}"
+            );
+            match sink {
+                CompletionSink::Pipeline(awaiter) => {
+                    tracing::debug!(
+                        now_ms,
+                        scope,
+                        transfer_id = id,
+                        direction = awaiter.direction.label(),
+                        blocks = awaiter.num_blocks,
+                        "kvbm-offload: mock transfer complete"
+                    );
+                    if awaiter.direction.is_offload() {
+                        offload_awaiter_blocks += awaiter.num_blocks;
+                    } else {
+                        onboard_awaiter_blocks += awaiter.num_blocks;
+                    }
+                    result
+                        .by_owner
+                        .entry(awaiter.owner_id)
+                        .or_default()
+                        .add_transfer(awaiter.direction, awaiter.num_blocks);
+                    result.completed.push(CompletedTransfer {
+                        id,
+                        direction: awaiter.direction,
+                    });
+                    // Ignore trigger errors — the velo event system may be
+                    // shut down during cleanup.
+                    let _ = awaiter.event.trigger();
+                    awaiter_fired += 1;
                 }
-                result
-                    .by_owner
-                    .entry(awaiter.owner_id)
-                    .or_default()
-                    .add_transfer(awaiter.direction, awaiter.num_blocks);
-                result.completed.push(CompletedTransfer {
-                    id,
-                    direction: awaiter.direction,
-                });
-                // Ignore trigger errors — the velo event system may be
-                // shut down during cleanup.
-                let _ = awaiter.event.trigger();
-                awaiter_fired += 1;
-            }
-            if let Some(flag) = self.swap_in_flags.remove(&id) {
-                flag.store(true, Ordering::Release);
-                swap_in_flipped += 1;
+                CompletionSink::SwapIn(complete) => {
+                    complete.store(true, Ordering::Release);
+                    swap_in_flipped += 1;
+                }
             }
         }
+        self.assert_sink_bijection();
         tracing::debug!(
             awaiter_fired,
             offload_awaiter_blocks,
@@ -324,7 +391,16 @@ static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
 // `AtomicU64`. Microsecond precision is more than sufficient for the
 // mocker's ms+ tick cadence.
 fn ms_to_us(ms: f64) -> u64 {
-    (ms.max(0.0) * 1000.0) as u64
+    assert!(
+        ms.is_finite() && ms >= 0.0,
+        "worker virtual time must be finite and nonnegative, got {ms}"
+    );
+    let us = ms * 1000.0;
+    assert!(
+        us < u64::MAX as f64,
+        "worker virtual time exceeds microsecond clock range: {ms} ms"
+    );
+    us as u64
 }
 fn us_to_ms(us: u64) -> f64 {
     (us as f64) / 1000.0
@@ -387,7 +463,11 @@ impl MockWorker {
         shared_g4: Option<Arc<SharedG4Store>>,
     ) -> Self {
         Self {
-            owner_id: NEXT_WORKER_ID.fetch_add(1, Ordering::Relaxed),
+            owner_id: NEXT_WORKER_ID
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                    next.checked_add(1)
+                })
+                .expect("worker owner id counter exhausted"),
             now_us: Arc::new(AtomicU64::new(0)),
             state: Arc::new(Mutex::new(TransferState::new(offload_gbps, onboard_gbps))),
             event_manager: EventManager::local(),
@@ -462,7 +542,9 @@ impl MockWorker {
         num_blocks: usize,
         complete: Arc<std::sync::atomic::AtomicBool>,
     ) -> TransferId {
-        let bytes = num_blocks.saturating_mul(self.block_bytes);
+        let bytes = num_blocks
+            .checked_mul(self.block_bytes)
+            .expect("swap-in transfer size overflowed");
         let mut state = self.state.lock().expect("TransferState mutex poisoned");
         state.drain_completions(now_ms, "worker");
         let id = state.onboard_bw.start_transfer(now_ms, bytes);
@@ -477,7 +559,7 @@ impl MockWorker {
             next_deadline_ms = ?next_deadline_ms,
             "kvbm-offload: reserve mock swap-in transfer"
         );
-        state.swap_in_flags.insert(id, complete);
+        state.insert_completion_sink(id, CompletionSink::SwapIn(complete));
         id
     }
 
@@ -556,7 +638,19 @@ impl MockWorker {
         num_blocks: usize,
         on_reserved: impl FnOnce(TransferId),
     ) -> Result<(TransferId, TransferCompleteNotification)> {
-        let bytes = num_blocks.saturating_mul(self.block_bytes);
+        let bytes = num_blocks.checked_mul(self.block_bytes).ok_or_else(|| {
+            anyhow!(
+                "MockWorker: transfer size overflow for {num_blocks} blocks of {} bytes",
+                self.block_bytes
+            )
+        })?;
+        let event = self
+            .event_manager
+            .new_event()
+            .map_err(|e| anyhow!("MockWorker: failed to allocate velo event: {e}"))?;
+        let awaiter = event
+            .awaiter()
+            .map_err(|e| anyhow!("MockWorker: failed to build event awaiter: {e}"))?;
         let (state_arc, scope, already_drained) =
             if direction.is_g3() {
                 let shared_g3 = self.shared_g3.as_ref().ok_or_else(|| {
@@ -595,29 +689,23 @@ impl MockWorker {
             next_deadline_ms = ?next_deadline_ms,
             "kvbm-offload: reserve mock transfer"
         );
-        self.reservation_count.fetch_add(1, Ordering::AcqRel);
-        self.reservation_notify.notify_waiters();
-
-        // Allocate a velo event + awaiter. Store the `Event` so we can
-        // `trigger()` it later (triggering consumes `self`).
-        let event = self
-            .event_manager
-            .new_event()
-            .map_err(|e| anyhow!("MockWorker: failed to allocate velo event: {e}"))?;
-        let awaiter = event
-            .awaiter()
-            .map_err(|e| anyhow!("MockWorker: failed to build event awaiter: {e}"))?;
-        state.awaiters.insert(
+        state.insert_completion_sink(
             id,
-            PipelineAwaiter {
+            CompletionSink::Pipeline(PipelineAwaiter {
                 event,
                 owner_id: self.owner_id,
                 direction,
                 num_blocks,
-            },
+            }),
         );
         on_reserved(id);
         drop(state);
+        self.reservation_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1)
+            })
+            .expect("transfer reservation counter exhausted");
+        self.reservation_notify.notify_waiters();
         Ok((id, TransferCompleteNotification::from_awaiter(awaiter)))
     }
 }
@@ -628,9 +716,16 @@ impl WorkerTransfers for MockWorker {
         src: LogicalLayoutHandle,
         dst: LogicalLayoutHandle,
         src_block_ids: Arc<[BlockId]>,
-        _dst_block_ids: Arc<[BlockId]>,
+        dst_block_ids: Arc<[BlockId]>,
         _options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
+        if src_block_ids.len() != dst_block_ids.len() {
+            bail!(
+                "MockWorker: source block count {} does not match destination block count {}",
+                src_block_ids.len(),
+                dst_block_ids.len()
+            );
+        }
         let direction = TransferDirection::try_from((src, dst))?;
         let now_ms = self.now_ms();
         self.reserve_transfer(direction, now_ms, src_block_ids.len())
@@ -896,6 +991,14 @@ mod tests {
         )
     }
 
+    fn reserve_shared_g3_capacity(worker: &MockWorker, blocks: usize) {
+        let shared_g3 = worker.shared_g3.as_ref().expect("G3 enabled");
+        assert!(
+            shared_g3.capacity_reservations().try_reserve(128, blocks),
+            "test setup should reserve shared G3 capacity"
+        );
+    }
+
     fn shared_g4_worker() -> (MockWorker, Arc<SharedG4Store>) {
         let config = KvbmOffloadConfig {
             enable_g4_storage: true,
@@ -1047,10 +1150,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mock_worker_rejects_mismatched_block_counts() {
+        let worker = make_worker();
+        let result = worker.execute_local_transfer(
+            LogicalLayoutHandle::G1,
+            LogicalLayoutHandle::G2,
+            Arc::from(vec![0usize, 1]),
+            Arc::from(vec![0usize]),
+            TransferOptions::default(),
+        );
+
+        let error = match result {
+            Ok(_) => panic!("mismatched block counts must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("source block count 2"));
+    }
+
+    #[test]
+    fn mock_worker_rejects_transfer_size_overflow() {
+        let worker = MockWorker::new(usize::MAX, 1.0, 1.0, None, None, None, None);
+        let error = match worker.reserve_transfer(TransferDirection::G1ToG2, 0.0, 2) {
+            Ok(_) => panic!("overflowing transfer size must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("transfer size overflow"));
+    }
+
+    #[test]
+    #[should_panic(expected = "worker virtual time must be finite and nonnegative")]
+    fn mock_worker_rejects_nonfinite_virtual_time() {
+        make_worker().set_now_ms(f64::INFINITY);
+    }
+
+    #[test]
+    #[should_panic(expected = "drained transfer 0 has no completion sink")]
+    fn transfer_state_panics_when_active_transfer_has_no_sink() {
+        let mut state = TransferState::new(1.0, 1.0);
+        state.offload_bw.start_transfer(0.0, 1);
+        state.drain_completions(1.0, "test");
+    }
+
+    #[test]
+    #[should_panic(expected = "completion sink direction does not match transfer lane")]
+    fn transfer_state_panics_when_sink_direction_mismatches_lane() {
+        use std::sync::atomic::AtomicBool;
+
+        let mut state = TransferState::new(1.0, 1.0);
+        let id = state.offload_bw.start_transfer(0.0, 1);
+        state.insert_completion_sink(id, CompletionSink::SwapIn(Arc::new(AtomicBool::new(false))));
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate completion sink for transfer 0")]
+    fn transfer_state_panics_on_duplicate_sink() {
+        use std::sync::atomic::AtomicBool;
+
+        let mut state = TransferState::new(1.0, 1.0);
+        let id = state.onboard_bw.start_transfer(0.0, 1);
+        state.insert_completion_sink(id, CompletionSink::SwapIn(Arc::new(AtomicBool::new(false))));
+        state.insert_completion_sink(id, CompletionSink::SwapIn(Arc::new(AtomicBool::new(false))));
+    }
+
+    #[tokio::test]
     async fn mock_worker_g2_to_g3_bandwidth_is_shared_across_workers() {
         let _guard = shared_g3_test_guard().await;
         let (worker_a, worker_b) = shared_g3_two_workers();
         let ids = || -> Arc<[BlockId]> { Arc::from(vec![0usize]) };
+        reserve_shared_g3_capacity(&worker_a, 2);
 
         worker_a.set_now_ms(0.0);
         worker_b.set_now_ms(0.0);
@@ -1097,6 +1264,7 @@ mod tests {
         let _guard = shared_g3_test_guard().await;
         let (worker_a, worker_b) = shared_g3_two_workers();
         let ids = || -> Arc<[BlockId]> { Arc::from(vec![0usize]) };
+        reserve_shared_g3_capacity(&worker_a, 2);
 
         worker_a.set_now_ms(0.0);
         let a = worker_a
@@ -1137,6 +1305,7 @@ mod tests {
         let _guard = shared_g3_test_guard().await;
         let (worker_a, worker_b) = shared_g3_two_workers();
         let ids = || -> Arc<[BlockId]> { Arc::from(vec![0usize]) };
+        reserve_shared_g3_capacity(&worker_b, 1);
 
         worker_a.set_now_ms(0.0);
         let a = worker_a
@@ -1243,17 +1412,8 @@ mod tests {
 
     #[tokio::test]
     async fn mock_worker_offload_and_swap_in_share_id_keyspace() {
-        // Invariant: pipeline transfers (`awaiters`) and G2→G1 swap-ins
-        // (`swap_in_flags`) live in two HashMaps but share one TransferId
-        // keyspace, because `TransferState::drain_completions` looks up every
-        // drained id in both maps. `TransferState::new` enforces this by handing the
-        // same Arc<AtomicU64> counter to `offload_bw` and `onboard_bw`.
-        //
-        // If a future refactor gives each BandwidthSharingModel its own
-        // counter, both would start at 0 and the first offload + first
-        // swap-in would alias on id=0 — causing a completing offload to
-        // falsely flip the swap-in flag (and vice versa). This test pins
-        // that invariant: ids drawn across the two models must be disjoint.
+        // Pipeline and swap-in transfers share one completion-sink map, so
+        // their model-issued ids must remain globally unique.
         use std::sync::atomic::AtomicBool;
         let worker = make_worker();
         worker.set_now_ms(0.0);
@@ -1273,10 +1433,10 @@ mod tests {
             .unwrap();
 
         let state = worker.state.lock().unwrap();
-        let awaiter_id = *state
-            .awaiters
-            .keys()
-            .next()
+        let awaiter_id = state
+            .completion_sinks
+            .iter()
+            .find_map(|(id, sink)| matches!(sink, CompletionSink::Pipeline(_)).then_some(*id))
             .expect("offload must register an awaiter");
         assert_ne!(
             awaiter_id, swap_id,

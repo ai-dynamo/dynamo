@@ -124,6 +124,12 @@ impl KvbmOffloadConfig {
             }
             return Ok(None);
         };
+        let block_size_bytes = args.block_size.checked_mul(bpt).ok_or_else(|| {
+            anyhow::anyhow!(
+                "KV block byte size overflow: block_size={} kv_bytes_per_token={bpt}",
+                args.block_size
+            )
+        })?;
         let defaults = Self::default();
         let offload_batch_size = args
             .offload_batch_size
@@ -135,7 +141,7 @@ impl KvbmOffloadConfig {
             offload_batch_size,
             num_g3_blocks,
             enable_g4_storage,
-            block_size_bytes: Some(args.block_size * bpt),
+            block_size_bytes: Some(block_size_bytes),
             bandwidth_g1_to_g2_gbps: args
                 .bandwidth_g1_to_g2_gbps
                 .unwrap_or(defaults.bandwidth_g1_to_g2_gbps),
@@ -241,6 +247,19 @@ mod tests {
         assert_eq!(cfg.bandwidth_g3_to_g2_gbps, DEFAULT_G2_G3_BANDWIDTH_GBPS);
         assert_eq!(cfg.bandwidth_g2_to_g4_gbps, DEFAULT_G2_G4_BANDWIDTH_GBPS);
         assert_eq!(cfg.bandwidth_g4_to_g2_gbps, DEFAULT_G2_G4_BANDWIDTH_GBPS);
+    }
+
+    #[test]
+    fn from_args_rejects_block_byte_size_overflow() {
+        let args = MockEngineArgs::builder()
+            .block_size(usize::MAX)
+            .kv_bytes_per_token(Some(2))
+            .num_g2_blocks(Some(1))
+            .build()
+            .unwrap();
+
+        let error = KvbmOffloadConfig::from_args(&args).unwrap_err();
+        assert!(error.to_string().contains("KV block byte size overflow"));
     }
 
     #[test]
