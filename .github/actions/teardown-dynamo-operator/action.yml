@@ -1,5 +1,5 @@
 name: 'Teardown Dynamo Operator'
-description: 'Delete a vCluster and its dynamic host namespace'
+description: 'Delete a vCluster and its dynamic host namespace, preserving shared deploy-test namespaces'
 
 inputs:
   kubeconfig_base64:
