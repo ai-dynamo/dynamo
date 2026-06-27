@@ -307,26 +307,64 @@ async def test_nonpositive_cost_is_rejected():
 
 
 async def test_partial_batch_failure_fails_request_once_and_releases():
-    """A multi-item request split across buckets where one batch raises fails the
-    whole request exactly once and releases all of its admission — no item reaches
-    fn after the request is tombstoned (regression for premature per-request
-    finalize)."""
+    """A multi-item request split across buckets where the FIRST batch raises
+    fails the whole request exactly once, releases all of its admission, and the
+    later sibling item is tombstoned — it never reaches fn (regression for
+    premature per-request finalize + cancellation/error sync before fn)."""
+    seen: list = []
 
     def fn(items):
+        seen.extend(items)
         if "bad" in items:
             raise ValueError("boom")
         return [("r", x) for x in items]
 
+    # bucket_key=identity → "bad" and "good" are separate batches; "bad" is
+    # submitted first so its batch runs (and fails) before "good"'s.
     b = ThreadedMicroBatcher(
         fn, max_wait_ms=200.0, bucket_key=lambda i: i, max_outstanding_cost=10
     )
     b.start()
     try:
         with pytest.raises(ValueError, match="boom"):
-            await b.submit(["good", "bad"])  # two buckets → two batches
+            await b.submit(["bad", "good"])
         assert b._outstanding == 0
+        assert "good" not in seen  # tombstoned sibling never reached fn
     finally:
         b.shutdown()
+
+
+async def test_no_fn_after_shutdown_for_collected_items():
+    """Items pulled off the queue by _collect but not yet run must not reach fn
+    once shutdown begins; they fail with the shutdown error (regression for work
+    escaping the shutdown drain)."""
+    entered = threading.Event()
+    release = threading.Event()
+    seen: list = []
+
+    def fn(items):
+        seen.extend(items)
+        if "a" in items:
+            entered.set()
+            release.wait(timeout=5.0)
+        return [("r", x) for x in items]
+
+    # bucket_key=identity → one batch per item; all three are collected together,
+    # the "a" batch blocks in fn while shutdown() is called.
+    b = ThreadedMicroBatcher(fn, max_wait_ms=50.0, bucket_key=lambda i: i)
+    b.start()
+    task = asyncio.ensure_future(b.submit(["a", "b", "c"]))
+    for _ in range(200):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert entered.is_set()
+    b.shutdown()  # b, c are collected but not yet run
+    release.set()
+    with pytest.raises(RuntimeError, match="shut down"):
+        await task
+    assert seen == ["a"]  # b and c never reached fn
+    b.shutdown()
 
 
 def test_double_start_raises():

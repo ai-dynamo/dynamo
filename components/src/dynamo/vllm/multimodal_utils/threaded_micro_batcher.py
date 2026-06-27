@@ -181,12 +181,13 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 raise RuntimeError("ThreadedMicroBatcher.start() called twice")
             # Non-daemon: a clean stop is via shutdown(); a daemon worker could be
             # torn down mid-fn at interpreter exit. Pin daemon=False explicitly so
-            # it never inherits a daemon creator thread.
+            # it never inherits a daemon creator thread. Start it *under* the lock
+            # so _thread is only published once actually started — a racing
+            # shutdown() can never join() an unstarted thread.
             self._thread = threading.Thread(
                 target=self._run, name=self._name, daemon=False
             )
-            thread = self._thread
-        thread.start()
+            self._thread.start()
         self._ready.wait()
         if self._start_error is not None:
             # on_start ran on the thread, which then exited — mark closed so a
@@ -196,6 +197,9 @@ class ThreadedMicroBatcher(Generic[T, R]):
         with self._lock:
             if self._state is _State.NEW:
                 self._state = _State.RUNNING
+            elif self._state is not _State.RUNNING:
+                # a concurrent shutdown() closed us during startup
+                raise RuntimeError("ThreadedMicroBatcher shut down during start()")
 
     async def submit(self, items: List[T]) -> List[R]:
         """Submit a group of items; await one result per item, in order.
@@ -389,6 +393,18 @@ class ThreadedMicroBatcher(Generic[T, R]):
             else:
                 runnable.append(work)
         if not runnable:
+            return
+        # Once shutdown/failure has begun, do not START new fn calls: fail these
+        # collected-but-not-yet-run items with the shutdown error. The fn already
+        # in flight when shutdown() was called still finishes (it is past this
+        # check); this just bounds work after teardown intent to that one batch.
+        with self._lock:
+            stopping = self._state is not _State.RUNNING
+        if stopping:
+            for work in runnable:
+                self._consume(
+                    work, error=RuntimeError("ThreadedMicroBatcher shut down")
+                )
             return
         items = [w.item for w in runnable]
         try:
