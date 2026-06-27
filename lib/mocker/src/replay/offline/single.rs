@@ -401,6 +401,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(11)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
@@ -409,6 +410,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(22)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(101.0),
@@ -417,6 +419,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![9, 9, 9, 9, 8, 8, 8, 8],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(33)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(500.0),
@@ -859,6 +862,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(11)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(900.0),
@@ -867,6 +871,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1, 2, 3, 4, 5, 9, 10, 11],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(22)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(1000.0),
@@ -875,6 +880,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![12, 13, 14, 15, 16, 17, 18, 19],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(33)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
@@ -988,6 +994,7 @@ mod tests {
         DirectRequest {
             tokens: vec![1; 4],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(arrival_ms),

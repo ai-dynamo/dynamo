@@ -151,6 +151,11 @@ What the **runtime** does with the mode (Rust `Worker` in `lib/backend-common`):
 - `Decode` → keep `endpoint_types`, but force-disable
   `enable_local_indexer` (decode workers don't host the indexer endpoint).
 - `Aggregated` → register with the parsed `endpoint_types`.
+- `Encode` → register **surface-less** (`ModelType.empty()`) with
+  `WorkerType.Encode` and topology needs `[[Prefill, Decode], [Aggregated]]`,
+  so the discovery layer registers the worker for readiness only and hides it
+  from `/v1/models`. The Encode role is a multimodal encoder upstream of
+  P/D/Agg; backend-specific encoder implementations land separately.
 
 What the **engine** does with the mode (consumed in each backend's
 `generate()`):
@@ -164,6 +169,15 @@ What the **engine** does with the mode (consumed in each backend's
   loudly if missing (`require_prefill_result`), feed it into the
   engine's resume-from-KV-transfer call.
 - `Aggregated`: existing path, no branching.
+- `Encode`: produce the encoder handoff payload on the terminal chunk's
+  `encoder_result` (object-only) via `encoder_terminal_chunk`. The native
+  vLLM backend is text-only and rejects this role at startup.
+
+`route_to_encoder` (on `WorkerConfig`; CLI `--route-to-encoder` / env
+`DYN_ROUTE_TO_ENCODER`) makes an `Aggregated` or `Prefill` worker advertise an
+upstream `Encode` peer in its topology `needs`. It is meaningful only for
+agg/prefill — setting it on `Decode` or `Encode` is rejected at startup with
+`BackendError::InvalidArgument`.
 
 `is_quiescent()` lets a prefill worker exit the drain early once its KV
 transfers finish, before GPU memory is released. Engines that can't introspect

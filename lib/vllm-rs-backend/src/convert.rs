@@ -180,6 +180,15 @@ fn apply_disaggregation_mode(
                 .insert("kv_transfer_params".to_string(), kv_transfer_params);
         }
         DisaggregationMode::Aggregated => {} // do nothing
+        DisaggregationMode::Encode => {
+            // The Encode role is a multimodal encoder upstream of P/D/Agg.
+            // This native backend is text-only (multimodal execution payloads
+            // are rejected in `validate_request`), so an Encode worker is never
+            // a valid configuration here.
+            return Err(invalid_arg(
+                "encode disaggregation mode is not supported by the native vLLM backend",
+            ));
+        }
     }
 
     Ok(())

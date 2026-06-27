@@ -750,6 +750,7 @@ mod tests {
         DirectRequest {
             tokens: vec![token; input_tokens],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),

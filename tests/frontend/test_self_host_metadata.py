@@ -5,7 +5,8 @@
 
 Single-worker check: opt the mocker into self-host via
 `DYN_SELF_HOST_METADATA=true`, then `requests.get` the
-`/v1/metadata/{slug}/{suffix}/{filename}` route on the worker's own
+`/v1/metadata/{namespace}/{component}/{endpoint}/{slug}/{suffix}/{filename}`
+route on the worker's own
 `system_status_server`. No frontend resolution involved — this only
 exercises the worker producer + HTTP route shipped in PR1 (#8855).
 
@@ -72,8 +73,13 @@ def test_worker_serves_metadata_via_http(
 
         slug = _slugify(TEST_MODEL)
         suffix = "_base"  # BASE_SUFFIX in lib/runtime/src/metadata_registry.rs
+        # MockerWorkerProcess defaults: --component=sample, the rest pick up
+        # WorkerConfig defaults from lib/runtime — namespace=dynamo,
+        # endpoint=generate. The route is now keyed on the endpoint triple
+        # so the URL includes (namespace, component, endpoint).
+        base = f"http://localhost:{system_port}/v1/metadata/dynamo/sample/generate"
 
-        url = f"http://localhost:{system_port}/v1/metadata/{slug}/{suffix}/config.json"
+        url = f"{base}/{slug}/{suffix}/config.json"
         response = requests.get(url, timeout=10)
         assert (
             response.status_code == 200
@@ -87,7 +93,7 @@ def test_worker_serves_metadata_via_http(
 
         # Unknown filename under the same (slug, suffix) → 404.
         miss = requests.get(
-            f"http://localhost:{system_port}/v1/metadata/{slug}/{suffix}/missing.json",
+            f"{base}/{slug}/{suffix}/missing.json",
             timeout=5,
         )
         assert miss.status_code == 404, miss.text
@@ -96,9 +102,7 @@ def test_worker_serves_metadata_via_http(
         # Qwen3 HF snapshot (`vocab.json`) must also be served. Doubles
         # as a symlink-follow check — HF snapshot entries are symlinks
         # into `blobs/`, so a non-following stat would miss this file.
-        extra_url = (
-            f"http://localhost:{system_port}/v1/metadata/{slug}/{suffix}/vocab.json"
-        )
+        extra_url = f"{base}/{slug}/{suffix}/vocab.json"
         extra_response = requests.get(extra_url, timeout=10)
         assert (
             extra_response.status_code == 200
