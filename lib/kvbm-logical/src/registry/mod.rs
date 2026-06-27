@@ -43,6 +43,7 @@ use crate::{events::EventsManager, tinylfu::FrequencyTracker};
 
 use crate::blocks::SequenceHash;
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
 
 use handle::BlockRegistrationHandleInner;
@@ -248,6 +249,61 @@ impl BlockRegistry {
         self.touch(seq_hash);
 
         handle
+    }
+
+    /// Register a batch of sequence hashes in input order.
+    pub fn register_sequence_hashes(
+        &self,
+        seq_hashes: impl IntoIterator<Item = SequenceHash>,
+    ) -> Vec<BlockRegistrationHandle> {
+        let seq_hashes: Vec<_> = seq_hashes.into_iter().collect();
+        if seq_hashes.is_empty() {
+            return Vec::new();
+        }
+
+        let mut by_position = BTreeMap::<u64, Vec<(usize, SequenceHash)>>::new();
+        for (index, seq_hash) in seq_hashes.iter().copied().enumerate() {
+            by_position
+                .entry(seq_hash.position())
+                .or_default()
+                .push((index, seq_hash));
+        }
+
+        let mut registered = vec![None; seq_hashes.len()];
+        let mut newly_created = vec![false; seq_hashes.len()];
+        for hashes in by_position.into_values() {
+            let map = self.prt.prefix(&hashes[0].1);
+            for (index, seq_hash) in hashes {
+                let mut weak = map.entry(seq_hash).or_default();
+                let (inner, is_new) = match weak.upgrade() {
+                    Some(inner) => (inner, false),
+                    None => {
+                        let inner = self.create_registration(seq_hash);
+                        *weak = Arc::downgrade(&inner);
+                        (inner, true)
+                    }
+                };
+                registered[index] = Some(BlockRegistrationHandle::from_inner(inner));
+                newly_created[index] = is_new;
+            }
+        }
+
+        registered
+            .into_iter()
+            .zip(newly_created)
+            .map(|(handle, is_new)| {
+                let handle = handle.expect("every batched sequence hash must be registered");
+                if is_new {
+                    if let Some(event_manager) = &self.event_manager
+                        && let Err(e) = event_manager.on_block_registered(&handle)
+                    {
+                        tracing::warn!("Failed to register block with event manager: {}", e);
+                    }
+                    self.touch(handle.seq_hash());
+                }
+                handle
+            })
+            .collect()
     }
 
     /// Internal method for transferring block registration without triggering frequency tracking.

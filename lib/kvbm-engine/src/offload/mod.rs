@@ -108,7 +108,10 @@ mod cancel_tests;
 // Re-export public API
 pub use cancel::{CancelConfirmation, CancelState, CancellationToken};
 pub use engine::{OffloadEngine, OffloadEngineBuilder};
-pub use handle::{TransferHandle, TransferId, TransferResult, TransferStatus};
+pub use handle::{
+    TransferHandle, TransferId, TransferProgressCounts, TransferProgressCursor,
+    TransferProgressDelta, TransferResult, TransferStatus,
+};
 pub use pending::{PendingGuard, PendingTracker};
 pub use pipeline::{
     ObjectPipeline, ObjectPipelineBuilder, ObjectPipelineConfig, Pipeline, PipelineBuilder,

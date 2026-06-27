@@ -1457,16 +1457,17 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
             let end_xfer = Instant::now();
 
             // Register each transferred block in the destination tier
-            let registered_blocks: Vec<ImmutableBlock<Dst>> = dst_blocks
+            let completed_blocks = dst_blocks
                 .into_iter()
                 .zip(sequence_hashes.iter())
                 .map(|(dst_block, seq_hash)| {
-                    let complete = dst_block
+                    dst_block
                         .stage(*seq_hash, shared.dst_manager.block_size())
-                        .expect("block size mismatch");
-                    shared.dst_manager.register_block(complete)
+                        .expect("block size mismatch")
                 })
                 .collect();
+            let registered_blocks: Vec<ImmutableBlock<Dst>> =
+                shared.dst_manager.register_blocks(completed_blocks);
 
             let registration_timepoint = Instant::now();
 
@@ -1560,15 +1561,16 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
             let mut state_guard = state.lock().unwrap();
             state_guard.mark_completed(block_ids);
 
-            let total = state_guard.passed_blocks.len() + state_guard.filtered_out.len();
-            let done = state_guard.completed.len() + state_guard.filtered_out.len();
+            let progress = state_guard.progress_counts();
+            let total = progress.passed + state_guard.filtered_out.len();
+            let done = progress.completed + state_guard.filtered_out.len();
             tracing::debug!(
                 %transfer_id,
                 total,
                 done,
-                passed = state_guard.passed_blocks.len(),
+                passed = progress.passed,
                 filtered = state_guard.filtered_out.len(),
-                completed = state_guard.completed.len(),
+                completed = progress.completed,
                 "Transfer batch progress"
             );
             if done >= total && total > 0 {
@@ -1929,22 +1931,21 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
                 }
             }
 
-            let total = state_guard.passed_blocks.len() + state_guard.filtered_out.len();
-            let done = state_guard.completed.len()
-                + state_guard.failed.len()
-                + state_guard.filtered_out.len();
+            let progress = state_guard.progress_counts();
+            let total = progress.passed + state_guard.filtered_out.len();
+            let done = progress.settled() + state_guard.filtered_out.len();
             tracing::debug!(
                 %transfer_id,
                 total,
                 done,
-                passed = state_guard.passed_blocks.len(),
+                passed = progress.passed,
                 filtered = state_guard.filtered_out.len(),
-                completed = state_guard.completed.len(),
-                failed = state_guard.failed.len(),
+                completed = progress.completed,
+                failed = progress.failed,
                 "Object transfer batch progress"
             );
             if done >= total && total > 0 {
-                let failed_count = state_guard.failed.len();
+                let failed_count = progress.failed;
                 if failed_count == 0 {
                     state_guard.set_complete();
                 } else {
@@ -2094,8 +2095,8 @@ mod tests {
 
         // Verify: block 20 (hash_fail) should be in failed, not completed
         let state_guard = state_arc.lock().unwrap();
-        assert_eq!(state_guard.completed, vec![10, 30]);
-        assert_eq!(state_guard.failed, vec![20]);
+        assert_eq!(handle.completed_blocks(), vec![10, 30]);
+        assert_eq!(handle.failed_blocks(), vec![20]);
         assert_eq!(state_guard.in_flight.len(), 0);
         assert_eq!(state_guard.status, TransferStatus::Failed);
         assert!(state_guard.error.is_some());
@@ -2162,8 +2163,8 @@ mod tests {
             .expect("execute_transfer should succeed");
 
         let state_guard = state_arc.lock().unwrap();
-        assert_eq!(state_guard.completed, vec![10, 20]);
-        assert!(state_guard.failed.is_empty());
+        assert_eq!(handle.completed_blocks(), vec![10, 20]);
+        assert!(handle.failed_blocks().is_empty());
         assert_eq!(state_guard.status, TransferStatus::Complete);
 
         drop(state_guard);
@@ -2253,8 +2254,8 @@ mod tests {
 
         // Transfer A: block 100 succeeded, block 200 failed
         let sa = state_a_arc.lock().unwrap();
-        assert_eq!(sa.completed, vec![100]);
-        assert_eq!(sa.failed, vec![200]);
+        assert_eq!(handle_a.completed_blocks(), vec![100]);
+        assert_eq!(handle_a.failed_blocks(), vec![200]);
         assert_eq!(sa.status, TransferStatus::Failed);
         assert!(sa.error.is_some());
         drop(sa);
@@ -2264,8 +2265,8 @@ mod tests {
 
         // Transfer B: both succeeded
         let sb = state_b_arc.lock().unwrap();
-        assert_eq!(sb.completed, vec![300, 400]);
-        assert!(sb.failed.is_empty());
+        assert_eq!(handle_b.completed_blocks(), vec![300, 400]);
+        assert!(handle_b.failed_blocks().is_empty());
         assert_eq!(sb.status, TransferStatus::Complete);
         drop(sb);
 
