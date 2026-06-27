@@ -31,7 +31,7 @@ use kvbm_engine::worker::{
 use kvbm_engine::{BlockId, InstanceId, SequenceHash};
 use kvbm_physical::manager::{LayoutHandle, SerializedLayout};
 use kvbm_physical::transfer::{PhysicalLayout, TransferCompleteNotification, TransferOptions};
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use velo::{Event, EventManager};
 
 use super::bandwidth_sharing_model::{BandwidthSharingModel, TransferId};
@@ -369,10 +369,7 @@ pub struct MockWorker {
     /// `reserve_transfer`. Offline replay uses this as a concrete barrier:
     /// enqueue should not let virtual time jump until the worker has
     /// actually reserved the simulated bandwidth slot.
-    reservation_count: AtomicU64,
-    /// Wakes offline barriers waiting for the kvbm-engine pipeline to
-    /// reserve simulated bandwidth after an enqueue.
-    reservation_notify: Arc<Notify>,
+    reservation_count_tx: watch::Sender<u64>,
     /// Bytes per block — used to derive transfer size from block-id counts.
     block_bytes: usize,
     g1_handle: Option<LayoutHandle>,
@@ -403,8 +400,7 @@ impl MockWorker {
             now_us: Arc::new(AtomicU64::new(0)),
             state: Arc::new(Mutex::new(TransferState::new(offload_gbps, onboard_gbps))),
             event_manager: EventManager::local(),
-            reservation_count: AtomicU64::new(0),
-            reservation_notify: Arc::new(Notify::new()),
+            reservation_count_tx: watch::channel(0).0,
             block_bytes,
             g1_handle,
             g2_handle,
@@ -426,11 +422,11 @@ impl MockWorker {
     }
 
     pub fn reservation_count(&self) -> u64 {
-        self.reservation_count.load(Ordering::Acquire)
+        *self.reservation_count_tx.borrow()
     }
 
-    pub(crate) fn reservation_notifier(&self) -> Arc<Notify> {
-        self.reservation_notify.clone()
+    pub(crate) fn subscribe_reservation_count(&self) -> watch::Receiver<u64> {
+        self.reservation_count_tx.subscribe()
     }
 
     /// Advance both models to `now_ms` under PS and notify any
@@ -524,6 +520,11 @@ impl MockWorker {
     pub(crate) fn is_local_offload_active(&self, transfer_id: TransferId) -> bool {
         let state = self.state.lock().expect("TransferState mutex poisoned");
         state.is_offload_active(transfer_id)
+    }
+
+    pub(crate) fn local_offload_active_count(&self) -> usize {
+        let state = self.state.lock().expect("TransferState mutex poisoned");
+        state.offload_bw.active_count()
     }
 
     pub(crate) fn earliest_shared_g3_offload_finish(&self) -> Option<f64> {
@@ -622,8 +623,9 @@ impl MockWorker {
             next_deadline_ms = ?next_deadline_ms,
             "kvbm-offload: reserve mock transfer"
         );
-        self.reservation_count.fetch_add(1, Ordering::AcqRel);
-        self.reservation_notify.notify_waiters();
+        self.reservation_count_tx.send_modify(|count| {
+            *count = count.checked_add(1).expect("reservation count overflow");
+        });
 
         // Allocate a velo event + awaiter. Store the `Event` so we can
         // `trigger()` it later (triggering consumes `self`).
@@ -923,6 +925,18 @@ mod tests {
         )
     }
 
+    fn reserve_shared_g3(worker: &MockWorker, blocks: usize) {
+        let shared_g3 = worker
+            .shared_g3
+            .as_ref()
+            .expect("test worker should have shared G3");
+        assert!(
+            shared_g3
+                .capacity_reservations()
+                .try_reserve(shared_g3.manager().available_blocks(), blocks)
+        );
+    }
+
     fn shared_g4_worker() -> (MockWorker, Arc<SharedG4Store>) {
         let config = KvbmOffloadConfig {
             enable_g4_storage: true,
@@ -1078,6 +1092,7 @@ mod tests {
         let _guard = shared_g3_test_guard().await;
         let (worker_a, worker_b) = shared_g3_two_workers();
         let ids = || -> Arc<[BlockId]> { Arc::from(vec![0usize]) };
+        reserve_shared_g3(&worker_a, 2);
 
         worker_a.set_now_ms(0.0);
         worker_b.set_now_ms(0.0);
@@ -1124,6 +1139,7 @@ mod tests {
         let _guard = shared_g3_test_guard().await;
         let (worker_a, worker_b) = shared_g3_two_workers();
         let ids = || -> Arc<[BlockId]> { Arc::from(vec![0usize]) };
+        reserve_shared_g3(&worker_a, 2);
 
         worker_a.set_now_ms(0.0);
         let a = worker_a
@@ -1164,6 +1180,7 @@ mod tests {
         let _guard = shared_g3_test_guard().await;
         let (worker_a, worker_b) = shared_g3_two_workers();
         let ids = || -> Arc<[BlockId]> { Arc::from(vec![0usize]) };
+        reserve_shared_g3(&worker_b, 1);
 
         worker_a.set_now_ms(0.0);
         let a = worker_a

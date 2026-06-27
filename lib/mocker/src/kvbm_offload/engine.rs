@@ -55,8 +55,8 @@ use super::shared_g3::SharedG3Pool;
 use super::shared_g4::SharedG4Store;
 use super::worker::MockWorker;
 
-// Successful offline barriers wake via kvbm-engine watch channels or the
-// mock worker's Notify. The timeout is only a hang guard for pipeline bugs.
+// Successful offline barriers wake via watch channels. The timeout is only a
+// hang guard for pipeline bugs.
 const PIPELINE_BARRIER_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy)]
@@ -658,13 +658,11 @@ impl MockOffloadEngine {
         target_reservation_count: u64,
         blocker: ReservationBlocker,
     ) -> bool {
-        let reservation_notify = self.worker.reservation_notifier();
+        let mut reservation_count = self.worker.subscribe_reservation_count();
         let mut status = handle.subscribe_status();
         self.wait_on_attached_runtime(async move {
             loop {
-                if handle.is_complete()
-                    || self.worker.reservation_count() >= target_reservation_count
-                {
+                if handle.is_complete() || *reservation_count.borrow() >= target_reservation_count {
                     return true;
                 }
                 // Active transfers mean this enqueue may be backpressured
@@ -672,7 +670,8 @@ impl MockOffloadEngine {
                 // virtual time to that deadline, not spend wall time waiting.
                 let blocked_by_active_transfer = match blocker {
                     ReservationBlocker::LocalOffload => {
-                        self.worker.earliest_local_offload_finish().is_some()
+                        self.worker.local_offload_active_count()
+                            >= self.config.offload_batch_size.max(1)
                     }
                     ReservationBlocker::SharedG3Offload => {
                         self.worker.earliest_shared_g3_offload_finish().is_some()
@@ -685,7 +684,11 @@ impl MockOffloadEngine {
                     return false;
                 }
                 tokio::select! {
-                    _ = reservation_notify.notified() => {}
+                    changed = reservation_count.changed() => {
+                        if changed.is_err() {
+                            return false;
+                        }
+                    }
                     changed = status.changed() => {
                         if changed.is_err() {
                             return false;
@@ -749,16 +752,18 @@ impl MockOffloadEngine {
         result: &FindMatchesResult,
         reservation_count_before: u64,
     ) -> bool {
-        let reservation_notify = self.worker.reservation_notifier();
+        let mut reservation_count = self.worker.subscribe_reservation_count();
         let wait = result.wait_for_completion();
         self.wait_on_attached_runtime(async move {
             tokio::select! {
                 reserved = async {
                     loop {
-                        if self.worker.reservation_count() > reservation_count_before {
+                        if *reservation_count.borrow() > reservation_count_before {
                             return true;
                         }
-                        reservation_notify.notified().await;
+                        if reservation_count.changed().await.is_err() {
+                            return false;
+                        }
                     }
                 } => reserved,
                 completed = wait => completed.is_ok(),
@@ -937,7 +942,11 @@ impl MockOffloadEngine {
         let transfer_batch_size = self.config.offload_batch_size.max(1);
         // The pipeline builder wires max_concurrent_transfers to the same
         // config knob as batch_size for this mocker-only G1→G2 pipeline.
-        let max_concurrent_transfer_batches = self.config.offload_batch_size.max(1);
+        let max_concurrent_transfer_batches = self
+            .config
+            .offload_batch_size
+            .max(1)
+            .saturating_sub(self.worker.local_offload_active_count());
         passed_blocks
             .div_ceil(transfer_batch_size)
             .min(max_concurrent_transfer_batches)
@@ -1263,7 +1272,7 @@ impl MockOffloadEngine {
             .collect();
         let mut offload_block_ids: Vec<_> = pending
             .iter()
-            .flat_map(|transfer| transfer.g2_to_lower_chain_blocks.keys().copied())
+            .flat_map(|transfer| transfer.handle.passed_blocks())
             .collect();
         source_slot_ids.sort_unstable();
         offload_block_ids.sort_unstable();
