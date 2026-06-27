@@ -61,7 +61,9 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         if scheduler_stats is None:
             return
 
-        active_decode_blocks = int(self.num_gpu_block * scheduler_stats.kv_cache_usage)
+        # Clamp >=0: an offloading KV connector can drive kv_cache_usage negative,
+        # and publish() rejects negative kv_used_blocks (unsigned) -> engine crash.
+        active_decode_blocks = max(0, int(self.num_gpu_block * scheduler_stats.kv_cache_usage))
         self.inner.publish(self.dp_rank, kv_used_blocks=active_decode_blocks)
 
         dp_rank_str = str(self.dp_rank)
