@@ -362,6 +362,7 @@ class SampleUnifiedWorkerProcess(ManagedProcess):
         worker_id: str = "sample-worker",
         extra_args: list | None = None,
         extra_env: dict | None = None,
+        wait_for_frontend_model: bool = True,
     ):
         self.worker_id = worker_id
         self.frontend_port = frontend_port
@@ -395,13 +396,25 @@ class SampleUnifiedWorkerProcess(ManagedProcess):
         except FileNotFoundError:
             pass
 
+        # In disaggregated mode a single worker (prefill OR decode alone) never
+        # makes the model appear on /v1/models — the frontend only publishes it
+        # once the full prefill+decode set registers (decode-completeness gate).
+        # So callers starting workers one at a time must gate each worker on its
+        # own system /health and defer the model-served check to
+        # wait_for_http_completions_ready after the whole set is up.
+        health_check_urls = [
+            (f"http://localhost:{system_port}/health", self.is_ready),
+        ]
+        if wait_for_frontend_model:
+            health_check_urls.insert(
+                0,
+                (f"http://localhost:{frontend_port}/v1/models", self._check_models_api),
+            )
+
         super().__init__(
             command=command,
             env=env,
-            health_check_urls=[
-                (f"http://localhost:{frontend_port}/v1/models", self._check_models_api),
-                (f"http://localhost:{system_port}/health", self.is_ready),
-            ],
+            health_check_urls=health_check_urls,
             timeout=120,
             display_output=True,
             terminate_all_matching_process_names=False,

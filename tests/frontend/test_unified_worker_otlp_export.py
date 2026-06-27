@@ -417,6 +417,11 @@ def test_disagg_decode_span_links_to_prefill_span(
             disaggregation_mode="prefill",
             extra_env=otel_env,
             worker_id="sample-prefill",
+            # Disagg: the model isn't published to /v1/models until BOTH prefill
+            # and decode register, and decode starts only after this worker is
+            # ready. Gate on its own /health and let wait_for_http_completions_ready
+            # (after both are up) confirm the model is served — else deadlock.
+            wait_for_frontend_model=False,
         ):
             with SampleUnifiedWorkerProcess(
                 request,
@@ -427,6 +432,7 @@ def test_disagg_decode_span_links_to_prefill_span(
                 disaggregation_mode="decode",
                 extra_env=otel_env,
                 worker_id="sample-decode",
+                wait_for_frontend_model=False,
             ):
                 wait_for_http_completions_ready(
                     frontend_port=frontend_port, model=TEST_MODEL
