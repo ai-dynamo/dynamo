@@ -304,6 +304,19 @@ impl<T> PendingDestinations<T> {
         Some((handoff_id, pending.request_id, &pending.payload))
     }
 
+    pub(crate) fn front_due_mut(&mut self, generation: u64) -> Option<(HandoffId, Uuid, &mut T)> {
+        self.normalize_front();
+        let handoff_id = *self.fifo.front()?;
+        let pending = self
+            .by_handoff
+            .get_mut(&handoff_id)
+            .expect("normalized pending destination must exist");
+        if pending.last_attempt_generation == Some(generation) {
+            return None;
+        }
+        Some((handoff_id, pending.request_id, &mut pending.payload))
+    }
+
     pub(crate) fn mark_front_attempted(&mut self, generation: u64) {
         self.normalize_front();
         let Some(handoff_id) = self.fifo.front() else {

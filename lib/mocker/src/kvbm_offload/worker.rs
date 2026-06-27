@@ -233,6 +233,18 @@ impl TransferState {
         self.offload_bw.earliest_finish()
     }
 
+    pub(crate) fn earliest_offload_finish_with_id(&self) -> Option<(TransferId, f64)> {
+        self.offload_bw.earliest_finish_with_id()
+    }
+
+    pub(crate) fn offload_deadline_for(&self, transfer_id: TransferId) -> Option<f64> {
+        self.offload_bw.deadline_for(transfer_id)
+    }
+
+    pub(crate) fn is_offload_active(&self, transfer_id: TransferId) -> bool {
+        self.offload_bw.is_active(transfer_id)
+    }
+
     pub(crate) fn earliest_onboard_finish(&self) -> Option<f64> {
         self.onboard_bw.earliest_finish()
     }
@@ -497,6 +509,21 @@ impl MockWorker {
     pub(crate) fn earliest_local_offload_finish(&self) -> Option<f64> {
         let state = self.state.lock().expect("TransferState mutex poisoned");
         state.earliest_offload_finish()
+    }
+
+    pub(crate) fn earliest_local_offload_finish_with_id(&self) -> Option<(TransferId, f64)> {
+        let state = self.state.lock().expect("TransferState mutex poisoned");
+        state.earliest_offload_finish_with_id()
+    }
+
+    pub(crate) fn local_offload_deadline_for(&self, transfer_id: TransferId) -> Option<f64> {
+        let state = self.state.lock().expect("TransferState mutex poisoned");
+        state.offload_deadline_for(transfer_id)
+    }
+
+    pub(crate) fn is_local_offload_active(&self, transfer_id: TransferId) -> bool {
+        let state = self.state.lock().expect("TransferState mutex poisoned");
+        state.is_offload_active(transfer_id)
     }
 
     pub(crate) fn earliest_shared_g3_offload_finish(&self) -> Option<f64> {

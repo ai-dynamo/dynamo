@@ -17,6 +17,7 @@ use crate::common::protocols::{
     OutputSignal, PreemptionMode, RawKvEvent, RawKvEventSink,
 };
 use crate::common::sequence::ActiveSequence;
+use crate::kv_manager::kvbm_backend::G1Acquire;
 use crate::scheduler::SchedulerHandle;
 use crate::scheduler::test_utils::{RouterIndexerHarness, removed_event_count, stored_hashes};
 use crate::scheduler::{
@@ -1209,7 +1210,10 @@ mod core_behavior {
         let mut sequence = ActiveSequence::new((0..6).collect(), 16, Some(4), true, false);
 
         let signal = sequence.take_creation_signal().unwrap();
-        assert_eq!(core.kv_manager.process(&signal), 2);
+        assert!(matches!(
+            core.kv_manager.process(&signal),
+            G1Acquire::Ready(2)
+        ));
         for _ in 0..6 {
             let signals = sequence.generate();
             for signal in &signals {
@@ -1227,7 +1231,10 @@ mod core_behavior {
         let prompt_only = sequence
             .prepare_allocation(sequence.num_input_tokens())
             .unwrap();
-        assert_eq!(core.kv_manager.process(&prompt_only), 2);
+        assert!(matches!(
+            core.kv_manager.process(&prompt_only),
+            G1Acquire::Ready(2)
+        ));
         sequence.commit_allocation(sequence.num_input_tokens());
 
         core.state.insert_running_for_test(uuid);
@@ -1238,6 +1245,7 @@ mod core_behavior {
                 status: RequestStatus::Running,
                 num_computed_tokens: 9,
                 num_preemptions: 1,
+                offload_dependency: None,
             },
         );
 
@@ -2431,14 +2439,16 @@ mod offload {
     use uuid::Uuid;
 
     use crate::common::handoff::HandoffId;
-    use crate::common::protocols::{DirectRequest, MockEngineArgs, MoveBlock};
+    use crate::common::protocols::{DirectRequest, MockEngineArgs, MoveBlock, WorkerType};
+    use crate::common::sequence::ActiveSequence;
+    use crate::kv_manager::kvbm_backend::G1Acquire;
     use crate::kvbm_offload::shared_g3::shared_g3_test_guard_blocking;
     use crate::kvbm_offload::{KvbmOffloadConfig, MockOffloadEngine};
     use crate::scheduler::{
         LiveBoundaryCore, SchedulerCommand, SchedulerCommandResult, SchedulerLifecycleEvent,
     };
 
-    use super::super::core::VllmCore;
+    use super::super::core::{RequestStatus, VllmCore, VllmRequestState};
 
     /// Seed `g2` with each PLH by allocating a fresh slot, staging,
     /// registering, and dropping — so the block lands in the inactive
@@ -2459,6 +2469,229 @@ mod offload {
             let staged = mutable.stage(*plh, g3.block_size()).expect("G3 stage");
             drop(g3.register_block(staged));
         }
+    }
+
+    fn insert_running_request(
+        core: &mut VllmCore,
+        uuid: Uuid,
+        tokens: Vec<u32>,
+        max_output_tokens: usize,
+    ) {
+        let mut sequence = ActiveSequence::new(
+            tokens,
+            max_output_tokens,
+            Some(core.args.block_size),
+            false,
+            false,
+        );
+        let signal = sequence
+            .prepare_allocation(sequence.len())
+            .expect("running test request must need initial KV");
+        assert!(matches!(
+            core.kv_manager.process(&signal),
+            G1Acquire::Ready(_)
+        ));
+        sequence.commit_allocation(sequence.len());
+        let num_computed_tokens = sequence.len();
+        core.state.insert_running_for_test(uuid);
+        core.state.requests.insert(
+            uuid,
+            VllmRequestState {
+                sequence,
+                status: RequestStatus::Running,
+                num_computed_tokens,
+                num_preemptions: 0,
+                offload_dependency: None,
+            },
+        );
+    }
+
+    fn seed_inactive_g1_block(core: &mut VllmCore) {
+        let mut sequence = ActiveSequence::new(
+            (10_000..10_004).collect(),
+            1,
+            Some(core.args.block_size),
+            false,
+            false,
+        );
+        let signal = sequence
+            .prepare_allocation(sequence.len())
+            .expect("cache seed must need initial KV");
+        assert!(matches!(
+            core.kv_manager.process(&signal),
+            G1Acquire::Ready(1)
+        ));
+        sequence.commit_allocation(sequence.len());
+        for signal in sequence.free_signal() {
+            assert!(matches!(
+                core.kv_manager.process(&signal),
+                G1Acquire::Ready(_)
+            ));
+        }
+        assert_eq!(core.kv_manager.num_inactive_blocks(), 1);
+    }
+
+    fn attach_g1_offload_engine(core: &mut VllmCore) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut engine = runtime
+            .block_on(MockOffloadEngine::new(KvbmOffloadConfig {
+                block_size_tokens: core.args.block_size,
+                block_size_bytes: Some(1_000_000),
+                bandwidth_g1_to_g2_gbps: 1.0,
+                offload_batch_size: 4,
+                ..Default::default()
+            }))
+            .expect("engine build");
+        engine.tick(0.0);
+        engine.attach_runtime(runtime);
+        core.kv_manager.attach_new_offload_engine(engine);
+    }
+
+    #[test]
+    fn decode_growth_waits_without_preempting() {
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(3)
+            .block_size(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .worker_type(WorkerType::Decode)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        seed_inactive_g1_block(&mut core);
+
+        let blocked = Uuid::from_u128(701);
+        let unrelated = Uuid::from_u128(702);
+        insert_running_request(&mut core, blocked, (0..4).collect(), 8);
+        insert_running_request(&mut core, unrelated, (100..102).collect(), 8);
+        attach_g1_offload_engine(&mut core);
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let blocked_pass = core.execute_pass(&mut collector, 0.0);
+        assert!(
+            blocked_pass
+                .output_signals
+                .iter()
+                .all(|signal| signal.uuid != blocked),
+            "the blocked decode token must not be emitted"
+        );
+        assert!(
+            blocked_pass
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == unrelated),
+            "the unrelated running request should continue"
+        );
+        let blocked_state = core.state.requests.get(&blocked).unwrap();
+        assert_eq!(blocked_state.sequence.generated_tokens(), 0);
+        assert_eq!(blocked_state.sequence.num_allocated_tokens(), 4);
+        assert_eq!(blocked_state.num_computed_tokens, 4);
+        let dependency = blocked_state
+            .offload_dependency
+            .expect("decode growth must retain its exact offload dependency");
+        assert!(dependency.transfer_id.is_some());
+        let deadline = dependency
+            .deadline_ms
+            .expect("active offload dependency must expose a virtual deadline");
+        let unrelated_state = core.state.requests.get(&unrelated).unwrap();
+        assert_eq!(unrelated_state.status, RequestStatus::Running);
+        assert_eq!(unrelated_state.num_preemptions, 0);
+        assert_eq!(core.state.preemptions_total, 0);
+
+        core.tick_offload_only(deadline);
+        let resumed = core.execute_pass(&mut collector, deadline);
+        assert!(
+            resumed
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == blocked),
+            "decode must resume after its exact offload dependency terminates"
+        );
+        let blocked_state = core.state.requests.get(&blocked).unwrap();
+        assert_eq!(blocked_state.sequence.generated_tokens(), 1);
+        assert_eq!(blocked_state.sequence.num_allocated_tokens(), 5);
+        assert!(blocked_state.offload_dependency.is_none());
+        assert_eq!(core.state.preemptions_total, 0);
+    }
+
+    #[test]
+    fn speculative_decode_reservation_waits_without_preempting() {
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(5)
+            .block_size(4)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(false)
+            .worker_type(WorkerType::Decode)
+            .speedup_ratio(0.0)
+            .aic_nextn(Some(5))
+            .aic_nextn_accept_rates(Some("1,1,1,1,1".to_string()))
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        seed_inactive_g1_block(&mut core);
+
+        let blocked = Uuid::from_u128(711);
+        let unrelated = Uuid::from_u128(712);
+        insert_running_request(&mut core, blocked, (0..4).collect(), 8);
+        insert_running_request(&mut core, unrelated, (100..102).collect(), 8);
+        attach_g1_offload_engine(&mut core);
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let blocked_pass = core.execute_pass(&mut collector, 0.0);
+        assert!(
+            blocked_pass.output_signals.is_empty(),
+            "speculative generation must not begin before full-burst reservation"
+        );
+        for uuid in [blocked, unrelated] {
+            let request = core.state.requests.get(&uuid).unwrap();
+            assert_eq!(request.sequence.generated_tokens(), 0);
+            assert_eq!(request.num_preemptions, 0);
+            assert_eq!(request.status, RequestStatus::Running);
+            assert!(request.offload_dependency.is_some());
+        }
+        let dependency = core.state.requests[&blocked]
+            .offload_dependency
+            .expect("speculative reservation must retain its exact dependency");
+        assert!(dependency.transfer_id.is_some());
+        let deadline = dependency
+            .deadline_ms
+            .expect("active offload dependency must expose a virtual deadline");
+        assert_eq!(core.state.preemptions_total, 0);
+
+        core.tick_offload_only(deadline);
+        let resumed = core.execute_pass(&mut collector, deadline);
+        assert_eq!(
+            resumed
+                .output_signals
+                .iter()
+                .filter(|signal| signal.uuid == blocked)
+                .count(),
+            6
+        );
+        assert_eq!(
+            resumed
+                .output_signals
+                .iter()
+                .filter(|signal| signal.uuid == unrelated)
+                .count(),
+            6
+        );
+        for uuid in [blocked, unrelated] {
+            let request = core.state.requests.get(&uuid).unwrap();
+            assert_eq!(request.sequence.generated_tokens(), 6);
+            assert_eq!(request.num_preemptions, 0);
+            assert!(request.offload_dependency.is_none());
+        }
+        assert_eq!(core.state.preemptions_total, 0);
     }
 
     /// Pass entry must call `tick_offload_engine` when an engine is
@@ -2894,8 +3127,14 @@ mod offload {
             MoveBlock::Use(blocks, ..) => blocks.clone(),
             _ => panic!("expected prefix Use signal"),
         };
-        assert_eq!(core.kv_manager.process(&prefix_signal), 2);
-        assert_eq!(core.kv_manager.process(&MoveBlock::Deref(prefix_blocks)), 1);
+        assert!(matches!(
+            core.kv_manager.process(&prefix_signal),
+            G1Acquire::Ready(2)
+        ));
+        assert!(matches!(
+            core.kv_manager.process(&MoveBlock::Deref(prefix_blocks)),
+            G1Acquire::Ready(1)
+        ));
 
         assert_eq!(plhs.len(), 3, "test request should have three full blocks");
         seed_g2_blocks(engine.g2_manager(), &plhs[2..]);
@@ -2966,8 +3205,14 @@ mod offload {
             MoveBlock::Use(blocks, ..) => blocks.clone(),
             _ => panic!("expected prefix Use signal"),
         };
-        assert_eq!(core.kv_manager.process(&prefix_signal), 2);
-        assert_eq!(core.kv_manager.process(&MoveBlock::Deref(prefix_blocks)), 1);
+        assert!(matches!(
+            core.kv_manager.process(&prefix_signal),
+            G1Acquire::Ready(2)
+        ));
+        assert!(matches!(
+            core.kv_manager.process(&MoveBlock::Deref(prefix_blocks)),
+            G1Acquire::Ready(1)
+        ));
         seed_g2_blocks(engine.g2_manager(), &plhs[2..]);
         core.kv_manager.attach_new_offload_engine(engine);
 

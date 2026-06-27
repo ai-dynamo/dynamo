@@ -47,6 +47,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::common::protocols::G1 as MockerG1;
 
+use super::bandwidth_sharing_model::TransferId;
 use super::capacity_reservation::{
     CapacityReservationGuard, CapacityReservationPolicy, CapacityReservations,
 };
@@ -215,6 +216,17 @@ pub(crate) struct G2OffloadBlock {
 pub(crate) enum G2RouterEvent {
     Stored(G2BlockEventMetadata),
     Removed { seq_hash: RouterSequenceHash },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum G1EvictionOutcome {
+    BlockedOnOffload {
+        transfer_id: Option<TransferId>,
+        deadline_ms: Option<f64>,
+    },
+    RetryNow {
+        released_slots: usize,
+    },
 }
 
 struct PendingG1ToG2 {
@@ -977,6 +989,16 @@ impl MockOffloadEngine {
     /// Number of G1→G2 transfer batches that an idle pipeline can reserve
     /// immediately for this enqueue.
     ///
+    /// NOTE: The mock pipeline currently combines a real Tokio async
+    /// concurrency gate with synchronous virtual-time driving. After a
+    /// transfer releases its permit, the successor batch may not reserve
+    /// bandwidth until Tokio schedules it, temporarily leaving a nonterminal
+    /// handle without a modeled deadline. This known modeling defect is
+    /// intentionally preserved and deferred in this change. Future work must
+    /// either model permit handoff as deterministic virtual state or
+    /// deliberately remove the concurrency gate. Do not repair this at replay
+    /// level with sleeps, spins, fake completion, or synthetic virtual time.
+    ///
     /// Offline replay needs those immediate reservations to observe the
     /// enqueue's current virtual `now_ms`; otherwise the kvbm-engine task may
     /// first run after the scheduler advances time and stamp the transfer too
@@ -998,12 +1020,20 @@ impl MockOffloadEngine {
 
     /// Drop pending entries whose source slots are safe to release; the
     /// `Vec<MutableBlock<MockerG1>>` Drop returns the G1 slots to the pool.
-    fn prune_releasable_g1_to_g2_sources(&self) {
+    fn prune_releasable_g1_to_g2_sources(&self) -> usize {
         let mut pending = self
             .pending_g1_to_g2
             .lock()
             .expect("pending G1→G2 handles mutex poisoned");
-        pending.retain(|pending| !pending.source_slots_releasable());
+        let mut released = 0usize;
+        pending.retain(|pending| {
+            let releasable = pending.source_slots_releasable();
+            if releasable {
+                released += pending.source_slots.len();
+            }
+            !releasable
+        });
+        released
     }
 
     fn release_completed_g1_to_g2_sources(&self) -> usize {
@@ -1028,7 +1058,6 @@ impl MockOffloadEngine {
         for pending in pending.iter_mut() {
             chain_blocks.extend(pending.collect_completed_chain_blocks());
         }
-        pending.retain(|pending| !pending.source_slots_releasable());
         chain_blocks
     }
 
@@ -1144,7 +1173,7 @@ impl MockOffloadEngine {
     /// G3/G4 are modeled by process-local shared resources hanging off the
     /// worker, so lower-tier transfers contend globally while G1↔G2 remains
     /// worker-local.
-    pub fn tick(&self, now_ms: f64) {
+    pub fn tick(&self, now_ms: f64) -> usize {
         self.worker.set_now_ms(now_ms);
         let g2_registrations_before = Self::tier_registrations(&self.g2_manager);
         let g3_registrations_before = self
@@ -1183,10 +1212,12 @@ impl MockOffloadEngine {
             );
         }
 
+        let mut released_g1_source_slots = 0usize;
         if offload_drained_blocks > 0 {
             self.g2_destination_reservations
                 .release(offload_drained_blocks);
             let released_source_slots = self.release_completed_g1_to_g2_sources();
+            released_g1_source_slots += released_source_slots;
             tracing::debug!(
                 now_ms,
                 offload_drained_blocks,
@@ -1228,6 +1259,7 @@ impl MockOffloadEngine {
             }
         }
         let g2_to_lower_chain_blocks = self.collect_g2_to_lower_chain_blocks();
+        released_g1_source_slots += self.prune_releasable_g1_to_g2_sources();
 
         if !g2_to_lower_chain_blocks.is_empty()
             && (self.g3_manager.is_some() || self.shared_g4.is_some())
@@ -1292,6 +1324,7 @@ impl MockOffloadEngine {
         self.cleanup_g2_to_g3_pending_handles();
         self.cleanup_g2_to_g4_pending_handles();
         self.pump_pending_staged_swap_ins(now_ms);
+        released_g1_source_slots
     }
 
     /// Earliest transfer completion that can change offload-visible state.
@@ -1305,6 +1338,26 @@ impl MockOffloadEngine {
         self.worker.earliest_finish()
     }
 
+    pub(crate) fn deadline_for_g1_offload(&self, transfer_id: TransferId) -> Option<f64> {
+        self.worker.local_offload_deadline_for(transfer_id)
+    }
+
+    pub(crate) fn is_g1_offload_active(&self, transfer_id: TransferId) -> bool {
+        self.worker.is_local_offload_active(transfer_id)
+    }
+
+    pub(crate) fn current_g1_offload_dependency(&self) -> Option<(TransferId, f64)> {
+        self.worker.earliest_local_offload_finish_with_id()
+    }
+
+    pub(crate) fn has_nonterminal_g1_pipeline(&self) -> bool {
+        let pending = self
+            .pending_g1_to_g2
+            .lock()
+            .expect("pending G1→G2 handles mutex poisoned");
+        pending.iter().any(|pending| !pending.handle.is_complete())
+    }
+
     /// Enqueue a burst of G1→G2 evictions with router metadata that will be
     /// used to publish HostPinned-tier events when G2 lifecycle notifications
     /// arrive.
@@ -1313,17 +1366,17 @@ impl MockOffloadEngine {
         evicted: &[G2OffloadBlock],
         source_slots: Vec<MutableBlock<MockerG1>>,
         now_ms: Option<f64>,
-    ) {
+    ) -> Option<G1EvictionOutcome> {
         if evicted.is_empty() {
             drop(source_slots);
-            return;
+            return None;
         }
         self.remember_g2_event_metadata(evicted);
         let engine_blocks: Vec<_> = evicted
             .iter()
             .map(|block| (block.block_id, block.plh))
             .collect();
-        self.enqueue_g1_evictions_holding_sources(&engine_blocks, source_slots, now_ms);
+        self.enqueue_g1_evictions_holding_sources(&engine_blocks, source_slots, now_ms)
     }
 
     /// Enqueue a burst of G1→G2 evictions and hold the reset source slots
@@ -1333,9 +1386,10 @@ impl MockOffloadEngine {
         evicted: &[(BlockId, SequenceHash)],
         source_slots: Vec<MutableBlock<MockerG1>>,
         now_ms: Option<f64>,
-    ) {
+    ) -> Option<G1EvictionOutcome> {
         if evicted.is_empty() {
-            return;
+            drop(source_slots);
+            return None;
         }
         if let Some(ms) = now_ms {
             self.worker.set_now_ms(ms);
@@ -1386,8 +1440,15 @@ impl MockOffloadEngine {
         if handle.is_complete() {
             let g2_to_lower_chain_blocks = self.collect_g2_to_lower_chain_blocks();
             self.enqueue_lower_tier_background(g2_to_lower_chain_blocks);
-            self.prune_releasable_g1_to_g2_sources();
+            let released_slots = self.prune_releasable_g1_to_g2_sources();
+            return Some(G1EvictionOutcome::RetryNow { released_slots });
         }
+
+        let dependency = self.worker.earliest_local_offload_finish_with_id();
+        Some(G1EvictionOutcome::BlockedOnOffload {
+            transfer_id: dependency.map(|(transfer_id, _deadline_ms)| transfer_id),
+            deadline_ms: dependency.map(|(_transfer_id, deadline_ms)| deadline_ms),
+        })
     }
 
     /// Prepare the longest lower-tier prefix without reserving G2→G1 bandwidth.
