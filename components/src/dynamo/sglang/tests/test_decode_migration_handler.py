@@ -6,6 +6,10 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from sglang.srt.managers.io_struct import (
+    FinalizeDecodeMigrationReqOutput,
+    PrepareDecodeMigrationReqOutput,
+)
 
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 
@@ -27,7 +31,11 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
         handler._decode_migration_reservations = {}
         handler._decode_migration_lock = asyncio.Lock()
         handler.engine = SimpleNamespace(
-            tokenizer_manager=SimpleNamespace(abort_request=Mock())
+            tokenizer_manager=SimpleNamespace(
+                abort_request=Mock(),
+                prepare_decode_migration=AsyncMock(),
+                finalize_decode_migration=AsyncMock(),
+            )
         )
         handler.config = SimpleNamespace(
             server_args=SimpleNamespace(enable_decode_migration=True)
@@ -48,6 +56,7 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
                 "bootstrap_port": 8998,
             },
             "reserve_tokens": 128,
+            "destination_dp_rank": 1,
             "status": "ready",
         }
 
@@ -147,6 +156,7 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
             "rid": "request",
             "status": "ready",
             "decode_stream": prepared_stream(),
+            "destination_dp_rank": 1,
         }
         context = SimpleNamespace(
             id=lambda: "frontend-request",
@@ -191,12 +201,106 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
         self.assertFalse(responses[0]["success"])
         self.assertIn("--enable-decode-migration", responses[0]["error"])
 
+    async def test_source_controls_route_to_selected_dp_rank(self):
+        handler = self.handler()
+        handler._get_bootstrap_info = lambda engine: ("127.0.0.1", 8998)
+        handler.engine.tokenizer_manager.prepare_decode_migration.return_value = (
+            PrepareDecodeMigrationReqOutput(
+                rid="request",
+                migration_id="migration",
+                success=True,
+                status="prepared",
+                source_dp_rank=3,
+            )
+        )
+        handler.engine.tokenizer_manager.finalize_decode_migration.return_value = (
+            FinalizeDecodeMigrationReqOutput(
+                rid="request",
+                migration_id="migration",
+                action="commit",
+                success=True,
+                source_dp_rank=3,
+            )
+        )
+
+        described = await collect(
+            handler.sync_decode_migration(
+                {
+                    "rid": "request",
+                    "migration_id": "migration",
+                    "phase": "describe",
+                    "source_dp_rank": 3,
+                }
+            )
+        )
+        prepared = await collect(
+            handler.sync_decode_migration(
+                {
+                    "rid": "request",
+                    "migration_id": "migration",
+                    "phase": "quiesce",
+                    "bootstrap_room": 17,
+                    "source_dp_rank": 3,
+                }
+            )
+        )
+        finalized = await collect(
+            handler.finalize_decode_migration(
+                {
+                    "rid": "request",
+                    "migration_id": "migration",
+                    "action": "commit",
+                    "source_dp_rank": 3,
+                }
+            )
+        )
+
+        self.assertEqual(described[0]["source_dp_rank"], 3)
+        self.assertEqual(prepared[0]["source_dp_rank"], 3)
+        self.assertEqual(finalized[0]["source_dp_rank"], 3)
+        prepare_req = (
+            handler.engine.tokenizer_manager.prepare_decode_migration.await_args.args[0]
+        )
+        finalize_req = (
+            handler.engine.tokenizer_manager.finalize_decode_migration.await_args.args[
+                0
+            ]
+        )
+        self.assertEqual(prepare_req.routed_dp_rank, 3)
+        self.assertEqual(finalize_req.routed_dp_rank, 3)
+
+    async def test_destination_reservation_preserves_selected_dp_rank(self):
+        handler = self.handler()
+
+        responses = await collect(
+            handler.prepare_decode_migration(
+                {
+                    "migration_id": "migration",
+                    "rid": "request",
+                    "destination_dp_rank": 1,
+                    "source": {
+                        "bootstrap_host": "127.0.0.1",
+                        "bootstrap_port": 8998,
+                        "dp_rank": 3,
+                    },
+                    "reserve_tokens": 128,
+                }
+            )
+        )
+
+        self.assertEqual(responses[0]["destination_dp_rank"], 1)
+        self.assertEqual(
+            handler._decode_migration_reservations["migration"]["destination_dp_rank"],
+            1,
+        )
+
     async def test_destination_abort_releases_session_and_engine_request(self):
         handler = self.handler()
         handler._decode_migration_reservations["migration"] = {
             "migration_id": "migration",
             "rid": "request",
             "status": "active",
+            "destination_dp_rank": 1,
         }
 
         responses = await collect(
@@ -252,17 +356,18 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
             "migration_id": "migration",
             "rid": "request",
             "source_state": {"committed_len": 3},
+            "destination_dp_rank": 1,
             "destination_request": {
                 "model": "model",
                 "token_ids": [1, 2, 3],
                 "stop_conditions": {},
                 "sampling_options": {},
                 "output_options": {},
-                "routing": {"dp_rank": 0},
+                "routing": {"dp_rank": 1},
                 "decode_migration_state": {
                     "rid": "request",
                     "migration_id": "migration",
-                    "source_dp_rank": 0,
+                    "source_dp_rank": 3,
                     "is_destination": True,
                 },
                 "bootstrap_info": {
@@ -292,6 +397,7 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
             "bootstrap_room": 17,
             "source": {"bootstrap_host": "127.0.0.1", "bootstrap_port": 8998},
             "reserve_tokens": 128,
+            "destination_dp_rank": 1,
             "status": "reserved",
         }
 
@@ -303,6 +409,13 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
         self.assertEqual(first[0]["status"], "ready")
         self.assertEqual(second[0]["status"], "ready")
         handler.engine.async_generate.assert_awaited_once()
+        self.assertEqual(
+            handler.engine.async_generate.await_args.kwargs["data_parallel_rank"], 1
+        )
+        self.assertEqual(
+            handler.engine.async_generate.await_args.kwargs["disagg_prefill_dp_rank"],
+            3,
+        )
 
     async def test_abort_waits_for_inflight_arm_then_cancels_engine_request(self):
         handler = self.handler()
@@ -326,6 +439,7 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
             "bootstrap_room": 17,
             "source": {"bootstrap_host": "127.0.0.1", "bootstrap_port": 8998},
             "reserve_tokens": 128,
+            "destination_dp_rank": 1,
             "status": "reserved",
         }
 

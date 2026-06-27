@@ -548,6 +548,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return
 
         migration_id = request["migration_id"]
+        destination_dp_rank = int(request.get("destination_dp_rank", 0))
         response = None
         async with self._decode_migration_lock:
             existing = self._decode_migration_reservations.get(migration_id)
@@ -559,6 +560,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "bootstrap_room": room,
                     "source": dict(request.get("source") or {}),
                     "reserve_tokens": int(request.get("reserve_tokens") or 0),
+                    "destination_dp_rank": destination_dp_rank,
                     "status": "reserved",
                     "created_at": time.monotonic(),
                 }
@@ -671,7 +673,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "bootstrap_host": source.get("bootstrap_host"),
                     "bootstrap_port": source.get("bootstrap_port"),
                     "bootstrap_room": existing["bootstrap_room"],
-                    "destination_dp_rank": 0,
+                    "destination_dp_rank": existing["destination_dp_rank"],
                     "reserve_tokens": existing["reserve_tokens"],
                 }
 
@@ -680,14 +682,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     async def sync_decode_migration(self, request, context=None):
         """Describe or quiesce this worker as the exact migration source."""
         bootstrap_host, bootstrap_port = self._get_bootstrap_info(self.engine)
+        source_dp_rank = int(request.get("source_dp_rank", 0))
         if request.get("phase") == "describe":
             logging.info(
                 "Described decode migration source rid=%s migration_id=%s "
-                "bootstrap=%s:%s source_dp_rank=0",
+                "bootstrap=%s:%s source_dp_rank=%s",
                 request["rid"],
                 request["migration_id"],
                 bootstrap_host,
                 bootstrap_port,
+                source_dp_rank,
             )
             yield {
                 "rid": request["rid"],
@@ -696,7 +700,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "status": "described",
                 "bootstrap_host": bootstrap_host,
                 "bootstrap_port": bootstrap_port,
-                "source_dp_rank": 0,
+                "source_dp_rank": source_dp_rank,
             }
             return
 
@@ -714,6 +718,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if request.get("target_sequence_length") is not None
                 else None
             ),
+            routed_dp_rank=source_dp_rank,
         )
         result = await self.engine.tokenizer_manager.prepare_decode_migration(obj)
         yield dataclasses.asdict(result)
@@ -733,6 +738,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         "action": action,
                         "success": action == "abort",
                         "status": "unknown",
+                        "destination_dp_rank": int(
+                            request.get("destination_dp_rank", 0)
+                        ),
                     }
                 elif action == "activate":
                     record["status"] = "active"
@@ -768,6 +776,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "action": action,
                 "success": True,
                 "status": record["status"],
+                "destination_dp_rank": record["destination_dp_rank"],
             }
             return
 
@@ -777,6 +786,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             rid=request["rid"],
             migration_id=request["migration_id"],
             action=request["action"],
+            routed_dp_rank=int(request.get("source_dp_rank", 0)),
         )
         result = await self.engine.tokenizer_manager.finalize_decode_migration(obj)
         yield dataclasses.asdict(result)

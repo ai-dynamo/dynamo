@@ -202,6 +202,7 @@ struct ControlResponse {
     bootstrap_port: Option<u16>,
     bootstrap_room: Option<u64>,
     source_dp_rank: Option<u32>,
+    destination_dp_rank: Option<u32>,
     prompt_len: Option<usize>,
     committed_len: Option<usize>,
     logical_len: Option<usize>,
@@ -282,12 +283,21 @@ async fn prepare_destination(
     let source_dp_rank = source_description
         .source_dp_rank
         .unwrap_or(source_worker.dp_rank);
+    if source_dp_rank != source_worker.dp_rank {
+        bail!(
+            "source describe returned DP rank {source_dp_rank}, expected {}",
+            source_worker.dp_rank
+        );
+    }
+
     let mut cleanup = MigrationCleanup::new(
         control.clone(),
         rid.clone(),
         migration_id.clone(),
         source_worker.worker_id,
         destination_worker.worker_id,
+        source_dp_rank,
+        destination_worker.dp_rank,
     );
     let reserve_tokens =
         request.token_ids.len() + request.stop_conditions.max_tokens.unwrap_or_default() as usize;
@@ -304,6 +314,7 @@ async fn prepare_destination(
                     "dp_rank": source_dp_rank,
                 },
                 "reserve_tokens": reserve_tokens,
+                "destination_dp_rank": destination_worker.dp_rank,
             }),
         )
         .await
@@ -313,6 +324,15 @@ async fn prepare_destination(
             "destination reservation declined with status {}: {}",
             reserve.status,
             reserve.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+    let destination_dp_rank = reserve
+        .destination_dp_rank
+        .context("destination reservation omitted destination_dp_rank")?;
+    if destination_dp_rank != destination_worker.dp_rank {
+        bail!(
+            "destination reserved DP rank {destination_dp_rank}, expected {}",
+            destination_worker.dp_rank
         );
     }
     let bootstrap_room = reserve
@@ -333,6 +353,7 @@ async fn prepare_destination(
                     "bootstrap_room": bootstrap_room,
                     "target_sequence_length": target_sequence_length,
                     "output_tokens_seen": output_tokens_seen,
+                    "source_dp_rank": source_dp_rank,
                 }),
             )
             .await
@@ -714,6 +735,7 @@ impl
                             "phase": "quiesce",
                             "bootstrap_room": bootstrap_room,
                             "output_tokens_seen": forwarded_tokens,
+                            "source_dp_rank": source_dp_rank,
                         }),
                     ).await;
                     match response {
@@ -736,6 +758,7 @@ impl
                                     "migration_id": migration_id,
                                     "side": "destination",
                                     "action": "abort",
+                                    "destination_dp_rank": destination_worker.dp_rank,
                                 }),
                             ).await;
                             cleanup.disarm();
@@ -828,6 +851,7 @@ impl
                             logical_len,
                         },
                         "destination_request": destination_json,
+                        "destination_dp_rank": destination_worker.dp_rank,
                     }),
                 ).await;
                 let arm_ready = matches!(&arm, Ok(response) if response.success && response.status == "ready");
@@ -896,7 +920,13 @@ impl
                         let activated = control.call(
                             ControlEndpoint::Finalize,
                             destination_worker.worker_id,
-                            json!({"rid": engine_rid, "migration_id": migration_id, "side": "destination", "action": "activate"}),
+                            json!({
+                                "rid": engine_rid,
+                                "migration_id": migration_id,
+                                "side": "destination",
+                                "action": "activate",
+                                "destination_dp_rank": destination_worker.dp_rank,
+                            }),
                         ).await;
                         if !matches!(activated, Ok(response) if response.success) {
                             destination_failed = true;
@@ -907,7 +937,12 @@ impl
                             let response = control.call(
                                 ControlEndpoint::Finalize,
                                 source_worker.worker_id,
-                                json!({"rid": engine_rid, "migration_id": migration_id, "action": "commit"}),
+                                json!({
+                                    "rid": engine_rid,
+                                    "migration_id": migration_id,
+                                    "action": "commit",
+                                    "source_dp_rank": source_dp_rank,
+                                }),
                             ).await;
                             match response {
                                 Ok(response) if response.success => break true,
@@ -950,7 +985,13 @@ impl
                     let _ = control.call(
                         ControlEndpoint::Finalize,
                         destination_worker.worker_id,
-                        json!({"rid": engine_rid, "migration_id": migration_id, "side": "destination", "action": "abort"}),
+                        json!({
+                            "rid": engine_rid,
+                            "migration_id": migration_id,
+                            "side": "destination",
+                            "action": "abort",
+                            "destination_dp_rank": destination_worker.dp_rank,
+                        }),
                     ).await;
                     yield Annotated::from_error("destination stream failed after source migration committed");
                     return;
@@ -1125,6 +1166,8 @@ struct MigrationCleanup {
     migration_id: String,
     source_worker: u64,
     destination_worker: u64,
+    source_dp_rank: u32,
+    destination_dp_rank: u32,
     active: bool,
     source_may_be_quiesced: bool,
     committed: bool,
@@ -1137,6 +1180,8 @@ impl MigrationCleanup {
         migration_id: String,
         source_worker: u64,
         destination_worker: u64,
+        source_dp_rank: u32,
+        destination_dp_rank: u32,
     ) -> Self {
         Self {
             control,
@@ -1144,6 +1189,8 @@ impl MigrationCleanup {
             migration_id,
             source_worker,
             destination_worker,
+            source_dp_rank,
+            destination_dp_rank,
             active: true,
             source_may_be_quiesced: false,
             committed: false,
@@ -1177,6 +1224,7 @@ impl MigrationCleanup {
                     "migration_id": &self.migration_id,
                     "side": "destination",
                     "action": "abort",
+                    "destination_dp_rank": self.destination_dp_rank,
                 }),
             )
             .await;
@@ -1190,6 +1238,7 @@ impl MigrationCleanup {
                         "rid": &self.rid,
                         "migration_id": &self.migration_id,
                         "action": "cancel",
+                        "source_dp_rank": self.source_dp_rank,
                     }),
                 )
                 .await;
@@ -1208,6 +1257,8 @@ impl Drop for MigrationCleanup {
         let migration_id = self.migration_id.clone();
         let source_worker = self.source_worker;
         let destination_worker = self.destination_worker;
+        let source_dp_rank = self.source_dp_rank;
+        let destination_dp_rank = self.destination_dp_rank;
         let source_may_be_quiesced = self.source_may_be_quiesced;
         tokio::spawn(async move {
             let _ = control
@@ -1219,6 +1270,7 @@ impl Drop for MigrationCleanup {
                         "migration_id": migration_id,
                         "side": "destination",
                         "action": "abort",
+                        "destination_dp_rank": destination_dp_rank,
                     }),
                 )
                 .await;
@@ -1231,6 +1283,7 @@ impl Drop for MigrationCleanup {
                             "rid": rid,
                             "migration_id": migration_id,
                             "action": "cancel",
+                            "source_dp_rank": source_dp_rank,
                         }),
                     )
                     .await;
@@ -1244,6 +1297,17 @@ mod tests {
     use super::*;
     use crate::protocols::common::llm_backend::TokenType;
     use dynamo_runtime::pipeline::AsyncEngine;
+
+    const SOURCE_DP_RANK: u32 = 3;
+    const DESTINATION_DP_RANK: u32 = 1;
+
+    fn assert_control_rank(request: &Value, field: &str, expected: u32) {
+        assert_eq!(
+            request.get(field).and_then(Value::as_u64),
+            Some(u64::from(expected)),
+            "control request omitted or misrouted {field}: {request}"
+        );
+    }
 
     #[test]
     fn single_trigger_is_structurally_tagged() {
@@ -1471,6 +1535,11 @@ mod tests {
                         .expect("source request must carry its engine migration identity");
                     assert_eq!(migration_state.rid, context.id());
                     assert!(!migration_state.migration_id.is_empty());
+                    assert_eq!(migration_state.source_dp_rank, SOURCE_DP_RANK);
+                    assert_eq!(
+                        request.routing.as_ref().and_then(|routing| routing.dp_rank),
+                        Some(SOURCE_DP_RANK)
+                    );
                     self.state.record("source:generate");
                     match self.scenario {
                         Scenario::SuccessCoalesced => vec![
@@ -1511,6 +1580,11 @@ mod tests {
                         .decode_migration_state
                         .as_ref()
                         .expect("destination request must retain the source engine RID");
+                    assert_eq!(migration_state.source_dp_rank, SOURCE_DP_RANK);
+                    assert_eq!(
+                        request.routing.as_ref().and_then(|routing| routing.dp_rank),
+                        Some(DESTINATION_DP_RANK)
+                    );
                     assert_ne!(migration_state.rid, context.id());
                     assert_eq!(
                         context.id(),
@@ -1603,17 +1677,19 @@ mod tests {
             let response = if phase == Some("describe") {
                 assert!(matches!(endpoint, ControlEndpoint::Sync));
                 assert_eq!(instance_id, 1);
+                assert_control_rank(&request, "source_dp_rank", SOURCE_DP_RANK);
                 self.state.record("source:describe");
                 json!({
                     "success": true,
                     "status": "described",
                     "bootstrap_host": "127.0.0.1",
                     "bootstrap_port": 9876,
-                    "source_dp_rank": 0,
+                    "source_dp_rank": SOURCE_DP_RANK,
                 })
             } else if phase == Some("quiesce") {
                 assert!(matches!(endpoint, ControlEndpoint::Sync));
                 assert_eq!(instance_id, 1);
+                assert_control_rank(&request, "source_dp_rank", SOURCE_DP_RANK);
                 self.state.record("source:quiesce");
                 if self.scenario == Scenario::QuiesceTransportFailure {
                     return Err(anyhow!("injected source quiesce transport failure"));
@@ -1631,7 +1707,7 @@ mod tests {
                         "bootstrap_host": "127.0.0.1",
                         "bootstrap_port": 9876,
                         "bootstrap_room": request["bootstrap_room"],
-                        "source_dp_rank": 0,
+                        "source_dp_rank": SOURCE_DP_RANK,
                         "prompt_len": 3,
                         "committed_len": 5,
                         "logical_len": 6,
@@ -1646,7 +1722,7 @@ mod tests {
                         "bootstrap_host": "127.0.0.1",
                         "bootstrap_port": 9876,
                         "bootstrap_room": request["bootstrap_room"],
-                        "source_dp_rank": 0,
+                        "source_dp_rank": SOURCE_DP_RANK,
                         "prompt_len": 3,
                         "committed_len": 5,
                         "logical_len": 6,
@@ -1658,12 +1734,14 @@ mod tests {
             } else if phase == Some("arm") {
                 assert!(matches!(endpoint, ControlEndpoint::Sync));
                 assert_eq!(instance_id, 1);
+                assert_control_rank(&request, "source_dp_rank", SOURCE_DP_RANK);
                 assert!(request["target_sequence_length"].as_u64().unwrap() > 0);
                 self.state.record("source:arm");
                 json!({"success": true, "status": "armed"})
             } else if request.get("source_state").is_some() {
                 assert!(matches!(endpoint, ControlEndpoint::Prepare));
                 assert_eq!(instance_id, 2);
+                assert_control_rank(&request, "destination_dp_rank", DESTINATION_DP_RANK);
                 self.state.record("destination:arm");
                 if self.scenario == Scenario::DestinationArmFailure {
                     json!({
@@ -1677,6 +1755,8 @@ mod tests {
             } else if request.get("source").is_some() {
                 assert!(matches!(endpoint, ControlEndpoint::Prepare));
                 assert_eq!(instance_id, 2);
+                assert_control_rank(&request, "destination_dp_rank", DESTINATION_DP_RANK);
+                assert_eq!(request["source"]["dp_rank"], SOURCE_DP_RANK);
                 self.state.record("destination:reserve");
                 if self.scenario == Scenario::CancelDuringReserve {
                     futures::future::pending::<()>().await;
@@ -1689,17 +1769,19 @@ mod tests {
                     "success": true,
                     "status": "reserved",
                     "bootstrap_room": 777,
-                    "destination_dp_rank": 0,
+                    "destination_dp_rank": DESTINATION_DP_RANK,
                 })
             } else if side == Some("destination") {
                 assert!(matches!(endpoint, ControlEndpoint::Finalize));
                 assert_eq!(instance_id, 2);
+                assert_control_rank(&request, "destination_dp_rank", DESTINATION_DP_RANK);
                 let action = action.unwrap();
                 self.state.record(format!("destination:{action}"));
                 json!({"success": true, "status": action})
             } else if let Some(action) = action {
                 assert!(matches!(endpoint, ControlEndpoint::Finalize));
                 assert_eq!(instance_id, 1);
+                assert_control_rank(&request, "source_dp_rank", SOURCE_DP_RANK);
                 self.state.record(format!("source:{action}"));
                 if action == "commit" && self.scenario == Scenario::CommitFailure {
                     self.state
@@ -1742,7 +1824,7 @@ mod tests {
             constraints: &DecodeMigrationConstraints,
         ) -> Result<WorkerWithDpRank> {
             assert_eq!(constraints.required_taints, vec!["test/fast"]);
-            Ok(WorkerWithDpRank::new(1, 0))
+            Ok(WorkerWithDpRank::new(1, SOURCE_DP_RANK))
         }
 
         async fn select_destination(
@@ -1752,9 +1834,9 @@ mod tests {
             constraints: &DecodeMigrationConstraints,
             source: WorkerWithDpRank,
         ) -> Result<WorkerWithDpRank> {
-            assert_eq!(source, WorkerWithDpRank::new(1, 0));
+            assert_eq!(source, WorkerWithDpRank::new(1, SOURCE_DP_RANK));
             assert_eq!(constraints.required_taints, vec!["test/slow"]);
-            Ok(WorkerWithDpRank::new(2, 0))
+            Ok(WorkerWithDpRank::new(2, DESTINATION_DP_RANK))
         }
     }
 
