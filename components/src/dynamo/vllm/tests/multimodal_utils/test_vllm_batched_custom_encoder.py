@@ -158,6 +158,55 @@ async def test_encode_after_shutdown_raises():
         await enc.encode(["a"])
 
 
+async def test_build_error_marks_closed_so_encode_raises():
+    """A build() failure exits the thread; load() re-raises and marks the encoder
+    closed, so a later encode() raises instead of hanging on a dead consumer."""
+
+    class _BadBuild(_RecordingEncoder):
+        def build(self, model_id: str, device: str) -> None:
+            raise RuntimeError("build failed")
+
+    enc = _BadBuild()
+    with pytest.raises(RuntimeError, match="build failed"):
+        enc.load("model", "cpu")
+    with pytest.raises(RuntimeError, match="after shutdown"):
+        await enc.encode(["a"])
+
+
+async def test_shutdown_defers_reap_while_forward_in_flight():
+    """If a forward is still running when the join times out, shutdown() leaves
+    the sentinel for the thread (does not drain it) and a later shutdown() reaps
+    the thread once the forward completes."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _Blocking(_RecordingEncoder):
+        max_wait_ms = 10.0
+        _join_timeout_s = 0.3
+
+        def forward_batch(self, image_urls: list[str]) -> list[torch.Tensor]:
+            entered.set()
+            release.wait(timeout=5.0)  # hold the batcher thread inside the forward
+            return [torch.zeros(1, _HIDDEN) for _ in image_urls]
+
+    enc = _Blocking()
+    enc.load("model", "cpu")
+    task = asyncio.ensure_future(enc.encode(["a"]))
+    for _ in range(200):  # wait until the batcher is actually inside forward_batch
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert entered.is_set()
+
+    enc.shutdown()  # join times out (forward blocked) → thread left alive
+    assert enc._thread.is_alive()
+
+    release.set()  # forward returns → request resolves, thread reads the sentinel
+    assert len(await task) == 1
+    enc.shutdown()  # retry join → reaps the now-exited thread
+    assert not enc._thread.is_alive()
+
+
 async def test_pad_to_max_batch_gives_static_batch_size():
     class _Padded(_RecordingEncoder):
         max_batch_size = 4

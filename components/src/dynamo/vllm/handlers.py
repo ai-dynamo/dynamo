@@ -2350,6 +2350,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def cleanup(self):
         """Clean up resources including temporary directories."""
+        if self._custom_encoder is not None:
+            # Stop the in-process encoder's batcher thread on teardown.
+            self._custom_encoder.shutdown()
         for temp_dir in self.temp_dirs:
             try:
                 temp_dir.cleanup()
@@ -3914,6 +3917,10 @@ class EmbeddingWorkerHandler:
         AsyncLLM lifecycle is owned by the worker factory / runtime; the
         engine monitor cancels its background tasks via ``__del__``.
         """
+        if self._custom_encoder is not None:
+            # Stop the in-process encoder's batcher thread on teardown
+            # (DecodeWorkerHandler.cleanup does not chain super().cleanup()).
+            self._custom_encoder.shutdown()
         return None
 
     async def _monitor_abort(self, context: Context, request_id: str) -> None:

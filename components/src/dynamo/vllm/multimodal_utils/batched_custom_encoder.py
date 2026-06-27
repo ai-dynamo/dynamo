@@ -131,6 +131,9 @@ class BatchedCustomEncoder(ABC):
     #: for a CUDA-graphed forward. Resolution/shape bucketing remains the
     #: encoder's responsibility.
     pad_to_max_batch: bool = False
+    #: Seconds ``shutdown()`` waits for an in-flight forward before deferring the
+    #: reap to a later call.
+    _join_timeout_s: float = 10.0
 
     # ---- subclass contract -------------------------------------------------
 
@@ -198,7 +201,10 @@ class BatchedCustomEncoder(ABC):
         self._thread.start()
         self._ready.wait()
         if self._build_error is not None:
-            # build() returned, so the thread has already exited — no leak.
+            # build() returned, so the thread has already exited. Mark closed
+            # (via shutdown) so a later encode() raises instead of queueing to a
+            # dead consumer and hanging.
+            self.shutdown()
             raise self._build_error
         try:
             self.validate()
@@ -240,17 +246,33 @@ class BatchedCustomEncoder(ABC):
         return await future
 
     def shutdown(self) -> None:
-        """Stop the batcher thread, failing any still-queued requests. Idempotent;
-        safe to call before ``load``."""
+        """Stop the batcher thread, failing any still-queued requests.
+
+        Idempotent and safe to call before ``load``. If a slow forward is still
+        in flight when the join times out, the thread is left to drain on its own
+        and a later ``shutdown()`` call reaps it (we must not remove the sentinel
+        while the thread is alive, or it would block forever on an empty queue).
+        """
         lock = getattr(self, "_lifecycle_lock", None)
         if lock is None:
             return  # never loaded
         with lock:
-            if self._closed:
-                return
-            self._closed = True
-            self._queue.put(_SHUTDOWN)
-        self._thread.join(timeout=10.0)
+            if not self._closed:
+                # Mark closed and enqueue the stop sentinel exactly once; repeat
+                # calls fall through to retry the join below.
+                self._closed = True
+                self._queue.put(_SHUTDOWN)
+        self._thread.join(timeout=self._join_timeout_s)
+        if self._thread.is_alive():
+            # A forward is still running: leave the sentinel queued for the thread
+            # to consume and do NOT drain (removing it would strand the thread).
+            # A later shutdown() call retries the join.
+            logger.warning(
+                "BatchedCustomEncoder.shutdown: batcher thread still running after "
+                "%gs; will reap on a later call",
+                self._join_timeout_s,
+            )
+            return
         # The consumer has exited; resolve anything still queued so an awaiter that
         # raced shutdown does not hang forever.
         self._drain_pending()
