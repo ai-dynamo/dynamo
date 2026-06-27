@@ -3,6 +3,7 @@
 
 use std::cmp;
 use std::collections::HashSet;
+use std::env;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
@@ -29,6 +30,9 @@ use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 /// 10s is the same as our etcd lease expiry.
 const DEFAULT_TTL: Duration = Duration::from_secs(10);
 
+/// Optional TTL override for file-backed discovery, in seconds.
+const FILE_KV_TTL_ENV: &str = "DYN_FILE_KV_TTL_SECS";
+
 /// Don't do keep-alive any more often than this. Limits the disk write load.
 const MIN_KEEP_ALIVE: Duration = Duration::from_secs(1);
 
@@ -36,6 +40,23 @@ const MIN_KEEP_ALIVE: Duration = Duration::from_secs(1);
 /// Files with this prefix are ignored by the watcher.
 const TEMP_FILE_PREFIX: &str = ".tmp_";
 const TEMP_FILE_CREATE_ATTEMPTS: usize = 16;
+
+fn default_ttl() -> Duration {
+    match env::var(FILE_KV_TTL_ENV) {
+        Ok(value) => match value.parse::<u64>() {
+            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
+            _ => {
+                tracing::warn!(
+                    env = FILE_KV_TTL_ENV,
+                    value = %value,
+                    "Ignoring invalid file KV TTL; using the default"
+                );
+                DEFAULT_TTL
+            }
+        },
+        Err(_) => DEFAULT_TTL,
+    }
+}
 
 /// Treat as a singleton
 #[derive(Clone)]
@@ -143,7 +164,11 @@ impl Store for FileStore {
             // Create
             fs::create_dir_all(&p).map_err(to_fs_err)?;
         }
-        let dir = Directory::new(self.root.clone(), p.clone(), ttl.unwrap_or(DEFAULT_TTL));
+        let dir = Directory::new(
+            self.root.clone(),
+            p.clone(),
+            ttl.unwrap_or_else(default_ttl),
+        );
         self.active_dirs.lock().insert(p, dir.clone());
         Ok(dir)
     }
@@ -164,7 +189,7 @@ impl Store for FileStore {
             ));
         }
         // The filesystem itself doesn't store the TTL so for now default it
-        let dir = Directory::new(self.root.clone(), p.clone(), DEFAULT_TTL);
+        let dir = Directory::new(self.root.clone(), p.clone(), default_ttl());
         self.active_dirs.lock().insert(p, dir.clone());
         Ok(Some(dir))
     }
@@ -687,6 +712,25 @@ mod tests {
 
         watcher_cancel.cancel();
         creator_cancel.cancel();
+    }
+
+    use super::{FILE_KV_TTL_ENV, default_ttl};
+
+    #[test]
+    fn default_ttl_honors_positive_environment_override() {
+        temp_env::with_vars([(FILE_KV_TTL_ENV, Some("1800"))], || {
+            assert_eq!(default_ttl(), Duration::from_secs(1800));
+        });
+    }
+
+    #[test]
+    fn default_ttl_rejects_zero_or_invalid_environment_override() {
+        temp_env::with_vars([(FILE_KV_TTL_ENV, Some("0"))], || {
+            assert_eq!(default_ttl(), Duration::from_secs(10));
+        });
+        temp_env::with_vars([(FILE_KV_TTL_ENV, Some("not-a-duration"))], || {
+            assert_eq!(default_ttl(), Duration::from_secs(10));
+        });
     }
 
     #[tokio::test]
