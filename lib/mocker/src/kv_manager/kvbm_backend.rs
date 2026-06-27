@@ -881,9 +881,11 @@ impl KvManager {
 
     fn bump_capacity_generation(&mut self, released_slots: usize) -> u64 {
         assert!(released_slots > 0, "capacity increase must release slots");
+        let released_slots =
+            u64::try_from(released_slots).expect("released G1 slot count does not fit in u64");
         self.capacity_generation = self
             .capacity_generation
-            .checked_add(1)
+            .checked_add(released_slots)
             .expect("G1 capacity generation exhausted");
         self.capacity_generation
     }
@@ -1325,7 +1327,10 @@ impl KvManager {
 
     #[cfg(feature = "kvbm-offload")]
     fn should_block_on_g1_offload(&self, evicted_plhs: &[PositionalLineageHash]) -> bool {
-        self.offload_engine.is_some() && !evicted_plhs.is_empty()
+        self.offload_engine.is_some()
+            && evicted_plhs
+                .iter()
+                .any(|plh| self.registered_blocks.contains_key(plh))
     }
 
     #[cfg(not(feature = "kvbm-offload"))]
@@ -1725,14 +1730,30 @@ impl KvManager {
 
         #[cfg(feature = "kvbm-offload")]
         let (g2_events, offload_outcome) = {
-            if !source_slots.is_empty() && source_slots.len() != offload_blocks.len() {
-                tracing::warn!(
-                    source_slots = source_slots.len(),
-                    offload_blocks = offload_blocks.len(),
-                    "kvbm-offload: source-slot hold count does not match offload block count"
-                );
-            }
-            self.enqueue_evictions_to_g2(&offload_blocks, source_slots, eviction_now_ms)
+            let offload_source_slots = if source_slots.is_empty() {
+                Vec::new()
+            } else {
+                let mut source_slots_by_id: FxHashMap<_, _> = source_slots
+                    .into_iter()
+                    .map(|slot| (slot.block_id(), slot))
+                    .collect();
+                let mut matching_slots = Vec::with_capacity(offload_blocks.len());
+                for block in &offload_blocks {
+                    let source_slot =
+                        source_slots_by_id
+                            .remove(&block.block_id)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "G1 offload block {} has no matching source slot",
+                                    block.block_id
+                                )
+                            });
+                    matching_slots.push(source_slot);
+                }
+                drop(source_slots_by_id);
+                matching_slots
+            };
+            self.enqueue_evictions_to_g2(&offload_blocks, offload_source_slots, eviction_now_ms)
         };
         #[cfg(not(feature = "kvbm-offload"))]
         drop(source_slots);
@@ -3200,6 +3221,81 @@ mod tests {
         }
 
         #[test]
+        fn unregistered_evictions_commit_without_offload_wait() {
+            const SLOTS: usize = 2;
+
+            let (mut mgr, sink) = make_mgr_tier_capturing(SLOTS, 4);
+            attach_test_offload_engine(&mut mgr, SLOTS + 1, 4);
+
+            let source_plhs: Vec<_> = (0..SLOTS).map(|index| plh(50_000 + index as u64)).collect();
+            for (index, source_plh) in source_plhs.iter().copied().enumerate() {
+                assert_eq!(use_full(&mut mgr, 60_000 + index as u64, source_plh), 1);
+                deref_full(&mut mgr, 60_000 + index as u64);
+            }
+            for source_plh in &source_plhs {
+                assert!(mgr.registered_blocks.remove(source_plh).is_some());
+            }
+            assert_eq!(mgr.block_manager.available_blocks(), SLOTS);
+            sink.clear();
+
+            let mut sequence = ActiveSequence::new((0..8).collect(), 1, Some(4), true, true);
+            let signal = sequence
+                .prepare_allocation(sequence.num_input_tokens())
+                .expect("two-block prompt must allocate");
+            let MoveBlock::Use(blocks, _, target_plhs, _, _) = &signal else {
+                panic!("creation signal must be Use");
+            };
+            let target_hashes: Vec<_> = blocks
+                .iter()
+                .map(|block| match block {
+                    UniqueBlock::FullBlock(seq_hash) => *seq_hash,
+                    UniqueBlock::PartialBlock(_) => panic!("exact prompt blocks must be full"),
+                })
+                .collect();
+            assert_eq!(target_hashes.len(), SLOTS);
+            assert!(
+                target_plhs
+                    .iter()
+                    .all(|target| !mgr.registered_blocks.contains_key(target))
+            );
+            let generation_before = mgr.capacity_generation;
+            let allocated_before = sequence.num_allocated_tokens();
+
+            assert_eq!(expect_ready(mgr.process(&signal)), SLOTS);
+
+            assert_eq!(mgr.capacity_generation, generation_before);
+            assert!(mgr.earliest_offload_deadline().is_none());
+            let (source_slot_ids, offload_block_ids) = mgr
+                .offload_engine
+                .as_ref()
+                .expect("offload engine attached")
+                .lock()
+                .expect("offload engine mutex poisoned")
+                .pending_g1_transfer_ownership();
+            assert!(source_slot_ids.is_empty());
+            assert!(offload_block_ids.is_empty());
+            assert_eq!(mgr.num_active_block_refs(), SLOTS);
+            assert_eq!(sequence.num_allocated_tokens(), allocated_before);
+            assert!(
+                target_plhs
+                    .iter()
+                    .all(|target| mgr.registered_blocks.contains_key(target))
+            );
+            assert!(target_hashes.iter().all(|target| {
+                mgr.active_full
+                    .get(target)
+                    .is_some_and(|refs| refs.len() == 1)
+            }));
+
+            let committed = sink.take();
+            assert!(target_hashes.iter().all(|target| {
+                stored_block(&committed, StorageTier::Device, *target).is_some()
+            }));
+            sequence.commit_allocation(sequence.num_input_tokens());
+            assert_eq!(sequence.num_allocated_tokens(), sequence.num_input_tokens());
+        }
+
+        #[test]
         fn blocked_fresh_use_is_invisible_until_commit() {
             let (mut mgr, sink) = make_mgr_tier_capturing(2, 4);
             attach_test_offload_engine(&mut mgr, 4, 4);
@@ -3275,24 +3371,171 @@ mod tests {
         }
 
         #[test]
-        fn presence_filtered_eviction_retries_once() {
-            let (mut mgr, sink) = make_mgr_tier_capturing(1, 4);
-            attach_test_offload_engine(&mut mgr, 4, 4);
+        fn blocked_use_holds_only_actual_offload_sources() {
+            const REQUESTED_SLOTS: usize = 40;
+            const OFFLOADED_SLOTS: usize = 5;
 
-            assert_eq!(use_full(&mut mgr, 1, plh(1)), 1);
-            deref_full(&mut mgr, 1);
-            seed_g2_block(&mgr, plh(1));
+            let (mut mgr, sink) = make_mgr_tier_capturing(REQUESTED_SLOTS, 4);
+            attach_test_offload_engine(&mut mgr, OFFLOADED_SLOTS + 1, 4);
+
+            let source_plhs: Vec<_> = (0..OFFLOADED_SLOTS)
+                .map(|index| plh(10_000 + index as u64))
+                .collect();
+            for (index, source_plh) in source_plhs.iter().copied().enumerate() {
+                assert_eq!(use_full(&mut mgr, 20_000 + index as u64, source_plh), 1);
+            }
+            let mut expected_source_ids: Vec<_> = source_plhs
+                .iter()
+                .map(|source_plh| mgr.registered_blocks[source_plh].block_id)
+                .collect();
+            expected_source_ids.sort_unstable();
+            for index in 0..OFFLOADED_SLOTS {
+                deref_full(&mut mgr, 20_000 + index as u64);
+            }
+            assert_eq!(mgr.block_manager.available_blocks(), REQUESTED_SLOTS);
+            sink.clear();
+
+            let mut sequence = ActiveSequence::new(
+                (0..(REQUESTED_SLOTS * 4) as u32).collect(),
+                1,
+                Some(4),
+                true,
+                true,
+            );
+            let signal = sequence
+                .prepare_allocation(sequence.num_input_tokens())
+                .expect("forty-block prompt must allocate");
+            let MoveBlock::Use(blocks, _, target_plhs, _, _) = &signal else {
+                panic!("creation signal must be Use");
+            };
+            assert_eq!(blocks.len(), REQUESTED_SLOTS);
+            let target_hashes: Vec<_> = blocks
+                .iter()
+                .map(|block| match block {
+                    UniqueBlock::FullBlock(seq_hash) => *seq_hash,
+                    UniqueBlock::PartialBlock(_) => panic!("exact prompt blocks must be full"),
+                })
+                .collect();
+            let allocated_before = sequence.num_allocated_tokens();
+            let refs_before = mgr.num_active_block_refs();
+            let generation_before = mgr.capacity_generation;
+            let cost_before = mgr.get_prefill_cost(&sequence);
+            let cost_before = (
+                cost_before.new_blocks,
+                cost_before.new_tokens,
+                cost_before.cached_tokens,
+                cost_before.active_cached_tokens,
+            );
+
+            assert!(matches!(
+                mgr.process(&signal),
+                G1Acquire::BlockedOnOffload { .. }
+            ));
+
+            assert_eq!(mgr.num_active_block_refs(), refs_before);
+            assert_eq!(sequence.num_allocated_tokens(), allocated_before);
+            assert_eq!(mgr.capacity_generation, generation_before);
+            assert_eq!(
+                mgr.block_manager.available_blocks(),
+                REQUESTED_SLOTS - OFFLOADED_SLOTS
+            );
+            assert_eq!(mgr.num_active_blocks(), OFFLOADED_SLOTS);
+            let (source_slot_ids, offload_block_ids) = mgr
+                .offload_engine
+                .as_ref()
+                .expect("offload engine attached")
+                .lock()
+                .expect("offload engine mutex poisoned")
+                .pending_g1_transfer_ownership();
+            assert_eq!(source_slot_ids, expected_source_ids);
+            assert_eq!(offload_block_ids, expected_source_ids);
+            let cost_after = mgr.get_prefill_cost(&sequence);
+            assert_eq!(
+                (
+                    cost_after.new_blocks,
+                    cost_after.new_tokens,
+                    cost_after.cached_tokens,
+                    cost_after.active_cached_tokens,
+                ),
+                cost_before
+            );
+            assert!(
+                target_plhs
+                    .iter()
+                    .all(|target| !mgr.registered_blocks.contains_key(target))
+            );
+            let blocked_events = sink.take();
+            assert!(target_hashes.iter().all(|target| {
+                stored_block(&blocked_events, StorageTier::Device, *target).is_none()
+            }));
+
+            let deadline = mgr
+                .earliest_offload_deadline()
+                .expect("real G1 eviction must expose its active transfer deadline");
+            mgr.tick_offload_engine(deadline);
+            assert_eq!(mgr.block_manager.available_blocks(), REQUESTED_SLOTS);
+            assert_eq!(
+                mgr.capacity_generation,
+                generation_before + OFFLOADED_SLOTS as u64
+            );
+
+            assert_eq!(expect_ready(mgr.process(&signal)), REQUESTED_SLOTS);
+            assert_eq!(sequence.num_allocated_tokens(), allocated_before);
+            sequence.commit_allocation(sequence.num_input_tokens());
+            assert_eq!(sequence.num_allocated_tokens(), sequence.num_input_tokens());
+            assert_eq!(mgr.num_active_block_refs(), REQUESTED_SLOTS);
+            let committed_events = sink.take();
+            assert!(target_hashes.iter().all(|target| {
+                stored_block(&committed_events, StorageTier::Device, *target).is_some()
+            }));
+        }
+
+        #[test]
+        fn presence_filtered_eviction_retries_once() {
+            const RELEASED_SLOTS: usize = 5;
+
+            let (mut mgr, sink) = make_mgr_tier_capturing(RELEASED_SLOTS, 4);
+            attach_test_offload_engine(&mut mgr, RELEASED_SLOTS + 1, 4);
+
+            for index in 0..RELEASED_SLOTS {
+                let source_plh = plh(30_000 + index as u64);
+                assert_eq!(use_full(&mut mgr, 40_000 + index as u64, source_plh), 1);
+                seed_g2_block(&mgr, source_plh);
+            }
+            for index in 0..RELEASED_SLOTS {
+                deref_full(&mut mgr, 40_000 + index as u64);
+            }
             sink.clear();
             let generation_before = mgr.capacity_generation;
 
-            let outcome = use_full_with_hash(&mut mgr, 2, plh(2), 202, vec![5, 6, 7, 8]);
-            assert_eq!(expect_ready(outcome), 1);
-            assert_eq!(mgr.capacity_generation, generation_before + 1);
+            let sequence = ActiveSequence::new(
+                (100..100 + (RELEASED_SLOTS * 4) as u32).collect(),
+                1,
+                Some(4),
+                true,
+                true,
+            );
+            let signal = sequence
+                .prepare_allocation(sequence.num_input_tokens())
+                .expect("five-block prompt must allocate");
+            assert_eq!(expect_ready(mgr.process(&signal)), RELEASED_SLOTS);
+            assert_eq!(
+                mgr.capacity_generation,
+                generation_before + RELEASED_SLOTS as u64
+            );
             assert!(mgr.earliest_offload_deadline().is_none());
-            assert_eq!(mgr.num_active_block_refs(), 1);
+            assert_eq!(mgr.num_active_block_refs(), RELEASED_SLOTS);
 
             let events = sink.take();
-            assert!(stored_block(&events, StorageTier::Device, 2).is_some());
+            let MoveBlock::Use(blocks, _, _, _, _) = signal else {
+                panic!("creation signal must be Use");
+            };
+            assert!(blocks.iter().all(|block| {
+                let UniqueBlock::FullBlock(seq_hash) = block else {
+                    return false;
+                };
+                stored_block(&events, StorageTier::Device, *seq_hash).is_some()
+            }));
         }
 
         #[test]

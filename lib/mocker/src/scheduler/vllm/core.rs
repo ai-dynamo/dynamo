@@ -1594,8 +1594,14 @@ impl VllmCore {
             break;
         }
         let preempted = selected.and_then(|uuid| self.state.preempt_uuid(uuid));
-        if preempted.is_some() {
+        if let Some(preempted) = preempted.as_ref() {
             self.bump_capacity_generation();
+            tracing::debug!(
+                worker_id = self.dp_rank,
+                request_id = %preempted.uuid,
+                preemptions_total = self.state.preemptions_total,
+                "vLLM scheduler preempted and requeued request"
+            );
         }
         preempted
     }

@@ -1358,6 +1358,25 @@ impl MockOffloadEngine {
         pending.iter().any(|pending| !pending.handle.is_complete())
     }
 
+    #[cfg(test)]
+    pub(crate) fn pending_g1_transfer_ownership(&self) -> (Vec<BlockId>, Vec<BlockId>) {
+        let pending = self
+            .pending_g1_to_g2
+            .lock()
+            .expect("pending G1→G2 handles mutex poisoned");
+        let mut source_slot_ids: Vec<_> = pending
+            .iter()
+            .flat_map(|transfer| transfer.source_slots.keys().copied())
+            .collect();
+        let mut offload_block_ids: Vec<_> = pending
+            .iter()
+            .flat_map(|transfer| transfer.g2_to_lower_chain_blocks.keys().copied())
+            .collect();
+        source_slot_ids.sort_unstable();
+        offload_block_ids.sort_unstable();
+        (source_slot_ids, offload_block_ids)
+    }
+
     /// Enqueue a burst of G1→G2 evictions with router metadata that will be
     /// used to publish HostPinned-tier events when G2 lifecycle notifications
     /// arrive.
