@@ -18,7 +18,7 @@ Use these branches together:
 | Repository | Remote | Branch | Minimum revision |
 |---|---|---|---|
 | SGLang | `git@github.com:Aphoh/sglang.git` | `req-migration-2.0` | `df1f4d7632` |
-| Dynamo | `git@github.com:ai-dynamo/dynamo.git` | `warnold/sglang-dd-2.0` | `fb1d8d5e0b` |
+| Dynamo | `git@github.com:ai-dynamo/dynamo.git` | `warnold/sglang-dd-2.0` | `2914c20e23` |
 
 The runtime image must contain the Dynamo revision and import the SGLang
 revision above. Record both full SHAs and the image digest with every result.
@@ -28,13 +28,18 @@ revision above. Record both full SHAs and the image digest with every result.
 A self-contained test image is published at:
 
 ```text
-tag:    aphoh/not-sglang-dynamo:fb1d8d5e0b3e-df1f4d763224
-digest: aphoh/not-sglang-dynamo@sha256:95e96fb661de0af86423899c2b444e0f985114b326aa4d531857ad2a26f117a3
+tag:    aphoh/not-sglang-dynamo:2914c20e23d4-df1f4d763224
+digest: aphoh/not-sglang-dynamo@sha256:4ee5d05cf36b15545e63f87799a3b928087cfcfabc8d1366553071a75960365a
 ```
 
-It contains Dynamo `fb1d8d5e0b3ea9b1c0e5a3175b8e351379e774f3` and
+It contains Dynamo `2914c20e23d4c13fd00431c8d533f5214b0849d8` and
 SGLang `df1f4d76322457eddd0fea97276b153fe00115bd`. Pin the digest in
-Kubernetes manifests.
+Kubernetes manifests. The previous `fb1d8d5e0b3e-df1f4d763224` image is
+incompatible with the SGLang source because it contains `sgl-deep-gemm==0.1.0`.
+
+The replacement was validated on B200 with DeepSeek-V2-Lite BF16, DEP2,
+DeepEP low-latency mode, the DeepGEMM runner, decode CUDA graphs through batch
+size 8, and a successful generated response.
 
 Build one immutable image after both worktrees are clean. The build archives
 the committed Dynamo `components/src` and SGLang `python` trees on the matching
