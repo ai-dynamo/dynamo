@@ -98,7 +98,7 @@ from dynamo.vllm.kv_connector_protocols import (
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
-from .multimodal_utils.custom_encoder import CustomEncoder
+from .multimodal_utils.batched_custom_encoder import BatchedCustomEncoder
 from .multimodal_utils.embed_assembler import build_mixed_embeds
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.model import (
@@ -1045,7 +1045,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
         # Aggregated partial encoder: loaded in-process if --custom-encoder-class is set.
-        self._custom_encoder: Optional[CustomEncoder] = None
+        self._custom_encoder: Optional[BatchedCustomEncoder] = None
         custom_encoder_class = getattr(config, "custom_encoder_class", None)
         if custom_encoder_class:
             # The CustomEncoder path only ever submits a mixed EmbedsPrompt, so
@@ -3270,9 +3270,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # failure becomes a structured request error instead of escaping the
         # request coroutine and tearing down the stream.
         try:
-            # encode() is async; the encoder owns its execution model (serial via
-            # SerializedCustomEncoder, or its own batching scheduler). The worker
-            # holds no lock — serialization, if any, is the encoder's concern.
+            # encode() is async; BatchedCustomEncoder coalesces concurrent calls
+            # onto its own dedicated thread and runs the batched forward there.
+            # The worker holds no lock — batching/serialization is the encoder's.
             img_tensors: list[torch.Tensor] = await self._custom_encoder.encode(
                 image_urls
             )

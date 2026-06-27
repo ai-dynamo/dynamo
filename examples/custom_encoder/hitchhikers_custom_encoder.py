@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Example CustomEncoder that fakes an image as a known text phrase.
+"""Example BatchedCustomEncoder that fakes an image as a known text phrase.
 
-Instead of a real vision encoder, ``_encode_blocking()`` returns the LM's
+Instead of a real vision encoder, ``forward_batch()`` returns the LM's
 ``embed_tokens`` embeddings of a fixed phrase (default: *"the Ultimate Question
 of Life, the Universe, and Everything"*).  Splicing those embeddings in at the
 image placeholder makes the assembled prompt read as one coherent sentence, so
@@ -17,10 +17,11 @@ shape:
 
 The image URL is ignored — any URL yields the same phrase embeddings.
 
-Subclasses ``QwenSerializedCustomEncoder``: the default model is a Qwen-family
-LM (Qwen2.5), so the ``<|image_pad|>`` placeholder id is resolved from the
-tokenizer, and the synchronous forward goes in ``_encode_blocking`` (the base
-runs it off the event loop, serialized).
+Mixes in ``QwenPlaceholderMixin``: the default model is a Qwen-family LM
+(Qwen2.5), so the ``<|image_pad|>`` placeholder id is resolved from the
+tokenizer.  Subclasses ``BatchedCustomEncoder`` and implements ``build`` (load
+on the batcher thread) and the synchronous ``forward_batch`` (the base coalesces
+concurrent requests and runs it on the dedicated thread).
 
 Usage (via agg_custom.sh):
     DYN_ENCODER_CLASS=examples.custom_encoder.hitchhikers_custom_encoder.HitchhikersCustomEncoder
@@ -42,8 +43,9 @@ from safetensors import safe_open
 from transformers import AutoTokenizer
 from transformers.utils import cached_file
 
-from dynamo.vllm.multimodal_utils.qwen_serialized_custom_encoder import (
-    QwenSerializedCustomEncoder,
+from dynamo.vllm.multimodal_utils.batched_custom_encoder import (
+    BatchedCustomEncoder,
+    QwenPlaceholderMixin,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,7 +90,7 @@ def _load_embed_tokens_weight(model_id: str) -> torch.Tensor:
         return f.get_tensor(embed_key)
 
 
-class HitchhikersCustomEncoder(QwenSerializedCustomEncoder):
+class HitchhikersCustomEncoder(QwenPlaceholderMixin, BatchedCustomEncoder):
     """Encoder that returns the LM embeddings of a fixed phrase for any image URL.
 
     A test/example encoder, not a production vision encoder: it loads the LM's
@@ -98,13 +100,13 @@ class HitchhikersCustomEncoder(QwenSerializedCustomEncoder):
 
     def __init__(self) -> None:
         self._device: str = "cpu"
-        # Named `tokenizer` (not `_tokenizer`) so QwenSerializedCustomEncoder can
-        # resolve the <|image_pad|> placeholder id from it.
+        # Named `tokenizer` (not `_tokenizer`) so QwenPlaceholderMixin can resolve
+        # the <|image_pad|> placeholder id from it.
         self.tokenizer = None
         self._embed_weight: Optional[torch.Tensor] = None
 
-    def load(self, model_id: str, device: str) -> None:
-        """Load the tokenizer and the LM ``embed_tokens`` weight."""
+    def build(self, model_id: str, device: str) -> None:
+        """Load the tokenizer and the LM ``embed_tokens`` weight (on the batcher thread)."""
         self._device = device
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
         self._embed_weight = _load_embed_tokens_weight(model_id)
@@ -115,18 +117,18 @@ class HitchhikersCustomEncoder(QwenSerializedCustomEncoder):
             _PHRASE,
         )
 
-    def _encode_blocking(self, image_urls: List[str]) -> List[torch.Tensor]:
+    def forward_batch(self, image_urls: List[str]) -> List[torch.Tensor]:
         """Return the ``embed_tokens`` embeddings of the phrase for each URL.
 
-        Synchronous forward — the SerializedCustomEncoder base runs it off the
-        event loop, serialized.
+        Synchronous batched forward — the BatchedCustomEncoder base runs it on
+        the dedicated thread, one batch at a time.
         """
         # Explicit check (not assert): asserts are stripped under `python -O`,
-        # which would turn a missing load() into an opaque None-index crash.
+        # which would turn a missing build() into an opaque None-index crash.
         if self._embed_weight is None or self.tokenizer is None:
             raise RuntimeError(
-                "HitchhikersCustomEncoder._encode_blocking() called before "
-                "load(); call load(model_id, device) first."
+                "HitchhikersCustomEncoder.forward_batch() called before "
+                "build(); call load(model_id, device) first."
             )
         ids = self.tokenizer.encode(_PHRASE, add_special_tokens=False)
         phrase_embeds = self._embed_weight[torch.tensor(ids, dtype=torch.long)]
