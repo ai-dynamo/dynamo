@@ -2780,7 +2780,6 @@ mod offload {
             ..Default::default()
         });
         let blocker_pass = core.execute_pass(&mut collector, now_ms);
-        now_ms = blocker_pass.end_ms;
         assert!(
             blocker_pass
                 .output_signals

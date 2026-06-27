@@ -15,8 +15,6 @@ use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArg
 use crate::replay::TraceCollector;
 use crate::scheduler::RouterEventVisibility;
 use crate::scheduler::{SchedulerCommand, SchedulerCommandEffects};
-#[cfg(feature = "kvbm-offload")]
-use dynamo_kv_router::protocols::RouterEvent;
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
     snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
