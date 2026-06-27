@@ -93,6 +93,7 @@ int kvbm_kernels_sycl_launch_universal_from_block(
     const void* const* block_ptrs,
     size_t num_blocks,
     size_t nh, size_t nl, size_t no, size_t nt, size_t hd,
+    size_t nl_full, size_t nl_offset,
     size_t elem_size,
     int layout_value,
     void* queue_ptr)
@@ -135,11 +136,17 @@ int kvbm_kernels_sycl_launch_universal_from_block(
           auto* chunk_base = static_cast<const uint8_t*>(block_ptrs[chunk_ptr_idx]);
           size_t chunk_offset = block_inner_offset(layout, nt_idx, nh_idx, hd_idx, nt, nh, hd);
 
-          // Destination: universal buffer
+          // Destination: universal buffer — use nl_full stride and nl_offset
           auto* univ_base = static_cast<uint8_t*>(universal_ptrs[block_idx]);
+          size_t univ_head_stride = nl_full * no * nt * hd;
+          size_t univ_layer_stride = no * nt * hd;
+          size_t univ_offset = nh_idx * univ_head_stride
+                             + (nl_offset + nl_idx) * univ_layer_stride
+                             + no_idx * (nt * hd)
+                             + nt_idx * hd + hd_idx;
 
           copy_element(chunk_base + chunk_offset * elem_size,
-                       univ_base  + residual * elem_size,
+                       univ_base  + univ_offset * elem_size,
                        elem_size);
         }
       }
@@ -157,6 +164,7 @@ int kvbm_kernels_sycl_launch_block_from_universal(
     void* const* block_ptrs,
     size_t num_blocks,
     size_t nh, size_t nl, size_t no, size_t nt, size_t hd,
+    size_t nl_full, size_t nl_offset,
     size_t elem_size,
     int layout_value,
     void* queue_ptr)
@@ -194,15 +202,21 @@ int kvbm_kernels_sycl_launch_block_from_universal(
           size_t nl_idx = tmp % nl;  tmp /= nl;
           size_t nh_idx = tmp;
 
-          // Source: universal buffer
+          // Source: universal buffer — use nl_full stride and nl_offset
           auto* univ_base = static_cast<const uint8_t*>(universal_ptrs[block_idx]);
+          size_t univ_head_stride = nl_full * no * nt * hd;
+          size_t univ_layer_stride = no * nt * hd;
+          size_t univ_offset = nh_idx * univ_head_stride
+                             + (nl_offset + nl_idx) * univ_layer_stride
+                             + no_idx * (nt * hd)
+                             + nt_idx * hd + hd_idx;
 
           // Destination: block chunk
           size_t chunk_ptr_idx = block_idx * block_stride + nl_idx * no + no_idx;
           auto* chunk_base = static_cast<uint8_t*>(block_ptrs[chunk_ptr_idx]);
           size_t chunk_offset = block_inner_offset(layout, nt_idx, nh_idx, hd_idx, nt, nh, hd);
 
-          copy_element(univ_base  + residual * elem_size,
+          copy_element(univ_base  + univ_offset * elem_size,
                        chunk_base + chunk_offset * elem_size,
                        elem_size);
         }

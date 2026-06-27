@@ -262,12 +262,12 @@ pub trait DeviceDtype: Copy + Send + 'static + private::Sealed {
 
     /// SYCL-side representation of `Self`.
     ///
-    /// Must be `oneapi_rs::safe::DeviceRepr` so SYCL's USM allocator
+    /// Must be `oneapi_rs::sycl::safe::DeviceRepr` so SYCL's USM allocator
     /// and memcpy APIs accept it. Same identity-by-default story as
     /// `CudaRepr`. The trait name mirrors cudarc's `DeviceRepr` to
     /// keep both backends conceptually symmetric.
     #[cfg(feature = "xpu-sycl")]
-    type SyclRepr: oneapi_rs::safe::DeviceRepr + Copy;
+    type SyclRepr: oneapi_rs::sycl::safe::DeviceRepr + Copy;
 
     /// Convert a host element into the CUDA representation. Identity
     /// for the common case; reserved for future scalars whose host and

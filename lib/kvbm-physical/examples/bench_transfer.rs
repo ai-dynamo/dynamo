@@ -77,7 +77,7 @@ const OUTER_DIM: usize = 2; // K and V
 /// Print device info for all SYCL devices.
 #[cfg(feature = "xpu-sycl")]
 fn print_sycl_device_info(device_ordinal: u32) {
-    use oneapi_rs::safe::{SyclDevice, SyclDeviceInfo};
+    use oneapi_rs::sycl::safe::{SyclDevice, SyclDeviceInfo};
 
     let count = match SyclDevice::count() {
         Ok(n) if n > 0 => n,
@@ -136,7 +136,7 @@ fn selected_device_name(backend: DeviceBackend, ordinal: u32) -> String {
         DeviceBackend::Sycl => {
             #[cfg(feature = "xpu-sycl")]
             {
-                use oneapi_rs::safe::SyclDevice;
+                use oneapi_rs::sycl::safe::SyclDevice;
                 if let Ok(d) = SyclDevice::by_ordinal(ordinal as usize) {
                     if let Ok(info) = d.info() {
                         return info.name;

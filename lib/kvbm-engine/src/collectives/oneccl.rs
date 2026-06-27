@@ -118,11 +118,11 @@ impl Drop for CclStream {
 /// # Performance
 ///
 /// Broadcast operations submit oneCCL collectives on a dedicated SYCL queue
-/// wrapped as a CCL stream. Completion is tracked via `ccl_rs_event_test`
+/// wrapped as a CCL stream. Completion is tracked via `ccl_rs_event_is_complete`
 /// polling, analogous to CUDA event polling in the NCCL path.
 pub struct OneCclCollectives {
     /// oneCCL communicator handle
-    comm: *mut sys::ccl_rs_comm_t,
+    comm: sys::ccl_rs_comm_t,
 
     /// Whether we own the communicator (and must destroy it on drop)
     ownership: CommOwnership,
@@ -217,7 +217,7 @@ impl OneCclCollectives {
         layout_resolver: Arc<dyn LayoutResolver>,
     ) -> Self {
         Self {
-            comm: comm_ptr as *mut sys::ccl_rs_comm_t,
+            comm: comm_ptr as sys::ccl_rs_comm_t,
             ownership: CommOwnership::Borrowed,
             rank,
             world_size,
@@ -230,7 +230,7 @@ impl OneCclCollectives {
     /// Broadcast memory regions using oneCCL.
     ///
     /// Submission is batched via `group_start`/`group_end`. Every
-    /// `ccl_rs_broadcast` returns an event and the API requires every
+    /// `ccl_rs_bcast_inplace` returns an event and the API requires every
     /// returned event to be destroyed; we destroy them as we iterate.
     ///
     /// **Host completion via `ccl_rs_stream_wait`, not per-op events.**
@@ -259,19 +259,19 @@ impl OneCclCollectives {
             // SAFETY: We're calling oneCCL with valid pointers.
             // Using CCL_RS_DATATYPE_UINT8 for byte-level transfer (like ncclChar).
             let res = check_ccl_result(unsafe {
-                sys::ccl_rs_broadcast(
+                sys::ccl_rs_bcast_inplace(
                     *ptr as *mut c_void,
                     *size,
-                    sys::ccl_rs_datatype_t::CCL_RS_DATATYPE_UINT8,
+                    sys::ccl_rs_data_type_t::CCL_RS_DATA_TYPE_UINT8,
                     root,
                     self.comm,
-                    stream,
+                    stream as *mut c_void,
                     &mut event,
                 )
             });
 
             if let Err(e) = res {
-                broadcast_err = Some(anyhow::anyhow!("ccl_rs_broadcast failed: {}", e));
+                broadcast_err = Some(anyhow::anyhow!("ccl_rs_bcast_inplace failed: {}", e));
                 break;
             }
 
@@ -424,7 +424,7 @@ unsafe impl Sync for OneCclCollectives {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oneapi_rs::safe::{DevicePtr, SyclSlice, SyclDevice, SyclQueue};
+    use oneapi_rs::sycl::safe::{DevicePtr, SyclSlice, SyclDevice, SyclQueue};
     use std::sync::Arc;
 
     /// Get the number of XPU (SYCL) devices available.
@@ -596,17 +596,17 @@ mod tests {
         // Broadcast from root (rank 0)
         let mut event: *mut sys::ccl_rs_event_t = ptr::null_mut();
         check_ccl_result(unsafe {
-            sys::ccl_rs_broadcast(
+            sys::ccl_rs_bcast_inplace(
                 buffer_ptr as *mut c_void,
                 test_size,
-                sys::ccl_rs_datatype_t::CCL_RS_DATATYPE_UINT8,
+                sys::ccl_rs_data_type_t::CCL_RS_DATA_TYPE_UINT8,
                 0, // root rank
                 comm,
-                ccl_stream,
+                ccl_stream as *mut c_void,
                 &mut event,
             )
         })
-        .expect("ccl_rs_broadcast failed");
+        .expect("ccl_rs_bcast_inplace failed");
 
         if !event.is_null() {
             check_ccl_result(unsafe { sys::ccl_rs_event_wait(event) })
@@ -666,17 +666,17 @@ mod tests {
         for &ptr in &buffer_ptrs {
             let mut event: *mut sys::ccl_rs_event_t = ptr::null_mut();
             check_ccl_result(unsafe {
-                sys::ccl_rs_broadcast(
+                sys::ccl_rs_bcast_inplace(
                     ptr as *mut c_void,
                     region_size,
-                    sys::ccl_rs_datatype_t::CCL_RS_DATATYPE_UINT8,
+                    sys::ccl_rs_data_type_t::CCL_RS_DATA_TYPE_UINT8,
                     0,
                     comm,
-                    ccl_stream,
+                    ccl_stream as *mut c_void,
                     &mut event,
                 )
             })
-            .expect("ccl_rs_broadcast failed");
+            .expect("ccl_rs_bcast_inplace failed");
 
             if !event.is_null() {
                 check_ccl_result(unsafe { sys::ccl_rs_event_wait(event) })
@@ -741,17 +741,17 @@ mod tests {
 
         let mut event: *mut sys::ccl_rs_event_t = ptr::null_mut();
         check_ccl_result(unsafe {
-            sys::ccl_rs_broadcast(
+            sys::ccl_rs_bcast_inplace(
                 buffer_ptr as *mut c_void,
                 test_size,
-                sys::ccl_rs_datatype_t::CCL_RS_DATATYPE_UINT8,
+                sys::ccl_rs_data_type_t::CCL_RS_DATA_TYPE_UINT8,
                 0,
                 comm,
-                ccl_stream,
+                ccl_stream as *mut c_void,
                 &mut event,
             )
         })
-        .expect("ccl_rs_broadcast failed");
+        .expect("ccl_rs_bcast_inplace failed");
 
         if !event.is_null() {
             check_ccl_result(unsafe { sys::ccl_rs_event_wait(event) })

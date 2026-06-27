@@ -16,7 +16,7 @@
 
 use crate::traits::*;
 use anyhow::Result;
-use oneapi_rs::safe::{SyclContext, SyclDevice, SyclDeviceType, SyclEvent, SyclQueue};
+use oneapi_rs::sycl::safe::{SyclContext, SyclDevice, SyclDeviceType, SyclEvent, SyclGraphAvailability, SyclQueue};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -77,8 +77,9 @@ fn discrete_gpu_devices() -> Result<&'static [Arc<SyclDevice>]> {
 
     if devs.is_empty() {
         return Err(anyhow::anyhow!(
-            "no discrete Level Zero GPUs visible (SYCL enumerated {} device(s))",
+            "no discrete Level Zero GPUs visible (SYCL enumerated {} device(s));              rejected: {:?}",
             device_count,
+            skipped,
         ));
     }
 
@@ -229,9 +230,9 @@ impl DeviceContextOps for SyclDeviceContext {
     }
 
     fn allocate_device(&self, size: usize) -> Result<u64> {
-        let ptr = self
+        let ptr = unsafe { self
             .shared_context
-            .malloc_device(&self.device, size)
+            .malloc_device(&self.device, size) }
             .map_err(|e| anyhow::anyhow!(
                 "SYCL device allocation failed ({} bytes): {}", size, e
             ))?;
@@ -242,8 +243,8 @@ impl DeviceContextOps for SyclDeviceContext {
 
     fn free_device(&self, ptr: u64) -> Result<()> {
         if untrack_alloc(&DEVICE_ALLOCS, ptr) {
-            self.shared_context
-                .free_raw(ptr as *mut c_void)
+            unsafe { self.shared_context
+                .free_raw(ptr as *mut c_void) }
                 .map_err(|e| anyhow::anyhow!("SYCL free_device failed: {}", e))?;
         } else {
             debug_assert!(
@@ -293,7 +294,7 @@ impl DeviceContextOps for SyclDeviceContext {
         // Fallback: non-NUMA SYCL host allocation.
         // If host USM is too constrained for a large G2 tier, fall back to
         // shared USM, which remains host-visible and device-accessible.
-        let ptr = match self.shared_context.malloc_host(size) {
+        let ptr = match unsafe { self.shared_context.malloc_host(size) } {
             Ok(ptr) => ptr,
             Err(host_err) => {
                 tracing::warn!(
@@ -301,8 +302,8 @@ impl DeviceContextOps for SyclDeviceContext {
                     error = %host_err,
                     "SYCL malloc_host failed; falling back to malloc_shared for pinned allocation"
                 );
-                self.shared_context
-                    .malloc_shared(&self.device, size)
+                unsafe { self.shared_context
+                    .malloc_shared(&self.device, size) }
                     .map_err(|shared_err| anyhow::anyhow!(
                         "SYCL host allocation failed ({} bytes): {}; fallback malloc_shared also failed: {}",
                         size,
@@ -318,8 +319,8 @@ impl DeviceContextOps for SyclDeviceContext {
 
     fn free_pinned(&self, ptr: u64) -> Result<()> {
         if untrack_alloc(&HOST_ALLOCS, ptr) {
-            self.shared_context
-                .free_raw(ptr as *mut c_void)
+            unsafe { self.shared_context
+                .free_raw(ptr as *mut c_void) }
                 .map_err(|e| anyhow::anyhow!("SYCL free_pinned failed: {}", e))?;
         } else {
             debug_assert!(
@@ -373,15 +374,15 @@ struct SyclPinnedAllocator {
 
 impl dynamo_memory::PinnedAllocator for SyclPinnedAllocator {
     fn alloc_pinned(&self, size: usize) -> Result<*mut u8, String> {
-        self.context
-            .malloc_host(size)
+        unsafe { self.context
+            .malloc_host(size) }
             .map(|p| p as *mut u8)
             .map_err(|e| format!("SYCL malloc_host failed: {}", e))
     }
 
     fn free_pinned(&self, ptr: *mut u8) -> Result<(), String> {
-        self.context
-            .free_raw(ptr as *mut c_void)
+        unsafe { self.context
+            .free_raw(ptr as *mut c_void) }
             .map_err(|e| format!("SYCL free_raw failed: {}", e))
     }
 }
@@ -394,6 +395,7 @@ impl dynamo_memory::PinnedAllocator for SyclPinnedAllocator {
 #[derive(Debug)]
 pub struct SyclHostRegistrar {
     context: Arc<SyclContext>,
+    device: Arc<SyclDevice>,
 }
 
 impl SyclHostRegistrar {
@@ -404,7 +406,9 @@ impl SyclHostRegistrar {
     /// GPUs — any device ordinal works.
     pub fn new(_device_id: u32) -> anyhow::Result<Self> {
         let context = shared_sycl_context()?;
-        Ok(Self { context })
+        let device = SyclDevice::by_ordinal(_device_id as usize)
+            .map_err(|e| anyhow::anyhow!("SyclHostRegistrar: device {}: {}", _device_id, e))?;
+        Ok(Self { context, device })
     }
 }
 
@@ -412,9 +416,10 @@ impl dynamo_memory::HostRegistrar for SyclHostRegistrar {
     unsafe fn register(&self, ptr: *mut c_void, len: usize) -> dynamo_memory::Result<()> {
         unsafe {
             self.context
-                .host_import_pointer(ptr, len)
+                .host_register(&self.device, ptr, len)
+                .map(|_| ())
                 .map_err(|e| dynamo_memory::StorageError::AllocationFailed(
-                    format!("host_import_pointer: {}", e)
+                    format!("host_register: {}", e)
                 ))
         }
     }
@@ -422,9 +427,9 @@ impl dynamo_memory::HostRegistrar for SyclHostRegistrar {
     unsafe fn unregister(&self, ptr: *mut c_void) -> dynamo_memory::Result<()> {
         unsafe {
             self.context
-                .host_release_imported_pointer(ptr)
+                .host_unregister(ptr)
                 .map_err(|e| dynamo_memory::StorageError::AllocationFailed(
-                    format!("host_release_imported_pointer: {}", e)
+                    format!("host_unregister: {}", e)
                 ))
         }
     }
@@ -470,9 +475,9 @@ impl DeviceStreamOps for SyclDeviceStream {
 
         for (&src, &dst) in src_ptrs.iter().zip(dst_ptrs.iter()) {
             unsafe {
-                self.queue.memcpy_raw_async(
-                    dst as *mut c_void,
+                self.queue.memcpy_raw_no_deps_no_event(
                     src as *const c_void,
+                    dst as *mut c_void,
                     size,
                 )
             }
@@ -483,9 +488,9 @@ impl DeviceStreamOps for SyclDeviceStream {
 
     fn memcpy_htod(&self, dst_device: u64, src_host: &[u8]) -> Result<()> {
         unsafe {
-            self.queue.memcpy_raw_async(
-                dst_device as *mut c_void,
+            self.queue.memcpy_raw_no_deps_no_event(
                 src_host.as_ptr() as *const c_void,
+                dst_device as *mut c_void,
                 src_host.len(),
             )
         }
@@ -494,9 +499,9 @@ impl DeviceStreamOps for SyclDeviceStream {
 
     fn memcpy_dtoh(&self, src_device: u64, dst_host: &mut [u8]) -> Result<()> {
         unsafe {
-            self.queue.memcpy_raw_async(
-                dst_host.as_mut_ptr() as *mut c_void,
+            self.queue.memcpy_raw_no_deps_no_event(
                 src_device as *const c_void,
+                dst_host.as_mut_ptr() as *mut c_void,
                 dst_host.len(),
             )
         }
@@ -544,18 +549,18 @@ impl DeviceStreamOps for SyclDeviceStream {
             let byte_len = count * std::mem::size_of::<u64>();
 
             unsafe {
-                self.queue.memcpy_raw_async(
-                    src_ptrs.as_mut_ptr() as *mut c_void,
+                self.queue.memcpy_raw_no_deps_no_event(
                     src_ptrs_device as *const c_void,
+                    src_ptrs.as_mut_ptr() as *mut c_void,
                     byte_len,
                 )
             }
             .map_err(|e| anyhow::anyhow!("SYCL readback src_ptrs failed: {}", e))?;
 
             unsafe {
-                self.queue.memcpy_raw_async(
-                    dst_ptrs.as_mut_ptr() as *mut c_void,
+                self.queue.memcpy_raw_no_deps_no_event(
                     dst_ptrs_device as *const c_void,
+                    dst_ptrs.as_mut_ptr() as *mut c_void,
                     byte_len,
                 )
             }
@@ -578,9 +583,9 @@ impl DeviceStreamOps for SyclDeviceStream {
         let event_handle = event.raw_handle()
             .ok_or_else(|| anyhow::anyhow!("SYCL wait_event: event has no raw handle"))?;
         unsafe {
-            oneapi_rs::sys::sycl_rs_queue_wait_event(
+            oneapi_rs::sycl::sys::sycl_rs_queue_wait_event(
                 self.queue.handle(),
-                event_handle as *mut oneapi_rs::sys::sycl_rs_event_t,
+                event_handle as *mut oneapi_rs::sycl::sys::sycl_rs_event_t,
             )
             .result()
         }
@@ -634,24 +639,24 @@ impl DeviceEventOps for SyclDeviceEvent {
 
     fn record_on_raw_stream(&self, stream_handle: u64) -> Result<()> {
         unsafe {
-            oneapi_rs::sys::sycl_rs_event_record_on_queue(
-                self.event.handle,
-                stream_handle as *mut oneapi_rs::sys::sycl_rs_queue_t,
+            oneapi_rs::sycl::sys::sycl_rs_event_record_on_queue(
+                self.event.handle(),
+                stream_handle as *mut oneapi_rs::sycl::sys::sycl_rs_queue_t,
             ).result()
         }.map_err(|e| anyhow::anyhow!("SYCL event record_on_queue failed: {}", e))
     }
 
     fn wait_on_raw_stream(&self, stream_handle: u64) -> Result<()> {
         unsafe {
-            oneapi_rs::sys::sycl_rs_queue_wait_event(
-                stream_handle as *mut oneapi_rs::sys::sycl_rs_queue_t,
-                self.event.handle,
+            oneapi_rs::sycl::sys::sycl_rs_queue_wait_event(
+                stream_handle as *mut oneapi_rs::sycl::sys::sycl_rs_queue_t,
+                self.event.handle(),
             ).result()
         }.map_err(|e| anyhow::anyhow!("SYCL queue_wait_event (raw) failed: {}", e))
     }
 
     fn raw_handle(&self) -> Option<u64> {
-        Some(self.event.handle as u64)
+        Some(self.event.handle() as u64)
     }
 }
 
@@ -689,7 +694,7 @@ fn drain_deferred_slice_frees() {
         match list[i].event.is_complete() {
             Ok(true) => {
                 let entry = list.swap_remove(i);
-                if let Err(e) = entry.context.free_raw(entry.ptr) {
+                if let Err(e) = unsafe { entry.context.free_raw(entry.ptr) } {
                     tracing::warn!("deferred SyclDeviceSlice free_raw failed: {}", e);
                 }
             }
@@ -742,18 +747,18 @@ impl<T: crate::DeviceDtype> SyclDeviceSlice<T> {
         let ptr = if bytes == 0 {
             0u64
         } else {
-            stream
+            unsafe { stream
                 .shared_context
-                .malloc_device(&stream.device, bytes)
+                .malloc_device(&stream.device, bytes) }
                 .map_err(|e| anyhow::anyhow!(
                     "SYCL clone_htod malloc_device failed ({} bytes): {}", bytes, e
                 ))? as u64
         };
         if bytes > 0 {
             unsafe {
-                stream.queue.memcpy_raw_async(
-                    ptr as *mut c_void,
+                stream.queue.memcpy_raw_no_deps_no_event(
                     host.as_ptr() as *const c_void,
+                    ptr as *mut c_void,
                     bytes,
                 )
             }
@@ -821,7 +826,7 @@ impl<T: crate::DeviceDtype> Drop for SyclDeviceSlice<T> {
         if let Err(e) = self.queue.synchronize() {
             tracing::warn!("SyclDeviceSlice drop: queue synchronize failed: {}", e);
         }
-        if let Err(e) = self.context.free_raw(self.ptr as *mut c_void) {
+        if let Err(e) = unsafe { self.context.free_raw(self.ptr as *mut c_void) } {
             tracing::warn!("SyclDeviceSlice drop: free_raw failed: {}", e);
         }
     }
@@ -999,7 +1004,7 @@ mod tests {
 // DeviceGraphOps / DeviceGraphExec — SYCL graph capture/replay.
 // =====================================================================
 
-use oneapi_rs::safe::SyclGraph;
+use oneapi_rs::sycl::safe::{SyclGraph, SyclGraphOp};
 
 /// An instantiated UR executable graph holding N captured USM memcpy nodes.
 ///
@@ -1037,8 +1042,8 @@ impl crate::DeviceGraphExec for SyclGraphExec {
                     "SyclGraphExec::launch: stream is not a SyclDeviceStream"
                 )
             })?;
-        self.graph
-            .enqueue(&sycl_stream.queue)
+        unsafe { self.graph
+            .enqueue(&sycl_stream.queue) }
             .map_err(|e| anyhow::anyhow!("SyclGraphExec::launch failed: {}", e))
     }
 }
@@ -1072,7 +1077,7 @@ impl crate::DeviceGraphOps for SyclDeviceContext {
             })?;
 
         // Check runtime availability of SYCL graph capture support.
-        if !SyclGraph::is_available() {
+        if SyclGraph::is_available(&sycl_stream.queue) == SyclGraphAvailability::None {
             anyhow::bail!(
                 "record_memcpy_graph: SYCL graph capture API not available \
                  (libur_loader.so not found or UR headers were not present at \
@@ -1080,15 +1085,18 @@ impl crate::DeviceGraphOps for SyclDeviceContext {
             );
         }
 
-        // Build pointer arrays for the C FFI call.
-        let c_src_ptrs: Vec<*const c_void> =
-            src_ptrs.iter().map(|&p| p as *const c_void).collect();
-        let c_dst_ptrs: Vec<*mut c_void> =
-            dst_ptrs.iter().map(|&p| p as *mut c_void).collect();
+        // Build graph ops for the batch memcpy.
+        let ops: Vec<SyclGraphOp> = src_ptrs.iter().zip(dst_ptrs.iter())
+            .map(|(&s, &d)| SyclGraphOp::memcpy(
+                d as *mut c_void,
+                s as *const c_void,
+                size,
+            ))
+            .collect();
 
         // Single call: queue-capture N memcpy + instantiate executable graph.
         let graph = unsafe {
-            SyclGraph::record(&sycl_stream.queue, &c_src_ptrs, &c_dst_ptrs, size)
+            SyclGraph::record(&sycl_stream.queue, &ops)
         }
         .map_err(|e| {
             anyhow::anyhow!("record_memcpy_graph: graph capture failed: {}", e)

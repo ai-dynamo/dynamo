@@ -62,7 +62,7 @@ oneshot = "0.1.11"
 # the NCCL collectives shims (`collectives/{bootstrap,nccl}.rs`), which
 # already cfg-gate on `feature = "nccl"`. Mirrors the oneCCL gating below.
 cudarc = { workspace = true, optional = true, features = ["nccl"] }
-oneapi-rs = { workspace = true, optional = true, features = ["oneccl"] }
+oneapi-rs = { workspace = true, optional = true }
 aws-sdk-s3 = { version = "1.120.0", optional = true }
 aws-config = { version = "1.8.11", optional = true }
 rayon = { version = "1", optional = true }

@@ -704,7 +704,7 @@ mod cuda_tests {
 #[cfg(all(test, feature = "testing-xpu-sycl"))]
 mod sycl_tests {
     use super::*;
-    use oneapi_rs::safe::{SyclContext, SyclDevice};
+    use oneapi_rs::sycl::safe::{SyclContext, SyclDevice};
 
     /// Test SYCL allocator that mirrors the real SyclPinnedAllocator
     struct TestSyclAllocator {
@@ -713,15 +713,15 @@ mod sycl_tests {
 
     impl PinnedAllocator for TestSyclAllocator {
         fn alloc_pinned(&self, size: usize) -> Result<*mut u8, String> {
-            self.context
-                .malloc_host(size)
+            unsafe { self.context
+                .malloc_host(size) }
                 .map(|p| p as *mut u8)
                 .map_err(|e| format!("SYCL malloc_host: {}", e))
         }
 
         fn free_pinned(&self, ptr: *mut u8) -> Result<(), String> {
-            self.context
-                .free_raw(ptr as *mut std::ffi::c_void)
+            unsafe { self.context
+                .free_raw(ptr as *mut std::ffi::c_void) }
                 .map_err(|e| format!("SYCL free_raw: {}", e))
         }
     }
@@ -756,7 +756,7 @@ mod sycl_tests {
         assert!(!ptr.is_null());
 
         // Free through the context.
-        context.free_raw(ptr as *mut std::ffi::c_void).unwrap();
+        unsafe { context.free_raw(ptr as *mut std::ffi::c_void) }.unwrap();
     }
 
     #[test]
@@ -775,7 +775,7 @@ mod sycl_tests {
             Some(ptr) => {
                 assert!(!ptr.is_null());
                 println!("SYCL NUMA-aware allocation succeeded for PCI {}", pci);
-                context.free_raw(ptr as *mut std::ffi::c_void).unwrap();
+                unsafe { context.free_raw(ptr as *mut std::ffi::c_void) }.unwrap();
             }
             None => {
                 println!(
@@ -806,8 +806,8 @@ mod sycl_tests {
                 assert!(!ptr1.is_null());
                 assert!(!ptr2.is_null());
                 assert_ne!(ptr1, ptr2);
-                context.free_raw(ptr1 as *mut std::ffi::c_void).unwrap();
-                context.free_raw(ptr2 as *mut std::ffi::c_void).unwrap();
+                unsafe { context.free_raw(ptr1 as *mut std::ffi::c_void) }.unwrap();
+                unsafe { context.free_raw(ptr2 as *mut std::ffi::c_void) }.unwrap();
             }
             (None, None) => {
                 println!("NUMA node unknown, both allocations skipped");

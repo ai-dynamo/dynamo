@@ -177,7 +177,7 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) {
 
     for block_idx in 0..nb {
         for chunk_idx in 0..chunk_count {
-            let mut buf = queue.context().alloc_device::<T>(queue.device(), inner)
+            let mut buf = unsafe { queue.context().alloc_device::<T>(queue.device(), inner) }
                 .expect("device alloc failed");
 
             // H2D: copy host chunk data to device
@@ -193,7 +193,7 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) {
     // Allocate universal output buffers on device
     let mut universal_device_bufs: Vec<SyclSlice<T>> = Vec::with_capacity(nb);
     for _ in 0..nb {
-        let buf = queue.context().alloc_device::<T>(queue.device(), universal_volume)
+        let buf = unsafe { queue.context().alloc_device::<T>(queue.device(), universal_volume) }
             .expect("device alloc failed");
         universal_device_bufs.push(buf);
     }
@@ -209,12 +209,12 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) {
         .map(|buf| buf.as_mut_ptr() as u64)
         .collect();
 
-    let mut block_ptrs_dev = queue.context().alloc_device::<u64>(queue.device(), block_ptr_values.len())
+    let mut block_ptrs_dev = unsafe { queue.context().alloc_device::<u64>(queue.device(), block_ptr_values.len()) }
         .expect("device alloc failed");
     queue.memcpy_sync(block_ptr_values.as_slice(), &mut block_ptrs_dev)
         .expect("block ptrs H2D failed");
 
-    let mut universal_ptrs_dev = queue.context().alloc_device::<u64>(queue.device(), universal_ptr_values.len())
+    let mut universal_ptrs_dev = unsafe { queue.context().alloc_device::<u64>(queue.device(), universal_ptr_values.len()) }
         .expect("device alloc failed");
     queue.memcpy_sync(universal_ptr_values.as_slice(), &mut universal_ptrs_dev)
         .expect("universal ptrs H2D failed");
@@ -227,7 +227,7 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) {
         sycl_universal_from_block(
             universal_ptrs_dev.as_mut_ptr() as *const *mut c_void,
             block_ptrs_dev.as_mut_ptr() as *const *const c_void,
-            nb, nh, nl, no, nt, hd, elem_size,
+            nb, nh, nl, no, nt, hd, nl, 0, elem_size,
             layout,
             queue_ptr,
         )
@@ -263,7 +263,7 @@ fn block_universal_roundtrip_inner<T: TestDtype>(layout: BlockLayout) {
         sycl_block_from_universal(
             universal_ptrs_dev.as_mut_ptr() as *const *const c_void,
             block_ptrs_dev.as_mut_ptr() as *const *mut c_void,
-            nb, nh, nl, no, nt, hd, elem_size,
+            nb, nh, nl, no, nt, hd, nl, 0, elem_size,
             layout,
             queue_ptr,
         )
@@ -398,7 +398,7 @@ fn nhd_hnd_transpose_inner<T: TestDtype>(src_layout: BlockLayout) {
     let mut src_device_bufs: Vec<SyclSlice<T>> = Vec::with_capacity(nb * chunk_count);
     for block in &src_blocks {
         for chunk in block {
-            let mut buf = queue.context().alloc_device::<T>(queue.device(), chunk_volume)
+            let mut buf = unsafe { queue.context().alloc_device::<T>(queue.device(), chunk_volume) }
                 .expect("device alloc failed");
             queue.memcpy_sync(chunk.as_slice(), &mut buf).expect("H2D src chunk");
             src_device_bufs.push(buf);
@@ -410,7 +410,7 @@ fn nhd_hnd_transpose_inner<T: TestDtype>(src_layout: BlockLayout) {
     let mut dst_device_bufs: Vec<SyclSlice<T>> = Vec::with_capacity(nb * chunk_count);
     let zeros = vec![T::from_f64(0.0); chunk_volume];
     for _ in 0..(nb * chunk_count) {
-        let mut buf = queue.context().alloc_device::<T>(queue.device(), chunk_volume)
+        let mut buf = unsafe { queue.context().alloc_device::<T>(queue.device(), chunk_volume) }
             .expect("device alloc failed");
         queue.memcpy_sync(zeros.as_slice(), &mut buf).expect("dst zero-fill");
         dst_device_bufs.push(buf);
@@ -419,12 +419,12 @@ fn nhd_hnd_transpose_inner<T: TestDtype>(src_layout: BlockLayout) {
     let src_ptr_values: Vec<u64> = src_device_bufs.iter().map(|b| b.as_mut_ptr() as u64).collect();
     let dst_ptr_values: Vec<u64> = dst_device_bufs.iter().map(|b| b.as_mut_ptr() as u64).collect();
 
-    let mut src_ptrs_dev = queue.context().alloc_device::<u64>(queue.device(), src_ptr_values.len())
+    let mut src_ptrs_dev = unsafe { queue.context().alloc_device::<u64>(queue.device(), src_ptr_values.len()) }
         .expect("device alloc failed");
     queue.memcpy_sync(src_ptr_values.as_slice(), &mut src_ptrs_dev)
         .expect("src ptrs H2D");
 
-    let mut dst_ptrs_dev = queue.context().alloc_device::<u64>(queue.device(), dst_ptr_values.len())
+    let mut dst_ptrs_dev = unsafe { queue.context().alloc_device::<u64>(queue.device(), dst_ptr_values.len()) }
         .expect("device alloc failed");
     queue.memcpy_sync(dst_ptr_values.as_slice(), &mut dst_ptrs_dev)
         .expect("dst ptrs H2D");
@@ -498,7 +498,7 @@ fn sycl_empty_batch_noop() {
         sycl_universal_from_block(
             std::ptr::null(),
             std::ptr::null(),
-            0, 1, 1, 1, 1, 1, 4,
+            0, 1, 1, 1, 1, 1, 1, 0, 4,
             BlockLayout::NHD,
             queue_ptr,
         )
@@ -531,9 +531,9 @@ fn sycl_vectorized_copy_roundtrip() {
 
     for i in 0..num_pairs as usize {
         let pattern: Vec<u8> = (0..copy_size).map(|b| ((i * 37 + b * 7) & 0xFF) as u8).collect();
-        let mut src = queue.context().alloc_device::<u8>(queue.device(), copy_size).expect("alloc src");
+        let mut src = unsafe { queue.context().alloc_device::<u8>(queue.device(), copy_size)}.expect("alloc src");
         queue.memcpy_sync(pattern.as_slice(), &mut src).expect("H2D src");
-        let dst = queue.context().alloc_device::<u8>(queue.device(), copy_size).expect("alloc dst");
+        let dst = unsafe { queue.context().alloc_device::<u8>(queue.device(), copy_size)}.expect("alloc dst");
 
         src_host_data.push(pattern);
         src_bufs.push(src);
@@ -544,11 +544,11 @@ fn sycl_vectorized_copy_roundtrip() {
     let src_ptrs: Vec<u64> = src_bufs.iter().map(|b| b.as_mut_ptr() as u64).collect();
     let dst_ptrs: Vec<u64> = dst_bufs.iter().map(|b| b.as_mut_ptr() as u64).collect();
 
-    let mut src_ptrs_dev = queue.context().alloc_device::<u64>(queue.device(), num_pairs as usize)
+    let mut src_ptrs_dev = unsafe { queue.context().alloc_device::<u64>(queue.device(), num_pairs as usize) }
         .expect("alloc src_ptrs");
     queue.memcpy_sync(src_ptrs.as_slice(), &mut src_ptrs_dev).expect("H2D src_ptrs");
 
-    let mut dst_ptrs_dev = queue.context().alloc_device::<u64>(queue.device(), num_pairs as usize)
+    let mut dst_ptrs_dev = unsafe { queue.context().alloc_device::<u64>(queue.device(), num_pairs as usize) }
         .expect("alloc dst_ptrs");
     queue.memcpy_sync(dst_ptrs.as_slice(), &mut dst_ptrs_dev).expect("H2D dst_ptrs");
 

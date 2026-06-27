@@ -958,7 +958,7 @@ mod cuda_tests {
 #[cfg(all(test, feature = "testing-xpu-sycl"))]
 mod sycl_tests {
     use super::*;
-    use oneapi_rs::safe::SyclDevice;
+    use oneapi_rs::sycl::safe::SyclDevice;
 
     fn xpu_pci_address() -> Option<String> {
         let dev = SyclDevice::by_ordinal(0).ok()?;

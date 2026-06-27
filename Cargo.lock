@@ -1308,9 +1308,10 @@ dependencies = [
 
 [[package]]
 name = "ccl-bindings"
-version = "2021.15.0"
+version = "2021.17.0"
 dependencies = [
  "cc",
+ "ctor 0.2.9",
 ]
 
 [[package]]
@@ -1903,6 +1904,16 @@ checksum = "6d2301688392eb071b0bf1a37be05c469d3cc4dbbd95df672fe28ab021e6a096"
 dependencies = [
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "ctor"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a2785755761f3ddc1492979ce1e48d2c00d09311c39e4466429188f3dd6501"
+dependencies = [
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -5419,7 +5430,7 @@ version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fb9b5c752f145ac5046bccc3c4f62892e3c950c1d1eab80c5949cd68a2078db"
 dependencies = [
- "ctor",
+ "ctor 0.1.26",
  "web-time",
 ]
 

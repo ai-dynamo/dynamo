@@ -1496,6 +1496,7 @@ pub(crate) fn dispatch_transform_kernel(
                             invocation,
                             block_pairs.len(),
                             nh, nl, no, nt, hd,
+                            nl_full, nl_offset,
                             a_ptr_raw, b_ptr_raw,
                             stream,
                         )
@@ -1618,6 +1619,7 @@ fn dispatch_transform_kernel_sycl_ffi(
     invocation: &crate::transfer::kernel_catalog::KernelInvocation,
     num_blocks: usize,
     nh: usize, nl: usize, no: usize, nt: usize, hd: usize,
+    nl_full: usize, nl_offset: usize,
     a_ptr: u64, b_ptr: u64,
     stream: &Arc<DeviceStream>,
 ) -> Result<()> {
@@ -1650,6 +1652,7 @@ fn dispatch_transform_kernel_sycl_ffi(
                     block_ptrs,
                     num_blocks,
                     nh, nl, no, nt, hd,
+                    nl_full, nl_offset,
                     elem_size,
                     invocation.block_layout,
                     queue_raw,
@@ -1665,6 +1668,7 @@ fn dispatch_transform_kernel_sycl_ffi(
                     block_ptrs,
                     num_blocks,
                     nh, nl, no, nt, hd,
+                    nl_full, nl_offset,
                     elem_size,
                     invocation.block_layout,
                     queue_raw,

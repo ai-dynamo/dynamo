@@ -38,7 +38,7 @@ use oneapi_rs::ccl::sys;
 /// 3. Other ranks deserialize via [`OneCclBootstrap::deserialize`]
 /// 4. All ranks collectively call [`OneCclBootstrap::init_communicator`]
 pub struct OneCclBootstrap {
-    kvs: *mut sys::ccl_rs_kvs_t,
+    kvs: sys::ccl_rs_kvs_t,
     address: sys::ccl_rs_kvs_address_t,
     world_size: usize,
 }
@@ -49,7 +49,7 @@ unsafe impl Send for OneCclBootstrap {}
 unsafe impl Sync for OneCclBootstrap {}
 
 /// Size of the serialized bootstrap (8 bytes world_size + 256 bytes KVS address).
-pub const SERIALIZED_SIZE: usize = 8 + sys::CCL_RS_KVS_ADDRESS_SIZE;
+pub const SERIALIZED_SIZE: usize = 8 + sys::CCL_RS_KVS_ADDRESS_BYTES as usize;
 
 impl OneCclBootstrap {
     /// Generate a new bootstrap on rank 0.
@@ -71,12 +71,12 @@ impl OneCclBootstrap {
             .context("ccl_rs_init failed")?;
 
         // Create the main KVS (rank 0 only)
-        let mut kvs: *mut sys::ccl_rs_kvs_t = ptr::null_mut();
-        check_ccl_result(unsafe { sys::ccl_rs_kvs_create_main(&mut kvs) })
-            .context("ccl_rs_kvs_create_main failed")?;
+        let mut kvs: sys::ccl_rs_kvs_t = ptr::null_mut();
+        check_ccl_result(unsafe { sys::ccl_rs_create_main_kvs(&mut kvs) })
+            .context("ccl_rs_create_main_kvs failed")?;
 
         // Extract the address
-        let mut address = sys::ccl_rs_kvs_address_t::default();
+        let mut address = sys::ccl_rs_kvs_address_t { internal: [0; sys::CCL_RS_KVS_ADDRESS_BYTES as usize] };
         check_ccl_result(unsafe { sys::ccl_rs_kvs_get_address(kvs, &mut address) })
             .context("ccl_rs_kvs_get_address failed")?;
 
@@ -101,7 +101,7 @@ impl OneCclBootstrap {
         let mut bytes = Vec::with_capacity(SERIALIZED_SIZE);
         bytes.extend_from_slice(&(self.world_size as u64).to_le_bytes());
         // Convert c_char array to u8 for serialization
-        for &byte in &self.address.data {
+        for &byte in &self.address.internal {
             bytes.push(byte as u8);
         }
         bytes
@@ -122,9 +122,9 @@ impl OneCclBootstrap {
 
         let world_size = u64::from_le_bytes(bytes[0..8].try_into().unwrap()) as usize;
 
-        let mut address = sys::ccl_rs_kvs_address_t::default();
+        let mut address = sys::ccl_rs_kvs_address_t { internal: [0; sys::CCL_RS_KVS_ADDRESS_BYTES as usize] };
         for (i, &byte) in bytes[8..].iter().enumerate() {
-            address.data[i] = byte as std::ffi::c_char;
+            address.internal[i] = byte as std::ffi::c_char;
         }
 
         // Initialize oneCCL runtime
@@ -132,11 +132,11 @@ impl OneCclBootstrap {
             .context("ccl_rs_init failed")?;
 
         // Recreate KVS from address
-        let mut kvs: *mut sys::ccl_rs_kvs_t = ptr::null_mut();
+        let mut kvs: sys::ccl_rs_kvs_t = ptr::null_mut();
         check_ccl_result(unsafe {
-            sys::ccl_rs_kvs_create_from_address(&address, &mut kvs)
+            sys::ccl_rs_create_kvs(&mut kvs, address)
         })
-        .context("ccl_rs_kvs_create_from_address failed")?;
+        .context("ccl_rs_create_kvs failed")?;
 
         Ok(Self {
             kvs,
@@ -155,7 +155,7 @@ impl OneCclBootstrap {
     ///
     /// # Returns
     /// A raw communicator handle. Caller must eventually call `ccl_rs_comm_destroy`.
-    pub fn init_communicator(&self, rank: usize) -> Result<*mut sys::ccl_rs_comm_t> {
+    pub fn init_communicator(&self, rank: usize) -> Result<sys::ccl_rs_comm_t> {
         if rank >= self.world_size {
             anyhow::bail!(
                 "Rank {} is invalid for world_size {}",
@@ -164,16 +164,16 @@ impl OneCclBootstrap {
             );
         }
 
-        let mut comm: *mut sys::ccl_rs_comm_t = ptr::null_mut();
+        let mut comm: sys::ccl_rs_comm_t = ptr::null_mut();
         check_ccl_result(unsafe {
-            sys::ccl_rs_comm_create(
-                self.world_size as std::ffi::c_int,
-                rank as std::ffi::c_int,
-                self.kvs,
+            sys::ccl_rs_comm_init_rank(
                 &mut comm,
+                self.world_size as std::ffi::c_int,
+                self.kvs,
+                rank as std::ffi::c_int,
             )
         })
-        .context("ccl_rs_comm_create failed")?;
+        .context("ccl_rs_comm_init_rank failed")?;
 
         tracing::debug!(
             rank,
@@ -223,15 +223,15 @@ mod tests {
         // We construct a bootstrap with a dummy address.
         let world_size = 4usize;
 
-        let mut address = sys::ccl_rs_kvs_address_t::default();
-        for (i, byte) in address.data.iter_mut().enumerate() {
+        let mut address = sys::ccl_rs_kvs_address_t { internal: [0; sys::CCL_RS_KVS_ADDRESS_BYTES as usize] };
+        for (i, byte) in address.internal.iter_mut().enumerate() {
             *byte = (i % 128) as std::ffi::c_char;
         }
 
         // Manually build the serialized bytes
         let mut bytes = Vec::with_capacity(SERIALIZED_SIZE);
         bytes.extend_from_slice(&(world_size as u64).to_le_bytes());
-        for &byte in &address.data {
+        for &byte in &address.internal {
             bytes.push(byte as u8);
         }
 
@@ -242,11 +242,11 @@ mod tests {
         assert_eq!(decoded_ws, world_size);
 
         // Verify address round-trips
-        let mut decoded_addr = sys::ccl_rs_kvs_address_t::default();
+        let mut decoded_addr = sys::ccl_rs_kvs_address_t { internal: [0; sys::CCL_RS_KVS_ADDRESS_BYTES as usize] };
         for (i, &byte) in bytes[8..].iter().enumerate() {
-            decoded_addr.data[i] = byte as std::ffi::c_char;
+            decoded_addr.internal[i] = byte as std::ffi::c_char;
         }
-        assert_eq!(decoded_addr.data.len(), address.data.len());
+        assert_eq!(decoded_addr.internal.len(), address.internal.len());
     }
 
     #[test]

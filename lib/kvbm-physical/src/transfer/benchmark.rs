@@ -519,15 +519,36 @@ fn dispatch_benchmark_candidate(
 ///
 /// Takes a backend-agnostic `&Arc<DeviceStream>`. Under `cuda` the body
 /// downcasts and calls `kvbm_kernels::memcpy_batch`; under `xpu-sycl` it
-/// bails with a TODO until the SYCL `memcpy_batch` analogue is wired up.
+/// currently uses per-copy sequential memcpy as a workaround (TODO: wire up
+/// a true batched SYCL `memcpy_batch` analogue for performance parity).
 #[allow(dead_code)]
 fn dispatch_direct_dma_ops(ops: &[CopyOp], stream: &Arc<DeviceStream>) -> Result<()> {
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(feature = "xpu-sycl")]
+    {
+        use std::collections::BTreeMap;
+
+        // Group by size and use the trait-level batch_copy which dispatches
+        // to SYCL queue.memcpy for each pair.
+        let mut by_size: BTreeMap<usize, (Vec<u64>, Vec<u64>)> = BTreeMap::new();
+        for op in ops {
+            let e = by_size.entry(op.size).or_default();
+            e.0.push(op.src_addr as u64);
+            e.1.push(op.dst_addr as u64);
+        }
+
+        for (size, (src_ptrs, dst_ptrs)) in by_size {
+            if size == 0 {
+                continue;
+            }
+            stream.batch_copy(&src_ptrs, &dst_ptrs, size)?;
+        }
+        return Ok(());
+    }
+    #[cfg(not(any(feature = "cuda", feature = "xpu-sycl")))]
     {
         let _ = (ops, stream);
         bail!(
-            "dispatch_direct_dma_ops requires the cuda feature; \
-             SYCL DirectDma benchmarking is not yet implemented"
+            "dispatch_direct_dma_ops requires the cuda or xpu-sycl feature"
         );
     }
     #[cfg(feature = "cuda")]

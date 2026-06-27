@@ -13,7 +13,7 @@
 //! are enabled. Select at runtime via `--backend {nccl,oneccl}`.
 //!
 //! - `oneccl` (Intel XPU, `feature = "oneccl"`) — uses `OneCclBootstrap`
-//!   rendezvous, `sycl::queue` operations, and raw `ccl_rs_broadcast` FFI.
+//!   rendezvous, `sycl::queue` operations, and raw `ccl_rs_bcast_inplace` FFI.
 //!   Each rank is pinned to an XPU via `ONEAPI_DEVICE_SELECTOR`.
 //! - `nccl` (NVIDIA CUDA, `feature = "nccl"`) — uses `NcclBootstrap` + raw
 //!   `ncclBcast` FFI on a `CudaStream`. Each rank is pinned to a GPU via
@@ -91,7 +91,7 @@
 //!
 //! Completion semantics differ by backend and by grouping:
 //! - **oneCCL, single broadcast (`num_regions == 1`)**: wait on the
-//!   event returned by `ccl_rs_broadcast`. Every returned event must be
+//!   event returned by `ccl_rs_bcast_inplace`. Every returned event must be
 //!   destroyed regardless of whether we wait on it.
 //! - **oneCCL, grouped broadcast (`num_regions > 1`)**: `event::wait()`
 //!   on an in-group collective's event is not supported by oneCCL
@@ -305,7 +305,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>> {
 #[cfg(feature = "oneccl")]
 struct OneCclHandles {
     stream: *mut oneapi_rs::ccl::sys::ccl_rs_stream_t,
-    comm: *mut oneapi_rs::ccl::sys::ccl_rs_comm_t,
+    comm: oneapi_rs::ccl::sys::ccl_rs_comm_t,
 }
 
 #[cfg(feature = "oneccl")]
@@ -335,7 +335,7 @@ fn run_oneccl_worker(
 ) -> Result<Vec<BenchResult>> {
     use kvbm_engine::collectives::OneCclBootstrap;
     use oneapi_rs::ccl::sys;
-    use oneapi_rs::safe::{DevicePtrMut, SyclQueue};
+    use oneapi_rs::sycl::safe::{DevicePtrMut, SyclQueue};
     use std::ptr;
 
     fn check_ccl(r: sys::ccl_rs_result_t) -> Result<()> {
@@ -395,7 +395,7 @@ fn run_oneccl_worker(
             // Run one iteration: group_start → N broadcasts → group_end →
             // optional completion wait.
             //
-            // `ccl_rs_broadcast` returns an event per call. The API contract
+            // `ccl_rs_bcast_inplace` returns an event per call. The API contract
             // requires every returned event to be destroyed (shim heap-
             // allocates unconditionally). We destroy intermediates
             // immediately and only keep the last one alive for the
@@ -419,13 +419,13 @@ fn run_oneccl_worker(
                 for &p in &buffer_ptrs {
                     let mut event: *mut sys::ccl_rs_event_t = ptr::null_mut();
                     check_ccl(unsafe {
-                        sys::ccl_rs_broadcast(
+                        sys::ccl_rs_bcast_inplace(
                             p,
                             region_size,
-                            sys::ccl_rs_datatype_t::CCL_RS_DATATYPE_UINT8,
+                            sys::ccl_rs_data_type_t::CCL_RS_DATA_TYPE_UINT8,
                             0,
                             handles.comm,
-                            handles.stream,
+                            handles.stream as *mut c_void,
                             &mut event,
                         )
                     })?;
@@ -670,7 +670,7 @@ fn eprint_rank_device(rank: usize, backend: &str) {
     let (bdf, name) = match backend {
         #[cfg(feature = "oneccl")]
         "oneccl" => {
-            use oneapi_rs::safe::SyclDevice;
+            use oneapi_rs::sycl::safe::SyclDevice;
             match SyclDevice::by_ordinal(0).and_then(|d| d.info()) {
                 Ok(info) => (
                     info.pci_address.unwrap_or_else(|| "unknown".to_string()),

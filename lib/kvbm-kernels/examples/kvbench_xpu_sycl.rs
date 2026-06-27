@@ -435,8 +435,8 @@ impl DeviceMem {
     fn new(queue: &Arc<SyclQueue>, bytes: usize) -> Self {
         let context = Arc::clone(queue.context());
         let device = queue.device();
-        let ptr = context
-            .malloc_device(device, bytes)
+        let ptr = unsafe { context
+            .malloc_device(device, bytes) }
             .expect("malloc_device failed");
         Self { ptr, context }
     }
@@ -445,7 +445,7 @@ impl DeviceMem {
 impl Drop for DeviceMem {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            let _ = self.context.free_raw(self.ptr);
+            let _ = unsafe { self.context.free_raw(self.ptr) };
         }
     }
 }
@@ -460,7 +460,7 @@ struct HostMem {
 impl HostMem {
     fn new(queue: &Arc<SyclQueue>, bytes: usize) -> Self {
         let context = Arc::clone(queue.context());
-        let ptr = context.malloc_host(bytes).expect("malloc_host failed");
+        let ptr = unsafe { context.malloc_host(bytes) }.expect("malloc_host failed");
         // Fill with pattern to avoid zero-page tricks.
         unsafe { std::ptr::write_bytes(ptr as *mut u8, 0xAB, bytes) };
         Self { ptr, context }
@@ -470,7 +470,7 @@ impl HostMem {
 impl Drop for HostMem {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            let _ = self.context.free_raw(self.ptr);
+            let _ = unsafe { self.context.free_raw(self.ptr) };
         }
     }
 }
@@ -635,14 +635,14 @@ fn execute_vectorized(
 ) {
     // Upload pointer arrays (H2D on the in-order queue).
     unsafe {
-        queue.memcpy_raw_async(
-            src_addrs_dev.ptr,
+        queue.memcpy_raw_no_deps_no_event(
             src_addrs.as_ptr() as *const c_void,
+            src_addrs_dev.ptr,
             ptr_array_bytes,
         ).expect("upload src_addrs");
-        queue.memcpy_raw_async(
-            dst_addrs_dev.ptr,
+        queue.memcpy_raw_no_deps_no_event(
             dst_addrs.as_ptr() as *const c_void,
+            dst_addrs_dev.ptr,
             ptr_array_bytes,
         ).expect("upload dst_addrs");
     }
@@ -672,9 +672,9 @@ fn execute_memcpy(
 ) {
     for i in 0..num_copies {
         unsafe {
-            queue.memcpy_raw_async(
-                dst_addrs[i] as *mut c_void,
+            queue.memcpy_raw_no_deps_no_event(
                 src_addrs[i] as *const c_void,
+                dst_addrs[i] as *mut c_void,
                 copy_size,
             ).expect("memcpy_raw_async");
         }
@@ -697,17 +697,17 @@ fn execute_memcpy_host_staged(
 ) {
     for i in 0..num_copies {
         unsafe {
-            src_queue.memcpy_raw_async(
-                stage_ptr,
+            src_queue.memcpy_raw_no_deps_no_event(
                 src_addrs[i] as *const c_void,
+                stage_ptr,
                 copy_size,
             ).expect("memcpy_raw_async src->host");
         }
         src_queue.synchronize().expect("sync after src->host");
         unsafe {
-            dst_queue.memcpy_raw_async(
-                dst_addrs[i] as *mut c_void,
+            dst_queue.memcpy_raw_no_deps_no_event(
                 stage_ptr,
+                dst_addrs[i] as *mut c_void,
                 copy_size,
             ).expect("memcpy_raw_async host->dst");
         }
@@ -775,9 +775,9 @@ fn execute_memcpy_host_staged_pipelined(
 
         // Enqueue S_i on src. Runs in-order after S_{i-1}.
         let s_event = unsafe {
-            src_queue.memcpy_raw_async_with_event(
-                stage_ptrs[s],
+            src_queue.memcpy_raw_no_deps(
                 src_addrs[i] as *const c_void,
+                stage_ptrs[s],
                 copy_size,
             )
         }
@@ -789,9 +789,9 @@ fn execute_memcpy_host_staged_pipelined(
 
         // Enqueue D_i on dst. Runs in-order after D_{i-1}.
         let d_event = unsafe {
-            dst_queue.memcpy_raw_async_with_event(
-                dst_addrs[i] as *mut c_void,
+            dst_queue.memcpy_raw_no_deps(
                 stage_ptrs[s],
+                dst_addrs[i] as *mut c_void,
                 copy_size,
             )
         }

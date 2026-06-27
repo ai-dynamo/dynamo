@@ -36,7 +36,7 @@
 //! is achieved by the caller via `SyclQueue` operations.
 
 use anyhow::{Result, anyhow};
-use oneapi_rs::safe::{SyclContext, SyclDevice};
+use oneapi_rs::sycl::safe::{SyclContext, SyclDevice};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
@@ -131,7 +131,7 @@ impl PoolInner {
 /// # Example
 /// ```ignore
 /// use std::sync::Arc;
-/// use oneapi_rs::safe::{SyclContext, SyclDevice};
+/// use oneapi_rs::sycl::safe::{SyclContext, SyclDevice};
 ///
 /// let device = SyclDevice::by_ordinal(0).unwrap();
 /// let context = SyclContext::new(&device).unwrap();
@@ -378,17 +378,17 @@ impl SyclMemPool {
 
     /// Raw allocation via `sycl::malloc_device(bytes, device, context)`.
     fn raw_alloc(&self, size: usize) -> Result<u64> {
-        let ptr = self
+        let ptr = unsafe { self
             .context
-            .malloc_device(&self.device, size)
+            .malloc_device(&self.device, size) }
             .map_err(|e| anyhow!("malloc_device failed: {}", e))?;
         Ok(ptr as u64)
     }
 
     /// Raw free via `sycl::free(ptr, context)`.
     fn raw_free(&self, ptr: u64) -> Result<()> {
-        self.context
-            .free_raw(ptr as *mut c_void)
+        unsafe { self.context
+            .free_raw(ptr as *mut c_void) }
             .map_err(|e| anyhow!("free_raw failed: {}", e))?;
         Ok(())
     }
@@ -405,7 +405,7 @@ impl Drop for SyclMemPool {
         // Drain every block from the free-list and return to the runtime.
         let all_blocks = inner.drain_to(0);
         for block in all_blocks {
-            if let Err(e) = self.context.free_raw(block.ptr as *mut c_void) {
+            if let Err(e) = unsafe { self.context.free_raw(block.ptr as *mut c_void) } {
                 tracing::warn!("free_raw failed during SyclMemPool drop: {e}");
             }
         }

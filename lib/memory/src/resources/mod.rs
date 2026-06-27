@@ -312,7 +312,7 @@ impl Resources {
         // This populates device_ordinal for Intel GPUs on CUDA-less hosts.
         #[cfg(feature = "xpu-sycl")]
         if device_ordinals_by_pci.is_empty() {
-            use oneapi_rs::safe::{SyclDevice, SyclDeviceType};
+            use oneapi_rs::sycl::safe::{SyclDevice, SyclDeviceType};
             const SYCL_BACKEND_LEVEL_ZERO: &str = "level_zero";
             if let Ok(count) = SyclDevice::count() {
                 let mut sycl_ord: u32 = 0;

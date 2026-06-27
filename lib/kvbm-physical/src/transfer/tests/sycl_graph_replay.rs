@@ -100,9 +100,9 @@ macro_rules! skip_if_not_sycl {
 /// that the captured SYCL graph + enqueue produces the same bytes as the source.
 #[tokio::test]
 async fn sycl_graph_replay_round_trips_d2d() -> Result<()> {
+    skip_if_not_sycl!();
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
-    skip_if_not_sycl!();
 
     let agent = super::local_transfers::build_agent_for_kinds(&[StorageKind::Device(0)])?;
     let src = device_fc(agent.clone(), 4);
@@ -125,9 +125,9 @@ async fn sycl_graph_replay_round_trips_d2d() -> Result<()> {
 /// distinct allocations; both are compared to src checksums AND to each other.
 #[tokio::test]
 async fn sycl_graph_replay_byte_equiv_to_direct_dma() -> Result<()> {
+    skip_if_not_sycl!();
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
-    skip_if_not_sycl!();
 
     let agent = super::local_transfers::build_agent_for_kinds(&[StorageKind::Device(0)])?;
     let src = device_fc(agent.clone(), 4);
@@ -180,9 +180,9 @@ async fn sycl_graph_replay_byte_equiv_to_direct_dma() -> Result<()> {
 /// graph handle.
 #[tokio::test]
 async fn sycl_graph_replay_fresh_record_each_call() -> Result<()> {
+    skip_if_not_sycl!();
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
-    skip_if_not_sycl!();
 
     let agent = super::local_transfers::build_agent_for_kinds(&[StorageKind::Device(0)])?;
     let src = device_fc(agent.clone(), 4);
@@ -246,9 +246,9 @@ async fn sycl_graph_replay_fresh_record_each_call() -> Result<()> {
 /// the device context and verifies the trait returns.
 #[tokio::test]
 async fn sycl_graph_replay_confirms_no_rebind() -> Result<()> {
+    skip_if_not_sycl!();
     skip_if_stubs_and_device!(StorageKind::Device(0));
     gpu_serial!();
-    skip_if_not_sycl!();
 
     use crate::device::{DeviceGraphExec, DeviceGraphOps};
 

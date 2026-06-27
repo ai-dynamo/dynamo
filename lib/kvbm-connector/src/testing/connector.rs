@@ -1337,10 +1337,9 @@ impl TestConnectorInstanceBuilder {
         let mut leader_config = self.test_config.build_leader_config()?;
 
         // Auto-configure backend based on compiled feature flags.
-        // When xpu-sycl is the only available backend (cuda not compiled), defa
-ult to SYCL
-        // so the leader sends the correct backend to workers via LeaderLayout
-Config.
+        // When xpu-sycl is the only available backend (cuda not compiled),
+        // default to SYCL so the leader sends the correct backend to workers
+        // via LeaderLayoutConfig.
         #[cfg(feature = "xpu-sycl")]
         #[cfg(not(feature = "cuda"))]
         {
