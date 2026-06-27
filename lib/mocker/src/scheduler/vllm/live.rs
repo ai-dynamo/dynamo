@@ -617,6 +617,8 @@ mod tests {
     }
 
     #[cfg(feature = "kvbm-offload")]
+    // TODO(https://github.com/ai-dynamo/dynamo/issues/11018): This test is expected to fail until
+    // KVBM publishes causal settlement after asynchronous permit handoff.
     #[tokio::test]
     async fn idle_destination_reservation_wakes_at_offload_deadline() {
         let args = MockEngineArgs::builder()

@@ -2727,6 +2727,8 @@ mod offload {
         assert!(core.kv_manager.earliest_offload_deadline().is_none());
     }
 
+    // TODO(https://github.com/ai-dynamo/dynamo/issues/11018): This test is expected to fail until
+    // KVBM publishes causal settlement after asynchronous permit handoff.
     #[tokio::test]
     async fn live_destination_eviction_uses_command_application_time() {
         let block_size = 4;
