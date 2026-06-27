@@ -164,15 +164,18 @@ impl AggRuntime {
             )?),
         };
         let capture_kv_events = router.is_some();
-        let workers = (0..num_workers)
-            .map(|worker_idx| {
-                super::state::OfflineWorkerState::new(worker_idx, args.clone(), capture_kv_events)
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
         let mut engine = EngineComponent::new(
             SimulationWorkerStage::Aggregated,
             EnginePassMode::Visible,
-            workers,
+            (0..num_workers)
+                .map(|worker_idx| {
+                    super::state::OfflineWorkerState::new(
+                        worker_idx,
+                        args.clone(),
+                        capture_kv_events,
+                    )
+                })
+                .collect(),
         );
         engine.set_scaling_args(args, capture_kv_events);
 
@@ -839,7 +842,7 @@ impl AggRuntime {
     /// Scale-down: the worker is removed from the router immediately (so no
     /// new requests land on it) and drains in-flight work in the engine.
     pub(in crate::replay) fn apply_scaling(&mut self, target_workers: usize) -> anyhow::Result<()> {
-        let (added, newly_marked, removed) = self.engine.apply_target_count(target_workers)?;
+        let (added, newly_marked, removed) = self.engine.apply_target_count(target_workers);
         #[cfg(test)]
         if let Some(new_len) = added.iter().max().map(|id| id + 1) {
             self.worker_active_requests.resize(new_len, Vec::new());

@@ -44,7 +44,7 @@ impl SingleRuntime {
         args: MockEngineArgs,
         pending: VecDeque<DirectRequest>,
         mode: SingleReplayMode,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         Self::new_with_source(args, AdmissionSource::Requests(pending), mode)
     }
 
@@ -52,7 +52,7 @@ impl SingleRuntime {
         args: MockEngineArgs,
         driver: WorkloadDriver,
         mode: SingleReplayMode,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         Self::new_with_source(args, AdmissionSource::Workload(driver), mode)
     }
 
@@ -60,7 +60,7 @@ impl SingleRuntime {
         args: MockEngineArgs,
         admission: AdmissionSource,
         mode: SingleReplayMode,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         let total_requests = match &admission {
             AdmissionSource::Requests(pending) => pending.len(),
             AdmissionSource::Workload(driver) => driver.total_turns(),
@@ -71,16 +71,16 @@ impl SingleRuntime {
         let mut collector = TraceCollector::default();
         collector.set_static_worker_count(0, 1);
         collector.set_gpus_per_worker(0, args.aic_gpus_per_worker());
-        Ok(Self {
+        Self {
             current_time_ms: 0.0,
             admission,
-            worker: ReplayWorkerCore::new(args)?,
+            worker: ReplayWorkerCore::new(args),
             collector,
             mode,
             progress: ReplayProgress::new(total_requests, "offline replay"),
             consecutive_no_progress_passes: 0,
             max_sim_time_ms: None,
-        })
+        }
     }
 
     /// Toggle per-request record capture on the underlying collector. When
@@ -490,7 +490,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
 
-        let mut worker = ReplayWorkerCore::new(args.clone()).unwrap();
+        let mut worker = ReplayWorkerCore::new(args.clone());
         let mut collector = TraceCollector::default();
         let mut current_time_ms = 0.0;
         let mut idle_jump_ms = 0.0;
@@ -555,7 +555,7 @@ mod tests {
         max_in_flight: usize,
     ) -> ManualConcurrencyResult {
         let mut pending = VecDeque::from(requests);
-        let mut worker = ReplayWorkerCore::new(args.clone()).unwrap();
+        let mut worker = ReplayWorkerCore::new(args.clone());
         let mut collector = TraceCollector::default();
         let mut current_time_ms = 0.0;
 
@@ -1032,7 +1032,6 @@ mod tests {
             cap_request(5, 4000.0),
         ]);
         let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace)
-            .unwrap()
             .with_max_sim_time_ms(Some(cap_ms))
             .run()
             .unwrap();
@@ -1064,7 +1063,6 @@ mod tests {
             cap_request(5, 4000.0),
         ]);
         let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace)
-            .unwrap()
             .run()
             .unwrap();
         let report = collector.finish();

@@ -407,34 +407,32 @@ impl DisaggRuntime {
         };
 
         let prefill_capture_kv = prefill_router.is_some();
-        let prefill_workers = (0..config.num_prefill_workers)
-            .map(|worker_idx| {
-                super::state::OfflineWorkerState::new(
-                    worker_idx,
-                    config.prefill_args.clone(),
-                    prefill_capture_kv,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
         let mut prefill_engine = EngineComponent::new(
             SimulationWorkerStage::Prefill,
             EnginePassMode::Hidden,
-            prefill_workers,
+            (0..config.num_prefill_workers)
+                .map(|worker_idx| {
+                    super::state::OfflineWorkerState::new(
+                        worker_idx,
+                        config.prefill_args.clone(),
+                        prefill_capture_kv,
+                    )
+                })
+                .collect(),
         );
         prefill_engine.set_scaling_args(config.prefill_args.clone(), prefill_capture_kv);
-        let decode_workers = (0..config.num_decode_workers)
-            .map(|worker_idx| {
-                super::state::OfflineWorkerState::new(
-                    worker_idx,
-                    config.decode_args.clone(),
-                    capture_conformance,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
         let mut decode_engine = EngineComponent::new(
             SimulationWorkerStage::Decode,
             EnginePassMode::Visible,
-            decode_workers,
+            (0..config.num_decode_workers)
+                .map(|worker_idx| {
+                    super::state::OfflineWorkerState::new(
+                        worker_idx,
+                        config.decode_args.clone(),
+                        capture_conformance,
+                    )
+                })
+                .collect(),
         );
         decode_engine.set_scaling_args(config.decode_args.clone(), capture_conformance);
 
@@ -1949,8 +1947,7 @@ impl DisaggRuntime {
         target_decode: usize,
     ) -> Result<()> {
         // -- prefill --
-        let (added, newly_marked, removed) =
-            self.prefill_engine.apply_target_count(target_prefill)?;
+        let (added, newly_marked, removed) = self.prefill_engine.apply_target_count(target_prefill);
         let prefill_delay = self.prefill_engine.startup_time_ms();
         for &id in &added {
             match prefill_delay {
@@ -1986,8 +1983,7 @@ impl DisaggRuntime {
         }
 
         // -- decode --
-        let (added, newly_marked, removed) =
-            self.decode_engine.apply_target_count(target_decode)?;
+        let (added, newly_marked, removed) = self.decode_engine.apply_target_count(target_decode);
         let decode_delay = self.decode_engine.startup_time_ms();
         for &id in &added {
             match decode_delay {

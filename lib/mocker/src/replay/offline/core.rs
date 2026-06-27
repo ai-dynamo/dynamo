@@ -11,48 +11,45 @@ pub(crate) struct ReplayWorkerCore {
 }
 
 impl ReplayWorkerCore {
-    pub(crate) fn new(args: MockEngineArgs) -> anyhow::Result<Self> {
+    pub(crate) fn new(args: MockEngineArgs) -> Self {
         let core = match args.engine_type {
             crate::common::protocols::EngineType::Vllm
             | crate::common::protocols::EngineType::Trtllm => {
                 let mut core = VllmCore::new(args);
-                Self::init_offload_vllm(&mut core)?;
+                Self::init_offload_vllm(&mut core);
                 EngineCore::Vllm(core)
             }
             crate::common::protocols::EngineType::Sglang => {
                 EngineCore::Sglang(SglangCore::new(args))
             }
         };
-        Ok(Self { core })
+        Self { core }
     }
 
-    pub(crate) fn new_with_kv_capture(
-        args: MockEngineArgs,
-        worker_id: WorkerId,
-    ) -> anyhow::Result<Self> {
+    pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
         let core = match args.engine_type {
             crate::common::protocols::EngineType::Vllm
             | crate::common::protocols::EngineType::Trtllm => {
                 let mut core = VllmCore::new_with_kv_capture(args, worker_id);
-                Self::init_offload_vllm(&mut core)?;
+                Self::init_offload_vllm(&mut core);
                 EngineCore::Vllm(core)
             }
             crate::common::protocols::EngineType::Sglang => {
                 EngineCore::Sglang(SglangCore::new_with_kv_capture(args, worker_id))
             }
         };
-        Ok(Self { core })
+        Self { core }
     }
 
     #[cfg(feature = "kvbm-offload")]
-    fn init_offload_vllm(core: &mut VllmCore) -> anyhow::Result<()> {
-        core.init_offload_offline()
+    fn init_offload_vllm(core: &mut VllmCore) {
+        if let Err(e) = core.init_offload_offline() {
+            tracing::error!("kvbm-offload single-worker offline init failed: {e}");
+        }
     }
 
     #[cfg(not(feature = "kvbm-offload"))]
-    fn init_offload_vllm(_core: &mut VllmCore) -> anyhow::Result<()> {
-        Ok(())
-    }
+    fn init_offload_vllm(_core: &mut VllmCore) {}
 
     pub(crate) fn is_empty(&self) -> bool {
         self.core.is_empty()

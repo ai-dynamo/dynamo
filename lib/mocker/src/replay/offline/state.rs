@@ -225,11 +225,7 @@ pub(crate) struct OfflineWorkerSnapshot {
 }
 
 impl OfflineWorkerState {
-    pub(crate) fn new(
-        worker_idx: usize,
-        args: MockEngineArgs,
-        capture_kv_events: bool,
-    ) -> Result<Self> {
+    pub(crate) fn new(worker_idx: usize, args: MockEngineArgs, capture_kv_events: bool) -> Self {
         let core = match args.engine_type {
             crate::common::protocols::EngineType::Vllm
             | crate::common::protocols::EngineType::Trtllm => {
@@ -240,7 +236,11 @@ impl OfflineWorkerState {
                     crate::scheduler::VllmCore::new_with_worker_id(args, worker_idx as u64)
                 };
                 #[cfg(feature = "kvbm-offload")]
-                core.init_offload_offline()?;
+                if let Err(e) = core.init_offload_offline() {
+                    tracing::error!(
+                        "kvbm-offload offline init failed for worker {worker_idx}: {e}"
+                    );
+                }
                 EngineCore::Vllm(core)
             }
             crate::common::protocols::EngineType::Sglang => {
@@ -258,11 +258,11 @@ impl OfflineWorkerState {
             }
         };
 
-        Ok(Self {
+        Self {
             core,
             busy: false,
             in_flight: 0,
-        })
+        }
     }
 
     pub(crate) fn in_flight(&self) -> usize {
@@ -450,7 +450,7 @@ mod tests {
         if engine_type == EngineType::Sglang {
             builder = builder.sglang(Some(Default::default()));
         }
-        OfflineWorkerState::new(0, builder.build().unwrap(), capture_kv_events).unwrap()
+        OfflineWorkerState::new(0, builder.build().unwrap(), capture_kv_events)
     }
 
     fn request(uuid: u128, tokens: usize) -> DirectRequest {
