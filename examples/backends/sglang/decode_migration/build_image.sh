@@ -45,6 +45,7 @@ git -C "$DYNAMO_ROOT" archive "$DYNAMO_COMMIT" components/src | \
 git -C "$SGLANG_ROOT" archive "$SGLANG_COMMIT" python | \
     tar -x -C "$BUILD_DIR/sglang"
 cp "$HERE/Dockerfile" "$BUILD_DIR/Dockerfile"
+cp "$HERE/verify_runtime.py" "$BUILD_DIR/verify_runtime.py"
 docker build \
     --build-arg "DYNAMO_COMMIT=$DYNAMO_COMMIT" \
     --build-arg "SGLANG_COMMIT=$SGLANG_COMMIT" \

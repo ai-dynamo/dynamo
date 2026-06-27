@@ -37,9 +37,11 @@ SGLang `df1f4d76322457eddd0fea97276b153fe00115bd`. Pin the digest in
 Kubernetes manifests.
 
 Build one immutable image after both worktrees are clean. The build archives
-the committed Dynamo `components/src` and SGLang `python` trees, installs the
-matching Dynamo runtime wheel, and records both full SHAs as OCI labels. It
-does not require source mounts at runtime.
+the committed Dynamo `components/src` and SGLang `python` trees on the matching
+SGLang `v0.5.13.post1` CUDA 13 runtime, installs the Dynamo runtime wheel, and
+records both full SHAs as OCI labels. A build-time check validates compiled
+dependency versions and migration imports. It does not require source mounts
+at runtime.
 
 ```bash
 export DYNAMO_ROOT=/root/proj/decode-migration/dynamo
