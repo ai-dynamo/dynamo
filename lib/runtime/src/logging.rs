@@ -1248,7 +1248,10 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(l)
         .with(tokio_console_layer.with_filter(tokio_console_target))
-        .init();
+        .try_init()
+        .unwrap_or_else(|e| {
+            eprintln!("dynamo logging: subscriber already initialized, skipping install: {e}")
+        });
     Ok(())
 }
 
@@ -1373,7 +1376,12 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
                     .with(otel_logs_layer)
                     .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
                     .with($fmt_layer)
-                    .init();
+                    .try_init()
+                    .unwrap_or_else(|e| {
+                        eprintln!(
+                            "dynamo logging: subscriber already initialized, skipping install: {e}"
+                        )
+                    });
             };
         }
 
@@ -1402,7 +1410,12 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
 
-        tracing_subscriber::registry().with(l).init();
+        tracing_subscriber::registry()
+            .with(l)
+            .try_init()
+            .unwrap_or_else(|e| {
+                eprintln!("dynamo logging: subscriber already initialized, skipping install: {e}")
+            });
     }
 
     Ok(())
@@ -2116,12 +2129,9 @@ pub mod tests {
 
     #[test]
     fn inject_trace_headers_preserves_current_span_flags() {
-        // Use the core `set_default` (not `SubscriberInitExt::set_default`, which
-        // also installs the global `log` LogTracer and would poison a later
-        // `logging::init()` with SetLoggerError).
-        let _guard = tracing::subscriber::set_default(
-            tracing_subscriber::registry().with(DistributedTraceIdLayer),
-        );
+        let _guard = tracing_subscriber::registry()
+            .with(DistributedTraceIdLayer)
+            .set_default();
         let span = tracing::info_span!(
             "root",
             trace_id = "11111111111111111111111111111111",
@@ -2141,12 +2151,9 @@ pub mod tests {
 
     #[test]
     fn request_span_preserves_inbound_trace_flags() {
-        // Use the core `set_default` (not `SubscriberInitExt::set_default`, which
-        // also installs the global `log` LogTracer and would poison a later
-        // `logging::init()` with SetLoggerError).
-        let _guard = tracing::subscriber::set_default(
-            tracing_subscriber::registry().with(DistributedTraceIdLayer),
-        );
+        let _guard = tracing_subscriber::registry()
+            .with(DistributedTraceIdLayer)
+            .set_default();
         let req = Request::builder()
             .header(
                 "traceparent",
@@ -2179,14 +2186,10 @@ pub mod tests {
             .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOff)
             .build();
         let tracer = provider.tracer("test");
-        // Core `set_default` (not `SubscriberInitExt::set_default`) to avoid
-        // installing the global `log` LogTracer, which would poison a later
-        // `logging::init()` with SetLoggerError.
-        let _guard = tracing::subscriber::set_default(
-            tracing_subscriber::registry()
-                .with(tracing_opentelemetry::layer().with_tracer(tracer))
-                .with(DistributedTraceIdLayer),
-        );
+        let _guard = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .with(DistributedTraceIdLayer)
+            .set_default();
         let span = tracing::info_span!("root");
         let _enter = span.enter();
         let mut headers = std::collections::HashMap::new();
@@ -2208,14 +2211,10 @@ pub mod tests {
             .with_sampler(opentelemetry_sdk::trace::Sampler::AlwaysOn)
             .build();
         let tracer = provider.tracer("test");
-        // Core `set_default` (not `SubscriberInitExt::set_default`) to avoid
-        // installing the global `log` LogTracer, which would poison a later
-        // `logging::init()` with SetLoggerError.
-        let _guard = tracing::subscriber::set_default(
-            tracing_subscriber::registry()
-                .with(tracing_opentelemetry::layer().with_tracer(tracer))
-                .with(DistributedTraceIdLayer),
-        );
+        let _guard = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .with(DistributedTraceIdLayer)
+            .set_default();
         let span = tracing::info_span!("root");
         let _enter = span.enter();
         let mut headers = std::collections::HashMap::new();
