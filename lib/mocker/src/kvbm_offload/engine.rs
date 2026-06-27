@@ -265,9 +265,12 @@ impl PendingG1ToG2 {
     }
 
     fn consume_progress(&mut self) -> usize {
+        let track_lower_chain = !self.g2_to_lower_chain_blocks.is_empty();
         let delta = self.handle.consume_progress(&mut self.progress_cursor);
         let mut released = 0usize;
-        self.passed_chain_blocks.extend(delta.passed_blocks);
+        if track_lower_chain {
+            self.passed_chain_blocks.extend(delta.passed_blocks);
+        }
 
         for block_id in delta.completed_blocks {
             if self.source_slots.remove(&block_id).is_some() {
@@ -284,7 +287,7 @@ impl PendingG1ToG2 {
             self.g2_to_lower_chain_blocks.remove(&block_id);
         }
 
-        if !matches!(self.handle.status(), TransferStatus::Evaluating) {
+        if track_lower_chain && !matches!(self.handle.status(), TransferStatus::Evaluating) {
             self.g2_to_lower_chain_blocks
                 .retain(|block_id, _seq_hash| self.passed_chain_blocks.contains(block_id));
         }
@@ -298,15 +301,15 @@ impl PendingG1ToG2 {
 
 struct PendingG2ToG3 {
     handle: TransferHandle,
-    progress_cursor: TransferProgressCursor,
+    released_failed_reservations: usize,
 }
 
 impl PendingG2ToG3 {
     fn take_unreleased_failed_reservations(&mut self) -> usize {
-        self.handle
-            .consume_progress(&mut self.progress_cursor)
-            .failed_blocks
-            .len()
+        let failed = self.handle.progress_counts().failed;
+        let unreleased = failed.saturating_sub(self.released_failed_reservations);
+        self.released_failed_reservations = failed;
+        unreleased
     }
 
     fn is_complete(&self) -> bool {
@@ -1038,9 +1041,6 @@ impl MockOffloadEngine {
     }
 
     fn collect_g2_to_lower_chain_blocks(&self) -> (Vec<SequenceHash>, usize) {
-        if self.g3_manager.is_none() && self.shared_g4.is_none() {
-            return (Vec::new(), 0);
-        }
         let mut chain_blocks = Vec::new();
         let mut released_source_slots = 0usize;
         let mut pending = self
@@ -1102,7 +1102,7 @@ impl MockOffloadEngine {
                 .expect("pending G2→G3 handles mutex poisoned");
             pending.push(PendingG2ToG3 {
                 handle: handle.clone(),
-                progress_cursor: handle.new_progress_cursor(),
+                released_failed_reservations: 0,
             });
             drop(pending);
             self.wait_for_reservations_or_completion(
@@ -1251,8 +1251,13 @@ impl MockOffloadEngine {
                 );
             }
         }
+        let track_lower_chain = self.g3_manager.is_some() || self.shared_g4.is_some();
         let (g2_to_lower_chain_blocks, released_after_settlement) =
-            self.collect_g2_to_lower_chain_blocks();
+            if offload_drained_blocks > 0 || track_lower_chain {
+                self.collect_g2_to_lower_chain_blocks()
+            } else {
+                (Vec::new(), 0)
+            };
         released_g1_source_slots += released_after_settlement;
         released_g1_source_slots += self.prune_releasable_g1_to_g2_sources();
 
@@ -1787,19 +1792,72 @@ mod tests {
     }
 
     #[test]
-    fn g2_only_eviction_does_not_track_lower_tier_chain_blocks() {
+    fn g2_only_drained_batches_release_sources_without_chain_tracking() {
+        const SOURCE_BLOCKS: usize = 5;
+        const FIRST_WAVE_BLOCKS: usize = 4;
+
         let rt = single_thread_runtime();
+        let config = KvbmOffloadConfig {
+            num_g2_blocks: SOURCE_BLOCKS + 1,
+            block_size_tokens: 4,
+            offload_batch_size: 2,
+            block_size_bytes: Some(1_000_000),
+            bandwidth_g1_to_g2_gbps: 1.0,
+            ..Default::default()
+        };
         let mut engine = rt
-            .block_on(MockOffloadEngine::new(KvbmOffloadConfig::default()))
+            .block_on(MockOffloadEngine::new(config))
             .expect("engine build");
         engine.attach_runtime(rt);
 
-        let plh = SequenceHash::new(42, None, 0);
-        engine.enqueue_g1_evictions_holding_sources(&[(0, plh)], Vec::new(), Some(0.0));
+        let source_registry = build_registry(Arc::new(EventsManager::builder().build()));
+        let source_manager = BlockManager::<MockerG1>::builder()
+            .block_count(SOURCE_BLOCKS)
+            .block_size(4)
+            .registry(source_registry)
+            .build()
+            .expect("source manager build");
+        let (source_slots, evicted_sources) = source_manager
+            .allocate_blocks_with_evictions(SOURCE_BLOCKS)
+            .expect("allocate source slots");
+        assert!(evicted_sources.is_empty());
+        let evicted: Vec<_> = source_slots
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                (
+                    slot.block_id(),
+                    SequenceHash::new(42 + index as u64, None, index as u64),
+                )
+            })
+            .collect();
+        assert!(matches!(
+            engine.enqueue_g1_evictions_holding_sources(&evicted, source_slots, Some(0.0)),
+            Some(G1EvictionOutcome::BlockedOnOffload { .. })
+        ));
+
+        {
+            let pending = engine.pending_g1_to_g2.lock().unwrap();
+            assert_eq!(pending.len(), 1);
+            assert!(pending[0].g2_to_lower_chain_blocks.is_empty());
+            assert!(pending[0].passed_chain_blocks.is_empty());
+            assert!(pending[0].ready_lower_chain_blocks.is_empty());
+        }
+
+        let deadline = engine
+            .earliest_pending_deadline()
+            .expect("first transfer wave must have a deadline");
+        assert_eq!(engine.tick(deadline), FIRST_WAVE_BLOCKS);
+        assert_eq!(source_manager.available_blocks(), FIRST_WAVE_BLOCKS);
 
         let pending = engine.pending_g1_to_g2.lock().unwrap();
         assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].source_slots.len(),
+            SOURCE_BLOCKS - FIRST_WAVE_BLOCKS
+        );
         assert!(pending[0].g2_to_lower_chain_blocks.is_empty());
+        assert!(pending[0].passed_chain_blocks.is_empty());
         assert!(pending[0].ready_lower_chain_blocks.is_empty());
     }
 

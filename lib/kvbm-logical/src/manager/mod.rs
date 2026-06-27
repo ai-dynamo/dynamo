@@ -116,11 +116,11 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
 
     /// Register a single completed block and return an immutable handle.
     pub fn register_block(&self, block: CompleteBlock<T>) -> ImmutableBlock<T> {
-        self.metrics.inc_registrations();
         let handle = self
             .block_registry
             .register_sequence_hash(block.sequence_hash());
         let inner = handle.register_block(block, self.duplication_policy, &self.store);
+        self.metrics.inc_registrations();
         ImmutableBlock::from_inner(inner)
     }
 
