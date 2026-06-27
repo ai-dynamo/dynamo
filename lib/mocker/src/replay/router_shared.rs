@@ -87,7 +87,12 @@ pub(super) fn replay_slots(
         .copied()
         .map(|worker_id| (worker_id, (0, 1)))
         .collect();
-    Arc::new(ActiveSequencesMultiWorker::new(
+    // NOTE: Offline replay must retire requests through explicit lifecycle events. Wall-clock
+    // expiry is a live-router cleanup heuristic and must not observe simulator CPU time: a
+    // healthy replay may spend minutes of wall time advancing seconds of virtual time. Keep
+    // expiry disabled here until replay has a liveness-aware definition of a stale request; do
+    // not mask replay dead ends by expiring requests that are still live in virtual time.
+    Arc::new(ActiveSequencesMultiWorker::new_without_expiry(
         ReplayNoopPublisher,
         args.block_size,
         dp_range,
