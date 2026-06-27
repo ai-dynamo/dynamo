@@ -915,7 +915,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encode_mock_satisfies_conformance() {
+    async fn encode_mock_without_usage_satisfies_conformance() {
         run_encode_conformance(|| encode_mock(EncodeMockResponse::Valid))
             .await
             .expect("encode conformance");

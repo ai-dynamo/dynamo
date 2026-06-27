@@ -350,6 +350,11 @@ class SampleLLMEngine(LLMEngine):
         multimodal_kwargs = extract_multimodal_kwargs(request)
         sample_multimodal_result: Optional[dict[str, Any]] = None
         if multimodal_kwargs is not None:
+            if self.disaggregation_mode == DisaggregationMode.DECODE:
+                raise ValueError(
+                    "decode worker should not receive raw multimodal payloads; "
+                    "encoder inputs are consumed by the upstream prefill worker"
+                )
             if self.route_to_encoder:
                 sample_multimodal_result = self._validate_encoder_result(request)
             else:

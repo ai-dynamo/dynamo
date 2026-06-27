@@ -64,6 +64,11 @@ def multimodal_request(model_name: str) -> dict[str, Any]:
     }
 
 
+def _require_equal(actual: Any, expected: Any, field: str) -> None:
+    if actual != expected:
+        raise RuntimeError(f"{field} mismatch: expected {expected!r}, got {actual!r}")
+
+
 async def run_aggregated(runtime: DistributedRuntime, args: argparse.Namespace) -> None:
     client = await connect(
         runtime,
@@ -74,8 +79,16 @@ async def run_aggregated(runtime: DistributedRuntime, args: argparse.Namespace) 
     chunks = await collect(client, request, args.timeout)
     terminal = chunks[-1]
     observed = terminal["engine_data"]["sample_multimodal"]["multimodal_kwargs"]
-    assert observed["multi_modal_data"] == request["multi_modal_data"]
-    assert observed["mm_processor_kwargs"] == request["mm_processor_kwargs"]
+    _require_equal(
+        observed["multi_modal_data"],
+        request["multi_modal_data"],
+        "aggregated multi_modal_data",
+    )
+    _require_equal(
+        observed["mm_processor_kwargs"],
+        request["mm_processor_kwargs"],
+        "aggregated mm_processor_kwargs",
+    )
 
 
 async def run_epd(runtime: DistributedRuntime, args: argparse.Namespace) -> None:
@@ -99,22 +112,27 @@ async def run_epd(runtime: DistributedRuntime, args: argparse.Namespace) -> None
     request = multimodal_request(args.model_name)
 
     [encode_terminal] = await collect(encode, request, args.timeout)
-    assert encode_terminal["token_ids"] == []
-    assert encode_terminal["finish_reason"] == "stop"
+    _require_equal(encode_terminal["token_ids"], [], "encode token_ids")
+    _require_equal(encode_terminal["finish_reason"], "stop", "encode finish_reason")
 
     [prefill_terminal] = await collect(
         prefill,
         {**request, "encoder_result": encode_terminal["encoder_result"]},
         args.timeout,
     )
-    assert (
-        prefill_terminal["engine_data"]["sample_multimodal"]
-        == encode_terminal["encoder_result"]
+    _require_equal(
+        prefill_terminal["engine_data"]["sample_multimodal"],
+        encode_terminal["encoder_result"],
+        "prefill encoder_result handoff",
     )
-    assert encode_terminal["encoder_result"]["multimodal_kwargs"] == {
-        "multi_modal_data": request["multi_modal_data"],
-        "mm_processor_kwargs": request["mm_processor_kwargs"],
-    }
+    _require_equal(
+        encode_terminal["encoder_result"]["multimodal_kwargs"],
+        {
+            "multi_modal_data": request["multi_modal_data"],
+            "mm_processor_kwargs": request["mm_processor_kwargs"],
+        },
+        "encode multimodal_kwargs",
+    )
 
     decode_request = {
         "model": args.model_name,
@@ -127,7 +145,7 @@ async def run_epd(runtime: DistributedRuntime, args: argparse.Namespace) -> None
         },
     }
     decode_chunks = await collect(decode, decode_request, args.timeout)
-    assert decode_chunks[-1]["finish_reason"] == "length"
+    _require_equal(decode_chunks[-1]["finish_reason"], "length", "decode finish_reason")
 
 
 async def main() -> None:

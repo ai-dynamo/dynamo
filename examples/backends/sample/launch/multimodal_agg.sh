@@ -38,6 +38,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# This direct worker smoke intentionally has no frontend. print_launch_banner
+# always advertises a frontend URL, so use a scoped message instead.
 echo "Running direct aggregated-worker multimodal handoff smoke with $MODEL_NAME"
 
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \

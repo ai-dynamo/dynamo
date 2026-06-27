@@ -106,6 +106,22 @@ async def test_decode_mode_runs_to_completion_when_prefill_result_provided():
     assert "disaggregated_params" not in terminal
 
 
+async def test_decode_mode_rejects_raw_multimodal_payload():
+    engine = SampleLLMEngine(
+        max_tokens=1,
+        delay=0.0,
+        disaggregation_mode=DisaggregationMode.DECODE,
+    )
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"image": [{"url": "data:image/png;base64,AA=="}]},
+        "prefill_result": {"disaggregated_params": {"sample_handle": "from-test"}},
+    }
+
+    with pytest.raises(ValueError, match="decode worker should not receive raw"):
+        await _collect(engine, request)
+
+
 async def test_from_args_propagates_mode_to_worker_config():
     engine, worker_config = await SampleLLMEngine.from_args(
         ["--disaggregation-mode", "prefill"]

@@ -20,6 +20,7 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.unified,
+    pytest.mark.timeout(270),
 ]
 
 REPO_ROOT = Path(__file__).parents[2]

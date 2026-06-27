@@ -512,9 +512,10 @@ pristine engine for the "cleanup before start" check.
 
 Encode-role engines call `run_encode_conformance`. It sends a multimodal
 request and checks the narrower handoff response contract: one terminal `Stop`
-chunk, no generated tokens, consistent usage, and an object-shaped
-`encoder_result`. Encode engines must also satisfy the common KV source,
-metrics, concurrency, cancellation, and cleanup lifecycle guarantees.
+chunk, no generated tokens, and an object-shaped `encoder_result`. Terminal
+usage remains optional; when provided, it must report zero completion tokens
+consistently. Encode engines must also satisfy the common KV source, metrics,
+concurrency, cancellation, and cleanup lifecycle guarantees.
 
 The kit asserts:
 

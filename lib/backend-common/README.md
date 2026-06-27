@@ -291,10 +291,10 @@ async fn my_encoder_passes_conformance() {
 ```
 
 `run_encode_conformance` sends a multimodal request and requires one terminal
-`FinishReason::Stop` chunk, empty `token_ids`, consistent zero-completion-token
-usage, and an object-shaped `encoder_result`. It also applies the same KV
-source, metrics, concurrency, cancellation, and cleanup checks as token-engine
-conformance.
+`FinishReason::Stop` chunk, empty `token_ids`, and an object-shaped
+`encoder_result`. When terminal usage is provided, it must consistently report
+zero completion tokens. The suite also applies the same KV source, metrics,
+concurrency, cancellation, and cleanup checks as token-engine conformance.
 
 The kit asserts:
 
