@@ -93,8 +93,9 @@ To run the included paired GSM8K check, add `TEST_MODE=gsm8k`,
 - Source and destination need compatible model, page size, PP layout, KV
   dtype/layout, and NIXL transport. Heterogeneous TP requires a supported direct
   or staging path.
-- Multi-DP-rank migration is wired through the protocol but still needs the
-  distributed live validation in [recipe.md](recipe.md).
+- DP-rank control routing is validated locally with a DP2-to-DP2 migration
+  pinned to source and destination rank 1. The full DEP8-to-DEP2 deployment in
+  [recipe.md](recipe.md) remains its own distributed validation gate.
 - Advanced generation state remains outside current coverage.
 
 See [SIZING.md](SIZING.md) for decode-only capacity planning and
