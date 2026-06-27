@@ -101,10 +101,10 @@ PY
 }
 
 verify_vllm_install() {
-    REQUIRE_CHECKPOINT_HOOKS="${1:-}" python3 <<'PY'
+    REQUIRE_CHECKPOINT_HOOKS="${1:-}" REQUIRE_EXACT_NATIVE="${2:-}" python3 <<'PY'
 import os
 import importlib.metadata as metadata
-import importlib.util
+from importlib.machinery import PathFinder
 from pathlib import Path
 
 from packaging.utils import canonicalize_name
@@ -121,11 +121,34 @@ if len(distributions) != 1:
 distribution = distributions[0]
 package_dir = Path(distribution.locate_file("vllm")).resolve()
 extensions = sorted(package_dir.rglob("*.so"))
-if not any(path.name.startswith("_C.") for path in extensions):
-    raise SystemExit(f"vllm._C extension file is missing under {package_dir}")
-extension_spec = importlib.util.find_spec("vllm._C")
-if extension_spec is None or extension_spec.origin is None:
-    raise SystemExit("vllm._C extension spec is missing")
+if os.environ["REQUIRE_EXACT_NATIVE"]:
+    distribution_files = {str(path) for path in distribution.files or ()}
+    required_extensions = (
+        "vllm/_C_stable_libtorch.abi3.so",
+        "vllm/_moe_C_stable_libtorch.abi3.so",
+    )
+    for relative_path in required_extensions:
+        if relative_path not in distribution_files:
+            raise SystemExit(
+                f"Exact-native vLLM distribution does not own {relative_path}"
+            )
+        extension = Path(distribution.locate_file(relative_path)).resolve()
+        if not extension.is_file():
+            raise SystemExit(f"Exact-native extension file is missing: {extension}")
+        module_name = f"vllm.{extension.name.removesuffix('.abi3.so')}"
+        extension_spec = PathFinder.find_spec(module_name, [str(package_dir)])
+        if (
+            extension_spec is None
+            or extension_spec.origin is None
+            or Path(extension_spec.origin).resolve() != extension
+        ):
+            raise SystemExit(f"{module_name} extension spec is missing")
+else:
+    if not any(path.name.startswith("_C.") for path in extensions):
+        raise SystemExit(f"vllm._C extension file is missing under {package_dir}")
+    extension_spec = PathFinder.find_spec("vllm._C", [str(package_dir)])
+    if extension_spec is None or extension_spec.origin is None:
+        raise SystemExit("vllm._C extension spec is missing")
 
 print(f"Installed vLLM version: {distribution.version}")
 print(f"Installed vLLM package: {package_dir}")
@@ -141,6 +164,26 @@ if os.environ["REQUIRE_CHECKPOINT_HOOKS"]:
     print("Verified vLLM checkpoint_prepare/checkpoint_restore worker methods")
 PY
 }
+
+validate_python_only_changes() {
+    local base=$1
+    local head=$2
+    local offending_paths
+
+    offending_paths="$(
+        git diff --no-renames --name-only "${base}..${head}" |
+            sed -n '\|^vllm/.*\.py$|!p'
+    )"
+    if [[ -n "${offending_paths}" ]]; then
+        echo "Exact-native mode only permits Python changes under vllm/:" >&2
+        printf '%s\n' "${offending_paths}" >&2
+        return 1
+    fi
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
 
 mkdir -p /opt/dynamo
 : > "${PROVENANCE_FILE}"
@@ -190,16 +233,8 @@ if [[ -n "${VLLM_GIT_URL:-}" ]]; then
             exit 1
         fi
 
-        offending_paths="$(
-            git diff --name-only \
-                "${VLLM_PRECOMPILED_WHEEL_COMMIT}..${vllm_source_sha}" |
-                sed -n '\|^vllm/.*\.py$|!p'
-        )"
-        if [[ -n "${offending_paths}" ]]; then
-            echo "Exact-native mode only permits Python changes under vllm/:" >&2
-            printf '%s\n' "${offending_paths}" >&2
-            exit 1
-        fi
+        validate_python_only_changes \
+            "${VLLM_PRECOMPILED_WHEEL_COMMIT}" "${vllm_source_sha}"
 
         uv pip uninstall --system vllm
         VLLM_USE_PRECOMPILED=1 \
@@ -262,7 +297,7 @@ else
     echo "Using FlashInfer from the vLLM runtime/dependency solve (${FLASHINF_REF})."
 fi
 
-verify_vllm_install "${VLLM_GIT_URL:-}"
+verify_vllm_install "${VLLM_GIT_URL:-}" "${native_wheel_commit}"
 python3 <<'PY'
 import importlib.metadata as metadata
 
