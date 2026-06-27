@@ -118,7 +118,7 @@ pub(crate) fn generate_trace_worker_artifacts_with_visibility(
 ) -> Result<ReplayWorkerArtifacts> {
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
-    let mut worker = ReplayWorkerCore::new_with_kv_capture(args, WorkerId::default());
+    let mut worker = ReplayWorkerCore::new_with_kv_capture(args, WorkerId::default())?;
     let mut driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
     let mut collector = TraceCollector::default();
     let mut artifacts = ReplayWorkerArtifacts::default();
@@ -597,7 +597,7 @@ pub(crate) fn simulate_trace_single(
     let started_at = Instant::now();
     let args = args.normalized()?;
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
-    let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace)
+    let collector = SingleRuntime::new(args, pending, SingleReplayMode::Trace)?
         .with_per_request_records(record_per_request)
         .with_max_sim_time_ms(max_sim_time_ms)
         .run()?;
@@ -619,7 +619,7 @@ pub(crate) fn simulate_concurrency_single(
         args,
         pending,
         SingleReplayMode::Concurrency { max_in_flight },
-    )
+    )?
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
@@ -642,7 +642,7 @@ pub(crate) fn simulate_trace_workload_single(
     } else {
         trace.into_trace_driver_with_block_size(engine_block_size)?
     };
-    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace)
+    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace)?
         .with_per_request_records(record_per_request)
         .with_max_sim_time_ms(max_sim_time_ms)
         .run()?;
@@ -658,7 +658,7 @@ pub(crate) fn simulate_agentic_trace_workload_single(
     let args = args.normalized()?;
     let engine_block_size = args.block_size;
     let driver = trace.into_trace_driver_with_block_size(engine_block_size)?;
-    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace).run()?;
+    let collector = SingleRuntime::new_workload(args, driver, SingleReplayMode::Trace)?.run()?;
     Ok(finish_with_replay_wall_time(collector, started_at, sla))
 }
 
@@ -686,7 +686,7 @@ pub(crate) fn simulate_concurrency_workload_single(
         args,
         driver,
         SingleReplayMode::Concurrency { max_in_flight },
-    )
+    )?
     .with_per_request_records(record_per_request)
     .with_max_sim_time_ms(max_sim_time_ms)
     .run()?;
@@ -862,6 +862,7 @@ pub(super) fn run_trace_single_collect(
 ) -> TraceCollector {
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio).unwrap();
     SingleRuntime::new(args, pending, SingleReplayMode::Trace)
+        .unwrap()
         .run()
         .unwrap()
 }
@@ -877,6 +878,7 @@ pub(super) fn run_concurrency_single_collect(
         VecDeque::from(requests),
         SingleReplayMode::Concurrency { max_in_flight },
     )
+    .unwrap()
     .run()
     .unwrap()
 }
@@ -894,6 +896,7 @@ pub(super) fn run_trace_workload_single_collect(
             .unwrap(),
         SingleReplayMode::Trace,
     )
+    .unwrap()
     .run()
     .unwrap()
 }
@@ -912,6 +915,7 @@ pub(super) fn run_concurrency_workload_single_collect(
             .unwrap(),
         SingleReplayMode::Concurrency { max_in_flight },
     )
+    .unwrap()
     .run()
     .unwrap()
 }
@@ -929,6 +933,7 @@ pub(super) fn run_agentic_trace_single_collect(
             .unwrap(),
         SingleReplayMode::Trace,
     )
+    .unwrap()
     .run()
     .unwrap()
 }
@@ -1138,9 +1143,17 @@ pub(super) fn run_concurrency_workload_collect(
 #[cfg(test)]
 mod tests {
     use super::{generate_trace_worker_artifacts, use_single_runtime};
+    #[cfg(feature = "kvbm-offload")]
+    use super::{simulate_trace_disagg, simulate_trace_single};
     use crate::common::protocols::MockEngineArgs;
+    #[cfg(feature = "kvbm-offload")]
+    use crate::common::protocols::{DirectRequest, WorkerType};
     use crate::loadgen::{SessionTrace, Trace, TurnTrace};
     use crate::replay::ReplayRouterMode;
+    #[cfg(feature = "kvbm-offload")]
+    use crate::replay::{OfflineDisaggReplayConfig, SlaThresholds};
+    #[cfg(feature = "kvbm-offload")]
+    use uuid::Uuid;
 
     #[test]
     fn single_runtime_selection_excludes_kv_router() {
@@ -1148,6 +1161,83 @@ mod tests {
         assert!(!use_single_runtime(1, ReplayRouterMode::KvRouter));
         assert!(!use_single_runtime(2, ReplayRouterMode::RoundRobin));
         assert!(!use_single_runtime(2, ReplayRouterMode::KvRouter));
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn offload_args(worker_type: WorkerType) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .worker_type(worker_type)
+            .num_g2_blocks(Some(8))
+            .kv_bytes_per_token(Some(1))
+            .build()
+            .unwrap()
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn invalid_offload_args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .worker_type(WorkerType::Aggregated)
+            .num_g2_blocks(Some(8))
+            .num_g3_blocks(Some(8))
+            .build()
+            .unwrap()
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn offload_request() -> DirectRequest {
+        DirectRequest {
+            tokens: vec![1; 4],
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(1)),
+            arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    #[test]
+    fn kvbm_initialization_error_reaches_replay_caller() {
+        let error = simulate_trace_single(
+            invalid_offload_args(),
+            vec![offload_request()],
+            1.0,
+            false,
+            None,
+            SlaThresholds::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("requires kv_bytes_per_token"));
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    #[test]
+    fn disagg_replay_initializes_kvbm_workers() {
+        let report = simulate_trace_disagg(
+            OfflineDisaggReplayConfig {
+                prefill_args: offload_args(WorkerType::Prefill),
+                decode_args: offload_args(WorkerType::Decode),
+                num_prefill_workers: 1,
+                num_decode_workers: 1,
+            },
+            None,
+            None,
+            vec![offload_request()],
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            false,
+            None,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 1);
     }
 
     #[test]
