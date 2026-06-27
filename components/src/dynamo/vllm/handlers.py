@@ -3371,20 +3371,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         mm_processor_kwargs=mm_processor_kwargs,
                     )
         else:
-            # Fast path: check for pre-processed mm_kwargs via NIXL/SHM from frontend.
-            # If available, we skip image downloading AND the HF processor.
-            with _nvtx.annotate("mm_backend:receive_mm_kwargs", color="magenta"):
-                pre_rendered = await self._try_receive_mm_kwargs(request)
-            if pre_rendered is not None:
-                logger.debug(
-                    "[mm-routing] Request %s: received pre-rendered mm_kwargs via NIXL/SHM",
-                    request_id,
-                )
-            elif self._custom_encoder is not None and has_mm_data:
-                # Aggregated CustomEncoder path: encoder runs in-process (no NIXL
-                # transfer) and assembles a mixed EmbedsPrompt, or yields an error.
-                # No vLLM multi_modal_data is produced here — images become embeds
-                # and a request with no images is treated as text-only.
+            if self._custom_encoder is not None and has_mm_data:
+                # Aggregated CustomEncoder path takes precedence: when an encoder
+                # is configured it owns the image path, so don't attempt the
+                # NIXL/SHM pre-render receive (which would otherwise silently
+                # win). The encoder runs in-process (no NIXL transfer) and
+                # assembles a mixed EmbedsPrompt, or yields an error; pre_rendered
+                # stays None. A request with no images is treated as text-only.
                 (
                     mixed_embeds,
                     multi_modal_data,
@@ -3396,13 +3389,24 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     yield assemble_error
                     return
             else:
-                # Aggregated mode: load images normally
-                multi_modal_data = await self._extract_multimodal_data(
-                    request,
-                    request_id,
-                    context,
-                    mm_processor_kwargs=mm_processor_kwargs,
-                )
+                # Fast path: check for pre-processed mm_kwargs via NIXL/SHM from
+                # frontend. If available, we skip image downloading AND the HF
+                # processor.
+                with _nvtx.annotate("mm_backend:receive_mm_kwargs", color="magenta"):
+                    pre_rendered = await self._try_receive_mm_kwargs(request)
+                if pre_rendered is not None:
+                    logger.debug(
+                        "[mm-routing] Request %s: received pre-rendered mm_kwargs via NIXL/SHM",
+                        request_id,
+                    )
+                else:
+                    # Aggregated mode: load images normally
+                    multi_modal_data = await self._extract_multimodal_data(
+                        request,
+                        request_id,
+                        context,
+                        mm_processor_kwargs=mm_processor_kwargs,
+                    )
 
         # Build prompt from request. `prompt` is either a pre-rendered
         # MultiModalInput dict (fast path) or a TokensPrompt/EmbedsPrompt from

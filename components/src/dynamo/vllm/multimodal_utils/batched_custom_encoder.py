@@ -153,9 +153,10 @@ class BatchedCustomEncoder(ABC):
         """Encode a coalesced batch of images, one tensor per URL, in order.
 
         Runs on the batcher thread, serialized (one call at a time). ``image_urls``
-        is the merged batch across concurrent requests; with ``pad_to_max_batch``
-        it is padded to ``max_batch_size`` and the runtime drops the extra rows.
-        Return one ``(n_visual_tokens, lm_hidden_dim)`` tensor per URL.
+        is a coalesced batch of at most ``max_batch_size`` images; with
+        ``pad_to_max_batch`` it is padded to exactly ``max_batch_size`` (the
+        runtime drops the padded outputs). Return one ``(n_visual_tokens,
+        lm_hidden_dim)`` tensor per URL.
         """
         ...
 
@@ -186,6 +187,8 @@ class BatchedCustomEncoder(ABC):
         self._queue: queue.Queue = queue.Queue()
         self._ready = threading.Event()
         self._build_error: Optional[BaseException] = None
+        self._lifecycle_lock = threading.Lock()
+        self._closed = False
         self._thread = threading.Thread(
             target=self._run,
             args=(model_id, device),
@@ -195,8 +198,16 @@ class BatchedCustomEncoder(ABC):
         self._thread.start()
         self._ready.wait()
         if self._build_error is not None:
+            # build() returned, so the thread has already exited — no leak.
             raise self._build_error
-        self.validate()
+        try:
+            self.validate()
+        except BaseException:
+            # build() succeeded, so the batcher thread is alive waiting on the
+            # queue (holding the model). Stop it before propagating so a failed
+            # handler init does not leak the thread / GPU memory.
+            self.shutdown()
+            raise
 
     def validate(self) -> None:
         """Fail-fast checks run by ``load`` after ``build``.
@@ -212,19 +223,47 @@ class BatchedCustomEncoder(ABC):
         The worker ``await``s this directly; coalescing and the forward run on the
         batcher thread, so the event loop is never blocked by the forward.
         """
+        lock = getattr(self, "_lifecycle_lock", None)
+        if lock is None:
+            raise RuntimeError("BatchedCustomEncoder.encode() called before load()")
         loop = asyncio.get_running_loop()
         future = loop.create_future()
-        self._queue.put(_Pending(list(image_urls), loop, future))
+        # Hold the lock across the closed-check and the put so a concurrent
+        # shutdown() cannot slip the sentinel between them and strand this request
+        # in a queue with no consumer.
+        with lock:
+            if self._closed:
+                raise RuntimeError(
+                    "BatchedCustomEncoder.encode() called after shutdown()"
+                )
+            self._queue.put(_Pending(list(image_urls), loop, future))
         return await future
 
     def shutdown(self) -> None:
-        """Stop the batcher thread. Safe to call before ``load`` or twice."""
-        q = getattr(self, "_queue", None)
-        if q is not None:
-            q.put(_SHUTDOWN)
-        thread = getattr(self, "_thread", None)
-        if thread is not None:
-            thread.join(timeout=10.0)
+        """Stop the batcher thread, failing any still-queued requests. Idempotent;
+        safe to call before ``load``."""
+        lock = getattr(self, "_lifecycle_lock", None)
+        if lock is None:
+            return  # never loaded
+        with lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._queue.put(_SHUTDOWN)
+        self._thread.join(timeout=10.0)
+        # The consumer has exited; resolve anything still queued so an awaiter that
+        # raced shutdown does not hang forever.
+        self._drain_pending()
+
+    def _drain_pending(self) -> None:
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            if item is _SHUTDOWN:
+                continue
+            self._resolve(item, exc=RuntimeError("BatchedCustomEncoder shut down"))
 
     # ---- batcher thread ----------------------------------------------------
 
@@ -295,18 +334,22 @@ class BatchedCustomEncoder(ABC):
             self._resolve(req, result=outputs[start : start + count])
 
     def _forward_all(self, flat: List[str]) -> List[torch.Tensor]:
-        """Forward the flattened batch, padding to a static shape if requested."""
-        if not self.pad_to_max_batch:
-            return self.forward_batch(flat)
-        # Static batch dimension for CUDA graphs: forward in chunks of exactly
-        # max_batch_size, padding the final (short) chunk by repeating its last
-        # URL, then dropping the padded outputs.
+        """Forward the flattened batch in chunks of at most ``max_batch_size``.
+
+        Chunking caps the per-forward image count even when a single request (or
+        coalescing overshoot) exceeds ``max_batch_size``. With ``pad_to_max_batch``
+        each short chunk is padded to exactly ``max_batch_size`` (repeat the last
+        URL, drop the padded outputs) so the batch dimension is static for a CUDA
+        graph.
+        """
         outputs: List[torch.Tensor] = []
         for start in range(0, len(flat), self.max_batch_size):
             chunk = flat[start : start + self.max_batch_size]
-            padded = chunk + [chunk[-1]] * (self.max_batch_size - len(chunk))
-            chunk_out = self.forward_batch(padded)
-            outputs.extend(chunk_out[: len(chunk)])
+            if self.pad_to_max_batch and len(chunk) < self.max_batch_size:
+                padded = chunk + [chunk[-1]] * (self.max_batch_size - len(chunk))
+                outputs.extend(self.forward_batch(padded)[: len(chunk)])
+            else:
+                outputs.extend(self.forward_batch(chunk))
         return outputs
 
     def _resolve(

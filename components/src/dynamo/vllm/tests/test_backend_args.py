@@ -41,6 +41,7 @@ def create_config() -> DynamoVllmConfig:
     config.embedding_worker = False
     config.benchmark_mode = None
     config.use_vllm_tokenizer = False
+    config.frontend_decoding = False
     return config
 
 
@@ -222,6 +223,17 @@ class TestValidateCustomEncoder:
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.use_vllm_tokenizer = True
         with pytest.raises(ValueError, match="use-vllm-tokenizer"):
+            config._validate_custom_encoder()
+
+    def test_frontend_decoding_rejected(self):
+        # --frontend-decoding pre-decodes images to tensors; the custom encoder
+        # consumes URLs, so the decoded inputs would fail extraction. Reject it.
+        config = create_config()
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.frontend_decoding = True
+        with pytest.raises(ValueError, match="frontend-decoding"):
             config._validate_custom_encoder()
 
     def test_accepted_when_agg_and_multimodal(self):

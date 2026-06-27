@@ -127,6 +127,37 @@ async def test_wrong_output_count_raises():
         enc.shutdown()
 
 
+async def test_oversized_request_is_chunked_to_max_batch():
+    """A single request larger than max_batch_size is split so forward_batch never
+    exceeds the cap, and the outputs stay in order."""
+
+    class _Small(_RecordingEncoder):
+        max_batch_size = 3
+
+    enc = _Small()
+    enc.load("model", "cpu")
+    try:
+        out = await enc.encode(["a", "b", "c", "d", "e", "f", "g"])  # 7 > 3
+        assert len(out) == 7
+        assert enc.batch_sizes == [3, 3, 1]  # capped per forward
+    finally:
+        enc.shutdown()
+
+
+async def test_encode_before_load_raises():
+    enc = _RecordingEncoder()
+    with pytest.raises(RuntimeError, match="before load"):
+        await enc.encode(["a"])
+
+
+async def test_encode_after_shutdown_raises():
+    enc = _RecordingEncoder()
+    enc.load("model", "cpu")
+    enc.shutdown()
+    with pytest.raises(RuntimeError, match="after shutdown"):
+        await enc.encode(["a"])
+
+
 async def test_pad_to_max_batch_gives_static_batch_size():
     class _Padded(_RecordingEncoder):
         max_batch_size = 4
@@ -142,8 +173,9 @@ async def test_pad_to_max_batch_gives_static_batch_size():
         enc.shutdown()
 
 
-def test_load_validates_placeholder_id():
-    """load() resolves the placeholder id after build() and re-raises its error."""
+def test_load_validates_placeholder_id_and_stops_thread():
+    """load() resolves the placeholder id after build(), re-raises its error, and
+    shuts the batcher thread down so a failed init does not leak it."""
 
     class _BadId(_RecordingEncoder):
         def get_image_placeholder_token_id(self) -> int:
@@ -152,7 +184,7 @@ def test_load_validates_placeholder_id():
     enc = _BadId()
     with pytest.raises(ValueError, match="no placeholder id"):
         enc.load("model", "cpu")
-    enc.shutdown()
+    assert not enc._thread.is_alive()  # load() cleaned up on validate failure
 
 
 def test_load_reraises_build_error():

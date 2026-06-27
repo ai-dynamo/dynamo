@@ -512,6 +512,12 @@ class DynamoVllmConfig(ConfigBase):
                 "which --use-vllm-tokenizer bypasses (text mode), so the encoder "
                 "would load but never run."
             )
+        if self.frontend_decoding:
+            raise ValueError(
+                "--custom-encoder-class is incompatible with --frontend-decoding: "
+                "the custom encoder consumes image URLs, but frontend decoding "
+                "pre-decodes images to tensors the encoder cannot accept."
+            )
         if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
             mode = (
                 self.disaggregation_mode.value
