@@ -14,6 +14,7 @@
 
 mod adapter;
 pub mod args;
+mod backend_media;
 pub mod disagg;
 pub mod engine;
 pub mod error;

@@ -71,6 +71,7 @@ def _make_sglang_config(**overrides):
     config.video_generation_worker = False
     config.enable_rl = False
     config.frontend_decoding = False
+    config.backend_decoding = False
     config.sglang_trace_level = 2
     config.disagg_config = None
     config.disagg_config_key = None

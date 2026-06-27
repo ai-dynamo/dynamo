@@ -19,7 +19,6 @@ from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
-from dynamo.sglang.request_handlers.llm.decoded_mm_processor import DecodedMmProcessor
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     IMAGE_URL_KEY,
     VIDEO_URL_KEY,
@@ -37,42 +36,6 @@ _SAMPLING_OPTION_FIELDS = (
     "top_k",
     "min_p",
 )
-
-
-def _decoded_items(mm_data: Dict[str, Any], media_key: str) -> list[Dict[str, Any]]:
-    """Inner NIXL descriptors of frontend-decoded items (``{"Decoded": ...}``)
-    for a modality. URL items (``{"Url": ...}``) are not decoded media.
-    """
-    items = mm_data.get(media_key) or []
-    return [
-        item["Decoded"]
-        for item in items
-        if isinstance(item, dict) and "Decoded" in item
-    ]
-
-
-def _has_url_media(mm_data: Dict[str, Any], media_key: str) -> bool:
-    """True if any item under ``media_key`` is a URL (string or ``{"Url": ...}``)."""
-    items = mm_data.get(media_key) or []
-    return any(
-        isinstance(item, str) or (isinstance(item, dict) and "Url" in item)
-        for item in items
-    )
-
-
-def _require_formatted_prompt(request: Dict[str, Any]) -> str:
-    """Chat-templated prompt the frontend renders into extra_args for MM requests
-    (preprocessor.rs gather_multi_modal_data). Used as the HF processor ``text``
-    so placeholders expand against the worker-decoded frames.
-    """
-    extra_args = request.get("extra_args") or {}
-    formatted_prompt = extra_args.get("formatted_prompt")
-    if not isinstance(formatted_prompt, str) or not formatted_prompt:
-        raise ValueError(
-            "frontend-decoded multimodal request is missing "
-            "extra_args.formatted_prompt required to run the worker HF processor"
-        )
-    return formatted_prompt
 
 
 def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
@@ -213,15 +176,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
         self._enable_frontend_decoding = enable_frontend_decoding
         self._image_loader: Optional[ImageLoader] = None
-        # Worker-side combined HF processor for requests carrying decoded video
-        # (SGLang can't ingest pre-decoded frames). None for text-only models.
-        self._decoded_mm_processor: Optional[DecodedMmProcessor] = None
         if self._enable_frontend_decoding:
             # Lazy-inits a NIXL connector internally for Decoded variants.
             self._image_loader = ImageLoader(enable_frontend_decoding=True)
-            processor = self._resolve_hf_processor(self.engine)
-            if processor is not None:
-                self._decoded_mm_processor = DecodedMmProcessor(processor)
         self._mm_hashes_supported: bool = self._resolve_mm_hashes_supported(self.engine)
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
@@ -246,27 +203,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         return filter_supported_async_generate_kwargs(
             engine, {"return_routed_experts": True}
         )
-
-    @staticmethod
-    def _resolve_hf_processor(engine: Any) -> Optional[Any]:
-        """Resolve the raw HF AutoProcessor from the SGLang engine.
-
-        ``tokenizer_manager.processor`` is set only when the tokenizer is loaded
-        (skip_tokenizer_init=False). Under the dynamo-frontend path
-        (skip_tokenizer_init=True) it is None, but SGLang still builds
-        ``tokenizer_manager.mm_processor`` for multimodal models and stores the
-        underlying HF processor as ``._processor``. Returns None for text-only
-        models (no mm_processor) — a natural gate keeping the video path off for
-        unsupported models.
-        """
-        tm = getattr(engine, "tokenizer_manager", None)
-        if tm is None:
-            return None
-        processor = getattr(tm, "processor", None)
-        if processor is not None:
-            return processor
-        mm_processor = getattr(tm, "mm_processor", None)
-        return getattr(mm_processor, "_processor", None)
 
     @staticmethod
     def _resolve_mm_hashes_supported(engine: Any) -> bool:
@@ -485,10 +421,27 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             raise_if_unextracted_multimodal(request)
 
-            # SGLang's mm_data_processor handles loading/preprocessing; the
-            # scheduler does vision encoding.
+            # Extract image/video URLs for multimodal requests. SGLang's mm_data_processor
+            # handles loading/preprocessing, and the scheduler does vision encoding.
             mm_data = request.get("multi_modal_data", {})
+            video_data = extract_media_urls(mm_data, VIDEO_URL_KEY)
+
+            image_data: list[str] | list[PILImage] | None
+            if self._enable_frontend_decoding:
+                # Invariant from __init__: _image_loader is non-None iff
+                # _enable_frontend_decoding is True. Assert narrows the
+                # Optional for the type checker without runtime branching.
+                assert self._image_loader is not None
+                image_items = mm_data.get(IMAGE_URL_KEY) or []
+                if image_items:
+                    image_data = await self._image_loader.load_image_batch(image_items)
+                else:
+                    image_data = None
+            else:
+                image_data = extract_media_urls(mm_data, IMAGE_URL_KEY)
+
             trace_header = context.trace_headers() if self.enable_trace else None
+
             # Extract dp_rank from routing info (set by KV router)
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
@@ -499,68 +452,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if forwarded is not None:
                     mm_hashes_kwargs["mm_hashes"] = forwarded
 
-            # SGLang can't ingest pre-decoded video frames, so any frontend-decoded
-            # video runs the model's full HF processor on the worker, yielding one
-            # processor_output dict + expanded input_ids. Decoded images in the same
-            # request fold into that one call. Decoded-image-only and URL passthrough
-            # keep the existing path (let SGLang run its own processor).
-            decoded_video_items = (
-                _decoded_items(mm_data, VIDEO_URL_KEY)
-                if self._enable_frontend_decoding
-                else []
-            )
-            gen_input: Dict[str, Any]
-            mm_kwargs: Dict[str, Any]
-            if decoded_video_items:
-                assert (
-                    self._decoded_mm_processor is not None
-                ), "decoded video requires a multimodal HF processor on the engine"
-                # The combined path consumes only NIXL-decoded media; a Url item
-                # alongside it would leave its prompt placeholder unfilled.
-                if _has_url_media(mm_data, IMAGE_URL_KEY) or _has_url_media(
-                    mm_data, VIDEO_URL_KEY
-                ):
-                    raise ValueError(
-                        "frontend-decoded video requests cannot mix Url media with "
-                        "Decoded media; expected all image/video items to be "
-                        "NIXL-decoded by the frontend"
-                    )
-                (
-                    expanded_ids,
-                    combined_dict,
-                    field,
-                ) = await self._decoded_mm_processor.build(
-                    _require_formatted_prompt(request),
-                    _decoded_items(mm_data, IMAGE_URL_KEY),
-                    decoded_video_items,
-                )
-                # The HF processor expands placeholders against the decoded
-                # frames, so its input_ids supersede the frontend's token_ids
-                # entirely (do not merge — that would double-expand).
-                gen_input = {"input_ids": expanded_ids}
-                mm_kwargs = {field: [combined_dict]}
-            else:
-                gen_input = dict(input_param)
-                video_data = extract_media_urls(mm_data, VIDEO_URL_KEY)
-                image_data: list[str] | list[PILImage] | None
-                if self._enable_frontend_decoding:
-                    # Invariant from __init__: _image_loader is non-None iff
-                    # _enable_frontend_decoding is True.
-                    assert self._image_loader is not None
-                    image_items = mm_data.get(IMAGE_URL_KEY) or []
-                    if image_items:
-                        image_data = await self._image_loader.load_image_batch(
-                            image_items
-                        )
-                    else:
-                        image_data = None
-                else:
-                    image_data = extract_media_urls(mm_data, IMAGE_URL_KEY)
-                mm_kwargs = {"image_data": image_data, "video_data": video_data}
-
             agg = await self.engine.async_generate(
-                **gen_input,
-                **mm_kwargs,
+                **input_param,
+                image_data=image_data,
+                video_data=video_data,
                 sampling_params=sampling_params,
                 stream=True,
                 **self._routed_experts_kwargs,

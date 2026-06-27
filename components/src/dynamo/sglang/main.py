@@ -41,6 +41,12 @@ async def worker(argv: list[str] | None = None):
     config = await parse_args(argv)
     dump_config(config.dynamo_args.dump_config_to, config)
 
+    if config.dynamo_args.backend_decoding:
+        raise ValueError(
+            "--backend-decoding is available through the unified worker; run "
+            "python -m dynamo.sglang.unified_main"
+        )
+
     if config.server_args.load_format == "gms":
         from gpu_memory_service.integrations.sglang import setup_gms
 

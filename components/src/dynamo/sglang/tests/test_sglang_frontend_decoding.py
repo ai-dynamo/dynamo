@@ -25,6 +25,7 @@ pytestmark = [
 def _make_config(
     *,
     frontend_decoding: bool = False,
+    backend_decoding: bool = False,
     multimodal_encode_worker: bool = False,
     multimodal_worker: bool = False,
 ) -> DynamoSGLangConfig:
@@ -40,6 +41,7 @@ def _make_config(
     config.video_generation_worker = False
     config.enable_rl = False
     config.frontend_decoding = frontend_decoding
+    config.backend_decoding = backend_decoding
     return config
 
 
@@ -58,6 +60,12 @@ def test_validate_rejects_frontend_decoding_with_multimodal_worker():
 def test_validate_accepts_frontend_decoding_alone():
     config = _make_config(frontend_decoding=True)
     config.validate()
+
+
+def test_validate_rejects_frontend_and_backend_decoding_together():
+    config = _make_config(frontend_decoding=True, backend_decoding=True)
+    with pytest.raises(ValueError, match="separate media pipelines"):
+        config.validate()
 
 
 class _Context:
@@ -87,7 +95,6 @@ def _new_decode_handler(*, enable_frontend_decoding: bool):
     handler._routed_experts_kwargs = {}
     handler._enable_frontend_decoding = enable_frontend_decoding
     handler._image_loader = None
-    handler._decoded_mm_processor = None
     handler._mm_hashes_supported = False
 
     @asynccontextmanager
@@ -200,70 +207,3 @@ async def test_aggregated_fd_on_no_images_passes_none():
         pass
 
     assert captured["image_data"] is None
-
-
-@pytest.mark.asyncio
-async def test_aggregated_fd_on_decoded_video_uses_combined_processor():
-    """FD on with a Decoded video: the worker runs the combined HF processor and
-    forwards the expanded input_ids + a single processor_output dict, not raw
-    token_ids / video URLs."""
-    handler = _new_decode_handler(enable_frontend_decoding=True)
-    handler._image_loader = SimpleNamespace(
-        load_image_batch=AsyncMock(
-            side_effect=AssertionError("image path must not run for decoded video")
-        ),
-    )
-
-    video_desc = {"shape": [8, 4, 4, 3], "dtype": "uint8"}
-    combined_dict = {"format": "processor_output", "pixel_values_videos": "stub"}
-    build_mock = AsyncMock(return_value=([10, 11, 12], combined_dict, "video_data"))
-    handler._decoded_mm_processor = SimpleNamespace(build=build_mock)
-
-    captured: Dict[str, Any] = {}
-
-    async def fake_async_generate(**kwargs):
-        captured.update(kwargs)
-        return _empty_stream()
-
-    handler.engine = SimpleNamespace(async_generate=fake_async_generate)
-
-    request = {
-        "token_ids": [1, 2, 3],
-        "extra_args": {"formatted_prompt": "<video>describe"},
-        "multi_modal_data": {"video_url": [{"Decoded": video_desc}]},
-    }
-
-    async for _ in handler.generate(request, _Context()):
-        pass
-
-    build_mock.assert_awaited_once_with("<video>describe", [], [video_desc])
-    # Worker-expanded ids drive prefill; the single dict rides video_data.
-    assert captured["input_ids"] == [10, 11, 12]
-    assert captured["video_data"] == [combined_dict]
-    assert "image_data" not in captured
-
-
-@pytest.mark.asyncio
-async def test_aggregated_fd_on_decoded_video_rejects_mixed_url_media():
-    """A Url item alongside decoded video would lose its placeholder fill — the
-    combined path must reject it loudly rather than silently drop it."""
-    handler = _new_decode_handler(enable_frontend_decoding=True)
-    handler._decoded_mm_processor = SimpleNamespace(
-        build=AsyncMock(side_effect=AssertionError("build must not run on mixed media"))
-    )
-    handler.engine = SimpleNamespace(
-        async_generate=AsyncMock(side_effect=AssertionError("must not generate"))
-    )
-
-    request = {
-        "token_ids": [1, 2, 3],
-        "extra_args": {"formatted_prompt": "<image><video>describe"},
-        "multi_modal_data": {
-            "image_url": [{"Url": "https://example.com/a.jpg"}],
-            "video_url": [{"Decoded": {"shape": [8, 4, 4, 3], "dtype": "uint8"}}],
-        },
-    }
-
-    with pytest.raises(ValueError, match="cannot mix Url media"):
-        async for _ in handler.generate(request, _Context()):
-            pass

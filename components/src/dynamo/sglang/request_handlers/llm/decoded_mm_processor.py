@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Worker-side combined HF processor for frontend-decoded multimodal media.
+"""Worker-side combined HF processor for backend-decoded multimodal media.
 
-When ``--frontend-decoding`` is on, Dynamo's Rust frontend decodes images and
-video frames and ships the raw RGB tensors to this worker over NIXL RDMA.
+When ``--backend-decoding`` is on, the unified Rust worker decodes images and
+    video frames and exposes the raw RGB tensors to Python over NIXL RDMA.
 SGLang's own video ingestion only accepts a decodable source (URL/bytes),
 never pre-decoded frames, so for any request that
 carries decoded video we run the model's full HF processor here and hand
@@ -26,7 +26,7 @@ Contract (verified against SGLang v0.5.13.post1):
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 _VIDEO_METADATA_VARIANT = "Video"
 
 
-def _normalize_video_metadata(raw: Dict[str, Any] | None) -> Dict[str, Any]:
+def _normalize_video_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
     """Map the Rust ``VideoMetadata`` serde variant to HF video metadata.
 
     The frontend ships ``{"Video": {source_fps, source_duration,
@@ -71,8 +71,8 @@ class DecodedMmProcessor:
     # SGLang's collect_mm_items_from_processor_output, so forwarding the whole
     # dict is safe; we keep an explicit allow-list for clarity and to drop the
     # unexpanded image/video placeholder bookkeeping.
-    _IMAGE_KEYS: Tuple[str, ...] = ("pixel_values", "image_grid_thw", "image_sizes")
-    _VIDEO_KEYS: Tuple[str, ...] = (
+    _IMAGE_KEYS: tuple[str, ...] = ("pixel_values", "image_grid_thw", "image_sizes")
+    _VIDEO_KEYS: tuple[str, ...] = (
         "pixel_values_videos",
         "video_grid_thw",
         "second_per_grid_ts",
@@ -83,17 +83,17 @@ class DecodedMmProcessor:
         processor: ``engine.tokenizer_manager.processor`` (raw HF AutoProcessor).
         """
         self._processor = processor
-        # Lazy NIXL connector for reading decoded media from frontend memory.
+        # Lazy NIXL connector for reading worker-owned decoded media.
         self._nixl_connector = nixl_connect.Connector()
         run_async(self._nixl_connector.initialize)
 
-    async def _read_image(self, decoded_metadata: Dict[str, Any]) -> np.ndarray:
+    async def _read_image(self, decoded_metadata: dict[str, Any]) -> np.ndarray:
         # Returns CPU [H, W, 3] uint8 RGB.
         return await read_decoded_media_via_nixl(self._nixl_connector, decoded_metadata)
 
     async def _read_video(
-        self, decoded_metadata: Dict[str, Any]
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        self, decoded_metadata: dict[str, Any]
+    ) -> tuple[np.ndarray, dict[str, Any]]:
         # Returns ([T, H, W, 3] uint8 RGB, HF video metadata).
         frames, raw_meta = await read_decoded_media_via_nixl(
             self._nixl_connector, decoded_metadata, return_metadata=True
@@ -103,17 +103,17 @@ class DecodedMmProcessor:
     def _run_processor(
         self,
         text: str,
-        images: List[np.ndarray],
-        videos: List[np.ndarray],
-        video_metadata: List[Dict[str, Any]],
+        images: list[np.ndarray],
+        videos: list[np.ndarray],
+        video_metadata: list[dict[str, Any]],
     ) -> Any:
         """Single combined HF processor call. Runs in a worker thread."""
-        kwargs: Dict[str, Any] = {}
+        kwargs: dict[str, Any] = {}
         if images:
             kwargs["images"] = images
         if videos:
             kwargs["videos"] = videos
-            # Frames are already sampled by the frontend decoder; trust them
+            # Frames are already sampled by the Rust backend decoder; trust them
             # and supply source metadata for timestamp-token expansion.
             kwargs["video_metadata"] = video_metadata
             kwargs["do_sample_frames"] = False
@@ -127,8 +127,8 @@ class DecodedMmProcessor:
     @staticmethod
     def _assemble_dict(
         processor_output: Any, has_image: bool, has_video: bool
-    ) -> Dict[str, Any]:
-        combined: Dict[str, Any] = {"format": "processor_output"}
+    ) -> dict[str, Any]:
+        combined: dict[str, Any] = {"format": "processor_output"}
         get = processor_output.get
         if has_image:
             for key in DecodedMmProcessor._IMAGE_KEYS:
@@ -145,9 +145,9 @@ class DecodedMmProcessor:
     async def build(
         self,
         formatted_prompt: str,
-        image_items: List[Dict[str, Any]],
-        video_items: List[Dict[str, Any]],
-    ) -> Tuple[List[int], Dict[str, Any], str]:
+        image_items: list[dict[str, Any]],
+        video_items: list[dict[str, Any]],
+    ) -> tuple[list[int], dict[str, Any], str]:
         """Read decoded media, run the HF processor, assemble the SGLang input.
 
         Returns ``(input_ids, processor_output_dict, field)`` where ``field`` is
@@ -168,7 +168,7 @@ class DecodedMmProcessor:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
-        images: List[np.ndarray] = list(results[:num_images])
+        images: list[np.ndarray] = list(results[:num_images])
         video_results = results[num_images:]
         videos = [frames for frames, _ in video_results]
         video_metadata = [meta for _, meta in video_results]

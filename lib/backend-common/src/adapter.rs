@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use crate::backend_media::{BackendMediaLoader, decode_request_media};
 use crate::disagg::DisaggregationMode;
 use crate::engine::{GenerateContext, LLMEngine, RawEngine};
 
@@ -135,11 +136,28 @@ impl Drop for CancelMonitorGuard {
 pub(crate) struct EngineAdapter {
     engine: Arc<dyn LLMEngine>,
     mode: DisaggregationMode,
+    backend_media_loader: Option<Arc<dyn BackendMediaLoader>>,
 }
 
 impl EngineAdapter {
     pub(crate) fn new(engine: Arc<dyn LLMEngine>, mode: DisaggregationMode) -> Self {
-        Self { engine, mode }
+        Self {
+            engine,
+            mode,
+            backend_media_loader: None,
+        }
+    }
+
+    pub(crate) fn with_backend_media_loader(
+        engine: Arc<dyn LLMEngine>,
+        mode: DisaggregationMode,
+        backend_media_loader: Arc<dyn BackendMediaLoader>,
+    ) -> Self {
+        Self {
+            engine,
+            mode,
+            backend_media_loader: Some(backend_media_loader),
+        }
     }
 }
 
@@ -257,6 +275,20 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             }
         }
 
+        // Backend decoding is intentionally worker-local: its configuration
+        // is absent from the model card, so the frontend forwards URL media
+        // unchanged. Stage every fetch/decode before invoking the engine and
+        // retain the returned guards in the response stream below.
+        let (request, decoded_media_lifetimes) =
+            decode_request_media(request, self.backend_media_loader.as_deref())
+                .instrument(span.clone())
+                .await
+                .map_err(|e| {
+                    span.record("error_kind", "backend_media_decode_failed");
+                    span.set_status(Status::error("backend_media_decode_failed"));
+                    Error::from(e)
+                })?;
+
         // Capture this worker's trace identity once, for stamping on the
         // first non-empty chunk. Yields None in non-JSONL deployments where
         // `DistributedTraceIdLayer` is not installed.
@@ -366,6 +398,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let finalizer_span = span.clone();
         let mapped = async_stream::stream! {
             let _guard = guard;
+            // NIXL descriptors sent to Python refer to worker-owned decoded
+            // storage. Keep every registration alive through the final engine
+            // chunk (or until the consumer drops the stream).
+            let _decoded_media_lifetimes = decoded_media_lifetimes;
             let finalizer = StreamSpanFinalizer::new(finalizer_span);
             let mut inner = chunks;
             let mut chunk_count: usize = 0;
@@ -596,13 +632,15 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend_media::{LoadedMedia, MediaLifetime};
     use crate::engine::{EngineConfig, FinishReason, LLMEngineOutputExt, chunk, usage};
     use crate::error::{BackendError, DynamoError, ErrorType};
+    use dynamo_llm::protocols::common::preprocessor::MultimodalData;
     use dynamo_llm::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_runtime::pipeline::Context;
     use futures::StreamExt;
     use futures::stream::BoxStream;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// Mock engine: yields a canned list of chunks with a per-chunk delay, and
     /// records how many times `abort` is called.
@@ -759,6 +797,138 @@ mod tests {
         let input = Context::new(make_request(vec![1]));
         let err = adapter.generate(input).await.unwrap_err();
         assert!(err.to_string().contains("init failed"));
+    }
+
+    struct CountingEngine {
+        generate_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl LLMEngine for CountingEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig::default())
+        }
+
+        async fn generate(
+            &self,
+            request: PreprocessedRequest,
+            _context: GenerateContext,
+        ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+            self.generate_calls.fetch_add(1, Ordering::SeqCst);
+            assert!(matches!(
+                &request.multi_modal_data.as_ref().unwrap()["video_url"][0],
+                MultimodalData::Decoded(_)
+            ));
+            Ok(Box::pin(futures::stream::iter(vec![Ok(
+                LLMEngineOutput::stop(),
+            )])))
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    struct DropMarker(Arc<AtomicBool>);
+
+    impl Drop for DropMarker {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct AdapterMediaLoader {
+        fail: bool,
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl BackendMediaLoader for AdapterMediaLoader {
+        async fn load(&self, _modality: &str, _url: &str) -> anyhow::Result<LoadedMedia> {
+            if self.fail {
+                anyhow::bail!("synthetic media failure");
+            }
+            let descriptor = serde_json::from_value(serde_json::json!({
+                "nixl_metadata": "test",
+                "nixl_descriptor": {
+                    "addr": 1,
+                    "size": 3,
+                    "mem_type": "Dram",
+                    "device_id": 0
+                },
+                "shape": [1, 1, 3],
+                "dtype": "UINT8",
+                "metadata": null
+            }))
+            .unwrap();
+            let lifetime: MediaLifetime = Arc::new(DropMarker(self.dropped.clone()));
+            Ok(LoadedMedia::for_test(descriptor, lifetime))
+        }
+    }
+
+    fn media_request() -> PreprocessedRequest {
+        let mut request = make_request(vec![1]);
+        request.multi_modal_data = Some(std::collections::HashMap::from([(
+            "video_url".to_string(),
+            vec![MultimodalData::RawUrl(
+                "https://example.com/video.mp4".to_string(),
+            )],
+        )]));
+        request
+    }
+
+    #[tokio::test]
+    async fn backend_media_failure_prevents_engine_invocation() {
+        let generate_calls = Arc::new(AtomicUsize::new(0));
+        let engine = Arc::new(CountingEngine {
+            generate_calls: generate_calls.clone(),
+        });
+        let loader = Arc::new(AdapterMediaLoader {
+            fail: true,
+            dropped: Arc::new(AtomicBool::new(false)),
+        });
+        let adapter = EngineAdapter::with_backend_media_loader(
+            engine,
+            DisaggregationMode::Aggregated,
+            loader,
+        );
+
+        let error = adapter
+            .generate(Context::new(media_request()))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("synthetic media failure"));
+        assert_eq!(generate_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn backend_media_storage_lives_through_response_stream() {
+        let generate_calls = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let engine = Arc::new(CountingEngine {
+            generate_calls: generate_calls.clone(),
+        });
+        let loader = Arc::new(AdapterMediaLoader {
+            fail: false,
+            dropped: dropped.clone(),
+        });
+        let adapter = EngineAdapter::with_backend_media_loader(
+            engine,
+            DisaggregationMode::Aggregated,
+            loader,
+        );
+
+        let mut stream = adapter
+            .generate(Context::new(media_request()))
+            .await
+            .unwrap();
+        assert!(!dropped.load(Ordering::SeqCst));
+        assert!(stream.next().await.is_some());
+        assert!(!dropped.load(Ordering::SeqCst));
+        assert!(stream.next().await.is_none());
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(generate_calls.load(Ordering::SeqCst), 1);
     }
 
     /// Engine that yields one regular chunk, then a terminal cancel chunk when

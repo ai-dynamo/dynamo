@@ -6,6 +6,8 @@
 # Pass --frontend-decoding to route the image through the Rust frontend's
 # NIXL RDMA pipeline (decoded pixels → SGLang worker as PIL Images) instead
 # of letting SGLang fetch+decode internally.
+# Pass --backend-decoding to keep URLs on the request plane and decode images
+# and videos in the unified Rust worker immediately before SGLang inference.
 # GPUs: 1
 
 set -e
@@ -23,6 +25,7 @@ CHAT_TEMPLATE=""
 PAGE_SIZE=16
 ENABLE_OTEL=false
 FRONTEND_DECODING=false
+BACKEND_DECODING=false
 
 # Parse command line arguments
 EXTRA_ARGS=()
@@ -48,6 +51,10 @@ while [[ $# -gt 0 ]]; do
             FRONTEND_DECODING=true
             shift
             ;;
+        --backend-decoding)
+            BACKEND_DECODING=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
@@ -58,6 +65,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --frontend-decoding      Decode images in the Rust frontend and"
             echo "                           ship pixels via NIXL RDMA (bypasses"
             echo "                           SGLang's internal HTTP fetch + base64 decode)"
+            echo "  --backend-decoding       Decode images/videos in the unified Rust"
+            echo "                           worker after the frontend request hop"
             echo "  -h, --help               Show this help message"
             echo ""
             echo "Additional SGLang/Dynamo flags can be passed and will be forwarded"
@@ -70,6 +79,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [ "$FRONTEND_DECODING" = true ] && [ "$BACKEND_DECODING" = true ]; then
+    echo "--frontend-decoding and --backend-decoding cannot be combined" >&2
+    exit 2
+fi
 
 # Enable tracing if requested
 TRACE_ARGS=()
@@ -93,15 +107,29 @@ if [ "$FRONTEND_DECODING" = true ]; then
     FD_ARGS+=(--frontend-decoding)
     BANNER_SUFFIX=" (Frontend Decoding)"
 
+fi
+
+WORKER_MODULE="dynamo.sglang"
+TOKENIZER_ARGS=(--skip-tokenizer-init)
+if [ "$BACKEND_DECODING" = true ]; then
+    FD_ARGS+=(--backend-decoding)
+    BANNER_SUFFIX=" (Backend Decoding)"
+    WORKER_MODULE="dynamo.sglang.unified_main"
+    # Backend decoding calls the model's HF processor on the worker.
+    TOKENIZER_ARGS=()
+fi
+
+if [ "$FRONTEND_DECODING" = true ] || [ "$BACKEND_DECODING" = true ]; then
     # The SGLang image inherits NIXL from the upstream lmsysorg/sglang runtime
     # stack but does NOT add its native libs to LD_LIBRARY_PATH (cf.
     # container/templates/dev.Dockerfile: "SGLang dev/local-dev inherit the
     # upstream SGLang/NIXL runtime stack"). Without this, dynamo.frontend's Rust
     # runtime hits "NIXL is not supported in stub mode" the moment it tries to
     # build a media-fetching pipeline. Point the loader at the wheel-shipped .so
-    # files explicitly. We build cuda13 only, so the wheel is nixl_cu13, which
-    # stores its native libs under ".nixl_cu13.mesonpy.libs".
-    NIXL_WHEEL_LIBS="$(python3 -c 'import nixl_cu13, os; print(os.path.join(os.path.dirname(os.path.dirname(nixl_cu13.__file__)), ".nixl_cu13.mesonpy.libs"))' 2>/dev/null || true)"
+    # files explicitly. NIXL wheels store their native libraries in a hidden
+    # sibling directory whose name includes the CUDA major version; accept the
+    # CUDA 12 and CUDA 13 layouts used by supported SGLang images.
+    NIXL_WHEEL_LIBS="$(python3 -c 'import glob, sys; paths = [path for base in sys.path for path in glob.glob(f"{base}/.nixl_cu*.mesonpy.libs")]; print(paths[0] if paths else "")' 2>/dev/null || true)"
     if [ -d "$NIXL_WHEEL_LIBS" ]; then
         export LD_LIBRARY_PATH="${NIXL_WHEEL_LIBS}:${NIXL_WHEEL_LIBS}/plugins:${LD_LIBRARY_PATH}"
         export NIXL_PLUGIN_DIR="${NIXL_PLUGIN_DIR:-$NIXL_WHEEL_LIBS/plugins}"
@@ -125,18 +153,18 @@ if [ -n "$CHAT_TEMPLATE" ]; then
 fi
 
 # run worker with a vision model (SGLang auto-detects chat template from HF tokenizer).
-# Without --frontend-decoding, the SGLang engine handles image/video loading and
-# vision encoding internally. With it, the worker consumes Decoded items via
-# ImageLoader and hands PIL Images to sgl.Engine.async_generate(image_data=[...]).
+# Without a decoding flag, SGLang handles image/video loading internally.
+# Frontend decoding remains the legacy image-only path. Backend decoding uses
+# the unified worker for Rust image/video decode and worker-side HF processing.
 OTEL_SERVICE_NAME=dynamo-worker DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-python3 -m dynamo.sglang \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
   "${TEMPLATE_ARGS[@]}" \
   --page-size "$PAGE_SIZE" \
   --tp 1 \
   --trust-remote-code \
-  --skip-tokenizer-init \
+  "${TOKENIZER_ARGS[@]}" \
   --enable-metrics \
   "${FD_ARGS[@]}" \
   $GPU_MEM_ARGS \

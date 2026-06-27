@@ -544,6 +544,47 @@ sglang_configs = {
             )
         ],
     ),
+    "video_agg_backend_decode_qwen3": SGLangConfig(
+        # Aggregated unified serving: URLs cross the frontend request plane,
+        # then the Rust worker fetches, samples, decodes, and NIXL-registers
+        # frames before one worker-side Qwen HF processor call.
+        name="video_agg_backend_decode_qwen3",
+        directory=sglang_dir,
+        script_name="agg_vision.sh",
+        marks=[
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(15.0),
+            # draw.mp4 expands to roughly 12.8K Qwen3-VL tokens at 2 FPS.
+            pytest.mark.requested_sglang_kv_tokens(32768),
+            pytest.mark.timeout(420),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--backend-decoding",
+            "--disable-cuda-graph",
+        ],
+        timeout=390,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["guitar", "tablet", "draw"],
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
     "video_e_pd_qwen": SGLangConfig(
         # Tests E/PD video inference path using a separate encode worker
         # and a multimodal PD worker on a single GPU for CI coverage.

@@ -119,6 +119,22 @@ def test_worker_config_accepts_parser_runtime_settings():
     )
 
 
+def test_worker_config_accepts_backend_media_configuration():
+    """Backend-only media settings must cross the PyO3 boundary without
+    becoming model-card registration settings."""
+    from dynamo.llm import MediaDecoder, MediaFetcher
+
+    decoder = MediaDecoder()
+    decoder.enable_image({})
+    fetcher = MediaFetcher()
+    fetcher.timeout_ms(30_000)
+    backend.WorkerConfig(
+        namespace="dynamo",
+        backend_media_decoder=decoder,
+        backend_media_fetcher=fetcher,
+    )
+
+
 def test_worker_config_accepts_disaggregation_mode():
     """The Rust binding must accept a DisaggregationMode kwarg so the
     Python shim can plumb the field through. Each variant must construct."""

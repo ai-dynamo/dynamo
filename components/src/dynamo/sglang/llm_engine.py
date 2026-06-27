@@ -58,7 +58,7 @@ from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
-from dynamo.llm import ModelInput
+from dynamo.llm import MediaDecoder, MediaFetcher, ModelInput
 from dynamo.sglang._disagg import (
     SGLANG_WORKER_GROUP_ID_KEY,
     compute_bootstrap_address,
@@ -74,6 +74,7 @@ from dynamo.sglang.capacity import (
 from dynamo.sglang.logits_processing import activate_logits_processors
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import format_zmq_endpoint
+from dynamo.sglang.request_handlers.llm.decoded_mm_processor import DecodedMmProcessor
 
 if TYPE_CHECKING:
     from dynamo._core.backend import EngineMetrics  # type: ignore[import-not-found]
@@ -84,6 +85,124 @@ logger = logging.getLogger(__name__)
 # environments where the warmup adds avoidable startup latency. The default
 # (`0`/unset) keeps warmup on; set to `1`/`true` to skip.
 _DYN_SGLANG_SKIP_WARMUP_ENV = "DYN_SGLANG_SKIP_PREFILL_WARMUP"
+_SUPPORTED_DECODED_MEDIA_MODEL_TYPES = frozenset({"qwen3_vl", "qwen3_vl_moe"})
+_IMAGE_URL_KEY = "image_url"
+_VIDEO_URL_KEY = "video_url"
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as e:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from e
+    if not value > 0:
+        raise ValueError(f"{name} must be greater than zero, got {value}")
+    return value
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from e
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than zero, got {value}")
+    return value
+
+
+def _build_backend_media_config() -> tuple[MediaDecoder, MediaFetcher]:
+    """Build the worker-local Rust media loader configuration."""
+    media_decoder = MediaDecoder()
+    media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+    if not hasattr(media_decoder, "enable_video"):
+        raise RuntimeError(
+            "--backend-decoding requires Dynamo bindings built with media-ffmpeg"
+        )
+    media_decoder.enable_video(
+        {
+            "fps": _env_positive_float("DYN_SGL_VIDEO_FPS", 2.0),
+            "max_frames": _env_positive_int("DYN_SGL_VIDEO_MAX_FRAMES", 128),
+        }
+    )
+    media_fetcher = MediaFetcher()
+    media_fetcher.timeout_ms(30_000)
+    return media_decoder, media_fetcher
+
+
+def _validate_unified_media_mode(dynamo_args: Any) -> None:
+    """Reject media modes implemented only by the legacy SGLang worker."""
+    if getattr(dynamo_args, "frontend_decoding", False):
+        raise ValueError(
+            "--frontend-decoding is available through the legacy worker; run "
+            "python -m dynamo.sglang, or use --backend-decoding with "
+            "python -m dynamo.sglang.unified_main"
+        )
+
+
+def _media_variant(item: Any) -> tuple[str, Any]:
+    if isinstance(item, str):
+        return "url", item
+    if not isinstance(item, dict):
+        raise ValueError(
+            "multimodal items must be URL strings or externally tagged objects; "
+            f"got {type(item).__name__}"
+        )
+    if "Url" in item and len(item) == 1:
+        return "url", item["Url"]
+    if "Decoded" in item and len(item) == 1:
+        decoded = item["Decoded"]
+        if not isinstance(decoded, dict):
+            raise ValueError("Decoded multimodal descriptor must be an object")
+        return "decoded", decoded
+    raise ValueError("multimodal item must contain exactly one Url or Decoded variant")
+
+
+def _split_multimodal_data(
+    multi_modal_data: dict[str, Any],
+) -> tuple[str | None, list[Any], list[Any]]:
+    """Return (variant, image items, video items), preserving list order."""
+    unsupported = [
+        key
+        for key, items in multi_modal_data.items()
+        if items and key not in {_IMAGE_URL_KEY, _VIDEO_URL_KEY}
+    ]
+    if unsupported:
+        raise ValueError(
+            "unified SGLang multimodal handling supports image_url/video_url; "
+            f"got {sorted(unsupported)}"
+        )
+
+    variants: set[str] = set()
+    images: list[Any] = []
+    videos: list[Any] = []
+    for key, target in ((_IMAGE_URL_KEY, images), (_VIDEO_URL_KEY, videos)):
+        raw_items = multi_modal_data.get(key) or []
+        if not isinstance(raw_items, list):
+            raise ValueError(f"multi_modal_data.{key} must be a list")
+        for item in raw_items:
+            variant, value = _media_variant(item)
+            variants.add(variant)
+            target.append(value)
+
+    if len(variants) > 1:
+        raise ValueError("multimodal request cannot mix Url and Decoded media variants")
+    return (next(iter(variants)) if variants else None), images, videos
+
+
+def _require_formatted_prompt(request: GenerateRequest) -> str:
+    extra_args = request.get("extra_args") or {}
+    formatted_prompt = extra_args.get("formatted_prompt")
+    if not isinstance(formatted_prompt, str) or not formatted_prompt:
+        raise ValueError(
+            "decoded multimodal request is missing extra_args.formatted_prompt"
+        )
+    return formatted_prompt
 
 
 def _warmup_enabled() -> bool:
@@ -144,6 +263,9 @@ class SglangLLMEngine(LLMEngine):
         self._logits_processor_spec: LogitsProcessorSpec | None = None
         self._pause_controller: SGLangEnginePauseController | None = None
         self._pause_lock = asyncio.Lock()
+        self._backend_decoding = bool(getattr(dynamo_args, "backend_decoding", False))
+        self._decoded_media_model_type: str | None = None
+        self._decoded_mm_processor: DecodedMmProcessor | None = None
 
     @classmethod
     async def from_args(
@@ -152,6 +274,7 @@ class SglangLLMEngine(LLMEngine):
         config = await parse_args(argv if argv is not None else sys.argv[1:])
         server_args = config.server_args
         dynamo_args = config.dynamo_args
+        _validate_unified_media_mode(dynamo_args)
 
         # Enable SGLang's custom-processor path and force tokenizer init (to
         # resolve the forced token IDs at startup). After parse_args so a user
@@ -166,13 +289,34 @@ class SglangLLMEngine(LLMEngine):
             ModelInput.Text if dynamo_args.use_sglang_tokenizer else ModelInput.Tokens
         )
 
+        if dynamo_args.backend_decoding:
+            if config.serving_mode != DisaggregationMode.AGGREGATED:
+                raise ValueError(
+                    "--backend-decoding currently supports aggregated serving only"
+                )
+            if dynamo_args.use_sglang_tokenizer:
+                raise ValueError(
+                    "--backend-decoding requires Dynamo frontend tokenization; "
+                    "do not combine it with --use-sglang-tokenizer"
+                )
+            # The decoded path calls tokenizer_manager.processor directly.
+            # Keep Dynamo frontend tokenization as the request contract while
+            # still asking SGLang to initialize its tokenizer/HF processor.
+            server_args.skip_tokenizer_init = False
+
         engine = cls(server_args, dynamo_args, config.serving_mode)
+        backend_media_decoder = None
+        backend_media_fetcher = None
+        if dynamo_args.backend_decoding:
+            backend_media_decoder, backend_media_fetcher = _build_backend_media_config()
         worker_config = WorkerConfig.from_runtime_config(
             dynamo_args,
             model_name=server_args.model_path,
             served_model_name=server_args.served_model_name,
             model_input=model_input,
             disaggregation_mode=config.serving_mode,
+            backend_media_decoder=backend_media_decoder,
+            backend_media_fetcher=backend_media_fetcher,
         )
         return engine, worker_config
 
@@ -185,6 +329,25 @@ class SglangLLMEngine(LLMEngine):
         # so they can't override the Rust Worker's shutdown; nothing to do here.
         self.engine = sgl.Engine(server_args=self.server_args)
         self._pause_controller = SGLangEnginePauseController(self.engine)
+
+        if self._backend_decoding:
+            hf_config = self.engine.tokenizer_manager.model_config.hf_config
+            self._decoded_media_model_type = getattr(hf_config, "model_type", None)
+            if (
+                self._decoded_media_model_type
+                not in _SUPPORTED_DECODED_MEDIA_MODEL_TYPES
+            ):
+                raise ValueError(
+                    "--backend-decoding supports model_type qwen3_vl and "
+                    f"qwen3_vl_moe; got {self._decoded_media_model_type!r}"
+                )
+            processor = self._resolve_hf_processor()
+            if processor is None:
+                raise RuntimeError(
+                    "--backend-decoding requires SGLang to initialize the "
+                    "model's Hugging Face multimodal processor"
+                )
+            self._decoded_mm_processor = DecodedMmProcessor(processor)
 
         tokenizer = (
             self.engine.tokenizer_manager.tokenizer
@@ -337,7 +500,7 @@ class SglangLLMEngine(LLMEngine):
         assert self.engine is not None, "Engine not initialized"
 
         sampling_params = self._build_sampling_params(request)
-        input_param = self._get_input_param(request)
+        input_param, multimodal_kwargs = await self._prepare_multimodal_input(request)
         # Prefill discards engine output (it only yields bootstrap info) —
         # asking SGLang to compute logprobs there would be wasted work,
         # especially with prompt_logprobs which forces a full prompt pass.
@@ -398,6 +561,7 @@ class SglangLLMEngine(LLMEngine):
             **bootstrap_kwargs,
             **logits_kwargs,
             **logprob_kwargs,
+            **multimodal_kwargs,
         )
 
         # ORDER MATTERS: async_generate must register the room (the await
@@ -988,6 +1152,60 @@ class SglangLLMEngine(LLMEngine):
             if structural_tag is not None:
                 return {"structural_tag": serialize_structural_tag(structural_tag)}
         return {}
+
+    def _resolve_hf_processor(self) -> Any | None:
+        if self.engine is None:
+            return None
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        processor = getattr(tokenizer_manager, "processor", None)
+        if processor is not None:
+            return processor
+        mm_processor = getattr(tokenizer_manager, "mm_processor", None)
+        return getattr(mm_processor, "_processor", None)
+
+    async def _prepare_multimodal_input(
+        self, request: GenerateRequest
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        input_param = self._get_input_param(request)
+        multi_modal_data = request.get("multi_modal_data") or {}
+        if not multi_modal_data:
+            return input_param, {}
+        if not isinstance(multi_modal_data, dict):
+            raise ValueError("multi_modal_data must be an object")
+
+        variant, images, videos = _split_multimodal_data(multi_modal_data)
+        if variant is None:
+            return input_param, {}
+        if variant == "url":
+            # This is the normal path when backend decoding is disabled: the
+            # model card advertises no frontend decoder, so URL/data media is
+            # handed to SGLang unchanged.
+            return input_param, {
+                "image_data": images or None,
+                "video_data": videos or None,
+            }
+
+        if not self._backend_decoding:
+            raise ValueError(
+                "received Decoded media while --backend-decoding is disabled"
+            )
+        if self._decoded_media_model_type not in _SUPPORTED_DECODED_MEDIA_MODEL_TYPES:
+            raise ValueError(
+                "decoded media is supported only for qwen3_vl/qwen3_vl_moe; "
+                f"got {self._decoded_media_model_type!r}"
+            )
+        processor = self._decoded_mm_processor
+        if processor is None:
+            raise RuntimeError("decoded media processor is not initialized")
+
+        expanded_ids, processor_output, field = await processor.build(
+            _require_formatted_prompt(request), images, videos
+        )
+        # The HF processor expands every image/video placeholder in one call.
+        # Its IDs replace the frontend tokenization; merging would duplicate
+        # vision tokens. The one combined processor_output dictionary is passed
+        # once and SGLang classifies each field by attribute name.
+        return {"input_ids": expanded_ids}, {field: [processor_output]}
 
     def _get_input_param(self, request: GenerateRequest) -> dict:
         assert self._input_param_manager is not None, "Engine not initialized"

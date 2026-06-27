@@ -19,6 +19,7 @@ use dynamo_llm::local_model::runtime_config::{
     StructuralTagScope,
 };
 use dynamo_llm::model_type::{ModelInput, ModelType};
+use dynamo_llm::preprocessor::media::{MediaDecoder, MediaFetcher, MediaLoader};
 use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
@@ -183,6 +184,13 @@ pub struct WorkerConfig {
     /// roles -- setting it on `Decode` or `Encode` is rejected at
     /// `Worker::run` validation time with `BackendError::InvalidArgument`.
     pub route_to_encoder: bool,
+    /// Optional worker-local decoder. Unlike a model-card media decoder, this
+    /// is instantiated inside the unified worker and is never advertised to
+    /// the frontend, so URL media crosses the request plane unchanged.
+    pub backend_media_decoder: Option<MediaDecoder>,
+    /// Fetch policy paired with `backend_media_decoder` (SSRF policy, timeout,
+    /// allowed domains). Ignored when backend decoding is disabled.
+    pub backend_media_fetcher: Option<MediaFetcher>,
 }
 
 impl WorkerConfig {
@@ -220,6 +228,8 @@ impl Default for WorkerConfig {
             structural_tag_schema: StructuralTagSchemaMode::Auto,
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,
+            backend_media_decoder: None,
+            backend_media_fetcher: None,
         }
     }
 }
@@ -818,6 +828,38 @@ impl Worker {
         let model_type = resolve_model_type(&self.config)?;
         let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
 
+        // Construct the worker-local loader before publishing discovery. A
+        // missing NIXL/UCX runtime or invalid fetch policy is a startup error,
+        // not a first-request failure, and must not leave a briefly routable
+        // model behind.
+        let backend_media_loader = match self.config.backend_media_decoder.clone() {
+            Some(decoder) if !self.engine.is_raw() => Some(Arc::new(
+                MediaLoader::new(decoder, self.config.backend_media_fetcher.clone()).map_err(
+                    |e| {
+                        err(
+                            ErrorType::Backend(BackendError::InvalidArgument),
+                            format!("backend media loader: {e}"),
+                        )
+                    },
+                )?,
+            )),
+            Some(_) => {
+                return Err(err(
+                    ErrorType::Backend(BackendError::InvalidArgument),
+                    "backend media decoding is supported only for LLMEngine workers".to_string(),
+                ));
+            }
+            None => {
+                if self.config.backend_media_fetcher.is_some() {
+                    return Err(err(
+                        ErrorType::Backend(BackendError::InvalidArgument),
+                        "backend_media_fetcher requires backend_media_decoder".to_string(),
+                    ));
+                }
+                None
+            }
+        };
+
         let mut local_model =
             build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
         tracing::debug!("local model built");
@@ -873,10 +915,17 @@ impl Worker {
             dynamo_runtime::local_endpoint_registry::LocalAsyncEngine,
         ) = match &self.engine {
             EngineKind::Llm(engine) => {
-                let engine_adapter = Arc::new(EngineAdapter::new(
-                    engine.clone(),
-                    self.config.disaggregation_mode,
-                ));
+                let engine_adapter = match backend_media_loader {
+                    Some(loader) => Arc::new(EngineAdapter::with_backend_media_loader(
+                        engine.clone(),
+                        self.config.disaggregation_mode,
+                        loader,
+                    )),
+                    None => Arc::new(EngineAdapter::new(
+                        engine.clone(),
+                        self.config.disaggregation_mode,
+                    )),
+                };
                 let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
                     err(
                         ErrorType::Backend(BackendError::Unknown),

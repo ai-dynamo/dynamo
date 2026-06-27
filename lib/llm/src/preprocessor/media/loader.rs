@@ -551,6 +551,33 @@ impl MediaLoader {
 
         Ok(rdma_descriptor)
     }
+
+    /// Fetch and decode one URL from an already-preprocessed multimodal map.
+    ///
+    /// Unified workers receive only the modality key plus URL rather than the
+    /// original OpenAI content-part struct. Reconstructing that struct through
+    /// serde keeps this path on the same SSRF, timeout, decoder-limit, and NIXL
+    /// registration implementation as frontend decoding.
+    pub async fn fetch_and_decode_url(
+        &self,
+        modality: &str,
+        url: &str,
+        media_io_kwargs: Option<&MediaDecoder>,
+    ) -> Result<RdmaMediaDataDescriptor> {
+        anyhow::ensure!(
+            matches!(modality, "image_url" | "video_url" | "audio_url"),
+            "Unsupported media modality '{modality}'"
+        );
+        let mut content_part = serde_json::json!({ "type": modality });
+        content_part
+            .as_object_mut()
+            .expect("content-part JSON is an object")
+            .insert(modality.to_string(), serde_json::json!({ "url": url }));
+        let content_part: ChatCompletionRequestUserMessageContentPart =
+            serde_json::from_value(content_part)?;
+        self.fetch_and_decode_media_part(&content_part, media_io_kwargs)
+            .await
+    }
 }
 
 #[cfg(all(test, feature = "testing-nixl"))]

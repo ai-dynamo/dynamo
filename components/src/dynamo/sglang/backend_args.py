@@ -153,6 +153,17 @@ class DynamoSGLangArgGroup(ArgGroup):
         # Topology constraint: rejecting --frontend-decoding combined with the
         # EPD multimodal flags happens in DynamoSGLangConfig.validate() below.
         add_frontend_decoding_arg(g, env_prefix="SGL")
+        add_negatable_bool_argument(
+            g,
+            flag_name="--backend-decoding",
+            env_var="DYN_SGL_BACKEND_DECODING",
+            default=False,
+            help=(
+                "Decode image/video URLs inside the unified Rust worker and "
+                "transfer decoded pixels to SGLang through NIXL. This mode is "
+                "currently supported for aggregated Qwen3-VL serving only."
+            ),
+        )
 
         add_argument(
             g,
@@ -184,6 +195,7 @@ class DynamoSGLangConfig(ConfigBase):
     video_generation_worker: bool
     enable_rl: bool
     frontend_decoding: bool = False
+    backend_decoding: bool = False
     sglang_trace_level: int
 
     def validate(self) -> None:
@@ -226,6 +238,11 @@ class DynamoSGLangConfig(ConfigBase):
             )
 
     def validate_multimodal_topology(self) -> None:
+        if self.frontend_decoding and self.backend_decoding:
+            raise ValueError(
+                "--frontend-decoding and --backend-decoding are separate media "
+                "pipelines and cannot be enabled together"
+            )
         if self.frontend_decoding and (
             self.multimodal_encode_worker
             or self.multimodal_worker

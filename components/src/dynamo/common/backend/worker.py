@@ -27,7 +27,7 @@ from typing import Optional
 
 from dynamo._core import backend as _backend
 from dynamo.common.constants import DisaggregationMode
-from dynamo.llm import ModelInput
+from dynamo.llm import MediaDecoder, MediaFetcher, ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine import BaseEngine, RawEngine
@@ -142,6 +142,10 @@ class WorkerConfig:
     # Appended at the END of the dataclass to keep positional callers
     # working -- inserting mid-class would silently shift downstream args.
     route_to_encoder: bool = False
+    # Worker-local decoding config. These values are consumed by the unified
+    # Rust worker and are deliberately not published in the model card.
+    backend_media_decoder: Optional[MediaDecoder] = None
+    backend_media_fetcher: Optional[MediaFetcher] = None
 
     @classmethod
     def from_runtime_config(
@@ -275,6 +279,8 @@ class Worker:
             structural_tag_schema=self.config.structural_tag_schema,
             runtime=runtime_cfg,
             route_to_encoder=self.config.route_to_encoder,
+            backend_media_decoder=self.config.backend_media_decoder,
+            backend_media_fetcher=self.config.backend_media_fetcher,
         )
 
         loop = asyncio.get_running_loop()

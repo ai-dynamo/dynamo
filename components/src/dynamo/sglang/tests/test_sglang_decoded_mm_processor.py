@@ -4,10 +4,6 @@
 import numpy as np
 import pytest
 
-from dynamo.sglang.request_handlers.llm.decode_handler import (
-    _decoded_items,
-    _require_formatted_prompt,
-)
 from dynamo.sglang.request_handlers.llm.decoded_mm_processor import (
     DecodedMmProcessor,
     _normalize_video_metadata,
@@ -97,23 +93,3 @@ def test_assemble_dict_image_and_video():
     assert combined["image_grid_thw"] == "igt"
     assert combined["pixel_values_videos"] == "pvv"
     assert combined["video_grid_thw"] == "vgt"
-
-
-def test_decoded_items_filters_url_variants():
-    mm_data = {
-        "video_url": [
-            {"Decoded": {"shape": [8, 4, 4, 3]}},
-            {"Url": "https://example.com/v.mp4"},
-        ]
-    }
-    items = _decoded_items(mm_data, "video_url")
-    assert items == [{"shape": [8, 4, 4, 3]}]
-    assert _decoded_items(mm_data, "image_url") == []
-
-
-def test_require_formatted_prompt():
-    assert _require_formatted_prompt({"extra_args": {"formatted_prompt": "hi"}}) == "hi"
-    with pytest.raises(ValueError, match="formatted_prompt"):
-        _require_formatted_prompt({"extra_args": {}})
-    with pytest.raises(ValueError, match="formatted_prompt"):
-        _require_formatted_prompt({})
