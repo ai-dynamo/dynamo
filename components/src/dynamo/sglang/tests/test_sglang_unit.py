@@ -13,15 +13,18 @@ import yaml
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 
 import dynamo.sglang._compat as sglang_compat
+from dynamo.common.constants import EmbeddingTransferMode
 from dynamo.sglang._compat import (
     ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
 )
 from dynamo.sglang.args import (
+    _normalize_multimodal_disaggregation_args,
     parse_args,
     should_fetch_model,
     use_modelexpress_remote_instance,
 )
+from dynamo.sglang.backend_args import DynamoSGLangConfig
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
@@ -53,6 +56,27 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+def _make_sglang_config(**overrides):
+    config = DynamoSGLangConfig()
+    config.use_sglang_tokenizer = False
+    config.multimodal_encode_worker = False
+    config.multimodal_worker = False
+    config.enable_multimodal = False
+    config.dedicated_mm_encoder = False
+    config.embedding_transfer_mode = EmbeddingTransferMode.NIXL_WRITE
+    config.embedding_worker = False
+    config.image_diffusion_worker = False
+    config.video_generation_worker = False
+    config.enable_rl = False
+    config.frontend_decoding = False
+    config.sglang_trace_level = 2
+    config.disagg_config = None
+    config.disagg_config_key = None
+    for key, value in overrides.items():
+        setattr(config, key, value)
+    return config
 
 
 def test_compat_restores_sglang_top_level_exports():
@@ -316,6 +340,130 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
     assert config.dynamo_args.namespace == "custom-ns"
 
 
+@pytest.mark.parametrize(
+    (
+        "mode",
+        "expected_encode_worker",
+        "expected_mm_worker",
+        "expected_args",
+    ),
+    [
+        ("encode", True, False, []),
+        ("prefill", False, False, ["--disaggregation-mode", "prefill"]),
+        ("decode", False, False, ["--disaggregation-mode", "decode"]),
+        ("agg", False, False, ["--disaggregation-mode", "null"]),
+        ("pd", False, False, ["--disaggregation-mode", "null"]),
+    ],
+)
+def test_enable_multimodal_disaggregation_mode_maps_sglang_roles(
+    mode,
+    expected_encode_worker,
+    expected_mm_worker,
+    expected_args,
+):
+    """Canonical multimodal roles map to SGLang's current worker flags."""
+    config = _make_sglang_config(enable_multimodal=True)
+
+    normalized = _normalize_multimodal_disaggregation_args(
+        ["--disaggregation-mode", mode], config
+    )
+
+    assert normalized == expected_args
+    assert config.multimodal_encode_worker is expected_encode_worker
+    assert config.multimodal_worker is expected_mm_worker
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_args"),
+    [
+        ("prefill", ["--disaggregation-mode", "prefill"]),
+        ("decode", ["--disaggregation-mode", "decode"]),
+        ("pd", ["--disaggregation-mode", "null"]),
+    ],
+)
+def test_dedicated_mm_encoder_selects_internal_multimodal_worker(mode, expected_args):
+    """Dedicated-mm-encoder selects internal E/PD or E/P/D workers."""
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    normalized = _normalize_multimodal_disaggregation_args(
+        ["--disaggregation-mode", mode], config
+    )
+
+    assert normalized == expected_args
+    assert config.multimodal_encode_worker is False
+    assert config.multimodal_worker is True
+
+
+def test_dedicated_mm_encoder_rejects_standalone_modes():
+    """The dedicated encoder flag must not silently turn agg/encode into a different topology."""
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="--dedicated-mm-encoder only applies"):
+        _normalize_multimodal_disaggregation_args(
+            ["--disaggregation-mode", "agg"], config
+        )
+
+
+def test_dedicated_mm_encoder_rejects_encode_worker_mode():
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="Do not combine"):
+        _normalize_multimodal_disaggregation_args(
+            ["--disaggregation-mode", "encode"], config
+        )
+
+
+def test_dedicated_mm_encoder_requires_explicit_worker_role():
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="requires --disaggregation-mode"):
+        _normalize_multimodal_disaggregation_args([], config)
+
+
+def test_multimodal_disaggregation_mode_uses_last_cli_value_with_dedicated_mm_encoder():
+    """Config-merged args precede CLI args, so the last explicit value must win."""
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    normalized = _normalize_multimodal_disaggregation_args(
+        ["--disaggregation-mode", "prefill", "--disaggregation-mode", "pd"],
+        config,
+    )
+
+    assert normalized == ["--disaggregation-mode", "null"]
+    assert config.multimodal_worker is True
+
+
+def test_enable_multimodal_without_role_keeps_standalone_worker():
+    """Capability-only SGLang serving should not select the internal EPD worker."""
+    config = _make_sglang_config(enable_multimodal=True)
+
+    normalized = _normalize_multimodal_disaggregation_args([], config)
+
+    assert normalized == []
+    assert config.enable_multimodal is True
+    assert config.multimodal_worker is False
+    assert config.multimodal_encode_worker is False
+
+
+def test_legacy_multimodal_worker_sets_enable_multimodal():
+    """Legacy multimodal role stays accepted while enabling the canonical flag."""
+    config = _make_sglang_config(multimodal_worker=True)
+
+    with pytest.warns(DeprecationWarning, match="--multimodal-worker"):
+        config.validate()
+
+    assert config.enable_multimodal is True
+    assert config.multimodal_worker is True
+
+
+def test_dedicated_mm_encoder_requires_enable_multimodal():
+    """Dedicated-mm-encoder is a topology modifier, not a multimodal enable switch."""
+    config = _make_sglang_config(dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="requires --enable-multimodal"):
+        config.validate()
+
+
 @pytest.mark.asyncio
 async def test_forward_pass_metrics_enabled_from_env(monkeypatch, mock_sglang_cli):
     """Dynamo should enable FPM when DYN_FORWARDPASS_METRIC_PORT is set."""
@@ -510,6 +658,20 @@ def test_should_fetch_model_skips_sglang_modelexpress_remote_instance():
     assert should_fetch_model(args, "Qwen/Qwen3-0.6B") is False
 
 
+@pytest.mark.parametrize(
+    "model_path",
+    [
+        "s3://bucket/model/",
+        "gs://bucket/model/",
+        "az://container/model/",
+    ],
+)
+def test_should_fetch_model_skips_object_storage_paths(model_path):
+    args = SimpleNamespace(load_format="runai_streamer")
+
+    assert should_fetch_model(args, model_path) is False
+
+
 def test_should_fetch_model_keeps_default_non_local_fetch():
     args = SimpleNamespace(load_format="auto")
 
@@ -556,6 +718,63 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
 
     assert result is True
     assert captured["kwargs"]["ignore_weights"] is True
+
+
+@pytest.mark.asyncio
+async def test_register_model_uses_engine_managed_path_for_runai_object_storage(
+    monkeypatch,
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    captured: dict = {}
+
+    async def fake_get_runtime_config(engine, server_args, dynamo_args):
+        return None
+
+    async def fake_register_model(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        if args[3].startswith("s3://"):
+            raise AssertionError("object-storage path used as a normal model_path")
+
+    monkeypatch.setattr(sglang_register, "_get_runtime_config", fake_get_runtime_config)
+    monkeypatch.setattr(sglang_register, "register_model", fake_register_model)
+
+    server_args = SimpleNamespace(
+        model_path="s3://bucket/model",
+        served_model_name="bucket-model",
+        context_length=4096,
+        page_size=1,
+        load_format="runai_streamer",
+        remote_instance_weight_loader_backend=None,
+    )
+    dynamo_args = SimpleNamespace(
+        use_sglang_tokenizer=False,
+        frontend_decoding=False,
+        custom_jinja_template=None,
+    )
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            model_config=SimpleNamespace(
+                model_weights="s3://bucket/model",
+                model_path="/tmp/runai-model-metadata",
+            )
+        )
+    )
+
+    result = await sglang_register._register_model_with_runtime_config(
+        engine=engine,
+        endpoint=SimpleNamespace(),
+        server_args=server_args,
+        dynamo_args=dynamo_args,
+        worker_type=sglang_register.WorkerType.Aggregated,
+    )
+
+    assert result is True
+    assert captured["args"][3] == "/tmp/runai-model-metadata"
+    assert "skip_model_path_fetch" not in captured["kwargs"]
+    assert captured["kwargs"]["ignore_weights"] is False
 
 
 # ---------------------------------------------------------------------------

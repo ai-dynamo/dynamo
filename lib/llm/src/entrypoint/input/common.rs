@@ -10,17 +10,20 @@ use crate::{
     backend::{Backend, ExecutionContext},
     discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
-    entrypoint::{EngineConfig, RouterConfig},
+    entrypoint::EngineConfig,
     http::service::metrics::Metrics,
-    kv_router::{
-        DirectRoutingRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
-    },
+    kv_router::indexer::try_build_cache_indexer,
+    kv_router::{KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics},
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
-    protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+    protocols::common::{
+        llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+        preprocessor::MultimodalData,
+    },
     request_template::RequestTemplate,
+    session_affinity::SessionAffinityPushRouter,
     types::{
         Annotated,
         openai::chat_completions::{
@@ -36,11 +39,37 @@ use dynamo_runtime::{
     component::Client,
     engine::{AsyncEngineStream, Data},
     pipeline::{
-        Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
-        ServiceEngine, ServiceFrontend, SingleIn, Source,
+        Context, ManyOut, MultimodalCacheKeyExtractor, Operator, PushRouter, RouterMode,
+        SegmentSource, ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
 };
 use std::sync::Arc;
+
+fn multimodal_cache_key_from_url(url: &str) -> String {
+    blake3::hash(url.as_bytes()).to_hex().to_string()
+}
+
+fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<String> {
+    let Some(items) = request
+        .multi_modal_data
+        .as_ref()
+        .and_then(|media| media.get("image_url"))
+    else {
+        return Vec::new();
+    };
+
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            MultimodalData::Url(url) => keys.push(multimodal_cache_key_from_url(url.as_str())),
+            MultimodalData::RawUrl(url) => keys.push(multimodal_cache_key_from_url(url)),
+            MultimodalData::Decoded(_) => {}
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
 
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
@@ -116,20 +145,25 @@ fn preprocessed_backend_engine(
     router: LlmPushRouter,
     router_mode: RouterMode,
     chooser: Option<Arc<KvRouter>>,
+    session_affinity_ttl: Option<Duration>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 {
     let engine: ServiceEngine<_, _> = match router_mode {
-        RouterMode::Direct => Arc::new(DirectRoutingRouter::new(router)),
-        RouterMode::Random
+        RouterMode::Direct
+        | RouterMode::Random
         | RouterMode::RoundRobin
         | RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
-        | RouterMode::DeviceAwareWeighted => Arc::new(router),
+        | RouterMode::DeviceAwareWeighted => Arc::new(SessionAffinityPushRouter::new(
+            router,
+            session_affinity_ttl,
+            router_mode.is_direct_routing(),
+        )?),
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(KvPushRouter::new(router, chooser))
+            Arc::new(KvPushRouter::new(router, chooser, session_affinity_ttl)?)
         }
     };
 
@@ -144,18 +178,38 @@ pub async fn build_preprocessed_routing(
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
+    enable_multimodal_cache_indexer: bool,
     enforce_disagg: bool,
+    session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting> {
     let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
 
+    let embedding_cache_indexer = if enable_multimodal_cache_indexer
+        && matches!(router_mode, RouterMode::DeviceAwareWeighted)
+    {
+        try_build_cache_indexer(&router_client.endpoint).await
+    } else {
+        None
+    };
+    let cache_key_extractor = embedding_cache_indexer.as_ref().map(|_| {
+        Arc::new(preprocessed_multimodal_cache_keys)
+            as MultimodalCacheKeyExtractor<PreprocessedRequest>
+    });
+
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
-    let router =
-        LlmPushRouter::from_client_with_monitor(router_client, router_mode, monitor_arc).await?;
+    let router = LlmPushRouter::from_client_with_state(
+        router_client,
+        router_mode,
+        monitor_arc,
+        embedding_cache_indexer,
+        cache_key_extractor,
+    )
+    .await?;
 
     // Eagerly register router request metrics so they appear as zeros even in
     // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
@@ -163,10 +217,21 @@ pub async fn build_preprocessed_routing(
     // OnceLock), which covers the standalone router path as well.
     RouterRequestMetrics::from_component(client.endpoint.component());
 
-    let prefill_router = prefill_chooser
-        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
+    let prefill_router = prefill_chooser.unwrap_or_else(|| {
+        PrefillRouter::disabled(
+            model_manager,
+            router_mode,
+            enforce_disagg,
+            session_affinity_ttl_secs,
+        )
+    });
 
-    let backend_engine = preprocessed_backend_engine(router, router_mode, chooser)?;
+    let backend_engine = preprocessed_backend_engine(
+        router,
+        router_mode,
+        chooser,
+        session_affinity_ttl_secs.map(Duration::from_secs),
+    )?;
 
     Ok(PreprocessedRouting {
         backend_engine,
@@ -191,7 +256,7 @@ pub async fn prepare_engine(
             let mut watcher = ModelWatcher::new(
                 distributed_runtime.clone(),
                 model_manager.clone(),
-                RouterConfig::default(),
+                local_model.router_config().clone(),
                 local_model.migration_limit(),
                 local_model.migration_max_seq_len(),
                 None,
@@ -201,6 +266,7 @@ pub async fn prepare_engine(
             if !local_model.path().as_os_str().is_empty() {
                 watcher.set_local_model_path(Some(local_model.path().to_path_buf()));
             }
+            watcher.set_tokenizer_backend(local_model.runtime_config().tokenizer_backend);
             let watch_obj = Arc::new(watcher);
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery

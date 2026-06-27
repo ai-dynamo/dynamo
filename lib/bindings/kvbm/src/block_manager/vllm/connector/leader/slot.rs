@@ -262,6 +262,26 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             offload_min_priority,
         }
     }
+
+    pub fn reset_prefix_cache(&self) -> Result<(), SlotError> {
+        if let Some(disk) = self.block_manager.disk() {
+            disk.reset_blocking()?;
+            tracing::debug!("reset disk prefix cache");
+        }
+
+        if let Some(host) = self.block_manager.host() {
+            host.reset_blocking()?;
+            tracing::debug!("reset host prefix cache");
+        }
+
+        if let Some(device) = self.block_manager.device() {
+            device.reset_blocking()?;
+            tracing::debug!("reset device prefix cache");
+        }
+
+        self.slots.lock().unwrap().clear();
+        Ok(())
+    }
 }
 
 impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {

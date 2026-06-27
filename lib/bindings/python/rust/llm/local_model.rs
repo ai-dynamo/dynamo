@@ -12,6 +12,7 @@ use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeCon
 use llm_rs::local_model::runtime_config::StructuralTagMode as RsStructuralTagMode;
 use llm_rs::local_model::runtime_config::StructuralTagSchemaMode as RsStructuralTagSchemaMode;
 use llm_rs::local_model::runtime_config::StructuralTagScope as RsStructuralTagScope;
+use llm_rs::local_model::runtime_config::TokenizerBackend as RsTokenizerBackend;
 use llm_rs::protocols::tensor::TensorModelConfig;
 use pyo3::exceptions::PyValueError;
 
@@ -129,6 +130,18 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
+    fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<String>) -> PyResult<()> {
+        self.inner.tokenizer_backend = tokenizer_backend
+            .map(|backend| {
+                backend
+                    .parse::<RsTokenizerBackend>()
+                    .map_err(PyValueError::new_err)
+            })
+            .transpose()?;
+        Ok(())
+    }
+
+    #[setter]
     fn set_data_parallel_start_rank(&mut self, data_parallel_start_rank: u32) {
         self.inner.data_parallel_start_rank = data_parallel_start_rank;
     }
@@ -207,6 +220,13 @@ impl ModelRuntimeConfig {
     #[getter]
     fn reasoning_parser(&self) -> Option<String> {
         self.inner.reasoning_parser.clone()
+    }
+
+    #[getter]
+    fn tokenizer_backend(&self) -> Option<String> {
+        self.inner
+            .tokenizer_backend
+            .map(|backend| backend.as_str().to_string())
     }
 
     #[getter]

@@ -6,11 +6,10 @@ use std::sync::Arc;
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
     protocols::{
-        common::{self, timing::RequestTracker},
+        common::{self, extensions::NvExtProvider, timing::RequestTracker},
         openai::{
             convert_backend_top_logprobs,
             delta_common::{self, DeltaGeneratorOptions},
-            nvext::NvExtProvider,
             token_to_utf8_bytes,
         },
     },
@@ -191,6 +190,7 @@ impl DeltaGenerator {
                 service_tier: self.service_tier.clone(),
             },
             nvext: None, // Will be populated by router layer if needed
+            llm_metrics: None,
         }
     }
 
@@ -214,6 +214,7 @@ impl DeltaGenerator {
                 service_tier: self.service_tier.clone(),
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
@@ -446,7 +447,7 @@ mod tests {
     }
 
     fn make_request_with_nvext(
-        nvext: crate::protocols::openai::nvext::NvExt,
+        nvext: crate::protocols::common::extensions::NvExt,
     ) -> NvCreateChatCompletionRequest {
         let mut request = create_test_request();
         request.nvext = Some(nvext);
@@ -471,6 +472,7 @@ mod tests {
             engine_data: Some(serde_json::json!({
                 "routed_experts": {"layer_0": [1, 3]}
             })),
+            encoder_result: None,
             routing_data: None,
         }
     }
@@ -493,7 +495,7 @@ mod tests {
             },
             common: Default::default(),
             nvext: Some(
-                crate::protocols::openai::nvext::NvExt::builder()
+                crate::protocols::common::extensions::NvExt::builder()
                     .extra_fields(fields)
                     .build()
                     .unwrap(),
@@ -520,6 +522,7 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             engine_data: Some(serde_json::json!({
                 "kv_transfer_time_ms": 12.3,
@@ -579,7 +582,7 @@ mod tests {
 
     #[test]
     fn test_timing_extra_field_emits_timing_on_final_chunk() {
-        use crate::protocols::openai::nvext::NvExt;
+        use crate::protocols::common::extensions::NvExt;
         let nvext = NvExt::builder()
             .extra_fields(vec!["timing".to_string()])
             .build()
@@ -603,7 +606,7 @@ mod tests {
 
     #[test]
     fn test_query_instance_id_emits_worker_id_and_token_ids() {
-        use crate::protocols::openai::nvext::NvExt;
+        use crate::protocols::common::extensions::NvExt;
         let nvext = NvExt::builder()
             .annotations(vec!["query_instance_id:abc".to_string()])
             .build()
@@ -638,7 +641,7 @@ mod tests {
 
     #[test]
     fn test_routed_experts_extra_field_emits_routed_experts() {
-        use crate::protocols::openai::nvext::NvExt;
+        use crate::protocols::common::extensions::NvExt;
         let nvext = NvExt::builder()
             .extra_fields(vec!["routed_experts".to_string()])
             .build()
@@ -735,6 +738,7 @@ mod tests {
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             engine_data: None, // engine didn't provide any data
             routing_data: None,

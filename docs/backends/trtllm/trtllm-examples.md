@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Examples
+subtitle: Launch scripts cover aggregated, disaggregated, KV-routed, and multinode deployment patterns for the TensorRT-LLM backend.
 ---
 
 For quick start instructions, see the [TensorRT-LLM README](README.md). This document provides all deployment patterns for running TensorRT-LLM with Dynamo, including single-node, multi-node, and Kubernetes deployments.

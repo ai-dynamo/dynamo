@@ -102,7 +102,7 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 ### New in 1.0
 
 - **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
-- **Agentic inference:** Per-request hints for latency priority, expected output length, and cache pinning TTL. [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
+- **Agentic inference:** Per-request hints for priority, expected output length, and speculative prefill, plus session metadata for tracing and SGLang subagent KV isolation. [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
 - **Multimodal E/P/D:** Disaggregated encode/prefill/decode with embedding cache — 30% faster TTFT on image workloads
 - **Video generation:** Native [FastVideo](https://github.com/hao-ai-lab/FastVideo) + [SGLang Diffusion](https://lmsys.org/blog/2026-02-16-sglang-diffusion-advanced-optimizations/) support — real-time 1080p on single B200
 - **K8s Inference Gateway plugin:** KV-aware routing inside the standard Kubernetes gateway
@@ -127,7 +127,7 @@ See the [Inference Gateway (GAIE) guide](docs/kubernetes/inference-gateway.md) f
 
 ```bash
 # Pull a prebuilt container (SGLang example)
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -141,7 +141,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.2.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.2.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+Also available: [`tensorrtllm-runtime:1.2.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.2.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 
@@ -197,7 +197,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && source $HOME/.
 
 # Create venv and build
 uv venv dynamo && source dynamo/bin/activate
-uv pip install pip maturin
+uv pip install pip 'maturin[patchelf]'
 cd lib/bindings/python && maturin develop --uv && cd $PROJECT_ROOT
 uv pip install -e lib/gpu_memory_service
 uv pip install -e .

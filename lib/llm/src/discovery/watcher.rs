@@ -34,6 +34,7 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::PrefillRouter,
+    local_model::runtime_config::TokenizerBackend,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{
@@ -81,6 +82,18 @@ fn worker_set_key(
     let mt = model_type.as_vec().join("|");
     let wt = effective_worker_type(worker_type, model_type).as_str();
     format!("{}:{}:{}", namespace, mt, wt)
+}
+
+fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
+    card.worker_type == Some(WorkerType::Encode)
+        || card.media_decoder.is_some()
+        || card.model_type.supports_images()
+        || card.model_type.supports_videos()
+        || card
+            .needs
+            .iter()
+            .flatten()
+            .any(|worker_type| *worker_type == WorkerType::Encode)
 }
 
 /// Resolve the effective [`WorkerType`] for a card during the
@@ -138,6 +151,8 @@ pub struct ModelWatcher {
     /// `file://` slots can fall back here when the worker's path is
     /// unreachable on this host.
     local_model_path: Option<PathBuf>,
+    /// Frontend-level tokenizer backend override for discovered model cards.
+    tokenizer_backend: Option<TokenizerBackend>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -218,6 +233,7 @@ impl ModelWatcher {
             registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
             local_model_path: None,
+            tokenizer_backend: None,
         }
     }
 
@@ -227,6 +243,16 @@ impl ModelWatcher {
 
     pub fn set_local_model_path(&mut self, path: Option<PathBuf>) {
         self.local_model_path = path;
+    }
+
+    pub fn set_tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) {
+        self.tokenizer_backend = tokenizer_backend;
+    }
+
+    fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
+        if let Some(tokenizer_backend) = self.tokenizer_backend {
+            card.runtime_config.tokenizer_backend = Some(tokenizer_backend);
+        }
     }
 
     /// Wait until we have at least one chat completions model and return it's name.
@@ -304,6 +330,8 @@ impl ModelWatcher {
                         );
                         continue;
                     }
+
+                    self.apply_tokenizer_backend_override(&mut card);
 
                     // If a WorkerSet already exists for this (model, namespace, type),
                     // validate that the new worker's checksum matches. Different
@@ -459,12 +487,25 @@ impl ModelWatcher {
             .await
             .with_context(|| model_name.clone())?;
 
-        // Check if instances of the SAME component remain in this namespace.
-        // In disaggregated deployments, prefill and decode are different components
-        // in the same namespace, so we must check at the component level to avoid
-        // removing one type's WorkerSet while the other still has workers.
-        let component_has_instances = active_instances.iter().any(|(eid, _)| {
-            eid.namespace == *worker_namespace && eid.component == *worker_component
+        // Check if instances of the SAME role and component remain in
+        // this namespace. In disaggregated deployments, prefill and
+        // decode are different components in the same namespace -- so
+        // checking only (ns, component) is necessary but not sufficient.
+        // Encode workers can share a (ns, component) with Aggregated, so
+        // we ALSO require the remaining instance to map to the same
+        // computed `ws_key` (which folds in worker_type for Encode). If
+        // we used only (ns, component), removing the last Encode
+        // instance from a namespace that still has an Aggregated worker
+        // in the same component would see "instances exist" and skip
+        // remove_worker_set, leaking the Encode WorkerSet forever.
+        let component_has_instances = active_instances.iter().any(|(eid, other_card)| {
+            eid.namespace == *worker_namespace
+                && eid.component == *worker_component
+                && worker_set_key(
+                    &eid.namespace,
+                    other_card.model_type,
+                    other_card.worker_type,
+                ) == ws_key
         });
 
         if !component_has_instances {
@@ -900,6 +941,31 @@ impl ModelWatcher {
                     None
                 };
 
+            // Create the worker monitor for this WorkerSet BEFORE the prefill router so the
+            // monitor can be handed directly to PrefillRouter::new. Each WorkerSet gets its own
+            // monitor (1-to-1), scoped to this WorkerSet's Client/namespace. The monitor tracks
+            // Prometheus metrics (active_decode_blocks, active_prefill_tokens, worker TTFT/ITL
+            // cleanup); thresholds control overload detection. The monitor and prefill router are
+            // created together here, so the monitor is passed into the prefill router directly.
+            //
+            // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
+            // so that overload-state updates (via set_overloaded_instances) are visible to the
+            // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
+            // Using a different Client instance would cause the PushRouter to never see
+            // overloaded workers, since each Client::new() creates independent ArcSwap state.
+            let worker_monitor = if needs_preprocessed_routing {
+                let monitor_client = kv_chooser
+                    .as_ref()
+                    .map(|chooser| chooser.client().clone())
+                    .unwrap_or_else(|| client.clone());
+                Some(KvWorkerMonitor::new(
+                    monitor_client,
+                    router_config.load_threshold_config.clone(),
+                ))
+            } else {
+                None
+            };
+
             // Create prefill chooser once if we're building pipelines
             // Both chat and completions will share the same prefill chooser instance
             let model_name = card.name().to_string();
@@ -922,34 +988,15 @@ impl ModelWatcher {
                             Some(prefill_config),
                             self.prefill_load_estimator.clone(),
                             router_config.enforce_disagg,
+                            router_config.session_affinity_ttl_secs,
                             model_name.clone(),
                             namespace.clone(),
                             prefill_enable_eagle,
+                            // Hand the monitor directly so the prefill Client can be attached
+                            // to it on activation (no namespace lookup).
+                            worker_monitor.clone(),
                         )
                     })
-            } else {
-                None
-            };
-
-            // Create a new worker monitor for this WorkerSet. Each WorkerSet gets its own
-            // monitor (1-to-1) since each monitor is scoped to this WorkerSet's Client/namespace.
-            // The monitor tracks Prometheus metrics (active_decode_blocks, active_prefill_tokens,
-            // worker TTFT/ITL cleanup). The thresholds control overload detection behavior only.
-            //
-            // IMPORTANT: When KV routing is active, the monitor must use the KvRouter's Client
-            // so that overload-state updates (via set_overloaded_instances) are visible to the
-            // PushRouter, which also uses the KvRouter's Client (see common.rs:258-263).
-            // Using a different Client instance would cause the PushRouter to never see
-            // overloaded workers, since each Client::new() creates independent ArcSwap state.
-            let worker_monitor = if needs_preprocessed_routing {
-                let monitor_client = kv_chooser
-                    .as_ref()
-                    .map(|chooser| chooser.client().clone())
-                    .unwrap_or_else(|| client.clone());
-                Some(KvWorkerMonitor::new(
-                    monitor_client,
-                    router_config.load_threshold_config.clone(),
-                ))
             } else {
                 None
             };
@@ -970,7 +1017,9 @@ impl ModelWatcher {
                         worker_monitor.clone(),
                         kv_chooser.clone(),
                         prefill_chooser.clone(),
+                        uses_multimodal_cache_routing(card),
                         router_config.enforce_disagg,
+                        router_config.session_affinity_ttl_secs,
                     )
                     .await
                     .context("build_preprocessed_routing")?,
@@ -1106,9 +1155,7 @@ impl ModelWatcher {
                 let images_router = PushRouter::<
                     NvCreateImageRequest,
                     Annotated<NvImagesResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.images_engine = Some(Arc::new(images_router));
             }
@@ -1117,9 +1164,7 @@ impl ModelWatcher {
                 let videos_router = PushRouter::<
                     NvCreateVideoRequest,
                     Annotated<NvVideosResponse>,
-                >::from_client_with_monitor(
-                    client.clone(), router_config.router_mode, None
-                )
+                >::from_client_with_monitor(client.clone(), router_config.router_mode, None)
                 .await?;
                 worker_set.videos_engine = Some(Arc::new(videos_router));
             }
@@ -1251,7 +1296,8 @@ impl ModelWatcher {
         let mut results = Vec::with_capacity(instances.len());
         for instance in instances {
             match instance.deserialize_model::<ModelDeploymentCard>() {
-                Ok(card) => {
+                Ok(mut card) => {
+                    self.apply_tokenizer_backend_override(&mut card);
                     let endpoint_id = match &instance {
                         dynamo_runtime::discovery::DiscoveryInstance::Model {
                             namespace,
@@ -1425,5 +1471,24 @@ mod tests {
         );
         let prefill = worker_set_key("ns1", ModelType::empty(), Some(WorkerType::Prefill));
         assert_ne!(decode, prefill);
+    }
+
+    #[test]
+    fn worker_set_key_encode_and_aggregated_coexist_in_same_namespace() {
+        // Regression for the Encode/Aggregated key collision: Encode and
+        // Aggregated workers in the same namespace MUST map to different keys,
+        // so both can register without an MDC checksum mismatch. Under the
+        // role-in-key scheme, an Encode worker registers surface-less
+        // (ModelType::empty()) and lands in `{ns}::encode`, while Aggregated
+        // keeps its `{ns}:chat|completions:aggregated` bucket.
+        let agg_key = worker_set_key(
+            "dynamo",
+            ModelType::Chat | ModelType::Completions,
+            Some(WorkerType::Aggregated),
+        );
+        let enc_key = worker_set_key("dynamo", ModelType::empty(), Some(WorkerType::Encode));
+        assert_ne!(agg_key, enc_key);
+        assert_eq!(agg_key, "dynamo:chat|completions:aggregated");
+        assert_eq!(enc_key, "dynamo::encode");
     }
 }

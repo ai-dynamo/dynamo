@@ -463,7 +463,7 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace)
+			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace, false)
 			_, err := validator.Validate(context.Background())
 
 			if (err != nil) != tt.wantErr {
@@ -531,7 +531,7 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace)
+			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace, false)
 			warnings, err := validator.Validate(context.Background())
 
 			if err != nil {
@@ -729,7 +729,7 @@ func TestSharedSpecValidator_Failover_ModeConstraints(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v := NewSharedSpecValidator(tt.spec, "spec", "default-my-dgd")
+			v := NewSharedSpecValidator(tt.spec, "spec", "default-my-dgd", false)
 			_, err := v.Validate(context.Background())
 
 			if tt.wantErr {

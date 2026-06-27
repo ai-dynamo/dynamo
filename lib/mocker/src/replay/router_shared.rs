@@ -12,8 +12,7 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, RouterSchedulingPolicy,
-    SequencePublisher,
+    ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, SequencePublisher,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -56,12 +55,8 @@ impl WorkerConfigLike for ReplayWorkerConfig {
     }
 }
 
-pub(super) type ReplayScheduler = LocalScheduler<
-    ReplayNoopPublisher,
-    ReplayWorkerConfig,
-    RouterSchedulingPolicy,
-    DefaultWorkerSelector,
->;
+pub(super) type ReplayScheduler =
+    LocalScheduler<ReplayNoopPublisher, ReplayWorkerConfig, DefaultWorkerSelector>;
 
 pub(in crate::replay) fn replay_worker_config(args: &MockEngineArgs) -> ReplayWorkerConfig {
     ReplayWorkerConfig {
@@ -115,8 +110,4 @@ pub(crate) fn replay_router_config(
         config.router_queue_policy = policy;
     }
     config
-}
-
-pub(super) fn replay_policy(config: &KvRouterConfig) -> RouterSchedulingPolicy {
-    RouterSchedulingPolicy::new(config.router_queue_policy)
 }

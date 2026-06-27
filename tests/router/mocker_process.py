@@ -14,7 +14,11 @@ from tests.router.helper import (
     generate_random_suffix,
     get_kv_indexer_command,
     get_kv_indexer_test_env,
+    get_runtime,
+    get_select_service_command,
+    poll_for_worker_instances,
     wait_for_indexer_workers_active,
+    wait_for_selection_service_ready,
 )
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
@@ -110,6 +114,13 @@ def _build_mocker_command(
         command.extend(["--zmq-kv-events-ports", mocker_args["zmq_kv_events_ports"]])
     if "zmq_replay_ports" in mocker_args:
         command.extend(["--zmq-replay-ports", mocker_args["zmq_replay_ports"]])
+    if "response_replay_trace_path" in mocker_args:
+        command.extend(
+            [
+                "--response-replay-trace-path",
+                str(mocker_args["response_replay_trace_path"]),
+            ]
+        )
 
     return command
 
@@ -126,9 +137,13 @@ class MockerProcess:
         request_plane: str = "nats",
         zmq_kv_events: bool = False,
         standalone_indexer: bool = False,
+        standalone_selector: bool = False,
         model_name: str = "mocker",
         zmq_replay: bool = False,
     ):
+        if standalone_selector and not standalone_indexer:
+            raise ValueError("standalone_selector requires standalone_indexer=True")
+
         namespace_suffix = generate_random_suffix()
         self.namespace = f"test-namespace-{namespace_suffix}"
         self.component_name = "mocker"
@@ -138,10 +153,13 @@ class MockerProcess:
         self._zmq_kv_events_ports: list[int] = []
         self._zmq_replay_ports: list[int] = []
         self._standalone_indexer = standalone_indexer
+        self._standalone_selector = standalone_selector
         self._standalone_indexer_port: Optional[int] = None
         self._standalone_indexer_b_port: Optional[int] = None
+        self._standalone_selector_port: Optional[int] = None
         self._indexer_process: Optional[ManagedProcess] = None
         self._indexer_b_process: Optional[ManagedProcess] = None
+        self._selector_process: Optional[ManagedProcess] = None
         self._mocker_processes: list[ManagedProcess] = []
         self._request = request
         self._store_backend = store_backend
@@ -186,10 +204,12 @@ class MockerProcess:
             )
 
         if standalone_indexer:
-            indexer_ports = allocate_ports(2, BASE_PORT)
-            self._standalone_indexer_port = indexer_ports[0]
-            self._standalone_indexer_b_port = indexer_ports[1]
-            request.addfinalizer(lambda: deallocate_ports(indexer_ports))
+            sidecar_ports = allocate_ports(3 if standalone_selector else 2, BASE_PORT)
+            self._standalone_indexer_port = sidecar_ports[0]
+            self._standalone_indexer_b_port = sidecar_ports[1]
+            if standalone_selector:
+                self._standalone_selector_port = sidecar_ports[2]
+            request.addfinalizer(lambda: deallocate_ports(sidecar_ports))
             self._process = None
         else:
             command = _build_mocker_command(
@@ -213,10 +233,11 @@ class MockerProcess:
             )
 
         logger.info(
-            "Created mocker process with %s worker(s), endpoint: %s%s",
+            "Created mocker process with %s worker(s), endpoint: %s%s%s",
             num_mockers,
             self.endpoint,
             ", standalone_indexer=True" if standalone_indexer else "",
+            ", standalone_selector=True" if standalone_selector else "",
         )
 
     @property
@@ -229,6 +250,12 @@ class MockerProcess:
     def standalone_indexer_b_url(self) -> Optional[str]:
         if self._standalone_indexer_b_port is not None:
             return f"http://localhost:{self._standalone_indexer_b_port}"
+        return None
+
+    @property
+    def standalone_selector_url(self) -> Optional[str]:
+        if self._standalone_selector_port is not None:
+            return f"http://localhost:{self._standalone_selector_port}"
         return None
 
     def __enter__(self):
@@ -257,6 +284,29 @@ class MockerProcess:
                 self._standalone_indexer_port,
             )
             self._indexer_process.__enter__()
+
+            if self._standalone_selector:
+                selector_cmd = [
+                    *get_select_service_command(),
+                    "--port",
+                    str(self._standalone_selector_port),
+                ]
+                self._selector_process = ManagedProcess(
+                    command=selector_cmd,
+                    timeout=120,
+                    display_output=True,
+                    health_check_ports=[self._standalone_selector_port],
+                    health_check_urls=[],
+                    log_dir=self._request.node.name,
+                    terminate_all_matching_process_names=False,
+                    display_name="dynamo-select-service",
+                    env=os.environ.copy(),
+                )
+                logger.info(
+                    "Starting standalone selection service on port %s",
+                    self._standalone_selector_port,
+                )
+                self._selector_process.__enter__()
         else:
             logger.info("Starting mocker process with %s worker(s)", self.num_workers)
             self._process.__enter__()
@@ -346,6 +396,33 @@ class MockerProcess:
                                 f"dp_rank {dp_rank}: {response.status} {body}"
                             )
 
+                if self.standalone_selector_url:
+                    select_payload = {
+                        "worker_id": new_worker_id,
+                        "model_name": self.model_name,
+                        "endpoint": self.endpoint,
+                        "kv_events_endpoints": zmq_addresses,
+                        "block_size": self._mocker_args_orig.get(
+                            "block_size", BLOCK_SIZE
+                        ),
+                        "data_parallel_start_rank": 0,
+                        "data_parallel_size": dp_size,
+                        "max_num_batched_tokens": self._mocker_args_orig.get(
+                            "max_num_batched_tokens",
+                            8192,
+                        ),
+                    }
+                    async with session.post(
+                        f"{self.standalone_selector_url}/workers",
+                        json=select_payload,
+                    ) as response:
+                        if response.status != 201:
+                            body = await response.text()
+                            raise RuntimeError(
+                                f"Failed to register selection service worker "
+                                f"{new_worker_id}: {response.status} {body}"
+                            )
+
             self.worker_id_to_zmq_ports[new_worker_id] = zmq_addresses
             logger.info(
                 "Mocker %s: worker_id=%s, zmq_addresses=%s",
@@ -357,6 +434,11 @@ class MockerProcess:
         await wait_for_indexer_workers_active(
             self.standalone_indexer_url, self.worker_id_to_zmq_ports
         )
+        if self.standalone_selector_url:
+            await wait_for_selection_service_ready(
+                self.standalone_selector_url,
+                set(self.worker_id_to_zmq_ports),
+            )
         logger.info(
             "All %s mockers launched and registered with indexer",
             self.num_workers,
@@ -422,6 +504,13 @@ class MockerProcess:
             except Exception as error:
                 logger.warning("Error stopping indexer B process: %s", error)
             self._indexer_b_process = None
+
+        if self._selector_process is not None:
+            try:
+                self._selector_process.__exit__(exc_type, exc_val, exc_tb)
+            except Exception as error:
+                logger.warning("Error stopping selection service process: %s", error)
+            self._selector_process = None
 
         if self._indexer_process is not None:
             try:
@@ -563,6 +652,26 @@ class DisaggMockerProcess:
             self._zmq_kv_events_ports = []
 
 
+def _wait_for_disagg_workers(
+    workers: DisaggMockerProcess,
+    store_backend: str,
+    request_plane: str,
+    event_plane: Optional[str],
+) -> None:
+    async def wait_for_workers() -> None:
+        runtime = get_runtime(
+            store_backend=store_backend,
+            request_plane=request_plane,
+            event_plane=event_plane,
+        )
+        endpoint = runtime.endpoint(
+            f"{workers.namespace}.{workers.component_name}.generate"
+        )
+        await poll_for_worker_instances(endpoint, workers.num_workers)
+
+    asyncio.run(wait_for_workers())
+
+
 @contextmanager
 def launch_disagg_workers(
     request,
@@ -597,6 +706,9 @@ def launch_disagg_workers(
             zmq_kv_events=zmq_kv_events,
         ) as prefill_workers:
             logger.info("Prefill workers using endpoint: %s", prefill_workers.endpoint)
+            _wait_for_disagg_workers(
+                prefill_workers, store_backend, request_plane, event_plane
+            )
             logger.info(
                 "Starting %s decode mocker instances (second)", num_decode_mockers
             )
@@ -614,6 +726,9 @@ def launch_disagg_workers(
                 logger.info(
                     "Decode workers using endpoint: %s", decode_workers.endpoint
                 )
+                _wait_for_disagg_workers(
+                    decode_workers, store_backend, request_plane, event_plane
+                )
                 yield prefill_workers, decode_workers
         return
 
@@ -630,6 +745,9 @@ def launch_disagg_workers(
         zmq_kv_events=zmq_kv_events,
     ) as decode_workers:
         logger.info("Decode workers using endpoint: %s", decode_workers.endpoint)
+        _wait_for_disagg_workers(
+            decode_workers, store_backend, request_plane, event_plane
+        )
         logger.info(
             "Starting %s prefill mocker instances (second)", num_prefill_mockers
         )
@@ -646,7 +764,7 @@ def launch_disagg_workers(
             zmq_kv_events=zmq_kv_events,
         ) as prefill_workers:
             logger.info("Prefill workers using endpoint: %s", prefill_workers.endpoint)
+            _wait_for_disagg_workers(
+                prefill_workers, store_backend, request_plane, event_plane
+            )
             yield prefill_workers, decode_workers
-
-
-_launch_disagg_workers = launch_disagg_workers

@@ -11,10 +11,10 @@ from tests.utils.multimodal import (
     make_image_payload_cached_tokens,
 )
 
-# pd_no_encoder = disaggregated prefill+decode, single GPU, no encode worker.
+# pd = multimodal prefill+decode on one GPU, no separate encode worker.
 SGLANG_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg_router": "agg_multimodal_router.sh",
-    "pd_no_encoder": "disagg_same_gpu.sh",
+    "pd": "disagg_same_gpu.sh",
 }
 
 # VLM coverage mirrors the vLLM profile registry. SINGLE_GPU=true packs both
@@ -43,7 +43,7 @@ SGLANG_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
             # Plain color-check payload; disagg KV semantics make the
             # cached-tokens hit-rate assertions inapplicable here.
-            "pd_no_encoder": TopologyConfig(
+            "pd": TopologyConfig(
                 marks=[pytest.mark.pre_merge],
                 timeout_s=500,
                 profiled_vram_gib=22.0,

@@ -44,7 +44,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_reset_states",
     "router_ttl_secs",
     "router_queue_threshold",
-    "router_queue_by_incoming_missing_isl",
+    "router_policy_config",
     "router_event_threads",
     "router_queue_policy",
     "use_remote_indexer",
@@ -127,7 +127,7 @@ class KvRouterConfigBase(ConfigBase):
     router_reset_states: bool
     router_ttl_secs: float
     router_queue_threshold: Optional[float]
-    router_queue_by_incoming_missing_isl: Optional[list[tuple[int, int]]] = None
+    router_policy_config: Optional[str] = None
     router_event_threads: int
     router_queue_policy: str
     use_remote_indexer: bool = False
@@ -402,6 +402,19 @@ class KvRouterArgGroup(ArgGroup):
                 "explicitly for predictable semantics, or use a smaller threshold."
             ),
             arg_type=nullable_float,
+        )
+        add_argument(
+            g,
+            flag_name="--router-policy-config",
+            env_var="DYN_ROUTER_POLICY_CONFIG",
+            default=None,
+            help=(
+                "KV Router: Startup-only YAML policy-family and cache-bucket "
+                "queue configuration. "
+                "When omitted, router_queue_threshold and router_queue_policy define "
+                "the existing single default queue."
+            ),
+            arg_type=str,
         )
         add_argument(
             g,
