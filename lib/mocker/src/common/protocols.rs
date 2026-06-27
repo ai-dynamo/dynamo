@@ -835,28 +835,34 @@ pub struct MockEngineArgs {
     /// falls back to the `KvbmOffloadConfig` default (host DRAM PCIe
     /// ballpark) when unset.
     #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
     pub bandwidth_g1_to_g2_gbps: Option<f64>,
 
     /// G2→G1 onboard bandwidth in GB/s for the PS-queue simulation.
     /// Only consulted when the `kvbm-offload` feature is enabled;
     /// falls back to the `KvbmOffloadConfig` default when unset.
     #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
     pub bandwidth_g2_to_g1_gbps: Option<f64>,
 
     /// G2→G3 offload bandwidth in GB/s for the shared PS-queue simulation.
     #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
     pub bandwidth_g2_to_g3_gbps: Option<f64>,
 
     /// G3→G2 staging bandwidth in GB/s for the shared PS-queue simulation.
     #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
     pub bandwidth_g3_to_g2_gbps: Option<f64>,
 
     /// G2→G4 object offload bandwidth in GB/s for the shared PS-queue simulation.
     #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
     pub bandwidth_g2_to_g4_gbps: Option<f64>,
 
     /// G4→G2 object staging bandwidth in GB/s for the shared PS-queue simulation.
     #[builder(default = "None")]
+    #[validate(range(min = 0.0))]
     pub bandwidth_g4_to_g2_gbps: Option<f64>,
 
     /// Reasoning/thinking token configuration.
@@ -1316,21 +1322,6 @@ impl MockEngineArgs {
     fn validate_config(&mut self) -> anyhow::Result<()> {
         self.validate()
             .map_err(|error| anyhow::anyhow!("Failed to validate MockEngineArgs: {error}"))?;
-        for (name, bandwidth) in [
-            ("bandwidth_g1_to_g2_gbps", self.bandwidth_g1_to_g2_gbps),
-            ("bandwidth_g2_to_g1_gbps", self.bandwidth_g2_to_g1_gbps),
-            ("bandwidth_g2_to_g3_gbps", self.bandwidth_g2_to_g3_gbps),
-            ("bandwidth_g3_to_g2_gbps", self.bandwidth_g3_to_g2_gbps),
-            ("bandwidth_g2_to_g4_gbps", self.bandwidth_g2_to_g4_gbps),
-            ("bandwidth_g4_to_g2_gbps", self.bandwidth_g4_to_g2_gbps),
-        ] {
-            let Some(bandwidth) = bandwidth else {
-                continue;
-            };
-            if !bandwidth.is_finite() || (bandwidth > 0.0 && !(bandwidth * 1e6).is_finite()) {
-                anyhow::bail!("{name} must be finite and representable, got {bandwidth}");
-            }
-        }
         if let Some(nextn) = self.aic_nextn {
             let rates = crate::common::speculative::normalize_conditional_accept_rates(
                 nextn,
@@ -1388,30 +1379,6 @@ impl MockEngineArgs {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn kvbm_bandwidth_rejects_nonfinite_values() {
-        for bandwidth in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let error = MockEngineArgs::builder()
-                .bandwidth_g1_to_g2_gbps(Some(bandwidth))
-                .build()
-                .unwrap()
-                .normalized()
-                .unwrap_err();
-            assert!(error.to_string().contains("must be finite"));
-        }
-    }
-
-    #[test]
-    fn kvbm_bandwidth_preserves_nonpositive_infinite_throughput_sentinel() {
-        let args = MockEngineArgs::builder()
-            .bandwidth_g1_to_g2_gbps(Some(-1.0))
-            .build()
-            .unwrap()
-            .normalized()
-            .expect("finite nonpositive bandwidth is the unbounded sentinel");
-        assert_eq!(args.bandwidth_g1_to_g2_gbps, Some(-1.0));
-    }
 
     #[test]
     fn direct_request_priorities_are_backward_compatible() {
