@@ -1175,16 +1175,6 @@ func isNewRestartRequest(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
 	return dgd.Spec.Restart.ID != dgd.Status.Restart.ObservedID
 }
 
-func (r *DynamoGraphDeploymentReconciler) isInitialRestartObservation(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	// ObservedGeneration is only set after a successful reconcile. Until then,
-	// a restart ID in the spec is part of the initial desired state rather than
-	// a user-initiated restart request. If restart or rolling-update status
-	// already exists, continue that lifecycle state instead of overwriting it.
-	return dgd.Status.ObservedGeneration == 0 &&
-		dgd.Status.Restart == nil &&
-		dgd.Status.RollingUpdate == nil
-}
-
 // computeParallelRestartStatus handles parallel restart where all components restart together.
 func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 	ctx context.Context,
@@ -1362,13 +1352,6 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 			return dgd.Status.Restart
 		}
 		return nil
-	}
-
-	if r.isInitialRestartObservation(dgd) {
-		return &nvidiacomv1beta1.RestartStatus{
-			ObservedID: dgd.Spec.Restart.ID,
-			Phase:      nvidiacomv1beta1.RestartPhaseCompleted,
-		}
 	}
 
 	// If restart was already processed (completed, failed, or superseded), return existing status

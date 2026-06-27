@@ -77,9 +77,13 @@ func DetermineRestartState(dgd *v1beta1.DynamoGraphDeployment, restartStatus *v1
 	}
 
 	if dgd.Spec.Restart == nil || dgd.Spec.Restart.ID == "" {
-		// Do not synthesize restart annotations from terminal status when no
-		// restart is requested. Existing annotations are preserved later via the
-		// existingRestartAnnotations fallback path.
+		// Check if there's a completed restart we need to preserve
+		if restartStatus.ObservedID != "" {
+			return &RestartState{
+				Timestamp:            restartStatus.ObservedID,
+				ComponentsToAnnotate: getAllComponentNames(dgd),
+			}
+		}
 		return nil
 	}
 
@@ -95,9 +99,10 @@ func DetermineRestartState(dgd *v1beta1.DynamoGraphDeployment, restartStatus *v1
 	}
 
 	if !isNewRestart && restartStatus.Phase == v1beta1.RestartPhaseCompleted {
-		// Completed restarts do not need fresh annotations. Existing annotations
-		// are preserved via the existingRestartAnnotations fallback path.
-		return nil
+		return &RestartState{
+			Timestamp:            specID,
+			ComponentsToAnnotate: getAllComponentNames(dgd),
+		}
 	}
 
 	if IsParallelRestart(dgd) {

@@ -7308,7 +7308,7 @@ func TestDetermineGroveRestartState(t *testing.T) {
 			wantTimestamp: ptr.To(restartID),
 		},
 		{
-			name: "completed restart with empty spec restart returns nil",
+			name: "completed restart with empty spec restart preserves all annotations",
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -7321,10 +7321,11 @@ func TestDetermineGroveRestartState(t *testing.T) {
 				ObservedID: oldRestartID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
-			wantNil: true,
+			wantSvcs:      []string{"Frontend", "Worker"},
+			wantTimestamp: ptr.To(oldRestartID),
 		},
 		{
-			name: "completed restart returns nil",
+			name: "completed restart",
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -7340,7 +7341,8 @@ func TestDetermineGroveRestartState(t *testing.T) {
 				ObservedID: restartID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
-			wantNil: true,
+			wantSvcs:      []string{"Frontend", "Worker"},
+			wantTimestamp: ptr.To(restartID),
 		},
 		{
 			name: "new restart after completed restart",
