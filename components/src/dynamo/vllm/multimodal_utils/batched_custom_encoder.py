@@ -246,21 +246,26 @@ class BatchedCustomEncoder(ABC):
         return await future
 
     def shutdown(self) -> None:
-        """Stop the batcher thread, failing any still-queued requests.
+        """Stop the batcher thread, failing any not-yet-started requests.
 
-        Idempotent and safe to call before ``load``. If a slow forward is still
-        in flight when the join times out, the thread is left to drain on its own
-        and a later ``shutdown()`` call reaps it (we must not remove the sentinel
-        while the thread is alive, or it would block forever on an empty queue).
+        Idempotent and safe to call before ``load``. Queued requests the consumer
+        has not yet picked up are failed immediately (rather than run as a backlog
+        during teardown); a batch already collected / in flight is allowed to
+        finish. If a slow forward is still running when the join times out, the
+        thread is left to consume the sentinel on its own and a later ``shutdown()``
+        call reaps it (removing the sentinel while the thread is alive would block
+        it forever on an empty queue).
         """
         lock = getattr(self, "_lifecycle_lock", None)
         if lock is None:
             return  # never loaded
         with lock:
             if not self._closed:
-                # Mark closed and enqueue the stop sentinel exactly once; repeat
-                # calls fall through to retry the join below.
                 self._closed = True
+                # Fail not-yet-collected requests, then enqueue the stop sentinel.
+                # Done under the lifecycle lock (which also guards encode()'s put)
+                # so no request can slip in between the drain and the sentinel.
+                self._drain_pending()
                 self._queue.put(_SHUTDOWN)
         self._thread.join(timeout=self._join_timeout_s)
         if self._thread.is_alive():
@@ -273,8 +278,8 @@ class BatchedCustomEncoder(ABC):
                 self._join_timeout_s,
             )
             return
-        # The consumer has exited; resolve anything still queued so an awaiter that
-        # raced shutdown does not hang forever.
+        # Consumer has exited; fail anything that slipped in (belt-and-suspenders —
+        # the lock-guarded drain above normally leaves nothing).
         self._drain_pending()
 
     def _drain_pending(self) -> None:

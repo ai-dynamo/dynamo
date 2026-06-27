@@ -1044,30 +1044,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
         self.embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
-        # Aggregated partial encoder: loaded in-process if --custom-encoder-class is set.
+        # Aggregated partial encoder. The attribute is set here so cleanup() is
+        # always safe, but the encoder is loaded last in __init__ (it starts a
+        # thread) — see _load_custom_encoder below — so a failure in the rest of
+        # init does not leak the batcher thread.
         self._custom_encoder: Optional[BatchedCustomEncoder] = None
-        custom_encoder_class = getattr(config, "custom_encoder_class", None)
-        if custom_encoder_class:
-            # The CustomEncoder path only ever submits a mixed EmbedsPrompt, so
-            # fail fast here if prompt-embeds are disabled rather than loading
-            # the encoder and then rejecting every image request at runtime.
-            if not config.engine_args.enable_prompt_embeds:
-                raise ValueError(
-                    "--custom-encoder-class requires --enable-prompt-embeds: the "
-                    "custom encoder submits a mixed EmbedsPrompt, which the engine "
-                    "cannot accept without prompt-embeds enabled."
-                )
-            _module_path, _, _class_name = custom_encoder_class.rpartition(".")
-            _module = importlib.import_module(_module_path)
-            self._custom_encoder = getattr(_module, _class_name)()
-            _device = "cuda" if torch.cuda.is_available() else "cpu"
-            self._custom_encoder.load(config.model, _device)
-            logger.info(
-                "Loaded CustomEncoder %s from %s on %s",
-                custom_encoder_class,
-                config.model,
-                _device,
-            )
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
@@ -1119,6 +1100,40 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # Request-plane RL method map served by rl_dispatch on
         # dyn://<namespace>.<component>.rl when --enable-rl / DYN_ENABLE_RL is set.
         self.rl_route_registry = RLRouteRegistry(self.runtime, logger_=logger)
+
+        # Load the custom encoder last: it starts a batcher thread, so deferring
+        # it until all other (fallible) setup is done means an earlier init
+        # failure cannot leave that thread orphaned.
+        self._load_custom_encoder(config)
+
+    def _load_custom_encoder(self, config: Config) -> None:
+        """Import, instantiate, and load the --custom-encoder-class encoder."""
+        custom_encoder_class = getattr(config, "custom_encoder_class", None)
+        if not custom_encoder_class:
+            return
+        # The custom encoder path only ever submits a mixed EmbedsPrompt, so fail
+        # fast here if prompt-embeds are disabled rather than loading the encoder
+        # and then rejecting every image request at runtime.
+        if not config.engine_args.enable_prompt_embeds:
+            raise ValueError(
+                "--custom-encoder-class requires --enable-prompt-embeds: the "
+                "custom encoder submits a mixed EmbedsPrompt, which the engine "
+                "cannot accept without prompt-embeds enabled."
+            )
+        module_path, _, class_name = custom_encoder_class.rpartition(".")
+        encoder_cls = getattr(importlib.import_module(module_path), class_name)
+        encoder = encoder_cls()
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        encoder.load(config.model, device)  # load() cleans up its thread on failure
+        # Assign only after a successful load so a failed load (which already shut
+        # its own thread down) leaves _custom_encoder None.
+        self._custom_encoder = encoder
+        logger.info(
+            "Loaded CustomEncoder %s from %s on %s",
+            custom_encoder_class,
+            config.model,
+            device,
+        )
 
     def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
         logger.error(f"vLLM EngineDeadError: {e}")
@@ -3917,10 +3932,6 @@ class EmbeddingWorkerHandler:
         AsyncLLM lifecycle is owned by the worker factory / runtime; the
         engine monitor cancels its background tasks via ``__del__``.
         """
-        if self._custom_encoder is not None:
-            # Stop the in-process encoder's batcher thread on teardown
-            # (DecodeWorkerHandler.cleanup does not chain super().cleanup()).
-            self._custom_encoder.shutdown()
         return None
 
     async def _monitor_abort(self, context: Context, request_id: str) -> None:

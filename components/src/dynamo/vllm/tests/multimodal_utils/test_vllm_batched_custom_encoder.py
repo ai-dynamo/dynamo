@@ -207,6 +207,46 @@ async def test_shutdown_defers_reap_while_forward_in_flight():
     assert not enc._thread.is_alive()
 
 
+async def test_shutdown_fails_queued_not_yet_started_requests():
+    """On shutdown, requests still queued (not yet picked up) are failed fast
+    instead of run as a backlog; the in-flight batch still completes."""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _Blocking(_RecordingEncoder):
+        max_wait_ms = 0.0  # dispatch the first request alone, immediately
+        _join_timeout_s = 0.2
+
+        def forward_batch(self, image_urls: list[str]) -> list[torch.Tensor]:
+            entered.set()
+            release.wait(timeout=5.0)  # hold the consumer inside "a"'s forward
+            return [torch.zeros(1, _HIDDEN) for _ in image_urls]
+
+    enc = _Blocking()
+    enc.load("model", "cpu")
+    in_flight = asyncio.ensure_future(enc.encode(["a"]))
+    for _ in range(200):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert entered.is_set()  # "a" is blocked in forward; consumer cannot pull more
+
+    queued = [
+        asyncio.ensure_future(enc.encode(["b"])),
+        asyncio.ensure_future(enc.encode(["c"])),
+    ]
+    await asyncio.sleep(0.05)  # let b, c enqueue behind the blocked consumer
+    enc.shutdown()  # fails b, c fast; "a" is in flight and finishes
+    for q in queued:
+        with pytest.raises(RuntimeError, match="shut down"):
+            await q
+
+    release.set()
+    assert len(await in_flight) == 1
+    enc.shutdown()
+    assert not enc._thread.is_alive()
+
+
 async def test_pad_to_max_batch_gives_static_batch_size():
     class _Padded(_RecordingEncoder):
         max_batch_size = 4
