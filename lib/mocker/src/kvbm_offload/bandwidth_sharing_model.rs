@@ -226,10 +226,6 @@ impl BandwidthSharingModel {
         Some(deadline)
     }
 
-    pub(crate) fn active_ids(&self) -> impl Iterator<Item = TransferId> + '_ {
-        self.active.iter().map(|transfer| transfer.id)
-    }
-
     /// Number of currently active (in-flight) transfers.
     pub fn active_count(&self) -> usize {
         self.active.len()

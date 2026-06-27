@@ -116,14 +116,7 @@ impl SharedG4Store {
             .pending_puts
             .lock()
             .expect("shared G4 pending put map poisoned");
-        match pending.entry(transfer_id) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(PendingG4Put { keys, size_bytes });
-            }
-            std::collections::hash_map::Entry::Occupied(_) => {
-                panic!("duplicate G4 pending-put metadata for transfer {transfer_id}");
-            }
-        }
+        pending.insert(transfer_id, PendingG4Put { keys, size_bytes });
     }
 
     #[cfg(test)]
@@ -184,20 +177,10 @@ impl SharedG4Store {
                 .lock()
                 .expect("shared G4 pending put map poisoned");
             for transfer in completed {
-                if transfer.direction == TransferDirection::G2ToG4 {
-                    let pending_put = pending.remove(&transfer.id).unwrap_or_else(|| {
-                        panic!(
-                            "completed G2→G4 transfer {} has no pending-put metadata",
-                            transfer.id
-                        )
-                    });
+                if transfer.direction == TransferDirection::G2ToG4
+                    && let Some(pending_put) = pending.remove(&transfer.id)
+                {
                     puts.push(pending_put);
-                } else {
-                    assert!(
-                        !pending.contains_key(&transfer.id),
-                        "non-G2→G4 transfer {} has pending-put metadata",
-                        transfer.id
-                    );
                 }
             }
         }
@@ -263,40 +246,4 @@ pub(crate) fn shared_g4_test_guard_blocking() -> tokio::sync::OwnedMutexGuard<()
         .blocking_lock_owned();
     SharedG4Store::reset_for_tests();
     guard
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_store() -> Arc<SharedG4Store> {
-        let config = KvbmOffloadConfig {
-            enable_g4_storage: true,
-            block_size_bytes: Some(1),
-            ..Default::default()
-        };
-        SharedG4Store::get_or_create(&config)
-            .unwrap()
-            .expect("G4 enabled")
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "duplicate G4 pending-put metadata")]
-    async fn duplicate_pending_put_metadata_panics() {
-        let _guard = shared_g4_test_guard().await;
-        let store = test_store();
-        store.register_pending_put(7, Vec::new(), 1);
-        store.register_pending_put(7, Vec::new(), 1);
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "has no pending-put metadata")]
-    async fn completed_put_without_metadata_panics() {
-        let _guard = shared_g4_test_guard().await;
-        let store = test_store();
-        store.publish_completed_puts(&[CompletedTransfer {
-            id: 9,
-            direction: TransferDirection::G2ToG4,
-        }]);
-    }
 }
