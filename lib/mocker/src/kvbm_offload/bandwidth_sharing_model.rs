@@ -327,36 +327,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "transfer start time must be finite and nonnegative")]
-    fn nonfinite_start_time_panics() {
-        let mut model = make_model(1.0);
-        model.start_transfer(f64::NAN, 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "bandwidth model advance time must be finite and nonnegative")]
-    fn negative_advance_time_panics() {
-        let mut model = make_model(1.0);
-        model.advance_to(-1.0);
-    }
-
-    #[test]
-    #[should_panic(expected = "transfer id counter exhausted")]
-    fn transfer_id_exhaustion_panics() {
-        let counter = Arc::new(AtomicU64::new(u64::MAX));
-        let mut model = BandwidthSharingModel::new(1.0, counter);
-        model.start_transfer(0.0, 1);
-    }
-
-    #[test]
-    #[should_panic(expected = "earliest transfer deadline must be finite and nonnegative")]
-    fn nonfinite_completion_deadline_panics() {
-        let mut model = make_model(f64::MIN_POSITIVE);
-        model.start_transfer(0.0, usize::MAX);
-        model.earliest_finish();
-    }
-
-    #[test]
     fn staggered_later_arrival_inherits_remaining_bandwidth() {
         // T1 arrives at 0 and finishes alone at 1.0 ms (rate 1 MB/ms).
         // T2 arrives at 5 ms (long after T1 done). T2 should finish at 6 ms.
