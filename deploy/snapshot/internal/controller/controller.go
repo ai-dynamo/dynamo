@@ -252,13 +252,21 @@ func (w *NodeController) Run(ctx context.Context) error {
 	go sourceFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, sourceInformer.HasSynced)
 
+	// Close stopCh on cancellation so a stalled cache sync (below) is unblocked by ctx, not only on
+	// the happy path.
+	var stopOnce sync.Once
+	go func() {
+		<-ctx.Done()
+		stopOnce.Do(func() { close(w.stopCh) })
+	}()
+
 	if !cache.WaitForCacheSync(w.stopCh, syncFuncs...) {
 		return fmt.Errorf("failed to sync informer caches")
 	}
 
 	w.log.Info("PodSnapshot node controller started and caches synced")
 	<-ctx.Done()
-	close(w.stopCh)
+	stopOnce.Do(func() { close(w.stopCh) })
 	return nil
 }
 
