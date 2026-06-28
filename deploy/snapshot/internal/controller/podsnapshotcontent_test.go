@@ -650,13 +650,14 @@ func TestReconcileSourcePod_PodNotIndexedNoOp(t *testing.T) {
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
 
-func TestReconcileSourcePod_IndexErrorNoOp(t *testing.T) {
+func TestReconcileSourcePod_IndexErrorReturned(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-abc", "node-a", "abc")
 	pod := podWithFailedSibling()
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	// Indexer without podRefIndex registered → ByIndex returns an error; reconcile must log and no-op.
+	// Indexer without podRefIndex registered → ByIndex returns an error; reconcile surfaces it
+	// (the informer handler logs it) and writes no status.
 	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.Error(t, w.reconcileSourcePod(context.Background(), pod))
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
