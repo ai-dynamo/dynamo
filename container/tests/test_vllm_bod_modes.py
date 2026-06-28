@@ -107,6 +107,9 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         extension_names: tuple[str, ...],
         exact_native: bool,
         unowned_extension_names: tuple[str, ...] = (),
+        vllm_version: str | None = None,
+        torch_version: str = "2.11.0+cu130",
+        checkpoint_hooks: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -115,8 +118,10 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             (package_dir / "__init__.py").touch()
             dist_info = root / "vllm-1.0.dist-info"
             dist_info.mkdir()
+            if vllm_version is None:
+                vllm_version = "1.0+precompiled" if exact_native else "1.0"
             (dist_info / "METADATA").write_text(
-                "Metadata-Version: 2.1\nName: vllm\nVersion: 1.0\n"
+                f"Metadata-Version: 2.1\nName: vllm\nVersion: {vllm_version}\n"
             )
             records = ["vllm/__init__.py,,"]
             for extension_name in extension_names:
@@ -124,6 +129,18 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
                 records.append(f"vllm/{extension_name},,")
             for extension_name in unowned_extension_names:
                 (package_dir / extension_name).touch()
+            if checkpoint_hooks:
+                worker_path = package_dir / "v1/worker/gpu_worker.py"
+                worker_path.parent.mkdir(parents=True)
+                worker_path.write_text(
+                    "class Worker:\n"
+                    "    def checkpoint_prepare(self):\n"
+                    "        pass\n"
+                    "\n"
+                    "    def checkpoint_restore(self):\n"
+                    "        pass\n"
+                )
+                records.append("vllm/v1/worker/gpu_worker.py,,")
             records.extend(
                 [
                     "vllm-1.0.dist-info/METADATA,,",
@@ -132,13 +149,19 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             )
             (dist_info / "RECORD").write_text("\n".join(records))
 
-            packaging_dir = root / "packaging"
-            packaging_dir.mkdir()
-            (packaging_dir / "__init__.py").touch()
-            (packaging_dir / "utils.py").write_text(
-                "def canonicalize_name(name):\n"
-                "    return name.lower().replace('_', '-').replace('.', '-')\n"
-            )
+            if exact_native:
+                torch_dist_info = root / "torch-2.11.0.dist-info"
+                torch_dist_info.mkdir()
+                (torch_dist_info / "METADATA").write_text(
+                    "Metadata-Version: 2.1\n"
+                    "Name: torch\n"
+                    f"Version: {torch_version}\n"
+                )
+                (torch_dist_info / "RECORD").write_text(
+                    "torch-2.11.0.dist-info/METADATA,,\n"
+                    "torch-2.11.0.dist-info/RECORD,,\n"
+                )
+
             bin_dir = root / "bin"
             bin_dir.mkdir()
             python = bin_dir / "python3"
@@ -152,8 +175,10 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             }
             return self.run_installer_function(
                 "verify_vllm_install",
-                "",
+                "checkpoint-hooks" if checkpoint_hooks else "",
                 "exact-native" if exact_native else "",
+                "cu130" if exact_native else "",
+                "cu130" if exact_native else "",
                 env=env,
             )
 
@@ -235,6 +260,11 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         self.assertIn("git merge-base --is-ancestor", installer)
         self.assertIn("requirements/cuda.txt", installer)
         self.assertIn("source-provenance.txt", installer)
+        self.assertIn("VLLM_TARGET_DEVICE=cuda", installer)
+        self.assertIn("VLLM_TORCH_BACKEND=cu130", installer)
+        self.assertIn("VLLM_EXPECTED_TORCH_LOCAL_VERSION=cu130", installer)
+        self.assertIn('--torch-backend="${VLLM_TORCH_BACKEND}"', installer)
+        self.assertNotIn("--torch-backend=auto", installer)
 
         dockerfile = self.render_runtime("amd64")
         self.assertLess(
@@ -277,6 +307,68 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             "Stable-libtorch modules still require libcuda at GPU runtime",
             installer,
         )
+
+    def test_exact_native_verification_requires_cuda_distribution_metadata(
+        self,
+    ) -> None:
+        extensions = (
+            "_C_stable_libtorch.abi3.so",
+            "_moe_C_stable_libtorch.abi3.so",
+        )
+        result = self.verify_fixture(
+            extensions,
+            exact_native=True,
+            torch_version="2.11.0+cpu",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "variant cu130 requires torch local version +cu130",
+            result.stderr,
+        )
+        self.assertIn("found torch 2.11.0+cpu", result.stderr)
+
+        for vllm_version in ("1.0+cpu", "1.0"):
+            with self.subTest(vllm_version=vllm_version):
+                result = self.verify_fixture(
+                    extensions,
+                    exact_native=True,
+                    vllm_version=vllm_version,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "requires a CUDA precompiled vLLM distribution",
+                    result.stderr,
+                )
+                self.assertIn(f"found vllm {vllm_version}", result.stderr)
+
+    def test_exact_native_verifies_hooks_without_importing_vllm(self) -> None:
+        result = self.verify_fixture(
+            (
+                "_C_stable_libtorch.abi3.so",
+                "_moe_C_stable_libtorch.abi3.so",
+            ),
+            exact_native=True,
+            checkpoint_hooks=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("without importing vLLM", result.stdout)
+
+    def test_exact_native_rejects_unsupported_torch_backend_variants(self) -> None:
+        for variant in ("cpu", "cu129", "rocm6.3", "cu130;true"):
+            with self.subTest(variant=variant):
+                result = self.run_installer_function(
+                    "validate_exact_native_mode",
+                    env={
+                        "VLLM_PRECOMPILED_WHEEL_COMMIT": "a" * 40,
+                        "VLLM_PRECOMPILED_WHEEL_VARIANT": variant,
+                    },
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    f"Unsupported exact-native vLLM wheel variant: {variant}",
+                    result.stderr,
+                )
+                self.assertIn("Supported CUDA variants: cu130", result.stderr)
 
     def test_exact_native_accepts_python_and_cuda_requirements_changes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

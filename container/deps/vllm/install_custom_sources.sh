@@ -9,6 +9,8 @@ set -euo pipefail
 
 VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_PRECOMPILED_WHEEL_COMMIT:-}"
 VLLM_PRECOMPILED_WHEEL_VARIANT="${VLLM_PRECOMPILED_WHEEL_VARIANT:-}"
+VLLM_TORCH_BACKEND=
+VLLM_EXPECTED_TORCH_LOCAL_VERSION=
 PROVENANCE_FILE=/opt/dynamo/source-provenance.txt
 
 clone_source() {
@@ -55,10 +57,18 @@ validate_exact_native_mode() {
         echo "VLLM_PRECOMPILED_WHEEL_VARIANT must be set in exact-native mode" >&2
         exit 1
     fi
-    if [[ ! "${VLLM_PRECOMPILED_WHEEL_VARIANT}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-        echo "VLLM_PRECOMPILED_WHEEL_VARIANT contains invalid characters" >&2
-        exit 1
-    fi
+    case "${VLLM_PRECOMPILED_WHEEL_VARIANT}" in
+        cu130)
+            VLLM_TORCH_BACKEND=cu130
+            VLLM_EXPECTED_TORCH_LOCAL_VERSION=cu130
+            ;;
+        *)
+            echo "Unsupported exact-native vLLM wheel variant: ${VLLM_PRECOMPILED_WHEEL_VARIANT}" \
+                >&2
+            echo "Supported CUDA variants: cu130" >&2
+            exit 1
+            ;;
+    esac
     if [[ "$(uname -m)" != "x86_64" ]]; then
         echo "Exact vLLM native wheels are only supported on x86_64" >&2
         exit 1
@@ -101,27 +111,70 @@ PY
 }
 
 verify_vllm_install() {
-    REQUIRE_CHECKPOINT_HOOKS="${1:-}" REQUIRE_EXACT_NATIVE="${2:-}" python3 <<'PY'
-import os
+    REQUIRE_CHECKPOINT_HOOKS="${1:-}" \
+    REQUIRE_EXACT_NATIVE="${2:-}" \
+    EXACT_NATIVE_VARIANT="${3:-}" \
+    EXPECTED_TORCH_LOCAL_VERSION="${4:-}" \
+        python3 <<'PY'
+import ast
 import importlib.metadata as metadata
+import os
 from importlib.machinery import PathFinder
 from pathlib import Path
 
-from packaging.utils import canonicalize_name
 
-distributions = [
-    dist
-    for dist in metadata.distributions()
-    if canonicalize_name(dist.metadata["Name"]) == "vllm"
-]
-if len(distributions) != 1:
-    locations = [str(dist.locate_file("").resolve()) for dist in distributions]
-    raise SystemExit(f"Expected one vllm distribution, found {locations!r}")
+def canonicalize_name(name):
+    return name.lower().replace("_", "-").replace(".", "-")
 
-distribution = distributions[0]
+
+def require_distribution(name):
+    distributions = [
+        dist
+        for dist in metadata.distributions()
+        if canonicalize_name(dist.metadata["Name"]) == canonicalize_name(name)
+    ]
+    if len(distributions) != 1:
+        locations = [str(dist.locate_file("").resolve()) for dist in distributions]
+        raise SystemExit(
+            f"Expected one {name} distribution, found {len(distributions)} "
+            f"at {locations!r}"
+        )
+    return distributions[0]
+
+
+distribution = require_distribution("vllm")
 package_dir = Path(distribution.locate_file("vllm")).resolve()
 extensions = sorted(package_dir.rglob("*.so"))
 if os.environ["REQUIRE_EXACT_NATIVE"]:
+    variant = os.environ["EXACT_NATIVE_VARIANT"]
+    expected_torch_local = os.environ["EXPECTED_TORCH_LOCAL_VERSION"]
+    if not variant or not expected_torch_local:
+        raise SystemExit(
+            "Exact-native verification requires a wheel variant and expected "
+            "Torch local version"
+        )
+
+    torch_distribution = require_distribution("torch")
+    torch_version = torch_distribution.version
+    torch_local_version = torch_version.partition("+")[2].lower()
+    if torch_local_version != expected_torch_local:
+        raise SystemExit(
+            f"Exact-native variant {variant} requires torch local version "
+            f"+{expected_torch_local}, found torch {torch_version}. "
+            f"Install with uv --torch-backend={variant}."
+        )
+
+    vllm_local_version = distribution.version.partition("+")[2].lower()
+    vllm_local_tags = set(
+        vllm_local_version.replace("-", ".").replace("_", ".").split(".")
+    )
+    if "cpu" in vllm_local_tags or "precompiled" not in vllm_local_tags:
+        raise SystemExit(
+            "Exact-native mode requires a CUDA precompiled vLLM distribution, "
+            f"found vllm {distribution.version}. Ensure VLLM_TARGET_DEVICE=cuda "
+            "and VLLM_USE_PRECOMPILED=1 during installation."
+        )
+
     distribution_files = {str(path) for path in distribution.files or ()}
     required_extensions = (
         "vllm/_C_stable_libtorch.abi3.so",
@@ -137,14 +190,6 @@ if os.environ["REQUIRE_EXACT_NATIVE"]:
         extension = Path(distribution.locate_file(relative_path)).resolve()
         if not extension.is_file():
             raise SystemExit(f"Exact-native extension file is missing: {extension}")
-        module_name = f"vllm.{extension.name.removesuffix('.abi3.so')}"
-        extension_spec = PathFinder.find_spec(module_name, [str(package_dir)])
-        if (
-            extension_spec is None
-            or extension_spec.origin is None
-            or Path(extension_spec.origin).resolve() != extension
-        ):
-            raise SystemExit(f"{module_name} extension spec is missing")
 else:
     if not any(path.name.startswith("_C.") for path in extensions):
         raise SystemExit(f"vllm._C extension file is missing under {package_dir}")
@@ -159,11 +204,44 @@ for extension in extensions:
     print(f"  {extension}")
 
 if os.environ["REQUIRE_CHECKPOINT_HOOKS"]:
-    from vllm.v1.worker.gpu_worker import Worker
+    if os.environ["REQUIRE_EXACT_NATIVE"]:
+        relative_path = "vllm/v1/worker/gpu_worker.py"
+        if relative_path not in distribution_files:
+            raise SystemExit(
+                f"Exact-native vLLM distribution does not own {relative_path}"
+            )
+        worker_path = Path(distribution.locate_file(relative_path)).resolve()
+        tree = ast.parse(worker_path.read_text(), filename=str(worker_path))
+        worker_classes = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "Worker"
+        ]
+        methods = {
+            node.name
+            for worker_class in worker_classes
+            for node in worker_class.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        missing_methods = {
+            "checkpoint_prepare",
+            "checkpoint_restore",
+        } - methods
+        if missing_methods:
+            raise SystemExit(
+                f"{worker_path} is missing Worker methods: "
+                f"{sorted(missing_methods)!r}"
+            )
+        print(
+            "Verified vLLM checkpoint_prepare/checkpoint_restore Worker "
+            "definitions without importing vLLM"
+        )
+    else:
+        from vllm.v1.worker.gpu_worker import Worker
 
-    assert hasattr(Worker, "checkpoint_prepare")
-    assert hasattr(Worker, "checkpoint_restore")
-    print("Verified vLLM checkpoint_prepare/checkpoint_restore worker methods")
+        assert hasattr(Worker, "checkpoint_prepare")
+        assert hasattr(Worker, "checkpoint_restore")
+        print("Verified vLLM checkpoint_prepare/checkpoint_restore worker methods")
 PY
 }
 
@@ -242,13 +320,14 @@ if [[ -n "${VLLM_GIT_URL:-}" ]]; then
             "${VLLM_PRECOMPILED_WHEEL_COMMIT}" "${vllm_source_sha}"
 
         uv pip uninstall --system vllm
+        VLLM_TARGET_DEVICE=cuda \
         VLLM_USE_PRECOMPILED=1 \
         VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_PRECOMPILED_WHEEL_COMMIT}" \
         VLLM_PRECOMPILED_WHEEL_VARIANT="${VLLM_PRECOMPILED_WHEEL_VARIANT}" \
         VLLM_PRECOMPILED_WHEEL_LOCATION="${VLLM_PRECOMPILED_WHEEL_LOCATION}" \
         VLLM_DOCKER_BUILD_CONTEXT=1 \
             uv pip install --system '.[flashinfer,runai,otel]' \
-                --torch-backend=auto
+                --torch-backend="${VLLM_TORCH_BACKEND}"
         install_mode=exact-native-source
         native_wheel_commit="${VLLM_PRECOMPILED_WHEEL_COMMIT}"
         native_wheel_variant="${VLLM_PRECOMPILED_WHEEL_VARIANT}"
@@ -304,7 +383,11 @@ else
     echo "Using FlashInfer from the vLLM runtime/dependency solve (${FLASHINF_REF})."
 fi
 
-verify_vllm_install "${VLLM_GIT_URL:-}" "${native_wheel_commit}"
+verify_vllm_install \
+    "${VLLM_GIT_URL:-}" \
+    "${native_wheel_commit}" \
+    "${native_wheel_variant}" \
+    "${VLLM_EXPECTED_TORCH_LOCAL_VERSION}"
 python3 <<'PY'
 import importlib.metadata as metadata
 
