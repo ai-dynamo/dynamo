@@ -40,6 +40,7 @@ from gpu_memory_service.client.torch.module import (
 )
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.common.vmm import VMMDeviceType, _reset_vmm_singleton, init_vmm
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
@@ -73,6 +74,7 @@ class _TinyModule(torch.nn.Module):
 
 @pytest.fixture
 def running_gms(tmp_path):
+    init_vmm(VMMDeviceType.CUDA)
     socket_path = str(tmp_path / "gms.sock")
     server = GMSRPCServer(socket_path, device=0)
     loop: asyncio.AbstractEventLoop | None = None
@@ -136,6 +138,7 @@ def running_gms(tmp_path):
             raise thread_error
         if os.path.exists(socket_path):
             os.unlink(socket_path)
+        _reset_vmm_singleton()
 
 
 def _make_gms_tensor(

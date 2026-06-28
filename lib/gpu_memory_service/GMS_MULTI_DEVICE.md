@@ -37,7 +37,7 @@ This design introduces a **device-agnostic VMM abstraction layer** so that Intel
 │                                                      │
 │  ┌───────────────┐          ┌───────────────┐        │
 │  │  CudaVMM      │          │  XpuVMM (TBD) │        │
-│  │  (cuda_utils) │          │  (l0_utils)   │        │
+│  │  (cuda_utils) │          │  (sycl_utils) │        │
 │  └───────────────┘          └───────────────┘        │
 └──────────────────────────────────────────────────────┘
                          │
@@ -145,7 +145,29 @@ No constructor threading — every module calls `get_vmm()` directly.
 
 ## 5. Phase 2 — XPU Implementation
 
-Implement `XpuVMM(VMMDevice)` using oneAPI runtime APIs.
+### 5.1 `XpuVMM(VMMDevice)`
+
+Implement the methods on the oneAPI SYCL runtime.
+
+### 5.2 Torch Allocator Dispatch
+
+The PyTorch front door (`client/torch/`) routes torch tensor allocations through GMS via a pluggable allocator inside a `gms_use_mem_pool(tag)` context; the dispatch key is the existing `get_vmm_device_type()`.
+
+- **`extensions/allocator.cpp` + `setup.py` — no change.**  `my_malloc(ssize_t,  int, void* stream)` forwards the opaque stream/queue to Python *without dereferencing it*, so it is ABI-compatible with `XPUPluggableAllocator`'s
+  `void* alloc_fn(size_t, int, sycl::queue*)`. The **same** `_allocator_ext.so`
+  and `"my_malloc"` / `"my_free"` symbols serve both backends.
+- **`client/torch/allocator.py` — only change.** Swap the four CUDA-hardcoded
+  spots for device dispatch (`torch.cuda.*`, `torch.xpu.*`):
+
+  | Spot | CUDA | XPU |
+  |------|------|-----|
+  | `_ensure_callbacks_initialized` | `torch.cuda.CUDAPluggableAllocator` | `torch.xpu.memory.XPUPluggableAllocator` |
+  | `_create_mem_pool` | `torch.cuda.memory.MemPool` | `torch.xpu.memory.MemPool` |
+  | `gms_use_mem_pool` | `torch.cuda.use_mem_pool` | `torch.xpu.memory.use_mem_pool` |
+  | `prune_allocations` | `torch.cuda.synchronize` | `torch.xpu.synchronize` |
+
+  The torch APIs are symmetric, so a small accessor returning the active device's
+  `(PluggableAllocator, MemPool, use_mem_pool, synchronize)` is sufficient.
 
 ---
 

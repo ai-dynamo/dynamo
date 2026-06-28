@@ -4,6 +4,7 @@
 """Unit tests for the GMS snapshot loader CLI."""
 
 import pytest
+from _fake_vmm import FakeVMM
 
 try:
     from gpu_memory_service.cli.snapshot import loader
@@ -22,23 +23,6 @@ pytestmark = [
 ]
 
 
-class _FakeVMM:
-    """Minimal VMMDevice mock for unit tests."""
-
-    def __init__(self, devices):
-        self._devices = devices
-        self.calls = []
-
-    def ensure_initialized(self):
-        pass
-
-    def list_devices(self):
-        return self._devices
-
-    def runtime_set_device(self, device):
-        self.calls.append(("set_device", device))
-
-
 def test_list_checkpoint_devices_requires_exact_visible_device_match(
     tmp_path,
     monkeypatch,
@@ -48,7 +32,7 @@ def test_list_checkpoint_devices_requires_exact_visible_device_match(
     (tmp_path / "device-0-copy").mkdir()
     (tmp_path / "not-a-device").mkdir()
     (tmp_path / "device-1").write_text("not a directory", encoding="utf-8")
-    monkeypatch.setattr(loader, "get_vmm", lambda: _FakeVMM([0, 2]))
+    monkeypatch.setattr(loader, "get_vmm", lambda: FakeVMM(devices=[0, 2]))
 
     assert loader._list_checkpoint_devices(str(tmp_path), VMMDeviceType.CUDA) == [0, 2]
 
@@ -71,7 +55,7 @@ def test_list_checkpoint_devices_rejects_mismatched_checkpoints(
 ):
     for dirname in checkpoint_dirs:
         (tmp_path / dirname).mkdir()
-    monkeypatch.setattr(loader, "get_vmm", lambda: _FakeVMM(visible_devices))
+    monkeypatch.setattr(loader, "get_vmm", lambda: FakeVMM(devices=visible_devices))
 
     with pytest.raises(RuntimeError, match=expected):
         loader._list_checkpoint_devices(str(tmp_path), VMMDeviceType.CUDA)
@@ -79,7 +63,7 @@ def test_list_checkpoint_devices_rejects_mismatched_checkpoints(
 
 def test_load_device_sets_cuda_context_before_storage_client(monkeypatch):
     calls = []
-    fake_vmm = _FakeVMM([3])
+    fake_vmm = FakeVMM(devices=[3])
     fake_vmm.calls = calls  # share the calls list
 
     class FakeStorageClient:

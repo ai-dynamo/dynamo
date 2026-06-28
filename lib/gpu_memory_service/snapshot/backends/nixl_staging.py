@@ -14,7 +14,7 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, as_co
 from dataclasses import dataclass
 from typing import Callable, List, Mapping, Optional, Sequence
 
-from gpu_memory_service.common.vmm import VMMDevice, get_vmm
+from gpu_memory_service.common.vmm import get_vmm
 from gpu_memory_service.snapshot.backends.nixl_common import (
     DRAM_MEM_TYPE,
     FILE_MEM_TYPE,
@@ -76,7 +76,6 @@ class NixlPosixStagingTransferBackend:
     ) -> None:
         self._backend_name = backend_name
         self._device = config.device
-        self._vmm = get_vmm()
         self._max_workers = config.max_workers
         # These are NIXL POSIX backend custom-param keys. NIXL's POSIX default
         # preallocates a large I/O pool, while GMS staging workers issue one
@@ -112,7 +111,6 @@ class NixlPosixStagingTransferBackend:
     def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
         return _NixlPosixStagingTransferSession(
             backend_name=self._backend_name,
-            vmm=self._vmm,
             device=self._device,
             max_workers=self._max_workers,
             group_sources=self._group_sources,
@@ -139,13 +137,11 @@ class _NixlPosixStagingTransferSession:
         warn_under_parallelized: bool,
         posix_backend_params: Mapping[str, str],
         sources: Sequence[FileTransferSource],
-        vmm: VMMDevice,
         api_future: Optional[Future[object]] = None,
     ) -> None:
         self._backend_name = backend_name
         self._device = device
         self._max_workers = max(1, int(max_workers))
-        self._vmm = vmm
         self._group_kind = group_kind
         self._posix_backend_params = dict(posix_backend_params)
         self._sources = list(sources)
@@ -297,7 +293,7 @@ class _NixlPosixStagingTransferSession:
             )
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
-            self._vmm.runtime_set_device(self._device)
+            get_vmm().runtime_set_device(self._device)
             agent = create_nixl_agent(
                 api,
                 agent_name=agent_name,
@@ -306,7 +302,7 @@ class _NixlPosixStagingTransferSession:
             )
             if self._cancel_event.is_set():
                 raise CancelledError(f"{self._backend_name} cancelled")
-            slots = make_pinned_copy_slots(self._vmm, _PINNED_COPY_BUFFERS_PER_WORKER)
+            slots = make_pinned_copy_slots(get_vmm(), _PINNED_COPY_BUFFERS_PER_WORKER)
             prep_elapsed_s = time.monotonic() - prep_t0
             logger.info(
                 "%s prepared %s=%s files=%d prep_elapsed=%.3fs "
@@ -339,13 +335,12 @@ class _NixlPosixStagingTransferSession:
         prepared: _PreparedNixlGroup,
         targets: Mapping[str, GMSTransferTarget],
     ) -> None:
-        self._vmm.runtime_set_device(self._device)
+        get_vmm().runtime_set_device(self._device)
         group_t0 = time.monotonic()
         group_bytes = 0
         try:
             group_bytes = restore_file_groups_with_nixl_staging(
                 backend_name=self._backend_name,
-                vmm=self._vmm,
                 agent=prepared.agent,
                 agent_name=prepared.agent_name,
                 file_groups=prepared.file_groups,
@@ -384,7 +379,6 @@ class _NixlPosixStagingTransferSession:
 def restore_file_groups_with_nixl_staging(
     *,
     backend_name: str,
-    vmm: VMMDevice,
     agent: object,
     agent_name: str,
     file_groups: Sequence[NixlFileGroup],
@@ -400,7 +394,7 @@ def restore_file_groups_with_nixl_staging(
     next_slot = 0
     try:
         if owned_slots:
-            slots = make_pinned_copy_slots(vmm, buffers_per_worker)
+            slots = make_pinned_copy_slots(get_vmm(), buffers_per_worker)
         for file_path, sources in file_groups:
             fd = open_direct_read_fd(file_path, logger=logger, require_direct=True)
             try:

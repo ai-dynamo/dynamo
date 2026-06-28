@@ -23,6 +23,8 @@ except ModuleNotFoundError:
         allow_module_level=True,
     )
 
+from _fake_vmm import FakeVMM
+
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
@@ -110,11 +112,8 @@ def test_staging_prep_starts_before_restore(monkeypatch):
         assert allow_finish.wait(timeout=1.0)
         return FakeApi()
 
-    class _FakeVMM:
-        def runtime_set_device(self, _device):
-            pass
-
-    fake_vmm = _FakeVMM()
+    fake_vmm = FakeVMM()
+    monkeypatch.setattr(nixl_staging, "get_vmm", lambda: fake_vmm)
     monkeypatch.setattr(nixl_staging, "load_nixl_api", fake_load_nixl_api)
     monkeypatch.setattr(nixl_staging, "make_pinned_copy_slots", lambda _vmm, _count: [])
 
@@ -127,7 +126,6 @@ def test_staging_prep_starts_before_restore(monkeypatch):
         warn_under_parallelized=False,
         posix_backend_params={"ios_pool_size": "64", "kernel_queue_size": "16"},
         sources=[source],
-        vmm=fake_vmm,
     )
     try:
         assert prep_started.wait(timeout=1.0)
