@@ -2890,9 +2890,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # their canonical hash strings for vLLM/Dynamo cache metadata parsing;
         # modality grouping belongs in the multi_modal_uuids dict keys, not in
         # the hash value. If no hashes were forwarded, compute image UUIDs only
-        # when the payload still contains raw image data. Embedding-only image
-        # payloads are dicts, and _compute_mm_uuids intentionally returns None
-        # for them.
+        # in aggregated mode, where the worker owns raw image payloads. In EPD,
+        # image identity lives upstream at the router / encoder cache.
         extra_args = request.get("extra_args") or {}
         mm_uuids: dict[str, Any] | None = None
         forwarded_mm_uuids = _build_forwarded_mm_uuids(
@@ -2901,7 +2900,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         )
         if forwarded_mm_uuids:
             mm_uuids = forwarded_mm_uuids
-        else:
+        elif self.embedding_loader is None:
             mm_uuids = _compute_mm_uuids(multi_modal_data)
             if mm_uuids and multi_modal_data:
                 logger.warning(

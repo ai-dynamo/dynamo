@@ -373,9 +373,8 @@ async def test_build_prompt_preserves_unified_vision_chunk_fallback_hashes():
     }
 
 
-@pytest.mark.asyncio
-async def test_build_prompt_computes_image_uuids_for_raw_payload_with_embedding_loader():
-    """Raw image payloads still get UUIDs when an encode worker is configured."""
+def test_build_prompt_skips_computed_image_uuids_with_embedding_loader():
+    """EPD workers rely on forwarded hashes, not local fallback image UUIDs."""
     handler = _make_handler()
     handler.embedding_loader = object()
     image = np.zeros((2, 2, 3), dtype=np.uint8)
@@ -383,6 +382,21 @@ async def test_build_prompt_computes_image_uuids_for_raw_payload_with_embedding_
     prompt, _, error = handler._build_prompt_from_request(
         {"token_ids": [1, 2, 3]},
         "req-prompt-5",
+        multi_modal_data={"image": image},
+    )
+
+    assert error is None
+    assert "multi_modal_uuids" not in prompt
+
+
+def test_build_prompt_computes_image_uuids_for_aggregated_raw_payload():
+    """Aggregated workers compute fallback UUIDs when frontend hashes are absent."""
+    handler = _make_handler()
+    image = np.zeros((2, 2, 3), dtype=np.uint8)
+
+    prompt, _, error = handler._build_prompt_from_request(
+        {"token_ids": [1, 2, 3]},
+        "req-prompt-6",
         multi_modal_data={"image": image},
     )
 
