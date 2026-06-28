@@ -974,25 +974,34 @@ impl ModelWatcher {
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
             }
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
-            // Case: Text + Chat (pure text-to-text, no diffusion)
-            let push_router =
-                PushRouter::<
+        } else if card.model_input == ModelInput::Text
+            && (card.model_type.supports_chat() || card.model_type.supports_completions())
+        {
+            // Text-input workers receive OpenAI-shaped requests directly, so add
+            // a direct router for every endpoint type the worker advertises.
+            if card.model_type.supports_chat() {
+                let push_router = PushRouter::<
                     NvCreateChatCompletionRequest,
                     Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client_with_monitor(client, router_config.router_mode, None)
+                >::from_client_with_monitor(
+                    client.clone(), router_config.router_mode, None
+                )
                 .await?;
-            worker_set.chat_engine = Some(Arc::new(push_router));
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
-            // Case: Text + Completions
-            let push_router = PushRouter::<
-                NvCreateCompletionRequest,
-                Annotated<NvCreateCompletionResponse>,
-            >::from_client_with_monitor(
-                client, router_config.router_mode, None
-            )
-            .await?;
-            worker_set.completions_engine = Some(Arc::new(push_router));
+                worker_set.chat_engine = Some(Arc::new(push_router));
+                tracing::info!("Chat completions is ready");
+            }
+
+            if card.model_type.supports_completions() {
+                let push_router = PushRouter::<
+                    NvCreateCompletionRequest,
+                    Annotated<NvCreateCompletionResponse>,
+                >::from_client_with_monitor(
+                    client, router_config.router_mode, None
+                )
+                .await?;
+                worker_set.completions_engine = Some(Arc::new(push_router));
+                tracing::info!("Completions is ready");
+            }
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
             // Case 4: Tokens + Embeddings
             // Create preprocessing pipeline similar to Backend
