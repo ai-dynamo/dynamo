@@ -31,7 +31,7 @@ use dynamo_renderer::OAIPromptFormatter;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
 use futures::stream::{self, StreamExt};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::metrics::frontend_perf::{
@@ -39,7 +39,7 @@ use dynamo_runtime::metrics::frontend_perf::{
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
 use std::borrow::Cow;
-use std::{collections::HashMap, pin::Pin, sync::Arc};
+use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 #[cfg(feature = "mm-routing")]
@@ -82,6 +82,7 @@ use crate::preprocessor::prompt::{MediaRequestExt, prompt_formatter_from_mdc};
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
+pub use crate::protocols::common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation};
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
@@ -112,68 +113,6 @@ fn encode_floats_to_base64(floats: &[f32]) -> String {
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
-pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LLMMetricAnnotation {
-    pub input_tokens: usize,
-    pub output_tokens: usize,
-    pub chunk_tokens: usize,
-    pub cached_tokens: Option<usize>,
-    /// Prefill worker ID (for TTFT attribution in disaggregated mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_worker_id: Option<u64>,
-    /// Prefill worker DP rank
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_dp_rank: Option<u32>,
-    /// Prefill worker type ("prefill" or "decode") for Prometheus metric labeling.
-    /// Stored at routing time to avoid expensive MDC lookup when updating TTFT metrics.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_worker_type: Option<String>,
-    /// Decode worker ID (for ITL attribution in disaggregated mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decode_worker_id: Option<u64>,
-    /// Decode worker DP rank
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decode_dp_rank: Option<u32>,
-    /// Decode worker type ("prefill" or "decode") for Prometheus metric labeling.
-    /// Stored at routing time to avoid expensive MDC lookup when updating ITL metrics.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decode_worker_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokenize_latency: Option<Duration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detokenize_total_latency: Option<Duration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detokenize_count: Option<u64>,
-}
-
-impl LLMMetricAnnotation {
-    /// Convert this metrics struct to an Annotated event
-    pub fn to_annotation<T>(&self) -> Result<Annotated<T>, serde_json::Error> {
-        Annotated::from_annotation(ANNOTATION_LLM_METRICS, self)
-    }
-
-    /// Extract LLM metrics from an Annotated event, if present
-    pub fn from_annotation<T>(
-        annotation: &Annotated<T>,
-    ) -> Result<Option<LLMMetricAnnotation>, Box<dyn std::error::Error>> {
-        if annotation.event.is_none() {
-            return Ok(None);
-        }
-        if annotation.event.as_ref().unwrap() != ANNOTATION_LLM_METRICS {
-            return Ok(None);
-        }
-        let comments = annotation
-            .comment
-            .as_ref()
-            .ok_or("missing comments block")?;
-        if comments.len() != 1 {
-            return Err("malformed comments block - expected exactly 1 comment".into());
-        }
-        let metrics: LLMMetricAnnotation = serde_json::from_str(&comments[0])?;
-        Ok(Some(metrics))
-    }
-}
 
 /// Drain a standalone router's forwarded `routing_data` onto this request's tracker so the
 /// frontend's timing/worker/token surfaces populate, then drop the field to keep it off the
@@ -199,6 +138,34 @@ fn drain_router_routing_data(
     if let Some(token_ids) = routing_data.token_ids {
         tracker.set_external_query_token_ids(token_ids);
     }
+}
+
+fn attach_metrics_annotation<Resp>(response: &mut Annotated<Resp>, metrics: &LLMMetricAnnotation) {
+    if let Ok(metrics_annotated) = metrics.to_annotation::<()>() {
+        response.event = metrics_annotated.event;
+        response.comment = metrics_annotated.comment;
+    } else {
+        tracing::warn!("Failed to serialize LLM metrics annotation");
+    }
+}
+
+fn attach_llm_metrics<Resp>(response: &mut Annotated<Resp>, metrics: LLMMetricAnnotation)
+where
+    Resp: 'static,
+{
+    if response.event.is_some() {
+        return;
+    }
+
+    if let Some(data) = response.data.as_mut()
+        && let Some(chat_response) =
+            (data as &mut dyn Any).downcast_mut::<NvCreateChatCompletionStreamResponse>()
+    {
+        chat_response.llm_metrics = Some(metrics);
+        return;
+    }
+
+    attach_metrics_annotation(response, &metrics);
 }
 
 // Reasoning State for reasoning parsing transformation step
@@ -465,12 +432,12 @@ impl OpenAIPreprocessor {
         // here; remove once fastokens upstream exposes the mutator.
         #[cfg(feature = "mm-routing")]
         let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
-            let fastokens_active = std::env::var("DYN_TOKENIZER").as_deref() == Ok("fastokens");
+            let fastokens_active = runtime_config.effective_tokenizer_backend().is_fastokens();
             if fastokens_active && model_dir_for_routing.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
-                    "DYN_TOKENIZER=fastokens is set; MM-aware KV routing disabled. \
-                     Unset DYN_TOKENIZER (or set it to 'default') to re-enable."
+                    "fastokens tokenizer backend is active; MM-aware KV routing disabled. \
+                     Use the default tokenizer backend to re-enable."
                 );
                 None
             } else {
@@ -1533,7 +1500,7 @@ impl OpenAIPreprocessor {
         static DIM_CACHE: LazyLock<Cache<u64, (u32, u32)>> = LazyLock::new(|| {
             Cache::builder()
                 .max_capacity(100_000)
-                .time_to_live(Duration::from_secs(24 * 60 * 60))
+                .time_to_live(std::time::Duration::from_secs(24 * 60 * 60))
                 .build()
         });
 
@@ -1572,7 +1539,7 @@ impl OpenAIPreprocessor {
         // Per-Range tighter bound than MediaFetcher's 30 s default — dim
         // fetch is best-effort; on a slow remote we'd rather skip MM
         // routing for this image than starve the request.
-        const DIM_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+        const DIM_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
         if let Some(rest) = url.strip_prefix("data:") {
             let comma = rest
@@ -1998,18 +1965,43 @@ impl OpenAIPreprocessor {
                 .collect()
         });
 
+        // When DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is set, supported families
+        // (Qwen3-Coder, DeepSeek-V4) stream through the dynamo-parsers-v2 parser
+        // instead of the jail, which is never built for them on this path.
+        // tool_choice=required/named and structural-tag still use the jail's
+        // Immediate mode, since those rely on guided-decoded JSON rather than the
+        // native markup the v2 parser reads. See tool_parser_v2::apply_stream.
+        use crate::protocols::openai::chat_completions::tool_parser_v2;
+        let parser_name = self.tool_call_parser.as_deref();
+        let use_parsers_v2 = tool_parser_v2::enabled()
+            && parser_name.is_some_and(tool_parser_v2::supports_family)
+            && !uses_tool_call_structural_tag
+            && matches!(
+                request.inner.tool_choice.as_ref(),
+                None | Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto)
+            );
+
         // Apply jail conditionally
-        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
-            Box::pin(Self::apply_tool_calling_jail(
-                self.tool_call_parser.clone(),
-                request.inner.tool_choice.clone(),
-                tool_definitions,
-                uses_tool_call_structural_tag,
-                stream,
-            ))
-        } else {
-            Box::pin(stream)
-        };
+        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> =
+            if should_jail && use_parsers_v2 {
+                Box::pin(tool_parser_v2::apply_stream(
+                    stream,
+                    tool_definitions,
+                    parser_name
+                        .expect("use_parsers_v2 implies a parser name")
+                        .to_string(),
+                ))
+            } else if should_jail {
+                Box::pin(Self::apply_tool_calling_jail(
+                    self.tool_call_parser.clone(),
+                    request.inner.tool_choice.clone(),
+                    tool_definitions,
+                    uses_tool_call_structural_tag,
+                    stream,
+                ))
+            } else {
+                Box::pin(stream)
+            };
 
         Ok(transformed_stream)
     }
@@ -2178,13 +2170,7 @@ impl OpenAIPreprocessor {
                         DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
                     }
 
-                    if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
-                        // Only set event if not already set to avoid overriding existing events (like errors)
-                        if response.event.is_none() {
-                            response.event = metrics_annotated.event;
-                            response.comment = metrics_annotated.comment;
-                        }
-                    }
+                    attach_llm_metrics(&mut response, llm_metrics);
 
                     // Mark if we've seen a finish_reason
                     if has_finish_reason {
@@ -2261,12 +2247,6 @@ impl OpenAIPreprocessor {
                             DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
                         }
 
-                        // Create annotation string
-                        let annotation = llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to serialize metrics: {}", e);
-                            Annotated::<()>::from_data(())
-                        });
-
                         // Send the usage chunk if needed
                         let data = if inner.response_generator.is_usage_enabled() {
                             Some(usage_chunk)
@@ -2274,13 +2254,14 @@ impl OpenAIPreprocessor {
                             None
                         };
 
-                        let annotated_usage = Annotated::<Resp> {
+                        let mut annotated_usage = Annotated::<Resp> {
                             id: None,
                             data,
-                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
-                            comment: annotation.comment,
+                            event: None,
+                            comment: None,
                             error: None,
                         };
+                        attach_llm_metrics(&mut annotated_usage, llm_metrics);
 
                         tracing::trace!(
                             request_id = inner.context.id(),

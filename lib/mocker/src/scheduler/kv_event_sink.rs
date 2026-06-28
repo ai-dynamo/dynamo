@@ -89,17 +89,26 @@ pub(crate) struct DeferredKvPublish {
 /// token-id payloads.
 #[derive(Clone, Default)]
 pub(crate) struct DeferredKvPublishBuffer {
-    events: Arc<Mutex<Vec<DeferredKvPublish>>>,
+    events: Option<Arc<Mutex<Vec<DeferredKvPublish>>>>,
 }
 
 impl DeferredKvPublishBuffer {
+    fn enabled() -> Self {
+        Self {
+            events: Some(Arc::new(Mutex::new(Vec::new()))),
+        }
+    }
+
     pub(crate) fn push(
         &self,
         event: KvCacheEvent,
         block_token_ids: Option<Vec<Vec<u32>>>,
         storage_tier: StorageTier,
     ) {
-        self.events.lock().unwrap().push(DeferredKvPublish {
+        let Some(events) = self.events.as_ref() else {
+            return;
+        };
+        events.lock().unwrap().push(DeferredKvPublish {
             event,
             block_token_ids,
             storage_tier,
@@ -107,7 +116,10 @@ impl DeferredKvPublishBuffer {
     }
 
     pub(crate) fn drain(&self) -> Vec<DeferredKvPublish> {
-        std::mem::take(&mut *self.events.lock().unwrap())
+        self.events
+            .as_ref()
+            .map(|events| std::mem::take(&mut *events.lock().unwrap()))
+            .unwrap_or_default()
     }
 }
 
@@ -141,7 +153,10 @@ struct DeferredRawKvEventSink {
 
 impl RawKvEventSink for DeferredRawKvEventSink {
     fn publish(&self, event: RawKvEvent) -> Result<()> {
-        let mut events = self.buffer.events.lock().unwrap();
+        let Some(events) = self.buffer.events.as_ref() else {
+            return Ok(());
+        };
+        let mut events = events.lock().unwrap();
         if let Some(last) = events.last_mut()
             && last.event.event_id == event.event.event_id
             && last.event.dp_rank == event.event.dp_rank
@@ -164,9 +179,16 @@ impl RawKvEventSink for DeferredRawKvEventSink {
 /// into the live scheduler core while `live.rs` retains control over when the
 /// buffered events are forwarded to the real sink.
 pub(crate) fn capture_deferred_kv_publish_sink(
+    enabled: bool,
     capture_raw: bool,
 ) -> (DeferredKvPublishBuffer, KvEventPublishers) {
-    let buffer = DeferredKvPublishBuffer::default();
+    if !enabled {
+        return (
+            DeferredKvPublishBuffer::default(),
+            KvEventPublishers::default(),
+        );
+    }
+    let buffer = DeferredKvPublishBuffer::enabled();
     let event_sink: Arc<dyn KvCacheEventSink> = Arc::new(DeferredKvEventSink {
         buffer: buffer.clone(),
     });
@@ -192,23 +214,6 @@ pub(crate) fn publish_deferred_kv_events(
         ) {
             tracing::warn!("Failed to forward buffered KV event: {error}");
         }
-    }
-}
-
-/// Captures FPM snapshots for the live scheduler so it can flush them at the
-/// correct pass phase, matching the deferred KV event pattern.
-#[derive(Clone, Default)]
-pub(crate) struct DeferredFpmBuffer {
-    snapshots: Arc<Mutex<Vec<ForwardPassSnapshot>>>,
-}
-
-impl DeferredFpmBuffer {
-    pub(crate) fn push(&self, snapshot: ForwardPassSnapshot) {
-        self.snapshots.lock().unwrap().push(snapshot);
-    }
-
-    pub(crate) fn drain(&self) -> Vec<ForwardPassSnapshot> {
-        std::mem::take(&mut *self.snapshots.lock().unwrap())
     }
 }
 

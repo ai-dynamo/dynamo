@@ -24,7 +24,7 @@ limitations under the License.
 // The Dynamo KV scorer sets routing headers that the Lua filter at the
 // gateway uses to inject nvext into the request body:
 //
-//   - x-worker-instance-id: Selected worker ID (decode worker in disagg mode)
+//   - x-dynamo-worker-instance-id: Selected worker ID (decode worker in disagg mode)
 //   - x-prefiller-host-port: Prefill worker ID (disaggregated mode only)
 //   - x-dynamo-routing-mode: "aggregated" or "disaggregated"
 //

@@ -1,8 +1,8 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Replay Tracing
-subtitle: Capture live chat and completion traffic for Mooncake replay
+subtitle: Capture live chat and completion traffic for direct DynoSim replay
 ---
 
 Request replay tracing records one `request_end` row for each eligible Rust OpenAI
@@ -142,9 +142,9 @@ Optional harness tool events use the `RequestTraceToolEventIngress` payload belo
 }
 ```
 
-`input_sequence_hashes` are Dynamo's sequence-aware rolling hashes. The
-Mooncake converter maps them to compact `hash_ids`; they are not copied
-verbatim into the Mooncake output.
+`input_sequence_hashes` are Dynamo's sequence-aware rolling hashes. Replay maps
+them to compact internal IDs while loading the original request trace; it does
+not write an intermediate Mooncake file.
 
 For a canceled response stream, `output_tokens` is the final partial OSL
 observed after the inner response stream has been dropped.
@@ -152,7 +152,7 @@ observed after the inner response stream has been dropped.
 ## Supported Requests
 
 Initial coverage is the Rust OpenAI chat-completions and completions paths.
-Context-free replay rows must represent one Mooncake request, so tracing skips:
+Each context-free replay row must represent one model request, so tracing skips:
 
 - `n > 1`
 - `best_of > 1`
@@ -164,34 +164,25 @@ Skipped requests produce a structured warning and no partial replay row.
 Header-derived session context enriches supported request trace rows; it does not bypass
 these shape checks or create an agent-only fallback row.
 
-## Convert And Replay
+## Replay Request Traces
 
-The converter accepts `dynamo.request.trace.v1` captures:
-
-```bash
-cargo run -p dynamo-bench --bin request_trace_to_mooncake -- \
-  --input-path /tmp/dynamo-request-trace.*.jsonl.gz \
-  --output-file /tmp/dynamo-request-trace.mooncake.jsonl
-```
-
-Pass `--agentic` only when every request row has `agent_context`. Context-free
-request traces still convert to ordinary Mooncake rows and are rejected with
-`--agentic`. The converter rejects unknown schema versions.
-
-Use the trace block size printed by the converter for both trace parsing and
-the mock engine:
+Pass `dynamo.request.trace.v1` JSONL or JSONL.GZ shards directly to replay:
 
 ```bash
-TRACE_BLOCK_SIZE=64
-.venv/bin/python -m dynamo.replay /tmp/dynamo-request-trace.mooncake.jsonl \
-  --trace-format mooncake \
-  --trace-block-size "${TRACE_BLOCK_SIZE}" \
+python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
+  --trace-format dynamo \
   --replay-mode offline \
   --router-mode kv_router \
   --num-workers 4 \
-  --extra-engine-args "{\"block_size\":${TRACE_BLOCK_SIZE}}" \
   --report-json /tmp/dynamo-request-trace.replay-report.json
 ```
+
+No format conversion or intermediate Mooncake file is required.
+
+Replay derives and validates the trace block size across all shards.
+Context-free rows use standard replay. If every request has `agent_context`,
+replay preserves session dependencies and tool waits. Mixed traces are
+rejected.
 
 `DYN_REQUEST_TRACE` is the switch for replay and agent-aware capture. Agent
 context does not require a separate trace flag; if session headers are

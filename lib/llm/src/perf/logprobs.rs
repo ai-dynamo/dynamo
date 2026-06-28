@@ -976,6 +976,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
@@ -1017,6 +1018,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
@@ -1361,6 +1363,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         };
 
         let logprobs = response.extract_logprobs_by_choice();
@@ -1578,6 +1581,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
