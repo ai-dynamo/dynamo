@@ -12,6 +12,7 @@ VLLM_PRECOMPILED_WHEEL_VARIANT="${VLLM_PRECOMPILED_WHEEL_VARIANT:-}"
 VLLM_TORCH_BACKEND=
 VLLM_EXPECTED_TORCH_LOCAL_VERSION=
 PROVENANCE_FILE=/opt/dynamo/source-provenance.txt
+FLASHINFER_VERSION_FILE=/opt/dynamo/flashinfer-source-version.txt
 
 clone_source() {
     local url=$1
@@ -371,6 +372,16 @@ if [[ -n "${FLASHINFER_GIT_URL:-}" ]]; then
         "${FLASHINFER_GIT_SHA:-}" \
         /tmp/flashinfer-src
     flashinfer_source_sha="${RESOLVED_SOURCE_SHA}"
+    if [[ ! -s version.txt ]]; then
+        echo "Custom FlashInfer source is missing version.txt" >&2
+        exit 1
+    fi
+    flashinfer_source_version="$(tr -d '[:space:]' < version.txt)"
+    if [[ -z "${flashinfer_source_version}" ]]; then
+        echo "Custom FlashInfer source has an empty version.txt" >&2
+        exit 1
+    fi
+    printf '%s\n' "${flashinfer_source_version}" > "${FLASHINFER_VERSION_FILE}"
     uv pip install --system -r requirements.txt
     uv pip install --system --force-reinstall --no-deps .
     if [[ -d ./flashinfer-cubin ]]; then
@@ -381,6 +392,7 @@ if [[ -n "${FLASHINFER_GIT_URL:-}" ]]; then
     rm -rf /tmp/flashinfer-src
 else
     flashinfer_source_sha=upstream-runtime
+    rm -f "${FLASHINFER_VERSION_FILE}"
     echo "Using FlashInfer from the vLLM runtime/dependency solve (${FLASHINF_REF})."
 fi
 
@@ -398,6 +410,10 @@ print(f"Installed FlashInfer location: {distribution.locate_file('').resolve()}"
 PY
 uv pip check --system
 echo "flashinfer_source_sha=${flashinfer_source_sha}" >> "${PROVENANCE_FILE}"
+if [[ -n "${flashinfer_source_version:-}" ]]; then
+    echo "flashinfer_source_version=${flashinfer_source_version}" \
+        >> "${PROVENANCE_FILE}"
+fi
 
 echo "Installed source/native provenance:"
 cat "${PROVENANCE_FILE}"
