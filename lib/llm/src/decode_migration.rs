@@ -917,56 +917,19 @@ impl
                     duplicate_tokens -= dropped;
 
                     if !destination_ready {
-                        let activated = control.call(
-                            ControlEndpoint::Finalize,
-                            destination_worker.worker_id,
-                            json!({
-                                "rid": engine_rid,
-                                "migration_id": migration_id,
-                                "side": "destination",
-                                "action": "activate",
-                                "destination_dp_rank": destination_worker.dp_rank,
-                            }),
-                        ).await;
-                        if !matches!(activated, Ok(response) if response.success) {
-                            destination_failed = true;
-                            break;
-                        }
-                        let deadline = tokio::time::Instant::now() + CONTROL_TIMEOUT;
-                        let committed = loop {
-                            let response = control.call(
-                                ControlEndpoint::Finalize,
-                                source_worker.worker_id,
-                                json!({
-                                    "rid": engine_rid,
-                                    "migration_id": migration_id,
-                                    "action": "commit",
-                                    "source_dp_rank": source_dp_rank,
-                                }),
-                            ).await;
-                            match response {
-                                Ok(response) if response.success => break true,
-                                Ok(response)
-                                    if matches!(response.transfer_status.as_deref(), Some("bootstrapping" | "transferring"))
-                                        && tokio::time::Instant::now() < deadline =>
-                                {
-                                    tokio::time::sleep(COMMIT_POLL_INTERVAL).await;
-                                }
-                                _ => break false,
-                            }
-                        };
-                        if !committed {
-                            destination_failed = true;
-                            break;
-                        }
+                        // A decode result proves that SGLang has admitted the
+                        // transferred KV and started the destination request.
+                        // Source cleanup is intentionally detached from the
+                        // client stream: its pending-commit response retains
+                        // source KV until the scheduler observes NIXL success.
+                        cleanup.start_source_commit();
                         destination_ready = true;
-                        cleanup.mark_committed();
                         tracing::info!(
                             request_id = %rid,
                             %migration_id,
                             source_worker = source_worker.worker_id,
                             destination_worker = destination_worker.worker_id,
-                            "decode migration committed"
+                            "decode migration destination handoff started"
                         );
                     }
 
@@ -1170,7 +1133,6 @@ struct MigrationCleanup {
     destination_dp_rank: u32,
     active: bool,
     source_may_be_quiesced: bool,
-    committed: bool,
 }
 
 impl MigrationCleanup {
@@ -1193,7 +1155,6 @@ impl MigrationCleanup {
             destination_dp_rank,
             active: true,
             source_may_be_quiesced: false,
-            committed: false,
         }
     }
 
@@ -1205,13 +1166,20 @@ impl MigrationCleanup {
         self.source_may_be_quiesced = true;
     }
 
-    fn mark_committed(&mut self) {
-        self.committed = true;
+    fn start_source_commit(&mut self) {
         self.active = false;
+        SourceCommitCleanup {
+            control: self.control.clone(),
+            rid: self.rid.clone(),
+            migration_id: self.migration_id.clone(),
+            source_worker: self.source_worker,
+            source_dp_rank: self.source_dp_rank,
+        }
+        .spawn();
     }
 
     async fn terminate(&mut self) {
-        if !self.active || self.committed {
+        if !self.active {
             return;
         }
         let _ = self
@@ -1249,7 +1217,7 @@ impl MigrationCleanup {
 
 impl Drop for MigrationCleanup {
     fn drop(&mut self) {
-        if !self.active || self.committed {
+        if !self.active {
             return;
         }
         let control = self.control.clone();
@@ -1289,6 +1257,92 @@ impl Drop for MigrationCleanup {
                     .await;
             }
         });
+    }
+}
+
+struct SourceCommitCleanup {
+    control: Arc<dyn MigrationControl>,
+    rid: String,
+    migration_id: String,
+    source_worker: u64,
+    source_dp_rank: u32,
+}
+
+impl SourceCommitCleanup {
+    fn spawn(self) {
+        tokio::spawn(async move {
+            self.run().await;
+        });
+    }
+
+    async fn run(self) {
+        let deadline = tokio::time::Instant::now() + CONTROL_TIMEOUT;
+        let mut retry_delay = COMMIT_POLL_INTERVAL;
+        loop {
+            let response = self
+                .control
+                .call(
+                    ControlEndpoint::Finalize,
+                    self.source_worker,
+                    json!({
+                        "rid": self.rid,
+                        "migration_id": self.migration_id,
+                        "action": "commit",
+                        "source_dp_rank": self.source_dp_rank,
+                    }),
+                )
+                .await;
+            match response {
+                Ok(response) if response.success => {
+                    tracing::info!(
+                        request_id = %self.rid,
+                        migration_id = %self.migration_id,
+                        "decode migration source cleanup completed"
+                    );
+                    return;
+                }
+                Ok(response)
+                    if matches!(
+                        response.transfer_status.as_deref(),
+                        Some("bootstrapping" | "transferring")
+                    ) && tokio::time::Instant::now() < deadline =>
+                {
+                    tracing::debug!(
+                        request_id = %self.rid,
+                        migration_id = %self.migration_id,
+                        transfer_status = ?response.transfer_status,
+                        "decode migration source cleanup is pending"
+                    );
+                }
+                Ok(response) => {
+                    tracing::error!(
+                        request_id = %self.rid,
+                        migration_id = %self.migration_id,
+                        status = %response.status,
+                        error = ?response.error,
+                        "decode migration source cleanup failed after destination handoff"
+                    );
+                    return;
+                }
+                Err(error) if tokio::time::Instant::now() < deadline => {
+                    tracing::warn!(
+                        request_id = %self.rid,
+                        migration_id = %self.migration_id,
+                        "decode migration source cleanup request failed; retrying: {error:#}"
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        request_id = %self.rid,
+                        migration_id = %self.migration_id,
+                        "decode migration source cleanup exhausted retries: {error:#}"
+                    );
+                    return;
+                }
+            }
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = retry_delay.saturating_mul(2).min(Duration::from_millis(50));
+        }
     }
 }
 
@@ -1459,6 +1513,8 @@ mod tests {
         DestinationArmFailure,
         DestinationDispatchFailure,
         CommitFailure,
+        DelayedCommit,
+        EmptyFirstDestinationChunk,
         FinishAtTrigger,
         FinishDuringQuiesce,
         CancelAfterArm,
@@ -1542,7 +1598,9 @@ mod tests {
                     );
                     self.state.record("source:generate");
                     match self.scenario {
-                        Scenario::SuccessCoalesced => vec![
+                        Scenario::SuccessCoalesced
+                        | Scenario::DelayedCommit
+                        | Scenario::EmptyFirstDestinationChunk => vec![
                             output(vec![10, 11, 12], None),
                             output(vec![99], Some(crate::protocols::common::FinishReason::Stop)),
                         ],
@@ -1600,9 +1658,13 @@ mod tests {
                         Scenario::RollbackSyntheticTail => {
                             vec![Annotated::from_error("injected destination failure")]
                         }
-                        Scenario::SuccessCoalesced => vec![
+                        Scenario::SuccessCoalesced | Scenario::DelayedCommit => vec![
                             output(vec![12, 13], None),
                             output(vec![14], Some(crate::protocols::common::FinishReason::Stop)),
+                        ],
+                        Scenario::EmptyFirstDestinationChunk => vec![
+                            output(vec![12], None),
+                            output(vec![13], Some(crate::protocols::common::FinishReason::Stop)),
                         ],
                         Scenario::CommitFailure | Scenario::CancelAfterArm => {
                             vec![output(vec![12], None)]
@@ -1700,7 +1762,12 @@ mod tests {
                 }
                 if self.scenario == Scenario::FinishDuringQuiesce {
                     json!({"success": false, "status": "finished"})
-                } else if self.scenario == Scenario::SuccessCoalesced {
+                } else if matches!(
+                    self.scenario,
+                    Scenario::SuccessCoalesced
+                        | Scenario::DelayedCommit
+                        | Scenario::EmptyFirstDestinationChunk
+                ) {
                     json!({
                         "success": true,
                         "status": "prepared",
@@ -1792,6 +1859,14 @@ mod tests {
                         "status": "failed",
                         "transfer_status": "failed",
                     })
+                } else if action == "commit" && self.scenario == Scenario::DelayedCommit {
+                    self.state
+                        .source_commit_calls
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    self.state.record("source:commit-start");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    self.state.record("source:commit-complete");
+                    json!({"success": true, "status": action})
                 } else if action == "commit"
                     && self
                         .state
@@ -1805,6 +1880,9 @@ mod tests {
                         "transfer_status": "transferring",
                     })
                 } else {
+                    if action == "commit" {
+                        self.state.record("source:commit-complete");
+                    }
                     json!({"success": true, "status": action})
                 }
             } else {
@@ -1969,9 +2047,9 @@ mod tests {
         let (tokens, errors) = collect_tokens(&harness, 6).await;
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(tokens, vec![10, 11, 12, 13, 14]);
+        wait_for_event(&harness.state, "source:commit-complete").await;
         let events = harness.state.events();
         assert!(events.contains(&"source:quiesce".to_string()));
-        assert!(events.contains(&"destination:activate".to_string()));
         assert_eq!(
             harness
                 .state
@@ -1979,6 +2057,47 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn integration_splices_destination_before_delayed_source_cleanup() {
+        let harness = integration_harness(Scenario::DelayedCommit);
+        let mut stream = harness
+            .operator
+            .generate(migration_request(6), harness.source.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            stream.next().await.unwrap().data.unwrap().token_ids,
+            vec![10, 11, 12]
+        );
+
+        let destination_item = tokio::time::timeout(Duration::from_millis(50), stream.next())
+            .await
+            .expect("destination output was blocked on source cleanup")
+            .unwrap();
+        assert_eq!(destination_item.data.unwrap().token_ids, vec![13]);
+        wait_for_event(&harness.state, "source:commit-start").await;
+        assert!(
+            !harness
+                .state
+                .events()
+                .contains(&"source:commit-complete".to_string())
+        );
+
+        drop(stream);
+        wait_for_event(&harness.state, "source:commit-complete").await;
+        let events = harness.state.events();
+        assert!(!events.contains(&"source:cancel".to_string()));
+    }
+
+    #[tokio::test]
+    async fn integration_skips_a_fully_duplicate_first_destination_chunk() {
+        let harness = integration_harness(Scenario::EmptyFirstDestinationChunk);
+        let (tokens, errors) = collect_tokens(&harness, 6).await;
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(tokens, vec![10, 11, 12, 13]);
+        wait_for_event(&harness.state, "source:commit-complete").await;
     }
 
     #[tokio::test]
@@ -2121,15 +2240,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integration_source_commit_failure_terminates_request() {
+    async fn integration_source_commit_failure_does_not_revoke_destination() {
         let harness = integration_harness(Scenario::CommitFailure);
         let (tokens, errors) = collect_tokens(&harness, 4).await;
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(tokens, vec![10, 11]);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(tokens, vec![10, 11, 12]);
+        wait_for_event(&harness.state, "source:commit").await;
         let events = harness.state.events();
-        assert!(events.contains(&"destination:activate".to_string()));
-        assert!(events.contains(&"destination:abort".to_string()));
-        assert!(events.contains(&"source:cancel".to_string()));
+        assert!(!events.contains(&"destination:abort".to_string()));
+        assert!(!events.contains(&"source:cancel".to_string()));
         assert_eq!(
             harness
                 .state
@@ -2153,7 +2272,6 @@ mod tests {
         }
         assert!(events.contains(&"source:generate".to_string()));
         assert!(!events.contains(&"source:quiesce".to_string()));
-        assert!(!events.contains(&"destination:activate".to_string()));
         assert_eq!(
             harness
                 .state
