@@ -1437,6 +1437,21 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
         run_guard.finish_shutdown();
     }
 
+    fn fail_transfer_states(
+        transfer_states: &std::collections::HashMap<
+            TransferId,
+            (Arc<std::sync::Mutex<TransferState>>, Vec<BlockId>),
+        >,
+        error: &anyhow::Error,
+    ) {
+        let message = format!("block transfer failed: {error}");
+        for (state, block_ids) in transfer_states.values() {
+            let mut state = state.lock().unwrap();
+            state.mark_failed(block_ids.iter().copied());
+            state.set_error(message.clone());
+        }
+    }
+
     /// Execute the actual transfer for resolved blocks.
     ///
     /// This is async I/O work that runs concurrently with other transfers.
@@ -1472,24 +1487,30 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
         // Skip actual transfers when in test mode
         if !shared.skip_transfers {
             // Allocate destination blocks
-            let dst_blocks = shared
-                .dst_manager
-                .allocate_blocks(resolved.len())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Failed to allocate {} destination blocks", resolved.len())
-                })?;
+            let Some(dst_blocks) = shared.dst_manager.allocate_blocks(resolved.len()) else {
+                let error =
+                    anyhow::anyhow!("failed to allocate {} destination blocks", resolved.len());
+                Self::fail_transfer_states(&transfer_states, &error);
+                return Err(error);
+            };
 
             let dst_block_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
 
             // Execute transfer via leader
             let start_xfer = Instant::now();
-            let notification = shared.leader.execute_local_transfer(
+            let notification = match shared.leader.execute_local_transfer(
                 shared.src_layout,
                 shared.dst_layout,
                 src_block_ids.clone(),
                 dst_block_ids.clone(),
                 TransferOptions::default(),
-            )?;
+            ) {
+                Ok(notification) => notification,
+                Err(error) => {
+                    Self::fail_transfer_states(&transfer_states, &error);
+                    return Err(error);
+                }
+            };
 
             // `execute_local_transfer` reserves the physical/simulated
             // transfer synchronously and returns an awaitable completion
@@ -1503,7 +1524,10 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
             phase.mark_in_flight();
 
             // Wait for transfer completion
-            notification.await?;
+            if let Err(error) = notification.await {
+                Self::fail_transfer_states(&transfer_states, &error);
+                return Err(error);
+            }
             phase.mark_settling();
             let end_xfer = Instant::now();
 
@@ -2050,6 +2074,8 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
 
 #[cfg(test)]
 mod tests {
+    use futures::FutureExt;
+
     use super::*;
 
     #[test]
@@ -2126,6 +2152,50 @@ mod tests {
             .await
             .expect("test semaphore should remain open");
         BatchPhaseGuard::starting(tracker, permit)
+    }
+
+    #[test]
+    fn block_transfer_failure_finalizes_queued_and_in_flight_handles() {
+        let mut transfer_states = std::collections::HashMap::new();
+        let mut handles = Vec::new();
+
+        for (block_id, status) in [
+            (7, TransferStatus::Queued),
+            (11, TransferStatus::Transferring),
+        ] {
+            let transfer_id = TransferId::new();
+            let (mut state, handle) = TransferState::new(transfer_id, vec![block_id]);
+            state.add_passed([block_id]);
+            state.set_status(status);
+            if status == TransferStatus::Transferring {
+                state.mark_in_flight([block_id]);
+            }
+            let state = Arc::new(std::sync::Mutex::new(state));
+            transfer_states.insert(transfer_id, (state.clone(), vec![block_id]));
+            handles.push((block_id, state, handle));
+        }
+
+        let error = anyhow::anyhow!("injected block transfer failure");
+        BlockTransferExecutor::<crate::G1, crate::G2>::fail_transfer_states(
+            &transfer_states,
+            &error,
+        );
+
+        for (block_id, state, mut handle) in handles {
+            let result = handle
+                .wait()
+                .now_or_never()
+                .expect("failed transfer handle must be ready")
+                .expect("failed transfer must publish a result");
+            assert_eq!(result.status, TransferStatus::Failed);
+            assert_eq!(result.failed_blocks, vec![block_id]);
+            assert!(result.completed_blocks.is_empty());
+            assert_eq!(
+                result.error.as_deref(),
+                Some("block transfer failed: injected block transfer failure")
+            );
+            assert!(state.lock().unwrap().in_flight.is_empty());
+        }
     }
 
     #[tokio::test]
