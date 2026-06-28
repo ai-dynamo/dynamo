@@ -129,6 +129,8 @@ func NewNodeController(
 
 // Run starts the local pod informers and processes checkpoint/restore events.
 func (w *NodeController) Run(ctx context.Context) error {
+	// Seed the agent logger onto ctx so the capture path resolves it via log.FromContext.
+	ctx = logr.NewContext(ctx, w.log)
 	w.log.Info("Starting snapshot node controller",
 		"node", w.config.NodeName,
 		"checkpoint_source_label", snapshotprotocol.CheckpointSourceLabel,
@@ -238,12 +240,16 @@ func (w *NodeController) Run(ctx context.Context) error {
 	if _, err := sourceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			if pod, ok := podFromInformerObj(obj); ok {
-				w.reconcileSourcePod(ctx, pod)
+				if err := w.reconcileSourcePod(ctx, pod); err != nil {
+					w.log.Error(err, "Failed to reconcile source pod", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+				}
 			}
 		},
 		UpdateFunc: func(_, newObj interface{}) {
 			if pod, ok := podFromInformerObj(newObj); ok {
-				w.reconcileSourcePod(ctx, pod)
+				if err := w.reconcileSourcePod(ctx, pod); err != nil {
+					w.log.Error(err, "Failed to reconcile source pod", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+				}
 			}
 		},
 	}); err != nil {

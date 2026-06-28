@@ -19,12 +19,6 @@ const (
 	// informer keys on CaptureEligibleLabel so only gate-validated pods drive the capture path.
 	CaptureEligibleLabel = "nvidia.com/snapshot-capture-eligible"
 
-	// SnapshotContentLabel is a back-reference the node agent stamps on the source pod at
-	// capture-begin, naming the cluster-scoped PodSnapshotContent work order capturing it. It is only
-	// set when the content name is a valid label value (it is under the podsnapshotcontent-<uid>
-	// convention, ~55 chars).
-	SnapshotContentLabel = "nvidia.com/snapshot-content"
-
 	// Restore pods carry CheckpointIDLabel without CheckpointSourceLabel.
 	CheckpointIDLabel  = "nvidia.com/snapshot-checkpoint-id"
 	RestoreTargetLabel = "nvidia.com/snapshot-is-restore-target"
