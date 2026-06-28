@@ -5,8 +5,8 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
-source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+source "$SCRIPT_DIR/../../../../common/gpu_utils.sh"
+source "$SCRIPT_DIR/../../../../common/launch_utils.sh"
 
 # Default values
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
@@ -127,7 +127,7 @@ fi
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
 VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 env $DEVICE_AFFINITY_ENV=$DYN_ENCODE_WORKER_GPU \
-python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
+python -m dynamo.vllm --enable-multimodal --disaggregation-mode encode --enable-mm-embeds --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device": "'"$DEVICE_PLATFORM"'"}' --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
 
 # Start prefill worker (also handles encode routing via --route-to-encoder)
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (GPU mem: $DYN_PREFILL_GPU_MEM)..."

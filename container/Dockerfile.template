@@ -31,6 +31,9 @@
 
 # --- SGLang Stages
 {% if framework == "sglang" %}
+    {% if device == "xpu" %}
+        {% include "templates/sglang_xpu_framework.Dockerfile" %}
+    {% endif %}
     # SGLang builds directly from its upstream runtime image.
     {% include "templates/sglang_runtime.Dockerfile" %}
 {% else %}
@@ -46,10 +49,7 @@
 
 # --- TRTLLM Stages
 {% if framework == "trtllm" %}
-    {% include "templates/trtllm_framework.Dockerfile" %}
-    {% if target != "framework" %}
-        {% include "templates/trtllm_runtime.Dockerfile" %}
-    {% endif %}
+    {% include "templates/trtllm_runtime.Dockerfile" %}
 {% else %}
 # --- No TRTLLM stages included
 {% endif %}

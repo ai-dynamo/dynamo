@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Prometheus
+subtitle: TensorRT-LLM exposes request, latency, and KV cache transfer metrics through Dynamo's Prometheus /metrics endpoint.
 ---
 
 For general TensorRT-LLM features and configuration, see the [Reference Guide](trtllm-reference-guide.md).
@@ -156,7 +157,7 @@ Metric name constants are defined in `lib/runtime/src/metrics/prometheus_names.r
 
 These metrics are only recorded in disaggregated (prefill + decode) deployments when a KV cache transfer actually occurs. They are sourced from TensorRT-LLM's `RequestPerfMetrics.timing_metrics`.
 
-- `trtllm_kv_transfer_success_total` (Counter) — Total number of successful KV cache transfers (recorded on prefill side)
+- `trtllm_kv_transfer_success_total` (Counter) — Total number of successful KV cache transfers (recorded on the decode worker, when it observes non-zero KV-transfer timing in `RequestPerfMetrics.timing_metrics`). Grows in lock-step with the `_count` of the sibling `trtllm_kv_transfer_latency_seconds` / `trtllm_kv_transfer_bytes` / `trtllm_kv_transfer_speed_gb_s` histograms for the same transfer events.
   - Labels: `model_name`, `disaggregation_mode`, `engine_type`
 - `trtllm_kv_transfer_latency_seconds` (Histogram) — KV cache transfer latency per request in seconds
   - Labels: `model_name`, `disaggregation_mode`, `engine_type`

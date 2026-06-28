@@ -11,7 +11,7 @@ We compare four Dynamo + TRTLLM deployment modes on **6x GB200 (24 GPU)**:
 
 | Mode | Routing | Speculative | KV Cache Offloading? | Concurrency | GPUs |
 |------|---------|-------------|----------------------|-------------|------|
-| **Disaggregated** | KV-aware | Eagle3 | ✅ (TRTLLM-native offload) | 32 | 3x TEP4 prefill + 3x DEP4 decode |
+| **Disaggregated** | KV-aware | Eagle3 | ✅ (TRTLLM-native offload) | 32 | 3x DEP4 prefill + 3x TEP4 decode |
 | **Aggregated** | KV-aware | Eagle3 | ❌ | 24 | 3x TEP=8 |
 | **Aggregated** | Round-robin | Eagle3 | ❌ | 24 | 3x TEP=8 |
 | **Aggregated** | Round-robin | ❌ | ❌ | 8 | 3x TEP=8 |

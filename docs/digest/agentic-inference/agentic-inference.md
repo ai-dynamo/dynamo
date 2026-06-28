@@ -1,13 +1,13 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Full-Stack Optimizations for Agentic Inference with Dynamo
+sidebar-title: Full-Stack Optimizations for Agentic Inference
 subtitle: "Ishan Dhanani and Matej Kosec — March 2026"
 description: "How Dynamo optimizes for agentic workloads at three layers: frontend API, router, and KV cache management."
 keywords: agentic inference, KV cache, prefix caching, agent hints, disaggregated serving, Dynamo
-last-updated: March 10, 2026
+last-updated: June 12, 2026
 ---
-
-# Full-Stack Optimizations for Agentic Inference with Dynamo
 
 Coding agents are starting to write production code at scale. [Stripe’s agents generate 1,300+ PRs per week](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents). [Ramp attributes 30% of merged PRs to agents](https://www.infoq.com/news/2026/01/ramp-coding-agent-platform/). [Spotify reports 650+ agent-generated PRs per month](https://engineering.atspotify.com/2025/11/spotifys-background-coding-agent-part-1). Tools like Claude Code and Codex make hundreds of API calls per coding session, each carrying the full conversation history. Behind every one of these workflows is an inference stack under significant KV cache pressure.
 
@@ -51,7 +51,7 @@ Agent harnesses are increasingly adopting `v1/responses` and `v1/messages` over 
 </tr>
 </table>
 
-We have also invested in day-0 tool call and reasoning parsing support for various open-source models. If you find that a model is not supported, please [open an issue](https://github.com/ai-dynamo/dynamo/issues) or use the [tool-call-parser-generator](https://github.com/ai-dynamo/dynamo/blob/main/.agents/skills/tool-parser-generator/SKILL.md) skill to generate it with your harness of choice.
+We have also invested in day-0 tool call and reasoning parsing support for various open-source models. If you find that a model is not supported, please [open an issue](https://github.com/ai-dynamo/dynamo/issues) or use the tool-call-parser-generator skill in [ai-dynamo/frontend-crates](https://github.com/ai-dynamo/frontend-crates) to generate it with your harness of choice.
 
 ### Agent Hints: The Harness-Orchestrator Interface
 
@@ -71,10 +71,6 @@ Dynamo’s new agent hints extension was designed to bridge this gap. It allows 
       "osl": 256,
       "speculative_prefill": true,
       "priority": 10
-    },
-    "cache_control": {
-      "type": "ephemeral",
-      "ttl": "1h"
     }
   }
 }
@@ -86,7 +82,7 @@ The `agent_hints` fields:
 - **`osl`** (output sequence length) is the harness's estimate of how many tokens this request will generate. The router uses this to gauge how long a worker will be occupied, which improves load balancing. A harness can learn this over time by tracking average output lengths per tool call type.
 - **`speculative_prefill`** signals the orchestrator to begin caching this request's prefix on a likely worker before the full request is ready. This is useful when the harness knows a tool call is about to return and wants to warm the cache ahead of time.
 
-The `cache_control` field will look familiar to anyone who has used Anthropic's prompt caching API. It tells the orchestrator to pin the computed prefix on the worker for the specified TTL, protecting it from eviction during tool call gaps. Currently `ephemeral` is the only supported type (to match Anthropic's API). We discuss how this works in the cache retention section below. You can find complete documentation on agent hints [here](../../components/frontend/nvext.md#cache-control).
+As of current Dynamo, `nvext.cache_control` is not a supported cache-pinning request extension. Anthropic-format requests may carry `cache_control` annotations for API compatibility, but Dynamo does not treat them as self-hosted TTL pinning directives. The supported public serving controls live under `agent_hints`; see the [NVIDIA Request Extensions reference](../../components/frontend/nvext.md#agent-hints).
 
 ## Layer 2: The Router
 
@@ -164,19 +160,19 @@ Blocks follow a write-through path: when a worker computes KV for a prefix, the 
 
 This directly solves the subagent cold-start problem. When the lead agent computes tool definitions and system prompt, those blocks write through to shared storage. When subagent 1 spawns on a different worker, the router queries the Flash Indexer, finds the blocks in shared storage, and the worker loads them via NIXL (RDMA read) instead of recomputing from scratch. Subagent 2 does the same. Four redundant prefill computations become one compute and three loads. The same mechanism addresses cache coherence in disaggregated prefill-decode serving. In disagg mode, the prefill worker computes KV and transfers it to the decode worker via NIXL. The decode worker generates tokens, producing new KV state. On the next turn, a prefill worker needs both the original prefix and the generated tokens from turn 1, but those live only on the decode worker. With shared storage, the decode worker writes its new blocks to the common tier and any prefill worker can fetch them on the next turn.
 
-Multi-tier storage solves sharing and persistence, but blocks still arrive on GPU only after the request hits the worker. The missing piece for agentic systems is prefetch: the harness can use historical timing data to predict when an agent's tool call might return, which means it knows which blocks will be needed and when. We are building prefetch hooks so the harness can signal "bring these blocks from storage to GPU ahead of the next request." Combined with the retention APIs (below), this gives the harness full lifecycle control: pin blocks to prevent eviction, set priority to control eviction ordering, and prefetch blocks proactively before they are needed.
+Multi-tier storage solves sharing and persistence, but blocks still arrive on GPU only after the request hits the worker. The missing piece for agentic systems is prefetch: the harness can use historical timing data to predict when an agent's tool call might return, which means it knows which blocks will be needed and when. We are building prefetch hooks so the harness can signal "bring these blocks from storage to GPU ahead of the next request." Combined with priority metadata today and richer retention APIs in the future, this gives the harness a path toward full lifecycle control: retain high-value blocks longer, control eviction ordering, and prefetch blocks proactively before they are needed.
 
 ![During tool calls, KV blocks offload to host memory and storage, then prefetch back to GPU before the next LLM call.](./tool-call-offload-prefetch.svg)
 
 ### Selective Cache Retention
 
-Making blocks globally available solves the sharing problem, but does not solve eviction. SGLang and vLLM both support priority-based eviction via a priority heap where the harness assigns a numeric priority per request and lower-priority blocks are evicted first. TensorRT-LLM takes this further with `TokenRangeRetentionConfig` (designed and implemented by a Dynamo team member[@jthomson04](https://github.com/jthomson04)) which allows per-region control within a single request.
+Making blocks globally available solves the sharing problem, but does not solve eviction. SGLang currently exposes priority-based radix eviction, where the harness assigns a numeric priority per request and lower-priority blocks are evicted first. TensorRT-LLM takes this further with `TokenRangeRetentionConfig` (designed and implemented by a Dynamo team member [@jthomson04](https://github.com/jthomson04)), which allows per-region control within a single request.
 
-A request carries zero or more directives. Blocks without directives follow the default LRU path with zero overhead. The evictor becomes a two-structure system: an LRU free list for unprioritized blocks (O(1), unchanged) and a priority queue for annotated blocks. The harness can express "system prompt blocks are evicted last (priority: 100); conversation context survives a 30-second tool call (duration: 45s); decode tokens are first to go (priority: 1)" without the engine needing to understand why.
+The general design pattern is to attach zero or more retention directives to a request or token range. Blocks without directives follow the default LRU path with zero overhead. The evictor becomes a two-structure system: an LRU free list for unprioritized blocks (O(1), unchanged) and a priority queue for annotated blocks. Dynamo's public agent surface exposes the priority part today through `nvext.agent_hints.priority`; TTL or per-token-range retention directives are future API work.
 
-Anthropic's prompt caching lets you mark prefixes as cacheable on their infrastructure. Dynamo's `cache_control` API brings the same semantics to self-hosted inference. When a request includes `cache_control: { type: "ephemeral", ttl: "1h" }`, the router pins the matching prefix nodes in the worker's radix tree for that TTL, protecting them from eviction in the worker's L2 storage.
+Anthropic's prompt caching lets you mark prefixes as cacheable on their infrastructure. Dynamo does not currently expose the same semantics as a self-hosted `nvext.cache_control` TTL pinning API. The supported production path is priority-driven: `nvext.agent_hints.priority` can influence router queueing and, when the backend enables it, engine scheduling and priority-aware cache eviction. SGLang can additionally tag ordinary evictable radix KV by session.
 
-The next step is connecting retention with the distributed cache. Today, retention directives apply to a single worker's local cache. When a block is pinned on worker A but the next request routes to worker B, the pin does not follow. Extending retention semantics across HiCache/KVBM's shared storage tier means the harness can pin a block once and have it survive across workers: the priority and TTL metadata travel with the block through the write-through path, and any worker that loads the block from shared storage inherits the retention policy. Combined with the prefetch hooks described above, this gives the harness end-to-end lifecycle control across the full memory hierarchy.
+The next step is connecting richer retention directives with the distributed cache. Today, priority and session metadata are local serving signals, not a cluster-wide per-block TTL lease. Extending retention semantics across HiCache/KVBM's shared storage tier would let the harness mark a block once and have its priority, lifetime, and placement intent travel with it through the write-through path. Combined with the prefetch hooks described above, this gives the harness end-to-end lifecycle control across the full memory hierarchy.
 
 ### Agent Lifecycle Awareness
 
@@ -184,7 +180,7 @@ Consider a typical Claude Code session. The lead agent runs for 20+ turns, accum
 
 ![Lead agent conversation flow branches to a sub-agent. The sub-agent's ephemeral KV is evicted on session end.](./subagent-lifecycle-vertical.svg)
 
-The retention primitives from above (priority, TTL, token ranges) give us the building blocks. What is missing is the ability to associate them with sessions. If the harness can tag a subagent's requests as belonging to a session and mark that session's KV as ephemeral, the evictor can target those blocks first and skip writing them to shared storage entirely. When the subagent terminates, its session's blocks are the first to reclaim. The same mechanism applies to thinking tokens: the engine can detect `<think>` boundaries during generation and tag those blocks as ephemeral at insertion time, so they skip L2 write-back and evict before normal blocks without any external signal. The design space here is wide: harness-driven session tagging, engine-native semantic detection, hybrid approaches that combine both. We are actively exploring multiple directions and expect the right answer will vary by workload and framework.
+The retention primitives above give us the building blocks: priority today, and TTL or token-range directives as future extensions. What is missing is the ability to associate them with sessions. If the harness can tag a subagent's requests as belonging to a session and mark that session's KV as ephemeral, the evictor can target those blocks first and skip writing them to shared storage entirely. When the subagent terminates, its session's blocks are the first to reclaim. The same mechanism applies to thinking tokens: the engine can detect `<think>` boundaries during generation and tag those blocks as ephemeral at insertion time, so they skip L2 write-back and evict before normal blocks without any external signal. The design space here is wide: harness-driven session tagging, engine-native semantic detection, hybrid approaches that combine both. We are actively exploring multiple directions and expect the right answer will vary by workload and framework.
 
 ## Closing the Gap
 

@@ -97,7 +97,8 @@ def compare_agg_and_disagg_with_replay(
     """Run both agg and disagg replay optimizations on the same spec and pick the winner.
 
     The spec must populate `spec.engine.baseEngineArgs` (agg path) plus
-    `basePrefillEngineArgs` / `baseDecodeEngineArgs` (disagg path).
+    `basePrefillEngineArgs` / `baseDecodeEngineArgs` (disagg path) with
+    JSON-like engine-arg input dictionaries.
     """
     agg_result = optimize_dense_agg_with_replay(spec)
     disagg_result = optimize_dense_disagg_with_replay(spec)

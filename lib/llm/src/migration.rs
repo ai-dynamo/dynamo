@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::sync::Arc;
 
@@ -12,7 +13,10 @@ use crate::{
     model_card::ModelDeploymentCard,
     protocols::{
         TokenIdType,
-        common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+        common::{
+            extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+            llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+        },
     },
 };
 
@@ -24,21 +28,30 @@ use dynamo_runtime::pipeline::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
-/// Access to the generated token IDs of a response, so migration can
-/// append already-delivered tokens onto the replayed request.
+/// Accessors the migration RetryManager needs from a response chunk.
+/// `token_ids` lets it replay already-delivered tokens; `worker_trace_link`
+/// lets it stamp the failed worker's span onto the next attempt's
+/// `migration_link`.
 pub(crate) trait HasTokenIds {
     fn token_ids(&self) -> &[TokenIdType];
+    fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink>;
 }
 
 impl HasTokenIds for BackendOutput {
     fn token_ids(&self) -> &[TokenIdType] {
         &self.token_ids
     }
+    fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
+        self.worker_trace_link.as_ref()
+    }
 }
 
 impl HasTokenIds for LLMEngineOutput {
     fn token_ids(&self) -> &[TokenIdType] {
         &self.token_ids
+    }
+    fn worker_trace_link(&self) -> Option<&crate::protocols::common::preprocessor::TraceLink> {
+        self.worker_trace_link.as_ref()
     }
 }
 
@@ -136,14 +149,20 @@ where
         let (preprocessed_request, context) = request.transfer(());
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
+        let session_affinity = context
+            .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .map_err(Error::msg)?
+            .map(|session_id| session_id.as_ref().clone());
         let retry_manager = RetryManager::build(
             engine_ctx,
+            context.metadata().clone(),
             preprocessed_request,
             next,
             self.migration_limit,
             self.max_seq_len,
             self.model_name.clone(),
             self.metrics.clone(),
+            session_affinity,
         )
         .await?;
         let response_stream = stream::unfold(retry_manager, move |mut retry_manager| async move {
@@ -162,27 +181,35 @@ where
     Resp: Data + HasTokenIds,
 {
     context: Arc<dyn AsyncEngineContext>,
+    metadata: BTreeMap<String, String>,
     request: PreprocessedRequest,
+    session_affinity: Option<SessionAffinityId>,
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     next_stream: Option<ManyOut<Annotated<Resp>>>,
     retries_left: u32,
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
+    /// Latest worker span pointer seen on the active stream; stamped as
+    /// `migration_link` on the next retry. Populated by `track_response`.
+    last_worker_link: Option<crate::protocols::common::preprocessor::TraceLink>,
 }
 
 impl<Resp> RetryManager<Resp>
 where
     Resp: Data + HasTokenIds,
 {
+    #[allow(clippy::too_many_arguments)]
     pub async fn build(
         context: Arc<dyn AsyncEngineContext>,
+        metadata: BTreeMap<String, String>,
         preprocessed_request: PreprocessedRequest,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
         mut retries_left: u32,
         max_seq_len: Option<u32>,
         model_name: Arc<String>,
         metrics: Arc<Metrics>,
+        session_affinity: Option<SessionAffinityId>,
     ) -> Result<Self> {
         // Disable migration for structured-output (guided-decoding) requests.
         // Inference backends initialize the guided-decoding FSM (finite state machine) fresh
@@ -214,13 +241,16 @@ where
         }
         let mut slf = Self {
             context,
+            metadata,
             request: preprocessed_request,
+            session_affinity,
             next_generate: next,
             next_stream: None,
             retries_left: retries_left + 1, // +1 to account for the initial attempt
             max_seq_len,
             model_name,
             metrics,
+            last_worker_link: None,
         };
         slf.new_stream().await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
@@ -260,7 +290,21 @@ where
         let mut response_stream: Option<Result<ManyOut<Annotated<Resp>>>> = None;
         while self.retries_left > 0 {
             self.retries_left -= 1;
-            let request = Context::with_id(self.request.clone(), self.context.id().to_string());
+            // Once any chunks have arrived from a previous attempt, stamp
+            // that worker's span as `migration_link` so the next worker's
+            // span renders an OTel Link back to it. Guarded so the initial
+            // attempt doesn't clobber a `migration_link` set upstream.
+            if let Some(link) = self.last_worker_link.as_ref() {
+                self.request.migration_link = Some(link.clone());
+            }
+            let mut request = Context::with_id_and_metadata(
+                self.request.clone(),
+                self.context.id().to_string(),
+                self.metadata.clone(),
+            );
+            if let Some(session_affinity) = self.session_affinity.as_ref() {
+                request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
+            }
             self.context.link_child(request.context());
             if self.context.is_stopped() || self.context.is_killed() {
                 tracing::debug!("Abort creating new stream after context is stopped or killed");
@@ -303,6 +347,13 @@ where
             Some(output) => output,
             None => return,
         };
+        // Capture the worker's engine.generate span pointer so a future
+        // migration retry can render an OTel Link back to it. The adapter
+        // stamps this on the first non-empty chunk; subsequent chunks may
+        // also carry it. Keep the most-recently-seen value.
+        if let Some(link) = llm_engine_output.worker_trace_link() {
+            self.last_worker_link = Some(link.clone());
+        }
         let token_ids = llm_engine_output.token_ids();
         if self.exceed_max_seq_len(token_ids.len() as u32) {
             return;
@@ -384,8 +435,11 @@ mod tests {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         })
     }
 
@@ -395,12 +449,19 @@ mod tests {
         Success,
         /// Fails on first call with NoResponders error, then succeeds on subsequent calls
         FailThenSuccess,
+        FailThenSuccessWithAffinity,
         /// Succeeds initially, fails mid-stream with specific error, then succeeds on retry
-        MidStreamFail { fail_after: usize },
+        MidStreamFail {
+            fail_after: usize,
+        },
         /// Succeeds initially, fails mid-stream with specific error, then always fails on retry attempts
-        MidStreamFailAlways { fail_after: usize },
+        MidStreamFailAlways {
+            fail_after: usize,
+        },
         /// Succeeds initially, fails mid-stream, then always fails with stream error on retry attempts
-        MidStreamFailAlwaysStreamError { fail_after: usize },
+        MidStreamFailAlwaysStreamError {
+            fail_after: usize,
+        },
         /// Always fails with NoResponders error (same as FailThenSuccess first call)
         AlwaysFail,
     }
@@ -441,6 +502,12 @@ mod tests {
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<BackendOutput>>> {
             let call_num = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if matches!(self.behavior, MockBehavior::FailThenSuccessWithAffinity) {
+                let actual = request
+                    .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+                    .expect("session affinity context missing after migration wrapper");
+                assert_eq!(actual.as_str(), "session-123");
+            }
             let (preprocessed_request, context) = request.transfer(());
 
             // Assert that the context_id matches the expected one
@@ -476,7 +543,7 @@ mod tests {
                     self.send_responses(responses_already_generated, self.num_responses)
                         .await
                 }
-                MockBehavior::FailThenSuccess => {
+                MockBehavior::FailThenSuccess | MockBehavior::FailThenSuccessWithAffinity => {
                     if call_num == 0 {
                         // First call - return "No responders available" error to trigger retry
                         return Err(anyhow::anyhow!(
@@ -692,12 +759,14 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             0,
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -717,6 +786,30 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
+    #[tokio::test]
+    async fn test_migration_preserves_session_affinity_across_retry() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::FailThenSuccessWithAffinity,
+            1,
+            100,
+            context_id.clone(),
+        ));
+        let calls = mock_engine.call_count.clone();
+        let mut request =
+            Context::with_id_and_metadata(create_mock_request(1), context_id, BTreeMap::new());
+        request.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new("session-123"),
+        );
+
+        let migration = Migration::new(1, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+        let mut stream = migration.generate(request, mock_engine).await.unwrap();
+        while stream.next().await.is_some() {}
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     /// Test case 2: New request migration
@@ -743,12 +836,14 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -795,12 +890,14 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -848,12 +945,14 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let retry_manager_result = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await;
 
@@ -888,12 +987,14 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         ) // 3 retries
         .await
         .expect("Failed to build RetryManager");
@@ -947,12 +1048,14 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         ) // 3 retries
         .await
         .expect("Failed to build RetryManager");
@@ -1011,12 +1114,14 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let retry_manager_result = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await;
 
@@ -1090,12 +1195,14 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3, // migration_limit=3 — should be ignored for guided-decoding requests
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1167,12 +1274,14 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
             Some(5), // prompt(3) + 3 generated = 6 > 5 → disables migration
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1238,12 +1347,14 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
             Some(5), // prompt(3) + 2 generated = 5 == max_seq_len → still migratable
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1303,12 +1414,14 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             3,
             Some(2), // prompt(3) > max_seq_len(2) → migration disabled at build time
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1350,6 +1463,7 @@ mod tests {
         let context_id = uuid::Uuid::new_v4().to_string();
 
         struct LlmEngineMock(String);
+
         #[async_trait]
         impl
             AsyncEngine<
@@ -1381,12 +1495,14 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut retry_manager = RetryManager::build(
             ctx,
+            BTreeMap::new(),
             request,
             next_generate,
             1,
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics,
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1400,5 +1516,158 @@ mod tests {
             retry_manager.request.token_ids,
             vec![1, 2, 3, 200, 201, 202]
         );
+    }
+
+    /// 2-hop migration: A → fail → B → fail → C. Each retry's
+    /// `migration_link` must point at the *latest* failed worker, not the
+    /// original.
+    #[tokio::test]
+    async fn test_retry_manager_propagates_migration_link_over_two_hops() {
+        use crate::protocols::common::preprocessor::TraceLink;
+        use std::sync::Mutex;
+
+        dynamo_runtime::logging::init();
+
+        struct LinkingMockEngine {
+            captured_links: Arc<Mutex<Vec<Option<TraceLink>>>>,
+            worker_links: Vec<TraceLink>,
+            context_id: String,
+            call_count: Arc<AtomicU32>,
+        }
+
+        #[async_trait]
+        impl
+            AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+                anyhow::Error,
+            > for LinkingMockEngine
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let call_num = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
+                let (preprocessed_request, _ctx) = request.transfer(());
+                self.captured_links
+                    .lock()
+                    .unwrap()
+                    .push(preprocessed_request.migration_link.clone());
+
+                let (tx, rx) = mpsc::channel(1);
+                let context_id = self.context_id.clone();
+                let fail_this_call = call_num < 2;
+                let link = self.worker_links.get(call_num).cloned();
+                let responses_already_generated =
+                    preprocessed_request.token_ids.len().saturating_sub(3);
+                let total_chunks: usize = 6;
+
+                tokio::spawn(async move {
+                    let start = responses_already_generated;
+                    let end = if fail_this_call {
+                        (start + 2).min(total_chunks)
+                    } else {
+                        total_chunks
+                    };
+                    for i in start..end {
+                        let mut out = create_mock_output(100 + 1 + i as u32);
+                        if i == start
+                            && let (Some(link), Some(data)) = (&link, out.data.as_mut())
+                        {
+                            data.worker_trace_link = Some(link.clone());
+                        }
+                        if tx.send(out).await.is_err() {
+                            return;
+                        }
+                    }
+                    if fail_this_call {
+                        let err = Annotated::from_err(
+                            DynamoError::builder()
+                                .error_type(ErrorType::Disconnected)
+                                .message("Stream ended before generation completed")
+                                .build(),
+                        );
+                        let _ = tx.send(err).await;
+                    }
+                });
+
+                let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+                let ctx = Arc::new(Controller::new(context_id));
+                Ok(dynamo_runtime::pipeline::ResponseStream::new(
+                    Box::pin(stream),
+                    ctx,
+                ))
+            }
+        }
+
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let request = create_mock_request(6);
+        let captured = Arc::new(Mutex::new(Vec::<Option<TraceLink>>::new()));
+        let link_a = TraceLink {
+            trace_id: "0123456789abcdef0123456789abcdef".to_string(),
+            span_id: "aaaaaaaaaaaaaaaa".to_string(),
+        };
+        let link_b = TraceLink {
+            trace_id: "0123456789abcdef0123456789abcdef".to_string(),
+            span_id: "bbbbbbbbbbbbbbbb".to_string(),
+        };
+
+        let engine = Arc::new(LinkingMockEngine {
+            captured_links: captured.clone(),
+            worker_links: vec![link_a.clone(), link_b.clone()],
+            context_id: context_id.clone(),
+            call_count: Arc::new(AtomicU32::new(0)),
+        });
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            engine;
+
+        let ctx = Arc::new(Controller::new(context_id));
+        let metrics = Arc::new(Metrics::new());
+        let mut retry_manager = RetryManager::build(
+            ctx,
+            BTreeMap::new(),
+            request,
+            next_generate,
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+            None,
+        )
+        .await
+        .expect("Failed to build RetryManager");
+
+        let mut responses = Vec::new();
+        while let Some(response) = retry_manager.next().await {
+            responses.push(response);
+        }
+
+        assert_eq!(responses.len(), 6, "expected all 6 chunks across 2 hops");
+        for response in &responses {
+            assert!(response.err().is_none(), "no chunk should be an error");
+        }
+
+        let links = captured.lock().unwrap();
+        assert_eq!(
+            links.len(),
+            3,
+            "engine.generate must be called 3 times for a 2-hop migration"
+        );
+        assert!(
+            links[0].is_none(),
+            "first attempt has no predecessor — migration_link must be None"
+        );
+        assert_eq!(
+            links[1].as_ref(),
+            Some(&link_a),
+            "second attempt must link back to worker A"
+        );
+        assert_eq!(
+            links[2].as_ref(),
+            Some(&link_b),
+            "third attempt must link back to worker B (latest worker, not original)"
+        );
+
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 2);
     }
 }

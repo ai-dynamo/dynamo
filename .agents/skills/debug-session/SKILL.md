@@ -7,6 +7,11 @@ disable-model-invocation: true
 
 # Start Debug Session
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 Create a structured debugging session for an issue in the Dynamo ecosystem.
 
 ## Step 1: Get the Bug Report

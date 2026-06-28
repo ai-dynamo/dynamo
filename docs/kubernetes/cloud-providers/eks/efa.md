@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: EFA (RDMA over AWS Fabric) on EKS
+subtitle: Enables GPU-Direct RDMA over AWS Elastic Fabric Adapter so disaggregated workers transfer KV cache across EKS nodes without TCP.
 ---
-
-# EFA (RDMA over AWS Fabric) on EKS
 
 This guide covers setting up RDMA over AWS Elastic Fabric Adapter (EFA) on EKS for high-performance disaggregated inference with Dynamo. EFA is the only RDMA fabric available on AWS — InfiniBand and RoCE are not offered. With EFA, Dynamo's prefill and decode workers transfer KV cache directly between GPUs across nodes via GPU-Direct RDMA, bypassing CPU and TCP/IP stacks.
 
@@ -99,11 +98,16 @@ If you are on an older kernel (< 5.12) and the host doesn't already have `efa_nv
 Dynamo's image build is two steps: `container/render.py` writes a Dockerfile for the chosen framework + target, then `docker build` consumes it. Passing `--make-efa` to `render.py` appends the AWS EFA installer stage from [`container/templates/aws.Dockerfile`](../../../../container/templates/aws.Dockerfile), which defines a stage named `aws` on top of `runtime`. **You must pass `--target aws` to `docker build`** — without it, `docker build` stops at the `runtime` stage and you get an image without EFA. See [`container/README.md`](../../../../container/README.md) for the full build workflow.
 
 ```bash
-# vLLM EFA image (amd64)
+# vLLM EFA image (amd64 or arm64 — vllm/vllm-openai is multi-arch)
 container/render.py --framework=vllm --target=runtime --platform=linux/amd64 \
     --make-efa --output-short-filename
 docker build --target aws -t dynamo:latest-vllm-runtime-efa \
     -f container/rendered.Dockerfile .
+
+container/render.py --framework=vllm --target=runtime --platform=linux/arm64 \
+    --make-efa --output-short-filename
+docker buildx build --platform=linux/arm64 --target aws \
+    -t dynamo:latest-vllm-runtime-efa-arm64 -f container/rendered.Dockerfile .
 
 # SGLang EFA image (amd64 or arm64)
 container/render.py --framework=sglang --target=runtime --platform=linux/amd64 \
@@ -116,11 +120,17 @@ container/render.py --framework=sglang --target=runtime --platform=linux/arm64 \
 docker buildx build --platform=linux/arm64 --target aws \
     -t dynamo:latest-sglang-runtime-efa-arm64 -f container/rendered.Dockerfile .
 
-# TRT-LLM EFA image (amd64 only — TRT-LLM base image has no arm64 variant)
+# TRT-LLM EFA image (amd64 or arm64 — upstream nvcr.io/nvidia/tensorrt-llm/release
+# publishes both variants; arm64 is what you want for GB200 / Grace EFA nodes)
 container/render.py --framework=trtllm --target=runtime --platform=linux/amd64 \
     --cuda-version=13.1 --make-efa --output-short-filename
 docker build --target aws -t dynamo:latest-trtllm-runtime-efa \
     -f container/rendered.Dockerfile .
+
+container/render.py --framework=trtllm --target=runtime --platform=linux/arm64 \
+    --cuda-version=13.1 --make-efa --output-short-filename
+docker buildx build --platform=linux/arm64 --target aws \
+    -t dynamo:latest-trtllm-runtime-efa-arm64 -f container/rendered.Dockerfile .
 ```
 
 `--output-short-filename` writes to `container/rendered.Dockerfile`; omit it to get the long auto-generated filename (e.g., `vllm-runtime-cuda12.9-amd64-rendered.Dockerfile`) — useful when keeping several rendered Dockerfiles side by side.

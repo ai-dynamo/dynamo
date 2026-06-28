@@ -7,6 +7,10 @@ subtitle: Get a Dynamo OpenAI-compatible endpoint running in a container in abou
 
 {/* Looking for the project README? See /README.md at the repo root: https://github.com/ai-dynamo/dynamo/blob/main/README.md */}
 
+<p align="left">
+  <a href="./quickstart.zh-CN.mdx" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
+
 ## Choose Your Path
 
 <CardGroup cols={4}>
@@ -17,7 +21,7 @@ subtitle: Get a Dynamo OpenAI-compatible endpoint running in a container in abou
     Full walkthrough — PyPI, configuration.
   </Card>
   <Card title="Kubernetes" icon="regular cubes" href="/dynamo/dev/getting-started/kubernetes-deployment">
-    Production multi-node clusters.
+    Kubernetes-native production path.
   </Card>
   <Card title="Build from Source" icon="regular code-branch" href="/dynamo/dev/getting-started/building-from-source">
     For contributors against `main`.
@@ -25,7 +29,7 @@ subtitle: Get a Dynamo OpenAI-compatible endpoint running in a container in abou
 </CardGroup>
 
 <Note>
-Dynamo is backend-agnostic — every install path works with **SGLang**, **TensorRT-LLM**, and **vLLM**. Pick the install path that fits your environment, then choose your backend.
+Dynamo is backend-agnostic and Kubernetes-native without being Kubernetes-only. Use this container path to try the same frontend/router/worker stack locally; use the Kubernetes path when you want the operator, CRDs, Gateway API integration, autoscaling, scheduling, and cluster lifecycle management.
 </Note>
 
 ## Pull a Container
@@ -35,17 +39,17 @@ Containers have all dependencies pre-installed. Pick your backend:
 <Tabs>
   <Tab title="SGLang" language="sglang">
     ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
     ```
   </Tab>
   <Tab title="TensorRT-LLM" language="trtllm">
     ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
     ```
   </Tab>
   <Tab title="vLLM" language="vllm">
     ```bash
-    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+    docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
     ```
   </Tab>
 </Tabs>

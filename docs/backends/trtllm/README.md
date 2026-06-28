@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: TensorRT-LLM
+subtitle: TensorRT-LLM engines run in Dynamo's distributed runtime with disaggregated serving, KV-aware routing, and multinode support.
 ---
 
 ## Use the Latest Release
@@ -54,7 +55,7 @@ Source of truth: [`docs/reference/support-matrix.md`](../../reference/support-ma
 **Step 1 (host terminal):** Start infrastructure services:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 **Step 2 (host terminal):** Pull and run the prebuilt container:

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Glossary
+subtitle: Definitions of core Dynamo terms covering disaggregated serving, KV cache, components, and the distributed runtime.
 ---
 
 ## B
@@ -52,6 +53,8 @@ title: Glossary
 
 **KVPublisher** - Dynamo component that emits KV cache events (stored/removed) from individual workers to the global KVIndexer.
 
+**KV Transfer Policy** - Kubernetes DGD policy under `spec.experimental.kvTransferPolicy` that tells Dynamo which worker topology domain to use for disaggregated prefill-to-decode KV-cache transfer routing.
+
 ## L
 
 **LoRA (Low-Rank Adaptation)** - A fine-tuning technique for serving specialized model variants without duplicating full model weights. Dynamo supports dynamic loading and serving of LoRA adapters at runtime using worker APIs (for example, to load/unload,or for discovery in /v1/models).
@@ -95,6 +98,12 @@ title: Glossary
 **TensorRT-LLM** - NVIDIA's optimized LLM inference engine with multinode MPI distributed support.
 
 **Time-To-First-Token (TTFT)** - The latency from receiving a request to generating the first output token.
+
+**Topology-Aware KV Transfer** - Dynamo routing behavior that constrains or biases decode worker selection toward workers sharing the selected prefill worker's topology domain.
+
+**Topology Domain** - A logical level in the cluster topology, such as `zone` or `rack`. For topology-aware KV transfer, workers publish domain values in `ModelRuntimeConfig.topology_domains`.
+
+**Topology Taint** - A canonical worker taint generated from topology metadata in the form `dynamo.topology/<domain>=<value>`. The router uses these taints through normal `RoutingConstraints`.
 
 ## V
 **vLLM** - High-throughput LLM serving engine with distributed tensor/pipeline parallelism and PagedAttention.

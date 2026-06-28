@@ -5,6 +5,7 @@
 
 import asyncio
 import re
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -19,7 +20,7 @@ if not torch.cuda.is_available():
     )
 
 from dynamo.trtllm.args import Config, parse_args
-from dynamo.trtllm.constants import Modality
+from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 from dynamo.trtllm.workers.llm_worker import init_llm_worker
@@ -37,6 +38,7 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
 ]
 
 
@@ -98,7 +100,7 @@ def test_parse_args_returns_config_with_expected_attrs(monkeypatch):
     assert isinstance(config, Config)
     assert config.model == "Qwen/Qwen3-0.6B"
     assert config.namespace == "testns"
-    assert config.component == "tensorrt_llm"
+    assert config.component == "backend"
     assert config.endpoint == "generate"
 
 
@@ -112,6 +114,30 @@ def test_config_use_kv_events_derived_from_publish_events(monkeypatch):
     config_off = parse_args(["--no-publish-events"])
     assert config_off.publish_events_and_metrics is False
     assert config_off.use_kv_events is False
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_rejects_invalid_kv_cache_config_override(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-kv-events",
+            "--override-engine-args",
+            '{"kv_cache_config": []}',
+        ]
+    )
+
+    with pytest.raises(
+        TypeError, match="kv_cache_config must be a dict or KvCacheConfig, got list"
+    ):
+        await init_llm_worker(
+            runtime=mock.MagicMock(),
+            config=config,
+            shutdown_event=asyncio.Event(),
+        )
 
 
 def test_config_has_connector(monkeypatch):
@@ -134,6 +160,63 @@ def test_config_multiple_connectors_fails(monkeypatch):
         match="TRT-LLM supports at most one connector entry. Use `--connector none` or `--connector kvbm`.",
     ):
         parse_args(["--connector", "none", "kvbm"])
+
+
+def test_enable_multimodal_maps_to_multimodal_modality():
+    config = parse_args(["--model", "fake-model", "--enable-multimodal"])
+
+    assert config.enable_multimodal is True
+    assert config.modality == Modality.MULTIMODAL
+
+
+def test_modality_multimodal_alias_does_not_warn():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        config = parse_args(["--model", "fake-model", "--modality", "multimodal"])
+
+    assert config.enable_multimodal is True
+    assert config.modality == Modality.MULTIMODAL
+    assert not [
+        warning
+        for warning in caught
+        if issubclass(warning.category, DeprecationWarning)
+    ]
+
+
+def test_disaggregation_mode_accepts_canonical_agg():
+    config = parse_args(["--model", "fake-model", "--disaggregation-mode", "agg"])
+
+    assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+    assert config.component == "backend"
+
+
+def test_disaggregation_mode_accepts_pd_alias():
+    config = parse_args(["--model", "fake-model", "--disaggregation-mode", "pd"])
+
+    assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+    assert config.component == "backend"
+
+
+def test_disaggregation_mode_legacy_aggregated_value_warns():
+    with pytest.warns(DeprecationWarning, match="prefill_and_decode"):
+        config = parse_args(
+            ["--model", "fake-model", "--disaggregation-mode", "prefill_and_decode"]
+        )
+
+    assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+
+
+def test_enable_multimodal_rejects_diffusion_modality():
+    with pytest.raises(ValueError, match="--enable-multimodal cannot be combined"):
+        parse_args(
+            [
+                "--model",
+                "fake-model",
+                "--enable-multimodal",
+                "--modality",
+                "video_diffusion",
+            ]
+        )
 
 
 # ---- Tests for trtllm_utils.deep_update ----

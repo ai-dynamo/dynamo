@@ -238,6 +238,7 @@ pub fn final_response_to_one_chunk_stream(
             usage: resp.inner.usage.clone(),
         },
         nvext: resp.nvext.clone(),
+        llm_metrics: None,
     };
 
     let annotated = Annotated {
@@ -292,6 +293,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         };
 
         Annotated {
@@ -332,6 +334,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         };
 
         Annotated {
@@ -469,6 +472,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: Some("correlation-123".to_string()),
             event: Some("test-event".to_string()),

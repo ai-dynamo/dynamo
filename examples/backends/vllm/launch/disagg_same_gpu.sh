@@ -41,6 +41,11 @@ fi
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
+# Select legacy vs unified worker entry point. `--unified` routes workers
+# through dynamo.vllm.unified_main (the Rust backend-common Worker, which
+# owns the prefill drain loop); default stays on the legacy main.
+pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Disaggregated on Same GPU (1 GPU)" "$MODEL" "$HTTP_PORT" \
     "Workers:     2 (prefill + decode, fraction is per worker)"
@@ -63,7 +68,8 @@ python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 # *_PREFILL/*_DECODE env names so test harnesses can set one simple pair.
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-python3 -m dynamo.vllm \
+VLLM_NIXL_SIDE_CHANNEL_PORT=${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1:-5600} \
+python3 -m "$WORKER_MODULE" \
   --model "$MODEL" \
   --enforce-eager \
   --disaggregation-mode decode \
@@ -81,15 +87,16 @@ wait_for_ready "http://localhost:${DECODE_SYSTEM_PORT}/health" 45 || true
 # run prefill worker with metrics on port 8082
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
-python3 -m dynamo.vllm \
+VLLM_NIXL_SIDE_CHANNEL_PORT=${DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2:-20097} \
+DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT=${DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT:-60} \
+python3 -m "$WORKER_MODULE" \
   --model "$MODEL" \
   --enforce-eager \
   --disaggregation-mode prefill \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
   $GPU_MEM_ARGS \
   --max-model-len "$MAX_MODEL_LEN" \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
+  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${DYN_VLLM_KV_EVENT_PORT:-20081}\",\"enable_kv_cache_events\":true}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit

@@ -24,9 +24,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use dynamo_backend_common::{
-    AsyncEngineContext, BackendError, CommonArgs, DisaggregationMode, DynamoError, EngineConfig,
-    ErrorType, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
-    Metrics, MetricsSource, PreprocessedRequest, WorkerConfig, chunk, usage,
+    AsyncEngineContext, BackendError, CommonArgs, ComponentSnapshot, DisaggregationMode,
+    DynamoError, EngineConfig, ErrorType, GenerateContext, HEALTH_CHECK_KEY, KvEventSource,
+    LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, MetricsBindings, MetricsCtx,
+    PreprocessedRequest, SnapshotPublisher, TopLogprob, WorkerConfig, chunk, usage,
 };
 use dynamo_mocker::common::protocols::{
     DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
@@ -45,6 +46,39 @@ const DP_RANK: u32 = 0;
 /// Fallback when the client does not set `stop_conditions.max_tokens`. The
 /// conformance suite exercises this path (single-generate uses `None`).
 const DEFAULT_MAX_TOKENS: usize = 16;
+
+/// Upper bound on synthesised top-k alternatives. Caps the per-chunk
+/// `top_logprobs` allocation so a client sending `logprobs=u32::MAX`
+/// can't drive unbounded memory / CPU here. Matches the OpenAI ceiling.
+const MAX_LOGPROBS: u32 = 20;
+
+/// Stamp deterministic synthetic logprobs onto `output` for a single
+/// generated token. Top-k alternatives appear when `top_k >= 1`.
+fn stamp_synthetic_logprobs(output: &mut LLMEngineOutput, token_id: u32, top_k: u32) {
+    let selected_lp = -0.1 * f64::from(token_id % 10);
+    output.log_probs = Some(vec![selected_lp]);
+    if top_k > 0 {
+        let mut entries: Vec<TopLogprob> = Vec::with_capacity(top_k as usize + 1);
+        entries.push(TopLogprob {
+            rank: 1,
+            token_id,
+            token: Some(format!("token_id:{token_id}")),
+            logprob: selected_lp,
+            bytes: None,
+        });
+        for r in 1..=top_k {
+            let alt_id = (token_id + r) % 32000;
+            entries.push(TopLogprob {
+                rank: r + 1,
+                token_id: alt_id,
+                token: Some(format!("token_id:{alt_id}")),
+                logprob: selected_lp - 0.1 * f64::from(r),
+                bytes: None,
+            });
+        }
+        output.top_logprobs = Some(vec![entries]);
+    }
+}
 
 #[derive(clap::Parser, Debug)]
 #[command(
@@ -140,6 +174,35 @@ impl Drop for ActiveRequestGuard {
     }
 }
 
+/// Background poll task that pushes the mocker's synthetic
+/// `kv_used_blocks` into the `SnapshotPublisher` every 100 ms. Real
+/// engines push from their natural stat-logger event surface; the
+/// mocker has none, so we approximate with a poll loop spawned during
+/// `setup_metrics::on_publisher_ready`.
+fn spawn_mocker_snapshot_loop(
+    publisher: Arc<SnapshotPublisher>,
+    kv_used_blocks: Arc<AtomicU64>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(100));
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = ticker.tick() => {
+                    publisher.publish(DP_RANK, ComponentSnapshot {
+                        kv_used_blocks: kv_used_blocks.load(Ordering::Relaxed),
+                        kv_total_blocks: 0,
+                        gpu_cache_usage: 0.0,
+                        kv_cache_hit_rate: None,
+                        dp_rank: DP_RANK,
+                    });
+                }
+            }
+        }
+    });
+}
+
 pub struct MockerBackend {
     model_name: String,
     context_length: u32,
@@ -190,6 +253,14 @@ impl MockerBackend {
 
         let engine_args = build_engine_args(&args)?;
         let disaggregation_mode = args.common.disaggregation_mode;
+        let (tool_call_parser, reasoning_parser) = if disaggregation_mode.is_prefill() {
+            (None, None)
+        } else {
+            (
+                args.common.dyn_tool_call_parser.clone(),
+                args.common.dyn_reasoning_parser.clone(),
+            )
+        };
         let engine = Self::new(
             args.model_name.clone(),
             args.context_length,
@@ -203,8 +274,12 @@ impl MockerBackend {
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
             disaggregation_mode,
+            route_to_encoder: args.common.route_to_encoder,
             model_name: args.model_path,
             served_model_name: Some(args.model_name),
+            tool_call_parser,
+            reasoning_parser,
+            exclude_tools_when_tool_choice_none: args.common.exclude_tools_when_tool_choice_none,
             ..Default::default()
         };
         Ok((engine, config))
@@ -278,19 +353,20 @@ impl LLMEngine for MockerBackend {
         Ok(EngineConfig {
             model: self.model_name.clone(),
             served_model_name: Some(self.model_name.clone()),
-            context_length: Some(self.context_length),
-            kv_cache_block_size: Some(self.engine_args.block_size as u32),
-            total_kv_blocks: Some(self.engine_args.num_gpu_blocks as u64),
-            max_num_seqs: self.engine_args.max_num_seqs.map(|v| v as u64),
-            max_num_batched_tokens: self.engine_args.max_num_batched_tokens.map(|v| v as u64),
-            data_parallel_size: None,
-            data_parallel_start_rank: None,
-            // Mocker has no real KV transport, so it never advertises a
-            // bootstrap address. Real prefill engines populate these in
-            // start() to publish ModelRuntimeConfig.disaggregated_endpoint.
-            bootstrap_host: None,
-            bootstrap_port: None,
             runtime_data: Default::default(),
+            llm: Some(LlmRegistration {
+                context_length: Some(self.context_length),
+                kv_cache_block_size: Some(self.engine_args.block_size as u32),
+                total_kv_blocks: Some(self.engine_args.num_gpu_blocks as u64),
+                max_num_seqs: self.engine_args.max_num_seqs.map(|v| v as u64),
+                max_num_batched_tokens: self.engine_args.max_num_batched_tokens.map(|v| v as u64),
+                data_parallel_size: None,
+                data_parallel_start_rank: None,
+                // Mocker has no real KV transport, so it never advertises a
+                // bootstrap address.
+                bootstrap_host: None,
+                bootstrap_port: None,
+            }),
         })
     }
 
@@ -323,6 +399,7 @@ impl LLMEngine for MockerBackend {
             .max_tokens
             .map(|n| n as usize)
             .unwrap_or(DEFAULT_MAX_TOKENS);
+        let logprobs_top_k = request.output_options.logprobs.map(|k| k.min(MAX_LOGPROBS));
         // Prefill workers only need to populate KV cache for the prompt; cap
         // generation at one token regardless of what the client asked for, so
         // the response carries a single terminal with disaggregated_params.
@@ -355,6 +432,7 @@ impl LLMEngine for MockerBackend {
             uuid: Some(uuid),
             dp_rank: DP_RANK,
             arrival_timestamp_ms: request.request_timestamp_ms,
+            ..Default::default()
         };
 
         let (tx, mut rx) = mpsc::unbounded_channel::<OutputSignal>();
@@ -435,6 +513,9 @@ impl LLMEngine for MockerBackend {
                             let mut terminal = LLMEngineOutput::length()
                                 .with_tokens(vec![token_id])
                                 .with_usage(usage(prompt_len, generated));
+                            if let Some(k) = logprobs_top_k {
+                                stamp_synthetic_logprobs(&mut terminal, token_id, k);
+                            }
                             // Prefill workers stamp a synthetic
                             // `disaggregated_params` payload on the terminal
                             // so the frontend's PrefillRouter has something
@@ -450,7 +531,11 @@ impl LLMEngine for MockerBackend {
                             yield Ok(terminal);
                             break;
                         }
-                        yield Ok(chunk::token(token_id));
+                        let mut tok = chunk::token(token_id);
+                        if let Some(k) = logprobs_top_k {
+                            stamp_synthetic_logprobs(&mut tok, token_id, k);
+                        }
+                        yield Ok(tok);
                     }
                 }
             }
@@ -482,16 +567,31 @@ impl LLMEngine for MockerBackend {
         }])
     }
 
-    async fn metrics_sources(&self) -> Result<Vec<MetricsSource>, DynamoError> {
-        let used = self.kv_used_blocks.clone();
-        Ok(vec![MetricsSource {
-            snapshot: Arc::new(move || {
-                Some(Metrics {
-                    kv_used_blocks: Some(used.load(Ordering::Relaxed)),
-                })
-            }),
-            dp_rank: DP_RANK,
-        }])
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        let kv_used_blocks = self.kv_used_blocks.clone();
+        let cancel = self.cancel.clone();
+        Ok(MetricsBindings {
+            dp_ranks: vec![DP_RANK],
+            on_publisher_ready: Some(Box::new(move |publisher| {
+                spawn_mocker_snapshot_loop(publisher, kv_used_blocks, cancel);
+                Ok(())
+            })),
+        })
+    }
+
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        let mut payload = serde_json::json!({
+            "token_ids": [1],
+            "stop_conditions": {"max_tokens": 1, "ignore_eos": true},
+            "sampling_options": {"temperature": 0.0},
+        });
+        // Decode mode's generate() rejects requests without prefill_result;
+        // synthesize an empty handoff so the canary clears the precondition.
+        if self.disaggregation_mode.is_decode() {
+            payload["prefill_result"] = serde_json::json!({"disaggregated_params": {}});
+        }
+        payload[HEALTH_CHECK_KEY] = serde_json::Value::Bool(true);
+        Ok(Some(payload))
     }
 
     async fn cleanup(&self) -> Result<(), DynamoError> {
@@ -606,10 +706,13 @@ mod tests {
         let engine = test_engine();
         let cfg = engine.start(0).await.unwrap();
         assert_eq!(cfg.model, "mocker-model");
-        assert_eq!(cfg.kv_cache_block_size, Some(64));
-        assert_eq!(cfg.total_kv_blocks, Some(16384));
-        assert_eq!(cfg.max_num_seqs, Some(256));
-        assert_eq!(cfg.context_length, Some(8192));
+        let llm = cfg
+            .llm
+            .expect("LLM engine advertises registration metadata");
+        assert_eq!(llm.kv_cache_block_size, Some(64));
+        assert_eq!(llm.total_kv_blocks, Some(16384));
+        assert_eq!(llm.max_num_seqs, Some(256));
+        assert_eq!(llm.context_length, Some(8192));
         engine.cleanup().await.unwrap();
     }
 
@@ -903,5 +1006,106 @@ mod tests {
         .unwrap();
         assert_eq!(config.disaggregation_mode, DisaggregationMode::Prefill);
         assert_eq!(engine.disaggregation_mode, DisaggregationMode::Prefill);
+    }
+
+    fn request_with_logprobs(max_tokens: u32, logprobs: Option<u32>) -> PreprocessedRequest {
+        use dynamo_backend_common::OutputOptions;
+        let mut req = request(Some(max_tokens));
+        req.output_options = OutputOptions {
+            logprobs,
+            ..Default::default()
+        };
+        req
+    }
+
+    #[tokio::test]
+    async fn logprobs_absent_when_not_requested() {
+        // Default request has output_options.logprobs = None — confirm no
+        // log_probs / top_logprobs leak onto chunks.
+        let engine = test_engine();
+        engine.start(0).await.unwrap();
+
+        let stream = engine
+            .generate(request(Some(3)), gen_ctx(Context::new(()).context()))
+            .await
+            .expect("stream");
+        let chunks: Vec<_> = collect_ok(stream).await;
+        for c in &chunks {
+            assert!(c.log_probs.is_none());
+            assert!(c.top_logprobs.is_none());
+        }
+
+        engine.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn logprobs_zero_emits_selected_only() {
+        // logprobs=Some(0) means "selected token logprob only" — no top-k.
+        let engine = test_engine();
+        engine.start(0).await.unwrap();
+
+        let stream = engine
+            .generate(
+                request_with_logprobs(2, Some(0)),
+                gen_ctx(Context::new(()).context()),
+            )
+            .await
+            .expect("stream");
+        let chunks: Vec<_> = collect_ok(stream).await;
+        for c in &chunks {
+            assert_eq!(c.log_probs.as_ref().map(|v| v.len()), Some(1));
+            assert!(c.top_logprobs.is_none());
+        }
+
+        engine.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn logprobs_with_top_k_emits_alternatives() {
+        let engine = test_engine();
+        engine.start(0).await.unwrap();
+
+        let stream = engine
+            .generate(
+                request_with_logprobs(2, Some(3)),
+                gen_ctx(Context::new(()).context()),
+            )
+            .await
+            .expect("stream");
+        let chunks: Vec<_> = collect_ok(stream).await;
+        for c in &chunks {
+            let top = c.top_logprobs.as_ref().expect("top_logprobs populated");
+            assert_eq!(top.len(), 1, "one position per emitted token");
+            // k=3 -> selected + 3 alternatives = 4 entries.
+            assert_eq!(top[0].len(), 4);
+            let ranks: Vec<u32> = top[0].iter().map(|e| e.rank).collect();
+            assert_eq!(ranks, vec![1, 2, 3, 4]);
+        }
+
+        engine.cleanup().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn logprobs_top_k_is_clamped_to_max() {
+        // A client request asking for an unbounded number of top
+        // logprobs must get capped at MAX_LOGPROBS so the per-chunk
+        // top-k allocation stays bounded.
+        let engine = test_engine();
+        engine.start(0).await.unwrap();
+
+        let stream = engine
+            .generate(
+                request_with_logprobs(1, Some(u32::MAX)),
+                gen_ctx(Context::new(()).context()),
+            )
+            .await
+            .expect("stream");
+        let chunks: Vec<_> = collect_ok(stream).await;
+        for c in &chunks {
+            let top = c.top_logprobs.as_ref().expect("top_logprobs populated");
+            assert_eq!(top[0].len() as u32, MAX_LOGPROBS + 1);
+        }
+
+        engine.cleanup().await.unwrap();
     }
 }

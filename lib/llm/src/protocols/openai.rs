@@ -8,6 +8,7 @@ use super::{
     ContentProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
+use crate::protocols::common::extensions::NvExt;
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use crate::types::TokenIdType;
 
@@ -19,7 +20,6 @@ pub(crate) mod delta_common;
 pub mod embeddings;
 pub mod images;
 pub mod models;
-pub mod nvext;
 pub mod responses;
 pub mod stream_aggregator;
 pub mod tools;
@@ -54,7 +54,7 @@ pub(crate) trait OpenAISamplingOptionsProvider {
 
     fn get_best_of(&self) -> Option<u8>;
 
-    fn nvext(&self) -> Option<&nvext::NvExt>;
+    fn nvext(&self) -> Option<&NvExt>;
 }
 
 pub(crate) trait OpenAIStopConditionsProvider {
@@ -68,7 +68,7 @@ pub(crate) trait OpenAIStopConditionsProvider {
         None
     }
 
-    fn nvext(&self) -> Option<&nvext::NvExt>;
+    fn nvext(&self) -> Option<&NvExt>;
 
     /// Get ignore_eos from CommonExt if the type supports it.
     /// Default returns None for types without CommonExt support.
@@ -144,7 +144,6 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         let guided_grammar = self.get_guided_grammar();
         let guided_choice = self.get_guided_choice();
         let guided_whitespace_pattern = self.get_guided_whitespace_pattern();
-
         let guided_decoding = match common::GuidedDecodingOptions::from_optional(
             guided_json,
             guided_regex,
@@ -208,6 +207,7 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             min_tokens,
             stop,
             stop_token_ids,
+            stop_token_ids_visible: None,
             stop_token_ids_hidden: None,
             ignore_eos,
             max_thinking_tokens,
@@ -324,6 +324,15 @@ pub struct ParsingOptions {
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
+
+    /// Request-side gate for routing the batch tool-call finalize through
+    /// `dynamo-parsers-v2` (see
+    /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`). Defaults `false`
+    /// so any path that does not explicitly opt in stays on the v1 finalize path; the
+    /// chat HTTP handlers set it from the request's tool_choice. The env flag and family
+    /// support are checked separately in the aggregator.
+    #[serde(default)]
+    pub experimental_v2_batch_eligible: bool,
 }
 
 impl ParsingOptions {
@@ -331,6 +340,15 @@ impl ParsingOptions {
         Self {
             tool_call_parser,
             reasoning_parser,
+            experimental_v2_batch_eligible: false,
         }
+    }
+
+    /// Set whether this request is eligible for the experimental v2 batch parser
+    /// (request-side tool_choice gate). See
+    /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`.
+    pub fn with_experimental_v2_batch_eligible(mut self, eligible: bool) -> Self {
+        self.experimental_v2_batch_eligible = eligible;
+        self
     }
 }

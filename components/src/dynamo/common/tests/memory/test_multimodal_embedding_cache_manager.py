@@ -8,6 +8,7 @@ import torch
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
+    CacheMutation,
     MultimodalEmbeddingCacheManager,
 )
 
@@ -67,6 +68,24 @@ class TestMultimodalEmbeddingCacheManagerBasicOperations:
         assert retrieved is not None
         assert torch.equal(retrieved.tensor, tensor2)
         assert cache.stats["entries"] == 1
+
+    def test_set_with_delta_reports_add_and_evictions(self):
+        tensor_size = 10 * 10 * 4
+        capacity = tensor_size * 2 + 100
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=capacity)
+        t1 = torch.randn(10, 10)
+        t2 = torch.randn(10, 10)
+        t3 = torch.randn(10, 10)
+
+        m1 = cache.set_with_delta("key1", CachedEmbedding(t1))
+        m2 = cache.set_with_delta("key2", CachedEmbedding(t2))
+        m3 = cache.set_with_delta("key3", CachedEmbedding(t3))
+
+        assert m1 == CacheMutation(True, ["key1"], [])
+        assert m2 == CacheMutation(True, ["key2"], [])
+        assert m3.stored is True
+        assert m3.added_keys == ["key3"]
+        assert m3.removed_keys == ["key1"]
 
 
 class TestMultimodalEmbeddingCacheManagerLRUEviction:

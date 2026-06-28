@@ -24,6 +24,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - nodes
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumeclaims
   verbs:
   - create
@@ -40,6 +47,7 @@ rules:
   - deletecollection
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - apps
@@ -219,6 +227,7 @@ rules:
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
+  - podsnapshotcontents
   verbs:
   - create
   - delete
@@ -235,6 +244,7 @@ rules:
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
+  - podsnapshots/finalizers
   verbs:
   - update
 - apiGroups:
@@ -246,10 +256,22 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
+  - podsnapshotcontents/status
+  - podsnapshots/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - nvidia.com
+  resources:
+  - podsnapshots
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - resource.k8s.io
   resources:

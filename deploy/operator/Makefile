@@ -90,6 +90,10 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
 	done
+	echo "Adding CA-less conversion webhook to multi-version CRD files"
+	for file in config/crd/bases/*.yaml; do \
+		$(YQ) eval 'with(select(.spec.versions | length > 1); .spec.conversion = {"strategy": "Webhook", "webhook": {"clientConfig": {"service": {"namespace": "dynamo-system", "name": "dynamo-operator-webhook-service", "path": "/convert"}}, "conversionReviewVersions": ["v1"]}} | .spec.conversion.webhook.clientConfig head_comment = "CA will be patched in by the Dynamo operator or other means, depending on cert mode auto or manual")' -i --indent 2 $$file || exit 1; \
+	done
 	echo "Adding NVIDIA header to CRD files"
 	for file in config/crd/bases/*.yaml; do \
 		if ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
@@ -150,6 +154,23 @@ test: manifests generate fmt vet envtest ## Run tests.
 .PHONY: test-e2e  # Run the e2e tests against a Kind k8s instance that is spun up.
 test-e2e:
 	go test ./test/e2e/ -v -ginkgo.v
+
+# DGDR e2e test configuration.
+# Override these via the command line, e.g.:
+#   make test-e2e-dgdr DGDR_IMAGE=nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0
+DGDR_TEST_TIMEOUT ?= 75m
+DGDR_NAMESPACE ?= dynamo-test
+DGDR_IMAGE ?=
+
+.PHONY: test-e2e-dgdr  # Run DGDR e2e tests against a live cluster with the operator installed.
+test-e2e-dgdr:
+ifndef DGDR_IMAGE
+	$(error DGDR_IMAGE is required. Example: make test-e2e-dgdr DGDR_IMAGE=nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.0)
+endif
+	go test ./test/e2e/dgdr/ -v -ginkgo.v -timeout=$(DGDR_TEST_TIMEOUT) \
+		-dgdr-namespace=$(DGDR_NAMESPACE) \
+		-dgdr-image=$(DGDR_IMAGE) \
+		$(DGDR_TEST_FLAGS)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint

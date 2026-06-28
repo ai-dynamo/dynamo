@@ -29,6 +29,7 @@ from dynamo.common.configuration.utils import (
 from . import __version__
 
 _U32_MAX = 2**32 - 1
+_MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
 
 
 def validate_model_name(value: str) -> str:
@@ -109,6 +110,13 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             )
         if self.min_initial_workers < 0:
             raise ValueError("--router-min-initial-workers must be >= 0")
+        if self.session_affinity_ttl_secs is not None and not (
+            1 <= self.session_affinity_ttl_secs <= _MAX_SESSION_AFFINITY_TTL_SECS
+        ):
+            raise ValueError(
+                "--router-session-affinity-ttl-secs must be between 1 and "
+                f"{_MAX_SESSION_AFFINITY_TTL_SECS}"
+            )
         if self.tokenizer_backend not in self._VALID_TOKENIZER_BACKENDS:
             raise ValueError(
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
@@ -149,7 +157,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 raise ValueError(
                     "--serve-indexer and --use-remote-indexer are mutually exclusive"
                 )
-        self.apply_no_admission_control()
+        self.apply_admission_control()
 
 
 @register_encoder(FrontendConfig)
@@ -355,9 +363,9 @@ class FrontendArgGroup(ArgGroup):
             default="tcp",
             help=(
                 "Determines how requests are distributed from routers to workers. "
-                "'tcp' is fastest [nats|http|tcp]"
+                "'tcp' is fastest [nats|tcp]"
             ),
-            choices=["nats", "http", "tcp"],
+            choices=["nats", "tcp"],
         )
         add_argument(
             g,
@@ -365,8 +373,8 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_EVENT_PLANE",
             default=None,
             help="Determines how events are published [nats|zmq]. If unset, "
-            "auto-detected from --discovery-backend (zmq for file/mem, nats "
-            "for etcd/kubernetes).",
+            "defaults to 'zmq' for all discovery backends. Set to 'nats' to use a "
+            "NATS-based event plane.",
             choices=["nats", "zmq"],
         )
         add_negatable_bool_argument(

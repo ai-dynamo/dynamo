@@ -1,12 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from pathlib import Path
 from typing import Optional, Union
 
 from huggingface_hub import model_info
 from pydantic import BaseModel
 from transformers import AutoConfig
+
+try:
+    from aiconfigurator.sdk.utils import get_model_config_from_model_path
+except ImportError:
+    get_model_config_from_model_path = None
 
 DTYPE_BYTES_MAP = {
     "F32": 4,  # FP32: 4 bytes per parameter
@@ -121,6 +127,62 @@ class ModelInfo(BaseModel):
     intermediate_size: Optional[int] = None
     num_kv_heads: Optional[int] = None
     quantization_block_size: Optional[int] = None
+
+
+def _get_config_value(config: object, attr: str) -> object:
+    if isinstance(config, dict):
+        return config.get(attr)
+    return getattr(config, attr, None)
+
+
+def _positive_int_config_value(config: object, attr: str) -> Optional[int]:
+    value = _get_config_value(config, attr)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _load_model_config_for_mamba(
+    model_name_or_path: Union[str, Path],
+    trust_remote_code: bool = False,
+) -> object:
+    path = Path(model_name_or_path)
+    config_path = path / "config.json"
+    if path.is_dir() and config_path.is_file():
+        with open(config_path) as f:
+            return json.load(f)
+
+    if get_model_config_from_model_path is not None:
+        model_config = get_model_config_from_model_path(str(model_name_or_path))
+        raw_config = model_config.get("raw_config")
+        if raw_config is not None:
+            return raw_config
+
+    return AutoConfig.from_pretrained(
+        model_name_or_path,
+        trust_remote_code=trust_remote_code,
+    )
+
+
+def get_mamba_cache_align_block_size(
+    model_name_or_path: Union[str, Path],
+    trust_remote_code: bool = False,
+) -> Optional[int]:
+    """Return vLLM's Mamba cache align token floor when derivable.
+
+    vLLM requires ``max_num_batched_tokens`` to be at least this block size
+    when Mamba cache mode is ``align``. Nemotron-H configs expose the fields
+    needed to compute it directly.
+    """
+    config = _load_model_config_for_mamba(model_name_or_path, trust_remote_code)
+    mamba_num_heads = _positive_int_config_value(config, "mamba_num_heads")
+    mamba_head_dim = _positive_int_config_value(config, "mamba_head_dim")
+    ssm_state_size = _positive_int_config_value(config, "ssm_state_size")
+    if not (mamba_num_heads and mamba_head_dim and ssm_state_size):
+        return None
+    return mamba_num_heads * mamba_head_dim + ssm_state_size
 
 
 def get_model_info(
