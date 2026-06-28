@@ -138,6 +138,15 @@ RUN set -eux; \
 
 COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
 RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
+    && if grep -Fq 'CR_PLUGIN_HOOK__DUMP_EXT_FILE' /tmp/criu/plugins/cuda/cuda_plugin.c \
+      && grep -Fq 'CR_PLUGIN_HOOK__RESTORE_EXT_FILE' /tmp/criu/plugins/cuda/cuda_plugin.c \
+      && grep -Fq 'Dynamo snapshot-agent owns CUDA checkpoint' /tmp/criu/plugins/cuda/cuda_plugin.c \
+      && grep -Fq 'Dynamo snapshot-agent owns CUDA restore' /tmp/criu/plugins/cuda/cuda_plugin.c; then \
+        cp /criu-install/usr/local/lib/criu/cuda_plugin.so \
+          /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_cuda.so; \
+      else \
+        echo "CRIU CUDA plugin is not Dynamo-managed; leaving it disabled"; \
+      fi \
     && gcc -O2 -Wall -Wextra -fPIC -shared \
       -idirafter /tmp/criu/criu/include \
       -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
