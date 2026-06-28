@@ -54,7 +54,7 @@ use crate::common::sequence::ActiveSequence;
 #[cfg(feature = "kvbm-offload")]
 use crate::kvbm_offload::{
     G1EvictionOutcome, G2BlockEventMetadata, G2OffloadBlock, G2RouterEvent, MockOffloadEngine,
-    SwapInHandle, TransferId,
+    OffloadId, SwapInHandle,
 };
 
 /// Outcome of [`KvManager::try_batch_swap_in`]. The caller uses this to
@@ -70,10 +70,7 @@ pub enum BatchSwapInOutcome {
     /// scheduler passes. Matched lower-tier blocks are held by the
     /// engine/handle for the duration of the transfer, while
     /// `destination_slots` pins the G1 write targets.
-    Scheduled {
-        handle: SwapInHandle,
-        destination_slots: Vec<MutableBlock<G1>>,
-    },
+    Scheduled { handle: SwapInHandle },
     /// G2 had a match, but reserving destination G1 slots first had to
     /// trigger a G1→G2 eviction. Caller should retry after offload advances.
     BlockedOnG1Offload(OffloadDependency),
@@ -116,7 +113,7 @@ pub(crate) enum G1Acquire<T> {
     Ready(T),
     CapacityExhausted,
     BlockedOnOffload {
-        transfer_id: Option<TransferId>,
+        offload_id: OffloadId,
         deadline_ms: Option<f64>,
     },
     RetryNow {
@@ -126,7 +123,7 @@ pub(crate) enum G1Acquire<T> {
 }
 
 #[cfg(not(feature = "kvbm-offload"))]
-type TransferId = u64;
+type OffloadId = u64;
 
 #[cfg(not(feature = "kvbm-offload"))]
 enum G1EvictionOutcome {}
@@ -134,7 +131,7 @@ enum G1EvictionOutcome {}
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[doc(hidden)]
 pub struct OffloadDependency {
-    pub(crate) transfer_id: Option<TransferId>,
+    pub(crate) offload_id: OffloadId,
     pub(crate) deadline_ms: Option<f64>,
 }
 
@@ -378,24 +375,28 @@ impl KvManager {
 
     /// Advance the offload engine's PS models and fire any
     /// completion sinks for drained transfers. Scheduler calls this at
-    /// the top of every pass so swap-in flags flip before the
+    /// the top of every pass so swap-in statuses publish before the
     /// promote-completed loop runs, and offload awaiters fire before
     /// the next enqueue measures the active-set size. No-op when no
     /// engine is attached.
     #[cfg(feature = "kvbm-offload")]
     pub fn tick_offload_engine(&mut self, now_ms: f64) {
-        let (g2_events, released_g1_slots) = if let Some(engine_arc) = self.offload_engine.as_ref()
-        {
-            let engine = engine_arc.lock().expect("offload engine mutex poisoned");
-            let released_g1_slots = engine.tick(now_ms);
-            (engine.drain_g2_router_events(), released_g1_slots)
-        } else {
-            (Vec::new(), 0)
+        let Some(engine_arc) = self.offload_engine.clone() else {
+            return;
         };
+        let prepared = {
+            let engine = engine_arc.lock().expect("offload engine mutex poisoned");
+            engine.prepare_tick_for_kv_manager(now_ms)
+        };
+        self.publish_g2_router_events(prepared.router_events);
+        let released_g1_slots = engine_arc
+            .lock()
+            .expect("offload engine mutex poisoned")
+            .acknowledge_tick_for_kv_manager(prepared.acknowledgement)
+            .expect("freshly prepared offload advance must acknowledge");
         if released_g1_slots > 0 {
             self.bump_capacity_generation(released_g1_slots);
         }
-        self.publish_g2_router_events(g2_events);
     }
 
     /// Earliest pending completion time across offload + onboard links,
@@ -415,23 +416,12 @@ impl KvManager {
     ) -> Option<OffloadDependency> {
         let engine_arc = self.offload_engine.as_ref()?;
         let engine = engine_arc.lock().expect("offload engine mutex poisoned");
-        if let Some(transfer_id) = dependency.transfer_id
-            && engine.is_g1_offload_active(transfer_id)
-            && let Some(deadline_ms) = engine.deadline_for_g1_offload(transfer_id)
-        {
-            return Some(OffloadDependency {
-                transfer_id: Some(transfer_id),
-                deadline_ms: Some(deadline_ms),
-            });
-        }
-        if !engine.has_nonterminal_g1_pipeline() {
-            return None;
-        }
-        let current = engine.current_g1_offload_dependency();
-        Some(OffloadDependency {
-            transfer_id: current.map(|(transfer_id, _deadline_ms)| transfer_id),
-            deadline_ms: current.map(|(_transfer_id, deadline_ms)| deadline_ms),
-        })
+        engine
+            .g1_offload_dependency(dependency.offload_id)
+            .map(|(offload_id, deadline_ms)| OffloadDependency {
+                offload_id,
+                deadline_ms,
+            })
     }
 
     #[cfg(not(feature = "kvbm-offload"))]
@@ -624,6 +614,7 @@ impl KvManager {
     pub fn try_batch_swap_in(
         &mut self,
         remaining_plhs: &[PositionalLineageHash],
+        prefix_pins: Vec<ImmutableBlock<G1>>,
         now_ms: Option<f64>,
     ) -> BatchSwapInOutcome {
         let Some(engine_arc) = self.offload_engine.clone() else {
@@ -650,12 +641,41 @@ impl KvManager {
         };
         let handle = {
             let mut engine = engine_arc.lock().expect("offload engine mutex poisoned");
-            engine.start_onboard_prefix(prepared, now_ms)
+            engine.start_onboard_prefix(prepared, destination_slots, prefix_pins, now_ms)
         };
-        BatchSwapInOutcome::Scheduled {
-            handle,
-            destination_slots,
-        }
+        BatchSwapInOutcome::Scheduled { handle }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn cancel_swap_in(&mut self, id: OffloadId) -> bool {
+        self.offload_engine.as_ref().is_some_and(|engine| {
+            engine
+                .lock()
+                .expect("offload engine mutex poisoned")
+                .cancel_swap_in(id)
+        })
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    pub(crate) fn register_completed_swap_in(
+        &mut self,
+        id: OffloadId,
+        entries: Vec<SwapInRegistrationBlock>,
+        parent_hash: Option<SequenceHash>,
+    ) -> SwapInRegistrationOutcome {
+        let (destination_slots, prefix_pins) = self
+            .offload_engine
+            .as_ref()
+            .and_then(|engine| {
+                engine
+                    .lock()
+                    .expect("offload engine mutex poisoned")
+                    .take_completed_swap_in(id)
+            })
+            .expect("completed swap-in lease must retain its G1 resources");
+        let outcome = self.register_swapped_in_blocks(entries, parent_hash, destination_slots);
+        drop(prefix_pins);
+        outcome
     }
 
     /// Hold the G1 prefix that admission used when deciding to swap in only a
@@ -854,11 +874,11 @@ impl KvManager {
                 }
                 G1Acquire::CapacityExhausted => return G1Acquire::CapacityExhausted,
                 G1Acquire::BlockedOnOffload {
-                    transfer_id,
+                    offload_id,
                     deadline_ms,
                 } => {
                     return G1Acquire::BlockedOnOffload {
-                        transfer_id,
+                        offload_id,
                         deadline_ms,
                     };
                 }
@@ -902,10 +922,10 @@ impl KvManager {
             }
             G1Acquire::CapacityExhausted => G1Acquire::CapacityExhausted,
             G1Acquire::BlockedOnOffload {
-                transfer_id,
+                offload_id,
                 deadline_ms,
             } => G1Acquire::BlockedOnOffload {
-                transfer_id,
+                offload_id,
                 deadline_ms,
             },
             G1Acquire::RetryNow {
@@ -949,10 +969,10 @@ impl KvManager {
                 .expect("G1 offload-enabled eviction must return a dependency outcome");
             match outcome {
                 G1EvictionOutcome::BlockedOnOffload {
-                    transfer_id,
+                    offload_id,
                     deadline_ms,
                 } => G1Acquire::BlockedOnOffload {
-                    transfer_id,
+                    offload_id,
                     deadline_ms,
                 },
                 G1EvictionOutcome::RetryNow { released_slots } => {
@@ -1079,11 +1099,11 @@ impl KvManager {
                 }
                 G1Acquire::CapacityExhausted => return G1Acquire::CapacityExhausted,
                 G1Acquire::BlockedOnOffload {
-                    transfer_id,
+                    offload_id,
                     deadline_ms,
                 } => {
                     return G1Acquire::BlockedOnOffload {
-                        transfer_id,
+                        offload_id,
                         deadline_ms,
                     };
                 }
@@ -1300,11 +1320,11 @@ impl KvManager {
                 G1Acquire::Ready(slots) => return SwapInSlotReservation::Reserved(slots),
                 G1Acquire::CapacityExhausted => return SwapInSlotReservation::NoCapacity,
                 G1Acquire::BlockedOnOffload {
-                    transfer_id,
+                    offload_id,
                     deadline_ms,
                 } => {
                     return SwapInSlotReservation::BlockedOnG1Offload(OffloadDependency {
-                        transfer_id,
+                        offload_id,
                         deadline_ms,
                     });
                 }
@@ -1366,11 +1386,11 @@ impl KvManager {
                 }
                 G1Acquire::CapacityExhausted => return G1Acquire::CapacityExhausted,
                 G1Acquire::BlockedOnOffload {
-                    transfer_id,
+                    offload_id,
                     deadline_ms,
                 } => {
                     return G1Acquire::BlockedOnOffload {
-                        transfer_id,
+                        offload_id,
                         deadline_ms,
                     };
                 }
@@ -1508,11 +1528,11 @@ impl KvManager {
                 G1Acquire::Ready(reservation) => reservation,
                 G1Acquire::CapacityExhausted => return G1Acquire::CapacityExhausted,
                 G1Acquire::BlockedOnOffload {
-                    transfer_id,
+                    offload_id,
                     deadline_ms,
                 } => {
                     return G1Acquire::BlockedOnOffload {
-                        transfer_id,
+                        offload_id,
                         deadline_ms,
                     };
                 }
@@ -3566,31 +3586,29 @@ mod tests {
             let first_dependency =
                 match use_full_with_hash(&mut mgr, 3, plh(3), 303, vec![9, 10, 11, 12]) {
                     G1Acquire::BlockedOnOffload {
-                        transfer_id,
+                        offload_id,
                         deadline_ms,
                     } => OffloadDependency {
-                        transfer_id,
+                        offload_id,
                         deadline_ms,
                     },
                     _ => panic!("first eviction must start an offload dependency"),
                 };
-            let first_id = first_dependency
-                .transfer_id
-                .expect("active predecessor must have a TransferId");
+            let first_id = first_dependency.offload_id;
             assert!(first_dependency.deadline_ms.is_some());
 
             let queued_dependency =
                 match use_full_with_hash(&mut mgr, 4, plh(4), 404, vec![13, 14, 15, 16]) {
                     G1Acquire::BlockedOnOffload {
-                        transfer_id,
+                        offload_id,
                         deadline_ms,
                     } => OffloadDependency {
-                        transfer_id,
+                        offload_id,
                         deadline_ms,
                     },
                     _ => panic!("second eviction must queue behind the active offload"),
                 };
-            assert_eq!(queued_dependency.transfer_id, Some(first_id));
+            assert_ne!(queued_dependency.offload_id, first_id);
             assert_eq!(queued_dependency.deadline_ms, first_dependency.deadline_ms);
             assert_eq!(
                 mgr.refresh_offload_dependency(queued_dependency),
@@ -3822,7 +3840,7 @@ mod tests {
         fn try_batch_swap_in_returns_no_hits_without_engine() {
             let mut mgr = make_mgr(8, 4);
             let plhs = [plh(1), plh(2), plh(3)];
-            let outcome = mgr.try_batch_swap_in(&plhs, None);
+            let outcome = mgr.try_batch_swap_in(&plhs, Vec::new(), None);
             assert!(matches!(outcome, BatchSwapInOutcome::NoHits));
         }
     }
