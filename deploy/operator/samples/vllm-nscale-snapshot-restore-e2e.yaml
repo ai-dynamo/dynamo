@@ -7,22 +7,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: fa2e-nccl-kvs-post1
+  name: fa2e-nccl-kvs-post2
   labels:
     app.kubernetes.io/created-by: pi-relay
     app.kubernetes.io/name: dynamo-snapshot-e2e-kvs
-    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post1
+    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post2
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: dynamo-snapshot-e2e-kvs
-      e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post1
+      e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post2
   template:
     metadata:
       labels:
         app.kubernetes.io/name: dynamo-snapshot-e2e-kvs
-        e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post1
+        e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post2
     spec:
       imagePullSecrets:
         - name: acr-token-secret
@@ -48,15 +48,15 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: fa2e-nccl-kvs-post1
+  name: fa2e-nccl-kvs-post2
   labels:
     app.kubernetes.io/created-by: pi-relay
     app.kubernetes.io/name: dynamo-snapshot-e2e-kvs
-    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post1
+    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post2
 spec:
   selector:
     app.kubernetes.io/name: dynamo-snapshot-e2e-kvs
-    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post1
+    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post2
   ports:
     - name: redis
       port: 6379
@@ -65,11 +65,11 @@ spec:
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: fi-nemotron-main-2f566-post1
+  name: fi-nemotron-main-2f566-post2
   labels:
     app.kubernetes.io/created-by: pi-relay
     app.kubernetes.io/name: dynamo-snapshot-e2e
-    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post1
+    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post2
   annotations:
     nvidia.com/enable-grove: "false"
 spec:
@@ -141,13 +141,16 @@ spec:
         deletionPolicy: Retain
         targetContainerName: main
       extraPodSpec:
+        # Preserve NCCL's cached bootstrap address across CRIU restore.
+        hostNetwork: true
+        dnsPolicy: ClusterFirstWithHostNet
         nodeSelector:
           kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-z2rzf
           nvidia.com/gpu.count: "8"
           nvidia.com/gpu.present: "true"
           nvidia.com/gpu.product: NVIDIA-B200
         runtimeClassName: nvidia
-        serviceAccountName: fi-nemotron-main-2f566-post1-k8s-service-discovery
+        serviceAccountName: fi-nemotron-main-2f566-post2-k8s-service-discovery
         securityContext:
           fsGroup: 1000
           fsGroupChangePolicy: OnRootMismatch
@@ -219,7 +222,7 @@ spec:
             - name: NCCL_CHECKPOINT_KVS_PATH
               value: /tmp/nccl-checkpoint-kvs-endpoint
             - name: DYN_SNAPSHOT_NCCL_KVS_ENDPOINT
-              value: fa2e-nccl-kvs-post1:6379/fi-nemotron-main-2f566-post1
+              value: fa2e-nccl-kvs-post2:6379/fi-nemotron-main-2f566-post2
             - name: NCCL_CHECKPOINT_KVS_TIMEOUT
               value: "300"
             - name: NCCL_DEBUG
