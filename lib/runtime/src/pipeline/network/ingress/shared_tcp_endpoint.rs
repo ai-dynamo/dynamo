@@ -29,6 +29,39 @@ use tokio_util::bytes::BytesMut;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+/// Request-plane ACK latency tracing (DYN_ACK_TRACE=1). Adds per-request decode->flush timing on
+/// the worker request plane so an ACK starvation (the iter4 collapse trigger) can be localized to
+/// the write-task scheduling delay vs the socket write, and correlated by request_id with the
+/// frontend's CannotConnect timeout. Zero-overhead when off.
+fn ack_trace_enabled() -> bool {
+    std::env::var("DYN_ACK_TRACE")
+        .ok()
+        .is_some_and(|v| v == "1" || v == "true")
+}
+
+/// Threshold (ms) at/above which a slow ACK flush is logged at WARN (default 1000).
+fn ack_trace_warn_ms() -> u64 {
+    std::env::var("DYN_ACK_TRACE_WARN_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1000)
+}
+
+/// Per-ACK trace metadata carried read_loop -> write_loop so the flush latency is attributable to a
+/// specific request and dispatch path. Only populated when DYN_ACK_TRACE is on.
+#[derive(Debug)]
+struct AckMeta {
+    decoded_at: Instant,
+    request_id: Box<str>,
+    path: &'static str,
+}
+
+/// Item sent over the response channel: the encoded frame plus optional ACK trace.
+struct ResponseItem {
+    bytes: Bytes,
+    meta: Option<AckMeta>,
+}
+
 /// Default worker pool size for TCP request handling
 const DEFAULT_WORKER_POOL_SIZE: usize = 10000;
 
@@ -505,8 +538,8 @@ impl SharedTcpServer {
         // Split stream into read and write halves for concurrent operations
         let (read_half, write_half) = tokio::io::split(stream);
 
-        // Channel for sending responses to the write task (zero-copy Bytes)
-        let (response_tx, response_rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+        // Channel for sending responses to the write task (zero-copy Bytes + optional ACK trace)
+        let (response_tx, response_rx) = tokio::sync::mpsc::unbounded_channel::<ResponseItem>();
 
         // Spawn write task
         let write_task = tokio::spawn(Self::write_loop(write_half, response_rx));
@@ -532,7 +565,7 @@ impl SharedTcpServer {
     async fn read_loop(
         mut read_half: tokio::io::ReadHalf<TcpStream>,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
-        response_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
+        response_tx: tokio::sync::mpsc::UnboundedSender<ResponseItem>,
         work_tx: tokio::sync::mpsc::Sender<WorkItem>,
         engine_sem: Arc<Semaphore>,
         queue_capacity: usize,
@@ -541,11 +574,12 @@ impl SharedTcpServer {
 
         // Create zero-copy decoder with optimized buffer size
         let mut decoder = ZeroCopyTcpDecoder::new();
+        let trace = ack_trace_enabled();
 
         // Encode and send a response frame; returns false if the write task is gone.
-        let send_response = |msg: TcpResponseMessage| -> bool {
+        let send_response = |msg: TcpResponseMessage, meta: Option<AckMeta>| -> bool {
             match msg.encode() {
-                Ok(encoded) => response_tx.send(encoded).is_ok(),
+                Ok(encoded) => response_tx.send(ResponseItem { bytes: encoded, meta }).is_ok(),
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to encode TCP response");
                     true
@@ -567,11 +601,14 @@ impl SharedTcpServer {
                     let error_response =
                         TcpResponseMessage::new(Bytes::from(format!("Read error: {}", e)));
                     if let Ok(encoded) = error_response.encode() {
-                        let _ = response_tx.send(encoded);
+                        let _ = response_tx.send(ResponseItem { bytes: encoded, meta: None });
                     }
                     return Err(e.into());
                 }
             };
+
+            // ACK-trace: stamp decode time as close to the wire as possible.
+            let decoded_at = if trace { Some(Instant::now()) } else { None };
 
             // Get endpoint path (zero-copy string slice)
             let endpoint_path = match request_msg.endpoint_path() {
@@ -581,7 +618,7 @@ impl SharedTcpServer {
                     let error_response =
                         TcpResponseMessage::new(Bytes::from_static(b"Invalid endpoint path"));
                     if let Ok(encoded) = error_response.encode() {
-                        let _ = response_tx.send(encoded);
+                        let _ = response_tx.send(ResponseItem { bytes: encoded, meta: None });
                     }
                     continue;
                 }
@@ -589,6 +626,20 @@ impl SharedTcpServer {
 
             // Get headers (parsed from message)
             let headers = request_msg.headers();
+
+            // ACK-trace: capture request_id (owned) for correlation with the frontend timeout log.
+            let req_id: Option<Box<str>> = if trace {
+                Some(
+                    headers
+                        .get("request-id")
+                        .or_else(|| headers.get("x-dynamo-request-id"))
+                        .map(|s| s.as_str())
+                        .unwrap_or("unknown")
+                        .into(),
+                )
+            } else {
+                None
+            };
 
             // Get payload (zero-copy Bytes - just Arc clone!)
             let payload = request_msg.payload();
@@ -613,7 +664,7 @@ impl SharedTcpServer {
                         endpoint_path
                     )));
                     if let Ok(encoded) = error_response.encode() {
-                        let _ = response_tx.send(encoded);
+                        let _ = response_tx.send(ResponseItem { bytes: encoded, meta: None });
                     }
                     continue;
                 }
@@ -648,7 +699,12 @@ impl SharedTcpServer {
             if let Some(permit) = direct_permit {
                 // Bypass the queue — routing through work_tx would make it a throat.
                 Self::spawn_handle(work_item, permit);
-                if !send_response(TcpResponseMessage::empty()) {
+                let ack_meta = decoded_at.zip(req_id.as_ref()).map(|(d, id)| AckMeta {
+                    decoded_at: d,
+                    request_id: id.clone(),
+                    path: "direct",
+                });
+                if !send_response(TcpResponseMessage::empty(), ack_meta) {
                     break;
                 }
                 continue;
@@ -661,7 +717,12 @@ impl SharedTcpServer {
                     REQUEST_QUEUE_GAUGE.inc();
                     slot.send(work_item);
                     // Queued: the dispatcher owns inflight, so don't touch it here.
-                    if !send_response(TcpResponseMessage::empty()) {
+                    let ack_meta = decoded_at.zip(req_id.as_ref()).map(|(d, id)| AckMeta {
+                        decoded_at: d,
+                        request_id: id.clone(),
+                        path: "queued",
+                    });
+                    if !send_response(TcpResponseMessage::empty(), ack_meta) {
                         break;
                     }
                 }
@@ -673,17 +734,23 @@ impl SharedTcpServer {
                         instance_id = handler.instance_id,
                         "Worker at capacity (engine + queue full), rejecting request"
                     );
-                    send_response(TcpResponseMessage::new(Bytes::from_static(
-                        b"Server overloaded: worker at capacity",
-                    )));
+                    send_response(
+                        TcpResponseMessage::new(Bytes::from_static(
+                            b"Server overloaded: worker at capacity",
+                        )),
+                        None,
+                    );
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
-                    send_response(TcpResponseMessage::new(Bytes::from_static(
-                        b"Server unavailable: worker pool channel closed",
-                    )));
+                    send_response(
+                        TcpResponseMessage::new(Bytes::from_static(
+                            b"Server unavailable: worker pool channel closed",
+                        )),
+                        None,
+                    );
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
                     tracing::error!("Worker pool channel closed, shutting down read loop");
@@ -697,11 +764,43 @@ impl SharedTcpServer {
 
     async fn write_loop(
         mut write_half: tokio::io::WriteHalf<TcpStream>,
-        mut response_rx: tokio::sync::mpsc::UnboundedReceiver<Bytes>,
+        mut response_rx: tokio::sync::mpsc::UnboundedReceiver<ResponseItem>,
     ) -> Result<()> {
-        while let Some(response) = response_rx.recv().await {
-            write_half.write_all(&response).await?;
+        let warn_ms = ack_trace_warn_ms();
+        while let Some(item) = response_rx.recv().await {
+            // For traced ACKs, mark the instant the write task dequeued the frame: the gap from
+            // decode->dequeue is the write-task SCHEDULING delay (runtime/CPU starvation), and
+            // dequeue->flush is the socket write time. This localizes the 5s ACK-timeout cause.
+            let dequeued_at = item.meta.as_ref().map(|_| Instant::now());
+            write_half.write_all(&item.bytes).await?;
             write_half.flush().await?;
+            if let (Some(meta), Some(dq)) = (item.meta, dequeued_at) {
+                let now = Instant::now();
+                let total_ms = now.duration_since(meta.decoded_at).as_millis() as u64;
+                let queue_ms = dq.duration_since(meta.decoded_at).as_millis() as u64;
+                let write_ms = now.duration_since(dq).as_millis() as u64;
+                if total_ms >= warn_ms {
+                    tracing::warn!(
+                        target: "dynamo_ack_trace",
+                        request_id = %meta.request_id,
+                        path = meta.path,
+                        total_ms,
+                        queue_ms,
+                        write_ms,
+                        "slow request-plane ACK flush"
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "dynamo_ack_trace",
+                        request_id = %meta.request_id,
+                        path = meta.path,
+                        total_ms,
+                        queue_ms,
+                        write_ms,
+                        "request-plane ACK flush"
+                    );
+                }
+            }
         }
         Ok(())
     }

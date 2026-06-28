@@ -1422,7 +1422,20 @@ impl RequestPlaneClient for TcpRequestClient {
             Err(_) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
                 TCP_ERRORS_TOTAL.inc();
-                tracing::warn!("TCP request timeout to {}", addr);
+                let req_id = headers
+                    .get("request-id")
+                    .or_else(|| headers.get("x-dynamo-request-id"))
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown");
+                // request_id correlates with the worker's dynamo_ack_trace flush log; timeout_s is
+                // the per-request ACK budget (DYN_TCP_REQUEST_TIMEOUT, default 5s).
+                tracing::warn!(
+                    addr = %addr,
+                    request_id = %req_id,
+                    timeout_s = self.config.request_timeout.as_secs(),
+                    "TCP request ACK timeout to {} (request-plane)",
+                    addr
+                );
                 Err(anyhow::anyhow!(
                     crate::error::DynamoError::builder()
                         .error_type(crate::error::ErrorType::CannotConnect)
