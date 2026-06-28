@@ -397,6 +397,15 @@ impl SharedTcpServer {
         // Store the actual bound address
         *self.actual_addr.write() = Some(actual_addr);
 
+        // ACK-trace: monitor THIS (worker request-plane) runtime for event-loop stalls. The canary
+        // is otherwise only spawned by the frontend HTTP service, so workers were unobservable.
+        // Stalls log to target `dynamo_stall` in the worker log → directly answers "is the GEN
+        // worker runtime starved" without scraping. Gated by DYN_ACK_TRACE.
+        if ack_trace_enabled() {
+            let cancel = self.cancellation_token.clone();
+            tokio::spawn(crate::metrics::tokio_perf::tokio_metrics_and_canary_loop(cancel));
+        }
+
         // Start accepting connections in a background task
         let server = self.clone();
         tokio::spawn(async move {
@@ -640,6 +649,29 @@ impl SharedTcpServer {
             } else {
                 None
             };
+
+            // ACK-trace: frontend-send -> worker-decode arrival delay — the PRE-decode wait that the
+            // decode->flush trace misses. High here = the request sat unread (request-plane read
+            // starvation on THIS worker), distinguishing it from a slow ACK write or frontend side.
+            if trace
+                && let Some(send_ts) = headers
+                    .get("x-frontend-send-ts-ns")
+                    .and_then(|s| s.parse::<u64>().ok())
+            {
+                let now_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                let arrival_ms = now_ns.saturating_sub(send_ts) / 1_000_000;
+                if arrival_ms >= 1000 {
+                    tracing::warn!(
+                        target: "dynamo_ack_trace",
+                        request_id = %req_id.as_deref().unwrap_or("unknown"),
+                        arrival_ms,
+                        "slow request arrival (frontend-send -> worker-decode)"
+                    );
+                }
+            }
 
             // Get payload (zero-copy Bytes - just Arc clone!)
             let payload = request_msg.payload();
