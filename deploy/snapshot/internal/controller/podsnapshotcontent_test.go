@@ -110,7 +110,7 @@ func makeWorkOrder(name, node, checkpointID string) *nvidiacomv1alpha1.PodSnapsh
 		},
 		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: "podsnapshot-" + checkpointID},
-			Source:      nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: types.UID("pod-uid")}, NodeName: node},
+			Source:         nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: types.UID("pod-uid")}, NodeName: node},
 		},
 	}
 }
@@ -327,8 +327,14 @@ func TestReconcileSnapshotContent_OpaqueNameUsesPodLabel(t *testing.T) {
 	assert.Equal(t, "abc", params.CheckpointID)
 	assert.Equal(t, filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"), params.HostPath)
 
-	got := getContent(t, w, content.Name)
-	require.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
+	// writeReady runs after checkpointFn returns, so poll for the Ready condition rather than reading once.
+	require.Eventually(t, func() bool {
+		c := &nvidiacomv1alpha1.PodSnapshotContent{}
+		if err := w.client.Get(context.Background(), types.NamespacedName{Name: content.Name}, c); err != nil {
+			return false
+		}
+		return meta.FindStatusCondition(c.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady) != nil
+	}, time.Second, 5*time.Millisecond)
 }
 
 func TestReconcileSnapshotContent_ResumeWritesReady(t *testing.T) {
@@ -477,9 +483,14 @@ func TestReconcileSnapshotContent_CapturesFromPod(t *testing.T) {
 	assert.Equal(t, dest, params.HostPath)
 	assert.Equal(t, dest, params.ContainerPath)
 
-	got := getContent(t, w, content.Name)
-	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady)
-	require.NotNil(t, cond)
+	// writeReady runs after checkpointFn returns, so poll for the Ready condition rather than reading once.
+	require.Eventually(t, func() bool {
+		c := &nvidiacomv1alpha1.PodSnapshotContent{}
+		if err := w.client.Get(context.Background(), types.NamespacedName{Name: content.Name}, c); err != nil {
+			return false
+		}
+		return meta.FindStatusCondition(c.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady) != nil
+	}, time.Second, 5*time.Millisecond)
 }
 
 func TestRunCheckpoint_WritesReadyOnSuccess(t *testing.T) {
@@ -536,7 +547,7 @@ func contentForWorker0(name string, created metav1.Time, terminal string) *nvidi
 		ObjectMeta: metav1.ObjectMeta{Name: name, CreationTimestamp: created},
 		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
 			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: "snapshot-" + name},
-			Source:      nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: types.UID("pod-uid")}, NodeName: "node-a"},
+			Source:         nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: types.UID("pod-uid")}, NodeName: "node-a"},
 		},
 	}
 	if terminal != "" {
