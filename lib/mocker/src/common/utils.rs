@@ -109,23 +109,17 @@ pub async fn sleep_until_precise(deadline: Instant) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
+    use std::task::Poll;
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_expired_precise_sleep_yields_to_runtime() {
-        let task_ran = Arc::new(AtomicBool::new(false));
-        let task_ran_clone = task_ran.clone();
-        let task = tokio::spawn(async move {
-            task_ran_clone.store(true, Ordering::SeqCst);
-        });
+        let sleep = sleep_until_precise(Instant::now());
+        tokio::pin!(sleep);
 
-        sleep_until_precise(Instant::now()).await;
+        let first_poll = futures::poll!(sleep.as_mut());
 
-        assert!(task_ran.load(Ordering::SeqCst));
-        task.await.unwrap();
+        assert!(matches!(first_poll, Poll::Pending));
+        sleep.await;
     }
 
     #[test]
