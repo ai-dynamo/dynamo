@@ -106,6 +106,7 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         self,
         extension_names: tuple[str, ...],
         exact_native: bool,
+        full_source: bool = False,
         unowned_extension_names: tuple[str, ...] = (),
         vllm_version: str | None = None,
         torch_version: str = "2.11.0+cu130",
@@ -125,7 +126,9 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             )
             records = ["vllm/__init__.py,,"]
             for extension_name in extension_names:
-                (package_dir / extension_name).touch()
+                extension = package_dir / extension_name
+                extension.parent.mkdir(parents=True, exist_ok=True)
+                extension.touch()
                 records.append(f"vllm/{extension_name},,")
             for extension_name in unowned_extension_names:
                 (package_dir / extension_name).touch()
@@ -149,8 +152,8 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             )
             (dist_info / "RECORD").write_text("\n".join(records))
 
-            if exact_native:
-                torch_dist_info = root / "torch-2.11.0.dist-info"
+            if exact_native or full_source:
+                torch_dist_info = root / "torch-test.dist-info"
                 torch_dist_info.mkdir()
                 (torch_dist_info / "METADATA").write_text(
                     "Metadata-Version: 2.1\n"
@@ -158,8 +161,8 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
                     f"Version: {torch_version}\n"
                 )
                 (torch_dist_info / "RECORD").write_text(
-                    "torch-2.11.0.dist-info/METADATA,,\n"
-                    "torch-2.11.0.dist-info/RECORD,,\n"
+                    "torch-test.dist-info/METADATA,,\n"
+                    "torch-test.dist-info/RECORD,,\n"
                 )
 
             bin_dir = root / "bin"
@@ -177,8 +180,10 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
                 "verify_vllm_install",
                 "checkpoint-hooks" if checkpoint_hooks else "",
                 "exact-native" if exact_native else "",
-                "cu130" if exact_native else "",
-                "cu130" if exact_native else "",
+                "cu130" if exact_native or full_source else "",
+                "cu130" if exact_native or full_source else "",
+                "full-source" if full_source else "",
+                torch_version if full_source else "",
                 env=env,
             )
 
@@ -206,13 +211,17 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
 
         dockerfile = self.render_runtime("multi")
         self.assertIn(
-            "FROM --platform=linux/amd64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} "
+            "FROM --platform=linux/amd64 ${VLLM_RUNTIME_BASE_IMAGE} "
             "AS vllm_runtime_amd64",
             dockerfile,
         )
         self.assertIn(
-            "FROM --platform=linux/arm64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} "
+            "FROM --platform=linux/arm64 ${VLLM_RUNTIME_BASE_IMAGE} "
             "AS vllm_runtime_arm64",
+            dockerfile,
+        )
+        self.assertIn(
+            "ARG VLLM_RUNTIME_BASE_IMAGE=${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG}",
             dockerfile,
         )
         self.assertIn("ARG VLLM_PRECOMPILED_WHEEL_COMMIT=", dockerfile)
@@ -221,7 +230,7 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
     def test_exact_wheel_workflow_selects_amd64_and_passes_args(self) -> None:
         workflow = (REPO_ROOT / ".github/workflows/build-on-demand.yml").read_text()
         self.assertIn(
-            "inputs.vllm_precompiled_wheel_commit != '' && "
+            "inputs.vllm_precompiled_wheel_commit != '') && "
             "'linux/amd64' || 'linux/amd64,linux/arm64'",
             workflow,
         )
@@ -237,7 +246,7 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
 
         dockerfile = self.render_runtime("amd64")
         self.assertIn(
-            "FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime",
+            "FROM ${VLLM_RUNTIME_BASE_IMAGE} AS pre_runtime",
             dockerfile,
         )
         self.assertNotIn("AS vllm_runtime_arm64", dockerfile)
@@ -251,7 +260,8 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             "uv pip install --system -r requirements.txt"
         )
         flashinfer_install = installer.index(
-            "uv pip install --system --force-reinstall --no-deps ."
+            "uv pip install --system --force-reinstall --no-build-isolation "
+            "--no-deps ."
         )
         pip_check = installer.index("uv pip check --system")
         self.assertLess(vllm_install, flashinfer_requirements)
@@ -261,8 +271,8 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         self.assertIn("requirements/cuda.txt", installer)
         self.assertIn("source-provenance.txt", installer)
         self.assertIn("VLLM_TARGET_DEVICE=cuda", installer)
-        self.assertIn("VLLM_TORCH_BACKEND=cu130", installer)
-        self.assertIn("VLLM_EXPECTED_TORCH_LOCAL_VERSION=cu130", installer)
+        self.assertIn("VLLM_TORCH_BACKEND", installer)
+        self.assertIn("VLLM_EXPECTED_TORCH_LOCAL_VERSION", installer)
         self.assertIn('--torch-backend="${VLLM_TORCH_BACKEND}"', installer)
         self.assertNotIn("--torch-backend=auto", installer)
 
@@ -490,6 +500,66 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         checkpoint_env = dockerfile.index("ENV NCCL_CHECKPOINT_SHIM=", build)
         self.assertLess(helper_copy, build)
         self.assertLess(build, checkpoint_env)
+
+    def test_full_source_mode_is_native_pinned_and_digest_based(self) -> None:
+        installer = self.installer.read_text()
+        workflow = (REPO_ROOT / ".github/workflows/build-on-demand.yml").read_text()
+        dockerfile = self.render_runtime("amd64")
+
+        self.assertIn("VLLM_INSTALL_MODE=${{ inputs.vllm_install_mode }}", workflow)
+        self.assertIn(
+            "VLLM_RUNTIME_BASE_IMAGE=${{ inputs.vllm_runtime_base_image }}",
+            workflow,
+        )
+        self.assertIn("validate_full_source_mode", installer)
+        self.assertIn("VLLM_RUNTIME_BASE_IMAGE digest", installer)
+        self.assertIn("VLLM_USE_PRECOMPILED=0", installer)
+        self.assertIn("VLLM_USE_PRECOMPILED_RUST=0", installer)
+        self.assertIn("--no-build-isolation --no-deps .", installer)
+        self.assertIn("torchaudio==0", installer)
+        self.assertIn("nvidia-nccl-cu13==${NCCL_CHECKPOINT_VERSION}", installer)
+        checkout = installer.index('vllm_source_sha="${RESOLVED_SOURCE_SHA}"')
+        full_source_dispatch = installer.index(
+            'if [[ "${VLLM_INSTALL_MODE}" == "full-source" ]]',
+            checkout,
+        )
+        build = installer.index("build_full_source_vllm", full_source_dispatch)
+        exact_native = installer.index(
+            'elif [[ -n "${VLLM_PRECOMPILED_WHEEL_COMMIT}" ]]',
+            build,
+        )
+        self.assertLess(checkout, full_source_dispatch)
+        self.assertLess(full_source_dispatch, build)
+        self.assertLess(build, exact_native)
+        self.assertIn("VLLM_NCCL_SO_PATH=/opt/dynamo/nccl/libnccl.so.2", dockerfile)
+        self.assertIn(
+            'LABEL ai.dynamo.vllm.base="${VLLM_RUNTIME_BASE_IMAGE}"', dockerfile
+        )
+
+    def test_full_source_verification_requires_current_main_extensions(self) -> None:
+        extensions = (
+            "_C_stable_libtorch.abi3.so",
+            "_moe_C_stable_libtorch.abi3.so",
+            "cumem_allocator.abi3.so",
+            "vllm_flash_attn/_vllm_fa2_C.abi3.so",
+        )
+        result = self.verify_fixture(
+            extensions,
+            exact_native=False,
+            full_source=True,
+            torch_version="2.12.0+cu130",
+            checkpoint_hooks=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        result = self.verify_fixture(
+            extensions[:-1],
+            exact_native=False,
+            full_source=True,
+            torch_version="2.12.0+cu130",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so", result.stderr)
 
 
 if __name__ == "__main__":

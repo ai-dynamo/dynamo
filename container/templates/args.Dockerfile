@@ -31,6 +31,9 @@ ARG BASE_IMAGE_TAG={{ context[framework][device_key].base_image_tag }}
 {% if framework in ["sglang", "trtllm", "vllm"] -%}
 ARG RUNTIME_IMAGE={{ context[framework][device_key].runtime_image }}
 ARG RUNTIME_IMAGE_TAG={{ context[framework][device_key].runtime_image_tag }}
+{% if framework == "vllm" and device == "cuda" -%}
+ARG VLLM_RUNTIME_BASE_IMAGE=${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG}
+{% endif -%}
 {%- endif %}
 
 # wheel builder image selection
@@ -105,6 +108,11 @@ ARG FLASHINFER_GIT_SHA={{ context.vllm.flashinfer_git_sha }}
 ARG VLLM_GIT_URL={{ context.vllm.vllm_git_url }}
 ARG VLLM_GIT_REF={{ context.vllm.vllm_git_ref }}
 ARG VLLM_GIT_SHA={{ context.vllm.vllm_git_sha }}
+ARG VLLM_INSTALL_MODE={{ context.vllm.vllm_install_mode }}
+ARG VLLM_TORCH_VERSION={{ context.vllm.vllm_torch_version }}
+ARG VLLM_TORCHVISION_VERSION={{ context.vllm.vllm_torchvision_version }}
+ARG VLLM_TORCH_BACKEND={{ context.vllm.vllm_torch_backend }}
+ARG VLLM_TORCH_CUDA_ARCH_LIST={{ context.vllm.vllm_torch_cuda_arch_list }}
 ARG VLLM_PRECOMPILED_WHEEL_COMMIT={{ context.vllm.vllm_precompiled_wheel_commit }}
 ARG VLLM_PRECOMPILED_WHEEL_VARIANT={{ context.vllm.vllm_precompiled_wheel_variant }}
 ARG NCCL_CHECKPOINT_GIT_URL={{ context.vllm.nccl_checkpoint_git_url }}

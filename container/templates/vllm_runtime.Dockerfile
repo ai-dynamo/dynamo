@@ -8,11 +8,11 @@
 ##################################
 
 {% if platform == "multi" %}
-FROM --platform=linux/amd64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_amd64
-FROM --platform=linux/arm64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_arm64
+FROM --platform=linux/amd64 ${VLLM_RUNTIME_BASE_IMAGE} AS vllm_runtime_amd64
+FROM --platform=linux/arm64 ${VLLM_RUNTIME_BASE_IMAGE} AS vllm_runtime_arm64
 FROM vllm_runtime_${TARGETARCH} AS pre_runtime
 {% else %}
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
+FROM ${VLLM_RUNTIME_BASE_IMAGE} AS pre_runtime
 {% endif %}
 
 ARG PYTHON_VERSION
@@ -30,6 +30,13 @@ ARG FLASHINFER_GIT_SHA
 ARG VLLM_GIT_URL
 ARG VLLM_GIT_REF
 ARG VLLM_GIT_SHA
+ARG VLLM_INSTALL_MODE
+ARG VLLM_TORCH_VERSION
+ARG VLLM_TORCHVISION_VERSION
+ARG VLLM_TORCH_BACKEND
+ARG VLLM_TORCH_CUDA_ARCH_LIST
+ARG VLLM_RUNTIME_BASE_IMAGE
+ARG MAX_JOBS
 ARG VLLM_PRECOMPILED_WHEEL_COMMIT
 ARG VLLM_PRECOMPILED_WHEEL_VARIANT
 ARG NCCL_CHECKPOINT_GIT_URL
@@ -39,10 +46,15 @@ ARG NCCL_CHECKPOINT_VERSION
 {% endif %}
 ARG MODELEXPRESS_VERSION
 
+LABEL ai.dynamo.vllm.base="${VLLM_RUNTIME_BASE_IMAGE}"
+
 WORKDIR /workspace
 
 ENV DYNAMO_HOME=/opt/dynamo
 ENV HOME=/home/dynamo
+{% if device == "cuda" %}
+ENV VLLM_NCCL_SO_PATH=/opt/dynamo/nccl/libnccl.so.2
+{% endif %}
 {% if device != "cuda" %}
 ENV PATH=/usr/local/ucx/bin:/usr/local/bin/etcd:${PATH}
 {% else %}
@@ -87,10 +99,12 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 {% if device == "cuda" %}
-# Build On Demand has two custom vLLM modes:
+# Build On Demand has three custom vLLM modes:
 # - blank VLLM_PRECOMPILED_WHEEL_COMMIT: legacy Python-only package overlay;
 # - exact 40-character commit: replace vLLM from custom source while reusing
 #   native artifacts from that exact ancestor's official x86_64 wheel.
+# - VLLM_INSTALL_MODE=full-source: replace vLLM with a complete local CUDA
+#   build against the explicitly selected official Torch stack.
 # FlashInfer is installed last so a vLLM dependency solve cannot replace a
 # checkpoint-aware FlashInfer fork. The helper records durable provenance under
 # /opt/dynamo for later pod inspection.
@@ -308,6 +322,21 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.txt
+
+{% if device == "cuda" %}
+# Revalidate after every Python package layer. Full native imports still wait
+# for a GPU runtime because the image build environment has no libcuda.so.1.
+RUN set -eux; \
+    uv pip check --system; \
+    if [ -f "${NCCL_CHECKPOINT_SHIM}" ]; then \
+        NCCL_CHECKPOINT_SHIM="${NCCL_CHECKPOINT_SHIM}" \
+        EXPECTED_NCCL_VERSION="${NCCL_CHECKPOINT_VERSION}" \
+        EXPECTED_TORCH_VERSION="${VLLM_TORCH_VERSION}" \
+        EXPECTED_TORCH_LOCAL_VERSION="${VLLM_TORCH_BACKEND:-${VLLM_PRECOMPILED_WHEEL_VARIANT}}" \
+        LD_PRELOAD="${NCCL_CHECKPOINT_SHIM}" \
+            python3 /usr/local/lib/validate_pynccl_checkpoint_binding.py; \
+    fi
+{% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
 # collection conflicts (duplicate conftest plugin registration) and stale

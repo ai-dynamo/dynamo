@@ -13,6 +13,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 
 EXPECTED_CHECKPOINT_VERSION = 100
 FLASHINFER_VERSION_FILE = Path("/opt/dynamo/flashinfer-source-version.txt")
+FLASHINFER_SHA_FILE = Path("/opt/dynamo/flashinfer-source-sha.txt")
 EXPECTED_SHIM_PATH = Path(
     "/opt/nccl-checkpoint/lib/libnccl-checkpoint-shim.so"
 ).resolve()
@@ -44,10 +45,7 @@ def require_distribution(name: str, expected_version: str) -> metadata.Distribut
     distributions = [
         distribution
         for distribution in metadata.distributions()
-        if distribution.metadata["Name"]
-        .lower()
-        .replace("_", "-")
-        .replace(".", "-")
+        if distribution.metadata["Name"].lower().replace("_", "-").replace(".", "-")
         == canonical_name
     ]
     if len(distributions) != 1:
@@ -60,10 +58,25 @@ def require_distribution(name: str, expected_version: str) -> metadata.Distribut
             f"{name} version is {distribution.version}, expected {expected_version}"
         )
     print(
-        f"{name}: {distribution.version} "
-        f"({distribution.locate_file('').resolve()})"
+        f"{name}: {distribution.version} " f"({distribution.locate_file('').resolve()})"
     )
     return distribution
+
+
+def check_nccl_mappings(expected_path: Path) -> None:
+    mappings = {
+        Path(line.rsplit(maxsplit=1)[-1]).resolve()
+        for line in Path("/proc/self/maps").read_text().splitlines()
+        if "/" in line
+        and Path(line.rsplit(maxsplit=1)[-1]).name.startswith("libnccl.so")
+    }
+    if mappings != {expected_path}:
+        raise RuntimeError(
+            "Unexpected runtime NCCL mappings: "
+            f"{sorted(str(path) for path in mappings)}; expected only "
+            f"{expected_path}"
+        )
+    print(f"Runtime NCCL mapping: {expected_path}")
 
 
 def check_flashinfer() -> None:
@@ -74,6 +87,13 @@ def check_flashinfer() -> None:
     expected_version = FLASHINFER_VERSION_FILE.read_text().strip()
     if not expected_version:
         raise RuntimeError(f"Empty FlashInfer version file {FLASHINFER_VERSION_FILE}")
+    if not FLASHINFER_SHA_FILE.is_file():
+        raise RuntimeError(f"Missing custom FlashInfer SHA file {FLASHINFER_SHA_FILE}")
+    expected_sha = FLASHINFER_SHA_FILE.read_text().strip()
+    if len(expected_sha) != 40 or any(
+        character not in "0123456789abcdef" for character in expected_sha.lower()
+    ):
+        raise RuntimeError(f"Invalid FlashInfer source SHA: {expected_sha!r}")
 
     require_distribution("flashinfer-python", expected_version)
     require_distribution("flashinfer-cubin", expected_version)
@@ -90,22 +110,36 @@ def check_flashinfer() -> None:
     for module_name in ("flashinfer", "flashinfer_cubin"):
         module = importlib.import_module(module_name)
         module_version = getattr(module, "__version__", None)
+        module_sha = getattr(module, "__git_version__", None)
         module_path = Path(module.__file__).resolve()
-        print(f"{module_name} import: {module_version} ({module_path})")
-        if module_version != expected_version:
+        print(
+            f"{module_name} import: {module_version} source={module_sha} "
+            f"({module_path})"
+        )
+        if module_version != expected_version or module_sha != expected_sha:
             raise RuntimeError(
-                f"{module_name} import version is {module_version}, "
-                f"expected {expected_version}"
+                f"{module_name} import version/SHA is "
+                f"{module_version!r}/{module_sha!r}, expected "
+                f"{expected_version!r}/{expected_sha!r}"
             )
+    print(f"FlashInfer source SHA: {expected_sha}")
 
 
 def check_torch(expected_nccl_code: int) -> None:
+    expected_version = os.environ.get("EXPECTED_TORCH_VERSION")
     expected_local_version = os.environ["EXPECTED_TORCH_LOCAL_VERSION"]
     if not expected_local_version:
         raise RuntimeError(
             "EXPECTED_TORCH_LOCAL_VERSION must be set for the image check"
         )
     torch_distribution = metadata.distribution("torch")
+    if expected_version:
+        expected_version = f"{expected_version}+{expected_local_version}"
+        if torch_distribution.version != expected_version:
+            raise RuntimeError(
+                f"torch version is {torch_distribution.version}, "
+                f"expected {expected_version}"
+            )
     torch_local_version = torch_distribution.version.partition("+")[2].lower()
     if torch_local_version != expected_local_version:
         raise RuntimeError(
@@ -148,7 +182,16 @@ def main() -> None:
             "EXPECTED_NCCL_VERSION must be set for the PyNCCL binding check"
         )
     expected_nccl_code = nccl_version_code(expected_nccl_version)
-    require_distribution("nvidia-nccl-cu13", expected_nccl_version)
+    nccl_distribution = require_distribution("nvidia-nccl-cu13", expected_nccl_version)
+    expected_nccl_path = Path(
+        nccl_distribution.locate_file("nvidia/nccl/lib/libnccl.so.2")
+    ).resolve()
+    configured_nccl_path = Path(os.environ["VLLM_NCCL_SO_PATH"]).resolve()
+    if configured_nccl_path != expected_nccl_path:
+        raise RuntimeError(
+            f"VLLM_NCCL_SO_PATH selects {configured_nccl_path}, expected "
+            f"{expected_nccl_path}"
+        )
 
     checkpoint_version = NCCLCheckpointLibrary().get_version()
     if (
@@ -195,6 +238,7 @@ def main() -> None:
     print(f"Checkpoint ncclAllReduce: {all_reduce_path}")
     check_flashinfer()
     check_torch(expected_nccl_code)
+    check_nccl_mappings(expected_nccl_path)
 
 
 if __name__ == "__main__":
