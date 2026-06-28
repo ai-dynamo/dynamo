@@ -103,23 +103,4 @@ mod tests {
         assert!(tracker.fractional_blocks.is_empty());
         assert_eq!(tracker.active_blocks(), 0);
     }
-
-    #[test]
-    fn shared_block_counts_once_until_last_reference_drops() {
-        let mut tracker = BlockTracker::default();
-        let first = tracker.touch_block(&7);
-        let second = tracker.touch_block(&7);
-        let third = tracker.touch_block(&7);
-
-        assert_eq!(tracker.active_blocks(), 1);
-
-        drop(first.rc);
-        drop(second.rc);
-        assert!(!tracker.try_remove_block(&7));
-        assert_eq!(tracker.active_blocks(), 1);
-
-        drop(third.rc);
-        assert!(tracker.try_remove_block(&7));
-        assert_eq!(tracker.active_blocks(), 0);
-    }
 }

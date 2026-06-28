@@ -35,6 +35,9 @@ class TestMultimodalEmbeddingCacheManagerBasicOperations:
         assert retrieved is not None
         assert torch.equal(retrieved.tensor, tensor)
         assert retrieved.image_grid_thw is None
+        assert retrieved.video_grid_thw is None
+        assert retrieved.second_per_grid_ts is None
+        assert retrieved.video_timestamps is None
 
     def test_set_and_get_with_grid(self):
         cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
@@ -269,21 +272,36 @@ class TestCachedEmbeddingNamedTuple:
 
     def test_fields(self):
         tensor = torch.randn(4, 4)
-        grid = [[1, 2, 3]]
-        entry = CachedEmbedding(tensor=tensor, image_grid_thw=grid)
+        video_grid = [[1, 2, 3]]
+        timestamps = [[0.0, 0.5]]
+        entry = CachedEmbedding(
+            tensor=tensor,
+            video_grid_thw=video_grid,
+            second_per_grid_ts=0.5,
+            video_timestamps=timestamps,
+        )
 
         assert torch.equal(entry.tensor, tensor)
-        assert entry.image_grid_thw == grid
+        assert entry.image_grid_thw is None
+        assert entry.video_grid_thw == video_grid
+        assert entry.second_per_grid_ts == 0.5
+        assert entry.video_timestamps == timestamps
 
     def test_none_grid(self):
         tensor = torch.randn(4, 4)
         entry = CachedEmbedding(tensor=tensor, image_grid_thw=None)
         assert entry.image_grid_thw is None
+        assert entry.video_grid_thw is None
+        assert entry.second_per_grid_ts is None
+        assert entry.video_timestamps is None
 
     def test_unpacking(self):
         tensor = torch.randn(4, 4)
         grid = [[1, 2, 3]]
         entry = CachedEmbedding(tensor=tensor, image_grid_thw=grid)
-        t, g = entry
+        t, image_grid, video_grid, second_per_grid_ts, video_timestamps = entry
         assert torch.equal(t, tensor)
-        assert g == grid
+        assert image_grid == grid
+        assert video_grid is None
+        assert second_per_grid_ts is None
+        assert video_timestamps is None

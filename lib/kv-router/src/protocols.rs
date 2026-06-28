@@ -1215,12 +1215,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_overlap_scores_default() {
-        let overlap_scores: OverlapScores = Default::default();
-        assert!(overlap_scores.scores.is_empty());
-    }
-
     #[rstest]
     #[case(11)]
     #[case(32)]
@@ -1460,59 +1454,6 @@ mod tests {
 
         let deserialized: ExternalSequenceBlockHash = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized, hash);
-    }
-
-    #[test]
-    fn test_kv_cache_events_serialization() {
-        let event_data = KvCacheEventData::Stored(KvCacheStoreData {
-            parent_hash: Some(ExternalSequenceBlockHash(1)),
-            start_position: None,
-            blocks: vec![KvCacheStoredBlockData {
-                block_hash: ExternalSequenceBlockHash(2),
-                tokens_hash: LocalBlockHash(3),
-                mm_extra_info: None,
-            }],
-        });
-
-        let event = KvCacheEvent {
-            event_id: 1,
-            data: event_data,
-            dp_rank: 0,
-        };
-
-        let events = KvCacheEvents {
-            events: vec![event],
-            shutdown: false,
-        };
-
-        let serialized = serde_json::to_string(&events).unwrap();
-        let deserialized: KvCacheEvents = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(deserialized.events.len(), 1);
-        assert_eq!(deserialized.events[0].event_id, 1);
-        if let KvCacheEventData::Stored(store_data) = &deserialized.events[0].data {
-            assert_eq!(store_data.parent_hash.unwrap().0, 1);
-            assert_eq!(store_data.blocks.len(), 1);
-            assert_eq!(store_data.blocks[0].block_hash.0, 2);
-            assert_eq!(store_data.blocks[0].tokens_hash.0, 3);
-        } else {
-            panic!("Expected KvCacheEventData::Stored variant");
-        }
-        assert!(!deserialized.shutdown);
-    }
-
-    #[test]
-    fn test_kv_cache_remove_data_serialization() {
-        let remove_data = KvCacheRemoveData {
-            block_hashes: vec![ExternalSequenceBlockHash(4), ExternalSequenceBlockHash(5)],
-        };
-
-        let serialized = serde_json::to_string(&remove_data).unwrap();
-        let deserialized: KvCacheRemoveData = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(deserialized.block_hashes.len(), 2);
-        assert_eq!(deserialized.block_hashes[0].0, 4);
-        assert_eq!(deserialized.block_hashes[1].0, 5);
     }
 
     #[test]

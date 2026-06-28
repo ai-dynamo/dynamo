@@ -189,6 +189,18 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
     else echo "WARNING: no bundled nsys found under /opt/nvidia/nsight-compute"; fi
 {% endif %}
 
+{%- if device != "xpu" %}
+# Precompile Python bytecode into the image while still root. CI runs tests as
+# the non-root `dynamo` user, which cannot write .pyc back to site-packages, and
+# the test harness forks a fresh process per test. Without baked .pyc, every test
+# process recompiles torch/transformers/sglang from source on first import (~+3.5s
+# each), which previously added ~8-10 min to the sglang CI job. This was implicitly
+# provided by the now-removed vendored-patch step that ran `import sglang` at build.
+RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    python3 -m compileall -q -j0 "$SITE_PACKAGES" && \
+    (python3 -m compileall -q -j0 /sgl-workspace/sglang/python || true)
+{%- endif %}
+
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}

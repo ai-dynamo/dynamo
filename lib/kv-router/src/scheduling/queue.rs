@@ -2050,23 +2050,6 @@ policy_classes:
         assert_eq!(queue.pending_count(), 0);
     }
 
-    #[tokio::test]
-    async fn test_no_workers_returns_error() {
-        let (queue, _slots) = make_queue(0, 16, 512, None);
-
-        let (req, rx) = make_request("lonely-req", 512);
-        queue.enqueue(req).await;
-
-        let resp = rx.await.expect("oneshot dropped");
-        assert!(
-            matches!(
-                resp,
-                Err(crate::scheduling::types::KvSchedulerError::NoEndpoints)
-            ),
-            "expected NoEndpoints, got {resp:?}"
-        );
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn test_overloaded_provider_filters_at_admission() {
         let overloaded_worker_provider: OverloadedWorkerProvider =

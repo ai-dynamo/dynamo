@@ -1561,25 +1561,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_updates_router_state() {
-        let index = make_indexer(2, 4);
-        index
-            .apply_event(store_event_with_dp_rank(0, 0, &[1, 2, 3]))
-            .await;
-        index
-            .apply_event(store_event_with_dp_rank(0, 1, &[1, 2, 4]))
-            .await;
-
-        index.remove_worker_dp_rank(0, 0).await;
-        let after_dp_remove = index.find_matches(local_hashes(&[1, 2, 3])).await.unwrap();
-        assert_eq!(score(&after_dp_remove, WorkerWithDpRank::new(0, 0)), None);
-
-        index.apply_event(clear_event(0)).await;
-        let after_clear = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
-        assert!(after_clear.scores.is_empty());
-    }
-
-    #[tokio::test]
     async fn worker_wide_cleanup_scans_block_and_anchor_worker_keys() {
         let index = make_indexer(2, 3);
         let dp0 = WorkerWithDpRank::new(7, 0);

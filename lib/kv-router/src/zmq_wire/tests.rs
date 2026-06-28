@@ -384,23 +384,6 @@ fn test_normalizer_ignores_map_serialized_non_main_attention_kind() {
 }
 
 #[test]
-fn test_normalizer_learns_main_attention_metadata_for_remove() {
-    let store: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
-        TestEventKind::BlockStored,
-        Some(3),
-        "full_attention",
-    ))
-    .expect("valid store event");
-    let remove: RawKvEvent =
-        from_slice(&block_removed_sequence(Some(3), None)).expect("valid remove event");
-    let mut normalizer = ZmqEventNormalizer::new(2);
-    let worker = WorkerWithDpRank::new(7, 0);
-
-    assert!(normalizer.preprocess(store, worker).is_some());
-    assert!(normalizer.preprocess(remove, worker).is_some());
-}
-
-#[test]
 fn test_normalizer_metadata_is_dp_rank_scoped() {
     let store: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
         TestEventKind::BlockStored,

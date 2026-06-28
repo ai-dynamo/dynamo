@@ -63,8 +63,14 @@ impl BandwidthSharingModel {
     /// Pass an `Arc` clone of the same counter to every model whose
     /// [`TransferId`]s can coexist in shared maps.
     pub fn new(gbps: f64, id_counter: Arc<AtomicU64>) -> Self {
+        assert!(gbps.is_finite(), "bandwidth must be finite, got {gbps}");
         let bandwidth_bytes_per_ms = if gbps > 0.0 {
-            gbps * 1e6
+            let bandwidth_bytes_per_ms = gbps * 1e6;
+            assert!(
+                bandwidth_bytes_per_ms.is_finite(),
+                "bandwidth conversion overflowed for {gbps} GB/s"
+            );
+            bandwidth_bytes_per_ms
         } else {
             f64::INFINITY
         };
@@ -84,11 +90,29 @@ impl BandwidthSharingModel {
     /// `now_ms` is clamped up to `last_update_ms` so the model's
     /// simulation time stays monotonic — trace replay's `current_time_ms`
     /// can rewind between passes (jumping to the next arrival timestamp),
-    /// but an in-flight transfer can't "un-copy" bytes.
+    /// but an in-flight transfer can't "un-copy" bytes. Panics if time moves
+    /// forward while transfers are active without a preceding
+    /// [`advance_to`](Self::advance_to).
     pub fn start_transfer(&mut self, now_ms: f64, bytes: usize) -> TransferId {
+        assert_valid_time("transfer start time", now_ms);
+        assert!(
+            self.active.is_empty() || now_ms <= self.last_update_ms,
+            "advance_to must be called before starting a transfer at {now_ms} ms; \
+             active transfers were last updated at {} ms",
+            self.last_update_ms
+        );
         let now_ms = now_ms.max(self.last_update_ms);
         self.last_update_ms = now_ms;
-        let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
+        let id = self
+            .id_counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .expect("transfer id counter exhausted");
+        assert!(
+            self.active.iter().all(|transfer| transfer.id != id),
+            "duplicate active transfer id {id}"
+        );
         let remaining = if self.bandwidth_bytes_per_ms.is_finite() {
             bytes as f64
         } else {
@@ -112,6 +136,7 @@ impl BandwidthSharingModel {
     /// prior pass's `end_ms`), the call is a no-op — the model stays
     /// at `last_update_ms`. Physical bytes already copied can't un-copy.
     pub fn advance_to(&mut self, now_ms: f64) -> Vec<TransferId> {
+        assert_valid_time("bandwidth model advance time", now_ms);
         let mut completed = Vec::new();
         if now_ms < self.last_update_ms {
             return completed;
@@ -143,6 +168,7 @@ impl BandwidthSharingModel {
                 0.0
             };
             let next_event_ms = self.last_update_ms + time_to_next_completion;
+            assert_valid_time("transfer completion deadline", next_event_ms);
 
             if next_event_ms > now_ms + 1e-9 {
                 // Not enough elapsed time for the next completion. Deduct
@@ -195,7 +221,9 @@ impl BandwidthSharingModel {
         } else {
             0.0
         };
-        Some(self.last_update_ms + delta)
+        let deadline = self.last_update_ms + delta;
+        assert_valid_time("earliest transfer deadline", deadline);
+        Some(deadline)
     }
 
     /// Number of currently active (in-flight) transfers.
@@ -207,6 +235,13 @@ impl BandwidthSharingModel {
     pub fn is_idle(&self) -> bool {
         self.active.is_empty()
     }
+}
+
+fn assert_valid_time(name: &str, time_ms: f64) {
+    assert!(
+        time_ms.is_finite() && time_ms >= 0.0,
+        "{name} must be finite and nonnegative, got {time_ms}"
+    );
 }
 
 #[cfg(test)]
@@ -280,6 +315,15 @@ mod tests {
         let c2 = model.advance_to(2.0);
         assert_eq!(c2, vec![id2]);
         assert!(model.is_idle());
+    }
+
+    #[test]
+    #[should_panic(expected = "advance_to must be called before starting a transfer")]
+    fn starting_after_earliest_finish_without_advance_panics() {
+        let mut model = make_model(1.0);
+        model.start_transfer(0.0, 1_000_000);
+
+        model.start_transfer(2.0, 1_000_000);
     }
 
     #[test]

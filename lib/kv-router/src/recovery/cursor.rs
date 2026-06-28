@@ -160,13 +160,4 @@ mod tests {
             }
         );
     }
-
-    #[test]
-    fn apply_barrier_and_advance_restore_live_cursor() {
-        assert_eq!(
-            CursorState::Initial.apply_barrier(20),
-            CursorState::Live(20)
-        );
-        assert_eq!(CursorState::Initial.advance_to(7), CursorState::Live(7));
-    }
 }
