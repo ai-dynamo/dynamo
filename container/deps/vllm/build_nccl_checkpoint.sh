@@ -11,27 +11,17 @@ fi
 
 PREFIX="${NCCL_CHECKPOINT_PREFIX:-/opt/nccl-checkpoint}"
 SRC_DIR="${NCCL_CHECKPOINT_SRC_DIR:-/tmp/nccl-src}"
-ARTIFACT_ROOT="${NCCL_CHECKPOINT_ARTIFACT_ROOT:-/tmp/nccl-source-artifact}"
-ARTIFACT_SRC="${ARTIFACT_ROOT}/opt/nccl-source"
-ARTIFACT_PROVENANCE="${ARTIFACT_ROOT}/opt/nccl-source-provenance"
-SOURCE_BUNDLE="${ARTIFACT_PROVENANCE}/source.bundle"
-SOURCE_PROVENANCE="${ARTIFACT_PROVENANCE}/provenance.json"
 SHIM="${PREFIX}/lib/libnccl-checkpoint-shim.so"
 PYNCCL_SMOKE_CHECK="${PYNCCL_SMOKE_CHECK:-/usr/local/lib/validate_pynccl_checkpoint_binding.py}"
 RUNTIME_PROVENANCE="${NCCL_CHECKPOINT_RUNTIME_PROVENANCE:-/opt/dynamo/source-provenance.txt}"
 
-EXPECTED_SOURCE_IMAGE="dynamoci.azurecr.io/ai-dynamo/nccl-source@sha256:5502f117103a84d8738f822f98c1d591d9b75fc72b14031d9e57af3a8db5b10c"
-EXPECTED_SOURCE_BRANCH="schwinns/nccl-2.29.7-checkpoint-shim"
-EXPECTED_SOURCE_SHA="0c112d6e5a81d5b5c39e3b295aa06282a5538979"
-EXPECTED_SOURCE_TREE="64912568e8b1ea07e7f0dd2c80cf9c4db986eace"
-EXPECTED_BASE_TAG="v2.29.7-1"
-EXPECTED_BASE_SHA="b81d6a5a3d2fa95ad11f6453c51cd6a6ba19f9b8"
-EXPECTED_CHECKPOINT_TREE="f43d560f98e687b0f175350b6ea51f054cbcb654"
+NCCL_PUBLIC_GIT_URL="https://github.com/NVIDIA/nccl.git"
+NCCL_CORE_SHA="b81d6a5a3d2fa95ad11f6453c51cd6a6ba19f9b8"
+NCCL_CORE_TREE="d61e2c86cfc507969000a963782b2e2231ff1475"
+NCCL_SHIM_SOURCE_SHA="a2e67d265b3c52172f20452a909f7eaa6a0f1328"
+NCCL_CHECKPOINT_TREE="f43d560f98e687b0f175350b6ea51f054cbcb654"
+NCCL_COMPOSED_TREE="64912568e8b1ea07e7f0dd2c80cf9c4db986eace"
 
-if [ "${NCCL_CHECKPOINT_SOURCE_IMAGE:-}" != "${EXPECTED_SOURCE_IMAGE}" ]; then
-  echo "NCCL checkpoint build requires ${EXPECTED_SOURCE_IMAGE}." >&2
-  exit 1
-fi
 if [ -z "${CUDA_MAJOR:-}" ]; then
   echo "CUDA_MAJOR is required when NCCL_CHECKPOINT_VERSION is set." >&2
   exit 1
@@ -129,92 +119,46 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
   "${cuda_packages[@]}"
 rm -rf /var/lib/apt/lists/*
 
-test -d "${ARTIFACT_SRC}"
-test -f "${SOURCE_BUNDLE}"
-test -f "${SOURCE_PROVENANCE}"
-
-EXPECTED_SOURCE_BRANCH="${EXPECTED_SOURCE_BRANCH}" \
-EXPECTED_SOURCE_SHA="${EXPECTED_SOURCE_SHA}" \
-EXPECTED_SOURCE_TREE="${EXPECTED_SOURCE_TREE}" \
-EXPECTED_BASE_TAG="${EXPECTED_BASE_TAG}" \
-EXPECTED_BASE_SHA="${EXPECTED_BASE_SHA}" \
-EXPECTED_CHECKPOINT_TREE="${EXPECTED_CHECKPOINT_TREE}" \
-  python3 - "${SOURCE_PROVENANCE}" <<'PY'
-import json
-import os
-import sys
-
-expected = {
-    "schema_version": 1,
-    "artifact_kind": "nccl-source",
-    "source_repository_visibility": "private-internal",
-    "source_branch": os.environ["EXPECTED_SOURCE_BRANCH"],
-    "source_commit": os.environ["EXPECTED_SOURCE_SHA"],
-    "source_tree": os.environ["EXPECTED_SOURCE_TREE"],
-    "base_tag": os.environ["EXPECTED_BASE_TAG"],
-    "base_commit": os.environ["EXPECTED_BASE_SHA"],
-    "checkpoint_subtree": "contrib/nccl_checkpoint",
-    "checkpoint_tree": os.environ["EXPECTED_CHECKPOINT_TREE"],
-}
-with open(sys.argv[1]) as provenance_file:
-    actual = json.load(provenance_file)
-if actual != expected:
-    raise SystemExit(
-        f"NCCL source provenance does not match:\n"
-        f"expected={expected!r}\nactual={actual!r}"
-    )
-print(f"Verified NCCL source provenance JSON: {actual!r}")
-PY
-
-verify_repo=/tmp/nccl-source-verify.git
-rm -rf "${verify_repo}"
-git clone --quiet --bare "${SOURCE_BUNDLE}" "${verify_repo}"
-bundle_ref="refs/heads/${EXPECTED_SOURCE_BRANCH}"
-bundle_head="$(git -C "${verify_repo}" rev-parse "${bundle_ref}^{commit}")"
-bundle_parent="$(git -C "${verify_repo}" rev-parse "${bundle_head}^")"
-bundle_tree="$(git -C "${verify_repo}" rev-parse "${bundle_head}^{tree}")"
-bundle_base_tag="$(
-  git -C "${verify_repo}" rev-parse \
-    "refs/tags/${EXPECTED_BASE_TAG}^{commit}"
-)"
-bundle_checkpoint_tree="$(
-  git -C "${verify_repo}" rev-parse \
-    "${bundle_head}:contrib/nccl_checkpoint"
-)"
-test "${bundle_head}" = "${EXPECTED_SOURCE_SHA}"
-test "${bundle_parent}" = "${EXPECTED_BASE_SHA}"
-test "${bundle_base_tag}" = "${EXPECTED_BASE_SHA}"
-test "${bundle_tree}" = "${EXPECTED_SOURCE_TREE}"
-test "${bundle_checkpoint_tree}" = "${EXPECTED_CHECKPOINT_TREE}"
-test "$(
-  git -C "${verify_repo}" rev-list --count \
-    "${EXPECTED_BASE_SHA}..${EXPECTED_SOURCE_SHA}"
-)" = 1
-test -z "$(
-  git -C "${verify_repo}" diff --name-only \
-    "${EXPECTED_BASE_SHA}..${EXPECTED_SOURCE_SHA}" -- \
-    . ':(exclude)contrib/nccl_checkpoint'
-)"
-
 rm -rf "${SRC_DIR}"
-cp -a "${ARTIFACT_SRC}" "${SRC_DIR}"
-archive_repo=/tmp/nccl-source-archive.git
-rm -rf "${archive_repo}"
-git init --quiet "${archive_repo}"
-cp -a "${SRC_DIR}/." "${archive_repo}/"
-git -C "${archive_repo}" add --all --force
-archive_tree="$(git -C "${archive_repo}" write-tree)"
-archive_checkpoint_tree="$(
-  git -C "${archive_repo}" rev-parse \
-    "${archive_tree}:contrib/nccl_checkpoint"
+git init --quiet "${SRC_DIR}"
+git -C "${SRC_DIR}" remote add origin "${NCCL_PUBLIC_GIT_URL}"
+
+git -C "${SRC_DIR}" fetch --no-tags --depth=1 origin "${NCCL_CORE_SHA}"
+resolved_core_sha="$(git -C "${SRC_DIR}" rev-parse "FETCH_HEAD^{commit}")"
+test "${resolved_core_sha}" = "${NCCL_CORE_SHA}"
+git -C "${SRC_DIR}" checkout --quiet --detach "${resolved_core_sha}"
+resolved_core_tree="$(git -C "${SRC_DIR}" rev-parse "HEAD^{tree}")"
+test "${resolved_core_tree}" = "${NCCL_CORE_TREE}"
+if git -C "${SRC_DIR}" cat-file -e \
+    "${NCCL_CORE_SHA}:contrib/nccl_checkpoint" 2>/dev/null; then
+  echo "Pinned NCCL core unexpectedly contains contrib/nccl_checkpoint." >&2
+  exit 1
+fi
+
+git -C "${SRC_DIR}" fetch --no-tags --depth=1 origin \
+  "${NCCL_SHIM_SOURCE_SHA}"
+resolved_shim_sha="$(git -C "${SRC_DIR}" rev-parse "FETCH_HEAD^{commit}")"
+test "${resolved_shim_sha}" = "${NCCL_SHIM_SOURCE_SHA}"
+resolved_checkpoint_tree="$(
+  git -C "${SRC_DIR}" rev-parse \
+    "${resolved_shim_sha}:contrib/nccl_checkpoint"
 )"
-test "${archive_tree}" = "${EXPECTED_SOURCE_TREE}"
-test "${archive_checkpoint_tree}" = "${EXPECTED_CHECKPOINT_TREE}"
-rm -rf "${verify_repo}" "${archive_repo}"
-echo "Verified NCCL source commit ${bundle_head} with parent ${bundle_parent}"
-echo "Verified NCCL base tag ${EXPECTED_BASE_TAG} at ${bundle_base_tag}"
-echo "Verified archived NCCL source tree ${archive_tree}"
-echo "Verified checkpoint subtree ${archive_checkpoint_tree}"
+test "${resolved_checkpoint_tree}" = "${NCCL_CHECKPOINT_TREE}"
+
+git -C "${SRC_DIR}" archive "${resolved_shim_sha}" \
+  contrib/nccl_checkpoint | tar -x -C "${SRC_DIR}"
+git -C "${SRC_DIR}" add --force contrib/nccl_checkpoint
+composed_tree="$(git -C "${SRC_DIR}" write-tree)"
+composed_checkpoint_tree="$(
+  git -C "${SRC_DIR}" rev-parse \
+    "${composed_tree}:contrib/nccl_checkpoint"
+)"
+test "${composed_tree}" = "${NCCL_COMPOSED_TREE}"
+test "${composed_checkpoint_tree}" = "${NCCL_CHECKPOINT_TREE}"
+echo "Verified public NCCL core ${resolved_core_sha} tree ${resolved_core_tree}"
+echo "Verified public shim source ${resolved_shim_sha}"
+echo "Verified checkpoint subtree ${composed_checkpoint_tree}"
+echo "Verified composed NCCL source tree ${composed_tree}"
 
 version_file="${SRC_DIR}/makefiles/version.mk"
 if [ ! -f "${version_file}" ]; then
@@ -256,12 +200,11 @@ LD_PRELOAD="${SHIM}${LD_PRELOAD:+:${LD_PRELOAD}}" \
 
 rm -rf "${SRC_DIR}"
 {
-  echo "nccl_source_image=${NCCL_CHECKPOINT_SOURCE_IMAGE}"
-  echo "nccl_source_branch=${EXPECTED_SOURCE_BRANCH}"
-  echo "nccl_source_sha=${EXPECTED_SOURCE_SHA}"
-  echo "nccl_source_tree=${EXPECTED_SOURCE_TREE}"
-  echo "nccl_base_tag=${EXPECTED_BASE_TAG}"
-  echo "nccl_base_sha=${EXPECTED_BASE_SHA}"
-  echo "nccl_checkpoint_tree=${EXPECTED_CHECKPOINT_TREE}"
+  echo "nccl_public_git_url=${NCCL_PUBLIC_GIT_URL}"
+  echo "nccl_core_sha=${NCCL_CORE_SHA}"
+  echo "nccl_core_tree=${NCCL_CORE_TREE}"
+  echo "nccl_shim_source_sha=${NCCL_SHIM_SOURCE_SHA}"
+  echo "nccl_checkpoint_tree=${NCCL_CHECKPOINT_TREE}"
+  echo "nccl_composed_tree=${NCCL_COMPOSED_TREE}"
 } >> "${RUNTIME_PROVENANCE}"
 echo "Installed NCCLCheckpoint shim at ${SHIM}"

@@ -501,37 +501,39 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         self.assertLess(helper_copy, build)
         self.assertLess(build, checkpoint_env)
 
-    def test_nccl_checkpoint_source_is_immutable_and_git_verified(self) -> None:
+    def test_nccl_checkpoint_source_is_public_immutable_and_verified(self) -> None:
         build_script = (
             CONTAINER_DIR / "deps/vllm/build_nccl_checkpoint.sh"
         ).read_text()
         workflow = (REPO_ROOT / ".github/workflows/build-on-demand.yml").read_text()
         dockerfile = self.render_runtime("amd64")
 
-        source_digest = (
-            "dynamoci.azurecr.io/ai-dynamo/nccl-source@sha256:"
-            "5502f117103a84d8738f822f98c1d591d9b75fc72b14031d9e57af3a8db5b10c"
-        )
-        self.assertIn(source_digest, workflow)
-        self.assertIn(source_digest, build_script)
-        self.assertNotIn("NCCL_CHECKPOINT_GIT_URL", workflow)
-        self.assertNotIn("NCCL_CHECKPOINT_GIT_URL", build_script)
+        self.assertIn("https://github.com/NVIDIA/nccl.git", build_script)
         self.assertIn(
-            "FROM ${NCCL_CHECKPOINT_SOURCE_IMAGE} AS nccl_checkpoint_source",
-            dockerfile,
-        )
-        self.assertIn("from=nccl_checkpoint_source", dockerfile)
-        self.assertIn("target=/tmp/nccl-source-artifact,readonly", dockerfile)
-        self.assertIn("provenance.json", build_script)
-        self.assertIn("source.bundle", build_script)
-        self.assertIn('git clone --quiet --bare "${SOURCE_BUNDLE}"', build_script)
-        self.assertIn('"${bundle_head}^"', build_script)
-        self.assertIn('"refs/tags/${EXPECTED_BASE_TAG}^{commit}"', build_script)
-        self.assertIn('git -C "${archive_repo}" write-tree', build_script)
-        self.assertIn(
-            "f43d560f98e687b0f175350b6ea51f054cbcb654",
+            'NCCL_CORE_SHA="b81d6a5a3d2fa95ad11f6453c51cd6a6ba19f9b8"',
             build_script,
         )
+        self.assertIn(
+            'NCCL_SHIM_SOURCE_SHA="' 'a2e67d265b3c52172f20452a909f7eaa6a0f1328"',
+            build_script,
+        )
+        self.assertIn(
+            'NCCL_CHECKPOINT_TREE="' 'f43d560f98e687b0f175350b6ea51f054cbcb654"',
+            build_script,
+        )
+        self.assertNotIn("NCCL_CHECKPOINT_GIT_URL", workflow)
+        self.assertNotIn("NCCL_CHECKPOINT_GIT_URL", build_script)
+        self.assertNotIn("gitlab-master.nvidia.com", build_script)
+        self.assertNotIn("dynamoci.azurecr.io/ai-dynamo/nccl-source", workflow)
+        self.assertNotIn("NCCL_CHECKPOINT_SOURCE_IMAGE", dockerfile)
+        self.assertIn(
+            'fetch --no-tags --depth=1 origin "${NCCL_CORE_SHA}"', build_script
+        )
+        self.assertIn(
+            '"${resolved_shim_sha}:contrib/nccl_checkpoint"',
+            build_script,
+        )
+        self.assertIn('git -C "${SRC_DIR}" write-tree', build_script)
 
     def test_full_source_mode_is_native_pinned_and_digest_based(self) -> None:
         installer = self.installer.read_text()

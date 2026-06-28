@@ -7,10 +7,6 @@
 ########## Runtime Image #########
 ##################################
 
-{% if device == "cuda" %}
-FROM ${NCCL_CHECKPOINT_SOURCE_IMAGE} AS nccl_checkpoint_source
-{% endif %}
-
 {% if platform == "multi" %}
 FROM --platform=linux/amd64 ${VLLM_RUNTIME_BASE_IMAGE} AS vllm_runtime_amd64
 FROM --platform=linux/arm64 ${VLLM_RUNTIME_BASE_IMAGE} AS vllm_runtime_arm64
@@ -43,7 +39,6 @@ ARG VLLM_RUNTIME_BASE_IMAGE
 ARG MAX_JOBS
 ARG VLLM_PRECOMPILED_WHEEL_COMMIT
 ARG VLLM_PRECOMPILED_WHEEL_VARIANT
-ARG NCCL_CHECKPOINT_SOURCE_IMAGE
 ARG NCCL_CHECKPOINT_VERSION
 {% endif %}
 ARG MODELEXPRESS_VERSION
@@ -255,7 +250,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 COPY --chmod=755 container/deps/vllm/build_nccl_checkpoint.sh /usr/local/bin/build_nccl_checkpoint
 COPY --chmod=644 container/deps/vllm/validate_pynccl_checkpoint_binding.py /usr/local/lib/validate_pynccl_checkpoint_binding.py
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    --mount=type=bind,from=nccl_checkpoint_source,source=/,target=/tmp/nccl-source-artifact,readonly \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     build_nccl_checkpoint

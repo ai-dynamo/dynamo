@@ -151,7 +151,6 @@ jobs:
         VLLM_RUNTIME_BASE_IMAGE=${{ inputs.vllm_runtime_base_image }}
         VLLM_PRECOMPILED_WHEEL_COMMIT=${{ inputs.vllm_precompiled_wheel_commit }}
         VLLM_PRECOMPILED_WHEEL_VARIANT=${{ inputs.vllm_precompiled_wheel_variant }}
-        NCCL_CHECKPOINT_SOURCE_IMAGE=${{ (inputs.vllm_install_mode == 'full-source' || inputs.nccl_checkpoint_version != '') && 'dynamoci.azurecr.io/ai-dynamo/nccl-source@sha256:5502f117103a84d8738f822f98c1d591d9b75fc72b14031d9e57af3a8db5b10c' || 'scratch' }}
         NCCL_CHECKPOINT_VERSION=${{ inputs.nccl_checkpoint_version }}
     secrets: inherit
 
