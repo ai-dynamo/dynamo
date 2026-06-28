@@ -46,9 +46,6 @@ async def prepare_snapshot_engine(
         snapshot_config=snapshot_config,
         pause_args=(None,),
     )
-    if snapshot_config.serve_before_capture:
-        return snapshot_controller
-
     if not await snapshot_controller.wait_for_restore():
         raise SystemExit(0)
 

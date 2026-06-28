@@ -11,12 +11,10 @@ from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from dynamo.common.snapshot.constants import (
-    PREPARE_FOR_SNAPSHOT_FILE,
     READY_FOR_SNAPSHOT_FILE,
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_COMPLETE_FILE,
     SNAPSHOT_CONTROL_DIR_ENV,
-    SNAPSHOT_SERVE_BEFORE_CAPTURE_ENV,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,9 +32,8 @@ def is_snapshot_enabled() -> bool:
 class SnapshotConfig:
     """Parsed snapshot configuration plus the sentinel-driven lifecycle."""
 
-    def __init__(self, control_dir: str, serve_before_capture: bool = False):
+    def __init__(self, control_dir: str):
         self.control_dir = control_dir
-        self.serve_before_capture = serve_before_capture
         self.ready_file = os.path.join(control_dir, READY_FOR_SNAPSHOT_FILE)
 
     @classmethod
@@ -45,23 +42,7 @@ class SnapshotConfig:
         if not control_dir:
             return None
 
-        return cls(
-            control_dir=control_dir,
-            serve_before_capture=os.environ.get(SNAPSHOT_SERVE_BEFORE_CAPTURE_ENV)
-            == "1",
-        )
-
-    async def wait_for_capture_request(self) -> None:
-        """Wait until a serving snapshot source is asked to quiesce."""
-        request_path = Path(self.control_dir) / PREPARE_FOR_SNAPSHOT_FILE
-        logger.info(
-            "Serving before snapshot capture. Polling for %s",
-            request_path,
-        )
-        while not request_path.exists():
-            await asyncio.sleep(SENTINEL_POLL_INTERVAL_SEC)
-        request_path.unlink()
-        logger.info("Snapshot capture requested")
+        return cls(control_dir=control_dir)
 
     async def run_lifecycle(
         self,
@@ -110,7 +91,6 @@ class SnapshotConfig:
 
     def _cleanup_ready_and_sentinels(self) -> None:
         for name in (
-            PREPARE_FOR_SNAPSHOT_FILE,
             READY_FOR_SNAPSHOT_FILE,
             SNAPSHOT_COMPLETE_FILE,
             RESTORE_COMPLETE_FILE,
