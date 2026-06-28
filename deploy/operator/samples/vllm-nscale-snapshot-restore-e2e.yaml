@@ -7,22 +7,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: fa2e-nccl-kvs-post4
+  name: fa2e-nccl-kvs-post5
   labels:
     app.kubernetes.io/created-by: pi-relay
     app.kubernetes.io/name: dynamo-snapshot-e2e-kvs
-    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post4
+    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post5
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: dynamo-snapshot-e2e-kvs
-      e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post4
+      e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post5
   template:
     metadata:
       labels:
         app.kubernetes.io/name: dynamo-snapshot-e2e-kvs
-        e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post4
+        e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post5
     spec:
       imagePullSecrets:
         - name: acr-token-secret
@@ -48,15 +48,15 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: fa2e-nccl-kvs-post4
+  name: fa2e-nccl-kvs-post5
   labels:
     app.kubernetes.io/created-by: pi-relay
     app.kubernetes.io/name: dynamo-snapshot-e2e-kvs
-    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post4
+    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post5
 spec:
   selector:
     app.kubernetes.io/name: dynamo-snapshot-e2e-kvs
-    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post4
+    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post5
   ports:
     - name: redis
       port: 6379
@@ -65,11 +65,11 @@ spec:
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: fi-nemotron-main-2f566-post4
+  name: fi-nemotron-main-2f566-post5
   labels:
     app.kubernetes.io/created-by: pi-relay
     app.kubernetes.io/name: dynamo-snapshot-e2e
-    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post4
+    e2e.ai-dynamo.io/run: fi-nemotron-main-2f566-post5
   annotations:
     nvidia.com/enable-grove: "false"
 spec:
@@ -87,7 +87,7 @@ spec:
           mountPoint: /home/dynamo/.cache/huggingface
       extraPodSpec:
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:42214223e3888cf0804ed7e6a7bcf884ab8009b14a97db24bc34c0b528059852
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:3310caead3ef807636482ba747e5557ae7c31e24161ac33e2b510744bb063dc9
           imagePullPolicy: Always
           command:
             - python3
@@ -147,7 +147,7 @@ spec:
           nvidia.com/gpu.present: "true"
           nvidia.com/gpu.product: NVIDIA-B200
         runtimeClassName: nvidia
-        serviceAccountName: fi-nemotron-main-2f566-post4-k8s-service-discovery
+        serviceAccountName: fi-nemotron-main-2f566-post5-k8s-service-discovery
         securityContext:
           fsGroup: 1000
           fsGroupChangePolicy: OnRootMismatch
@@ -164,7 +164,7 @@ spec:
             emptyDir: {}
         mainContainer:
           name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:3add7233cd828638e66acb04f3cd58903483557e6133bcbcc947ace34582ae03
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:064c79874eba3302deb4a51777820e1b60cd371d2a1c67ae6406fccd178e4b50
           imagePullPolicy: Always
           workingDir: /workspace/
           command:
@@ -219,7 +219,7 @@ spec:
             - name: NCCL_CHECKPOINT_KVS_PATH
               value: /tmp/nccl-checkpoint-kvs-endpoint
             - name: DYN_SNAPSHOT_NCCL_KVS_ENDPOINT
-              value: fa2e-nccl-kvs-post4:6379/fi-nemotron-main-2f566-post4
+              value: fa2e-nccl-kvs-post5:6379/fi-nemotron-main-2f566-post5
             - name: NCCL_CHECKPOINT_KVS_TIMEOUT
               value: "300"
             - name: NCCL_DEBUG
