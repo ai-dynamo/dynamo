@@ -330,10 +330,20 @@ rules:
   - dynamographdeploymentscalingadapters
   - dynamomodels
   - dynamoworkermetadatas
-  - podsnapshots
   verbs:
   - create
   - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - podsnapshots
+  verbs:
+  - create
   - get
   - list
   - patch
