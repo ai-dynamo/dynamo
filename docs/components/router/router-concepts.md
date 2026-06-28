@@ -39,7 +39,9 @@ The router uses a cost function that considers both the prefill cost (influenced
 1. **Prefill blocks**: Calculated from active prompt-side token load plus the incoming request's input tokens, divided by the block size. The system updates active prompt load when the first output token signals prefill completion.
 2. **Decode blocks**: Estimated from the request's input tokens and each worker's active sequences. The count updates when requests complete and their blocks are freed.
 3. **Overlap credits**: Device-local, host, disk, and shared-cache hits reduce the prompt-side prefill load before the final prefill scale is applied.
-4. **Cost formula**:
+4. **Selection policy**:
+
+By default, the router uses the existing linear score:
 
 ```text
 adjusted_prefill_blocks = max(
@@ -53,9 +55,16 @@ adjusted_prefill_blocks = max(
 cost = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 ```
 
+Set `router_selection_policy=lmetric` to use the Blitz-router-inspired multiplicative score:
+
+```text
+cost = adjusted_prefill_blocks * (decode_blocks + 1)
+```
+
+`decode_blocks` is Dynamo's projected decode-load proxy at worker selection time.
 Lower costs indicate better routing choices.
 `overlap_score_credit` is the device-local prefix-overlap credit multiplier, from 0.0 to 1.0.
-Higher values favor cache reuse (improving TTFT), while lower values prioritize even load distribution (improving ITL). `prefill_load_scale` controls the weight of the adjusted prompt-side load relative to decode blocks.
+Higher values favor cache reuse (improving TTFT), while lower values prioritize even load distribution (improving ITL). `prefill_load_scale` controls the weight of the adjusted prompt-side load relative to decode blocks for the default linear score.
 
 ### Active Load Modeling
 

@@ -72,7 +72,8 @@ The router uses a cost function that considers both the prefill cost (influenced
    ```
    - Lower costs indicate better routing choices
    - `overlap_score_credit` is the device-local prefix-overlap credit multiplier, from 0.0 to 1.0
-   - `prefill_load_scale` controls adjusted prompt-side load relative to decode blocks
+   - This is the default `router_selection_policy=linear` score. `router_selection_policy=lmetric` uses `adjusted_prefill_blocks * (decode_blocks + 1)`.
+   - `prefill_load_scale` controls adjusted prompt-side load relative to decode blocks for the linear score
    - Higher overlap credits favor cache reuse (improving TTFT), while lower credits prioritize even load distribution (improving ITL)
 
 #### Worker Selection

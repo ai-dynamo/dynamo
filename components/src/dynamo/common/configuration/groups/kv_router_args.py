@@ -24,6 +24,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_weight",
     "overlap_score_credit",
     "prefill_load_scale",
+    "router_selection_policy",
     "router_temperature",
     "use_kv_events",
     "durable_kv_events",
@@ -103,6 +104,7 @@ class KvRouterConfigBase(ConfigBase):
     overlap_score_weight: Optional[float] = None
     overlap_score_credit: float
     prefill_load_scale: float
+    router_selection_policy: str = "linear"
     router_temperature: float
     use_kv_events: bool
     durable_kv_events: bool
@@ -191,6 +193,19 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="prefill_load_scale",
+        )
+        add_argument(
+            g,
+            flag_name="--router-selection-policy",
+            env_var="DYN_ROUTER_SELECTION_POLICY",
+            default="linear",
+            help=(
+                "KV Router: Worker selection scoring policy. "
+                "'linear' (default) uses the existing additive score; "
+                "'lmetric' uses adjusted prefill blocks multiplied by decode load plus one."
+            ),
+            arg_type=str,
+            choices=["linear", "lmetric"],
         )
         add_argument(
             g,

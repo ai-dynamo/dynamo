@@ -33,6 +33,7 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `--load-aware` / `--no-load-aware` | `DYN_ROUTER_LOAD_AWARE` | `false` | Preset for KV load-aware routing without cache-reuse signals; implies `--router-mode kv` |
 | `--router-kv-overlap-score-credit` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
 | `--router-prefill-load-scale` | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
+| `--router-selection-policy` | `DYN_ROUTER_SELECTION_POLICY` | `linear` | Worker selection scoring policy: `linear` or `lmetric` |
 | `--router-temperature` | `DYN_ROUTER_TEMPERATURE` | `0.0` | Softmax temperature for normalized worker sampling. 0 = deterministic |
 | `--router-kv-events` / `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS` | `true` | Enable KV cache state events from workers. Disable for prediction-based routing |
 | `--router-ttl-secs` | `DYN_ROUTER_TTL_SECS` | `120.0` | Block TTL when KV events are disabled |

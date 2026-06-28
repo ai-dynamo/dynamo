@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::config::RouterConfigOverride;
+use dynamo_kv_router::config::{RouterConfigOverride, RouterSelectionPolicy};
 
 use crate::protocols::common::preprocessor::{BootstrapInfo, PrefillResult};
 
@@ -49,6 +49,7 @@ pub(super) fn build_decode_router_override(
 ) -> RouterConfigOverride {
     RouterConfigOverride {
         overlap_score_credit: Some(0.0),
+        router_selection_policy: Some(RouterSelectionPolicy::Linear),
         assume_kv_reuse: Some(false),
         track_prefill_tokens: Some(false),
         ..existing_override.unwrap_or_default()

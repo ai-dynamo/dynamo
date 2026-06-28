@@ -14,6 +14,7 @@ use std::time::Duration;
 use dynamo_kv_router::{
     config::{
         KvRouterConfig, RouterConfigOverride, apply_deprecated_overlap_score_weight_override,
+        RouterSelectionPolicy,
     },
     protocols::*,
 };
@@ -514,6 +515,7 @@ impl RouterHandles {
         let config_override = if is_disaggregated {
             Some(RouterConfigOverride {
                 overlap_score_credit: Some(0.0),
+                router_selection_policy: Some(RouterSelectionPolicy::Linear),
                 assume_kv_reuse: Some(false),
                 track_prefill_tokens: Some(false),
                 ..Default::default()
@@ -593,12 +595,23 @@ fn kv_router_config_from_env() -> KvRouterConfig {
                 _ => None,
             })
     }
+    fn env_string(key: &str) -> Option<String> {
+        std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+    }
 
     if let Some(v) = env_f64("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {
         cfg.overlap_score_credit = v;
     }
     if let Some(v) = env_f64("DYN_ROUTER_PREFILL_LOAD_SCALE") {
         cfg.prefill_load_scale = v;
+    }
+    if let Some(v) = env_string("DYN_ROUTER_SELECTION_POLICY") {
+        match v.parse() {
+            Ok(policy) => cfg.router_selection_policy = policy,
+            Err(error) => tracing::warn!(
+                "Ignoring invalid DYN_ROUTER_SELECTION_POLICY={v:?}: {error}"
+            ),
+        }
     }
     for key in [
         "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
@@ -642,6 +655,7 @@ fn kv_router_config_from_env() -> KvRouterConfig {
     tracing::info!(
         overlap_score_credit = cfg.overlap_score_credit,
         prefill_load_scale = cfg.prefill_load_scale,
+        router_selection_policy = %cfg.router_selection_policy,
         router_temperature = cfg.router_temperature,
         use_kv_events = cfg.use_kv_events,
         router_replica_sync = cfg.router_replica_sync,
@@ -919,6 +933,7 @@ pub unsafe extern "C" fn add_request(
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
             let router_config_override = RouterConfigOverride {
                 overlap_score_credit: Some(0.0),
+                router_selection_policy: Some(RouterSelectionPolicy::Linear),
                 assume_kv_reuse: Some(false),
                 track_prefill_tokens: Some(false),
                 ..Default::default()

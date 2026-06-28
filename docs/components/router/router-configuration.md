@@ -11,6 +11,7 @@ This page collects the main router flags for frontend-embedded and standalone de
 
 - `--router-kv-overlap-score-credit`: Device-local prefix-overlap credit multiplier in the prefill cost calculation, from 0.0 to 1.0. Higher values improve Time To First Token (TTFT) at the cost of Inter-Token Latency (ITL). When set to 0, the router ignores prefix caches and skips creating a local indexer. Defaults to 1.
 - `--router-prefill-load-scale`: Scale applied to adjusted prompt-side prefill load after device, lower-tier, and shared-cache credits are subtracted. Defaults to 1.
+- `--router-selection-policy`: Worker selection scoring policy. `linear` keeps the existing additive score. `lmetric` uses the Blitz-router-inspired multiplicative score. Defaults to `linear`.
 - `--load-aware`: Preset for load-aware KV routing without cache-reuse signals. On the frontend, it implies `--router-mode kv`. It sets `overlap_score_credit=0`, disables KV events, durable KV events, and KV reuse assumptions, enables active-block and prefill-token load tracking, disables remote/shared cache indexers, and preserves `--router-prefill-load-scale`.
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of normalized router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
@@ -103,7 +104,9 @@ Deprecated: `--router-kv-overlap-score-weight`, `--kv-overlap-score-weight`, `DY
 
 If an older config used overlap score weight above 1.0 to make the router care more about TTFT, keep the overlap credit at or below 1.0 and move that larger value to `--router-prefill-load-scale` instead. `prefill_load_scale` multiplies the overlap-adjusted prompt-side load, so it still implicitly accounts for device, host, disk, and shared-cache credits.
 
-Use `--router-prefill-load-scale` when prompt-side load should count more or less than decode-side block load after cache-hit credits are applied. The final score is `prefill_load_scale * adjusted_prefill_blocks + decode_blocks`.
+Use `--router-prefill-load-scale` when prompt-side load should count more or less than decode-side block load after cache-hit credits are applied. With the default `--router-selection-policy linear`, the final score is `prefill_load_scale * adjusted_prefill_blocks + decode_blocks`.
+
+Use `--router-selection-policy lmetric` to enable the Blitz-router-inspired multiplicative score `adjusted_prefill_blocks * (decode_blocks + 1)`. This keeps the same cache-credit calculation, then multiplies remaining prompt-side load by Dynamo's projected decode-load proxy.
 
 Use `--no-router-kv-events` when you are not confident that your backend engine emits KV events correctly. In this mode the router falls back to approximate routing, predicting cache state from its own routing decisions with TTL-based expiration.
 
