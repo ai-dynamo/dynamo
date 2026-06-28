@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 	"syscall"
@@ -17,7 +18,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -55,7 +55,7 @@ type CheckpointParams struct {
 // the resync is the backstop that eventually writes a terminal failure for a work order whose source
 // pod is gone.
 func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name string) {
-	logger := w.log.WithValues("content", name)
+	logger := logr.FromContextOrDiscard(ctx).WithValues("content", name)
 
 	content := &nvidiacomv1alpha1.PodSnapshotContent{}
 	if err := w.client.Get(ctx, client.ObjectKey{Name: name}, content); err != nil {
@@ -80,14 +80,14 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 			// The operator creates the PodSnapshotContent only after the source pod exists, and this
 			// is a linearizable (quorum) Get, so NotFound means the pod was deleted, not a
 			// creation race: fail the work order terminally.
-			w.writeFailed(ctx, content, "SourcePodNotFound", fmt.Errorf("source pod %q not found", key.String()))
+			w.setSnapshotContentFailed(ctx, content, "SourcePodNotFound", fmt.Errorf("source pod %q not found", key.String()))
 			return
 		}
 		logger.Error(err, "Failed to get source pod", "pod", key.String())
 		return
 	}
 	if reason, msg := classifySourcePod(content, pod); reason != "" {
-		w.writeFailed(ctx, content, reason, errors.New(msg))
+		w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg))
 		return
 	}
 
@@ -104,38 +104,32 @@ func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name s
 // single source of truth; it never mutates spec and writes status via Status().Patch only. The
 // triggering content event (if any) may name a different work order than the one chosen here — the
 // event is only a trigger; chooseActiveContent picks the oldest active PodSnapshotContent for the pod.
-func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod) {
-	if w.contentIndexer == nil {
-		return
-	}
+func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod) error {
 	objs, err := w.contentIndexer.ByIndex(podRefIndex, pod.Namespace+"/"+pod.Name)
 	if err != nil {
-		w.log.Error(err, "Failed to look up PodSnapshotContent by source pod", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
-		return
+		return fmt.Errorf("look up PodSnapshotContent by source pod %s/%s: %w", pod.Namespace, pod.Name, err)
 	}
 	name := chooseActiveContent(objs)
 	if name == "" {
-		return
+		return nil
 	}
-	logger := w.log.WithValues("content", name)
-	// Carry the logger on ctx so the capture path (incl. executor-level CRIU/CUDA logging) does not
-	// fall back to a discard logger.
+	logger := logr.FromContextOrDiscard(ctx).WithValues("content", name)
 	ctx = logr.NewContext(ctx, logger)
 
 	content := &nvidiacomv1alpha1.PodSnapshotContent{}
 	if err := w.client.Get(ctx, client.ObjectKey{Name: name}, content); err != nil {
-		if !apierrors.IsNotFound(err) {
-			logger.Error(err, "Failed to get PodSnapshotContent")
+		if apierrors.IsNotFound(err) {
+			return nil
 		}
-		return
+		return fmt.Errorf("get PodSnapshotContent %q: %w", name, err)
 	}
 	if isContentTerminal(content) {
-		return
+		return nil
 	}
 
 	key := content.Name
 	if !w.tryAcquire(key) {
-		return
+		return nil
 	}
 	releaseInFlight := true
 	defer func() {
@@ -144,85 +138,75 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		}
 	}()
 
-	// No node re-check: pod.Spec.NodeName is immutable, so a same-UID pod is pinned to this node; a
-	// recreation (new UID) is caught by classifySourcePod, and the content informer is node-scoped.
-
-	// Run before the gone-guard so a non-zero container exit still SIGKILLs siblings and fails the
-	// order even when the pod is already Phase==Failed.
 	if w.failCheckpointOnContainerExit(ctx, content, pod) {
-		return
+		return nil
 	}
-	// Detection-only cancellation: an invalidating change after promotion fails the order and drops
-	// the label. An in-flight dump is never interrupted — tryAcquire above short-circuited re-entry.
 	if reason, msg := classifySourcePod(content, pod); reason != "" {
-		w.writeFailed(ctx, content, reason, errors.New(msg))
+		w.setSnapshotContentFailed(ctx, content, reason, errors.New(msg))
 		w.removeCaptureEligibleLabel(ctx, pod)
-		return
+		return nil
 	}
-
-	// Record the back-reference to the work order on the source pod (best-effort).
-	w.setSnapshotContentRef(ctx, pod, content.Name)
 
 	// Capture parameters come from the source pod, which is the single source of truth. The
 	// checkpoint ID is the pod label; the work order name is treated as opaque (never parsed).
 	id := strings.TrimSpace(pod.Labels[snapshotprotocol.CheckpointIDLabel])
 	if id == "" {
-		w.writeFailed(ctx, content, "MissingCheckpointID",
+		w.setSnapshotContentFailed(ctx, content, "MissingCheckpointID",
 			fmt.Errorf("source pod %q missing %s label", pod.Name, snapshotprotocol.CheckpointIDLabel))
-		return
+		return nil
 	}
 
 	containerName, err := snapshotprotocol.TargetContainersFromAnnotations(pod.Annotations, 1, 1)
 	if err != nil {
-		w.writeFailed(ctx, content, "MissingTargetContainer", err)
-		return
+		w.setSnapshotContentFailed(ctx, content, "MissingTargetContainer", err)
+		return nil
 	}
 	if !isContainerReady(pod, containerName[0]) {
 		logger.V(1).Info("Source container not ready, awaiting quiesce", "pod", pod.Name, "container", containerName[0])
-		return
+		return nil
 	}
 
 	containerID := containerIDForName(pod, containerName[0])
 	if containerID == "" {
-		w.writeFailed(ctx, content, "ContainerNotResolved",
+		w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved",
 			fmt.Errorf("could not resolve container %q ID", containerName[0]))
-		return
+		return nil
 	}
 	containerPID, _, err := w.runtime.ResolveContainer(ctx, containerID)
 	if err != nil {
-		w.writeFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName[0], err))
-		return
+		w.setSnapshotContentFailed(ctx, content, "ContainerNotResolved", fmt.Errorf("resolve container %q: %w", containerName[0], err))
+		return nil
 	}
 	loc, err := w.checkpointLocationsFromPod(pod, id, containerPID)
 	if err != nil {
-		w.writeFailed(ctx, content, "InvalidDestination", err)
-		return
+		w.setSnapshotContentFailed(ctx, content, "InvalidDestination", err)
+		return nil
 	}
 	if err := w.validatePodMountContainerPID(ctx, containerID, containerPID); err != nil {
-		w.writeFailed(ctx, content, "ContainerChanged", err)
-		return
+		w.setSnapshotContentFailed(ctx, content, "ContainerChanged", err)
+		return nil
 	}
 
 	// Resume: a present artifact with unwritten status means a prior dump finished but the
 	// status write did not. The artifact dir exists only after the executor's atomic rename,
 	// so its presence means a completed dump.
 	if artifactPresent(loc.HostPath) {
-		w.writeReady(ctx, content)
-		return
+		w.setSnapshotContentSucceeded(ctx, content)
+		return nil
 	}
 
 	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: content.Name}
 	acquired, err := w.acquireLease(ctx, leaseKey)
 	if err != nil {
-		logger.Error(err, "Failed to acquire checkpoint lease", "lease", leaseKey.String())
-		return
+		return fmt.Errorf("acquire checkpoint lease %s: %w", leaseKey.String(), err)
 	}
 	if !acquired {
-		return
+		return nil
 	}
 
 	releaseInFlight = false
 	go w.runCheckpoint(ctx, content, pod, containerName[0], containerID, containerPID, id, loc, leaseKey, key)
+	return nil
 }
 
 // runCheckpoint executes the dump under a renewed lease and writes the terminal status.
@@ -239,7 +223,7 @@ func (w *NodeController) runCheckpoint(
 	leaseKey client.ObjectKey,
 	inFlightKey string,
 ) {
-	logger := w.log.WithValues("content", content.Name)
+	logger := logr.FromContextOrDiscard(ctx)
 	defer w.release(inFlightKey)
 
 	leaseCtx, stopLease := context.WithCancel(ctx)
@@ -265,16 +249,16 @@ func (w *NodeController) runCheckpoint(
 	}
 	if err := w.checkpointFn(leaseCtx, params); err != nil {
 		logger.Error(err, "Checkpoint failed")
-		w.writeFailed(ctx, content, "CheckpointFailed", err)
+		w.setSnapshotContentFailed(ctx, content, "CheckpointFailed", err)
 		return
 	}
 
-	w.writeReady(ctx, content)
+	w.setSnapshotContentSucceeded(ctx, content)
 }
 
 // classifySourcePod reports whether the source pod is unusable for capture, returning a terminal
 // failure reason and message ("" reason means the pod is valid). It is pure: callers decide whether
-// to writeFailed (reconcilePodSnapshotContent, pre-bind) or merely skip capture (reconcileSourcePod
+// to setSnapshotContentFailed (reconcilePodSnapshotContent, pre-bind) or merely skip capture (reconcileSourcePod
 // guard). Pod existence (NotFound) is handled by the caller, which holds the Get error.
 func classifySourcePod(content *nvidiacomv1alpha1.PodSnapshotContent, pod *corev1.Pod) (string, string) {
 	if content.Spec.Source.PodRef.UID != "" && pod.UID != content.Spec.Source.PodRef.UID {
@@ -310,11 +294,11 @@ func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, cont
 	if term.Reason != "" {
 		message = fmt.Sprintf("%s: %s", message, term.Reason)
 	}
-	logger := w.log.WithValues("content", content.Name, "container", failed.Name)
+	logger := logr.FromContextOrDiscard(ctx).WithValues("container", failed.Name)
 	logger.Info("Checkpoint container failed", "exit_code", term.ExitCode, "reason", term.Reason)
 	emitPodEvent(ctx, w.clientset, logger, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", message)
 	w.killRunningContainers(ctx, logger, pod, fmt.Sprintf("checkpoint container %s failed", failed.Name))
-	w.writeFailed(ctx, content, "CheckpointContainerFailed", errors.New(message))
+	w.setSnapshotContentFailed(ctx, content, "CheckpointContainerFailed", errors.New(message))
 	return true
 }
 
@@ -340,61 +324,48 @@ func (w *NodeController) killRunningContainers(ctx context.Context, logger logr.
 	}
 }
 
+// podLabelPatchBase returns a minimal Pod carrying only the identity + a clone of the source pod's
+// labels, suitable as the MergeFrom base for a label-only patch — so the informer-cached pod is not
+// mutated and the whole object is not deep-copied.
+func podLabelPatchBase(pod *corev1.Pod) *corev1.Pod {
+	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: pod.Namespace,
+		Name:      pod.Name,
+		Labels:    maps.Clone(pod.Labels),
+	}}
+}
+
 // labelCaptureEligible promotes a gate-validated source pod by adding CaptureEligibleLabel, which the
-// source-pod informer keys on. Idempotent. It patches a copy so the informer-cached pod is not
-// mutated.
+// source-pod informer keys on. Idempotent.
 func (w *NodeController) labelCaptureEligible(ctx context.Context, pod *corev1.Pod) error {
 	if pod.Labels[snapshotprotocol.CaptureEligibleLabel] == "true" {
 		return nil
 	}
-	updated := pod.DeepCopy()
+	base := podLabelPatchBase(pod)
+	updated := base.DeepCopy()
 	if updated.Labels == nil {
 		updated.Labels = map[string]string{}
 	}
 	updated.Labels[snapshotprotocol.CaptureEligibleLabel] = "true"
-	return w.client.Patch(ctx, updated, client.MergeFrom(pod))
-}
-
-// setSnapshotContentRef stamps SnapshotContentLabel=<contentName> on the source pod as a back-ref to
-// the work order capturing it. Idempotent and best-effort: the idempotent check reads the
-// informer-cached pod (may be one reconcile cycle stale — fine for a back-ref), and a contentName that
-// is not a valid label value is logged and skipped (it is valid under the podsnapshotcontent-<uid>
-// convention). It patches a copy so the informer-cached pod is not mutated.
-func (w *NodeController) setSnapshotContentRef(ctx context.Context, pod *corev1.Pod, contentName string) {
-	if pod.Labels[snapshotprotocol.SnapshotContentLabel] == contentName {
-		return
-	}
-	if errs := validation.IsValidLabelValue(contentName); len(errs) > 0 {
-		w.log.Error(fmt.Errorf("invalid label value: %s", strings.Join(errs, "; ")),
-			"Skipping snapshot-content back-ref", "pod", pod.Name, "content", contentName)
-		return
-	}
-	updated := pod.DeepCopy()
-	if updated.Labels == nil {
-		updated.Labels = map[string]string{}
-	}
-	updated.Labels[snapshotprotocol.SnapshotContentLabel] = contentName
-	if err := w.client.Patch(ctx, updated, client.MergeFrom(pod)); err != nil {
-		w.log.Error(err, "Failed to set snapshot-content back-ref", "pod", pod.Name, "content", contentName)
-	}
+	return w.client.Patch(ctx, updated, client.MergeFrom(base))
 }
 
 // removeCaptureEligibleLabel drops CaptureEligibleLabel so the source-pod informer stops driving the
-// pod after a terminal cancellation (node move, provenance/liveness failure). Best-effort: a failure
-// is logged, not surfaced. It patches a copy so the informer-cached pod is not mutated.
+// pod after a terminal cancellation. Best-effort: a failure is logged, not surfaced.
 func (w *NodeController) removeCaptureEligibleLabel(ctx context.Context, pod *corev1.Pod) {
 	if _, ok := pod.Labels[snapshotprotocol.CaptureEligibleLabel]; !ok {
 		return
 	}
-	updated := pod.DeepCopy()
+	base := podLabelPatchBase(pod)
+	updated := base.DeepCopy()
 	delete(updated.Labels, snapshotprotocol.CaptureEligibleLabel)
-	if err := w.client.Patch(ctx, updated, client.MergeFrom(pod)); err != nil {
-		w.log.Error(err, "Failed to remove capture-eligible label", "pod", pod.Name)
+	if err := w.client.Patch(ctx, updated, client.MergeFrom(base)); err != nil {
+		logr.FromContextOrDiscard(ctx).Error(err, "Failed to remove capture-eligible label", "pod", pod.Name)
 	}
 }
 
-// writeReady patches status with the Ready condition.
-func (w *NodeController) writeReady(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent) {
+// setSnapshotContentSucceeded patches status with the Ready condition.
+func (w *NodeController) setSnapshotContentSucceeded(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent) {
 	patch := client.MergeFrom(content.DeepCopy())
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type:    nvidiacomv1alpha1.PodSnapshotConditionReady,
@@ -403,12 +374,12 @@ func (w *NodeController) writeReady(ctx context.Context, content *nvidiacomv1alp
 		Message: "Checkpoint captured and verified",
 	})
 	if err := w.client.Status().Patch(ctx, content, patch); err != nil {
-		w.log.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
+		logr.FromContextOrDiscard(ctx).Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
 	}
 }
 
-// writeFailed patches status with the Failed condition.
-func (w *NodeController) writeFailed(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent, reason string, cause error) {
+// setSnapshotContentFailed patches status with the Failed condition.
+func (w *NodeController) setSnapshotContentFailed(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent, reason string, cause error) {
 	patch := client.MergeFrom(content.DeepCopy())
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
 		Type:    nvidiacomv1alpha1.PodSnapshotConditionFailed,
@@ -417,7 +388,7 @@ func (w *NodeController) writeFailed(ctx context.Context, content *nvidiacomv1al
 		Message: cause.Error(),
 	})
 	if err := w.client.Status().Patch(ctx, content, patch); err != nil {
-		w.log.Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name, "reason", reason)
+		logr.FromContextOrDiscard(ctx).Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name, "reason", reason)
 	}
 }
 

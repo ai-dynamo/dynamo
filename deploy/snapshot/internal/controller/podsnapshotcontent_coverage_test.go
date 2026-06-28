@@ -122,7 +122,7 @@ func TestReconcileSourcePod_ContentGetErrorReturns(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, fc, funcs, content, pod)
 
-	w.reconcileSourcePod(context.Background(), pod)
+	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
 
 	assert.False(t, fc.called, "a content Get error must abort before the dump")
 }
@@ -185,7 +185,7 @@ func TestRemoveCaptureEligibleLabel_PatchErrorLeavesLabel(t *testing.T) {
 	assert.True(t, labeled)
 }
 
-func TestWriteReady_StatusPatchErrorLeavesNoCondition(t *testing.T) {
+func TestSetSnapshotContentSucceeded_StatusPatchErrorLeavesNoCondition(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	funcs := interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
@@ -194,12 +194,12 @@ func TestWriteReady_StatusPatchErrorLeavesNoCondition(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
 
-	w.writeReady(context.Background(), content)
+	w.setSnapshotContentSucceeded(context.Background(), content)
 
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionReady))
 }
 
-func TestWriteFailed_StatusPatchErrorLeavesNoCondition(t *testing.T) {
+func TestSetSnapshotContentFailed_StatusPatchErrorLeavesNoCondition(t *testing.T) {
 	content := makeWorkOrder("podsnapshotcontent-x", "node-a", "x")
 	funcs := interceptor.Funcs{
 		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
@@ -208,7 +208,7 @@ func TestWriteFailed_StatusPatchErrorLeavesNoCondition(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, &fakeCheckpointer{}, funcs, content)
 
-	w.writeFailed(context.Background(), content, "SomeReason", errors.New("boom"))
+	w.setSnapshotContentFailed(context.Background(), content, "SomeReason", errors.New("boom"))
 
 	assert.Nil(t, meta.FindStatusCondition(getContent(t, w, content.Name).Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed))
 }
