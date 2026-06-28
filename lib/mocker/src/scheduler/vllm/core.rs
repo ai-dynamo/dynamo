@@ -6,15 +6,11 @@ use std::time::Duration;
 
 use dynamo_kv_router::protocols::WorkerId;
 use dynamo_tokens::blocks::UniqueBlock;
-#[cfg(feature = "kvbm-offload")]
-use kvbm_logical::{ImmutableBlock, MutableBlock};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::common::handoff::HandoffId;
-#[cfg(feature = "kvbm-offload")]
-use crate::common::protocols::G1;
 use crate::common::protocols::{
     DirectRequest, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
     PrefillCost, WorkerType,
@@ -26,6 +22,8 @@ use crate::kv_manager::KvManager;
 #[cfg(feature = "kvbm-offload")]
 use crate::kv_manager::kvbm_backend::SwapInRegistrationBlock;
 use crate::kv_manager::kvbm_backend::{G1Acquire, OffloadDependency, VllmDestinationReservation};
+#[cfg(feature = "kvbm-offload")]
+use crate::kvbm_offload::coordinator::SwapInTerminal;
 use crate::replay::TraceCollector;
 use crate::scheduler::vllm::policy::{self, AdmissionDecision};
 use crate::scheduler::{
@@ -363,14 +361,12 @@ impl SchedulerState {
 /// cached in G1 at park time; the swap-in covers the next
 /// `handle.block_count()` blocks starting at that offset. We need this
 /// to register the right slice of the request's PLHs into G1 inactive
-/// after the transfer completes. `_prefix_pins` keeps that cached prefix
-/// resident until the suffix can publish Device-tier Stored events against it.
+/// after the transfer completes. The coordinator keeps that cached prefix
+/// resident until the suffix publishes Device-tier Stored events.
 #[cfg(feature = "kvbm-offload")]
 pub(crate) struct AwaitingSwapIn {
     pub(crate) uuid: Uuid,
     pub(crate) handle: crate::kvbm_offload::SwapInHandle,
-    pub(crate) destination_slots: Vec<MutableBlock<G1>>,
-    pub(crate) _prefix_pins: Vec<ImmutableBlock<G1>>,
     pub(crate) skip_blocks: usize,
 }
 
@@ -730,11 +726,11 @@ impl VllmCore {
         let kv = match reservation {
             G1Acquire::Ready(kv) => kv,
             G1Acquire::BlockedOnOffload {
-                transfer_id,
+                offload_id,
                 deadline_ms,
             } => {
                 request.offload_dependency = Some(OffloadDependency {
-                    transfer_id,
+                    offload_id,
                     deadline_ms,
                 });
                 self.pending_destinations.mark_front_attempted(generation);
@@ -1054,10 +1050,13 @@ impl VllmCore {
         let mut pending = Vec::with_capacity(awaiting.len());
 
         for aws in awaiting {
-            if aws.handle.is_complete() {
-                completed.push(aws);
-            } else {
-                pending.push(aws);
+            match aws.handle.terminal() {
+                SwapInTerminal::Pending => pending.push(aws),
+                SwapInTerminal::Completed => completed.push(aws),
+                SwapInTerminal::Cancelled => {}
+                SwapInTerminal::Failed(context) => {
+                    panic!("mocker swap-in failed for request {}: {context}", aws.uuid)
+                }
             }
         }
 
@@ -1124,9 +1123,9 @@ impl VllmCore {
     /// `[skip_blocks .. skip_blocks + count]` of the request's block
     /// sequence — we skip the G1-cached prefix the request already had
     /// and register only the uncached-remainder blocks that the engine
-    /// actually onboarded from G2. `aws` drops at the end →
-    /// `SwapInHandle` drops → pinned G2 blocks release to kvbm-engine's
-    /// inactive pool.
+    /// actually onboarded from G2. `register_completed_swap_in` consumes
+    /// the coordinator lease, registers its retained G1 destinations, and
+    /// releases the remaining swap-in resources.
     #[cfg(feature = "kvbm-offload")]
     fn complete_swap_in(&mut self, aws: AwaitingSwapIn) {
         let count = aws.handle.block_count();
@@ -1174,7 +1173,7 @@ impl VllmCore {
         let entries_len = entries.len();
         let outcome =
             self.kv_manager
-                .register_swapped_in_blocks(entries, parent_hash, aws.destination_slots);
+                .register_completed_swap_in(aws.handle.id(), entries, parent_hash);
         debug_assert_eq!(
             outcome.consumed_entries, entries_len,
             "reserved destination slots should cover every swapped-in block"
@@ -1248,58 +1247,54 @@ impl VllmCore {
                 return SwapInAdmissionAttempt::NoHit;
             }
         };
-        let (handle, destination_slots) = match self
-            .kv_manager
-            .try_batch_swap_in(remaining_plhs, Some(now_ms))
-        {
-            BatchSwapInOutcome::Scheduled {
-                handle,
-                destination_slots,
-            } => {
-                tracing::debug!(
-                    %uuid,
-                    now_ms,
-                    skip_blocks,
-                    remaining_blocks = remaining_plhs.len(),
-                    "kvbm-offload: swap-in admission parked"
-                );
-                (handle, destination_slots)
-            }
-            BatchSwapInOutcome::BlockedOnG1Offload(dependency) => {
-                tracing::debug!(
-                    %uuid,
-                    now_ms,
-                    transfer_id = ?dependency.transfer_id,
-                    deadline_ms = ?dependency.deadline_ms,
-                    skip_blocks,
-                    remaining_blocks = remaining_plhs.len(),
-                    "kvbm-offload: swap-in blocked on G1 offload"
-                );
-                let request = self
-                    .state
-                    .requests
-                    .get_mut(&uuid)
-                    .expect("swap-in dependency request must remain active");
-                request.offload_dependency = Some(dependency);
-                return SwapInAdmissionAttempt::BlockedOnG1Offload;
-            }
-            BatchSwapInOutcome::NoHits => {
-                tracing::trace!(
-                    %uuid,
-                    now_ms,
-                    skip_blocks,
-                    remaining_blocks = remaining_plhs.len(),
-                    "kvbm-offload: swap-in lower-tier miss"
-                );
-                return SwapInAdmissionAttempt::NoHit;
-            }
-        };
+        let handle =
+            match self
+                .kv_manager
+                .try_batch_swap_in(remaining_plhs, prefix_pins, Some(now_ms))
+            {
+                BatchSwapInOutcome::Scheduled { handle } => {
+                    tracing::debug!(
+                        %uuid,
+                        now_ms,
+                        skip_blocks,
+                        remaining_blocks = remaining_plhs.len(),
+                        "kvbm-offload: swap-in admission parked"
+                    );
+                    handle
+                }
+                BatchSwapInOutcome::BlockedOnG1Offload(dependency) => {
+                    tracing::debug!(
+                        %uuid,
+                        now_ms,
+                        offload_id = ?dependency.offload_id,
+                        deadline_ms = ?dependency.deadline_ms,
+                        skip_blocks,
+                        remaining_blocks = remaining_plhs.len(),
+                        "kvbm-offload: swap-in blocked on G1 offload"
+                    );
+                    let request = self
+                        .state
+                        .requests
+                        .get_mut(&uuid)
+                        .expect("swap-in dependency request must remain active");
+                    request.offload_dependency = Some(dependency);
+                    return SwapInAdmissionAttempt::BlockedOnG1Offload;
+                }
+                BatchSwapInOutcome::NoHits => {
+                    tracing::trace!(
+                        %uuid,
+                        now_ms,
+                        skip_blocks,
+                        remaining_blocks = remaining_plhs.len(),
+                        "kvbm-offload: swap-in lower-tier miss"
+                    );
+                    return SwapInAdmissionAttempt::NoHit;
+                }
+            };
         self.state.remove_from_waiting(uuid);
         self.requests_awaiting_swap_in.push(AwaitingSwapIn {
             uuid,
             handle,
-            destination_slots,
-            _prefix_pins: prefix_pins,
             skip_blocks,
         });
         SwapInAdmissionAttempt::Parked
@@ -1532,8 +1527,19 @@ impl VllmCore {
     pub(super) fn drop_request(&mut self, uuid: Uuid) {
         let active_blocks_before = self.kv_manager.num_active_blocks();
         #[cfg(feature = "kvbm-offload")]
-        self.requests_awaiting_swap_in
-            .retain(|request| request.uuid != uuid);
+        {
+            let awaiting = std::mem::take(&mut self.requests_awaiting_swap_in);
+            for request in awaiting {
+                if request.uuid == uuid {
+                    assert!(
+                        self.kv_manager.cancel_swap_in(request.handle.id()),
+                        "parked swap-in must retain a coordinator lease"
+                    );
+                } else {
+                    self.requests_awaiting_swap_in.push(request);
+                }
+            }
+        }
 
         let Some(request) = self.state.requests.get(&uuid) else {
             if self.kv_manager.num_active_blocks() < active_blocks_before {
@@ -1779,14 +1785,14 @@ impl VllmCore {
                     break;
                 }
                 G1Acquire::BlockedOnOffload {
-                    transfer_id,
+                    offload_id,
                     deadline_ms,
                 } => {
                     let request = self.state.requests.get_mut(&uuid).unwrap_or_else(|| {
                         panic!("schedule_request: {uuid} removed while attaching dependency")
                     });
                     request.offload_dependency = Some(OffloadDependency {
-                        transfer_id,
+                        offload_id,
                         deadline_ms,
                     });
                     actual_computed_after = effective_computed_before;
@@ -1961,7 +1967,7 @@ impl VllmCore {
                         break;
                     }
                     G1Acquire::BlockedOnOffload {
-                        transfer_id,
+                        offload_id,
                         deadline_ms,
                     } => {
                         sequence.pop();
@@ -1971,7 +1977,7 @@ impl VllmCore {
                             .get_mut(&uuid)
                             .expect("decode dependency request must remain active");
                         request.offload_dependency = Some(OffloadDependency {
-                            transfer_id,
+                            offload_id,
                             deadline_ms,
                         });
                         break;
@@ -2081,11 +2087,11 @@ impl VllmCore {
             match self.kv_manager.reserve_decode_blocks(required_blocks) {
                 G1Acquire::Ready(reservation) => break reservation,
                 G1Acquire::BlockedOnOffload {
-                    transfer_id,
+                    offload_id,
                     deadline_ms,
                 } => {
                     let dependency = Some(OffloadDependency {
-                        transfer_id,
+                        offload_id,
                         deadline_ms,
                     });
                     for uuid in &ready {
@@ -2324,12 +2330,12 @@ fn process_signals(kv_manager: &mut KvManager, signals: &[MoveBlock]) -> G1Acqui
         match kv_manager.process(signal) {
             G1Acquire::Ready(_) => continue,
             G1Acquire::BlockedOnOffload {
-                transfer_id,
+                offload_id,
                 deadline_ms,
             } => {
                 validate_decode_allocation_failure(signal);
                 return G1Acquire::BlockedOnOffload {
-                    transfer_id,
+                    offload_id,
                     deadline_ms,
                 };
             }

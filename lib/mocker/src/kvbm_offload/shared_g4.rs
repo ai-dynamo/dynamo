@@ -13,7 +13,8 @@ use kvbm_engine::offload::PendingTracker;
 use super::bandwidth_sharing_model::TransferId;
 use super::config::KvbmOffloadConfig;
 use super::worker::{
-    CompletedTransfer, DrainResult, SharedDrainCounts, TransferDirection, TransferState,
+    CompletedTransfer, DeferredOwnerDrain, DrainResult, SharedDrainCounts, TransferDirection,
+    TransferState,
 };
 
 /// Object metadata tracked by the mock G4 tier.
@@ -36,7 +37,7 @@ pub(crate) struct SharedG4Store {
     pending_puts: Mutex<HashMap<TransferId, PendingG4Put>>,
     state: Arc<Mutex<TransferState>>,
     pending_tracker: Arc<PendingTracker>,
-    pending_owner_drains: Mutex<HashMap<u64, SharedDrainCounts>>,
+    pending_owner_drains: Mutex<HashMap<u64, DeferredOwnerDrain>>,
 }
 
 static SHARED_G4_STORE: OnceLock<Mutex<Option<Weak<SharedG4Store>>>> = OnceLock::new();
@@ -130,7 +131,7 @@ impl SharedG4Store {
         let drained = state.drain_completions(now_ms, "shared-g4");
         drop(state);
 
-        self.record_drained(drained, Some(owner_id))
+        self.record_drained(drained, Some(owner_id), now_ms)
     }
 
     pub(crate) fn drain_completions_to_pending(&self, now_ms: f64) {
@@ -138,10 +139,15 @@ impl SharedG4Store {
         let drained = state.drain_completions(now_ms, "shared-g4");
         drop(state);
 
-        self.record_drained(drained, None);
+        self.record_drained(drained, None, now_ms);
     }
 
-    fn record_drained(&self, drained: DrainResult, owner_id: Option<u64>) -> SharedDrainCounts {
+    fn record_drained(
+        &self,
+        drained: DrainResult,
+        owner_id: Option<u64>,
+        now_ms: f64,
+    ) -> SharedDrainCounts {
         self.publish_completed_puts(&drained.completed);
 
         let mut owner_result = SharedDrainCounts::default();
@@ -152,7 +158,7 @@ impl SharedG4Store {
         if let Some(owner_id) = owner_id
             && let Some(record) = pending.remove(&owner_id)
         {
-            owner_result.add_deferred_record(record);
+            owner_result.add_deferred_record(record.counts);
         }
         for (owner, counts) in drained.by_owner {
             let record = SharedDrainCounts {
@@ -163,7 +169,16 @@ impl SharedG4Store {
             if Some(owner) == owner_id {
                 owner_result.add_record(record);
             } else {
-                pending.entry(owner).or_default().add_record(record);
+                pending
+                    .entry(owner)
+                    .and_modify(|pending| {
+                        pending.counts.add_record(record);
+                        pending.deadline_ms = pending.deadline_ms.min(now_ms);
+                    })
+                    .or_insert(DeferredOwnerDrain {
+                        counts: record,
+                        deadline_ms: now_ms,
+                    });
             }
         }
         owner_result
@@ -205,6 +220,14 @@ impl SharedG4Store {
     pub(crate) fn earliest_finish(&self) -> Option<f64> {
         let state = self.state.lock().expect("shared G4 state poisoned");
         state.earliest_finish()
+    }
+
+    pub(crate) fn pending_owner_deadline(&self, owner_id: u64) -> Option<f64> {
+        self.pending_owner_drains
+            .lock()
+            .expect("shared G4 owner drain map poisoned")
+            .get(&owner_id)
+            .map(|pending| pending.deadline_ms)
     }
 
     pub(crate) fn earliest_offload_finish(&self) -> Option<f64> {
