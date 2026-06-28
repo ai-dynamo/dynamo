@@ -397,7 +397,7 @@ mod tests {
         // Two models sharing a single `Arc<AtomicU64>` counter must
         // never hand out the same TransferId. This is the invariant
         // `TransferState` relies on when keying `awaiters` and
-        // `swap_in_flags` by TransferId — a collision would cause
+        // swap-in completion publishers by TransferId — a collision would cause
         // completion signals to cross-fire into the wrong transfer.
         let counter = Arc::new(AtomicU64::new(0));
         let mut a = BandwidthSharingModel::new(1.0, counter.clone());
