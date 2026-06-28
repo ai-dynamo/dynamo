@@ -500,6 +500,14 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         checkpoint_env = dockerfile.index("ENV NCCL_CHECKPOINT_SHIM=", build)
         self.assertLess(helper_copy, build)
         self.assertLess(build, checkpoint_env)
+        final_validation = dockerfile.index(
+            "python3 /usr/local/lib/validate_pynccl_checkpoint_binding.py",
+            checkpoint_env,
+        )
+        cache_cleanup = dockerfile.index(
+            "rm -rf /home/dynamo/.cache/flashinfer", final_validation
+        )
+        self.assertLess(final_validation, cache_cleanup)
 
     def test_nccl_checkpoint_source_is_public_immutable_and_verified(self) -> None:
         build_script = (

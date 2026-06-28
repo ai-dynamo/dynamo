@@ -335,7 +335,8 @@ RUN set -eux; \
         EXPECTED_TORCH_LOCAL_VERSION="${VLLM_TORCH_BACKEND:-${VLLM_PRECOMPILED_WHEEL_VARIANT}}" \
         LD_PRELOAD="${NCCL_CHECKPOINT_SHIM}" \
             python3 /usr/local/lib/validate_pynccl_checkpoint_binding.py; \
-    fi
+    fi; \
+    rm -rf /home/dynamo/.cache/flashinfer
 {% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
