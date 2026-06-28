@@ -121,20 +121,10 @@ struct RequestedRecvConnection {
     send_buffer_count: usize,
 }
 
-impl RequestedSendConnection {
-    fn is_cancelled(&self) -> bool {
-        self.instance_gate
-            .as_ref()
-            .is_some_and(|gate| gate.is_cancelled())
-    }
-}
-
-impl RequestedRecvConnection {
-    fn is_cancelled(&self) -> bool {
-        self.instance_gate
-            .as_ref()
-            .is_some_and(|gate| gate.is_cancelled())
-    }
+fn is_instance_cancelled(instance_gate: &Option<Arc<InstanceGate>>) -> bool {
+    instance_gate
+        .as_deref()
+        .is_some_and(InstanceGate::is_cancelled)
 }
 
 /// Build the per-stream data-plane mpsc channel that bridges the socket task
@@ -202,8 +192,8 @@ struct StreamRegistries {
 }
 
 impl StreamRegistries {
-    /// Drop tombstones older than [`TOMBSTONE_TTL`]. Called lazily on every
-    /// `associate_instance` / `cancel_instance_streams` to bound the set size.
+    /// Drop tombstones older than [`TOMBSTONE_TTL`]. Called from instance
+    /// cancellation, which is off the per-request association hot path.
     fn prune_tombstones(&self, now: Instant) {
         self.instance_states.retain(|_, state| {
             state
@@ -232,12 +222,18 @@ impl StreamRegistries {
         conn
     }
 
-    fn instance_gate(&self, id: &EndpointInstanceId) -> Arc<InstanceGate> {
-        self.instance_states
-            .entry(id.clone())
-            .or_default()
-            .gate
-            .clone()
+    /// Return the active cancellation generation for `id`. An expired
+    /// tombstone is refreshed in-place so association only touches this
+    /// instance's shard instead of scanning all instance states.
+    fn instance_gate(&self, id: &EndpointInstanceId, now: Instant) -> Arc<InstanceGate> {
+        let mut state = self.instance_states.entry(id.clone()).or_default();
+        if state
+            .removed_at
+            .is_some_and(|ts| now.saturating_duration_since(ts) >= TOMBSTONE_TTL)
+        {
+            *state = InstanceState::default();
+        }
+        state.gate.clone()
     }
 
     fn associate_subject(
@@ -286,12 +282,21 @@ impl StreamRegistries {
             return;
         };
 
-        if let Some(mut state) = self.instance_states.get_mut(&id) {
+        let active_state_is_empty = if let Some(mut state) = self.instance_states.get_mut(&id) {
             state.subjects.remove(&(kind, subject.to_string()));
+            state.subjects.is_empty() && state.removed_at.is_none()
+        } else {
+            false
+        };
+
+        if active_state_is_empty {
+            self.instance_states.remove_if(&id, |_, state| {
+                state.subjects.is_empty() && state.removed_at.is_none()
+            });
         }
     }
 
-    fn cancel_registered_subject(&self, kind: StreamType, subject: &str) {
+    fn remove_registered_subject(&self, kind: StreamType, subject: &str) {
         match kind {
             StreamType::Request => {
                 self.tx_subjects.remove(subject);
@@ -300,7 +305,17 @@ impl StreamRegistries {
                 self.rx_subjects.remove(subject);
             }
         }
+    }
+
+    fn cancel_registered_subject(&self, kind: StreamType, subject: &str) {
+        self.remove_registered_subject(kind.clone(), subject);
         self.remove_subject_tracking(kind, subject);
+    }
+
+    /// Cancel a subject already removed from its instance's subject set.
+    fn cancel_drained_subject(&self, kind: StreamType, subject: &str) {
+        self.remove_registered_subject(kind, subject);
+        self.subject_instance.remove(subject);
     }
 }
 
@@ -395,8 +410,7 @@ impl TcpStreamServer {
         id: &EndpointInstanceId,
     ) -> bool {
         let now = Instant::now();
-        self.registries.prune_tombstones(now);
-        let gate = self.registries.instance_gate(id);
+        let gate = self.registries.instance_gate(id, now);
 
         let recv_associated =
             self.registries
@@ -467,7 +481,7 @@ impl TcpStreamServer {
         let count = subjects.len();
         for (kind, subject) in &subjects {
             self.registries
-                .cancel_registered_subject(kind.clone(), subject);
+                .cancel_drained_subject(kind.clone(), subject);
         }
         count
     }
@@ -754,7 +768,7 @@ async fn tcp_listener(
                 subject
             ))?;
 
-        if request_stream.is_cancelled() {
+        if is_instance_cancelled(&request_stream.instance_gate) {
             return Err(error!(
                 "Subject cancelled before request-stream call-home completed: {}",
                 subject
@@ -867,7 +881,7 @@ async fn tcp_listener(
             .remove_response_stream(&subject)
             .ok_or(error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject))?;
 
-        if response_stream.is_cancelled() {
+        if is_instance_cancelled(&response_stream.instance_gate) {
             return Err(error!(
                 "Subject cancelled before response-stream call-home completed: {}",
                 subject
@@ -1570,7 +1584,12 @@ mod tests {
         // Cancel the individual subject
         server.cancel_recv_stream(&subject).await;
 
-        // Instance should have no remaining subjects
+        assert!(
+            !server.registries.instance_states.contains_key(&id),
+            "empty active instance state should be reclaimed"
+        );
+
+        // Cancelling the instance now should create an empty tombstone.
         let cancelled = server.cancel_instance_streams(&id).await;
         assert_eq!(
             cancelled, 0,
@@ -1988,8 +2007,8 @@ mod tests {
             "tombstone older than TTL should not block association"
         );
 
-        // The expired tombstone must have been pruned (lazy pruning fires on
-        // every associate_instance/cancel_instance_streams call).
+        // The expired tombstone for this identity must have been replaced by
+        // a fresh active generation without scanning unrelated identities.
         assert!(
             server
                 .registries
@@ -1997,6 +2016,37 @@ mod tests {
                 .get(&id)
                 .is_some_and(|state| state.removed_at.is_none()),
             "expired tombstone should be pruned, not retained"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_associate_refreshes_only_target_tombstone() {
+        let server = test_server().await;
+        let target_id = make_eid("ns", "comp", "generate", 42);
+        let sibling_id = make_eid("ns", "comp", "generate", 43);
+
+        server.cancel_instance_streams(&target_id).await;
+        server.cancel_instance_streams(&sibling_id).await;
+        tokio::time::advance(TOMBSTONE_TTL + Duration::from_secs(1)).await;
+
+        let (subject, _provider) = register_and_get_subject(&server).await;
+        assert!(server.associate_instance(&subject, None, &target_id).await);
+
+        assert!(
+            server
+                .registries
+                .instance_states
+                .get(&target_id)
+                .is_some_and(|state| state.removed_at.is_none()),
+            "the associated instance should receive a fresh active generation"
+        );
+        assert!(
+            server
+                .registries
+                .instance_states
+                .get(&sibling_id)
+                .is_some_and(|state| state.removed_at.is_some()),
+            "association should not scan and prune unrelated tombstones"
         );
     }
 
