@@ -545,8 +545,17 @@ pub fn chat_completion_to_anthropic_response(
                 .prompt_tokens_details
                 .and_then(|d| d.cached_tokens)
                 .filter(|&n| n > 0);
+            // OpenAI's `prompt_tokens` is the TOTAL prompt size and already
+            // includes the cached (and cache-creation) tokens. Anthropic's
+            // `input_tokens` semantics are the opposite: it counts only the
+            // *uncached* input, with cache_read/cache_creation reported
+            // separately and non-overlapping. Subtract so the same token isn't
+            // double-counted across input_tokens + cache_read_input_tokens.
+            let input_tokens = u
+                .prompt_tokens
+                .saturating_sub(cache_read_input_tokens.unwrap_or(0));
             AnthropicUsage {
-                input_tokens: u.prompt_tokens,
+                input_tokens,
                 output_tokens: u.completion_tokens,
                 cache_creation_input_tokens: None, // Not available from OpenAI format
                 cache_read_input_tokens,
@@ -964,6 +973,56 @@ mod tests {
             }
             _ => panic!("expected text block"),
         }
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn test_anthropic_response_input_tokens_excludes_cached() {
+        // OpenAI prompt_tokens is the total (12) and already includes the
+        // cached tokens (11). Anthropic input_tokens must report only the
+        // uncached portion (12 - 11 = 1), with cache_read reported separately.
+        let chat_resp = NvCreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                id: "chatcmpl-cache".into(),
+                choices: vec![dynamo_protocols::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                            "Hi!".to_string(),
+                        )),
+                        refusal: None,
+                        tool_calls: None,
+                        role: dynamo_protocols::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+                    logprobs: None,
+                }],
+                created: 1726000000,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".to_string(),
+                usage: Some(dynamo_protocols::types::CompletionUsage {
+                    prompt_tokens: 12,
+                    completion_tokens: 5,
+                    total_tokens: 17,
+                    prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                        audio_tokens: None,
+                        cached_tokens: Some(11),
+                    }),
+                    completion_tokens_details: None,
+                }),
+            },
+            nvext: None,
+        };
+
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
+        assert_eq!(response.usage.input_tokens, 1);
+        assert_eq!(response.usage.cache_read_input_tokens, Some(11));
+        assert_eq!(response.usage.output_tokens, 5);
     }
 
     #[allow(deprecated)]

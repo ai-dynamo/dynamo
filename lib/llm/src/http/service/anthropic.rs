@@ -272,14 +272,6 @@ async fn anthropic_messages(
         .as_ref()
         .is_some_and(|t| t.thinking_type == "disabled");
 
-    // Estimate input tokens before consuming the request via try_into().
-    // Only used in the streaming path to populate message_start.
-    let estimated_input_tokens = if streaming {
-        estimate_input_tokens(&orig_request)
-    } else {
-        0
-    };
-
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
         tracing::error!(
@@ -416,10 +408,8 @@ async fn anthropic_messages(
         stream_handle.arm();
 
         let mut converter = match anthropic_ctx {
-            Some(ctx) => {
-                AnthropicStreamConverter::with_context(model_for_resp, estimated_input_tokens, ctx)
-            }
-            None => AnthropicStreamConverter::new(model_for_resp, estimated_input_tokens),
+            Some(ctx) => AnthropicStreamConverter::with_context(model_for_resp, ctx),
+            None => AnthropicStreamConverter::new(model_for_resp),
         };
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -769,23 +759,6 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
             content.text = trimmed[newline_pos + 1..].to_string();
         }
     }
-}
-
-/// Estimate input token count for an Anthropic request.
-///
-/// Uses the same heuristic as `AnthropicCountTokensRequest::estimate_tokens()`
-/// (sum character lengths / 3). This populates `input_tokens` in the streaming
-/// `message_start` event, since the engine only reports prompt token counts on
-/// the final chunk.
-fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
-    // Build a temporary count-tokens request to reuse the existing estimator.
-    let count_req = AnthropicCountTokensRequest {
-        model: req.model.clone(),
-        messages: req.messages.clone(),
-        system: req.system.clone(),
-        tools: req.tools.clone(),
-    };
-    count_req.estimate_tokens()
 }
 
 fn gate_anthropic_nvext(request: &mut AnthropicCreateMessageRequest, nvext_enabled: bool) {
