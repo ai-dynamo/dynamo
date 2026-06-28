@@ -370,11 +370,17 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
                 )
                 self.assertIn("Supported CUDA variants: cu130", result.stderr)
 
-    def test_exact_native_accepts_python_and_cuda_requirements_changes(self) -> None:
+    def test_exact_native_accepts_python_tests_and_cuda_requirements_changes(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)
             base = self.initialize_git_repository(repository)
-            for relative_path in ("vllm/checkpoint.py", "requirements/cuda.txt"):
+            for relative_path in (
+                "vllm/checkpoint.py",
+                "tests/distributed/test_pynccl.py",
+                "requirements/cuda.txt",
+            ):
                 path = repository / relative_path
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("# custom source\n")
@@ -397,6 +403,7 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             "setup.py",
             "pyproject.toml",
             "csrc/kernel.cpp",
+            "tests/distributed/pynccl_fixture.json",
         )
         for rejected_path in rejected_paths:
             with self.subTest(path=rejected_path):
@@ -443,10 +450,37 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("csrc/kernel.cpp", result.stderr)
         self.assertIn(
-            "Exact-native mode only permits Python changes under vllm/ or "
-            "requirements/cuda.txt",
+            "Exact-native mode only permits Python changes under vllm/ or tests/, "
+            "or requirements/cuda.txt",
             result.stderr,
         )
+
+    def test_nccl_checkpoint_build_runs_pynccl_binding_smoke_check(self) -> None:
+        build_script = (
+            CONTAINER_DIR / "deps/vllm/build_nccl_checkpoint.sh"
+        ).read_text()
+        smoke_check = (
+            CONTAINER_DIR / "deps/vllm/validate_pynccl_checkpoint_binding.py"
+        ).read_text()
+        dockerfile = self.render_runtime("amd64")
+
+        install = build_script.index("uv pip install --system --no-deps ./python")
+        preload = build_script.index('NCCL_CHECKPOINT_SHIM="${SHIM}"')
+        smoke = build_script.index('python3 "${PYNCCL_SMOKE_CHECK}"')
+        self.assertLess(install, preload)
+        self.assertLess(preload, smoke)
+        self.assertIn('LD_PRELOAD="${SHIM}${LD_PRELOAD:+:${LD_PRELOAD}}"', build_script)
+        self.assertIn("library = NCCLLibrary()", smoke_check)
+        self.assertIn('library._funcs["ncclAllReduce"]', smoke_check)
+        self.assertIn('library._funcs["ncclGetVersion"]', smoke_check)
+        self.assertIn("library.real_lib.ncclGetVersion", smoke_check)
+        self.assertIn("library.ncclGetVersion()", smoke_check)
+
+        helper_copy = dockerfile.index("validate_pynccl_checkpoint_binding.py")
+        build = dockerfile.index("build_nccl_checkpoint", helper_copy)
+        checkpoint_env = dockerfile.index("ENV NCCL_CHECKPOINT_SHIM=", build)
+        self.assertLess(helper_copy, build)
+        self.assertLess(build, checkpoint_env)
 
 
 if __name__ == "__main__":

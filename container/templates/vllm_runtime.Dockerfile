@@ -237,6 +237,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 
 {% if device == "cuda" %}
 COPY --chmod=755 container/deps/vllm/build_nccl_checkpoint.sh /usr/local/bin/build_nccl_checkpoint
+COPY --chmod=644 container/deps/vllm/validate_pynccl_checkpoint_binding.py /usr/local/lib/validate_pynccl_checkpoint_binding.py
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \

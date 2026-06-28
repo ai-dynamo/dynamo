@@ -12,6 +12,7 @@ fi
 PREFIX="${NCCL_CHECKPOINT_PREFIX:-/opt/nccl-checkpoint}"
 SRC_DIR="${NCCL_CHECKPOINT_SRC_DIR:-/tmp/nccl-src}"
 SHIM="${PREFIX}/lib/libnccl-checkpoint-shim.so"
+PYNCCL_SMOKE_CHECK="${PYNCCL_SMOKE_CHECK:-/usr/local/lib/validate_pynccl_checkpoint_binding.py}"
 
 if [ -n "${NCCL_CHECKPOINT_VERSION:-}" ]; then
   if [ -z "${CUDA_MAJOR:-}" ]; then
@@ -188,8 +189,10 @@ make install NCCL_SRC="${SRC_DIR}/src" PREFIX="${PREFIX}" \
   CUDA_VERSION="${CUDA_VERSION:-}"
 uv pip install --system --no-deps ./python
 test -f "${SHIM}"
-LD_PRELOAD="${SHIM}${LD_PRELOAD:+:${LD_PRELOAD}}" python3 -c \
-  'from nccl_checkpoint import NCCLCheckpointLibrary; print(NCCLCheckpointLibrary().get_version())'
+test -f "${PYNCCL_SMOKE_CHECK}"
+NCCL_CHECKPOINT_SHIM="${SHIM}" \
+LD_PRELOAD="${SHIM}${LD_PRELOAD:+:${LD_PRELOAD}}" \
+  python3 "${PYNCCL_SMOKE_CHECK}"
 
 rm -rf "${SRC_DIR}"
 echo "Installed NCCLCheckpoint shim at ${SHIM}"

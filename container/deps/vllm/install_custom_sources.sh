@@ -254,11 +254,12 @@ validate_exact_native_changes() {
         git diff --no-renames --name-only "${base}..${head}" |
             sed -n \
                 -e '\|^vllm/.*\.py$|b' \
+                -e '\|^tests/.*\.py$|b' \
                 -e '\|^requirements/cuda\.txt$|b' \
                 -e p
     )"
     if [[ -n "${offending_paths}" ]]; then
-        echo "Exact-native mode only permits Python changes under vllm/ or requirements/cuda.txt:" >&2
+        echo "Exact-native mode only permits Python changes under vllm/ or tests/, or requirements/cuda.txt:" >&2
         printf '%s\n' "${offending_paths}" >&2
         return 1
     fi
