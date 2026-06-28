@@ -122,7 +122,7 @@ func TestReconcileSourcePod_ContentGetErrorReturns(t *testing.T) {
 	}
 	w := makeNodeControllerWithInterceptor(t, fc, funcs, content, pod)
 
-	require.NoError(t, w.reconcileSourcePod(context.Background(), pod))
+	require.Error(t, w.reconcileSourcePod(context.Background(), pod))
 
 	assert.False(t, fc.called, "a content Get error must abort before the dump")
 }
