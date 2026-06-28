@@ -81,14 +81,6 @@ on:
         description: 'Official torchvision version for full-source vLLM builds'
         type: string
         default: ''
-      vllm_torch_backend:
-        description: 'Official uv PyTorch backend for full-source vLLM builds'
-        type: string
-        default: 'cu130'
-      vllm_torch_cuda_arch_list:
-        description: 'CUDA architectures compiled by full-source vLLM builds'
-        type: string
-        default: '10.0'
       vllm_runtime_base_image:
         description: 'Immutable standalone vLLM image ref used by full-source builds'
         type: string
@@ -166,8 +158,8 @@ jobs:
         VLLM_INSTALL_MODE=${{ inputs.vllm_install_mode }}
         VLLM_TORCH_VERSION=${{ inputs.vllm_torch_version }}
         VLLM_TORCHVISION_VERSION=${{ inputs.vllm_torchvision_version }}
-        VLLM_TORCH_BACKEND=${{ inputs.vllm_torch_backend }}
-        VLLM_TORCH_CUDA_ARCH_LIST=${{ inputs.vllm_torch_cuda_arch_list }}
+        VLLM_TORCH_BACKEND=cu130
+        VLLM_TORCH_CUDA_ARCH_LIST=10.0
         VLLM_RUNTIME_BASE_IMAGE=${{ inputs.vllm_runtime_base_image }}
         VLLM_PRECOMPILED_WHEEL_COMMIT=${{ inputs.vllm_precompiled_wheel_commit }}
         VLLM_PRECOMPILED_WHEEL_VARIANT=${{ inputs.vllm_precompiled_wheel_variant }}
