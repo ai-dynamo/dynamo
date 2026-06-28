@@ -48,7 +48,7 @@ metadata:
 rules:
   - apiGroups: ["nvidia.com"]
     resources: ["podsnapshotcontents"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["nvidia.com"]
     resources: ["podsnapshotcontents/status"]
     verbs: ["update", "patch"]
