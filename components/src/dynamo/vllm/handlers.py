@@ -1647,7 +1647,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "message": "'reset_prefix_cache' must be a boolean",
             }
         async with self._pause_lock:
-            if not getattr(self, "_paused", False) and not allow_unpaused:
+            if not self._paused and not allow_unpaused:
                 return {
                     "status": "error",
                     "message": (
