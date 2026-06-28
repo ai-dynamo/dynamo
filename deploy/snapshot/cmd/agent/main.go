@@ -47,19 +47,9 @@ func main() {
 		}
 	}()
 
-	// rootCtx is cancelled on signal. The single node controller drives both the
-	// restore (pod informer) and capture (PodSnapshotContent informer) paths and shuts
-	// down when rootCtx is cancelled.
-	rootCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		agentLog.Info("Shutting down")
-		cancel()
-	}()
+	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,
