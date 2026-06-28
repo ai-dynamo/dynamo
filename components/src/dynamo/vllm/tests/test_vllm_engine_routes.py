@@ -64,17 +64,21 @@ async def test_sleep_and_wake_delegate_to_engine_client():
     engine.engine_client.pause_generation.assert_awaited_once()
     assert engine.engine_client.collective_rpc.await_args_list == [
         (("checkpoint_prepare",), {"kwargs": {}}),
+        (("sleep",), {"kwargs": {"level": 2}}),
+        (("wake_up",), {"kwargs": {"tags": ["weights"]}}),
         (("checkpoint_restore",), {"kwargs": {}}),
     ]
-    engine.engine_client.sleep.assert_awaited_once_with(2)
-    engine.engine_client.wake_up.assert_awaited_once_with(["weights"])
+    engine.engine_client.sleep.assert_not_awaited()
+    engine.engine_client.wake_up.assert_not_awaited()
     engine.engine_client.resume_generation.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
     engine = _make_engine()
-    engine.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
+    engine.engine_client.collective_rpc = AsyncMock(
+        side_effect=RuntimeError("sleep failed")
+    )
     failed_resume = AsyncMock(side_effect=RuntimeError("resume failed"))
     engine.engine_client.resume_generation = failed_resume
 
@@ -83,17 +87,22 @@ async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
     assert sleep_result["status"] == "error"
     assert engine._pause_controller.is_paused is False
     assert engine._pause_controller.needs_resume_recovery is True
-    engine.engine_client.collective_rpc.assert_awaited_once_with(
-        "checkpoint_prepare",
-        kwargs={},
-    )
-    failed_resume.assert_awaited_once()
+    assert engine.engine_client.collective_rpc.await_args_list == [
+        (("checkpoint_prepare",), {"kwargs": {}}),
+        (("sleep",), {"kwargs": {"level": 1}}),
+    ]
+    failed_resume.assert_not_awaited()
 
+    engine.engine_client.collective_rpc = AsyncMock()
     engine.engine_client.resume_generation = AsyncMock()
     wake_result = await engine.wake_up({})
 
     assert wake_result["status"] == "ok"
     engine.engine_client.wake_up.assert_not_awaited()
+    assert engine.engine_client.collective_rpc.await_args_list == [
+        (("wake_up",), {"kwargs": {}}),
+        (("checkpoint_restore",), {"kwargs": {}}),
+    ]
     engine.engine_client.resume_generation.assert_awaited_once()
     assert engine._pause_controller.needs_resume_recovery is False
 

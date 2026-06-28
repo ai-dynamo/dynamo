@@ -312,6 +312,8 @@ class VllmEnginePauseController:
         self._engine_client = engine_client
         self._is_paused = False
         self._generation_paused = False
+        self._checkpoint_prepared = False
+        self._workers_sleeping = False
 
     @property
     def is_paused(self) -> bool:
@@ -328,21 +330,10 @@ class VllmEnginePauseController:
         level = args[0] if args else None
         await self._engine_client.pause_generation()
         self._generation_paused = True
-        try:
-            await self._checkpoint_prepare()
-            if level is None:
-                await self._engine_client.sleep()
-            else:
-                await self._engine_client.sleep(level)
-        except Exception:
-            try:
-                await self._engine_client.resume_generation()
-                self._generation_paused = False
-            except Exception:
-                logger.exception(
-                    "Failed to resume generation after native vLLM sleep failure"
-                )
-            raise
+        self._checkpoint_prepared = True
+        await self._checkpoint_prepare()
+        self._workers_sleeping = True
+        await self._worker_sleep(level)
         self._is_paused = True
         return True
 
@@ -350,12 +341,12 @@ class VllmEnginePauseController:
         if not self._is_paused and not self._generation_paused:
             return False
 
-        if self._is_paused:
-            if tags is None:
-                await self._engine_client.wake_up()
-            else:
-                await self._engine_client.wake_up(tags)
+        if self._workers_sleeping:
+            await self._worker_wake_up(tags)
+            self._workers_sleeping = False
+        if self._checkpoint_prepared:
             await self._checkpoint_restore()
+            self._checkpoint_prepared = False
         if self._generation_paused:
             await self._engine_client.resume_generation()
             self._generation_paused = False
@@ -364,12 +355,24 @@ class VllmEnginePauseController:
     def mark_resumed(self) -> None:
         self._is_paused = False
         self._generation_paused = False
+        self._checkpoint_prepared = False
+        self._workers_sleeping = False
 
     async def _checkpoint_prepare(self) -> None:
         await self._engine_client.collective_rpc("checkpoint_prepare", kwargs={})
 
     async def _checkpoint_restore(self) -> None:
         await self._engine_client.collective_rpc("checkpoint_restore", kwargs={})
+
+    async def _worker_sleep(self, level: object) -> None:
+        # pause_generation already quiesced the DP scheduler. Calling the
+        # engine-level sleep here would start another wave after NCCL detach.
+        kwargs = {} if level is None else {"level": level}
+        await self._engine_client.collective_rpc("sleep", kwargs=kwargs)
+
+    async def _worker_wake_up(self, tags: list[str] | None) -> None:
+        kwargs = {} if tags is None else {"tags": tags}
+        await self._engine_client.collective_rpc("wake_up", kwargs=kwargs)
 
 
 def _pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:

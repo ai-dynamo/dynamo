@@ -35,7 +35,9 @@ class _RecordingEngineClient:
         self.pause_generation = AsyncMock(side_effect=self._record("pause_generation"))
         self.sleep = AsyncMock(side_effect=self._record("sleep"))
         self.wake_up = AsyncMock(side_effect=self._record("wake_up"))
-        self.resume_generation = AsyncMock(side_effect=self._record("resume_generation"))
+        self.resume_generation = AsyncMock(
+            side_effect=self._record("resume_generation")
+        )
         self.collective_rpc = AsyncMock(side_effect=self._record_collective_rpc)
 
     def _record(self, name: str):
@@ -99,12 +101,14 @@ async def test_sleep_and_wake_are_idempotent():
     handler.engine_client.pause_generation.assert_awaited_once()
     assert handler.engine_client.collective_rpc.await_args_list == [
         (("checkpoint_prepare",), {"kwargs": {}}),
+        (("sleep",), {"kwargs": {"level": 2}}),
+        (("wake_up",), {"kwargs": {}}),
         (("checkpoint_restore",), {"kwargs": {}}),
     ]
-    handler.engine_client.sleep.assert_awaited_once_with(2)
+    handler.engine_client.sleep.assert_not_awaited()
     handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
 
-    handler.engine_client.wake_up.assert_awaited_once_with()
+    handler.engine_client.wake_up.assert_not_awaited()
     handler.engine_client.resume_generation.assert_awaited_once()
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
 
@@ -124,15 +128,15 @@ async def test_pause_without_level_uses_vllm_default_sleep():
 
     assert changed is True
     engine_client.pause_generation.assert_awaited_once()
-    engine_client.collective_rpc.assert_awaited_once_with(
-        "checkpoint_prepare",
-        kwargs={},
-    )
-    engine_client.sleep.assert_awaited_once_with()
+    assert engine_client.collective_rpc.await_args_list == [
+        (("checkpoint_prepare",), {"kwargs": {}}),
+        (("sleep",), {"kwargs": {}}),
+    ]
+    engine_client.sleep.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_pause_calls_checkpoint_prepare_before_sleep():
+async def test_pause_calls_checkpoint_prepare_before_worker_sleep():
     engine_client = _make_recording_engine_client()
     controller = VllmEnginePauseController(engine_client)
 
@@ -142,12 +146,12 @@ async def test_pause_calls_checkpoint_prepare_before_sleep():
     assert engine_client.calls == [
         ("pause_generation", {}),
         ("checkpoint_prepare", {"kwargs": {}}),
-        ("sleep", (1,)),
+        ("sleep", {"kwargs": {"level": 1}}),
     ]
 
 
 @pytest.mark.asyncio
-async def test_resume_calls_checkpoint_restore_after_wake():
+async def test_resume_calls_checkpoint_restore_after_worker_wake():
     engine_client = _make_recording_engine_client()
     controller = VllmEnginePauseController(engine_client)
     await controller.pause(1)
@@ -157,21 +161,22 @@ async def test_resume_calls_checkpoint_restore_after_wake():
 
     assert changed is True
     assert engine_client.calls == [
-        ("wake_up", {}),
+        ("wake_up", {"kwargs": {}}),
         ("checkpoint_restore", {"kwargs": {}}),
         ("resume_generation", {}),
     ]
 
 
 @pytest.mark.asyncio
-async def test_pause_does_not_restore_after_sleep_failure():
+async def test_pause_keeps_generation_paused_after_worker_sleep_failure():
     engine_client = _make_recording_engine_client()
 
-    async def fail_sleep(*args, **kwargs):
-        engine_client.calls.append(("sleep", args or kwargs))
-        raise RuntimeError("sleep failed")
+    async def fail_sleep(method: str, **kwargs):
+        engine_client.calls.append((method, kwargs))
+        if method == "sleep":
+            raise RuntimeError("sleep failed")
 
-    engine_client.sleep = AsyncMock(side_effect=fail_sleep)
+    engine_client.collective_rpc = AsyncMock(side_effect=fail_sleep)
     controller = VllmEnginePauseController(engine_client)
 
     with pytest.raises(RuntimeError, match="sleep failed"):
@@ -180,10 +185,9 @@ async def test_pause_does_not_restore_after_sleep_failure():
     assert engine_client.calls == [
         ("pause_generation", {}),
         ("checkpoint_prepare", {"kwargs": {}}),
-        ("sleep", (1,)),
-        ("resume_generation", {}),
+        ("sleep", {"kwargs": {"level": 1}}),
     ]
-    assert controller.needs_resume_recovery is False
+    assert controller.needs_resume_recovery is True
 
 
 @pytest.mark.asyncio
@@ -204,7 +208,7 @@ async def test_resume_propagates_checkpoint_restore_failure():
         await controller.resume()
 
     assert engine_client.calls == [
-        ("wake_up", {}),
+        ("wake_up", {"kwargs": {}}),
         ("checkpoint_restore", {"kwargs": {}}),
     ]
     assert controller.needs_resume_recovery is True
@@ -219,11 +223,11 @@ async def test_wake_up_passes_explicit_tags_from_request():
     result = await handler.wake_up({"tags": ["weights"]})
 
     assert result["status"] == "ok"
-    handler.engine_client.wake_up.assert_awaited_once_with(["weights"])
-    handler.engine_client.collective_rpc.assert_awaited_once_with(
-        "checkpoint_restore",
-        kwargs={},
-    )
+    handler.engine_client.wake_up.assert_not_awaited()
+    assert handler.engine_client.collective_rpc.await_args_list == [
+        (("wake_up",), {"kwargs": {"tags": ["weights"]}}),
+        (("checkpoint_restore",), {"kwargs": {}}),
+    ]
     handler.engine_client.resume_generation.assert_awaited_once()
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
 
@@ -231,7 +235,9 @@ async def test_wake_up_passes_explicit_tags_from_request():
 @pytest.mark.asyncio
 async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
     handler = _make_handler()
-    handler.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
+    handler.engine_client.collective_rpc = AsyncMock(
+        side_effect=RuntimeError("sleep failed")
+    )
     failed_resume = AsyncMock(side_effect=RuntimeError("resume failed"))
     handler.engine_client.resume_generation = failed_resume
 
@@ -240,42 +246,47 @@ async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
     assert sleep_result["status"] == "error"
     assert handler._pause_controller.is_paused is False
     assert handler._pause_controller.needs_resume_recovery is True
-    handler.engine_client.collective_rpc.assert_awaited_once_with(
-        "checkpoint_prepare",
-        kwargs={},
-    )
-    failed_resume.assert_awaited_once()
+    assert handler.engine_client.collective_rpc.await_args_list == [
+        (("checkpoint_prepare",), {"kwargs": {}}),
+        (("sleep",), {"kwargs": {"level": 1}}),
+    ]
+    failed_resume.assert_not_awaited()
     handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
 
+    handler.engine_client.collective_rpc = AsyncMock()
     handler.engine_client.resume_generation = AsyncMock()
     wake_result = await handler.wake_up({})
 
     assert wake_result["status"] == "ok"
     handler.engine_client.wake_up.assert_not_awaited()
+    assert handler.engine_client.collective_rpc.await_args_list == [
+        (("wake_up",), {"kwargs": {}}),
+        (("checkpoint_restore",), {"kwargs": {}}),
+    ]
     handler.engine_client.resume_generation.assert_awaited_once()
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
     assert handler._pause_controller.needs_resume_recovery is False
 
 
 @pytest.mark.asyncio
-async def test_sleep_reregisters_after_clean_pause_rollback():
+async def test_sleep_stays_unregistered_until_recovery():
     handler = _make_handler()
-    handler.engine_client.sleep = AsyncMock(side_effect=RuntimeError("sleep failed"))
+    handler.engine_client.collective_rpc = AsyncMock(
+        side_effect=RuntimeError("sleep failed")
+    )
 
     result = await handler.sleep({"level": 1})
 
-    # Rollback resumed generation cleanly, so the engine is serving-safe again.
     assert result["status"] == "error"
     assert handler._pause_controller.is_paused is False
-    assert handler._pause_controller.needs_resume_recovery is False
-    handler.engine_client.collective_rpc.assert_awaited_once_with(
-        "checkpoint_prepare",
-        kwargs={},
-    )
-    handler.engine_client.resume_generation.assert_awaited_once()
+    assert handler._pause_controller.needs_resume_recovery is True
+    assert handler.engine_client.collective_rpc.await_args_list == [
+        (("checkpoint_prepare",), {"kwargs": {}}),
+        (("sleep",), {"kwargs": {"level": 1}}),
+    ]
+    handler.engine_client.resume_generation.assert_not_awaited()
     handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
-    # The endpoint must rejoin the routing pool since wake_up will early-return.
-    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -305,10 +316,10 @@ async def test_wake_up_returns_error_for_register_failure():
     result = await handler.wake_up({})
 
     assert result["status"] == "error"
-    handler.engine_client.wake_up.assert_awaited_once_with()
-    handler.engine_client.collective_rpc.assert_awaited_once_with(
-        "checkpoint_restore",
-        kwargs={},
-    )
+    handler.engine_client.wake_up.assert_not_awaited()
+    assert handler.engine_client.collective_rpc.await_args_list == [
+        (("wake_up",), {"kwargs": {}}),
+        (("checkpoint_restore",), {"kwargs": {}}),
+    ]
     handler.engine_client.resume_generation.assert_awaited_once()
     assert handler._pause_controller.is_paused is True
