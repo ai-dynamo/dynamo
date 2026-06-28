@@ -869,6 +869,9 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 				Message: condType + " from agent",
 			}}
 		}
+		// Observe tests start from a checkpoint that already recorded its pointer, so the heal in
+		// observePodSnapshot is a no-op and the observed transition is exercised directly.
+		ckpt.Status.PodSnapshotName = snap.Name
 		return snap
 	}
 
@@ -886,6 +889,23 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, updated.Status.Phase)
 		assert.Equal(t, testHash, updated.Status.CheckpointID)
 		assert.NotNil(t, updated.Status.CreatedAt)
+	})
+
+	t.Run("missing podSnapshotName is healed before observing", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
+		job := newCheckpointJob(defaultCheckpointJobName)
+		snap := ownedSnapshot(ckpt, nvidiacomv1alpha1.PodSnapshotConditionReady)
+		ckpt.Status.PodSnapshotName = "" // a prior create whose status write did not land
+
+		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
+		_, err := r.handleCreating(ctx, ckpt)
+		require.NoError(t, err)
+
+		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
+		// The pointer is recorded and the terminal transition is deferred to the next reconcile.
+		assert.Equal(t, snap.Name, updated.Status.PodSnapshotName)
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
 	})
 
 	t.Run("PodSnapshot Failed transitions checkpoint to Failed", func(t *testing.T) {

@@ -65,7 +65,7 @@ func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -393,6 +393,18 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 // PodSnapshot → DynamoCheckpoint, so this never reads the Job's terminal annotation. The Job is read
 // only on the non-terminal path (the terminal PodSnapshot result always wins).
 func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job, snap *nvidiacomv1alpha1.PodSnapshot, checkpointID string) (ctrl.Result, error) {
+	// Heal the authoritative pointer: if the PodSnapshot was created but the status write that records
+	// its name did not land, this is the only path that observes it again — record it now so a checkpoint
+	// can never reach Ready with an empty status.podSnapshotName. Return so the next watch event observes
+	// a consistent object.
+	if ckpt.Status.PodSnapshotName != snap.Name {
+		ckpt.Status.PodSnapshotName = snap.Name
+		if err := r.Status().Update(ctx, ckpt); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// A PodSnapshot can fail before it is bound (e.g. the PodSnapshotReconciler rejects the
 	// source pod), so always observe Failed. Ready is only meaningful once bound.
 	if nvidiacomv1alpha1.IsPodSnapshotFailed(snap) {

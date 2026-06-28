@@ -239,7 +239,6 @@ rules:
   - dynamographdeploymentscalingadapters
   - dynamomodels
   - podsnapshotcontents
-  - podsnapshots
   verbs:
   - create
   - delete
@@ -279,6 +278,7 @@ rules:
   resources:
   - podsnapshots
   verbs:
+  - create
   - get
   - list
   - patch
