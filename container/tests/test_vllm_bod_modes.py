@@ -535,6 +535,19 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         )
         self.assertIn('git -C "${SRC_DIR}" write-tree', build_script)
 
+    def test_cuda_build_only_package_purge_does_not_autoremove(self) -> None:
+        dockerfile = self.render_runtime("amd64")
+
+        self.assertIn("cuda-libraries-dev-13-0", dockerfile)
+        self.assertIn("cuda-sandbox-dev-13-0", dockerfile)
+        self.assertIn("libnvfatbin-dev-13-0", dockerfile)
+        commands = "\n".join(
+            line
+            for line in dockerfile.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        self.assertNotIn("apt-get autoremove", commands)
+
     def test_full_source_mode_is_native_pinned_and_digest_based(self) -> None:
         installer = self.installer.read_text()
         workflow = (REPO_ROOT / ".github/workflows/build-on-demand.yml").read_text()

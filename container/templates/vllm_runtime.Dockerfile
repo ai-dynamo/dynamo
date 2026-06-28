@@ -266,7 +266,10 @@ ENV NCCL_CHECKPOINT_SHIM=/opt/nccl-checkpoint/lib/libnccl-checkpoint-shim.so
 # safe. dpkg-query keeps the match robust across base-image/arch version
 # suffixes (e.g. libavcodec58 vs 60).
 #
-# This grep is the COMPLETE, auditable set of what leaves the image: there is
+# This grep is the COMPLETE, auditable set of what leaves the image. It also
+# removes three build-only CUDA packages after the source and shim builds:
+# cuda-libraries-dev is a metapackage, while cuda-sandbox-dev and
+# libnvfatbin-dev provide headers and static/stub libraries. There is
 # deliberately NO apt-get autoremove, so the removal can never cascade into
 # unrelated auto-installed packages. That matters because the base image marks
 # both the gcc/g++/make toolchain (torch.inductor/Triton JIT shell out to it at
@@ -278,7 +281,7 @@ ENV NCCL_CHECKPOINT_SHIM=/opt/nccl-checkpoint/lib/libnccl-checkpoint-shim.so
 # dead weight, not a compliance issue.
 RUN set -eux; \
     purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
-        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
+        | grep -E '^(cuda-libraries-dev-13-0|cuda-sandbox-dev-13-0|libnvfatbin-dev-13-0|ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
         || true); \
     if [ -n "$purge" ]; then \
         DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
