@@ -84,6 +84,12 @@ pub async fn sleep_precise(duration: Duration) {
 /// deadline's reference point, making it suitable for simulation loops where
 /// computation time should be subtracted from the sleep.
 pub async fn sleep_until_precise(deadline: Instant) {
+    // Scheduler work may consume the modeled delay, especially at high speedup ratios. Avoid
+    // allocating and registering a timerfd when there is no remaining time to sleep.
+    if deadline <= Instant::now() {
+        return;
+    }
+
     #[cfg(target_os = "linux")]
     {
         if let Ok(delay) = tokio_timerfd::Delay::new(deadline) {

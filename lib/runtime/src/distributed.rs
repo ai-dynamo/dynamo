@@ -476,6 +476,15 @@ impl DistributedRuntime {
         subject: String,
         payload: bytes::Bytes,
     ) -> anyhow::Result<()> {
+        self.kv_router_nats_publish_subject(subject.into(), payload)
+            .await
+    }
+
+    pub(crate) async fn kv_router_nats_publish_subject(
+        &self,
+        subject: async_nats::Subject,
+        payload: bytes::Bytes,
+    ) -> anyhow::Result<()> {
         let Some(nats_client) = self.nats_client.as_ref() else {
             // NATS not available - this is expected in approximate mode (--no-kv-events)
             tracing::trace!("Skipping NATS publish (NATS not configured): {subject}");
