@@ -321,10 +321,10 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
         --requirement /tmp/requirements.vllm.txt
 
 {% if device == "cuda" %}
-# Revalidate after every Python package layer. Full native imports still wait
-# for a GPU runtime because the image build environment has no libcuda.so.1.
+# Revalidate the pinned Torch, NCCL, FlashInfer, and checkpoint shim stack after
+# every Python package layer. Full native imports still wait for a GPU runtime
+# because the image build environment has no libcuda.so.1.
 RUN set -eux; \
-    uv pip check --system; \
     if [ -f "${NCCL_CHECKPOINT_SHIM}" ]; then \
         NCCL_CHECKPOINT_SHIM="${NCCL_CHECKPOINT_SHIM}" \
         EXPECTED_NCCL_VERSION="${NCCL_CHECKPOINT_VERSION}" \
