@@ -118,6 +118,9 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return
 	}
 	logger := w.log.WithValues("content", name)
+	// Carry the logger on ctx so the capture path (incl. executor-level CRIU/CUDA logging) does not
+	// fall back to a discard logger.
+	ctx = logr.NewContext(ctx, logger)
 
 	content := &nvidiacomv1alpha1.PodSnapshotContent{}
 	if err := w.client.Get(ctx, client.ObjectKey{Name: name}, content); err != nil {
