@@ -115,9 +115,7 @@ ARG VLLM_TORCH_BACKEND={{ context.vllm.vllm_torch_backend }}
 ARG VLLM_TORCH_CUDA_ARCH_LIST={{ context.vllm.vllm_torch_cuda_arch_list }}
 ARG VLLM_PRECOMPILED_WHEEL_COMMIT={{ context.vllm.vllm_precompiled_wheel_commit }}
 ARG VLLM_PRECOMPILED_WHEEL_VARIANT={{ context.vllm.vllm_precompiled_wheel_variant }}
-ARG NCCL_CHECKPOINT_GIT_URL={{ context.vllm.nccl_checkpoint_git_url }}
-ARG NCCL_CHECKPOINT_GIT_REF={{ context.vllm.nccl_checkpoint_git_ref }}
-ARG NCCL_CHECKPOINT_GIT_SHA={{ context.vllm.nccl_checkpoint_git_sha }}
+ARG NCCL_CHECKPOINT_SOURCE_IMAGE={{ context.vllm.nccl_checkpoint_source_image }}
 ARG NCCL_CHECKPOINT_VERSION={{ context.vllm.nccl_checkpoint_version }}
 {% endif %}
 ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}

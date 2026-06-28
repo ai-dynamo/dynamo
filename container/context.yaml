@@ -104,9 +104,7 @@ vllm:
   # an exact native commit enables an x86_64 source-package installation.
   vllm_precompiled_wheel_commit: ""
   vllm_precompiled_wheel_variant: "cu130"
-  nccl_checkpoint_git_url: ""
-  nccl_checkpoint_git_ref: ""
-  nccl_checkpoint_git_sha: ""
+  nccl_checkpoint_source_image: "scratch"
   nccl_checkpoint_version: ""
 
 sglang:

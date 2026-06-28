@@ -100,8 +100,6 @@ validate_full_source_mode() {
 
     require_full_sha VLLM_GIT_SHA "${VLLM_GIT_SHA:-}"
     require_full_sha FLASHINFER_GIT_SHA "${FLASHINFER_GIT_SHA:-}"
-    require_full_sha NCCL_CHECKPOINT_GIT_SHA "${NCCL_CHECKPOINT_GIT_SHA:-}"
-
     if [[ "${VLLM_TORCH_VERSION}" != "2.12.0" ||
           "${VLLM_TORCHVISION_VERSION}" != "0.27.0" ||
           "${VLLM_TORCH_BACKEND}" != "cu130" ]]; then
@@ -115,6 +113,11 @@ EOF
     fi
     if [[ "${NCCL_CHECKPOINT_VERSION:-}" != "2.29.7" ]]; then
         echo "full-source mode requires NCCL_CHECKPOINT_VERSION=2.29.7" >&2
+        exit 1
+    fi
+    if [[ "${NCCL_CHECKPOINT_SOURCE_IMAGE:-}" != \
+          "dynamoci.azurecr.io/ai-dynamo/nccl-source@sha256:5502f117103a84d8738f822f98c1d591d9b75fc72b14031d9e57af3a8db5b10c" ]]; then
+        echo "full-source mode requires the approved immutable NCCL source image" >&2
         exit 1
     fi
     if [[ -z "${VLLM_TORCH_CUDA_ARCH_LIST}" ]]; then

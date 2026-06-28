@@ -93,18 +93,6 @@ on:
         description: 'vLLM precompiled wheel variant used with an exact native commit'
         type: string
         default: 'cu130'
-      nccl_checkpoint_git_url:
-        description: 'Optional NCCL source git repository containing contrib/nccl_checkpoint; empty skips shim build'
-        type: string
-        default: ''
-      nccl_checkpoint_git_ref:
-        description: 'Optional NCCL source git ref; empty auto-selects the installed NCCL version tag when possible'
-        type: string
-        default: ''
-      nccl_checkpoint_git_sha:
-        description: 'Optional NCCL source git SHA override for reproducible NCCLCheckpoint shim builds'
-        type: string
-        default: ''
       nccl_checkpoint_version:
         description: 'Optional nvidia-nccl-cu13 wheel version to install before building the NCCLCheckpoint shim'
         type: string
@@ -163,9 +151,7 @@ jobs:
         VLLM_RUNTIME_BASE_IMAGE=${{ inputs.vllm_runtime_base_image }}
         VLLM_PRECOMPILED_WHEEL_COMMIT=${{ inputs.vllm_precompiled_wheel_commit }}
         VLLM_PRECOMPILED_WHEEL_VARIANT=${{ inputs.vllm_precompiled_wheel_variant }}
-        NCCL_CHECKPOINT_GIT_URL=${{ inputs.nccl_checkpoint_git_url }}
-        NCCL_CHECKPOINT_GIT_REF=${{ inputs.nccl_checkpoint_git_ref }}
-        NCCL_CHECKPOINT_GIT_SHA=${{ inputs.nccl_checkpoint_git_sha }}
+        NCCL_CHECKPOINT_SOURCE_IMAGE=${{ (inputs.vllm_install_mode == 'full-source' || inputs.nccl_checkpoint_version != '') && 'dynamoci.azurecr.io/ai-dynamo/nccl-source@sha256:5502f117103a84d8738f822f98c1d591d9b75fc72b14031d9e57af3a8db5b10c' || 'scratch' }}
         NCCL_CHECKPOINT_VERSION=${{ inputs.nccl_checkpoint_version }}
     secrets: inherit
 
