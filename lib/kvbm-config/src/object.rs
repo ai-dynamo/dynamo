@@ -28,6 +28,8 @@ pub enum ObjectClientConfig {
     S3(S3ObjectConfig),
     /// NIXL agent with object storage backend.
     Nixl(NixlObjectConfig),
+    /// Mooncake distributed KV store.
+    Mooncake(MooncakeObjectConfig),
 }
 
 /// S3-compatible object storage configuration.
@@ -100,6 +102,100 @@ impl S3ObjectConfig {
             max_concurrent_requests: default_max_concurrent(),
         }
     }
+}
+
+/// Transport protocol for Mooncake Store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MooncakeProtocol {
+    /// TCP transport (no RDMA required).
+    Tcp,
+    /// RDMA transport for zero-copy transfers.
+    Rdma,
+}
+
+impl MooncakeProtocol {
+    /// Convert to the string representation expected by the Mooncake C library.
+    pub fn to_mooncake_str(&self) -> &str {
+        match self {
+            MooncakeProtocol::Tcp => "tcp",
+            MooncakeProtocol::Rdma => "rdma",
+        }
+    }
+}
+
+/// Mooncake distributed KV store configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Validate)]
+pub struct MooncakeObjectConfig {
+    /// Metadata server address.
+    /// - HTTP mode: `http://host:port/metadata`
+    /// - etcd mode: `etcd://host:2379`
+    pub metadata_server: String,
+
+    /// Mooncake master server gRPC address.
+    #[serde(default = "default_master_server_addr")]
+    pub master_server_addr: String,
+
+    /// Local hostname for RDMA addressing.
+    ///
+    /// Default reads from `/proc/sys/kernel/hostname` (Linux only).
+    /// Falls back to `"localhost"` on non-Linux platforms.
+    #[serde(default = "default_hostname")]
+    pub local_hostname: String,
+
+    /// Transport protocol: "tcp" or "rdma".
+    #[serde(default = "default_mooncake_protocol")]
+    pub protocol: MooncakeProtocol,
+
+    /// RDMA device name (empty = auto-select).
+    #[serde(default)]
+    pub device_name: String,
+
+    /// Global memory segment size in bytes.
+    #[serde(default = "default_segment_size")]
+    pub global_segment_size: u64,
+
+    /// Local transfer buffer size in bytes.
+    #[serde(default = "default_buffer_size")]
+    pub local_buffer_size: u64,
+
+    /// Key namespace prefix for multi-cluster isolation.
+    #[serde(default)]
+    pub namespace: Option<String>,
+
+    /// Maximum concurrent requests.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent_requests: usize,
+}
+
+fn default_master_server_addr() -> String {
+    "127.0.0.1:50051".to_string()
+}
+
+/// Reads the system hostname from `/proc/sys/kernel/hostname`.
+///
+/// **Linux only**: This path does not exist on macOS or Windows.
+/// On non-Linux platforms the fallback `"localhost"` will be used,
+/// which may cause confusing RDMA addressing errors. For development
+/// on macOS, explicitly set `local_hostname` in your config.
+fn default_hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+fn default_mooncake_protocol() -> MooncakeProtocol {
+    MooncakeProtocol::Tcp
+}
+
+fn default_segment_size() -> u64 {
+    512 << 20 // 512 MiB
+}
+
+fn default_buffer_size() -> u64 {
+    128 << 20 // 128 MiB
 }
 
 /// NIXL object storage backend configuration.

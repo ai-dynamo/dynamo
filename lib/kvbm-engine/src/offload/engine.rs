@@ -42,6 +42,7 @@ use crate::worker::RemoteDescriptor;
 use crate::{BlockId, G1, G2, G3, SequenceHash};
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_logical::blocks::{BlockMetadata, BlockRegistry, WeakBlock};
+use kvbm_logical::events::KvCacheEvent;
 use kvbm_logical::manager::BlockManager;
 use kvbm_physical::transfer::{PhysicalLayout, TransferOptions};
 
@@ -269,6 +270,9 @@ pub struct OffloadEngineBuilder {
     runtime: Option<tokio::runtime::Handle>,
     /// Enable remote G4 offloading via workers' ObjectBlockOps (for distributed mode)
     enable_remote_g4: bool,
+    /// Optional broadcast sender for G4 offload completion events.
+    /// Emits `KvCacheEvent::Create` for each block successfully uploaded to G4.
+    event_sender: Option<tokio::sync::broadcast::Sender<KvCacheEvent>>,
 }
 
 impl OffloadEngineBuilder {
@@ -287,6 +291,7 @@ impl OffloadEngineBuilder {
             g2_to_g4_config: None,
             runtime: None,
             enable_remote_g4: false,
+            event_sender: None,
         }
     }
 
@@ -380,6 +385,20 @@ impl OffloadEngineBuilder {
         self
     }
 
+    /// Set an event sender for notifying about successful G4 offloads.
+    ///
+    /// When configured, the offload engine emits `KvCacheEvent::Create` events
+    /// for each block successfully uploaded to G4 object storage. This enables
+    /// KV Router and other downstream subscribers to track G4 tier availability
+    /// without querying object storage on every routing decision.
+    pub fn with_event_sender(
+        mut self,
+        sender: tokio::sync::broadcast::Sender<KvCacheEvent>,
+    ) -> Self {
+        self.event_sender = Some(sender);
+        self
+    }
+
     /// Build the offload engine.
     pub fn build(self) -> Result<OffloadEngine> {
         let registry = self
@@ -433,6 +452,10 @@ impl OffloadEngineBuilder {
 
         // Build G2→G4 pipeline if configured (object storage destination)
         // Note: For distributed mode, use enable_remote_g4 instead
+        //
+        // Clone event_sender for the remote G4 path before it's consumed
+        // by the local ObjectPipeline.
+        let event_sender_for_remote = self.event_sender.clone();
         let g2_to_g4 = if let Some(config) = self.g2_to_g4_config {
             let object_ops = self
                 .object_ops
@@ -446,6 +469,7 @@ impl OffloadEngineBuilder {
                 LogicalLayoutHandle::G2,
                 self.leader.clone(),
                 runtime.clone(),
+                self.event_sender,
             ))
         } else {
             None
@@ -504,7 +528,11 @@ impl OffloadEngineBuilder {
         // Spawn remote G4 offload task if enabled
         let remote_g4_offload_handle = if let Some(rx) = remote_g4_rx {
             tracing::info!("Enabling remote G4 offload via workers' ObjectBlockOps");
-            Some(runtime.spawn(remote_g4_offload_task(rx, self.leader.clone())))
+            Some(runtime.spawn(remote_g4_offload_task(
+                rx,
+                self.leader.clone(),
+                event_sender_for_remote,
+            )))
         } else {
             None
         };
@@ -629,6 +657,7 @@ async fn chain_router_task(
 async fn remote_g4_offload_task(
     mut rx: mpsc::Receiver<RemoteG4OffloadRequest>,
     leader: Arc<InstanceLeader>,
+    event_sender: Option<tokio::sync::broadcast::Sender<KvCacheEvent>>,
 ) {
     tracing::info!("Remote G4 offload task started");
 
@@ -661,6 +690,13 @@ async fn remote_g4_offload_task(
                             num_blocks,
                             "Remote G4 offload completed successfully"
                         );
+                        // Emit KvCacheEvent::Create for each key so KV Router
+                        // and indexers can track G4 tier availability.
+                        if let Some(ref sender) = event_sender {
+                            for hash in &request.keys {
+                                let _ = sender.send(KvCacheEvent::Create(*hash));
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(

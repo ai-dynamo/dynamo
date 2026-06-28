@@ -28,6 +28,9 @@ use kvbm_physical::transfer::PhysicalLayout;
 #[cfg(feature = "s3")]
 pub mod s3;
 
+#[cfg(feature = "mooncake")]
+pub mod mooncake;
+
 // ============================================================================
 // Key Formatting
 // ============================================================================
@@ -314,85 +317,98 @@ pub trait ObjectLockManager: Send + Sync {
 
 /// Create an object client from configuration.
 ///
-/// Returns a trait object so consumers don't need to depend on the `s3` feature.
+/// Returns a trait object so consumers don't need to depend on specific features.
 /// The implementation is selected based on the configuration type.
-///
-/// # Arguments
-/// * `config` - Object storage configuration
-/// * `rank` - Optional worker rank for key prefixing (None for leader)
-///
-/// # Errors
-/// Returns an error if the object client cannot be initialized or if the
-/// required feature is not enabled.
-#[cfg(feature = "s3")]
+#[cfg(any(feature = "s3", feature = "mooncake"))]
 pub async fn create_object_client(
     config: &kvbm_config::ObjectConfig,
     rank: Option<usize>,
 ) -> Result<Arc<dyn ObjectBlockOps>> {
     use kvbm_config::ObjectClientConfig;
-    use s3::{S3Config, S3ObjectBlockClient};
 
     let key_formatter = create_key_formatter(rank);
 
     match &config.client {
+        #[cfg(feature = "s3")]
         ObjectClientConfig::S3(s3_config) => {
+            use s3::{S3Config, S3ObjectBlockClient};
             let config = S3Config::from_object_config(s3_config);
             let client = S3ObjectBlockClient::with_key_formatter(config, key_formatter).await?;
+            Ok(Arc::new(client))
+        }
+        #[cfg(feature = "mooncake")]
+        ObjectClientConfig::Mooncake(mc_config) => {
+            use mooncake::client::MooncakeObjectBlockClient;
+            let client = MooncakeObjectBlockClient::new(mc_config)
+                .map(|c| c.with_key_formatter(key_formatter))?;
             Ok(Arc::new(client))
         }
         ObjectClientConfig::Nixl(_nixl_config) => {
             anyhow::bail!("Nixl object storage backend not yet implemented")
         }
+        #[cfg(not(feature = "s3"))]
+        ObjectClientConfig::S3(_) => {
+            anyhow::bail!("S3 feature not enabled")
+        }
+        #[cfg(not(feature = "mooncake"))]
+        ObjectClientConfig::Mooncake(_) => {
+            anyhow::bail!("Mooncake feature not enabled")
+        }
     }
 }
 
-/// Fallback when S3 feature is disabled.
-#[cfg(not(feature = "s3"))]
+/// Fallback when neither S3 nor Mooncake feature is enabled.
+#[cfg(not(any(feature = "s3", feature = "mooncake")))]
 pub async fn create_object_client(
     _config: &kvbm_config::ObjectConfig,
     _rank: Option<usize>,
 ) -> Result<Arc<dyn ObjectBlockOps>> {
-    anyhow::bail!("Object storage requires the 's3' feature to be enabled")
+    anyhow::bail!("Object storage requires the 's3' or 'mooncake' feature to be enabled")
 }
 
 /// Create a lock manager from configuration.
-///
-/// Returns a trait object so consumers don't need to depend on the `s3` feature.
-///
-/// # Arguments
-/// * `config` - Object storage configuration
-/// * `instance_id` - Unique identifier for this instance (used in lock files)
-///
-/// # Errors
-/// Returns an error if the lock manager cannot be initialized or if the
-/// required feature is not enabled.
-#[cfg(feature = "s3")]
+#[cfg(any(feature = "s3", feature = "mooncake"))]
 pub async fn create_lock_manager(
     config: &kvbm_config::ObjectConfig,
     instance_id: String,
 ) -> Result<Arc<dyn ObjectLockManager>> {
     use kvbm_config::ObjectClientConfig;
-    use s3::{S3Config, S3LockManager, S3ObjectBlockClient};
 
     match &config.client {
+        #[cfg(feature = "s3")]
         ObjectClientConfig::S3(s3_config) => {
+            use s3::{S3Config, S3LockManager, S3ObjectBlockClient};
             let config = S3Config::from_object_config(s3_config);
-            // Lock manager uses default key formatter (no rank prefix for lock/meta files)
             let client = Arc::new(S3ObjectBlockClient::new(config).await?);
             let manager = S3LockManager::new(client, instance_id);
+            Ok(Arc::new(manager))
+        }
+        #[cfg(feature = "mooncake")]
+        ObjectClientConfig::Mooncake(mc_config) => {
+            use mooncake::{client::MooncakeObjectBlockClient, lock::MooncakeLockManager};
+            let client = Arc::new(MooncakeObjectBlockClient::new(mc_config)?);
+            let manager = MooncakeLockManager::new(client);
             Ok(Arc::new(manager))
         }
         ObjectClientConfig::Nixl(_nixl_config) => {
             anyhow::bail!("Nixl object storage backend not yet implemented")
         }
+        #[cfg(not(feature = "s3"))]
+        ObjectClientConfig::S3(_) => {
+            anyhow::bail!("S3 feature not enabled")
+        }
+        #[cfg(not(feature = "mooncake"))]
+        ObjectClientConfig::Mooncake(_) => {
+            anyhow::bail!("Mooncake feature not enabled")
+        }
     }
 }
 
-/// Fallback when S3 feature is disabled.
-#[cfg(not(feature = "s3"))]
+/// Fallback when neither S3 nor Mooncake feature is enabled.
+#[cfg(not(any(feature = "s3", feature = "mooncake")))]
 pub async fn create_lock_manager(
     _config: &kvbm_config::ObjectConfig,
     _instance_id: String,
 ) -> Result<Arc<dyn ObjectLockManager>> {
-    anyhow::bail!("Object storage requires the 's3' feature to be enabled")
+    anyhow::bail!("Object storage requires the 's3' or 'mooncake' feature to be enabled")
 }

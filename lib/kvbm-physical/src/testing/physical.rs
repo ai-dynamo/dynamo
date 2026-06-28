@@ -14,13 +14,18 @@ use std::collections::HashMap;
 
 use crate::BlockId;
 use crate::{
-    layout::{BlockDimension, LayoutConfig, PhysicalLayout},
+    layout::{
+        BlockDimension, FullyContiguousLayout, LayerSeparateLayout, LayoutConfig, NixlMetadata,
+        PhysicalLayout,
+    },
     manager::{LayoutHandle, TransferManager},
     transfer::{
         BlockChecksum, FillPattern, NixlAgent, StorageKind, TransferCapabilities,
         compute_block_checksums, compute_layer_checksums, fill_blocks, fill_layers,
     },
 };
+use dynamo_memory::nixl::MemType;
+use dynamo_memory::{Buffer, SystemStorage};
 
 // =============================================================================
 // Flexible Backend Agent Builder
@@ -710,4 +715,54 @@ mod tests {
         assert_eq!(config.inner_dim, 64);
         assert_eq!(config.dtype_width_bytes, 2);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Stub-safe layout creation (no NIXL agent required)
+// ---------------------------------------------------------------------------
+
+/// Create a fully contiguous physical layout backed by system memory,
+/// without requiring a NIXL agent. For use in environments where NIXL
+/// is unavailable (stub mode).
+pub fn create_fc_layout_system(num_blocks: usize) -> PhysicalLayout {
+    let config = standard_config(num_blocks);
+    let total_size = config.num_blocks
+        * config.num_layers
+        * config.outer_dim
+        * config.page_size
+        * config.inner_dim
+        * config.dtype_width_bytes;
+    let storage = SystemStorage::new(total_size).expect("system allocation failed");
+    let buffer = Buffer::new(storage);
+    let layout = FullyContiguousLayout::new(config, buffer).expect("layout creation failed");
+    let nixl_metadata = NixlMetadata::new("stub".to_string(), MemType::Dram, 0);
+    PhysicalLayout::new_local(
+        std::sync::Arc::new(layout),
+        StorageKind::System,
+        nixl_metadata,
+    )
+}
+
+/// Create a layer-separate physical layout backed by system memory,
+/// without requiring a NIXL agent.
+pub fn create_lw_layout_system(num_blocks: usize) -> PhysicalLayout {
+    let config = standard_config(num_blocks);
+    let per_layer = config.num_blocks
+        * config.outer_dim
+        * config.page_size
+        * config.inner_dim
+        * config.dtype_width_bytes;
+    let mut buffers = Vec::with_capacity(config.num_layers);
+    for _ in 0..config.num_layers {
+        let storage = SystemStorage::new(per_layer).expect("system allocation failed");
+        buffers.push(Buffer::new(storage));
+    }
+    let layout = LayerSeparateLayout::new(config, buffers, BlockDimension::BlockIsFirstDim)
+        .expect("layout creation failed");
+    let nixl_metadata = NixlMetadata::new("stub".to_string(), MemType::Dram, 0);
+    PhysicalLayout::new_local(
+        std::sync::Arc::new(layout),
+        StorageKind::System,
+        nixl_metadata,
+    )
 }

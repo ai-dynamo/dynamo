@@ -24,7 +24,10 @@ pub use discovery::{
 pub use events::{BatchingConfig as EventsBatchingConfig, EventPolicyConfig, EventsConfig};
 pub use messenger::{MessengerBackendConfig, MessengerConfig};
 pub use nixl::NixlConfig;
-pub use object::{NixlObjectConfig, ObjectClientConfig, ObjectConfig, S3ObjectConfig};
+pub use object::{
+    MooncakeObjectConfig, MooncakeProtocol, NixlObjectConfig, ObjectClientConfig, ObjectConfig,
+    S3ObjectConfig,
+};
 pub use offload::{
     OffloadConfig, PolicyType, PresenceFilterConfig, PresenceLfuFilterConfig, TierOffloadConfig,
 };
@@ -162,6 +165,11 @@ impl KvbmConfig {
             .merge(
                 Env::prefixed("KVBM_EVENTS_BATCHING_")
                     .map(|k| format!("events.batching.{}", k.as_str().to_lowercase()).into()),
+            )
+            // Object storage config: KVBM_OBJECT_CLIENT_TYPE, KVBM_OBJECT_CLIENT_METADATA_SERVER, etc.
+            .merge(
+                Env::prefixed("KVBM_OBJECT_CLIENT_")
+                    .map(|k| format!("object.client.{}", k.as_str().to_lowercase()).into()),
             )
     }
 

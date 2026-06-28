@@ -43,6 +43,7 @@ use crate::object::ObjectBlockOps;
 use crate::{BlockId, SequenceHash};
 use kvbm_common::LogicalLayoutHandle;
 use kvbm_logical::blocks::{BlockMetadata, BlockRegistry, ImmutableBlock};
+use kvbm_logical::events::KvCacheEvent;
 use kvbm_logical::manager::BlockManager;
 use kvbm_physical::transfer::TransferOptions;
 
@@ -643,6 +644,7 @@ impl<Src: BlockMetadata> ObjectPipeline<Src> {
     /// * `src_layout` - Source physical layout for reading block data
     /// * `leader` - Instance leader for precondition events
     /// * `runtime` - Tokio runtime handle for spawning background tasks
+    /// * `event_sender` - Optional broadcast sender for G4 offload completion events
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: ObjectPipelineConfig<Src>,
@@ -650,6 +652,7 @@ impl<Src: BlockMetadata> ObjectPipeline<Src> {
         src_layout: LogicalLayoutHandle,
         leader: Arc<InstanceLeader>,
         runtime: tokio::runtime::Handle,
+        event_sender: Option<tokio::sync::broadcast::Sender<KvCacheEvent>>,
     ) -> Self {
         // Create cancellable queues
         let eval_queue: Arc<CancellableQueue<PipelineInput<Src>>> =
@@ -720,6 +723,7 @@ impl<Src: BlockMetadata> ObjectPipeline<Src> {
             config.skip_transfers,
             config.max_concurrent_transfers,
             config.lock_manager.clone(),
+            event_sender,
         );
         let transfer_handle = runtime.spawn(async move {
             executor.run().await;
@@ -1620,6 +1624,8 @@ pub struct ObjectTransferExecutor<Src: BlockMetadata> {
     max_concurrent_transfers: usize,
     /// Optional lock manager for creating meta files and releasing locks
     lock_manager: Option<Arc<dyn ObjectLockManager>>,
+    /// Optional event sender for G4 offload completion notifications
+    event_sender: Option<tokio::sync::broadcast::Sender<KvCacheEvent>>,
 }
 
 /// Shared state for ObjectTransferExecutor that can be cloned across concurrent tasks.
@@ -1628,6 +1634,10 @@ struct SharedObjectExecutorState {
     src_layout: LogicalLayoutHandle,
     skip_transfers: bool,
     lock_manager: Option<Arc<dyn ObjectLockManager>>,
+    /// Optional event sender for notifying about successful G4 offloads.
+    /// When provided, `KvCacheEvent::Create` is emitted for each block
+    /// successfully uploaded to object storage, enabling KV Router G4 awareness.
+    event_sender: Option<tokio::sync::broadcast::Sender<KvCacheEvent>>,
 }
 
 impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
@@ -1640,6 +1650,7 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
         skip_transfers: bool,
         max_concurrent_transfers: usize,
         lock_manager: Option<Arc<dyn ObjectLockManager>>,
+        event_sender: Option<tokio::sync::broadcast::Sender<KvCacheEvent>>,
     ) -> Self {
         Self {
             input_rx,
@@ -1648,6 +1659,7 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
             skip_transfers,
             max_concurrent_transfers,
             lock_manager,
+            event_sender,
         }
     }
 
@@ -1664,6 +1676,7 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
             src_layout: self.src_layout,
             skip_transfers: self.skip_transfers,
             lock_manager: self.lock_manager.clone(),
+            event_sender: self.event_sender,
         });
 
         while let Some(batch) = self.input_rx.recv().await {
@@ -1799,9 +1812,14 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
                 );
             }
 
-            // todo: merge the else part of this conditional and perhaps add the event tap for the successful transfers
-            // for block transfers we emit an event as part of registration; however, we don't register g4 blocks in the
-            // same way; therefore, we need a new convention on how we inform the broader system of the object creation
+            // Emit events for successful offloads so KV Router / indexer can track G4 tier.
+            // Unlike G1→G2/G2→G3 transfers, G4 blocks are not registered in a local
+            // BlockManager, so we emit events explicitly here.
+            if let Some(ref event_sender) = shared.event_sender {
+                for hash in &successful_hashes {
+                    let _ = event_sender.send(KvCacheEvent::Create(*hash));
+                }
+            }
 
             // Create meta files and release locks for successful transfers
             if let Some(lock_manager) = &shared.lock_manager {
@@ -2046,6 +2064,7 @@ mod tests {
             src_layout: LogicalLayoutHandle::G2,
             skip_transfers: false,
             lock_manager: None,
+            event_sender: None,
         };
 
         let transfer_id = crate::offload::handle::TransferId::new();
@@ -2122,6 +2141,7 @@ mod tests {
             src_layout: LogicalLayoutHandle::G2,
             skip_transfers: false,
             lock_manager: None,
+            event_sender: None,
         };
 
         let transfer_id = crate::offload::handle::TransferId::new();
@@ -2190,6 +2210,7 @@ mod tests {
             src_layout: LogicalLayoutHandle::G2,
             skip_transfers: false,
             lock_manager: None,
+            event_sender: None,
         };
 
         // Transfer A: blocks 100, 200 (200 will fail)
@@ -2271,5 +2292,106 @@ mod tests {
 
         assert_eq!(handle_b.completed_blocks(), vec![300, 400]);
         assert!(handle_b.failed_blocks().is_empty());
+    }
+
+    /// Verify that KvCacheEvent::Create is emitted for successful hashes
+    /// but NOT for failed hashes in the partial-failure path.
+    #[tokio::test]
+    async fn test_execute_transfer_emits_events_for_successful_hashes() {
+        use crate::offload::handle::{TransferState, TransferStatus};
+
+        let hash_ok_1 = test_hash(10);
+        let hash_fail = test_hash(20);
+        let hash_ok_2 = test_hash(30);
+
+        let fail_hashes = [hash_fail].into_iter().collect();
+        let object_ops: Arc<dyn crate::object::ObjectBlockOps> =
+            Arc::new(FailableObjectBlockOps { fail_hashes });
+
+        let (sender, mut receiver) = tokio::sync::broadcast::channel::<KvCacheEvent>(16);
+
+        let shared = SharedObjectExecutorState {
+            object_ops,
+            src_layout: LogicalLayoutHandle::G2,
+            skip_transfers: false,
+            lock_manager: None,
+            event_sender: Some(sender.clone()),
+        };
+
+        let transfer_id = crate::offload::handle::TransferId::new();
+        let (mut state, handle) = TransferState::new(transfer_id, vec![100, 200, 300]);
+        state.add_passed(vec![100, 200, 300]);
+        state.mark_in_flight(vec![100, 200, 300]);
+        let state_arc = Arc::new(std::sync::Mutex::new(state));
+
+        let blocks = vec![
+            ResolvedBlock::<crate::G2> {
+                transfer_id,
+                block_id: 100,
+                sequence_hash: hash_ok_1,
+                guard: None,
+                state: state_arc.clone(),
+            },
+            ResolvedBlock::<crate::G2> {
+                transfer_id,
+                block_id: 200,
+                sequence_hash: hash_fail,
+                guard: None,
+                state: state_arc.clone(),
+            },
+            ResolvedBlock::<crate::G2> {
+                transfer_id,
+                block_id: 300,
+                sequence_hash: hash_ok_2,
+                guard: None,
+                state: state_arc.clone(),
+            },
+        ];
+
+        let mut timing = TimingTrace::new();
+        timing.mark_policy_complete();
+        timing.mark_precondition_complete();
+
+        let batch = ResolvedBatch {
+            blocks,
+            evicted: Vec::new(),
+            timing,
+        };
+
+        ObjectTransferExecutor::<crate::G2>::execute_transfer(&shared, batch)
+            .await
+            .expect("execute_transfer should succeed");
+
+        // Collect all received events
+        let mut received_hashes: Vec<crate::SequenceHash> = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            if let KvCacheEvent::Create(hash) = event {
+                received_hashes.push(hash);
+            }
+        }
+
+        // hash_ok_1 and hash_ok_2 should be in received events
+        assert!(
+            received_hashes.contains(&hash_ok_1),
+            "hash_ok_1 should be in received events, got {:?}",
+            received_hashes
+        );
+        assert!(
+            received_hashes.contains(&hash_ok_2),
+            "hash_ok_2 should be in received events, got {:?}",
+            received_hashes
+        );
+        // hash_fail should NOT be in received events
+        assert!(
+            !received_hashes.contains(&hash_fail),
+            "hash_fail should NOT be in received events, got {:?}",
+            received_hashes
+        );
+
+        // Verify transfer state is still correct
+        let state_guard = state_arc.lock().unwrap();
+        assert_eq!(state_guard.completed, vec![100, 300]);
+        assert_eq!(state_guard.failed, vec![200]);
+        drop(state_guard);
     }
 }
