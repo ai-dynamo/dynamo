@@ -3,6 +3,7 @@
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.model_fetch import fetch_model
+from dynamo.common.snapshot.lifecycle import SnapshotConfig
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
@@ -47,7 +49,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.worker_factory import WorkerFactory
+from dynamo.vllm.worker_factory import EngineSetupResult, WorkerFactory
 
 from . import envs
 from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
@@ -193,6 +195,15 @@ async def worker(argv: list[str] | None = None) -> None:
     snapshot_engine = None
     if snapshot_controller is not None:
         snapshot_engine = snapshot_controller.engine
+        if snapshot_controller.snapshot_config.serve_before_capture:
+            await serve_until_snapshot_capture_requested(
+                config,
+                snapshot_engine,
+                snapshot_controller.snapshot_config,
+            )
+            if not await snapshot_controller.wait_for_restore():
+                raise SystemExit(0)
+
         config = await refresh_snapshot_restore_config(
             config,
             lambda: parse_snapshot_restore_runtime_config(argv),
@@ -204,6 +215,26 @@ async def worker(argv: list[str] | None = None) -> None:
         run_dynamo_headless(config)
         return
 
+    await serve_worker(config, snapshot_engine=snapshot_engine)
+
+    logger.debug("Worker function completed, exiting...")
+
+
+def create_worker_factory() -> WorkerFactory:
+    return WorkerFactory(
+        setup_vllm_engine_fn=setup_vllm_engine,
+        setup_kv_event_publisher_fn=setup_kv_event_publisher,
+        register_vllm_model_fn=register_vllm_model,
+        setup_fpm_relay_fn=setup_fpm_relay,
+        setup_metrics_collection_fn=setup_metrics_collection,
+    )
+
+
+async def serve_worker(
+    config: Config,
+    snapshot_engine: EngineSetupResult | None = None,
+) -> None:
+    shutdown_endpoints.clear()
     shutdown_event = asyncio.Event()
     runtime, loop = create_runtime(
         discovery_backend=config.discovery_backend,
@@ -216,14 +247,7 @@ async def worker(argv: list[str] | None = None) -> None:
     install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
-    factory = WorkerFactory(
-        setup_vllm_engine_fn=setup_vllm_engine,
-        setup_kv_event_publisher_fn=setup_kv_event_publisher,
-        register_vllm_model_fn=register_vllm_model,
-        setup_fpm_relay_fn=setup_fpm_relay,
-        setup_metrics_collection_fn=setup_metrics_collection,
-    )
-    await factory.create(
+    await create_worker_factory().create(
         runtime,
         config,
         shutdown_event,
@@ -231,7 +255,76 @@ async def worker(argv: list[str] | None = None) -> None:
         snapshot_engine=snapshot_engine,
     )
 
-    logger.debug("Worker function completed, exiting...")
+
+async def serve_until_snapshot_capture_requested(
+    config: Config,
+    snapshot_engine: EngineSetupResult,
+    snapshot_config: SnapshotConfig,
+) -> None:
+    """Serve with a temporary runtime, then close it before snapshot capture."""
+    shutdown_endpoints.clear()
+    shutdown_event = asyncio.Event()
+    runtime, loop = create_runtime(
+        discovery_backend=config.discovery_backend,
+        request_plane=config.request_plane,
+        event_plane=config.event_plane,
+    )
+    install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
+
+    # The first handler normally owns cleanup of the Prometheus temporary
+    # directory. This engine must survive that handler and be captured, so keep
+    # the directory owned by the original snapshot_engine tuple.
+    serving_engine = (
+        snapshot_engine[0],
+        snapshot_engine[1],
+        snapshot_engine[2],
+        None,
+        snapshot_engine[4],
+    )
+    worker_task = asyncio.create_task(
+        create_worker_factory().create(
+            runtime,
+            config,
+            shutdown_event,
+            shutdown_endpoints,
+            snapshot_engine=serving_engine,
+        )
+    )
+    capture_task = asyncio.create_task(snapshot_config.wait_for_capture_request())
+    done, _ = await asyncio.wait(
+        (worker_task, capture_task),
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if worker_task in done:
+        capture_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await capture_task
+        await worker_task
+        raise RuntimeError("Snapshot source stopped before capture was requested")
+
+    await capture_task
+    logger.info("Unregistering snapshot source endpoints")
+    results = await asyncio.gather(
+        *(endpoint.unregister_endpoint_instance() for endpoint in shutdown_endpoints),
+        return_exceptions=True,
+    )
+    for result in results:
+        if isinstance(result, Exception):
+            logger.warning(
+                "Failed to unregister snapshot source endpoint: %s",
+                result,
+            )
+
+    shutdown_event.set()
+    logger.info("Shutting down snapshot source runtime before capture")
+    runtime.shutdown()
+    await worker_task
+    # Runtime shutdown coordinates endpoint drain before cancelling its
+    # backend connections. Give that final cancellation a scheduling turn
+    # before the engine enters the captured state.
+    await asyncio.sleep(1)
+    shutdown_endpoints.clear()
+    logger.info("Snapshot source runtime stopped; engine is ready to pause")
 
 
 def setup_metrics_collection(
