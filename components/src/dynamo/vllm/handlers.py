@@ -1634,8 +1634,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
+        allow_unpaused = body.get("allow_unpaused", False)
+        reset_prefix_cache = body.get("reset_prefix_cache", True)
+        if not isinstance(allow_unpaused, bool):
+            return {
+                "status": "error",
+                "message": "'allow_unpaused' must be a boolean",
+            }
+        if not isinstance(reset_prefix_cache, bool):
+            return {
+                "status": "error",
+                "message": "'reset_prefix_cache' must be a boolean",
+            }
         async with self._pause_lock:
-            if not getattr(self, "_paused", False):
+            if not getattr(self, "_paused", False) and not allow_unpaused:
                 return {
                     "status": "error",
                     "message": (
@@ -1649,13 +1661,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             rpc_kwargs = {
                 k: v
                 for k, v in body.items()
-                if k not in ("engine_rpc", "weight_version")
+                if k
+                not in (
+                    "allow_unpaused",
+                    "engine_rpc",
+                    "reset_prefix_cache",
+                    "weight_version",
+                )
             }
             try:
                 await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
-                # Weights changed: stale prefix/KV cache must be invalidated
-                # before resume so it is not reused under the new weights.
-                await self.engine_client.reset_prefix_cache()
+                if reset_prefix_cache:
+                    # Weights changed: stale prefix/KV cache must be invalidated
+                    # before resume so it is not reused under the new weights.
+                    await self.engine_client.reset_prefix_cache()
                 self._weight_version = version
                 logger.info(
                     f"[RL] Weights received via distributed "
