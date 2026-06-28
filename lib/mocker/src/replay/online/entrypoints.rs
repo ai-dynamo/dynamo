@@ -204,6 +204,28 @@ pub(super) fn simulate_trace_requests_with_stats(
 }
 
 #[cfg(test)]
+pub(super) fn simulate_trace_requests_with_config_and_stats(
+    args: MockEngineArgs,
+    router_config: KvRouterConfig,
+    requests: Vec<DirectRequest>,
+    num_workers: usize,
+    arrival_speedup_ratio: f64,
+    router_mode: ReplayRouterMode,
+) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
+    let args = args.normalized()?;
+    let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
+    run_live_runtime(
+        args,
+        Some(router_config),
+        None,
+        pending,
+        num_workers,
+        LiveReplayMode::Trace,
+        router_mode,
+    )
+}
+
+#[cfg(test)]
 pub(super) fn simulate_concurrency_requests_with_stats(
     args: MockEngineArgs,
     requests: Vec<DirectRequest>,

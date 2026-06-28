@@ -67,6 +67,7 @@ pub enum WorkerTopologyError {
 pub(super) struct RemovedWorkerState {
     pub(super) worker: WorkerWithDpRank,
     pub(super) trie_lookup: Arc<RwLock<WorkerLookup>>,
+    pub(super) selector_trie_lookup: Arc<RwLock<WorkerLookup>>,
 }
 
 impl std::fmt::Debug for RemovedWorkerState {
@@ -87,6 +88,7 @@ pub(super) struct WorkerSlot {
     pub(super) worker: WorkerWithDpRank,
     pub(super) sequences: RwLock<ActiveSequences>,
     pub(super) trie_lookup: Arc<RwLock<WorkerLookup>>,
+    pub(super) selector_trie_lookup: Arc<RwLock<WorkerLookup>>,
 }
 
 impl WorkerSlot {
@@ -95,6 +97,7 @@ impl WorkerSlot {
             worker,
             sequences: RwLock::new(ActiveSequences::new(block_size)),
             trie_lookup: Arc::new(RwLock::new(WorkerLookup::default())),
+            selector_trie_lookup: Arc::new(RwLock::new(WorkerLookup::default())),
         }
     }
 }
@@ -269,6 +272,7 @@ impl WorkerTable {
             .map(|slot| RemovedWorkerState {
                 worker: slot.worker,
                 trie_lookup: slot.trie_lookup,
+                selector_trie_lookup: slot.selector_trie_lookup,
             })
             .collect();
 
@@ -309,6 +313,7 @@ impl From<WorkerSlot> for RemovedWorkerState {
         Self {
             worker: slot.worker,
             trie_lookup: slot.trie_lookup,
+            selector_trie_lookup: slot.selector_trie_lookup,
         }
     }
 }

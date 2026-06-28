@@ -21,8 +21,8 @@ use crate::replay::ReplayRouterMode;
 use super::ReplayRouter;
 use super::entrypoints::{
     simulate_concurrency_requests_with_stats, simulate_concurrency_workload_with_stats,
-    simulate_trace_requests, simulate_trace_requests_with_stats,
-    simulate_trace_workload_with_stats,
+    simulate_trace_requests, simulate_trace_requests_with_config_and_stats,
+    simulate_trace_requests_with_stats, simulate_trace_workload_with_stats,
 };
 use super::state::{SharedLiveRuntimeStats, WorkloadDispatchState, record_arrival};
 use super::task::{RequestTaskContext, run_request_task, wait_for_workload_progress};
@@ -505,9 +505,21 @@ fn test_online_trace_replay_kv_router_prefers_cached_worker() {
     let args = replay_args();
     let requests = vec![request(1, 88, Some(0.0)), request(2, 88, Some(500.0))];
 
-    let (_, stats) =
-        simulate_trace_requests_with_stats(args, requests, 2, 1.0, ReplayRouterMode::KvRouter)
-            .unwrap();
+    // Under staged decode accounting and equal prefill/decode weights, a fully cached request
+    // ties a cold request: its prompt blocks move from the prefill term to the decode term.
+    // Increase the prefill scale so this fixture continues to exercise explicit cache affinity.
+    let (_, stats) = simulate_trace_requests_with_config_and_stats(
+        args,
+        KvRouterConfig {
+            prefill_load_scale: 2.0,
+            ..Default::default()
+        },
+        requests,
+        2,
+        1.0,
+        ReplayRouterMode::KvRouter,
+    )
+    .unwrap();
 
     assert_eq!(stats.dispatch_history.len(), 2);
     assert_eq!(stats.dispatch_history[0], stats.dispatch_history[1]);

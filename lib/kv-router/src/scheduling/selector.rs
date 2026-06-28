@@ -1257,6 +1257,7 @@ mod tests {
                 active_prefill_tokens: 16,
                 active_decode_blocks: 2,
                 additional_active_blocks: 3,
+                staged_decode_blocks: None,
             },
         );
         let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");

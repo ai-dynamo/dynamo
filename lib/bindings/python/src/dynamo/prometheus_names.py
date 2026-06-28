@@ -141,6 +141,8 @@ class frontend_service:
     # Active decode blocks (KV cache blocks) per worker
     # Gauge metric tracking current KV cache block utilization for each worker
     WORKER_ACTIVE_DECODE_BLOCKS = "worker_active_decode_blocks"
+    # Selector-only staged decode-cost blocks per worker
+    WORKER_SELECTOR_DECODE_BLOCKS = "worker_selector_decode_blocks"
     # Active prefill tokens per worker
     # Gauge metric tracking current queued prefill tokens for each worker
     WORKER_ACTIVE_PREFILL_TOKENS = "worker_active_prefill_tokens"

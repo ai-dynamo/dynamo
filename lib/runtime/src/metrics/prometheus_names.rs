@@ -272,6 +272,9 @@ pub mod frontend_service {
     /// Gauge metric tracking current KV cache block utilization for each worker
     pub const WORKER_ACTIVE_DECODE_BLOCKS: &str = "worker_active_decode_blocks";
 
+    /// Selector-only staged decode-cost blocks per worker
+    pub const WORKER_SELECTOR_DECODE_BLOCKS: &str = "worker_selector_decode_blocks";
+
     /// Active prefill tokens per worker
     /// Gauge metric tracking current queued prefill tokens for each worker
     pub const WORKER_ACTIVE_PREFILL_TOKENS: &str = "worker_active_prefill_tokens";

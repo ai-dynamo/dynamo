@@ -379,7 +379,7 @@ impl SequencePublisher for NoopSequencePublisher {
 
     fn publish_load(&self, _load: ActiveLoad) {}
 
-    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+    fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize, _: usize) {}
 }
 
 /// Minimal [`WorkerConfigLike`] for scheduler/queue tests and benchmarks.

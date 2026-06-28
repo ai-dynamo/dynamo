@@ -35,11 +35,16 @@ pub struct WorkerLoadProjection {
     /// These blocks may still exist in an inactive cache; this field describes
     /// additional active block footprint, not cache misses.
     pub additional_active_blocks: usize,
+    /// Selector-only staged decode cost for aggregated dual-signal routing.
+    ///
+    /// `None` preserves the legacy full active-block projection exactly.
+    pub staged_decode_blocks: Option<usize>,
 }
 
 impl WorkerLoadProjection {
     pub fn potential_decode_blocks(self) -> usize {
-        self.active_decode_blocks + self.additional_active_blocks
+        self.staged_decode_blocks
+            .unwrap_or(self.active_decode_blocks + self.additional_active_blocks)
     }
 }
 
@@ -58,6 +63,7 @@ pub type PotentialLoadMaps = (
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkerLoadSnapshot {
     pub(super) active_blocks: usize,
+    pub(super) selector_decode_blocks: usize,
     pub(super) active_requests: usize,
     pub(super) prefill: PrefillLoadSnapshot,
 }
@@ -175,6 +181,7 @@ pub(super) struct PromptRegistry {
     // after the write finishes, but reads can still observe a mixed membership/load state that
     // never existed atomically and make a suboptimal routing choice.
     membership: PromptMembershipTrie,
+    selector_membership: PromptMembershipTrie,
     loads: RwLock<WorkerLoadTable>,
     #[cfg(test)]
     cleanup_attempts: AtomicUsize,
@@ -184,6 +191,7 @@ impl Default for PromptRegistry {
     fn default() -> Self {
         Self {
             membership: PromptMembershipTrie::new(),
+            selector_membership: PromptMembershipTrie::new(),
             loads: RwLock::new(WorkerLoadTable::default()),
             #[cfg(test)]
             cleanup_attempts: AtomicUsize::new(0),
@@ -210,6 +218,7 @@ impl PromptRegistry {
         self.upsert_worker_load(worker, load);
     }
 
+    #[cfg(test)]
     pub(super) fn apply_membership_delta_and_load(
         &self,
         worker: WorkerWithDpRank,
@@ -221,6 +230,27 @@ impl PromptRegistry {
         self.maybe_cleanup();
     }
 
+    pub(super) fn apply_membership_deltas_and_load(
+        &self,
+        worker: WorkerWithDpRank,
+        lookup: &Arc<parking_lot::RwLock<WorkerLookup>>,
+        selector_lookup: &Arc<parking_lot::RwLock<WorkerLookup>>,
+        delta: PromptMembershipDelta,
+        selector_delta: PromptMembershipDelta,
+        load: WorkerLoadSnapshot,
+    ) {
+        self.apply_membership_deltas_and_load_without_cleanup(
+            worker,
+            lookup,
+            selector_lookup,
+            delta,
+            selector_delta,
+            load,
+        );
+        self.maybe_cleanup();
+    }
+
+    #[cfg(test)]
     pub(super) fn apply_membership_delta_and_load_without_cleanup(
         &self,
         worker: WorkerWithDpRank,
@@ -238,6 +268,37 @@ impl PromptRegistry {
         self.upsert_worker_load(worker, load);
     }
 
+    pub(super) fn apply_membership_deltas_and_load_without_cleanup(
+        &self,
+        worker: WorkerWithDpRank,
+        lookup: &Arc<parking_lot::RwLock<WorkerLookup>>,
+        selector_lookup: &Arc<parking_lot::RwLock<WorkerLookup>>,
+        delta: PromptMembershipDelta,
+        selector_delta: PromptMembershipDelta,
+        load: WorkerLoadSnapshot,
+    ) {
+        for remove in delta.removes {
+            self.membership.remove_chain(worker, lookup, &remove.hashes);
+        }
+        for store in delta.stores {
+            self.membership
+                .store_chain(worker, lookup, store.parent, &store.hashes);
+        }
+        for remove in selector_delta.removes {
+            self.selector_membership
+                .remove_chain(worker, selector_lookup, &remove.hashes);
+        }
+        for store in selector_delta.stores {
+            self.selector_membership.store_chain(
+                worker,
+                selector_lookup,
+                store.parent,
+                &store.hashes,
+            );
+        }
+        self.upsert_worker_load(worker, load);
+    }
+
     fn upsert_worker_load(&self, worker: WorkerWithDpRank, load: WorkerLoadSnapshot) {
         if self.loads.read().update(worker, load) {
             return;
@@ -249,6 +310,7 @@ impl PromptRegistry {
         #[cfg(test)]
         self.cleanup_attempts.fetch_add(1, Ordering::Relaxed);
         self.membership.maybe_cleanup();
+        self.selector_membership.maybe_cleanup();
     }
 
     #[cfg(test)]
@@ -260,6 +322,8 @@ impl PromptRegistry {
         for removed in change.removed {
             self.membership
                 .remove_worker(removed.worker, &removed.trie_lookup);
+            self.selector_membership
+                .remove_worker(removed.worker, &removed.selector_trie_lookup);
             self.loads.write().remove(removed.worker);
         }
 
@@ -267,6 +331,7 @@ impl PromptRegistry {
             self.loads.write().ensure_worker(worker);
         }
         self.membership.maybe_cleanup();
+        self.selector_membership.maybe_cleanup();
     }
 
     fn project_loads_from_membership<const INCLUDE_ACTIVE_REQUESTS: bool>(
@@ -332,6 +397,59 @@ impl PromptRegistry {
                     active_prefill_tokens: load.active_tokens(decay_now),
                     active_decode_blocks: load.active_blocks,
                     additional_active_blocks: query_len.saturating_sub(overlap_depth),
+                    staged_decode_blocks: None,
+                },
+            );
+        }
+
+        projections
+    }
+
+    pub(super) fn project_worker_loads_with_staged_decode_cost(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        track_prefill_tokens: bool,
+        cached_tokens: &HashMap<WorkerWithDpRank, usize>,
+        block_size: usize,
+        decay_now: Instant,
+    ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        let query_len = token_sequence.map_or(0, |query| query.len());
+        let stage_decode_cost = track_prefill_tokens && query_len > 0;
+        if !stage_decode_cost {
+            return self.project_worker_loads(token_sequence, decay_now);
+        }
+
+        let matched_depth = self.membership.compute_overlap_depths(token_sequence);
+        let selector_matched_depth = self
+            .selector_membership
+            .compute_overlap_depths(token_sequence);
+        let loads = self.loads.read();
+        let mut projections = FxHashMap::with_capacity_and_hasher(loads.len(), FxBuildHasher);
+
+        for (worker, load) in loads.iter() {
+            let overlap_depth = matched_depth.get(&worker).copied().unwrap_or(0);
+            let cached_prefix_blocks = cached_tokens
+                .get(&worker)
+                .copied()
+                .unwrap_or(0)
+                .checked_div(block_size)
+                .unwrap_or(0)
+                .min(query_len);
+            let selector_overlap_depth = selector_matched_depth
+                .get(&worker)
+                .copied()
+                .unwrap_or(0)
+                .min(cached_prefix_blocks);
+            projections.insert(
+                worker,
+                WorkerLoadProjection {
+                    active_prefill_tokens: load.active_tokens(decay_now),
+                    active_decode_blocks: load.active_blocks,
+                    additional_active_blocks: query_len.saturating_sub(overlap_depth),
+                    staged_decode_blocks: Some(
+                        load.selector_decode_blocks
+                            + cached_prefix_blocks.saturating_sub(selector_overlap_depth),
+                    ),
                 },
             );
         }
@@ -352,6 +470,14 @@ impl PromptRegistry {
             .read()
             .iter()
             .map(|(worker, load)| (worker, load.active_requests))
+            .collect()
+    }
+
+    pub(super) fn selector_decode_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.loads
+            .read()
+            .iter()
+            .map(|(worker, load)| (worker, load.selector_decode_blocks))
             .collect()
     }
 
@@ -405,7 +531,7 @@ impl PromptRegistry {
 
     #[cfg(any(test, feature = "bench"))]
     pub(super) fn is_block_index_empty(&self) -> bool {
-        self.membership.is_empty()
+        self.membership.is_empty() && self.selector_membership.is_empty()
     }
 }
 
@@ -442,6 +568,7 @@ mod tests {
     fn worker_load_snapshot(active_blocks: usize) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks,
+            selector_decode_blocks: active_blocks,
             active_requests: 0,
             prefill: PrefillLoadSnapshot::default(),
         }
@@ -456,6 +583,7 @@ mod tests {
     ) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks,
+            selector_decode_blocks: active_blocks,
             active_requests: 0,
             prefill: PrefillLoadSnapshot {
                 prefill_full_tokens_sum,
@@ -622,6 +750,66 @@ mod tests {
     }
 
     #[test]
+    fn staged_projection_counts_only_cached_prefix_and_preserves_legacy_boundaries() {
+        let worker = worker(1, 0);
+        let registry = PromptRegistry::new([worker]);
+        let active_lookup = lookup();
+        let selector_lookup = lookup();
+        let now = Instant::now();
+        let load = WorkerLoadSnapshot {
+            active_blocks: 4,
+            selector_decode_blocks: 2,
+            active_requests: 1,
+            prefill: PrefillLoadSnapshot::default(),
+        };
+        registry.apply_membership_deltas_and_load(
+            worker,
+            &active_lookup,
+            &selector_lookup,
+            store(None, &[1, 2, 3, 4]),
+            store(None, &[1, 2]),
+            load,
+        );
+
+        for (cached_tokens, expected_decode_blocks) in [(0, 2), (12, 3), (16, 4)] {
+            let projection = registry.project_worker_loads_with_staged_decode_cost(
+                Some(&[1, 2, 3, 4]),
+                true,
+                &HashMap::from([(worker, cached_tokens)]),
+                4,
+                now,
+            )[&worker];
+            assert_eq!(
+                projection.staged_decode_blocks,
+                Some(expected_decode_blocks)
+            );
+            assert_eq!(projection.potential_decode_blocks(), expected_decode_blocks);
+            assert_eq!(projection.active_decode_blocks, 4);
+            assert_eq!(projection.additional_active_blocks, 0);
+        }
+
+        let decode_only = registry.project_worker_loads_with_staged_decode_cost(
+            Some(&[1, 2, 3, 4]),
+            false,
+            &HashMap::from([(worker, 16)]),
+            4,
+            now,
+        )[&worker];
+        assert_eq!(decode_only.staged_decode_blocks, None);
+        assert_eq!(decode_only.potential_decode_blocks(), 4);
+
+        let no_active_block_tracking = registry.project_worker_loads_with_staged_decode_cost(
+            None,
+            true,
+            &HashMap::from([(worker, 16)]),
+            4,
+            now,
+        )[&worker];
+        assert_eq!(no_active_block_tracking.staged_decode_blocks, None);
+        assert_eq!(no_active_block_tracking.potential_decode_blocks(), 4);
+    }
+
+    #[test]
     fn removing_worker_clears_prompt_membership_and_load_state() {
         let worker_a = worker(1, 0);
         let worker_b = worker(2, 0);
@@ -650,6 +838,7 @@ mod tests {
             removed: vec![RemovedWorkerState {
                 worker: worker_a,
                 trie_lookup: Arc::clone(&lookup_a),
+                selector_trie_lookup: lookup(),
             }],
         });
         expected_loads.remove(&worker_a);

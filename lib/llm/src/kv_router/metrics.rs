@@ -5,7 +5,8 @@
 //!
 //! This module centralizes all router-side Prometheus metric definitions:
 //!
-//! - [`WorkerLoadMetrics`]: Per-worker active decode blocks and prefill tokens gauges.
+//! - [`WorkerLoadMetrics`]: Per-worker active decode blocks, staged selector decode blocks,
+//!   and prefill token gauges.
 //!   Registered on the frontend's own `prometheus::Registry` (default port 8000).
 //!   Populated by `KvWorkerMonitor` in the frontend when receiving ActiveLoad events.
 //!   - Frontend (aggregated and disaggregated): available on default port 8000
@@ -247,6 +248,7 @@ impl RouterWorkerStatusMetrics {
 /// and cleaned up by `KvWorkerMonitor` when workers disappear.
 pub struct WorkerLoadMetrics {
     pub active_decode_blocks: IntGaugeVec,
+    pub selector_decode_blocks: IntGaugeVec,
     pub active_prefill_tokens: IntGaugeVec,
 }
 
@@ -257,6 +259,7 @@ impl WorkerLoadMetrics {
         dp_rank: u32,
         worker_type: &str,
         active_blocks: usize,
+        selector_decode_blocks: usize,
         active_tokens: usize,
     ) {
         let worker_id_str = worker_id.to_string();
@@ -265,6 +268,9 @@ impl WorkerLoadMetrics {
         self.active_decode_blocks
             .with_label_values(labels)
             .set(active_blocks as i64);
+        self.selector_decode_blocks
+            .with_label_values(labels)
+            .set(selector_decode_blocks as i64);
         self.active_prefill_tokens
             .with_label_values(labels)
             .set(active_tokens as i64);
@@ -284,6 +290,18 @@ pub static WORKER_LOAD_METRICS: LazyLock<WorkerLoadMetrics> = LazyLock::new(|| W
         &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
     )
     .expect("Failed to create worker_active_decode_blocks gauge"),
+    selector_decode_blocks: IntGaugeVec::new(
+        Opts::new(
+            format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::WORKER_SELECTOR_DECODE_BLOCKS
+            ),
+            "Selector-only staged decode-cost KV blocks per worker",
+        ),
+        &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
+    )
+    .expect("Failed to create worker_selector_decode_blocks gauge"),
     active_prefill_tokens: IntGaugeVec::new(
         Opts::new(
             format!(
@@ -305,6 +323,7 @@ pub fn register_worker_load_metrics(
 ) -> Result<(), prometheus::Error> {
     let m = &*WORKER_LOAD_METRICS;
     registry.register(Box::new(m.active_decode_blocks.clone()))?;
+    registry.register(Box::new(m.selector_decode_blocks.clone()))?;
     registry.register(Box::new(m.active_prefill_tokens.clone()))?;
     Ok(())
 }
@@ -793,6 +812,18 @@ mod tests {
                 &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
             )
             .unwrap(),
+            selector_decode_blocks: IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::FRONTEND,
+                        frontend_service::WORKER_SELECTOR_DECODE_BLOCKS
+                    ),
+                    "Selector-only staged decode-cost KV blocks per worker",
+                ),
+                &[labels::WORKER_ID, labels::DP_RANK, labels::WORKER_TYPE],
+            )
+            .unwrap(),
             active_prefill_tokens: IntGaugeVec::new(
                 Opts::new(
                     format!(
@@ -810,10 +841,13 @@ mod tests {
             .register(Box::new(metrics.active_decode_blocks.clone()))
             .unwrap();
         registry
+            .register(Box::new(metrics.selector_decode_blocks.clone()))
+            .unwrap();
+        registry
             .register(Box::new(metrics.active_prefill_tokens.clone()))
             .unwrap();
 
-        metrics.observe(123, 0, "decode", 42, 100);
+        metrics.observe(123, 0, "decode", 42, 17, 100);
 
         let output = gather_pef(&registry);
         let expected = "\
@@ -823,6 +857,9 @@ dynamo_frontend_worker_active_decode_blocks{dp_rank=\"0\",worker_id=\"123\",work
 # HELP dynamo_frontend_worker_active_prefill_tokens Active prefill tokens queued per worker
 # TYPE dynamo_frontend_worker_active_prefill_tokens gauge
 dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 100
+# HELP dynamo_frontend_worker_selector_decode_blocks Selector-only staged decode-cost KV blocks per worker
+# TYPE dynamo_frontend_worker_selector_decode_blocks gauge
+dynamo_frontend_worker_selector_decode_blocks{dp_rank=\"0\",worker_id=\"123\",worker_type=\"decode\"} 17
 ";
         assert_eq!(
             output, expected,

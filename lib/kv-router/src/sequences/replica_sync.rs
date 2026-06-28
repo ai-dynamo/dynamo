@@ -13,6 +13,7 @@ use super::multi_worker::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequencePublisher, SequenceSubscriber,
 };
 use super::prompt_registry::WorkerLoadSnapshot;
+use super::single::PromptMembershipDelta;
 use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank};
 
 const MAX_REPLICA_BATCH_EVENTS: usize = 256;
@@ -196,10 +197,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     );
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry
-                        .apply_membership_delta_and_load_without_cleanup(
+                        .apply_membership_deltas_and_load_without_cleanup(
                             event_worker,
                             &slot.trie_lookup,
+                            &slot.selector_trie_lookup,
                             outcome.membership_delta,
+                            outcome.selector_membership_delta,
                             load,
                         );
                     (outcome.expired_request_ids, load)
@@ -221,13 +224,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let load = {
                     let slot = &table.slots[idx];
                     let mut seq = slot.sequences.write();
-                    let delta = seq.free(&request_id, decay_now);
+                    let updates = seq.free(&request_id, decay_now);
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry
-                        .apply_membership_delta_and_load_without_cleanup(
+                        .apply_membership_deltas_and_load_without_cleanup(
                             worker,
                             &slot.trie_lookup,
-                            delta,
+                            &slot.selector_trie_lookup,
+                            updates.active,
+                            updates.selector,
                             load,
                         );
                     load
@@ -246,10 +251,19 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                     return;
                 };
                 let load = {
-                    let mut seq = table.slots[idx].sequences.write();
-                    seq.mark_prefill_completed(&request_id, decay_now);
+                    let slot = &table.slots[idx];
+                    let mut seq = slot.sequences.write();
+                    let selector_delta = seq.mark_prefill_completed(&request_id, decay_now);
                     let load = seq.worker_load_snapshot();
-                    self.prompt_registry.replace_worker_load_state(worker, load);
+                    self.prompt_registry
+                        .apply_membership_deltas_and_load_without_cleanup(
+                            worker,
+                            &slot.trie_lookup,
+                            &slot.selector_trie_lookup,
+                            PromptMembershipDelta::default(),
+                            selector_delta,
+                            load,
+                        );
                     load
                 };
                 drop(table);

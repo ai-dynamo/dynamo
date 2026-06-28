@@ -73,6 +73,7 @@ impl SequencePublisher for RuntimeSequencePublisher {
         worker: &WorkerWithDpRank,
         worker_type: &str,
         blocks: usize,
+        selector_decode_blocks: usize,
         tokens: usize,
     ) {
         WORKER_LOAD_METRICS.observe(
@@ -80,6 +81,7 @@ impl SequencePublisher for RuntimeSequencePublisher {
             worker.dp_rank,
             worker_type,
             blocks,
+            selector_decode_blocks,
             tokens,
         );
     }

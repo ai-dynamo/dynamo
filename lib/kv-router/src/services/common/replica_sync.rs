@@ -135,6 +135,7 @@ impl SequencePublisher for ScopedSequencePublisher {
         _worker: &WorkerWithDpRank,
         _worker_type: &str,
         _blocks: usize,
+        _selector_decode_blocks: usize,
         _tokens: usize,
     ) {
     }

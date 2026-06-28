@@ -27,7 +27,7 @@ use super::prefill_tracker::PrefillTimeLoad;
 use super::prompt_membership_trie::lookup_live_hashes;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
 use super::request_maps::RequestIndex;
-use super::single::{ActiveSequences, PromptMembershipDelta, RequestId};
+use super::single::{ActiveSequences, PromptMembershipDelta, PromptMembershipUpdates, RequestId};
 use super::topology::{WorkerDpRange, WorkerTable, WorkerTopologyChange, WorkerTopologyError};
 use super::{PotentialLoadMaps, PrefillTokenDeltas, WorkerLoadProjection};
 use crate::protocols::{
@@ -72,6 +72,7 @@ pub trait SequencePublisher: Send + Sync {
         worker: &WorkerWithDpRank,
         worker_type: &str,
         blocks: usize,
+        selector_decode_blocks: usize,
         tokens: usize,
     );
 
@@ -232,6 +233,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             "expected all workers to have zero active blocks, got {active_blocks:?}",
         );
 
+        let selector_decode_blocks = self.selector_decode_blocks();
+        assert!(
+            selector_decode_blocks.values().all(|&count| count == 0),
+            "expected all workers to have zero staged selector blocks, got {selector_decode_blocks:?}",
+        );
+
         let active_tokens = self.active_tokens(decay_now);
         assert!(
             active_tokens.values().all(|&count| count == 0),
@@ -265,8 +272,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 .slots
                 .iter()
                 .filter_map(|slot| {
-                    let live_hashes = lookup_live_hashes(&slot.trie_lookup);
-                    (!live_hashes.is_empty()).then_some((slot.worker, live_hashes))
+                    let active = lookup_live_hashes(&slot.trie_lookup);
+                    let selector = lookup_live_hashes(&slot.selector_trie_lookup);
+                    (!active.is_empty() || !selector.is_empty()).then_some((
+                        slot.worker,
+                        active,
+                        selector,
+                    ))
                 })
                 .collect()
         };
@@ -294,10 +306,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         decay_now: Instant,
     ) -> ActiveLoad {
         let active_blocks = load.active_blocks;
+        let selector_decode_blocks = load.selector_decode_blocks;
         let active_tokens = load.active_tokens(decay_now);
 
-        self.publisher
-            .observe_load(&worker, self.worker_type, active_blocks, active_tokens);
+        self.publisher.observe_load(
+            &worker,
+            self.worker_type,
+            active_blocks,
+            selector_decode_blocks,
+            active_tokens,
+        );
 
         ActiveLoad {
             worker_id: worker.worker_id,
@@ -521,13 +539,15 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         request_id: &RequestId,
         decay_now: Instant,
     ) -> Result<(), SequenceError> {
-        self.mutate_request_worker_load_state(
+        self.mutate_request_worker_prompt_state(
             request_id,
             decay_now,
             ActiveSequenceEventData::MarkPrefillCompleted,
-            |seqs, rid, decay_now| {
-                seqs.mark_prefill_completed(rid, decay_now);
+            |seqs, rid, decay_now| PromptMembershipUpdates {
+                active: PromptMembershipDelta::default(),
+                selector: seqs.mark_prefill_completed(rid, decay_now),
             },
+            false,
         )
     }
 
@@ -655,6 +675,23 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         result
     }
 
+    pub fn project_worker_loads_with_staged_decode_cost(
+        &self,
+        token_sequence: Option<&[SequenceHash]>,
+        track_prefill_tokens: bool,
+        cached_tokens: &HashMap<WorkerWithDpRank, usize>,
+        decay_now: Instant,
+    ) -> FxHashMap<WorkerWithDpRank, WorkerLoadProjection> {
+        self.prompt_registry
+            .project_worker_loads_with_staged_decode_cost(
+                token_sequence,
+                track_prefill_tokens,
+                cached_tokens,
+                self.block_size,
+                decay_now,
+            )
+    }
+
     /// Query all workers for their current number of active blocks.
     pub fn active_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
         self.prompt_registry.active_blocks()
@@ -714,6 +751,10 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         self.prompt_registry.active_request_counts()
     }
 
+    pub fn selector_decode_blocks(&self) -> HashMap<WorkerWithDpRank, usize> {
+        self.prompt_registry.selector_decode_blocks()
+    }
+
     /// Force expire stale requests across all workers (one-shot).
     ///
     /// This is necessary because worker expiration otherwise only runs as a side-effect
@@ -730,10 +771,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             let outcome = seq.force_expiry();
             if !outcome.expired_request_ids.is_empty() {
                 let load = seq.worker_load_snapshot();
-                self.prompt_registry.apply_membership_delta_and_load(
+                self.prompt_registry.apply_membership_deltas_and_load(
                     slot.worker,
                     &slot.trie_lookup,
+                    &slot.selector_trie_lookup,
                     outcome.membership_delta,
+                    outcome.selector_membership_delta,
                     load,
                 );
                 removed_request_count += outcome.expired_request_ids.len();
@@ -853,10 +896,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 decay_now,
             );
             let load = seq.worker_load_snapshot();
-            self.prompt_registry.apply_membership_delta_and_load(
+            self.prompt_registry.apply_membership_deltas_and_load(
                 worker,
                 &slot.trie_lookup,
+                &slot.selector_trie_lookup,
                 outcome.membership_delta,
+                outcome.selector_membership_delta,
                 load,
             );
             break (outcome.expired_request_ids, load);
@@ -903,7 +948,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         worker: WorkerWithDpRank,
         request_id: &RequestId,
         decay_now: Instant,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipDelta,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipUpdates,
         remove_mapping: bool,
     ) -> Result<(), SequenceError> {
         let load = {
@@ -914,12 +959,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             };
             let slot = &table.slots[idx];
             let mut seq = slot.sequences.write();
-            let delta = mutate_fn(&mut seq, request_id, decay_now);
+            let updates = mutate_fn(&mut seq, request_id, decay_now);
             let load = seq.worker_load_snapshot();
-            self.prompt_registry.apply_membership_delta_and_load(
+            self.prompt_registry.apply_membership_deltas_and_load(
                 worker,
                 &slot.trie_lookup,
-                delta,
+                &slot.selector_trie_lookup,
+                updates.active,
+                updates.selector,
                 load,
             );
             load
@@ -934,37 +981,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(())
     }
 
-    fn mutate_request_worker_load_state_local(
-        &self,
-        worker: WorkerWithDpRank,
-        request_id: &RequestId,
-        decay_now: Instant,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
-    ) -> Result<(), SequenceError> {
-        let load = {
-            let table = self.workers.read();
-            let Some(&idx) = table.index.get(&worker) else {
-                drop(table);
-                return Err(self.stale_request_not_found(request_id, worker, "load_only_mutate"));
-            };
-            let mut seq = table.slots[idx].sequences.write();
-            mutate_fn(&mut seq, request_id, decay_now);
-            let load = seq.worker_load_snapshot();
-            self.prompt_registry.replace_worker_load_state(worker, load);
-            load
-        };
-
-        self.publish_worker_load_snapshot(worker, load, decay_now);
-
-        Ok(())
-    }
-
     fn mutate_request_worker_prompt_state(
         &self,
         request_id: &RequestId,
         decay_now: Instant,
         event_data: ActiveSequenceEventData,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipDelta,
+        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant) -> PromptMembershipUpdates,
         remove_mapping: bool,
     ) -> Result<(), SequenceError> {
         let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
@@ -981,31 +1003,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             mutate_fn,
             remove_mapping,
         )?;
-        self.spawn_publish_event(ActiveSequenceEvent {
-            request_id: request_id.clone(),
-            worker,
-            data: event_data,
-            router_id: self.router_id,
-            lora_name,
-        });
-        Ok(())
-    }
-
-    fn mutate_request_worker_load_state(
-        &self,
-        request_id: &RequestId,
-        decay_now: Instant,
-        event_data: ActiveSequenceEventData,
-        mutate_fn: impl FnOnce(&mut ActiveSequences, &RequestId, Instant),
-    ) -> Result<(), SequenceError> {
-        let worker = self.request_index.worker_for(request_id).ok_or_else(|| {
-            SequenceError::RequestNotFound {
-                request_id: request_id.clone(),
-            }
-        })?;
-
-        let lora_name = self.request_index.lora_for(request_id);
-        self.mutate_request_worker_load_state_local(worker, request_id, decay_now, mutate_fn)?;
         self.spawn_publish_event(ActiveSequenceEvent {
             request_id: request_id.clone(),
             worker,
@@ -1261,6 +1258,7 @@ mod tests {
             worker: &WorkerWithDpRank,
             _worker_type: &str,
             blocks: usize,
+            _selector_decode_blocks: usize,
             tokens: usize,
         ) {
             self.state
@@ -1602,6 +1600,7 @@ mod tests {
                 active_prefill_tokens: 0,
                 active_decode_blocks: 2,
                 additional_active_blocks: 1,
+                staged_decode_blocks: None,
             })
         );
         assert_eq!(
@@ -1610,6 +1609,7 @@ mod tests {
                 active_prefill_tokens: 12,
                 active_decode_blocks: 3,
                 additional_active_blocks: 2,
+                staged_decode_blocks: None,
             })
         );
     }
@@ -1809,7 +1809,65 @@ mod tests {
         assert!(sequences.request_index.is_empty());
         assert!(sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(0));
+        assert_eq!(
+            sequences.selector_decode_blocks().get(&worker).copied(),
+            Some(0)
+        );
         assert_eq!(active_request_count(&sequences, worker), 0);
+    }
+
+    #[tokio::test]
+    async fn replica_sync_promotes_staged_decode_blocks_without_wire_changes() {
+        let sequences = ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            4,
+            HashMap::from([(1_u64, (0_u32, 1_u32))]),
+            true,
+            0,
+            "test",
+        );
+        let worker = WorkerWithDpRank::new(1, 0);
+        let subscriber = VecSubscriber {
+            events: VecDeque::from(vec![
+                Ok(ActiveSequenceEvent {
+                    request_id: "req-1".to_string(),
+                    worker,
+                    data: ActiveSequenceEventData::AddRequest {
+                        token_sequence: Some(vec![1, 2, 3]),
+                        track_prefill_tokens: true,
+                        expected_output_tokens: None,
+                        prefill_load_hint: tracking_hint(8),
+                    },
+                    router_id: 99,
+                    lora_name: None,
+                }),
+                Ok(ActiveSequenceEvent {
+                    request_id: "req-1".to_string(),
+                    worker,
+                    data: ActiveSequenceEventData::MarkPrefillCompleted,
+                    router_id: 99,
+                    lora_name: None,
+                }),
+            ]),
+        };
+
+        sequences
+            .run_replica_sync(subscriber, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(3));
+        assert_eq!(
+            sequences.selector_decode_blocks().get(&worker).copied(),
+            Some(3)
+        );
+        assert_eq!(
+            sequences
+                .active_tokens(Instant::now())
+                .get(&worker)
+                .copied(),
+            Some(0)
+        );
     }
 
     #[tokio::test(start_paused = true)]

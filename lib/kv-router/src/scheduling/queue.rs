@@ -648,9 +648,12 @@ impl<
     /// Run the full scheduling pipeline for a single request:
     /// compute projected load -> select worker -> book tracked state -> respond.
     fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
-        request.worker_loads = self
-            .slots
-            .project_worker_loads(request.token_seq.as_deref(), decay_now);
+        request.worker_loads = self.slots.project_worker_loads_with_staged_decode_cost(
+            request.token_seq.as_deref(),
+            request.track_prefill_tokens,
+            &request.overlap.effective_cached_tokens,
+            decay_now,
+        );
 
         let selection = {
             let workers = self.workers_with_configs.borrow();
@@ -923,7 +926,7 @@ mod tests {
             self.response_rx.lock().unwrap().take();
         }
 
-        fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize) {}
+        fn observe_load(&self, _: &WorkerWithDpRank, _: &str, _: usize, _: usize, _: usize) {}
     }
 
     #[derive(Default)]
