@@ -2596,7 +2596,7 @@ mod offload {
         let dependency = blocked_state
             .offload_dependency
             .expect("decode growth must retain its exact offload dependency");
-        let _ = dependency.offload_id;
+        assert!(dependency.transfer_id.is_some());
         let deadline = dependency
             .deadline_ms
             .expect("active offload dependency must expose a virtual deadline");
@@ -2661,7 +2661,7 @@ mod offload {
         let dependency = core.state.requests[&blocked]
             .offload_dependency
             .expect("speculative reservation must retain its exact dependency");
-        let _ = dependency.offload_id;
+        assert!(dependency.transfer_id.is_some());
         let deadline = dependency
             .deadline_ms
             .expect("active offload dependency must expose a virtual deadline");
@@ -3148,6 +3148,7 @@ mod offload {
 
         assert_eq!(pass.admissions.len(), 0);
         assert_eq!(core.requests_awaiting_swap_in.len(), 1);
+        assert_eq!(core.requests_awaiting_swap_in[0]._prefix_pins.len(), 2);
         assert_eq!(
             core.kv_manager.num_active_blocks(),
             3,
@@ -3221,6 +3222,7 @@ mod offload {
         let mut collector = crate::replay::TraceCollector::default();
         core.execute_pass(&mut collector, 0.0);
         assert_eq!(core.requests_awaiting_swap_in.len(), 1);
+        assert_eq!(core.requests_awaiting_swap_in[0]._prefix_pins.len(), 2);
         assert_eq!(core.kv_manager.num_active_blocks(), 3);
         assert!(
             core.apply_command(SchedulerCommand::Submit(DirectRequest {
@@ -3262,10 +3264,14 @@ mod offload {
         assert_eq!(canceled.result, SchedulerCommandResult::Applied);
         assert!(core.requests_awaiting_swap_in.is_empty());
         assert!(!core.state.requests.contains_key(&uuid));
-        assert!(
-            canceled.lifecycle_events.is_empty(),
-            "cancelled swap-in must retain prefix pins and its destination until transfer termination"
-        );
+        assert!(canceled.lifecycle_events.iter().any(|event| matches!(
+            event,
+            SchedulerLifecycleEvent::DestinationReserved {
+                handoff_id,
+                request_id,
+                ..
+            } if *handoff_id == follower_handoff && *request_id == follower_uuid
+        )));
 
         assert_eq!(
             core.apply_command(SchedulerCommand::CancelDestination {
@@ -3274,13 +3280,7 @@ mod offload {
             .unwrap(),
             SchedulerCommandResult::Applied
         );
-        assert_eq!(
-            core.kv_manager.num_active_blocks(),
-            3,
-            "cancelled swap-in prefix pins and destination must remain reserved"
-        );
-        core.tick_offload_only(0.5);
-        assert_eq!(core.kv_manager.num_active_blocks(), 3);
+        assert_eq!(core.kv_manager.num_active_blocks(), 0);
 
         assert_eq!(
             core.receive(DirectRequest {
@@ -3292,7 +3292,6 @@ mod offload {
             uuid
         );
         core.tick_offload_only(10.0);
-        assert_eq!(core.kv_manager.num_active_blocks(), 0);
         assert!(core.requests_awaiting_swap_in.is_empty());
         assert!(core.state.requests.contains_key(&uuid));
         let replacement = core.execute_pass(&mut collector, 10.0);

@@ -13,7 +13,6 @@
 pub mod bandwidth_sharing_model;
 pub(crate) mod capacity_reservation;
 pub mod config;
-pub(crate) mod coordinator;
 pub mod engine;
 pub(crate) mod shared_g3;
 pub(crate) mod shared_g4;
@@ -21,8 +20,6 @@ pub mod worker;
 
 pub use bandwidth_sharing_model::{BandwidthSharingModel, TransferId};
 pub use config::KvbmOffloadConfig;
-pub(crate) use coordinator::OffloadId;
-pub use coordinator::SwapInHandle;
-pub use engine::MockOffloadEngine;
 pub(crate) use engine::{G1EvictionOutcome, G2BlockEventMetadata, G2OffloadBlock, G2RouterEvent};
+pub use engine::{MockOffloadEngine, SwapInHandle};
 pub use worker::{MockWorker, TransferDirection};
