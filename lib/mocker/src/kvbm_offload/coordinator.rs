@@ -706,15 +706,6 @@ impl OffloadCoordinator {
         }
     }
 
-    pub(crate) fn first_live_g1(&self) -> Option<OffloadId> {
-        self.state
-            .lock()
-            .expect("offload coordinator mutex poisoned")
-            .leases
-            .iter()
-            .find_map(|(id, lease)| matches!(lease.kind, LeaseKind::G1ToG2(_)).then_some(id))
-    }
-
     pub(crate) fn has_live_g1(&self, id: OffloadId) -> bool {
         self.state
             .lock()

@@ -1170,22 +1170,15 @@ impl MockOffloadEngine {
     }
 
     pub(crate) fn g1_offload_dependency(&self, id: OffloadId) -> Option<(OffloadId, Option<f64>)> {
-        if self.coordinator.has_live_g1(id) {
-            return Some((
-                id,
-                self.worker
-                    .earliest_local_offload_finish_with_id()
-                    .map(|(_, d)| d),
-            ));
+        if !self.coordinator.has_live_g1(id) {
+            return None;
         }
-        self.coordinator.first_live_g1().map(|current| {
-            (
-                current,
-                self.worker
-                    .earliest_local_offload_finish_with_id()
-                    .map(|(_, d)| d),
-            )
-        })
+        Some((
+            id,
+            self.worker
+                .earliest_local_offload_finish_with_id()
+                .map(|(_, d)| d),
+        ))
     }
 
     #[cfg(test)]

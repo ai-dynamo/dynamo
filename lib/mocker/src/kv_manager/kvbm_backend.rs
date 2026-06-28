@@ -67,9 +67,8 @@ pub enum BatchSwapInOutcome {
     NoHits,
     /// Swap-in reservation accepted. Caller parks the request with this
     /// handle and polls `SwapInHandle::is_complete()` on subsequent
-    /// scheduler passes. Matched lower-tier blocks are held by the
-    /// engine/handle for the duration of the transfer, while
-    /// `destination_slots` pins the G1 write targets.
+    /// scheduler passes. The coordinator retains matched lower-tier blocks,
+    /// G1 destination slots, and any pinned cached prefix for the transfer.
     Scheduled { handle: SwapInHandle },
     /// G2 had a match, but reserving destination G1 slots first had to
     /// trigger a G1→G2 eviction. Caller should retry after offload advances.
@@ -3613,7 +3612,23 @@ mod tests {
             assert_eq!(
                 mgr.refresh_offload_dependency(queued_dependency),
                 Some(queued_dependency),
-                "the queued request must stay protected while its exact predecessor is active"
+                "the queued request must stay protected while its exact lease is active"
+            );
+            mgr.tick_offload_engine(
+                first_dependency
+                    .deadline_ms
+                    .expect("first offload dependency deadline"),
+            );
+            assert_eq!(
+                mgr.refresh_offload_dependency(first_dependency),
+                None,
+                "a completed lease must not retarget to an unrelated live offload"
+            );
+            assert_eq!(
+                mgr.refresh_offload_dependency(queued_dependency)
+                    .map(|dependency| dependency.offload_id),
+                Some(queued_dependency.offload_id),
+                "the queued lease must remain independently live"
             );
             assert_eq!(mgr.num_active_block_refs(), 0);
         }

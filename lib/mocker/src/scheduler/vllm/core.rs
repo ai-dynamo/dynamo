@@ -1123,9 +1123,9 @@ impl VllmCore {
     /// `[skip_blocks .. skip_blocks + count]` of the request's block
     /// sequence — we skip the G1-cached prefix the request already had
     /// and register only the uncached-remainder blocks that the engine
-    /// actually onboarded from G2. `aws` drops at the end →
-    /// `SwapInHandle` drops → pinned G2 blocks release to kvbm-engine's
-    /// inactive pool.
+    /// actually onboarded from G2. `register_completed_swap_in` consumes
+    /// the coordinator lease, registers its retained G1 destinations, and
+    /// releases the remaining swap-in resources.
     #[cfg(feature = "kvbm-offload")]
     fn complete_swap_in(&mut self, aws: AwaitingSwapIn) {
         let count = aws.handle.block_count();
