@@ -278,8 +278,8 @@ impl Stream for DeduplicatingStream {
 /// Event publisher for a specific topic.
 pub struct EventPublisher {
     transport_kind: EventTransportKind,
-    scope: EventScope,
     topic: String,
+    subject: String,
     publisher_id: u64,
     sequence: AtomicU64,
     tx: Arc<dyn EventTransportTx>,
@@ -349,6 +349,7 @@ impl EventPublisher {
         let publisher_id = drt.discovery().instance_id();
         let discovery = Some(drt.discovery());
         let runtime_handle = drt.runtime().secondary();
+        let subject = format!("{}.{}", scope.subject_prefix(), topic);
 
         // Use Msgpack codec for all transports
         enum TransportSetup {
@@ -359,7 +360,10 @@ impl EventPublisher {
 
         let transport_setup = match transport_kind {
             EventTransportKind::Nats => {
-                let transport = Arc::new(nats_transport::NatsTransport::new(drt.clone()));
+                let transport = Arc::new(nats_transport::NatsTransport::new_publisher(
+                    drt.clone(),
+                    subject.clone(),
+                ));
                 let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
                 TransportSetup::Nats(transport as Arc<dyn EventTransportTx>, codec)
             }
@@ -472,8 +476,8 @@ impl EventPublisher {
 
         Ok(Self {
             transport_kind,
-            scope,
             topic,
+            subject,
             publisher_id,
             sequence: AtomicU64::new(0),
             tx,
@@ -487,23 +491,25 @@ impl EventPublisher {
     /// Publish a serializable event.
     pub async fn publish<T: Serialize + Send + Sync>(&self, event: &T) -> Result<()> {
         let payload = self.codec.encode_payload(event)?;
-        self.publish_bytes(payload.to_vec()).await
+        self.publish_bytes_ref(payload.as_ref()).await
     }
 
     /// Publish raw bytes.
     pub async fn publish_bytes(&self, bytes: Vec<u8>) -> Result<()> {
-        let envelope = EventEnvelope {
-            publisher_id: self.publisher_id,
-            sequence: self.sequence.fetch_add(1, Ordering::SeqCst),
-            published_at: current_timestamp_ms(),
-            topic: self.topic.clone(),
-            payload: Bytes::from(bytes),
-        };
+        self.publish_bytes_ref(&bytes).await
+    }
 
-        let envelope_bytes = self.codec.encode_envelope(&envelope)?;
-        let subject = format!("{}.{}", self.scope.subject_prefix(), self.topic);
+    /// Publish raw bytes without taking ownership of the payload buffer.
+    pub async fn publish_bytes_ref(&self, bytes: &[u8]) -> Result<()> {
+        let envelope_bytes = self.codec.encode_envelope_parts(
+            self.publisher_id,
+            self.sequence.fetch_add(1, Ordering::SeqCst),
+            current_timestamp_ms(),
+            &self.topic,
+            bytes,
+        )?;
 
-        self.tx.publish(&subject, envelope_bytes).await
+        self.tx.publish(&self.subject, envelope_bytes).await
     }
 
     /// Get the publisher ID.

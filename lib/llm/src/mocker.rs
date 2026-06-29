@@ -9,6 +9,10 @@
 mod handoff;
 mod metrics;
 
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -17,7 +21,7 @@ use crate::backend::ExecutionContext;
 use crate::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher};
 use crate::protocols::TokenIdType;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::{KvCacheEvent, StorageTier};
 use dynamo_mocker::common::handoff::HandoffId;
@@ -26,6 +30,7 @@ use dynamo_mocker::common::protocols::{
     RawKvEventSink,
 };
 use dynamo_mocker::engine::create_engine;
+use dynamo_mocker::loadgen::{OUTPUT_REPLAY_ID_ANNOTATION_KEY, effective_replay_key};
 use dynamo_mocker::scheduler::{SchedulerCommandEnvelope, SchedulerHandle};
 use dynamo_mocker::services::bootstrap::{
     BootstrapIdentity, BootstrapParticipantRole, BootstrapServer, BootstrapServerConfig,
@@ -43,6 +48,7 @@ use dynamo_runtime::{
 };
 use futures::StreamExt;
 use rand::Rng;
+use serde::Deserialize;
 use tokio::sync::{Notify, OnceCell, Semaphore, mpsc, oneshot};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -56,6 +62,107 @@ use self::handoff::{
 use self::metrics::NativeMockerMetrics;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
+
+#[derive(Debug, Clone, Deserialize)]
+struct ResponseReplayTraceRow {
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default, alias = "output_tokens")]
+    output_length: Option<usize>,
+    #[serde(default)]
+    output_token_ids: Option<Vec<TokenIdType>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResponseReplayTable {
+    rows: HashMap<String, Vec<TokenIdType>>,
+}
+
+impl ResponseReplayTable {
+    fn from_path(path: &Path) -> Result<Self> {
+        let file = File::open(path)
+            .with_context(|| format!("failed to open response replay trace {}", path.display()))?;
+        let reader = BufReader::new(file);
+        let mut rows = HashMap::new();
+        let mut session_turns: HashMap<String, usize> = HashMap::new();
+
+        for (line_index, line) in reader.lines().enumerate() {
+            let line = line.with_context(|| {
+                format!(
+                    "failed to read line {} from response replay trace {}",
+                    line_index + 1,
+                    path.display()
+                )
+            })?;
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let row: ResponseReplayTraceRow = serde_json::from_str(&line).with_context(|| {
+                format!(
+                    "failed to parse line {} from response replay trace {}",
+                    line_index + 1,
+                    path.display()
+                )
+            })?;
+            let turn_index = row
+                .session_id
+                .as_ref()
+                .map(|session_id| {
+                    let entry = session_turns.entry(session_id.clone()).or_default();
+                    let turn_index = *entry;
+                    *entry += 1;
+                    turn_index
+                })
+                .unwrap_or(0);
+
+            let Some(output_token_ids) = row.output_token_ids else {
+                continue;
+            };
+            let output_length = row.output_length.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "response replay trace line {} has output_token_ids but no output_length",
+                    line_index + 1
+                )
+            })?;
+            if output_length != output_token_ids.len() {
+                bail!(
+                    "response replay trace line {} output_length {} does not match output_token_ids length {}",
+                    line_index + 1,
+                    output_length,
+                    output_token_ids.len()
+                );
+            }
+
+            let key = effective_replay_key(
+                row.request_id.as_deref(),
+                row.session_id.as_deref(),
+                turn_index,
+                line_index,
+            );
+            if rows.insert(key.clone(), output_token_ids).is_some() {
+                bail!(
+                    "response replay trace line {} duplicates output_replay_id key {}",
+                    line_index + 1,
+                    key
+                );
+            }
+        }
+
+        Ok(Self { rows })
+    }
+
+    fn get(&self, key: &str) -> Option<Vec<TokenIdType>> {
+        self.rows.get(key).cloned()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+}
 
 /// Wrapper to adapt KvEventPublisher to the KvCacheEventSink trait
 struct KvEventSinkAdapter(KvEventPublisher);
@@ -113,6 +220,7 @@ pub struct MockEngine {
     handoff_session_permits: OnceCell<Vec<Arc<Semaphore>>>,
     senders_ready: Notify,
     engine_args: MockEngineArgs,
+    response_replay_table: Option<ResponseReplayTable>,
     unset_dp_rank_counter: AtomicU32,
     /// Bootstrap server for prefill workers in disaggregated mode
     bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
@@ -139,6 +247,23 @@ impl MockEngine {
     pub fn new(engine_args: MockEngineArgs) -> Self {
         let native_metrics = NativeMockerMetrics::new(engine_args.engine_type, engine_args.dp_size)
             .expect("mocker native metrics collectors should be valid");
+        let response_replay_table = engine_args
+            .response_replay_trace_path
+            .as_deref()
+            .map(|path| {
+                ResponseReplayTable::from_path(path).unwrap_or_else(|error| {
+                    panic!(
+                        "failed to load response replay trace {}: {error:#}",
+                        path.display()
+                    )
+                })
+            });
+        if let Some(table) = response_replay_table.as_ref() {
+            tracing::info!(
+                rows = table.rows.len(),
+                "loaded response replay token table"
+            );
+        }
         Self {
             active_requests: Arc::new(DashMap::new()),
             request_senders: OnceCell::new(),
@@ -146,6 +271,7 @@ impl MockEngine {
             handoff_session_permits: OnceCell::new(),
             senders_ready: Notify::new(),
             engine_args,
+            response_replay_table,
             unset_dp_rank_counter: AtomicU32::new(0),
             bootstrap_server: Arc::new(OnceCell::new()),
             source_handoff_manager: OnceCell::new(),
@@ -630,7 +756,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
         let is_prefill = self.engine_args.is_prefill();
-        let max_output_tokens = if is_prefill {
+        let requested_max_output_tokens = if is_prefill {
             1
         } else {
             request
@@ -639,6 +765,32 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 .ok_or_else(|| Error::msg("max_output_tokens must be specified for mocker"))?
                 as usize
         };
+        let replay_key = (!is_prefill)
+            .then(|| request.get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY))
+            .flatten();
+        let planned_output_token_ids = replay_key.as_deref().and_then(|key| {
+            let Some(table) = self.response_replay_table.as_ref() else {
+                tracing::warn!(
+                    replay_key = key,
+                    "request asked for output token replay but mocker has no response replay trace"
+                );
+                return None;
+            };
+            match table.get(key) {
+                Some(tokens) => Some(tokens),
+                None => {
+                    tracing::warn!(
+                        replay_key = key,
+                        "request asked for output token replay but key was not found"
+                    );
+                    None
+                }
+            }
+        });
+        let has_planned_output_tokens = planned_output_token_ids.is_some();
+        let max_output_tokens = planned_output_token_ids
+            .as_ref()
+            .map_or(requested_max_output_tokens, Vec::len);
         let native_timing = self
             .native_metrics
             .request_timing(&request.model, dp_rank, is_prefill, request_start)
@@ -648,6 +800,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let direct_request = DirectRequest {
             tokens: request.token_ids.clone(),
             max_output_tokens,
+            output_token_ids: planned_output_token_ids.clone(),
             uuid: Some(request_uuid),
             dp_rank,
             arrival_timestamp_ms: request.request_timestamp_ms,
@@ -873,7 +1026,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                         }
 
                         // Generate a token (with thinking boundaries if configured)
-                        let token_id = if token_count == 0 && think_len > 0 {
+                        let token_id = if has_planned_output_tokens {
+                            signal.token_id.unwrap_or_else(generate_random_token)
+                        } else if token_count == 0 && think_len > 0 {
                             reasoning.as_ref().unwrap().start_thinking_token_id
                         } else if think_len > 0 && token_count == think_len - 1 {
                             reasoning.as_ref().unwrap().end_thinking_token_id
@@ -1059,12 +1214,13 @@ pub async fn make_mocker_engine(
 
 #[cfg(test)]
 mod tests {
-    use super::MockEngine;
+    use super::*;
     use crate::protocols::common::llm_backend::PreprocessedRequest;
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_mocker::common::protocols::{MockEngineArgs, OutputSignal, WorkerType};
     use dynamo_runtime::pipeline::{AsyncEngine, SingleIn};
     use futures::StreamExt;
+    use std::io::Write;
     use std::time::Duration;
 
     fn prefill_request() -> PreprocessedRequest {
@@ -1105,6 +1261,7 @@ mod tests {
             .unwrap()
             .send(OutputSignal {
                 uuid: request_id,
+                token_id: None,
                 completed: true,
                 rejected: false,
                 handoff_delay_ms: Some(100.0),
@@ -1175,5 +1332,51 @@ mod tests {
             .expect("released bootstrap port must be reusable");
         engine.handoff_shutdown.cancel();
         prepared.server.wait_closed().await;
+    }
+
+    fn write_replay_trace(lines: &[serde_json::Value]) -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for line in lines {
+            writeln!(file, "{}", serde_json::to_string(line).unwrap()).unwrap();
+        }
+        file
+    }
+
+    #[test]
+    fn response_replay_table_derives_keys_and_validates_lengths() {
+        let file = write_replay_trace(&[
+            serde_json::json!({
+                "request_id": "explicit",
+                "session_id": "s",
+                "output_length": 2,
+                "output_token_ids": [7, 8],
+            }),
+            serde_json::json!({
+                "session_id": "s",
+                "output_length": 1,
+                "output_token_ids": [9],
+            }),
+            serde_json::json!({
+                "output_length": 1,
+                "output_token_ids": [10],
+            }),
+        ]);
+
+        let table = ResponseReplayTable::from_path(file.path()).unwrap();
+        assert_eq!(table.len(), 3);
+        assert_eq!(table.get("explicit").as_deref(), Some(&[7, 8][..]));
+        assert_eq!(table.get("s:1").as_deref(), Some(&[9][..]));
+        assert_eq!(table.get("line:2").as_deref(), Some(&[10][..]));
+
+        let invalid = write_replay_trace(&[serde_json::json!({
+            "output_length": 2,
+            "output_token_ids": [1],
+        })]);
+        let err = ResponseReplayTable::from_path(invalid.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("output_length 2 does not match output_token_ids length 1"),
+            "{err:#}"
+        );
     }
 }

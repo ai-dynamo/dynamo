@@ -4,6 +4,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    str::FromStr,
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -44,6 +45,58 @@ pub enum StructuralTagScope {
     Always,
 }
 
+pub const ENV_TOKENIZER_BACKEND: &str = "DYN_TOKENIZER";
+
+/// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenizerBackend {
+    Default,
+    Fastokens,
+}
+
+impl TokenizerBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Fastokens => "fastokens",
+        }
+    }
+
+    pub fn is_fastokens(self) -> bool {
+        matches!(self, Self::Fastokens)
+    }
+
+    pub fn from_env_or_default() -> Self {
+        match std::env::var(ENV_TOKENIZER_BACKEND) {
+            Ok(v) if v == "fastokens" => Self::Fastokens,
+            Ok(v) if v == "default" || v.is_empty() => Self::Default,
+            Ok(v) => {
+                tracing::warn!(
+                    value = %v,
+                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to default"
+                );
+                Self::Default
+            }
+            Err(_) => Self::Default,
+        }
+    }
+}
+
+impl FromStr for TokenizerBackend {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "default" => Ok(Self::Default),
+            "fastokens" => Ok(Self::Fastokens),
+            _ => Err(format!(
+                "invalid tokenizer backend '{value}' (expected 'default' or 'fastokens')"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct DisaggregatedEndpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +128,11 @@ pub struct ModelRuntimeConfig {
     pub tool_call_parser: Option<String>,
 
     pub reasoning_parser: Option<String>,
+
+    /// Frontend tokenizer backend override. When unset, direct Rust callers can still use
+    /// `DYN_TOKENIZER`; when set, this explicit value wins over process environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_backend: Option<TokenizerBackend>,
 
     /// Whether structural tag guided decoding is enabled for tool calls.
     #[serde(default)]
@@ -185,6 +243,7 @@ impl Default for ModelRuntimeConfig {
             max_num_batched_tokens: None,
             tool_call_parser: None,
             reasoning_parser: None,
+            tokenizer_backend: None,
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
@@ -365,6 +424,19 @@ impl ModelRuntimeConfig {
         }
     }
 
+    pub fn effective_tokenizer_backend(&self) -> TokenizerBackend {
+        self.tokenizer_backend
+            .unwrap_or_else(TokenizerBackend::from_env_or_default)
+    }
+
+    pub fn set_tokenizer_backend(
+        &mut self,
+        tokenizer_backend: Option<TokenizerBackend>,
+    ) -> &mut Self {
+        self.tokenizer_backend = tokenizer_backend;
+        self
+    }
+
     /// Rebuild canonical topology taints derived from `topology_domains`.
     ///
     /// Existing caller-provided taints outside the reserved topology prefix are preserved; generated
@@ -477,6 +549,63 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(!json.contains("stable_routing_id"));
         assert!(!json.contains("context_length"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tokenizer_backend_env_fallback() {
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("fastokens"))], || {
+            let cfg = ModelRuntimeConfig::default();
+            assert_eq!(
+                cfg.effective_tokenizer_backend(),
+                TokenizerBackend::Fastokens
+            );
+        });
+
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("default"))], || {
+            let cfg = ModelRuntimeConfig::default();
+            assert_eq!(cfg.effective_tokenizer_backend(), TokenizerBackend::Default);
+        });
+
+        temp_env::with_vars_unset([ENV_TOKENIZER_BACKEND], || {
+            let cfg = ModelRuntimeConfig::default();
+            assert_eq!(cfg.effective_tokenizer_backend(), TokenizerBackend::Default);
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tokenizer_backend_explicit_config_wins_over_env() {
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("fastokens"))], || {
+            let cfg = ModelRuntimeConfig {
+                tokenizer_backend: Some(TokenizerBackend::Default),
+                ..Default::default()
+            };
+            assert_eq!(cfg.effective_tokenizer_backend(), TokenizerBackend::Default);
+        });
+
+        temp_env::with_vars([(ENV_TOKENIZER_BACKEND, Some("default"))], || {
+            let cfg = ModelRuntimeConfig {
+                tokenizer_backend: Some(TokenizerBackend::Fastokens),
+                ..Default::default()
+            };
+            assert_eq!(
+                cfg.effective_tokenizer_backend(),
+                TokenizerBackend::Fastokens
+            );
+        });
+    }
+
+    #[test]
+    fn tokenizer_backend_roundtrips_through_serde_json() {
+        let cfg = ModelRuntimeConfig {
+            tokenizer_backend: Some(TokenizerBackend::Fastokens),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"tokenizer_backend\":\"fastokens\""));
+        let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tokenizer_backend, Some(TokenizerBackend::Fastokens));
     }
 
     #[test]
