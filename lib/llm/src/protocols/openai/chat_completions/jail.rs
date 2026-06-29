@@ -1451,6 +1451,41 @@ impl JailedStream {
         false
     }
 
+    /// Build a synthetic terminal chunk carrying `finish_reason: ToolCalls` for a
+    /// choice that emitted tool calls but never received a finish_reason from the
+    /// engine. Used by `fix_finish_reason` to satisfy the OpenAI stream ordering
+    /// requirement (the terminal chunk must carry a non-null `finish_reason`)
+    /// when the stream ends without one — DGH-967. The delta is empty; only the
+    /// `finish_reason` carries information.
+    fn synthesize_tool_calls_chunk(
+        template: &NvCreateChatCompletionStreamResponse,
+        index: u32,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut response = template.clone();
+        #[allow(deprecated)]
+        let choice = dynamo_protocols::types::ChatChoiceStream {
+            index,
+            delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+                role: None,
+                content: None,
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: Some(FinishReason::ToolCalls),
+            logprobs: None,
+        };
+        response.inner.choices = vec![choice];
+        Annotated {
+            data: Some(response),
+            id: None,
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
     /// Post-processor that sets finish_reason to ToolCalls when tool calls were emitted
     /// This should be called after apply() to fix the finish_reason for tool call chunks
     fn fix_finish_reason<S>(
@@ -1467,14 +1502,17 @@ impl JailedStream {
             tokio::pin!(input_stream);
             let mut has_tool_calls_per_choice: HashMap<u32, bool> = HashMap::new();
             // Choices that already received a finish_reason during the stream — used by
-            // the end-of-stream backstop below to avoid synthesizing a duplicate.
+            // the backstop below to avoid synthesizing a duplicate.
             let mut terminated: std::collections::HashSet<u32> = std::collections::HashSet::new();
             // Last response, kept (with choices cleared) as a template for a synthesized
-            // trailing finish_reason chunk when the stream ended without one.
+            // finish_reason chunk when the stream ended without one.
             let mut template: Option<NvCreateChatCompletionStreamResponse> = None;
+            // Whether we have already emitted the synthesized terminal chunks (either
+            // before the usage-only chunk or at stream end), so we don't emit twice.
+            let mut synthesized = false;
 
             while let Some(mut response) = input_stream.next().await {
-                // Track if any choice emitted tool calls
+                // Track if any choice emitted tool calls, and which already terminated.
                 if let Some(ref data) = response.data {
                     for choice in &data.inner.choices {
                         if choice.delta.tool_calls.is_some() {
@@ -1521,45 +1559,48 @@ impl JailedStream {
                     }
                 }
 
+                // OpenAI stream ordering: the terminal finish_reason chunk must precede
+                // the usage-only chunk. When a chunk with no choices arrives (the
+                // frontend's compliance usage chunk, or any other empty-choices chunk)
+                // and tool-call choices are still missing a finish_reason, synthesize
+                // their terminal `ToolCalls` chunks *before* yielding this one.
+                let is_empty_choices = response
+                    .data
+                    .as_ref()
+                    .map(|d| d.inner.choices.is_empty())
+                    .unwrap_or(true);
+                if is_empty_choices && !synthesized {
+                    if let Some(template) = &template {
+                        for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, has)| *has) {
+                            if terminated.contains(index) {
+                                continue;
+                            }
+                            yield synthesize_tool_calls_chunk(template, *index);
+                        }
+                    }
+                    synthesized = true;
+                }
+
                 yield response;
             }
 
-            // Backstop: the stream ended without a finish_reason for some choice that
-            // emitted tool calls (e.g. speculative decoding folded EOS into content, or
-            // the engine dropped the terminal signal). Strict OpenAI clients wait for a
-            // non-null finish_reason before considering a tool call complete; without a
-            // synthesized `ToolCalls` here they hang until their client-side timeout
-            // (DGH-967). Emit one trailing chunk per such choice carrying the missing
-            // reason. Choices that never emitted tool calls are left alone — there is no
-            // signal to invent a finish_reason from for text-only output.
-            if let Some(template) = template {
-                for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, has)| *has) {
-                    if terminated.contains(index) {
-                        continue;
+            // Backstop: the stream ended without a finish_reason AND without an
+            // empty-choices/usage chunk to anchor the synthesized terminal chunks
+            // before (e.g. the engine dropped the terminal signal and the frontend
+            // never emitted a usage chunk). Emit one trailing `ToolCalls` chunk per
+            // tool-call choice that never received a finish_reason. Strict OpenAI
+            // clients wait for a non-null finish_reason before considering a tool call
+            // complete; without this they hang until their client-side timeout
+            // (DGH-967). Choices that never emitted tool calls are left alone — there
+            // is no signal to invent a finish_reason from for text-only output.
+            if !synthesized {
+                if let Some(template) = template {
+                    for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, has)| *has) {
+                        if terminated.contains(index) {
+                            continue;
+                        }
+                        yield synthesize_tool_calls_chunk(template, *index);
                     }
-                    let mut response = template.clone();
-                    #[allow(deprecated)]
-                    let choice = dynamo_protocols::types::ChatChoiceStream {
-                        index: *index,
-                        delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
-                            role: None,
-                            content: None,
-                            tool_calls: None,
-                            function_call: None,
-                            refusal: None,
-                            reasoning_content: None,
-                        },
-                        finish_reason: Some(FinishReason::ToolCalls),
-                        logprobs: None,
-                    };
-                    response.inner.choices = vec![choice];
-                    yield Annotated {
-                        data: Some(response),
-                        id: None,
-                        event: None,
-                        comment: None,
-                        error: None,
-                    };
                 }
             }
         }
@@ -1816,6 +1857,38 @@ mod tests {
                     model: "test-model".to_string(),
                     choices: vec![choice],
                     usage: None,
+                    service_tier: None,
+                    system_fingerprint: None,
+                },
+                nvext: None,
+                llm_metrics: None,
+            }),
+            id: None,
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    /// A usage-only chunk (empty `choices`, a usage object) — the frontend's
+    /// OpenAI-compliance terminal chunk. Used to test that the synthesized
+    /// `ToolCalls` finish_reason chunk is emitted *before* this one.
+    fn usage_only_chunk() -> Annotated<NvCreateChatCompletionStreamResponse> {
+        Annotated {
+            data: Some(NvCreateChatCompletionStreamResponse {
+                inner: CreateChatCompletionStreamResponse {
+                    id: "id-42".to_string(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: 0,
+                    model: "test-model".to_string(),
+                    choices: vec![],
+                    usage: Some(dynamo_protocols::types::CompletionUsage {
+                        prompt_tokens: 10,
+                        completion_tokens: 5,
+                        total_tokens: 15,
+                        prompt_tokens_details: None,
+                        completion_tokens_details: None,
+                    }),
                     service_tier: None,
                     system_fingerprint: None,
                 },
@@ -2201,6 +2274,57 @@ mod tests {
             final_finish_reason(&responses),
             None,
             "text-only stream with no upstream finish_reason must not get a synthetic one"
+        );
+    }
+
+    // DGH-967 ordering: the ticket's repro is a tool call followed by a
+    // usage-only chunk, with NO finish_reason chunk from the engine. The
+    // synthesized `ToolCalls` terminal chunk must be emitted *before* the
+    // usage-only chunk (OpenAI stream ordering — the terminal finish_reason
+    // precedes usage). This mirrors the production repro in the ticket.
+    #[tokio::test]
+    async fn jail_synthesizes_tool_calls_before_usage_only_chunk() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![text_chunk("```
+{"name": "get_weather", "arguments": {"location": "SF"}}
+```"), usage_only_chunk()];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+        assert!(
+            !tool_calls.is_empty(),
+            "expected the hermes tool call: {tool_calls:?}"
+        );
+        assert_eq!(tool_calls[0].0, "get_weather");
+        assert_eq!(
+            final_finish_reason(&responses),
+            Some(FinishReason::ToolCalls),
+            "a synthesized ToolCalls terminal chunk must be present"
+        );
+
+        // The ToolCalls terminal chunk must precede the usage-only chunk.
+        let finish_pos = responses.iter().position(|r| {
+            r.data.as_ref().is_some_and(|d| {
+                d.inner
+                    .choices
+                    .iter()
+                    .any(|c| c.finish_reason == Some(FinishReason::ToolCalls))
+            })
+        });
+        let usage_pos = responses.iter().position(|r| {
+            r.data
+                .as_ref()
+                .is_some_and(|d| d.inner.usage.is_some() && d.inner.choices.is_empty())
+        });
+        let finish_pos = finish_pos.expect("no ToolCalls chunk emitted");
+        let usage_pos = usage_pos.expect("no usage-only chunk in output");
+        assert!(
+            finish_pos < usage_pos,
+            "ToolCalls chunk at {finish_pos} must precede the usage chunk at {usage_pos}"
         );
     }
 }
