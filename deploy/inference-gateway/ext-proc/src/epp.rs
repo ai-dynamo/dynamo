@@ -213,35 +213,44 @@ impl Router {
 
     /// Tokenize a JSON request body and extract router queue priorities.
     ///
-    /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority, routing_constraints)`.
     /// Priorities default to zero when absent. Mirrors the standalone Dynamo
     /// preprocessor lift in `lib/llm/src/preprocessor.rs`.
-    pub fn tokenize(
-        &self,
-        request_json: &str,
-    ) -> Result<(Vec<u32>, Option<String>, f64, u32, RoutingConstraints)> {
+    fn tokenize(&self, request_json: &str) -> Result<TokenizeResult> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
         let mut request_json: serde_json::Value = serde_json::from_str(request_json)?;
 
-        if request_json.get("prompt").is_some() {
-            normalize_completion_prompt_for_routing(&mut request_json);
+        if request_json.get("prompt").is_some() || request_json.get("prompt_embeds").is_some() {
+            let inject_token_data = prepare_completion_prompt_for_routing(&mut request_json);
             let request: NvCreateCompletionRequest = serde_json::from_value(request_json)?;
             let nvext = request.nvext.as_ref();
             let priority_jump = extract_priority_jump(nvext);
             let strict_priority = extract_strict_priority(nvext);
             let routing_constraints = extract_routing_constraints(nvext);
             let cache_namespace = request_cache_salt(&request).map(str::to_owned);
+
+            if request.inner.prompt_embeds.is_some() {
+                return Ok(TokenizeResult {
+                    token_ids: Vec::new(),
+                    cache_namespace,
+                    priority_jump,
+                    strict_priority,
+                    routing_constraints,
+                    inject_token_data: false,
+                });
+            }
+
             let (token_ids, _) = self.preprocessor.gather_tokens(&request, None, None)?;
 
-            return Ok((
+            return Ok(TokenizeResult {
                 token_ids,
                 cache_namespace,
                 priority_jump,
                 strict_priority,
                 routing_constraints,
-            ));
+                inject_token_data,
+            });
         }
 
         let request: NvCreateChatCompletionRequest = serde_json::from_value(request_json)?;
@@ -257,13 +266,14 @@ impl Router {
             .unwrap_or_default();
 
         let encoding = self.preprocessor.tokenize(&formatted_prompt)?;
-        Ok((
-            encoding.token_ids().to_vec(),
+        Ok(TokenizeResult {
+            token_ids: encoding.token_ids().to_vec(),
             cache_namespace,
             priority_jump,
             strict_priority,
             routing_constraints,
-        ))
+            inject_token_data: true,
+        })
     }
 
     /// Resolve a worker_id to a pod endpoint address (ip:port).
@@ -511,29 +521,54 @@ impl Router {
     }
 }
 
-/// Collapse completion batch prompts into the single prompt shape the router
-/// can score today. Full batch-aware routing needs an explicit policy.
-fn normalize_completion_prompt_for_routing(request_json: &mut serde_json::Value) {
+struct TokenizeResult {
+    token_ids: Vec<u32>,
+    cache_namespace: Option<String>,
+    priority_jump: f64,
+    strict_priority: u32,
+    routing_constraints: RoutingConstraints,
+    inject_token_data: bool,
+}
+
+/// Pick a single completion prompt shape the router can score today.
+///
+/// Returns whether the resulting tokens may be injected into the original
+/// forwarded request as `nvext.token_data`. Batch and prompt-embeds completions
+/// must not receive synthetic token data because the backend preprocesses them
+/// per subrequest or from embeddings.
+fn prepare_completion_prompt_for_routing(request_json: &mut serde_json::Value) -> bool {
+    if request_json.get("prompt_embeds").is_some() {
+        return false;
+    }
+
     let Some(prompt) = request_json.get_mut("prompt") else {
-        return;
+        return true;
     };
     let Some(items) = prompt.as_array() else {
-        return;
+        return true;
     };
     if items.len() <= 1 {
-        return;
+        return true;
     }
 
     if items.iter().all(|item| item.is_string()) {
-        let joined = items
-            .iter()
-            .filter_map(|item| item.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        *prompt = serde_json::Value::String(joined);
+        let first = items
+            .first()
+            .and_then(|item| item.as_str())
+            .map(str::to_string);
+        if let Some(first) = first {
+            *prompt = serde_json::Value::String(first);
+        }
+        return false;
     } else if items.iter().all(|item| item.is_array()) {
-        *prompt = items[0].clone();
+        let first = items.first().cloned();
+        if let Some(first) = first {
+            *prompt = first;
+        }
+        return false;
     }
+
+    true
 }
 
 /// Extract the router queue `priority_jump` from an OpenAI request's
@@ -986,7 +1021,14 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let (tokens, body_cache_namespace, priority_jump, strict_priority, routing_constraints) = self
+        let TokenizeResult {
+            token_ids: tokens,
+            cache_namespace: body_cache_namespace,
+            priority_jump,
+            strict_priority,
+            routing_constraints,
+            inject_token_data,
+        } = self
             .tokenize(body_str)
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
         let cache_namespace =
@@ -1121,6 +1163,7 @@ impl EndpointPicker for Router {
             is_disaggregated,
             endpoint = %endpoint,
             token_count = tokens.len(),
+            inject_token_data,
             priority_jump,
             model = %req.model,
             header_count = headers.len(),
@@ -1134,7 +1177,7 @@ impl EndpointPicker for Router {
             endpoint,
             fallbacks: vec![],
             headers,
-            token_ids: Some(tokens),
+            token_ids: inject_token_data.then_some(tokens),
         })
     }
 
@@ -1263,15 +1306,16 @@ mod tests {
     }
 
     #[test]
-    fn completion_string_array_prompt_collapses_to_single_prompt() {
+    fn completion_string_array_prompt_routes_first_prompt_without_token_injection() {
         let mut request = serde_json::json!({
             "model": "test",
             "prompt": ["hello", "world"]
         });
 
-        normalize_completion_prompt_for_routing(&mut request);
+        let inject_token_data = prepare_completion_prompt_for_routing(&mut request);
 
-        assert_eq!(request["prompt"], "hello world");
+        assert!(!inject_token_data);
+        assert_eq!(request["prompt"], "hello");
     }
 
     #[test]
@@ -1281,21 +1325,37 @@ mod tests {
             "prompt": [101, 102, 103]
         });
 
-        normalize_completion_prompt_for_routing(&mut request);
+        let inject_token_data = prepare_completion_prompt_for_routing(&mut request);
 
+        assert!(inject_token_data);
         assert_eq!(request["prompt"], serde_json::json!([101, 102, 103]));
     }
 
     #[test]
-    fn completion_token_batch_prompt_uses_first_prompt() {
+    fn completion_token_batch_prompt_routes_first_prompt_without_token_injection() {
         let mut request = serde_json::json!({
             "model": "test",
             "prompt": [[101, 102], [201, 202]]
         });
 
-        normalize_completion_prompt_for_routing(&mut request);
+        let inject_token_data = prepare_completion_prompt_for_routing(&mut request);
 
+        assert!(!inject_token_data);
         assert_eq!(request["prompt"], serde_json::json!([101, 102]));
+    }
+
+    #[test]
+    fn completion_prompt_embeds_disables_token_injection() {
+        let mut request = serde_json::json!({
+            "model": "test",
+            "prompt": "placeholder",
+            "prompt_embeds": "encoded"
+        });
+
+        let inject_token_data = prepare_completion_prompt_for_routing(&mut request);
+
+        assert!(!inject_token_data);
+        assert_eq!(request["prompt"], "placeholder");
     }
 
     #[test]

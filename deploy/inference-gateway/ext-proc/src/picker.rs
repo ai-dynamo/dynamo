@@ -60,9 +60,11 @@ pub struct PickResult {
     /// Extra headers to inject into the forwarded request.
     /// Used by Dynamo for routing metadata (worker IDs, DP ranks, routing mode).
     pub headers: Vec<(String, String)>,
-    /// Pre-computed token IDs from the picker's tokenization.
+    /// Optional pre-computed token IDs safe to forward to the backend.
     /// Injected into the request body as `nvext.token_data` so the backend
-    /// skips redundant tokenization. Mirrors Go EPP's `setTokenizedPrompt`.
+    /// skips redundant tokenization. Pickers must leave this unset when their
+    /// routing tokens do not exactly match the original request's execution
+    /// prompt, such as batch completions collapsed for routing.
     pub token_ids: Option<Vec<u32>>,
 }
 
