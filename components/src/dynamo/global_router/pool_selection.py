@@ -778,6 +778,7 @@ def _load_disagg_config(data: dict, mode: str) -> GlobalRouterConfig:
     config = GlobalRouterConfig(
         mode=mode,
         enable_priority_retry=data.get("enable_priority_retry", False),
+        reserve_output_tokens_for_context=data.get("reserve_output_tokens_for_context", False),
         num_prefill_pools=data["num_prefill_pools"],
         num_decode_pools=data["num_decode_pools"],
         prefill_pool_dynamo_namespaces=data["prefill_pool_dynamo_namespaces"],
@@ -819,6 +820,7 @@ def _load_agg_config(data: dict, mode: str) -> GlobalRouterConfig:
     config = GlobalRouterConfig(
         mode=mode,
         enable_priority_retry=data.get("enable_priority_retry", False),
+        reserve_output_tokens_for_context=data.get("reserve_output_tokens_for_context", False),
         num_agg_pools=data["num_agg_pools"],
         agg_pool_dynamo_namespaces=data["agg_pool_dynamo_namespaces"],
         agg_pool_priorities=data.get("agg_pool_priorities"),
