@@ -195,13 +195,13 @@ benchmarks with AIPerf. Takes 2–4 hours.
 - **Requires GPU resources** — the profiler deploys real inference engines on
   your cluster during profiling.
 
-## DGDR Detail: AIC Support
+## DGDR Detail: AIC Support Matrix
 
 The rapid strategy relies on AIC system metadata and performance models. Check
 the [AIC support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
 for the latest model, GPU, backend, and backend-version support.
 
-Rapid fallback has three gates:
+Rapid checks support in this order:
 
 - **DGDR GPU SKU:** DGDR must accept `hardware.gpuSku`. If discovery cannot map
   your GPU product name to a recognized SKU, set `hardware.gpuSku`,
