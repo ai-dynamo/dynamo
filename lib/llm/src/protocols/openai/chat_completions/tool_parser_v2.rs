@@ -299,6 +299,19 @@ where
                 if result.normal_text.is_empty() && tool_calls.is_none() {
                     continue;
                 }
+                // A choice that produced tool calls during the stream must terminate
+                // with `ToolCalls` even when the backend never sent a finish_reason
+                // chunk (e.g. speculative decoding folded EOS into content, or the
+                // engine dropped the terminal signal). Strict OpenAI clients wait for
+                // a non-null finish_reason before considering a tool call complete;
+                // emitting `None` here left them hanging until their client-side
+                // timeout (DGH-967). Text-only output without an upstream finish
+                // reason stays `None` — we have no signal to invent one from.
+                let finish_reason = if tool_emitted.contains(index) {
+                    Some(FinishReason::ToolCalls)
+                } else {
+                    None
+                };
                 let mut response = template.clone();
                 #[allow(deprecated)]
                 let choice = dynamo_protocols::types::ChatChoiceStream {
@@ -312,7 +325,7 @@ where
                         refusal: None,
                         reasoning_content: None,
                     },
-                    finish_reason: None,
+                    finish_reason,
                     logprobs: None,
                 };
                 response.inner.choices = vec![choice];
@@ -533,6 +546,61 @@ mod tests {
             final_finish_reason(&out),
             Some(FinishReason::ToolCalls),
             "finish_reason must flip Stop->ToolCalls when tool calls are emitted"
+        );
+    }
+
+    // DGH-967: the stream emits a complete tool call but ends WITHOUT any
+    // finish_reason chunk (e.g. speculative decoding folded EOS into content, or
+    // the engine dropped the terminal signal). A strict OpenAI client waits for a
+    // non-null finish_reason before considering the tool call complete; the
+    // end-of-stream backstop must synthesize `ToolCalls` so the client doesn't
+    // hang until its timeout.
+    #[tokio::test]
+    async fn qwen3_bypass_synthesizes_tool_calls_when_stream_lacks_finish_reason() {
+        // Same call as the incremental test, but the final chunk carries NO
+        // finish_reason — the stream simply ends after the tool markup.
+        let mut chunks: Vec<_> = QWEN3_GET_WEATHER
+            .as_bytes()
+            .chunks(8)
+            .map(|b| chunk(std::str::from_utf8(b).unwrap(), false))
+            .collect();
+        // Trailing empty chunk with finish=false — no finish_reason at all.
+        chunks.push(chunk("", false));
+
+        let out: Vec<_> = apply_stream(stream::iter(chunks), None, "qwen3_coder".to_string())
+            .collect::<Vec<_>>()
+            .await;
+
+        let (calls, _content) = reassemble(&out);
+        assert_eq!(calls.len(), 1, "expected exactly one tool call: {calls:?}");
+        assert_eq!(calls[0].0, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(args["location"], "Paris");
+        assert_eq!(
+            final_finish_reason(&out),
+            Some(FinishReason::ToolCalls),
+            "backstop must synthesize ToolCalls when the stream ended without a finish_reason"
+        );
+    }
+
+    // DGH-967 corollary: when the stream ends without a finish_reason AND no tool
+    // call was emitted (text-only output), the backstop must NOT invent a
+    // finish_reason — there is no signal to synthesize one from. A trailing
+    // content chunk may be emitted, but its finish_reason stays None.
+    #[tokio::test]
+    async fn qwen3_bypass_does_not_synthesize_finish_reason_for_text_only_stream() {
+        let chunks = vec![chunk("hello world", false), chunk("", false)];
+
+        let out: Vec<_> = apply_stream(stream::iter(chunks), None, "qwen3_coder".to_string())
+            .collect::<Vec<_>>()
+            .await;
+
+        let (calls, _content) = reassemble(&out);
+        assert!(calls.is_empty(), "no tool calls expected: {calls:?}");
+        assert_eq!(
+            final_finish_reason(&out),
+            None,
+            "text-only stream with no upstream finish_reason must not get a synthetic one"
         );
     }
 }

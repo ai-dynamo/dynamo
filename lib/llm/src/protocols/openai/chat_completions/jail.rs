@@ -1461,9 +1461,17 @@ impl JailedStream {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        let _ = named_tool_active;
+        let _ = &jail_mode;
         stream! {
             tokio::pin!(input_stream);
             let mut has_tool_calls_per_choice: HashMap<u32, bool> = HashMap::new();
+            // Choices that already received a finish_reason during the stream — used by
+            // the end-of-stream backstop below to avoid synthesizing a duplicate.
+            let mut terminated: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            // Last response, kept (with choices cleared) as a template for a synthesized
+            // trailing finish_reason chunk when the stream ended without one.
+            let mut template: Option<NvCreateChatCompletionStreamResponse> = None;
 
             while let Some(mut response) = input_stream.next().await {
                 // Track if any choice emitted tool calls
@@ -1472,6 +1480,14 @@ impl JailedStream {
                         if choice.delta.tool_calls.is_some() {
                             has_tool_calls_per_choice.insert(choice.index, true);
                         }
+                        if choice.finish_reason.is_some() {
+                            terminated.insert(choice.index);
+                        }
+                    }
+                    {
+                        let mut t = data.clone();
+                        t.inner.choices.clear();
+                        template = Some(t);
                     }
                 }
 
@@ -1487,7 +1503,6 @@ impl JailedStream {
                                 // choice, finish_reason MUST be "tool_calls" — regardless of
                                 // whether tool_choice was "auto", "required", or a named
                                 // function.
-                                let _ = named_tool_active;
                                 match &jail_mode {
                                     JailMode::MarkerBased => {
                                         if has_tool_calls {
@@ -1507,6 +1522,45 @@ impl JailedStream {
                 }
 
                 yield response;
+            }
+
+            // Backstop: the stream ended without a finish_reason for some choice that
+            // emitted tool calls (e.g. speculative decoding folded EOS into content, or
+            // the engine dropped the terminal signal). Strict OpenAI clients wait for a
+            // non-null finish_reason before considering a tool call complete; without a
+            // synthesized `ToolCalls` here they hang until their client-side timeout
+            // (DGH-967). Emit one trailing chunk per such choice carrying the missing
+            // reason. Choices that never emitted tool calls are left alone — there is no
+            // signal to invent a finish_reason from for text-only output.
+            if let Some(template) = template {
+                for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, &has)| has) {
+                    if terminated.contains(index) {
+                        continue;
+                    }
+                    let mut response = template.clone();
+                    #[allow(deprecated)]
+                    let choice = dynamo_protocols::types::ChatChoiceStream {
+                        index: *index,
+                        delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+                            role: None,
+                            content: None,
+                            tool_calls: None,
+                            function_call: None,
+                            refusal: None,
+                            reasoning_content: None,
+                        },
+                        finish_reason: Some(FinishReason::ToolCalls),
+                        logprobs: None,
+                    };
+                    response.inner.choices = vec![choice];
+                    yield Annotated {
+                        data: Some(response),
+                        id: None,
+                        event: None,
+                        comment: None,
+                        error: None,
+                    };
+                }
             }
         }
     }
@@ -2077,6 +2131,76 @@ mod tests {
             all_text.contains("Done!"),
             "Trailing text 'Done!' should appear in output. Got text: {:?}",
             all_text
+        );
+    }
+
+    /// The last `finish_reason` a client sees across the stream. `None` if the
+    /// stream never carried one (the DGH-967 hang condition).
+    fn final_finish_reason(
+        responses: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> Option<FinishReason> {
+        responses
+            .iter()
+            .filter_map(|r| r.data.as_ref())
+            .flat_map(|d| d.inner.choices.iter())
+            .filter_map(|c| c.finish_reason)
+            .next_back()
+    }
+
+    // DGH-967: when the engine emits a complete tool call but the stream ends
+    // WITHOUT any finish_reason chunk (speculative decoding folded EOS into
+    // content, or the terminal signal was dropped), a strict OpenAI client
+    // waits for a non-null finish_reason and hangs until its timeout. The jail
+    // path's finalize() emits the tool call with the (absent) upstream
+    // finish_reason; fix_finish_reason's end-of-stream backstop must synthesize
+    // `ToolCalls` so the client gets a terminal signal.
+    #[tokio::test]
+    async fn jail_synthesizes_tool_calls_finish_reason_when_stream_lacks_one() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![text_chunk("```
+{"name": "get_weather", "arguments": {"location": "SF"}}
+```")];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+        assert!(
+            !tool_calls.is_empty(),
+            "expected the hermes tool call to be parsed: {tool_calls:?}"
+        );
+        assert_eq!(tool_calls[0].0, "get_weather");
+        assert_eq!(
+            final_finish_reason(&responses),
+            Some(FinishReason::ToolCalls),
+            "backstop must synthesize ToolCalls when the stream ended without a finish_reason"
+        );
+    }
+
+    // DGH-967 corollary: a text-only stream that ends without a finish_reason
+    // must NOT get a synthesized one — there is no signal to invent a
+    // finish_reason from when no tool call was emitted.
+    #[tokio::test]
+    async fn jail_does_not_synthesize_finish_reason_for_text_only_stream() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![text_chunk("hello world"), text_chunk("")];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+        assert!(
+            tool_calls.is_empty(),
+            "no tool calls expected: {tool_calls:?}"
+        );
+        assert_eq!(
+            final_finish_reason(&responses),
+            None,
+            "text-only stream with no upstream finish_reason must not get a synthetic one"
         );
     }
 }
