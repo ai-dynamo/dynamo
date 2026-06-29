@@ -2291,6 +2291,7 @@ def _test_router_decisions_disagg(
     router_aic_config: Optional[dict[str, Any]] = None,
     enable_bootstrap: bool = False,
     strict_timing: bool = True,
+    progressive_request_count: int = 4,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -2315,6 +2316,7 @@ def _test_router_decisions_disagg(
         durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
         router_aic_config: Optional AIC router perf-model config for frontend KV routing.
         strict_timing: If False, allow backend responses that omit optional timing fields.
+        progressive_request_count: Number of overlapping-prefix requests to send.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -2357,6 +2359,9 @@ def _test_router_decisions_disagg(
             )
         )
 
+        if progressive_request_count < 2:
+            raise ValueError("progressive_request_count must be at least 2")
+
         async def send_progressive_requests():
             """Send progressive requests with overlapping prefixes and collect worker IDs."""
             prefill_worker_ids = []
@@ -2366,7 +2371,7 @@ def _test_router_decisions_disagg(
             base_content = test_payload["messages"][0]["content"]
 
             async with aiohttp.ClientSession() as session:
-                for i in range(4):
+                for i in range(progressive_request_count):
                     # Build progressive content by repeating base content
                     # Each iteration adds more content to extend the prefix
                     progressive_content = " ".join([base_content] * (i + 1))
@@ -2385,7 +2390,7 @@ def _test_router_decisions_disagg(
                     }
 
                     logger.info(
-                        f"Sending request {i + 1}/4 with progressive prefix "
+                        f"Sending request {i + 1}/{progressive_request_count} with progressive prefix "
                         f"(~{len(progressive_content)} chars)"
                     )
 
@@ -2483,8 +2488,8 @@ def _test_router_decisions_disagg(
         logger.info(f"Collected decode_worker_ids: {decode_ids}")
 
         # Verify we got worker IDs from all requests
-        assert len(prefill_ids) == 4, (
-            f"Expected 4 prefill_worker_ids, got {len(prefill_ids)}. "
+        assert len(prefill_ids) == progressive_request_count, (
+            f"Expected {progressive_request_count} prefill_worker_ids, got {len(prefill_ids)}. "
             f"Make sure nvext.extra_fields=['worker_id'] is being processed."
         )
 
@@ -2495,12 +2500,12 @@ def _test_router_decisions_disagg(
         # the second request is routed before the first request's KV "stored" events have been
         # fully ingested. After ingestion, routing stabilizes.
         #
-        # So for TCP we assert that requests 2-4 converge to the same prefill worker; for NATS
+        # So for TCP we assert that requests 2-N converge to the same prefill worker; for NATS
         # request plane we keep the stronger assertion that all 4 match.
         if request_plane == "tcp":
             unique_prefill_ids = set(prefill_ids[1:])
             assert len(unique_prefill_ids) == 1, (
-                f"Expected prefill requests 2-4 to route to the same worker due to prefix reuse, "
+                f"Expected prefill requests 2-{progressive_request_count} to route to the same worker due to prefix reuse, "
                 f"but found {len(unique_prefill_ids)} unique prefill_worker_ids: {unique_prefill_ids}. "
                 f"Full list: {prefill_ids}"
             )

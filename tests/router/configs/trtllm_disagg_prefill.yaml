@@ -13,6 +13,8 @@
 #     "Context only requests are not supported in pytorch backend when
 #     overlap is enabled with block reuse").
 disable_overlap_scheduler: true
+attn_backend: VANILLA
 
 cache_transceiver_config:
-  backend: DEFAULT
+  backend: UCX
+  max_tokens_in_buffer: 8192

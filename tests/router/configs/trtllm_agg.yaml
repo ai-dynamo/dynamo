@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Extra-engine-args for aggregate TRT-LLM router e2e tests.
+#
+# The TRTLLM attention backend currently takes the FMHA NVRTC path on B200 for
+# TinyLlama generation and can fail when runtime include discovery does not
+# populate cuda.h search paths. VANILLA keeps the test on the PyTorch backend
+# path while still exercising real TRT-LLM workers,
+# router discovery, request forwarding, KV events, and local indexer behavior.
+attn_backend: VANILLA
