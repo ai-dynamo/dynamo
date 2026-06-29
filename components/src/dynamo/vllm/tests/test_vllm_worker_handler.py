@@ -1485,6 +1485,24 @@ class TestRLAdminRouteHardening:
         handler.engine_client.reset_prefix_cache.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_distributed_update_rejects_unpaused_cache_reset(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        resp = await handler.update_weights_from_distributed(
+            {"allow_unpaused": True, "engine_rpc": "update_weights"}
+        )
+
+        assert resp["status"] == "error"
+        assert "cannot reset the prefix cache" in resp["message"]
+        handler.engine_client.collective_rpc.assert_not_awaited()
+        handler.engine_client.reset_prefix_cache.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_distributed_update_preserves_safe_defaults(self):
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()

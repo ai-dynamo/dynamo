@@ -1646,6 +1646,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "'reset_prefix_cache' must be a boolean",
             }
+        if allow_unpaused and reset_prefix_cache:
+            return {
+                "status": "error",
+                "message": (
+                    "Unpaused weight updates cannot reset the prefix cache. "
+                    "Set 'reset_prefix_cache' to false or pause generation first."
+                ),
+            }
         async with self._pause_lock:
             if not self._paused and not allow_unpaused:
                 return {
