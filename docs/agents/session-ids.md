@@ -25,7 +25,7 @@ Dynamo also recognizes the current stable identity headers emitted by the follow
 
 | Source | Session input | Parent input | Dynamo behavior |
 |--------|------------------|--------------|-----------------|
-| Claude Code | `x-claude-code-session-id`; `x-claude-code-agent-id` for child agents | Inferred from `x-claude-code-session-id` when `x-claude-code-agent-id` differs | Root turns use the session header as `session_id`; child-agent turns use the agent header as `session_id` and the session header as `parent_session_id`. |
+| Claude Code | `x-claude-code-session-id`; `x-claude-code-agent-id` for child agents | `x-claude-code-parent-agent-id`; falls back to `x-claude-code-session-id` | Root turns use the session header as `session_id`; child-agent turns use the agent header as `session_id`. Nested children use the parent-agent header as `parent_session_id`; top-level children use the root session header. |
 | Codex | `session-id` | None | `session-id` becomes the `session_id`. |
 | OpenCode | `x-session-id` | `x-parent-session-id` | `x-session-id` becomes the `session_id`; `x-parent-session-id` becomes `parent_session_id` when present. |
 

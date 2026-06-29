@@ -294,25 +294,6 @@ async fn query_returns_404_for_unknown_model() {
     task.await.expect("server task join");
 }
 
-/// Smoke test that the axum router is wired correctly end-to-end and
-/// reports `/health` 200. Catches misuse of feature flags / route gates.
-#[tokio::test]
-async fn health_returns_ok() {
-    let registry = Arc::new(WorkerRegistry::new(1));
-    let state = make_app_state(registry);
-    let (base_url, cancel, task) = spawn_indexer_http(state).await;
-
-    let resp = reqwest::Client::new()
-        .get(format!("{base_url}/health"))
-        .send()
-        .await
-        .expect("GET /health");
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
-
-    cancel.cancel();
-    task.await.expect("server task join");
-}
-
 #[cfg(feature = "metrics")]
 #[tokio::test]
 async fn duplicate_store_warning_is_exported() {

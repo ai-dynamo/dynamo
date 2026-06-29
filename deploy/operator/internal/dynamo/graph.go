@@ -1710,6 +1710,9 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 		if mount.Name == "" {
 			continue
 		}
+		if _, ok := seen[mount.Name]; ok {
+			continue
+		}
 		if volume, ok := volumesByName[mount.Name]; ok {
 			ordered = append(ordered, volume)
 			seen[mount.Name] = struct{}{}
@@ -2077,6 +2080,8 @@ type cliqueParams struct {
 
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
 // injecting labels, annotations, checkpoint config, and scheduler settings.
+//
+//nolint:gocyclo
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
@@ -2103,46 +2108,31 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		}
 	}
 
-	// minAvailable controls Grove gang-scheduling: the clique is only
-	// considered available when at least this many replicas are Ready.
-	//
-	// The invariant we want is "minAvailable = Replicas unless the clique
-	// has redundant replicas". Concretely:
-	//
-	//   - Plain multinode (no inter-pod GMS failover): the worker clique
-	//     collapses non-leader ranks into a single clique with
-	//     Replicas = numberOfNodes - 1 and those pods are NCCL peers of each
-	//     other — losing any one breaks the collective, so all replicas
-	//     must be Ready. Standalone inter-pod GMS on multinode also lands
-	//     here but has Replicas = 1 per PCLQ (primary only, no shadows), so
-	//     the same rule evaluates to minAvailable = 1 without a special case.
-	//
-	//   - Inter-pod GMS failover (single- or multinode): within each rank
-	//     Replicas = primary + shadows and shadows ARE redundant hot spares
-	//     — requiring every shadow to be Ready would defeat failover, so
-	//     the clique stays at minAvailable = 1.
-	//
-	//   - Single-node clique (no multinode, with or without intra-pod
-	//     failover or standalone inter-pod GMS): Replicas is at most 1 or a
-	//     small DP fanout under the outer PCSG where the replicas are
-	//     independent of each other; minAvailable = 1 is correct.
-	//
-	// The two-line rule below captures all of the above: take the baseline
-	// of 1, then lift it to Replicas only on plain multinode without
-	// inter-pod failover (the only layout that combines >1 replicas per
-	// clique with no redundancy between them).
+	// MinAvailable serves two purposes for Grove PCLQ:
+	// 1. It defines the minimum number of pods that are guaranteed to be gang scheduled.
+	// 2. It defines the minimum requirement of available pods in a PodClique. Violation of this threshold will result
+	// in termination of the PodGang that it belongs to.
 	minAvailable := int32(1)
+	// single-node standalone pclq set to component.MinAvailable if defined
+	if !p.usesPCSG && p.component.MinAvailable != nil {
+		minAvailable = *p.component.MinAvailable
+	}
+	// pclqs that are part of a multi-node component set minAvailable to their
+	// replica count. Plain multi-node needs every leader/worker rank ready for
+	// collective operations. multi-node inter-pod GMS without failover creates
+	// one replica per rank PCLQ, so this also evaluates to minAvailable=1.
 	if p.isMultinode && !p.isInterPodFailover {
 		minAvailable = p.r.Replicas
 	}
 	replicas := p.r.Replicas
+	// if checkpoint is enabled and not ready, set replicas to 0
+	// to prevent the engine clique from being scheduled
 	if p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
 		p.checkpointInfo.Enabled &&
 		p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 		!p.checkpointInfo.Ready {
 		replicas = 0
-		minAvailable = 0
 	}
 
 	clique := &grovev1alpha1.PodCliqueTemplateSpec{
@@ -2406,12 +2396,14 @@ func GenerateGrovePodCliqueSet(
 		if usesPCSG {
 			replicas := component.Replicas
 			minAvailable := ptr.To(int32(1))
+			if component.MinAvailable != nil {
+				minAvailable = ptr.To(*component.MinAvailable)
+			}
 			if checkpointInfo != nil &&
 				checkpointInfo.Enabled &&
 				checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 				!checkpointInfo.Ready {
 				replicas = ptr.To(int32(0))
-				minAvailable = ptr.To(int32(0))
 			}
 			pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
 				Name:               strings.ToLower(componentName),

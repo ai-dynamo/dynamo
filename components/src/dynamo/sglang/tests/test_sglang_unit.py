@@ -64,6 +64,7 @@ def _make_sglang_config(**overrides):
     config.multimodal_encode_worker = False
     config.multimodal_worker = False
     config.enable_multimodal = False
+    config.dedicated_mm_encoder = False
     config.embedding_transfer_mode = EmbeddingTransferMode.NIXL_WRITE
     config.embedding_worker = False
     config.image_diffusion_worker = False
@@ -348,10 +349,10 @@ async def test_namespace_flag_drives_default_endpoint_namespace(mock_sglang_cli)
     ),
     [
         ("encode", True, False, []),
-        ("prefill", False, True, ["--disaggregation-mode", "prefill"]),
-        ("decode", False, True, ["--disaggregation-mode", "decode"]),
+        ("prefill", False, False, ["--disaggregation-mode", "prefill"]),
+        ("decode", False, False, ["--disaggregation-mode", "decode"]),
         ("agg", False, False, ["--disaggregation-mode", "null"]),
-        ("pd", False, True, ["--disaggregation-mode", "null"]),
+        ("pd", False, False, ["--disaggregation-mode", "null"]),
     ],
 )
 def test_enable_multimodal_disaggregation_mode_maps_sglang_roles(
@@ -372,9 +373,56 @@ def test_enable_multimodal_disaggregation_mode_maps_sglang_roles(
     assert config.multimodal_worker is expected_mm_worker
 
 
-def test_multimodal_disaggregation_mode_uses_last_cli_value():
+@pytest.mark.parametrize(
+    ("mode", "expected_args"),
+    [
+        ("prefill", ["--disaggregation-mode", "prefill"]),
+        ("decode", ["--disaggregation-mode", "decode"]),
+        ("pd", ["--disaggregation-mode", "null"]),
+    ],
+)
+def test_dedicated_mm_encoder_selects_internal_multimodal_worker(mode, expected_args):
+    """Dedicated-mm-encoder selects internal E/PD or E/P/D workers."""
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    normalized = _normalize_multimodal_disaggregation_args(
+        ["--disaggregation-mode", mode], config
+    )
+
+    assert normalized == expected_args
+    assert config.multimodal_encode_worker is False
+    assert config.multimodal_worker is True
+
+
+def test_dedicated_mm_encoder_rejects_standalone_modes():
+    """The dedicated encoder flag must not silently turn agg/encode into a different topology."""
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="--dedicated-mm-encoder only applies"):
+        _normalize_multimodal_disaggregation_args(
+            ["--disaggregation-mode", "agg"], config
+        )
+
+
+def test_dedicated_mm_encoder_rejects_encode_worker_mode():
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="Do not combine"):
+        _normalize_multimodal_disaggregation_args(
+            ["--disaggregation-mode", "encode"], config
+        )
+
+
+def test_dedicated_mm_encoder_requires_explicit_worker_role():
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="requires --disaggregation-mode"):
+        _normalize_multimodal_disaggregation_args([], config)
+
+
+def test_multimodal_disaggregation_mode_uses_last_cli_value_with_dedicated_mm_encoder():
     """Config-merged args precede CLI args, so the last explicit value must win."""
-    config = _make_sglang_config(enable_multimodal=True)
+    config = _make_sglang_config(enable_multimodal=True, dedicated_mm_encoder=True)
 
     normalized = _normalize_multimodal_disaggregation_args(
         ["--disaggregation-mode", "prefill", "--disaggregation-mode", "pd"],
@@ -406,6 +454,14 @@ def test_legacy_multimodal_worker_sets_enable_multimodal():
 
     assert config.enable_multimodal is True
     assert config.multimodal_worker is True
+
+
+def test_dedicated_mm_encoder_requires_enable_multimodal():
+    """Dedicated-mm-encoder is a topology modifier, not a multimodal enable switch."""
+    config = _make_sglang_config(dedicated_mm_encoder=True)
+
+    with pytest.raises(ValueError, match="requires --enable-multimodal"):
+        config.validate()
 
 
 @pytest.mark.asyncio

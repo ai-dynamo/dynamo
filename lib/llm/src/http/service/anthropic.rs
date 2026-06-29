@@ -24,7 +24,6 @@ use axum::{
     },
     routing::{get, post},
 };
-use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 use tracing::Instrument;
@@ -32,7 +31,10 @@ use tracing::Instrument;
 use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
+    metrics::{
+        CancellationLabels, Endpoint,
+        process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
+    },
     service_v2,
 };
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
@@ -42,7 +44,8 @@ use crate::protocols::anthropic::types::{
     chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, agent_context_from_headers, apply_header_routing_overrides,
+    AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
+    apply_header_routing_overrides, session_affinity_from_headers,
 };
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -173,6 +176,9 @@ async fn handler_anthropic_messages(
     if let Some(agent_context) = agent_context_from_headers(&headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
+    if let Some(session_affinity) = session_affinity_from_headers(&headers) {
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+    }
     let context = request.context();
 
     // Create connection handles
@@ -225,7 +231,7 @@ async fn anthropic_messages(
     }
 
     // Strip Claude Code billing preamble from system prompt if enabled
-    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+    if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }
 
@@ -333,6 +339,14 @@ async fn anthropic_messages(
 
     let request = context.map(|_req| chat_request);
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // Create inflight_guard early to ensure all errors are counted
@@ -350,6 +364,18 @@ async fn anthropic_messages(
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+            inflight_guard.mark_error(super::metrics::ErrorType::Overload);
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Overloaded,
+                format!("{e:#}"),
+            );
+        }
+        if super::metrics::request_was_unavailable(e.as_ref()) {
+            inflight_guard.mark_error(super::metrics::ErrorType::Unavailable);
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Unavailable,
+                format!("{e:#}"),
+            );
         }
         // Check for cancelled request (client disconnected before response was sent)
         if super::metrics::request_was_cancelled(e.as_ref()) {
@@ -518,10 +544,10 @@ async fn anthropic_messages(
 /// Handler for POST /v1/messages/count_tokens.
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
-    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Json(mut request): Json<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
-    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+    if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }
     let tokens = request.estimate_tokens();

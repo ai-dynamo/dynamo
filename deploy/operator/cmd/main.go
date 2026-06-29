@@ -263,6 +263,11 @@ func main() {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
 		}
+		// PodSnapshotContent is cluster-scoped, so DefaultNamespaces does not cover it.
+		// Register it cluster-wide explicitly so the PodSnapshotReconciler can watch it.
+		mgrOpts.Cache.ByObject = map[client.Object]cache.ByObject{
+			&nvidiacomv1alpha1.PodSnapshotContent{}: {},
+		}
 		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
 
 		banner := strings.Repeat("=", 80)
@@ -491,11 +496,10 @@ func main() {
 	if restrictedNamespace == "" {
 		factory = informers.NewSharedInformerFactory(kubernetes.NewForConfigOrDie(mgr.GetConfig()), time.Hour*24)
 	} else {
-		factory = informers.NewFilteredSharedInformerFactory(
+		factory = informers.NewSharedInformerFactoryWithOptions(
 			kubernetes.NewForConfigOrDie(mgr.GetConfig()),
 			time.Hour*24,
-			restrictedNamespace,
-			nil,
+			informers.WithNamespace(restrictedNamespace),
 		)
 	}
 	secretInformer := factory.Core().V1().Secrets().Informer()
@@ -720,6 +724,15 @@ func registerControllers(
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
 	}
 
+	if err = (&controller.PodSnapshotReconciler{
+		Client:        mgr.GetClient(),
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
+		Recorder:      mgr.GetEventRecorderFor("snapshot"),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
+	}
+
 	if runtimeConfig.GroveEnabled {
 		if err = controller.NewFailoverCascadeReconciler(
 			mgr.GetClient(),
@@ -804,26 +817,22 @@ func registerWebhookHandlers(
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest conversion webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoGraphDeployment{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeployment{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment conversion webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoComponentDeployment{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoComponentDeployment{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoComponentDeployment conversion webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentScalingAdapter conversion webhook: %w", err)
 	}
@@ -835,7 +844,7 @@ func registerWebhookHandlers(
 		return fmt.Errorf("unable to register DynamoComponentDeployment defaulting webhook: %w", err)
 	}
 
-	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
+	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion, runtimeConfig.GroveEnabled)
 	if err := dgdDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment defaulting webhook: %w", err)
 	}

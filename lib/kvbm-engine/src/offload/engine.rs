@@ -35,6 +35,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use crate::leader::InstanceLeader;
 use crate::object::ObjectBlockOps;
@@ -51,6 +52,10 @@ use super::pipeline::{
     PipelineInput,
 };
 use super::queue::CancellableQueue;
+use super::settlement::{
+    PipelineLane, PipelineSettlementTracker, SettlementError, SettlementTarget, SettlementToken,
+    SettlementWaiter, wait_for_settlement,
+};
 use super::source::SourceBlocks;
 
 /// Central coordinator for offload pipelines.
@@ -72,6 +77,8 @@ use super::source::SourceBlocks;
 /// `ObjectBlockOps` implementations.
 #[allow(dead_code)]
 pub struct OffloadEngine {
+    /// Identity carried by settlement tokens to reject cross-engine use.
+    engine_id: Uuid,
     /// Reference to the instance leader for transfers
     leader: Arc<InstanceLeader>,
     /// Block registry for policy evaluation
@@ -247,6 +254,73 @@ impl OffloadEngine {
     /// Check if G2→G4 pipeline is configured.
     pub fn has_g2_to_g4(&self) -> bool {
         self.g2_to_g4.is_some()
+    }
+
+    /// Capture a causal checkpoint for every configured transfer lane.
+    pub fn settlement_token(&self) -> SettlementToken {
+        let mut checkpoints = [None; 3];
+        for lane in PipelineLane::ALL {
+            if let Some((tracker, _)) = self.settlement_tracker(lane) {
+                checkpoints[lane.index()] = Some(tracker.snapshot().checkpoint());
+            }
+        }
+        SettlementToken {
+            engine_id: self.engine_id,
+            checkpoints,
+        }
+    }
+
+    /// Wait until the targeted post-token batches are causally settled.
+    ///
+    /// Settlement includes synchronous executor publication and semaphore handoff to
+    /// every immediately runnable successor. It deliberately does not include
+    /// auto-chained downstream topology in this implementation slice.
+    pub async fn settle_after(
+        &self,
+        token: SettlementToken,
+        target: SettlementTarget,
+    ) -> Result<(), SettlementError> {
+        token.validate_engine(self.engine_id)?;
+        if target.is_empty() {
+            return Ok(());
+        }
+
+        let mut waiters = Vec::new();
+        for lane in PipelineLane::ALL {
+            let delta = target.completed_batches(lane);
+            if delta == 0 {
+                continue;
+            }
+
+            let (tracker, auto_chain) = self
+                .settlement_tracker(lane)
+                .ok_or(SettlementError::LaneUnavailable { lane })?;
+            if auto_chain {
+                return Err(SettlementError::UnsupportedAutoChain { lane });
+            }
+            let checkpoint = token.checkpoint(lane)?;
+
+            // Subscribe every targeted lane before the first state read below.
+            waiters.push(SettlementWaiter::new(lane, tracker, checkpoint, delta)?);
+        }
+        wait_for_settlement(waiters).await
+    }
+
+    fn settlement_tracker(&self, lane: PipelineLane) -> Option<(&PipelineSettlementTracker, bool)> {
+        match lane {
+            PipelineLane::G1ToG2 => self
+                .g1_to_g2
+                .as_ref()
+                .map(|pipeline| (&pipeline.settlement, pipeline.auto_chain())),
+            PipelineLane::G2ToG3 => self
+                .g2_to_g3
+                .as_ref()
+                .map(|pipeline| (&pipeline.settlement, pipeline.auto_chain())),
+            PipelineLane::G2ToG4 => self
+                .g2_to_g4
+                .as_ref()
+                .map(|pipeline| (&pipeline.settlement, false)),
+        }
     }
 }
 
@@ -510,6 +584,7 @@ impl OffloadEngineBuilder {
         };
 
         Ok(OffloadEngine {
+            engine_id: Uuid::new_v4(),
             leader: self.leader,
             registry,
             g1_to_g2,
