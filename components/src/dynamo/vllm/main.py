@@ -68,14 +68,21 @@ logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 MX_LOAD_FORMATS = {"modelexpress", "mx"}
+_OBJECT_STORAGE_SCHEMES = ("s3://", "gs://", "az://")
 
 
 def uses_modelexpress_load_format(config: Config) -> bool:
     return getattr(config.engine_args, "load_format", None) in MX_LOAD_FORMATS
 
 
+def is_object_storage_path(model: str) -> bool:
+    return model.startswith(_OBJECT_STORAGE_SCHEMES)
+
+
 def should_prefetch_model(config: Config) -> bool:
     if os.path.exists(config.model):
+        return False
+    if is_object_storage_path(config.model):
         return False
     return not uses_modelexpress_load_format(config)
 

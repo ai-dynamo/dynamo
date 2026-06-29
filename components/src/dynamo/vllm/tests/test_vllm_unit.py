@@ -15,6 +15,10 @@ from unittest.mock import patch
 
 import pytest
 
+# dynamo.vllm imports uvloop transitively; skip collection in environments where
+# it is not installed (e.g. the pre-commit pytest-marker-report hook).
+pytest.importorskip("uvloop")
+
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
     _is_routable,
@@ -27,6 +31,11 @@ from dynamo.vllm.args import (
     update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.main import (
+    MX_LOAD_FORMATS,
+    is_object_storage_path,
+    should_prefetch_model,
+)
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -1215,3 +1224,62 @@ class TestEmbeddingWorkerFlag:
             ValueError, match="--embedding-worker cannot be combined with multimodal"
         ):
             parse_args()
+
+
+# --- is_object_storage_path tests (pure logic, no I/O) ---
+
+
+class TestIsObjectStoragePath:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "s3://my-bucket/model/",
+            "gs://my-bucket/model",
+            "az://myaccount/container/model",
+        ],
+    )
+    def test_returns_true_for_object_storage_uris(self, path):
+        assert is_object_storage_path(path) is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "Qwen/Qwen3-0.6B",
+            "/local/path/to/model",
+            "hf://Qwen/Qwen3-0.6B",
+            "",
+            "runai://model",
+        ],
+    )
+    def test_returns_false_for_non_object_storage(self, path):
+        assert is_object_storage_path(path) is False
+
+
+# --- should_prefetch_model tests ---
+
+
+class TestShouldPrefetchModel:
+    def _make_config(self, model: str, load_format: str = "auto") -> SimpleNamespace:
+        engine_args = SimpleNamespace(load_format=load_format)
+        return SimpleNamespace(model=model, engine_args=engine_args)
+
+    def test_local_path_skips_prefetch(self, tmp_path):
+        config = self._make_config(str(tmp_path))
+        assert should_prefetch_model(config) is False
+
+    @pytest.mark.parametrize(
+        "uri",
+        ["s3://bucket/model", "gs://bucket/model", "az://account/container/model"],
+    )
+    def test_object_storage_uri_skips_prefetch(self, uri):
+        config = self._make_config(uri)
+        assert should_prefetch_model(config) is False
+
+    def test_hf_model_name_triggers_prefetch(self):
+        config = self._make_config("Qwen/Qwen3-0.6B")
+        assert should_prefetch_model(config) is True
+
+    @pytest.mark.parametrize("load_format", sorted(MX_LOAD_FORMATS))
+    def test_modelexpress_load_format_skips_prefetch(self, load_format):
+        config = self._make_config("Qwen/Qwen3-0.6B", load_format=load_format)
+        assert should_prefetch_model(config) is False

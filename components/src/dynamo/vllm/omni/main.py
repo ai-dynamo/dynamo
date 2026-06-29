@@ -5,7 +5,6 @@
 
 import asyncio
 import logging
-import os
 
 import uvloop
 
@@ -19,7 +18,7 @@ from dynamo.llm import ModelInput, ModelType, WorkerType, fetch_model, register_
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
-from dynamo.vllm.main import setup_metrics_collection
+from dynamo.vllm.main import setup_metrics_collection, should_prefetch_model
 from dynamo.vllm.omni.stage_router import init_omni_stage_router
 from dynamo.vllm.omni.stage_worker import init_omni_stage
 
@@ -123,7 +122,7 @@ async def worker():
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
 
-    if not os.path.exists(config.model):
+    if should_prefetch_model(config):
         await fetch_model(config.model)
 
     shutdown_event = asyncio.Event()
