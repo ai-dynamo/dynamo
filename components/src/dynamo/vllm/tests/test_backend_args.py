@@ -48,6 +48,16 @@ class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
     Test suite for resolving disaggregation mode when legacy multimodal flags are set.
     """
 
+    def test_pd_alias_resolves_to_aggregated(self):
+        config = create_config()
+        config.disaggregation_mode = "pd"
+        config.is_prefill_worker = False
+        config.is_decode_worker = False
+
+        config._resolve_disaggregation_mode()
+
+        assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+
     @pytest.mark.parametrize(
         "mode",
         [

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Disaggregation
+subtitle: SGLang runs prefill and decode as separate workers in Dynamo, coordinated by a bootstrap handshake with RDMA-based KV cache transfer.
 ---
 
 This document explains how SGLang's disaggregated prefill-decode architecture works, both standalone and within Dynamo.

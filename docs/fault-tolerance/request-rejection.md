@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Rejection
+subtitle: Sheds load with HTTP 529 when all workers exceed admission-control thresholds, preventing cascading failures and OOMs.
 ---
 
 This document describes how Dynamo implements request rejection to prevent system overload and maintain service stability under high load conditions.
@@ -14,7 +15,7 @@ Request rejection (also known as load shedding) is a fault tolerance mechanism t
 - Degraded latency for all requests
 - Out-of-memory conditions on GPU workers
 
-When all workers exceed their configured busy thresholds, new requests receive an HTTP 503 (Service Unavailable) response, signaling clients to retry later.
+When all workers exceed their configured busy thresholds, new requests receive an HTTP 529 response, signaling clients to retry later.
 
 ## Architecture
 
@@ -33,7 +34,7 @@ When all workers exceed their configured busy thresholds, new requests receive a
                                          │ If all workers busy
                                          ▼
                                 ┌─────────────────────┐
-                                │   HTTP 503 Error    │
+                                │   HTTP 529 Error    │
                                 │ "All workers busy"  │
                                 └─────────────────────┘
 ```
@@ -42,18 +43,22 @@ When all workers exceed their configured busy thresholds, new requests receive a
 
 ### Frontend Arguments
 
-Configure busy thresholds when starting the frontend. `--admission-control token-capacity` is required to activate the thresholds; the default (`none`) leaves them disabled.
+Configure busy thresholds when starting the frontend. `--admission-control token-capacity` is required to activate the thresholds; the default (`none`) leaves them disabled. For decode-block rejection, start the frontend in KV router mode so the worker load metrics path is active.
 
 ```bash
 python -m dynamo.frontend \
     --admission-control token-capacity \
+    --router-mode kv \
     --active-decode-blocks-threshold 0.85 \
+    --router-track-output-blocks \
     --active-prefill-tokens-threshold 10000
 ```
 
 | Argument | Type | Description |
 |----------|------|-------------|
+| `--router-mode kv` | enum | Required for decode-block rejection. Initializes the KV router worker-load plumbing that receives `active_decode_blocks` updates. Without KV mode, `--active-decode-blocks-threshold` will not produce 529s based on decode-block load. |
 | `--active-decode-blocks-threshold` | float (0.0-1.0) | KV cache block utilization threshold |
+| `--router-track-output-blocks` | bool | Include generated output tokens in the router's active block count. Enable this for long-output workloads; otherwise only prompt/input blocks are counted and a long generation can fill KV without crossing the threshold seen by the router. |
 | `--active-prefill-tokens-threshold` | int | Prefill token count threshold |
 | `--active-prefill-tokens-threshold-frac` | float | Prefill token threshold as a fraction of `max_num_batched_tokens` |
 | `--admission-control` | `token-capacity` \| `none` | Admission control mode. `token-capacity` applies the busy thresholds above; `none` (the default) clears them while leaving router queueing controlled by `--router-queue-threshold`. To enable busy-worker admission, you must pass `--admission-control token-capacity` |
@@ -61,6 +66,8 @@ python -m dynamo.frontend \
 ### Dynamic Configuration via API
 
 Thresholds can be adjusted at runtime via the `/busy_threshold` endpoint:
+
+The API updates threshold values only. It does not enable `--admission-control token-capacity`, `--router-mode kv`, or `--router-track-output-blocks`; those must be set when the frontend starts.
 
 #### Set Thresholds
 
@@ -96,6 +103,36 @@ Response:
 ## Busy Detection Logic
 
 Workers are marked as "busy" based on a dual-threshold system. A worker is considered busy when **either** threshold is exceeded.
+
+### Decode-Block Rejection Requirements
+
+Decode-block based rejection (`active_decode_blocks_threshold`) only works when all of these conditions are true:
+
+1. The frontend is started with `--admission-control token-capacity`.
+2. The frontend is started with `--router-mode kv`.
+3. A decode-block threshold is configured (`--active-decode-blocks-threshold` or `/busy_threshold` API).
+4. The frontend `KvWorkerMonitor` is receiving worker load events (`ActiveLoad`).
+5. Workers are publishing `active_decode_blocks`.
+6. Worker runtime config provides `kv_total_blocks` so utilization ratio can be computed.
+7. For long-output workloads, `--router-track-output-blocks` is enabled so generated tokens add output blocks to the active block count.
+
+If any prerequisite is missing, decode-block busy detection is effectively disabled for those workers. The most common production symptom is that `--active-decode-blocks-threshold` appears to be accepted but no HTTP 529 is returned when KV fills up.
+
+Examples of missing prerequisites:
+
+- Frontend was launched without `--router-mode kv`; the NATS/event client path used for worker load metrics is not initialized, so `active_decode_blocks` updates are not consumed and the threshold is ignored.
+- Frontend cannot receive events because worker-load subscription is unavailable (for example, event transport not reachable or misconfigured).
+- Workers are running in a mode/path that does not publish `active_decode_blocks` (for example, custom integrations without worker metrics publishing).
+- Output-heavy traffic is served without `--router-track-output-blocks`; only prompt/input blocks are reflected in the router's active block accounting, so generated output blocks can exhaust KV before triggering decode-block rejection.
+
+### Important: Different from `router_track_active_blocks`
+
+`active_decode_blocks_threshold` and `router_track_active_blocks` are related to load, but they are not the same feature:
+
+- `active_decode_blocks_threshold` drives busy/free worker classification and request rejection (HTTP 529 when all workers are busy).
+- `router_track_active_blocks` controls KV router internal block bookkeeping used for routing decisions.
+
+In disaggregated setups, prefill routing intentionally disables `router_track_active_blocks`; this does **not** disable decode-block rejection for decode workers.
 
 ### KV Cache Block Threshold
 
@@ -156,26 +193,26 @@ Workers publish these metrics for monitoring:
 3. If configured, router retrieves list of free (non-busy) instances
 4. If no free instances exist (but instances are registered):
    - Request is rejected with `PipelineError::ServiceOverloaded`
-   - HTTP 503 response is returned to client
+   - HTTP 529 response is returned to client
 
 ### Error Response
 
 When requests are rejected, clients receive:
 
 ```http
-HTTP/1.1 503 Service Unavailable
+HTTP/1.1 529
 Content-Type: application/json
 
 {
-  "message": "Service temporarily unavailable: All workers are busy, please retry later",
-  "type": "service_unavailable",
-  "code": 503
+  "message": "Service temporarily overloaded",
+  "type": "Overloaded",
+  "code": 529
 }
 ```
 
 ### Client Retry Strategy
 
-Clients should implement exponential backoff when receiving 503 responses:
+Clients should implement exponential backoff when receiving 529 responses:
 
 ```python
 import time
@@ -184,7 +221,7 @@ import random
 def send_with_retry(request, max_retries=5):
     for attempt in range(max_retries):
         response = send_request(request)
-        if response.status_code != 503:
+        if response.status_code != 529:
             return response
 
         # Exponential backoff with jitter
@@ -204,13 +241,20 @@ Track rejection behavior with these metrics:
   - Labels:
     - `model`: The model name being served
     - `endpoint`: The API endpoint that received the request (e.g., `chat_completions`, `completions`, `embeddings`)
-  - This metric is incremented when the router returns a `ResourceExhausted` error because all workers are busy. The rejected request is surfaced to the client as an HTTP 503 response.
+  - This metric is incremented when the router returns a `ResourceExhausted` error because all workers are busy. The rejected request is surfaced to the client as an HTTP 529 response.
 
 **Example metrics output:**
 ```text
 dynamo_frontend_model_rejection_total{endpoint="chat_completions",model="Qwen/Qwen3-0.6B"} 32
 dynamo_frontend_model_rejection_total{endpoint="completions",model="Qwen/Qwen3-0.6B"} 5
 ```
+
+For decode-block rejection debugging, also inspect:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `dynamo_frontend_worker_active_decode_blocks` | Gauge | Latest active decode blocks per worker and DP rank |
+| `dynamo_frontend_worker_active_prefill_tokens` | Gauge | Latest active prefill tokens per worker and DP rank |
 
 **Endpoint:** Available on the frontend HTTP service at `/metrics`.
 
@@ -292,6 +336,32 @@ If using Kubernetes HPA, ensure rejection thresholds trigger before autoscaling:
 --active-decode-blocks-threshold 0.85
 ```
 
+## Troubleshooting
+
+### Decode-block rejection not triggering
+
+1. Confirm threshold is actually set:
+```bash
+curl -s http://localhost:8000/busy_threshold
+```
+2. Confirm the frontend was started with `--admission-control token-capacity`.
+3. Confirm the frontend was started with `--router-mode kv`.
+4. For long-output workloads, confirm the frontend was started with `--router-track-output-blocks`.
+5. Verify frontend is receiving worker load updates:
+```bash
+curl -s http://localhost:8000/metrics | grep dynamo_frontend_worker_active_decode_blocks
+```
+6. Check frontend logs for worker-monitor subscription issues (for example, warnings that KV metrics subscriber is unavailable).
+7. Verify worker `kv_total_blocks` is present (runtime config / worker metrics), for example:
+```bash
+curl -s http://<worker-system-port>/metrics | grep dynamo_component_total_blocks
+```
+8. Verify event transport configuration between frontend and workers (`--event-plane`, NATS/ZMQ connectivity).
+
+### Common confusion: `router_track_active_blocks`
+
+If `active_decode_blocks_threshold` is configured but you suspect `router_track_active_blocks` is the blocker, treat that as a separate routing knob. Busy rejection depends on worker load events and threshold configuration, not on the router's internal active-block tracking flag.
+
 ## Worker-Side Request Admission
 
 In addition to the frontend's metric-driven busy detection above, a worker can
@@ -311,7 +381,7 @@ the engine while a slot is free; once all `N` engine slots are busy, further
 requests go into the small overflow queue of size `Q`; when the engine **and**
 the queue are both full the worker rejects the request with
 `Server overloaded: worker at capacity`. The frontend maps this rejection to
-`ResourceExhausted` → **HTTP 503**, and temporarily marks the worker overloaded
+`ResourceExhausted` → **HTTP 529**, and temporarily marks the worker overloaded
 so it is skipped on the next routing decision (cleared automatically on the next
 metric recompute). The effective hard cap is **N + Q** in-flight requests per
 worker. The overflow channel is sized to `Q-1` because the single dispatcher

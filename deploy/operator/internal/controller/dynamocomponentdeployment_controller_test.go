@@ -2007,11 +2007,11 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		if sidecarContainer == nil || len(sidecarContainer.Command) != 1 || sidecarContainer.Command[0] != "python3" {
 			t.Fatalf("expected user sidecar container to remain unchanged, got %#v", sidecarContainer)
 		}
-		if mainContainer == nil || len(mainContainer.Command) != 2 || mainContainer.Command[0] != "sleep" || mainContainer.Command[1] != "infinity" {
-			t.Fatalf("expected main container to be rewritten for restore, got %#v", mainContainer)
+		if mainContainer == nil || len(mainContainer.Command) != 1 || mainContainer.Command[0] != "python3" {
+			t.Fatalf("expected main container command to be preserved for restore, got %#v", mainContainer)
 		}
-		if mainContainer.Args != nil {
-			t.Fatalf("expected main container args to be cleared, got %#v", mainContainer.Args)
+		if len(mainContainer.Args) == 0 {
+			t.Fatalf("expected main container args to be preserved, got %#v", mainContainer.Args)
 		}
 		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != checkpointName {
 			t.Fatalf("expected %s to be checkpoint id, got %q", snapshotprotocol.CheckpointIDLabel, got)
