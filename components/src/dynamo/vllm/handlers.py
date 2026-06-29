@@ -2943,12 +2943,13 @@ class EmbeddingWorkerHandler:
 
         The Rust frontend forwards the request dict directly. Expected keys:
         ``model: str``, ``input: str | list[str] | list[int] | list[list[int]]``.
-        Optional ``dimensions`` (Matryoshka truncation; first N floats of each
-        embedding). Optional ``encoding_format`` (``"float"`` -- default --
-        or ``"base64"``); when ``"base64"`` is requested, each per-input
-        vector is serialized as a base64-encoded string of little-endian
-        ``f32`` bytes per the OpenAI spec, applied after any
-        ``dimensions`` truncation so the byte count matches the requested
+        Optional ``dimensions`` (Matryoshka dimensionality reduction):
+        forwarded to vLLM's pooler, which truncates to N dims and
+        re-normalizes; vLLM requires the model to declare Matryoshka support.
+        Optional ``encoding_format`` (``"float"`` -- default -- or
+        ``"base64"``); when ``"base64"`` is requested, each per-input vector is
+        serialized as a base64-encoded string of little-endian ``f32`` bytes
+        per the OpenAI spec, so the byte count matches the (possibly reduced)
         dimensionality.
         """
         model_name = request.get("model") or self.config.served_model_name or ""
@@ -2991,7 +2992,20 @@ class EmbeddingWorkerHandler:
         # (normalization included for models like Qwen3-Embedding), matching
         # vLLM's own embedding server. ``use_activation`` is intentionally
         # left at the pooler default so per-model behaviour isn't overridden.
-        pooling_params = PoolingParams(task="embed")
+        #
+        # ``dimensions`` (OpenAI Matryoshka truncation) is forwarded to vLLM
+        # rather than applied here: vLLM's pooler truncates to ``dimensions``
+        # and then re-normalizes (the correct MRL behaviour) and validates
+        # that the model actually supports Matryoshka -- raising rather than
+        # silently returning a degraded, un-normalized vector for models that
+        # don't. This matches bare ``vllm serve``. Models whose HF config
+        # doesn't declare Matryoshka support (e.g. Qwen3-Embedding) must be
+        # launched with ``--hf-overrides '{"is_matryoshka": true}'`` for
+        # ``dimensions`` requests to be accepted.
+        pooling_kwargs: dict[str, Any] = {"task": "embed"}
+        if dimensions is not None:
+            pooling_kwargs["dimensions"] = dimensions
+        pooling_params = PoolingParams(**pooling_kwargs)
         # Use the per-request context id (same as the chat/completion paths
         # in this file) so concurrent embeddings never collide inside
         # ``AsyncLLM``. ``context.trace_id`` is a distributed-trace id
@@ -3044,14 +3058,10 @@ class EmbeddingWorkerHandler:
         embedding_objects: list[Dict[str, Any]] = []
         prompt_tokens = 0
         for idx, final_output in enumerate(outputs):
+            # vLLM has already applied any ``dimensions`` Matryoshka reduction
+            # (truncate + re-normalize) inside the pooler, so this is the
+            # final per-input vector -- no post-hoc truncation here.
             embedding = _pooling_output_to_list(final_output.outputs.data)
-            if dimensions is not None:
-                if dimensions > len(embedding):
-                    raise ValueError(
-                        f"dimensions={dimensions} exceeds model embedding "
-                        f"dimension {len(embedding)}"
-                    )
-                embedding = embedding[:dimensions]
 
             # Always emit base64 over the worker->frontend wire format. The
             # Rust frontend decodes back to float when the client's

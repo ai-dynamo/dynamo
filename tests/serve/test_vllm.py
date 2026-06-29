@@ -673,8 +673,12 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=["Generated 3 embeddings with dimension"],
             ),
-            # `dimensions` truncation (Matryoshka). Qwen3-Embedding-0.6B has a
-            # hidden dim of 1024, so the truncated vector should be exactly 128.
+            # `dimensions` reduction (Matryoshka). Qwen3-Embedding-0.6B has a
+            # hidden dim of 1024, so the reduced vector should be exactly 128.
+            # The worker forwards `dimensions` to vLLM's pooler (truncate +
+            # re-normalize); `agg_embed.sh` launches this model with
+            # `--hf-overrides '{"is_matryoshka": true}'` so vLLM accepts the
+            # request (Qwen3-Embedding's config doesn't declare Matryoshka).
             # Built inline because the `embedding_payload()` helper doesn't
             # expose an `extra_body` kwarg yet.
             EmbeddingPayload(
