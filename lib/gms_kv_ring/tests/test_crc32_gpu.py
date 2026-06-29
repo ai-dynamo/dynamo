@@ -116,3 +116,43 @@ def test_crc32_gpu_detects_device_corruption():
     assert crc32_gpu(int(tensor.data_ptr()), len(payload)) == expected
     tensor[len(payload) // 2] ^= 0x80
     assert crc32_gpu(int(tensor.data_ptr()), len(payload)) != expected
+
+
+def test_gds_promote_verifies_destination_in_hbm(tmp_path):
+    """The backend's GDS promotion path consumes the device verifier result."""
+    import struct
+    import threading
+    import time
+
+    from gms_kv_ring.daemon.backends_nixl import (
+        _HEADER_FMT,
+        _MAGIC,
+        _VERSION,
+        NixlBackend,
+        _NixlSlot,
+    )
+
+    payload = bytearray((i * 37 & 0xFF) for i in range(4097))
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+    path = tmp_path / "slot.bin"
+    path.write_bytes(
+        struct.pack(_HEADER_FMT, _MAGIC, _VERSION, crc, len(payload), 0) + payload
+    )
+    backend = object.__new__(NixlBackend)
+    backend.plugin = "GDS"
+    backend._lock = threading.Lock()
+    backend._slots = {
+        ("eng", 0, 0): _NixlSlot(len(payload), crc, time.time(), str(path))
+    }
+    backend._do_nixl_xfer_gds = lambda *args, **kwargs: None
+
+    destination = torch.frombuffer(payload, dtype=torch.uint8).cuda()
+    assert (
+        backend.promote_into_gpu("eng", 0, 0, destination.data_ptr(), len(payload))
+        == crc
+    )
+    destination[3] ^= 1
+    assert (
+        backend.promote_into_gpu("eng", 0, 0, destination.data_ptr(), len(payload))
+        is None
+    )

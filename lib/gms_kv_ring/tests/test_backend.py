@@ -3,6 +3,8 @@
 
 """Tests for the StorageBackend abstraction layer:
   - StorageTier still satisfies the StorageBackend ABC
+  - NixlBackend / MooncakeBackend skeletons: is_available + import
+    cleanly even when their runtime deps are absent
   - BackendSupervisor: catches Python exceptions, restarts on
     persistent failure, tracks metrics, marks dead on max_restarts
 
@@ -67,6 +69,44 @@ def test_storage_release_does_not_delete_replacement(tmp_path):
     assert dst.raw == second_bytes
 
 
+def test_nixl_backend_is_available_returns_bool_without_raising():
+    """is_available probes for the binding lazily. Calling it on a
+    machine without nixl installed must return False, not raise."""
+    from gms_kv_ring.daemon.backends_nixl import NixlBackend
+
+    result = NixlBackend.is_available()
+    assert isinstance(result, bool)
+
+
+def test_mooncake_backend_is_available_returns_bool_without_raising():
+    from gms_kv_ring.daemon.backends_mooncake import MooncakeBackend
+
+    result = MooncakeBackend.is_available()
+    assert isinstance(result, bool)
+
+
+def test_nixl_backend_init_raises_when_dep_missing():
+    """If `nixl` isn't importable, constructing the backend must
+    raise a clear RuntimeError pointing to the install path —
+    rather than failing later in a confusing way."""
+    from gms_kv_ring.daemon.backends_nixl import NixlBackend
+
+    if NixlBackend.is_available():
+        pytest.skip("nixl is installed; can't test missing-dep path")
+    with pytest.raises(RuntimeError, match="nixl"):
+        NixlBackend("/tmp/x", plugin="POSIX")
+
+
+def test_mooncake_backend_init_raises_when_dep_missing():
+    from gms_kv_ring.daemon.backends_mooncake import MooncakeBackend
+
+    if MooncakeBackend.is_available():
+        pytest.skip("mooncake is installed; can't test missing-dep path")
+    with pytest.raises(RuntimeError, match="mooncake"):
+        MooncakeBackend(master_server_addr="127.0.0.1:50051")
+
+
+# ---------------------------------------------------------------------------
 # BackendSupervisor
 # ---------------------------------------------------------------------------
 
