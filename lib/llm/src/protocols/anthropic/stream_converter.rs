@@ -51,12 +51,14 @@ struct ToolCallState {
     id: String,
     name: String,
     argument_fragments: Vec<String>,
-    started: bool,
 }
 
 impl ToolCallState {
+    /// A tool block is ready to flush once both required identity fields are
+    /// present. Arguments are optional: a tool call with no parameters still
+    /// emits, so `argument_fragments` is deliberately not part of this check.
     fn is_emit_ready(&self) -> bool {
-        self.started && !self.id.is_empty() && !self.name.is_empty()
+        !self.id.is_empty() && !self.name.is_empty()
     }
 }
 
@@ -102,22 +104,18 @@ impl AnthropicStreamConverter {
                 id: String::new(),
                 name: String::new(),
                 argument_fragments: Vec::new(),
-                started: false,
             });
         }
 
         let state = &mut self.tool_call_states[tool_call_index];
         if let Some(id) = &tool_call.id {
-            state.started = true;
             state.id = id.clone();
         }
         if let Some(function) = &tool_call.function {
             if let Some(name) = &function.name {
-                state.started = true;
                 state.name = name.clone();
             }
             if let Some(arguments) = &function.arguments {
-                state.started = true;
                 state.argument_fragments.push(arguments.clone());
             }
         }
