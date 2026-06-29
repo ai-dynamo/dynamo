@@ -310,16 +310,61 @@ def test_python_worker_config_rejects_unrecognized_disaggregation_mode_value():
 
 
 @pytest.mark.unified
-def test_python_worker_config_rejects_unsupported_mode_when_running():
-    """ENCODE has no unified-path implementation yet; the shim must raise
-    NotImplementedError when it tries to translate the mode for the Rust
-    binding instead of silently treating ENCODE as aggregated."""
-    from dynamo.common.backend.worker import WorkerConfig, _to_rust_disaggregation_mode
+def test_python_worker_config_translates_all_disagg_modes():
+    """Every variant of dynamo.common.constants.DisaggregationMode must map
+    to a Rust binding value -- including ENCODE, which gained unified-path
+    support. Regression for the prior `NotImplementedError`
+    behavior where ENCODE was rejected at translation time."""
+    from dynamo.common.backend.worker import _to_rust_disaggregation_mode
     from dynamo.common.constants import DisaggregationMode
 
-    cfg = WorkerConfig(namespace="ns", disaggregation_mode=DisaggregationMode.ENCODE)
-    with pytest.raises(NotImplementedError):
-        _to_rust_disaggregation_mode(cfg.disaggregation_mode)
+    rust_mode_for = {
+        DisaggregationMode.AGGREGATED: backend.DisaggregationMode.Aggregated,
+        DisaggregationMode.PREFILL: backend.DisaggregationMode.Prefill,
+        DisaggregationMode.DECODE: backend.DisaggregationMode.Decode,
+        DisaggregationMode.ENCODE: backend.DisaggregationMode.Encode,
+    }
+    for py_mode, expected_rust in rust_mode_for.items():
+        assert _to_rust_disaggregation_mode(py_mode) == expected_rust
+
+
+@pytest.mark.unified
+def test_python_worker_config_round_trips_route_to_encoder():
+    """route_to_encoder must flow from runtime_cfg -> WorkerConfig dataclass
+    -> Rust pyclass without being silently dropped at any layer. vLLM is the
+    only Python backend with the field today; SGLang/TRT-LLM get False via
+    the getattr default until they add the field."""
+    from dynamo.common.backend.worker import WorkerConfig
+
+    # Simulated vLLM-style runtime config that exposes the field.
+    class _RuntimeWithRoute:
+        namespace = "ns"
+        discovery_backend = "etcd"
+        request_plane = "tcp"
+        event_plane = None
+        route_to_encoder = True
+
+    cfg = WorkerConfig.from_runtime_config(_RuntimeWithRoute(), model_name="m")
+    assert cfg.route_to_encoder is True
+
+    # Simulated SGLang/TRT-LLM-style runtime config that doesn't expose the
+    # field yet -- the getattr default keeps it False so legacy behavior is
+    # preserved until the backend adds the field on its own runtime config.
+    class _RuntimeWithoutRoute:
+        namespace = "ns"
+        discovery_backend = "etcd"
+        request_plane = "tcp"
+        event_plane = None
+
+    cfg_default = WorkerConfig.from_runtime_config(
+        _RuntimeWithoutRoute(), model_name="m"
+    )
+    assert cfg_default.route_to_encoder is False
+
+    # Verify the Rust pyclass accepts the kwarg at the end of its signature
+    # (appended for backward-compat with positional callers).
+    rust_cfg = backend.WorkerConfig(namespace="ns", route_to_encoder=True)
+    assert rust_cfg is not None
 
 
 def test_worker_constructor_requires_engine_config_loop():

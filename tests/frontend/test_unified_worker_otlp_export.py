@@ -19,6 +19,7 @@ from concurrent import futures
 
 import grpc
 import pytest
+import requests
 from opentelemetry.proto.collector.trace.v1 import (
     trace_service_pb2,
     trace_service_pb2_grpc,
@@ -66,9 +67,18 @@ class InProcOtlpCollector(trace_service_pb2_grpc.TraceServiceServicer):
         with self._lock:
             return [s for s in self.spans if s.name == "engine.generate"]
 
+    def spans_for_trace_id(self, trace_id_hex):
+        trace_id = bytes.fromhex(trace_id_hex)
+        with self._lock:
+            return [s for s in self.spans if s.trace_id == trace_id]
+
     def has_span(self, name):
         with self._lock:
             return any(s.name == name for s in self.spans)
+
+    def clear(self):
+        with self._lock:
+            self.spans.clear()
 
     def snapshot(self):
         """Return a stable copy of `self.spans` for assertions."""
@@ -89,6 +99,42 @@ def _get_attr(span, key):
             if v.HasField("double_value"):
                 return str(v.double_value)
     return None
+
+
+def _send_chat_completions_with_headers(
+    port: int,
+    *,
+    headers: dict[str, str],
+    model: str = TEST_MODEL,
+    max_tokens: int = 5,
+) -> requests.Response:
+    request_headers = {"Content-Type": "application/json", **headers}
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_tokens": max_tokens,
+    }
+    return requests.post(
+        f"http://localhost:{port}/v1/chat/completions",
+        headers=request_headers,
+        json=payload,
+        timeout=60,
+    )
+
+
+def _wait_for_engine_generate_count(
+    collector: InProcOtlpCollector,
+    *,
+    min_count: int,
+    timeout: float = 15.0,
+) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        count = len(collector.engine_generate_spans())
+        if count >= min_count:
+            return count
+        time.sleep(0.5)
+    return len(collector.engine_generate_spans())
 
 
 @pytest.fixture
@@ -183,6 +229,146 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
     assert (
         _get_attr(span, "input_tokens") is not None
     ), "missing `input_tokens` attribute"
+
+
+def test_unsampled_traceparent_does_not_export_spans_over_otlp(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_tokenizers,
+    otlp_collector,
+):
+    collector, otlp_port = otlp_collector
+    trace_id = "11111111111111111111111111111111"
+    traceparent = f"00-{trace_id}-2222222222222222-00"
+
+    otel_env = {
+        "OTEL_EXPORT_ENABLED": "1",
+        "DYN_LOGGING_JSONL": "1",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"http://127.0.0.1:{otlp_port}",
+        "OTEL_SERVICE_NAME": "dynamo-unified-worker-unsampled-test",
+    }
+
+    ports = dynamo_dynamic_ports
+    frontend_port = ports.frontend_port
+    system_port = ports.system_ports[0]
+
+    with DynamoFrontendProcess(
+        request,
+        frontend_port=frontend_port,
+        extra_env=otel_env,
+        terminate_all_matching_process_names=False,
+    ):
+        with SampleUnifiedWorkerProcess(
+            request,
+            frontend_port=frontend_port,
+            system_port=system_port,
+            model_name=TEST_MODEL,
+            component="sample",
+            disaggregation_mode="agg",
+            extra_env=otel_env,
+            worker_id="sample-agg-otlp-unsampled",
+        ):
+            wait_for_http_completions_ready(
+                frontend_port=frontend_port, model=TEST_MODEL
+            )
+            collector.clear()
+
+            resp = _send_chat_completions_with_headers(
+                frontend_port,
+                headers={"traceparent": traceparent},
+                model=TEST_MODEL,
+                max_tokens=5,
+            )
+            assert (
+                resp.status_code == 200
+            ), f"curl failed: {resp.status_code} {resp.text!r}"
+
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                if collector.spans_for_trace_id(trace_id):
+                    break
+                time.sleep(0.5)
+
+    spans = collector.spans_for_trace_id(trace_id)
+    assert not spans, (
+        "unsampled traceparent exported spans: " f"{[span.name for span in spans]}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("sampler_arg", "request_count", "expected_min", "expected_max"),
+    [
+        ("0", 20, 0, 0),
+        ("0.1", 200, 5, 45),
+        ("1", 20, 20, None),
+    ],
+    ids=["ratio-0", "ratio-0.1", "ratio-1"],
+)
+def test_traceidratio_sampler_controls_otlp_exports(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_tokenizers,
+    otlp_collector,
+    sampler_arg,
+    request_count,
+    expected_min,
+    expected_max,
+):
+    collector, otlp_port = otlp_collector
+
+    otel_env = {
+        "OTEL_EXPORT_ENABLED": "1",
+        "DYN_LOGGING_JSONL": "1",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"http://127.0.0.1:{otlp_port}",
+        "OTEL_SERVICE_NAME": f"dynamo-unified-worker-sampler-{sampler_arg}",
+        "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
+        "OTEL_TRACES_SAMPLER_ARG": sampler_arg,
+        "OTEL_BSP_SCHEDULE_DELAY": "1000",
+    }
+
+    ports = dynamo_dynamic_ports
+    frontend_port = ports.frontend_port
+    system_port = ports.system_ports[0]
+
+    with DynamoFrontendProcess(
+        request,
+        frontend_port=frontend_port,
+        extra_env=otel_env,
+        terminate_all_matching_process_names=False,
+    ):
+        with SampleUnifiedWorkerProcess(
+            request,
+            frontend_port=frontend_port,
+            system_port=system_port,
+            model_name=TEST_MODEL,
+            component="sample",
+            disaggregation_mode="agg",
+            extra_env=otel_env,
+            worker_id=f"sample-agg-otlp-sampler-{sampler_arg}",
+        ):
+            wait_for_http_completions_ready(
+                frontend_port=frontend_port, model=TEST_MODEL
+            )
+            collector.clear()
+
+            for _ in range(request_count):
+                resp = _send_chat_completions(
+                    frontend_port, model=TEST_MODEL, max_tokens=1
+                )
+                assert (
+                    resp.status_code == 200
+                ), f"curl failed: {resp.status_code} {resp.text!r}"
+
+            count = _wait_for_engine_generate_count(
+                collector,
+                min_count=expected_min if expected_max is None else expected_max + 1,
+            )
+
+    assert count >= expected_min
+    if expected_max is not None:
+        assert count <= expected_max
 
 
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
