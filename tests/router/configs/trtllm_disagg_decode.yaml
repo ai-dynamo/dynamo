@@ -4,5 +4,8 @@
 # Extra-engine-args for the decode side of disaggregated TRT-LLM in router
 # e2e tests. Only the transceiver backend is required here; the overlap
 # scheduler can stay on for decode workers.
+attn_backend: VANILLA
+
 cache_transceiver_config:
-  backend: DEFAULT
+  backend: UCX
+  max_tokens_in_buffer: 8192

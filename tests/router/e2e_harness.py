@@ -373,6 +373,7 @@ def run_disagg_router_decisions_test(
     test_payload: dict[str, Any] | None = None,
     test_kwargs: dict[str, Any] | None = None,
     strict_timing: bool = True,
+    progressive_request_count: int = 4,
 ):
     shared_namespace = f"test-namespace-{generate_random_suffix()}"
     frontend_port = allocate_frontend_ports(request, 1)[0]
@@ -387,7 +388,11 @@ def run_disagg_router_decisions_test(
     }
 
     def run_test(prefill_workers, decode_workers):
-        scenario_kwargs = {"strict_timing": strict_timing, **(test_kwargs or {})}
+        scenario_kwargs = {
+            "strict_timing": strict_timing,
+            "progressive_request_count": progressive_request_count,
+            **(test_kwargs or {}),
+        }
         _test_router_decisions_disagg(
             prefill_workers=prefill_workers,
             decode_workers=decode_workers,

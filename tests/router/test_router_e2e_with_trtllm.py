@@ -13,6 +13,11 @@ import pytest
 
 from tests.router.e2e_harness import (
     ManagedEngineProcessMixin,
+    env_bool,
+    env_float,
+    env_int,
+    env_optional_int,
+    resolve_router_gpu_start_index,
     run_basic_router_test,
     run_disagg_router_decisions_test,
     run_indexers_sync_test,
@@ -26,7 +31,10 @@ from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+MODEL_NAME = os.environ.get(
+    "DYNAMO_ROUTER_E2E_TRTLLM_MODEL", "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+)
 TRTLLM_BLOCK_SIZE = 32  # fixed internally to 32
 
 # Per-mode extra-engine-args YAMLs for disaggregated TRT-LLM. Both files
@@ -39,6 +47,7 @@ DISAGG_EXTRA_ENGINE_ARGS = {
     "prefill": os.path.join(_DISAGG_CONFIG_DIR, "trtllm_disagg_prefill.yaml"),
     "decode": os.path.join(_DISAGG_CONFIG_DIR, "trtllm_disagg_decode.yaml"),
 }
+AGG_EXTRA_ENGINE_ARGS = os.path.join(_DISAGG_CONFIG_DIR, "trtllm_agg.yaml")
 
 pytestmark = [
     pytest.mark.e2e,
@@ -52,8 +61,17 @@ pytestmark = [
 TRTLLM_ARGS: Dict[str, Any] = {
     "kv_block_size": TRTLLM_BLOCK_SIZE,
     "model": MODEL_NAME,
-    "free_gpu_memory_fraction": 0.4,  # Limit VRAM allocation per worker
-    "max_seq_len": 1024,  # Limit context length to reduce KV cache size
+    "free_gpu_memory_fraction": env_float(
+        "DYNAMO_ROUTER_E2E_TRTLLM_FREE_GPU_MEMORY_FRACTION", 0.4
+    ),
+    "max_seq_len": env_int("DYNAMO_ROUTER_E2E_TRTLLM_MAX_SEQ_LEN", 1024),
+    "enable_cuda_graph": env_bool("DYNAMO_ROUTER_E2E_TRTLLM_ENABLE_CUDA_GRAPH", True),
+    "tensor_parallel_size": env_optional_int(
+        "DYNAMO_ROUTER_E2E_TRTLLM_TENSOR_PARALLEL_SIZE"
+    ),
+    "expert_parallel_size": env_optional_int(
+        "DYNAMO_ROUTER_E2E_TRTLLM_EXPERT_PARALLEL_SIZE"
+    ),
 }
 
 
@@ -115,6 +133,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
         self.num_workers = num_workers
         self.worker_processes = []
         self.store_backend = store_backend
+        gpu_start_index = resolve_router_gpu_start_index(gpu_start_index)
 
         # Dynamically allocate unique system ports (one per worker) to avoid
         # conflicts when tests run in parallel via pytest-xdist.
@@ -127,21 +146,36 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
         model = trtllm_args.get("model", MODEL_NAME)
         free_gpu_memory_fraction = trtllm_args.get("free_gpu_memory_fraction")
         max_seq_len = trtllm_args.get("max_seq_len")
+        enable_cuda_graph = trtllm_args.get("enable_cuda_graph", True)
         enable_attention_dp = trtllm_args.get("enable_attention_dp", False)
         tensor_parallel_size = trtllm_args.get("tensor_parallel_size")
+        expert_parallel_size = trtllm_args.get("expert_parallel_size")
+        load_format = trtllm_args.get("load_format") or os.environ.get(
+            "DYNAMO_ROUTER_E2E_LOAD_FORMAT"
+        )
+        model_loader_extra_config = trtllm_args.get(
+            "model_loader_extra_config"
+        ) or os.environ.get("DYNAMO_ROUTER_E2E_MODEL_LOADER_EXTRA_CONFIG")
+        extra_engine_args = trtllm_args.get("extra_engine_args") or os.environ.get(
+            "DYNAMO_ROUTER_E2E_TRTLLM_EXTRA_ENGINE_ARGS"
+        )
 
         self.model_name = model
 
         for worker_idx in range(num_workers):
             # Calculate GPU device for this process
             if single_gpu:
-                # Force all processes to GPU 0 (for single-GPU testing)
+                # Force all processes to one GPU (for single-GPU testing)
                 gpu_device = str(gpu_start_index)
-            elif enable_attention_dp and tensor_parallel_size:
-                # For attention DP, TRT-LLM spawns tensor_parallel_size internal MPI workers.
-                # So one process = two attention DP ranks = visibility in to both GPUs.
+            elif tensor_parallel_size:
+                worker_start_gpu = gpu_start_index + worker_idx * int(
+                    tensor_parallel_size
+                )
                 gpu_device = ",".join(
-                    str(gpu_start_index + i) for i in range(tensor_parallel_size)
+                    str(i)
+                    for i in range(
+                        worker_start_gpu, worker_start_gpu + int(tensor_parallel_size)
+                    )
                 )
             else:
                 # Each worker sees one GPU
@@ -169,6 +203,18 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
                         DISAGG_EXTRA_ENGINE_ARGS[disaggregation_mode],
                     ]
                 )
+            elif extra_engine_args is not None:
+                command.extend(["--extra-engine-args", str(extra_engine_args)])
+            elif "DYN_TRTLLM_EXTRA_ENGINE_ARGS" not in os.environ:
+                command.extend(["--extra-engine-args", AGG_EXTRA_ENGINE_ARGS])
+
+            if load_format is not None:
+                command.extend(["--load-format", str(load_format)])
+
+            if model_loader_extra_config is not None:
+                command.extend(
+                    ["--model-loader-extra-config", str(model_loader_extra_config)]
+                )
 
             # Limit VRAM allocation (required for multi-worker on same GPU)
             if free_gpu_memory_fraction is not None:
@@ -180,6 +226,9 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
             if max_seq_len is not None:
                 command.extend(["--max-seq-len", str(max_seq_len)])
 
+            if enable_cuda_graph:
+                command.append("--enable-cuda-graph")
+
             # Use --durable-kv-events to enable JetStream mode (local indexer disabled)
             if durable_kv_events:
                 command.append("--durable-kv-events")
@@ -187,6 +236,9 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
             # Set tensor parallel size if specified (needed for attention DP)
             if tensor_parallel_size is not None:
                 command.extend(["--tensor-parallel-size", str(tensor_parallel_size)])
+
+            if expert_parallel_size is not None:
+                command.extend(["--expert-parallel-size", str(expert_parallel_size)])
 
             # Enable attention data parallelism if requested
             if enable_attention_dp:
@@ -205,7 +257,32 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
                 "DYN_REQUEST_PLANE": request_plane,
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
                 "DYN_SYSTEM_PORT": str(system_port),
+                # Keep OpenMPI's internal control plane off UCX by default. TRT-LLM's
+                # data plane (for example NIXL/UCX KV transfer) still reads UCX_*.
+                "OMPI_MCA_pml": os.environ.get("OMPI_MCA_pml", "ob1"),
+                "OMPI_MCA_btl": os.environ.get("OMPI_MCA_btl", "self,tcp,vader"),
+                "OMPI_MCA_btl_openib_allow_ib": os.environ.get(
+                    "OMPI_MCA_btl_openib_allow_ib", "0"
+                ),
             }
+
+            if disaggregation_mode is not None:
+                # TRT-LLM's UCX cache transceiver is configured inside the
+                # worker process. Keep it off the broad test fixture default
+                # because "^mm,gdr_copy" lets UCX select RDMA devices that may
+                # be unavailable in a local developer shell. IB-only validation
+                # can still opt in explicitly via the DYNAMO_ROUTER_E2E_TRTLLM_*
+                # variables below.
+                env.pop("UCX_NET_DEVICES", None)
+                env_vars["UCX_TLS"] = os.environ.get(
+                    "DYNAMO_ROUTER_E2E_TRTLLM_UCX_TLS",
+                    "tcp,self,sm,cuda_copy,cuda_ipc",
+                )
+                ucx_net_devices = os.environ.get(
+                    "DYNAMO_ROUTER_E2E_TRTLLM_UCX_NET_DEVICES"
+                )
+                if ucx_net_devices:
+                    env_vars["UCX_NET_DEVICES"] = ucx_net_devices
 
             # Add DYN_FILE_KV if using file storage backend
             if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
@@ -223,6 +300,8 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
                 health_check_urls=[],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
+                terminate_parent_only_first=True,
+                graceful_shutdown_timeout=30.0,
             )
             self.worker_processes.append(process)
             logger.info(
@@ -345,8 +424,12 @@ def test_router_decisions_trtllm_disagg(
         request_plane=request_plane,
         model_name=MODEL_NAME,
         block_size=TRTLLM_BLOCK_SIZE,
-        num_prefill_workers=2,
-        num_decode_workers=1,
+        num_prefill_workers=int(
+            os.environ.get("DYNAMO_ROUTER_E2E_NUM_PREFILL_WORKERS", "1")
+        ),
+        num_decode_workers=int(
+            os.environ.get("DYNAMO_ROUTER_E2E_NUM_DECODE_WORKERS", "1")
+        ),
         prefill_process_kwargs={
             "single_gpu": True,
             "gpu_start_index": 0,
@@ -357,6 +440,9 @@ def test_router_decisions_trtllm_disagg(
             "gpu_start_index": 1,
             "disaggregation_mode": "decode",
         },
+        progressive_request_count=int(
+            os.environ.get("DYNAMO_ROUTER_E2E_DISAGG_REQUESTS", "3")
+        ),
     )
 
 
