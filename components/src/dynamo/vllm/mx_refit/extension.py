@@ -854,6 +854,44 @@ class MxRefitWorkerExtension:
         from modelexpress.megatron_translator import run_refit_cycle
         from modelexpress.nemo_rl_v2 import ROLE_MEGATRON_VOCAB_PARALLEL
 
+        # Detect matched-TP vs mixed-TP up front. The matched-TP context
+        # (built via _build_megatron_context) encodes per-rank target_shape;
+        # the mixed-TP path needs a *global* target_shape so the slice
+        # planner can compute cross-source ranges, so it builds its own ctx.
+        megatron_cands = [c for c in candidates if c.megatron_meta is not None]
+        if not megatron_cands:
+            return False
+        target_tp_size, target_tp_rank = _target_tp(self)
+        matched = next(
+            (
+                c
+                for c in megatron_cands
+                if c.megatron_meta.tp_rank == target_tp_rank
+                and c.megatron_meta.tp_size == target_tp_size
+            ),
+            None,
+        )
+        source_tp_size = max(
+            (
+                c.megatron_meta.tp_size
+                for c in megatron_cands
+                if c.megatron_meta.tp_size > 0
+            ),
+            default=0,
+        )
+        is_matched_tp = matched is not None and source_tp_size == target_tp_size
+
+        if not is_matched_tp:
+            return self._mx_update_weights_via_mx_megatron_mixed_tp(
+                megatron_cands=megatron_cands,
+                source_tp_size=source_tp_size,
+                target_tp_size=target_tp_size,
+                target_tp_rank=target_tp_rank,
+                version=version,
+                mx_config=mx_config,
+            )
+
+        # ---- Matched-TP path ----
         if not getattr(self, "_mx_megatron_ctx", None):
             self._mx_megatron_ctx = self._build_megatron_context(candidates)
 
@@ -861,14 +899,6 @@ class MxRefitWorkerExtension:
         if not hasattr(self, "_mx_megatron_buffers"):
             buffers: dict[str, torch.Tensor] = {}
             vocab_buffers: dict[str, torch.Tensor] = {}
-            source_tp_size = next(
-                (
-                    c.megatron_meta.tp_size
-                    for c in candidates
-                    if c.megatron_meta is not None and c.megatron_meta.tp_size > 0
-                ),
-                ctx.target_tp_layout.tp_size,
-            )
             for spec in ctx.receive_specs.values():
                 if spec.role.startswith("expert_"):
                     continue
@@ -895,32 +925,6 @@ class MxRefitWorkerExtension:
                 "[mx-megatron] registered %d per-rank buffers and %d full-vocab buffers",
                 len(buffers),
                 len(vocab_buffers),
-            )
-
-        matched = next(
-            (
-                c
-                for c in candidates
-                if c.megatron_meta is not None
-                and c.megatron_meta.tp_rank == ctx.target_tp_layout.tp_rank
-            ),
-            None,
-        )
-        source_tp_size = next(
-            (
-                c.megatron_meta.tp_size
-                for c in candidates
-                if c.megatron_meta is not None and c.megatron_meta.tp_size > 0
-            ),
-            None,
-        )
-        if matched is None or (
-            source_tp_size is not None
-            and source_tp_size != ctx.target_tp_layout.tp_size
-        ):
-            raise RuntimeError(
-                "Dynamo Megatron MX refit currently supports matched TP only "
-                f"(target_tp={ctx.target_tp_layout.tp_size}, source_tp={source_tp_size})."
             )
 
         self._mx_receiver._receiver._nixl.rebind_tensors(self._mx_megatron_buffers)
@@ -965,6 +969,277 @@ class MxRefitWorkerExtension:
                 version=int(version),
                 model_name=_model_name(self),
             )
+        gc.collect()
+        torch.cuda.empty_cache()
+        return True
+
+    def _mx_update_weights_via_mx_megatron_mixed_tp(
+        self,
+        *,
+        megatron_cands: list[Any],
+        source_tp_size: int,
+        target_tp_size: int,
+        target_tp_rank: int,
+        version: int,
+        mx_config: MxConfig,
+    ) -> bool:
+        """Mixed-TP weight refit: v1 sliced-pull where the dest narrow is
+        contiguous, v0 scratch + host-copy fallback otherwise.
+
+        Mirrors NeMo-RL's ``vllm_backend.py::_update_weights_via_mx_megatron``
+        mixed-TP branch (ported from ai-dynamo/dynamo#10901). Builds receive
+        specs with *global* ``target_shape`` (per-rank × ``source_tp_size`` on
+        the role's shard axis, except for replicated tensors) so
+        ``MxV2RefitReceiver.pick_megatron_slice_plans`` can compute cross-
+        source ranges. Caches per-plan dest buffers via
+        ``self._mx_megatron_plan_dests``; NIXL re-registers only when new
+        allocations land.
+        """
+        from modelexpress.megatron_translator import (
+            MegatronReceiverContext,
+            ReceiveSpec,
+            assemble_into_destination,
+            discover_megatron_context,
+            translate_megatron_to_hf,
+        )
+        from modelexpress.nemo_rl_v2 import MegatronTensorSpec, TargetTpLayout
+
+        sidecar_cfg, name_map = discover_megatron_context(megatron_cands)
+        if sidecar_cfg is None:
+            logger.warning(
+                "[mx-megatron] mixed-TP: sources advertise Megatron but no "
+                "transformer_config sidecar found; aborting refit"
+            )
+            return False
+
+        layout = TargetTpLayout(tp_size=target_tp_size, tp_rank=target_tp_rank)
+
+        # Per-role shard axes; matches modelexpress nemo_rl_v2 convention.
+        SHARD_AXIS_BY_ROLE = {
+            "column": 0,
+            "qkv_column": 0,
+            "gated_mlp_column": 0,
+            "vocab_parallel": 0,
+            "row": 1,
+            "expert_column": 0,
+            "expert_row": 0,
+            "replicated": 0,
+        }
+        receive_specs: dict[str, ReceiveSpec] = {}
+        for c in megatron_cands:
+            tensors = c.registry.get("tensors", []) if c.registry else []
+            for td in tensors:
+                if not td.megatron_role or td.name in receive_specs:
+                    continue
+                role = td.megatron_role
+                shard_axis = SHARD_AXIS_BY_ROLE.get(role, int(td.shard_axis))
+                per_rank_shape = list(td.global_shape)
+                global_shape = list(per_rank_shape)
+                if role != "replicated":
+                    global_shape[shard_axis] = (
+                        per_rank_shape[shard_axis] * source_tp_size
+                    )
+                receive_specs[td.name] = ReceiveSpec(
+                    megatron_name=td.name,
+                    hf_names=_resolve_hf_names(td.name, role, name_map),
+                    role=role,
+                    target_shape=tuple(int(s) for s in global_shape),
+                    target_dtype=td.dtype or "bfloat16",
+                    shard_axis=shard_axis,
+                    pp_rank=c.megatron_meta.pp_rank,
+                    role_descriptor=dict(td.megatron_extras or {}),
+                )
+        logger.info(
+            "[mx-megatron] mixed-TP: %d ReceiveSpecs built; source_tp=%d target_tp=%d",
+            len(receive_specs),
+            source_tp_size,
+            target_tp_size,
+        )
+
+        # Plan the cross-source slice transfer.
+        target_specs = {
+            m_name: MegatronTensorSpec(
+                role=rs.role,
+                target_shape=rs.target_shape,
+                target_dtype=rs.target_dtype,
+                shard_axis=rs.shard_axis,
+                pp_rank=rs.pp_rank,
+                role_descriptor=dict(rs.role_descriptor or {}),
+            )
+            for m_name, rs in receive_specs.items()
+        }
+        plans = self._mx_receiver.pick_megatron_slice_plans(
+            megatron_cands,
+            target_tp_layout=layout,
+            target_tensor_specs=target_specs,
+        )
+
+        # Cache plan_dests across refit cycles. Plan shapes are deterministic
+        # for a fixed (source_tp, target_tp) layout, so cycle-N's allocations
+        # match cycle-1's. v1 sliced-pull writes directly into these dest
+        # views; cached buffers stay live across pulls.
+        cached_plan_dests: dict[str, torch.Tensor] | None = getattr(
+            self, "_mx_megatron_plan_dests", None
+        )
+        plan_dests: dict[str, torch.Tensor] = cached_plan_dests or {}
+        v1_batches: dict[str, list[Any]] = {
+            c.ref.mx_source_id: [] for c in megatron_cands
+        }
+        v0_plans: list[Any] = []
+        newly_allocated_this_cycle = 0
+
+        for plan in plans:
+            if not plan.sources:
+                continue
+            rs = receive_specs[plan.tensor_name]
+            if plan.assembly == "per_expert":
+                v0_plans.append(plan)
+                continue
+            if plan.tensor_name in plan_dests:
+                dest = plan_dests[plan.tensor_name]
+            else:
+                dest = torch.empty(
+                    plan.target_shape,
+                    dtype=_torch_dtype(rs.target_dtype),
+                    device=self.device,
+                )
+                plan_dests[plan.tensor_name] = dest
+                newly_allocated_this_cycle += 1
+            axis = 1 if plan.assembly == "concat_dim1" else 0
+            routed_v1 = True
+            for src in plan.sources:
+                target_lo, target_hi = src.target_local_range
+                dest_view = dest.narrow(axis, target_lo, target_hi - target_lo)
+                if not dest_view.is_contiguous():
+                    routed_v1 = False
+                    break
+                v1_batches[src.mx_source_id].append(
+                    (plan.tensor_name, src.source_subslice, dest_view)
+                )
+            if not routed_v1:
+                # Don't drop cached entries — they may be valid for other
+                # plans; just route this plan to v0.
+                if cached_plan_dests is None:
+                    plan_dests.pop(plan.tensor_name, None)
+                for sid in v1_batches:
+                    v1_batches[sid] = [
+                        r for r in v1_batches[sid] if r[0] != plan.tensor_name
+                    ]
+                v0_plans.append(plan)
+
+        if newly_allocated_this_cycle > 0 and plan_dests:
+            self._mx_receiver._receiver._nixl.register_tensors(plan_dests)
+            self._mx_megatron_plan_dests = plan_dests
+            logger.info(
+                "[mx-megatron] mixed-TP: registered %d plan_dests "
+                "(%d newly allocated this cycle)",
+                len(plan_dests),
+                newly_allocated_this_cycle,
+            )
+        n_v1_slices = sum(len(b) for b in v1_batches.values())
+        logger.info(
+            "[mx-megatron] mixed-TP: %d v1 slices across %d sources "
+            "(plans cached=%d v0=%d)",
+            n_v1_slices,
+            sum(1 for b in v1_batches.values() if b),
+            len(plan_dests),
+            len(v0_plans),
+        )
+
+        # v1 sliced-pulls write directly into pre-narrowed dest views.
+        for cand in megatron_cands:
+            batch = v1_batches[cand.ref.mx_source_id]
+            if not batch:
+                continue
+            self._mx_receiver._receiver.pull_to(
+                cand.ref,
+                batch,
+                timeout_seconds=mx_config.timeout_seconds,
+            )
+
+        # v0 fallback: scratch per source, host-copy into target.
+        scratch: dict[str, dict[str, torch.Tensor]] = {}
+        if v0_plans:
+            v0_source_ids: set[str] = set()
+            for plan in v0_plans:
+                for src in plan.sources:
+                    v0_source_ids.add(src.mx_source_id)
+            for cand in [c for c in megatron_cands if c.ref.mx_source_id in v0_source_ids]:
+                buf_dict: dict[str, torch.Tensor] = {}
+                for name, t in self._mx_receiver._receiver.receive_weights_scratch(
+                    cand.ref, timeout_seconds=mx_config.timeout_seconds,
+                ):
+                    buf_dict[name] = t
+                scratch[cand.ref.mx_source_id] = buf_dict
+
+        ctx = MegatronReceiverContext(
+            target_tp_layout=layout,
+            transformer_config=sidecar_cfg,
+            hf_name_map=name_map,
+            receive_specs=receive_specs,
+        )
+        weights: list[tuple[str, torch.Tensor]] = []
+        for plan in plans:
+            if not plan.sources:
+                continue
+            rs = receive_specs[plan.tensor_name]
+            if plan.tensor_name in plan_dests:
+                assembled = plan_dests[plan.tensor_name]
+            else:
+                def _pull_factory(name=plan.tensor_name, assembly=plan.assembly):
+                    def _pull(src, dest):
+                        full = scratch.get(src.mx_source_id, {}).get(name)
+                        if full is None:
+                            raise RuntimeError(
+                                f"mixed-TP v0: scratch missing {name!r} from "
+                                f"source {src.mx_source_id}"
+                            )
+                        axis = 1 if assembly == "concat_dim1" else 0
+                        if src.source_subslice is not None:
+                            slo, shi = src.source_subslice
+                            slice_src = full.narrow(axis, slo, shi - slo)
+                        else:
+                            slice_src = full
+                        dest.copy_(slice_src, non_blocking=True)
+
+                    return _pull
+
+                assembled = assemble_into_destination(
+                    plan, pull=_pull_factory(), device=self.device,
+                )
+            for hf_name, hf_tensor in translate_megatron_to_hf(
+                plan,
+                assembled,
+                transformer_config=ctx.transformer_config,
+                hf_names=list(rs.hf_names),
+            ):
+                weights.append((hf_name, hf_tensor))
+
+        if not weights:
+            logger.warning(
+                "[mx-megatron] mixed-TP yielded 0 tensors for version %d",
+                version,
+            )
+            return False
+        logger.info(
+            "[mx-megatron] mixed-TP yielded %d HF tensors; calling vLLM load_weights",
+            len(weights),
+        )
+
+        self._mx_load_weights(weights)
+        torch.cuda.current_stream().synchronize()
+        self._mx_maybe_process_fp8_kv_cache()
+        if mx_config.tree_scale_out:
+            try:
+                self._mx_receiver.publish_self_as_source(
+                    version=int(version),
+                    model_name=_model_name(self),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[mx-megatron] mixed-TP tree-scale-out republish failed: %s",
+                    exc,
+                )
         gc.collect()
         torch.cuda.empty_cache()
         return True
