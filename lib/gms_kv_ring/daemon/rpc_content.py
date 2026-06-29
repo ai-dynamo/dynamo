@@ -2,19 +2,27 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Content-address, staging, and restore RPC handlers."""
+
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Optional
 
-from gms_kv_ring.daemon.rpc_types import Handler, Message, Response
+from gms_kv_ring.daemon.rpc_types import (
+    Handler,
+    Message,
+    Response,
+    required_digest,
+    required_int,
+)
 
 logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
-    from gms_kv_ring.daemon.server import Daemon
+    from gms_kv_ring.daemon.kv_cache_manager import GmsKvCacheManager
 
 
-def handle_staging_reserve(daemon: "Daemon", msg: Message) -> Response:
+def handle_staging_reserve(daemon: "GmsKvCacheManager", msg: Message) -> Response:
     # Receiver-side RPC for cross-node transfer (Phase 4b).
     # Router calls this on the DESTINATION daemon to
     # pre-allocate a slot + register a write target before
@@ -28,8 +36,8 @@ def handle_staging_reserve(daemon: "Daemon", msg: Message) -> Response:
             "ok": False,
             "error": "staging not enabled",
         }
-    content_hash = bytes.fromhex(str(msg["content_hash"]))
-    size = int(msg["size"])
+    content_hash = required_digest(msg)
+    size = required_int(msg, "size")
     source_daemon = str(msg.get("source_daemon", "unknown"))
     # Step 1: reserve the StagingTier slot. May coalesce
     # if another peer is already delivering this hash.
@@ -94,7 +102,7 @@ def handle_staging_reserve(daemon: "Daemon", msg: Message) -> Response:
     }
 
 
-def handle_staging_fail(daemon: "Daemon", msg: Message) -> Response:
+def handle_staging_fail(daemon: "GmsKvCacheManager", msg: Message) -> Response:
     # Cleanup on transfer failure. Frees the receive
     # buffer offset and the StagingTier reservation.
     rid = str(msg["reservation_id"])
@@ -109,7 +117,9 @@ def handle_staging_fail(daemon: "Daemon", msg: Message) -> Response:
     return {"ok": True}
 
 
-def handle_register_content_addresses_batch(daemon: "Daemon", msg: Message) -> Response:
+def handle_register_content_addresses_batch(
+    daemon: "GmsKvCacheManager", msg: Message
+) -> Response:
     # Batched form of register_content_address — connector
     # emits one RPC per request_finished instead of one
     # per block. Each item: {content_hash, engine_id, ranges}.
@@ -198,13 +208,15 @@ def handle_register_content_addresses_batch(daemon: "Daemon", msg: Message) -> R
     }
 
 
-def handle_register_content_address(daemon: "Daemon", msg: Message) -> Response:
+def handle_register_content_address(
+    daemon: "GmsKvCacheManager", msg: Message
+) -> Response:
     # Connector calls this after a successful spill to
     # advertise the content_hash → host_tier address
     # mapping. The router uses this index to drive
     # cross-node transfers (P4c). Multi-range payload
     # because one logical block spans N layers.
-    content_hash = bytes.fromhex(str(msg["content_hash"]))
+    content_hash = required_digest(msg)
     engine_id = str(msg["engine_id"])
     ranges_raw = msg.get("ranges", []) or []
     ranges = [(int(r["layer"]), int(r["offset"]), int(r["size"])) for r in ranges_raw]
@@ -262,7 +274,7 @@ def handle_register_content_address(daemon: "Daemon", msg: Message) -> Response:
     return {"ok": True, "total_size": total_size}
 
 
-def handle_notify_kv_arrived(daemon: "Daemon", msg: Message) -> Response:
+def handle_notify_kv_arrived(daemon: "GmsKvCacheManager", msg: Message) -> Response:
     # Engine on the decode side tells its local daemon
     # "I just NIXL-read these hashes; please publish
     # PlacementEvent::Stored". Off the critical path —
@@ -293,7 +305,9 @@ def handle_notify_kv_arrived(daemon: "Daemon", msg: Message) -> Response:
     return {"ok": True, "published": published}
 
 
-def handle_restore_staging_ranges(daemon: "Daemon", msg: Message) -> Response:
+def handle_restore_staging_ranges(
+    daemon: "GmsKvCacheManager", msg: Message
+) -> Response:
     # Blocking control-plane restore from StagingTier into
     # explicit destination ranges. Unlike restore_staging_blocks,
     # this does not assume one content hash maps to one daemon
@@ -350,7 +364,7 @@ def handle_restore_staging_ranges(daemon: "Daemon", msg: Message) -> Response:
             )
             if consume is None:
                 logger.warning(
-                    "restore-staging-ranges: hash=%s " "generation=%d not READY",
+                    "restore-staging-ranges: hash=%s generation=%d not READY",
                     content_hash.hex()[:16],
                     generation,
                 )
@@ -461,7 +475,7 @@ def handle_restore_staging_ranges(daemon: "Daemon", msg: Message) -> Response:
     }
 
 
-def handle_restore_host_blocks(daemon: "Daemon", msg: Message) -> Response:
+def handle_restore_host_blocks(daemon: "GmsKvCacheManager", msg: Message) -> Response:
     engine_id = str(msg["engine_id"])
     src_engine_id = str(msg["src_engine_id"])
     with daemon._lock:
@@ -507,7 +521,9 @@ def handle_restore_host_blocks(daemon: "Daemon", msg: Message) -> Response:
     }
 
 
-def handle_restore_staging_blocks(daemon: "Daemon", msg: Message) -> Response:
+def handle_restore_staging_blocks(
+    daemon: "GmsKvCacheManager", msg: Message
+) -> Response:
     # Blocking control-plane restore from StagingTier. Used
     # by connectors whose load hook is synchronous (for
     # example TRT-LLM): the caller supplies content hashes,
@@ -579,7 +595,9 @@ def handle_restore_staging_blocks(daemon: "Daemon", msg: Message) -> Response:
     }
 
 
-def handle_register_staging_restore_handles(daemon: "Daemon", msg: Message) -> Response:
+def handle_register_staging_restore_handles(
+    daemon: "GmsKvCacheManager", msg: Message
+) -> Response:
     # Worker-side connector is about to push a
     # FLAG_SOURCE_STAGING restore ring record. The ring's
     # src field is only u32, so we create one-shot local
@@ -621,7 +639,9 @@ def handle_register_staging_restore_handles(daemon: "Daemon", msg: Message) -> R
     return {"ok": True, "handles": handles}
 
 
-def handle_release_staging_restore_handles(daemon: "Daemon", msg: Message) -> Response:
+def handle_release_staging_restore_handles(
+    daemon: "GmsKvCacheManager", msg: Message
+) -> Response:
     handles = msg.get("handles") or []
     released = 0
     with daemon._staging_restore_lock:
@@ -635,7 +655,7 @@ def handle_release_staging_restore_handles(daemon: "Daemon", msg: Message) -> Re
     return {"ok": True, "released": released}
 
 
-def handle_staging_scan(daemon: "Daemon", msg: Message) -> Response:
+def handle_staging_scan(daemon: "GmsKvCacheManager", msg: Message) -> Response:
     # Phase 2 of cross-node design (see docs/CROSS_NODE_DESIGN.md
     # §4.3 — batch RPC chosen over SHM ring). Hashes are
     # hex-encoded for JSON transport. Disabled (returns empty)

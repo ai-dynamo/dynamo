@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Typed contracts shared by daemon RPC handlers."""
+"""Typed contracts shared by daemon RPC handler domains."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Callable, TypeAlias
 
 if TYPE_CHECKING:
-    from gms_kv_ring.daemon.server import Daemon
+    from gms_kv_ring.daemon.kv_cache_manager import GmsKvCacheManager
+
 Message: TypeAlias = dict[str, Any]
 Response: TypeAlias = dict[str, Any]
-Handler: TypeAlias = Callable[["Daemon", Message], Response]
+Handler: TypeAlias = Callable[["GmsKvCacheManager", Message], Response]
 
 
 def required_str(msg: Message, key: str) -> str:
@@ -34,7 +36,7 @@ def error_response(exc: Exception) -> Response:
 
 
 def dispatch_table(
-    daemon: "Daemon", msg: Message, handlers: dict[str, Handler]
+    daemon: "GmsKvCacheManager", msg: Message, handlers: dict[str, Handler]
 ) -> Response:
     op = msg.get("op")
     handler = handlers.get(op) if isinstance(op, str) else None
