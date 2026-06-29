@@ -1,0 +1,14 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen/Qwen3-0.6B",
+      "object": "model",
+      "created": 1782492322,
+      "owned_by": "sglang",
+      "root": "Qwen/Qwen3-0.6B",
+      "parent": null,
+      "max_model_len": 40960
+    }
+  ]
+}

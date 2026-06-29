@@ -152,6 +152,8 @@ pub struct WorkerCatalogRecord {
     pub kv_transfer_domain: Option<String>,
     pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
     pub kv_transfer_preferred_weight: Option<f32>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_schedulable_reasons: Vec<String>,
 }
@@ -179,6 +181,7 @@ impl WorkerCatalogRecord {
             kv_transfer_domain: req.kv_transfer_domain,
             kv_transfer_enforcement: req.kv_transfer_enforcement,
             kv_transfer_preferred_weight: req.kv_transfer_preferred_weight,
+            metadata: req.metadata,
             not_schedulable_reasons: Vec::new(),
         }
     }
@@ -304,6 +307,8 @@ pub struct WorkerRequest {
     pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
     #[serde(default)]
     pub kv_transfer_preferred_weight: Option<f32>,
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,6 +345,8 @@ pub struct WorkerPatchRequest {
     pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
     #[serde(default)]
     pub kv_transfer_preferred_weight: Option<f32>,
+    #[serde(default)]
+    pub metadata: Option<HashMap<String, String>>,
 }
 
 impl WorkerCatalogRecord {
@@ -391,6 +398,9 @@ impl WorkerCatalogRecord {
         }
         if patch.kv_transfer_preferred_weight.is_some() {
             self.kv_transfer_preferred_weight = patch.kv_transfer_preferred_weight;
+        }
+        if let Some(metadata) = patch.metadata {
+            self.metadata = metadata;
         }
     }
 }

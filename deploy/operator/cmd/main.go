@@ -772,6 +772,15 @@ func registerControllers(
 		return fmt.Errorf("unable to create DynamoModel controller: %w", err)
 	}
 
+	if err = (&controller.SelectionTopologyReconciler{
+		Client:        mgr.GetClient(),
+		Recorder:      mgr.GetEventRecorderFor("selection-topology"),
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create SelectionTopology controller: %w", err)
+	}
+
 	if err = (&controller.CheckpointReconciler{
 		Client:        mgr.GetClient(),
 		Config:        operatorCfg,

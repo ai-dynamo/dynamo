@@ -56,6 +56,10 @@ const (
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"
+	KubeAnnotationDynamoSelectionAdapter          = "nvidia.com/dynamo-selection-adapter"
+	KubeAnnotationDynamoSelectionServiceURL       = "nvidia.com/dynamo-selection-service-url"
+	KubeAnnotationDynamoSelectionTenantID         = "nvidia.com/dynamo-selection-tenant-id"
+	KubeAnnotationDynamoSelectionRequireKVEvents  = "nvidia.com/dynamo-selection-require-kv-events"
 
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
@@ -230,6 +234,7 @@ const (
 	ResourceTypeDynamoModel                         = "DynamoModel"
 	ResourceTypeDynamoGraphDeploymentRequest        = "DynamoGraphDeploymentRequest"
 	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"
+	ResourceTypeSelectionTopology                   = "SelectionTopology"
 
 	// Resource state constants - used in status reporting and metrics
 	ResourceStateReady    = "ready"

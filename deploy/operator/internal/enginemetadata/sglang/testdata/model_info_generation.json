@@ -1,0 +1,13 @@
+{
+  "model_path": "Qwen/Qwen3-0.6B",
+  "tokenizer_path": "Qwen/Qwen3-0.6B",
+  "is_generation": true,
+  "preferred_sampling_params": null,
+  "weight_version": "default",
+  "has_image_understanding": false,
+  "has_audio_understanding": false,
+  "model_type": "qwen3",
+  "architectures": [
+    "Qwen3ForCausalLM"
+  ]
+}

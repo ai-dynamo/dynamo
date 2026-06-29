@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runtime-free-sglang-worker
+  labels:
+    app.kubernetes.io/name: runtime-free-sglang-worker
+    app.kubernetes.io/part-of: runtime-free-router-sglang
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runtime-free-sglang-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runtime-free-sglang-worker
+        app.kubernetes.io/part-of: runtime-free-router-sglang
+    spec:
+      containers:
+        - name: sglang
+          image: sglang-image
+          imagePullPolicy: IfNotPresent
+          command:
+            - python3
+            - -m
+            - sglang.launch_server
+          args:
+            - --model-path
+            - Qwen/Qwen3-0.6B
+            - --host
+            - 0.0.0.0
+            - --port
+            - "30000"
+            - --page-size
+            - "16"
+            - --kv-events-config
+            - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+                  optional: true
+          ports:
+            - name: system
+              containerPort: 30000
+            - name: kv-events
+              containerPort: 5557
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+              ephemeral-storage: 2Gi
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  python3 - <<'PY'
+                  import urllib.request
+                  for path in ("/v1/models", "/model_info", "/server_info"):
+                      urllib.request.urlopen("http://127.0.0.1:30000" + path, timeout=5).read()
+                  PY
+            failureThreshold: 180
+            periodSeconds: 5
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  python3 - <<'PY'
+                  import urllib.request
+                  for path in ("/v1/models", "/model_info", "/server_info"):
+                      urllib.request.urlopen("http://127.0.0.1:30000" + path, timeout=5).read()
+                  PY
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: system
+            periodSeconds: 30
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: runtime-free-sglang-worker
+  labels:
+    app.kubernetes.io/name: runtime-free-sglang-worker
+    app.kubernetes.io/part-of: runtime-free-router-sglang
+  annotations:
+    nvidia.com/dynamo-selection-adapter: external-sglang
+    nvidia.com/dynamo-selection-service-url: http://runtime-free-selector:8092
+    nvidia.com/dynamo-selection-tenant-id: default
+    nvidia.com/dynamo-selection-require-kv-events: "true"
+spec:
+  selector:
+    app.kubernetes.io/name: runtime-free-sglang-worker
+  ports:
+    - name: system
+      port: 30000
+      targetPort: system
+    - name: kv-events
+      port: 5557
+      targetPort: kv-events

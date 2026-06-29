@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - selection-service.yaml
+  - sglang-worker.yaml
+images:
+  - name: dynamo-image
+    # TODO: Replace with a published Dynamo image that packages
+    # `python -m dynamo.select_service` built with the `select-service` feature.
+    newName: nvcr.io/nvidia/ai-dynamo/dynamo-frontend
+    newTag: 1.2.1
+  - name: sglang-image
+    newName: lmsysorg/sglang
+    newTag: v0.5.12.post1

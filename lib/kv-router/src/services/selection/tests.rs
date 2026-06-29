@@ -3,7 +3,7 @@
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode, header};
+use axum::http::{Method, Request, StatusCode, header};
 use axum::response::Response;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
@@ -57,7 +57,17 @@ async fn replica_sync_routes_are_mounted() {
 }
 
 async fn post(app: Router, uri: &str, body: &str) -> Response {
-    post_with_policy_class(app, uri, body, None).await
+    request_with_body(app, Method::POST, uri, body, None).await
+}
+
+async fn patch_json(app: Router, uri: &str, body: &str) -> Response {
+    request_with_body(app, Method::PATCH, uri, body, None).await
+}
+
+async fn get(app: Router, uri: &str) -> Response {
+    app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap()
 }
 
 async fn post_with_policy_class(
@@ -66,8 +76,18 @@ async fn post_with_policy_class(
     body: &str,
     policy_class: Option<&str>,
 ) -> Response {
+    request_with_body(app, Method::POST, uri, body, policy_class).await
+}
+
+async fn request_with_body(
+    app: Router,
+    method: Method,
+    uri: &str,
+    body: &str,
+    policy_class: Option<&str>,
+) -> Response {
     let mut request = Request::builder()
-        .method("POST")
+        .method(method)
         .uri(uri)
         .header(header::CONTENT_TYPE, "application/json");
     if let Some(policy_class) = policy_class {
@@ -93,6 +113,49 @@ async fn register_worker_id(app: Router, worker_id: u64, max_tokens: Option<u64>
         body["max_num_batched_tokens"] = serde_json::json!(max_tokens);
     }
     post(app, "/workers", &body.to_string()).await
+}
+
+#[tokio::test]
+async fn worker_metadata_round_trips_without_affecting_readiness() {
+    let app = app();
+    let worker = serde_json::json!({
+        "worker_id": 7,
+        "model_name": "model",
+        "tenant_id": "tenant-a",
+        "endpoint": "http://worker-7:8000",
+        "block_size": 4,
+        "metadata": {
+            "managed-by": "dynamo-operator",
+            "adapter": "external-sglang"
+        }
+    });
+    let response = post(app.clone(), "/workers", &worker.to_string()).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = response_json(response).await;
+    assert_eq!(body["metadata"]["managed-by"], "dynamo-operator");
+    assert_eq!(body["lifecycle"], "schedulable");
+
+    let response = get(app.clone(), "/ready").await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = get(app.clone(), "/workers?model_name=model&tenant_id=tenant-a").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    let workers = body.as_array().expect("workers array");
+    assert_eq!(workers.len(), 1);
+    assert_eq!(workers[0]["metadata"]["adapter"], "external-sglang");
+
+    let patch = serde_json::json!({
+        "metadata": {
+            "managed-by": "dynamo-operator",
+            "adapter": "external-sglang",
+            "selector-url": "http://selector:8000"
+        }
+    });
+    let response = patch_json(app, "/workers/7", &patch.to_string()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["metadata"]["selector-url"], "http://selector:8000");
 }
 
 #[test]

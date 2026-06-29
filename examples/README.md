@@ -53,6 +53,7 @@ Platform-specific manifests and templates for production environments. Deploymen
 Low-level runtime examples for developers using Python<>Rust bindings:
 
 - **[Hello World](/examples/custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
+- **[Runtime-Free Router Examples](/examples/runtime-free-router/README.md)** - Kubernetes examples for registering external runtime workers with the standalone selection service, starting with SGLang
 
 ## Getting Started
 

@@ -21,6 +21,7 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
   - `DynamoGraphDeploymentScalingAdapterController`: Watches scaling adapter CRs used by external autoscalers and Planner-driven scaling flows.
   - `DynamoModelController`: Watches `DynamoModel` CRs and manages model lifecycle (e.g., loading LoRA adapters).
   - `DynamoCheckpointController`: Watches `DynamoCheckpoint` CRs for GPU worker checkpoint/restore workflows.
+  - `SelectionTopologyController`: Reconciles annotated engine Services into selector catalogs.
 
 - **Workflow:**
   1. A custom resource is created by the user or API server.
@@ -141,6 +142,68 @@ For user-focused workflows, see:
 - **[DGDR Reference](./dgdr.md)** for deploy-by-intent generated deployments
 - **[Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
 - **[Snapshotting GPU Workers](./snapshot.md)** for `DynamoCheckpoint`
+
+## Selection Topology Controller
+
+The `SelectionTopologyController` reconciles annotated external engine
+`Service`s into the standalone selection service
+[`/workers` catalog](../components/router/standalone-selection.md#worker-registration).
+The initial adapter is `external-sglang`. The controller only maintains catalog
+entries; it does not forward inference requests or use Endpoint Picker Protocol
+(EPP).
+
+Annotate the external engine worker `Service`, not the worker Pods:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang-worker
+  annotations:
+    nvidia.com/dynamo-selection-adapter: external-sglang
+    nvidia.com/dynamo-selection-service-url: http://selector.default.svc:8092
+    nvidia.com/dynamo-selection-tenant-id: default
+    nvidia.com/dynamo-selection-require-kv-events: "true"
+spec:
+  selector:
+    app: sglang-worker
+  ports:
+    - name: system
+      port: 30000
+      targetPort: 30000
+```
+
+Selection topology has these contracts and limits:
+
+- The worker `Service` must expose SGLang `/v1/models`, `/model_info`, and
+  `/server_info`.
+- Use a Kubernetes `Service` DNS name for production selector URLs, such as
+  `http://runtime-free-selector:8092` or
+  `http://runtime-free-selector.default.svc:8092`. The controller uses selector
+  EndpointSlices to fan out catalog writes and replay entries when selector Pods
+  are replaced.
+- Raw IPs, `localhost`, host URLs, external load balancers, and other
+  non-Service selector URLs are single HTTP targets. They can work for a stable
+  selector process or an external fan-out layer, but the operator cannot
+  discover or replay to hidden selector replicas.
+- If required metadata is missing or invalid, the controller fails closed
+  instead of publishing partial workers. Stale-record deactivation is best
+  effort; operator restarts or deletion of the last annotated worker `Service`
+  can leave visible `unschedulable` tombstones until a later reconcile/sweep or
+  future purge/active-only catalog view handles them.
+- `nvidia.com/dynamo-selection-require-kv-events` controls operator-side
+  metadata validation only and defaults to `"true"`. The selection service still
+  decides schedulability. With the default `DYN_USE_KV_EVENTS=true`, every worker
+  needs a KV-event endpoint for each data-parallel rank. Set the annotation to
+  `"false"` only when the target selection service has `DYN_USE_KV_EVENTS=false`.
+- The controller validates KV-event metadata shape, not selector-to-worker TCP
+  reachability. A worker can be schedulable while KV event ingestion is empty,
+  so verify connectivity from the selector network and check `/dump`, logs, or
+  metrics for ingested events.
+- Structured SGLang `kv_events` metadata takes precedence over legacy
+  `kv_events_config`. Legacy metadata is used only when structured metadata is
+  absent. If structured metadata is present but invalid, the controller fails
+  closed instead of falling back.
 
 ## Webhooks
 
