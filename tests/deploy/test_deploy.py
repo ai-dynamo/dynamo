@@ -158,7 +158,7 @@ async def test_deployment(
     # TODO (ops): remove this if CI transitions to e.g. CUDA MPS
     if framework == "vllm":
         deployment_spec.add_arg_to_service(
-            "VllmDecodeWorker", "--gpu-memory-utilization", "0.7"
+            "decode", "--gpu-memory-utilization", "0.7"
         )
 
     model = next((s.model for s in deployment_spec.services if s.model), None)
