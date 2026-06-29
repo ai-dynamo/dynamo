@@ -758,10 +758,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         yield response
 
     async def sync_decode_migration(self, request, context=None):
-        """Describe or quiesce this worker as the exact migration source."""
+        """Describe, prepare, or quiesce this migration source."""
         bootstrap_host, bootstrap_port = self._get_bootstrap_info(self.engine)
         source_dp_rank = int(request.get("source_dp_rank", 0))
-        if request.get("phase") == "describe":
+        phase = request.get("phase")
+        if phase == "describe":
             logging.info(
                 "Described decode migration source rid=%s migration_id=%s "
                 "bootstrap=%s:%s source_dp_rank=%s",
@@ -782,28 +783,38 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             }
             return
 
-        from sglang.srt.managers.io_struct import PrepareDecodeMigrationReqInput
+        if phase == "prepare":
+            from sglang.srt.managers.io_struct import PrepareDecodeMigrationReqInput
 
-        obj = PrepareDecodeMigrationReqInput(
-            rid=request["rid"],
-            migration_id=request["migration_id"],
-            bootstrap_host=bootstrap_host,
-            bootstrap_port=bootstrap_port,
-            bootstrap_room=int(request["bootstrap_room"]),
-            output_tokens_seen=int(request.get("output_tokens_seen", 0)),
-            target_sequence_length=(
-                int(request["target_sequence_length"])
-                if request.get("target_sequence_length") is not None
-                else None
-            ),
-            target_token_id=(
-                int(request["target_token_id"])
-                if request.get("target_token_id") is not None
-                else None
-            ),
-            routed_dp_rank=source_dp_rank,
-        )
-        result = await self.engine.tokenizer_manager.prepare_decode_migration(obj)
+            obj = PrepareDecodeMigrationReqInput(
+                rid=request["rid"],
+                migration_id=request["migration_id"],
+                bootstrap_host=bootstrap_host,
+                bootstrap_port=bootstrap_port,
+                bootstrap_room=int(request["bootstrap_room"]),
+                routed_dp_rank=source_dp_rank,
+            )
+            result = await self.engine.tokenizer_manager.prepare_decode_migration(obj)
+        elif phase == "quiesce":
+            from sglang.srt.managers.io_struct import QuiesceDecodeMigrationReqInput
+
+            obj = QuiesceDecodeMigrationReqInput(
+                rid=request["rid"],
+                migration_id=request["migration_id"],
+                output_tokens_seen=int(request.get("output_tokens_seen", 0)),
+                routed_dp_rank=source_dp_rank,
+            )
+            result = await self.engine.tokenizer_manager.quiesce_decode_migration(obj)
+        else:
+            yield {
+                "rid": request.get("rid"),
+                "migration_id": request.get("migration_id"),
+                "success": False,
+                "status": "error",
+                "source_dp_rank": source_dp_rank,
+                "error": f"Unsupported source migration phase {phase!r}",
+            }
+            return
         yield dataclasses.asdict(result)
 
     async def finalize_decode_migration(self, request, context=None):

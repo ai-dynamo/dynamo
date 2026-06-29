@@ -10,6 +10,7 @@ from sglang.srt.managers.io_struct import (
     BindDecodeMigrationReqOutput,
     FinalizeDecodeMigrationReqOutput,
     PrepareDecodeMigrationReqOutput,
+    QuiesceDecodeMigrationReqOutput,
 )
 
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
@@ -45,6 +46,7 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
                     )
                 ),
                 prepare_decode_migration=AsyncMock(),
+                quiesce_decode_migration=AsyncMock(),
                 finalize_decode_migration=AsyncMock(),
             )
         )
@@ -220,7 +222,16 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
                 rid="request",
                 migration_id="migration",
                 success=True,
-                status="prepared",
+                status="ready",
+                source_dp_rank=3,
+            )
+        )
+        handler.engine.tokenizer_manager.quiesce_decode_migration.return_value = (
+            QuiesceDecodeMigrationReqOutput(
+                rid="request",
+                migration_id="migration",
+                success=True,
+                status="quiesced",
                 source_dp_rank=3,
             )
         )
@@ -249,8 +260,19 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
                 {
                     "rid": "request",
                     "migration_id": "migration",
-                    "phase": "quiesce",
+                    "phase": "prepare",
                     "bootstrap_room": 17,
+                    "source_dp_rank": 3,
+                }
+            )
+        )
+        quiesced = await collect(
+            handler.sync_decode_migration(
+                {
+                    "rid": "request",
+                    "migration_id": "migration",
+                    "phase": "quiesce",
+                    "output_tokens_seen": 8,
                     "source_dp_rank": 3,
                 }
             )
@@ -268,9 +290,13 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(described[0]["source_dp_rank"], 3)
         self.assertEqual(prepared[0]["source_dp_rank"], 3)
+        self.assertEqual(quiesced[0]["source_dp_rank"], 3)
         self.assertEqual(finalized[0]["source_dp_rank"], 3)
         prepare_req = (
             handler.engine.tokenizer_manager.prepare_decode_migration.await_args.args[0]
+        )
+        quiesce_req = (
+            handler.engine.tokenizer_manager.quiesce_decode_migration.await_args.args[0]
         )
         finalize_req = (
             handler.engine.tokenizer_manager.finalize_decode_migration.await_args.args[
@@ -278,6 +304,8 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
             ]
         )
         self.assertEqual(prepare_req.routed_dp_rank, 3)
+        self.assertEqual(quiesce_req.routed_dp_rank, 3)
+        self.assertEqual(quiesce_req.output_tokens_seen, 8)
         self.assertEqual(finalize_req.routed_dp_rank, 3)
 
     async def test_destination_reservation_preserves_selected_dp_rank(self):

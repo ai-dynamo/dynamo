@@ -241,6 +241,7 @@ async fn prepare_destination(
     migration_id: String,
     source_trigger: DecodeMigrationTrigger,
 ) -> Result<PreparedDestination> {
+    let setup_started = std::time::Instant::now();
     let destination_worker = selector
         .select_destination(&request, &request.token_ids, &constraints, source_worker)
         .await?;
@@ -301,8 +302,22 @@ async fn prepare_destination(
         source_dp_rank,
         destination_worker.dp_rank,
     );
-    let reserve_tokens =
-        request.token_ids.len() + request.stop_conditions.max_tokens.unwrap_or_default() as usize;
+    let reserved_logical_len = match request.stop_conditions.max_tokens {
+        Some(max_output_tokens) => request
+            .token_ids
+            .len()
+            .saturating_add(max_output_tokens as usize),
+        None => match &source_trigger {
+            DecodeMigrationTrigger::SequenceLength { tokens } => *tokens as usize,
+            DecodeMigrationTrigger::TokenId { .. } => {
+                bail!("token-ID migration requires a bounded max_tokens")
+            }
+        },
+    };
+    if reserved_logical_len <= request.token_ids.len() {
+        bail!("decode migration boundary must extend beyond the prompt");
+    }
+    let reserve_tokens = reserved_logical_len;
     let reserve = control
         .call(
             ControlEndpoint::Prepare,
@@ -341,55 +356,10 @@ async fn prepare_destination(
         .bootstrap_room
         .context("destination reservation omitted bootstrap_room")?;
 
-    let mut source_arm = json!({
-        "rid": rid,
-        "migration_id": migration_id,
-        "phase": "arm",
-        "bootstrap_room": bootstrap_room,
-        "source_dp_rank": source_dp_rank,
-        "output_tokens_seen": 0,
-    });
-    match &source_trigger {
-        DecodeMigrationTrigger::SequenceLength { tokens } => {
-            source_arm["target_sequence_length"] = json!(tokens);
-            source_arm["output_tokens_seen"] =
-                json!((*tokens as usize).saturating_sub(request.token_ids.len()));
-        }
-        DecodeMigrationTrigger::TokenId { token_id } => {
-            source_arm["target_token_id"] = json!(token_id);
-        }
-    }
-    let armed = control
-        .call(ControlEndpoint::Sync, source_worker.worker_id, source_arm)
-        .await
-        .context("source migration arm failed")?;
-    if !armed.success || !matches!(armed.status.as_str(), "armed" | "prepared") {
-        bail!(
-            "source migration arm declined with status {}: {}",
-            armed.status,
-            armed.error.as_deref().unwrap_or("unknown error")
-        );
-    }
-    cleanup.mark_source_quiesce_started();
-
-    let reserved_committed_len = match &source_trigger {
-        DecodeMigrationTrigger::SequenceLength { tokens } => (*tokens as usize).saturating_sub(1),
-        DecodeMigrationTrigger::TokenId { .. } => {
-            let max_output_tokens = request
-                .stop_conditions
-                .max_tokens
-                .context("token-ID migration requires a bounded max_tokens")?
-                as usize;
-            request
-                .token_ids
-                .len()
-                .saturating_add(max_output_tokens)
-                .saturating_sub(1)
-        }
-    };
-    if reserved_committed_len < request.token_ids.len() {
-        bail!("decode migration boundary must extend beyond the prompt");
-    }
+    // Stream delivery can coalesce several generated tokens around a trigger.
+    // Reserve the bounded request maximum so an acknowledged trigger overshoot
+    // can still bind exactly; SGLang releases the unused page-aligned tail.
+    let reserved_committed_len = reserved_logical_len - 1;
     let reserved_output_tokens = reserved_committed_len - request.token_ids.len();
     let mut reserved_input_ids = request.token_ids.clone();
     reserved_input_ids.resize(reserved_committed_len, 0);
@@ -413,19 +383,45 @@ async fn prepare_destination(
     reserved_request.decode_migration = None;
     let reserved_request = serde_json::to_value(reserved_request)
         .context("failed to serialize reserved destination request")?;
-    let started = control
-        .call(
+    let source_prepare = json!({
+        "rid": &rid,
+        "migration_id": &migration_id,
+        "phase": "prepare",
+        "bootstrap_room": bootstrap_room,
+        "source_dp_rank": source_dp_rank,
+    });
+    let destination_bootstrap = json!({
+        "rid": &rid,
+        "migration_id": &migration_id,
+        "destination_request": reserved_request,
+        "destination_dp_rank": destination_worker.dp_rank,
+    });
+    // Both operations depend on the reservation room but not on each other.
+    // Starting them together keeps setup ahead of short or heavily batched
+    // source stages. A response loss may mean the source was prepared, so the
+    // cleanup path must cancel it from this point onward.
+    cleanup.mark_source_control_started();
+    let (source_ready, started) = tokio::join!(
+        control.call(
+            ControlEndpoint::Sync,
+            source_worker.worker_id,
+            source_prepare,
+        ),
+        control.call(
             ControlEndpoint::Prepare,
             destination_worker.worker_id,
-            json!({
-                "rid": rid,
-                "migration_id": migration_id,
-                "destination_request": reserved_request,
-                "destination_dp_rank": destination_worker.dp_rank,
-            }),
+            destination_bootstrap,
         )
-        .await
-        .context("destination early bootstrap failed")?;
+    );
+    let source_ready = source_ready.context("source migration prepare failed")?;
+    let started = started.context("destination early bootstrap failed")?;
+    if !source_ready.success || source_ready.status != "ready" {
+        bail!(
+            "source migration prepare declined with status {}: {}",
+            source_ready.status,
+            source_ready.error.as_deref().unwrap_or("unknown error")
+        );
+    }
     if !started.success || !matches!(started.status.as_str(), "bootstrapping" | "ready") {
         bail!(
             "destination early bootstrap declined with status {}: {}",
@@ -433,6 +429,12 @@ async fn prepare_destination(
             started.error.as_deref().unwrap_or("unknown error")
         );
     }
+    tracing::info!(
+        request_id = %rid,
+        %migration_id,
+        setup_latency_ms = setup_started.elapsed().as_secs_f64() * 1000.0,
+        "decode migration setup prepared"
+    );
 
     Ok(PreparedDestination {
         worker: destination_worker,
@@ -777,12 +779,11 @@ impl
                     return;
                 }
 
-                // Sequence triggers are normally parked locally by the early arm.
-                // This call fetches the exact frontier and remains the token-trigger
-                // fallback. A cancelled or lost call may already have detached the
-                // source request, so cleanup must terminate it from this point.
-                cleanup.mark_source_quiesce_started();
+                // Dynamo owns trigger detection. SGLang only receives a generic
+                // request to quiesce at the latest output frontier Dynamo observed.
+                cleanup.mark_source_control_started();
                 let quiesce_deadline = tokio::time::Instant::now() + CONTROL_TIMEOUT;
+                let quiesce_started = tokio::time::Instant::now();
                 let quiesced = loop {
                     let response = control.call(
                         ControlEndpoint::Sync,
@@ -797,11 +798,11 @@ impl
                         }),
                     ).await;
                     match response {
-                        Ok(response) if response.success && response.status == "armed" => {
+                        Ok(response) if response.success && response.status == "quiescing" => {
                             if tokio::time::Instant::now() >= quiesce_deadline {
                                 cleanup.terminate().await;
                                 yield Annotated::from_error(
-                                    "source did not reach the armed migration boundary",
+                                    "source did not reach a safe quiesce boundary",
                                 );
                                 return;
                             }
@@ -822,7 +823,9 @@ impl
                             cleanup.disarm();
                             continue 'request_stream;
                         }
-                        Ok(response) if response.success => break response,
+                        Ok(response) if response.success && response.status == "quiesced" => {
+                            break response;
+                        }
                         Ok(response) => {
                             tracing::warn!(request_id = %rid, status = %response.status, error = ?response.error, "source quiesce declined; terminating request");
                             cleanup.terminate().await;
@@ -862,6 +865,7 @@ impl
                 tracing::info!(
                     request_id = %rid,
                     %migration_id,
+                    quiesce_latency_ms = quiesce_started.elapsed().as_secs_f64() * 1000.0,
                     committed_len,
                     logical_len,
                     unforwarded_tokens = unforwarded.len(),
@@ -1192,7 +1196,7 @@ struct MigrationCleanup {
     source_dp_rank: u32,
     destination_dp_rank: u32,
     active: bool,
-    source_may_be_quiesced: bool,
+    source_may_need_cancel: bool,
 }
 
 impl MigrationCleanup {
@@ -1214,7 +1218,7 @@ impl MigrationCleanup {
             source_dp_rank,
             destination_dp_rank,
             active: true,
-            source_may_be_quiesced: false,
+            source_may_need_cancel: false,
         }
     }
 
@@ -1222,8 +1226,8 @@ impl MigrationCleanup {
         self.active = false;
     }
 
-    fn mark_source_quiesce_started(&mut self) {
-        self.source_may_be_quiesced = true;
+    fn mark_source_control_started(&mut self) {
+        self.source_may_need_cancel = true;
     }
 
     fn start_source_commit(&mut self) {
@@ -1256,7 +1260,7 @@ impl MigrationCleanup {
                 }),
             )
             .await;
-        if self.source_may_be_quiesced {
+        if self.source_may_need_cancel {
             let _ = self
                 .control
                 .call(
@@ -1287,7 +1291,7 @@ impl Drop for MigrationCleanup {
         let destination_worker = self.destination_worker;
         let source_dp_rank = self.source_dp_rank;
         let destination_dp_rank = self.destination_dp_rank;
-        let source_may_be_quiesced = self.source_may_be_quiesced;
+        let source_may_need_cancel = self.source_may_need_cancel;
         tokio::spawn(async move {
             let _ = control
                 .call(
@@ -1302,7 +1306,7 @@ impl Drop for MigrationCleanup {
                     }),
                 )
                 .await;
-            if source_may_be_quiesced {
+            if source_may_need_cancel {
                 let _ = control
                     .call(
                         ControlEndpoint::Finalize,
@@ -1776,10 +1780,7 @@ mod tests {
                 ) {
                     json!({
                         "success": true,
-                        "status": "prepared",
-                        "bootstrap_host": "127.0.0.1",
-                        "bootstrap_port": 9876,
-                        "bootstrap_room": request["bootstrap_room"],
+                        "status": "quiesced",
                         "source_dp_rank": SOURCE_DP_RANK,
                         "prompt_len": 3,
                         "committed_len": 5,
@@ -1791,10 +1792,7 @@ mod tests {
                 } else {
                     json!({
                         "success": true,
-                        "status": "prepared",
-                        "bootstrap_host": "127.0.0.1",
-                        "bootstrap_port": 9876,
-                        "bootstrap_room": request["bootstrap_room"],
+                        "status": "quiesced",
                         "source_dp_rank": SOURCE_DP_RANK,
                         "prompt_len": 3,
                         "committed_len": 5,
@@ -1804,22 +1802,18 @@ mod tests {
                         "unforwarded_committed_output_ids": [11],
                     })
                 }
-            } else if phase == Some("arm") {
+            } else if phase == Some("prepare") {
                 assert!(matches!(endpoint, ControlEndpoint::Sync));
                 assert_eq!(instance_id, 1);
                 assert_control_rank(&request, "source_dp_rank", SOURCE_DP_RANK);
                 assert!(
                     request
-                        .get("target_sequence_length")
+                        .get("bootstrap_room")
                         .and_then(Value::as_u64)
-                        .is_some_and(|value| value > 0)
-                        || request
-                            .get("target_token_id")
-                            .and_then(Value::as_u64)
-                            .is_some()
+                        .is_some()
                 );
-                self.state.record("source:arm");
-                json!({"success": true, "status": "armed"})
+                self.state.record("source:prepare");
+                json!({"success": true, "status": "ready"})
             } else if request.get("source_state").is_some() {
                 assert!(matches!(endpoint, ControlEndpoint::Prepare));
                 assert_eq!(instance_id, 2);
@@ -1859,6 +1853,13 @@ mod tests {
                 assert!(matches!(endpoint, ControlEndpoint::Prepare));
                 assert_eq!(instance_id, 2);
                 assert_control_rank(&request, "destination_dp_rank", DESTINATION_DP_RANK);
+                assert_eq!(
+                    request["destination_request"]["token_ids"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    12,
+                );
                 self.state.record("destination:bootstrap");
                 json!({"success": true, "status": "bootstrapping"})
             } else if side == Some("destination") {
