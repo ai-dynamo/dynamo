@@ -41,6 +41,10 @@ kubectl create secret generic hf-token-secret \
   -n "${NAMESPACE}"
 ```
 
+Before applying, replace the `my-registry/dynamo-select-service:my-tag`
+placeholder in `kustomization.yaml` with a Dynamo image that includes
+`python -m dynamo.select_service`.
+
 Apply the manifests and wait for the Pods:
 
 ```bash
