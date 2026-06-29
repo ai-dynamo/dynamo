@@ -37,6 +37,9 @@ from gpu_memory_service.integrations.common.utils import (
     get_gms_persistent_kv_socket,
     get_gms_ro_connect_timeout_ms,
 )
+from gpu_memory_service.integrations.vllm.gds_connector_v1 import (
+    register_gms_gds_connector,
+)
 from gpu_memory_service.integrations.vllm.install_kv_leases import (
     install as install_kv_leases,
 )
@@ -78,6 +81,7 @@ install_vmm_ipc_kv()
 # Register the KV-cache GDS-direct connector under the short name so
 # users can wire it via vLLM's standard --kv-transfer-config flag.
 # Opt-in: the connector is only constructed if the user names it.
+register_gms_gds_connector()
 
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
