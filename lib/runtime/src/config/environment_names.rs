@@ -315,6 +315,11 @@ pub mod llm {
     /// `extra_fields` opt-in.
     pub const DYN_ENABLE_FRONTEND_NVEXT: &str = "DYN_ENABLE_FRONTEND_NVEXT";
 
+    /// Ignore unknown OpenAI frontend request fields. Unknown fields are dropped,
+    /// not handled; known pass-through fields remain type-validated.
+    pub const DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: &str =
+        "DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS";
+
     /// Master switch for the frontend's HTTP admin API surface.
     /// Default `true`. Falsy values prevent registration of `GET` /
     /// `POST /busy_threshold`. Inference, metrics, models, health, and
@@ -702,10 +707,14 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
+            llm::DYN_ENABLE_FRONTEND_NVEXT,
+            llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+            llm::DYN_ENABLE_FRONTEND_ADMIN_API,
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,

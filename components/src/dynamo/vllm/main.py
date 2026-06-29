@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from dynamo.vllm.omni.args import OmniConfig
 
 import uvloop
+from huggingface_hub import try_to_load_from_cache
+from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -358,9 +360,32 @@ def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional
     except ImportError:
         return None
 
-    # vLLM has already resolved the model to a local dir (config.json +
-    # tokenizer.json on disk) during engine init; read from there.
-    return resolve_routing_image_token_id(config.model, vllm_config.model_config.model)
+    # `model_config.model` is the user-supplied `--model` argument verbatim, so
+    # for HF ids ("Qwen/Qwen3.5-0.8B") it points nowhere on disk. Resolve via
+    # huggingface_hub's public cache lookup with vLLM's revision so we pick
+    # the same snapshot vLLM is using; fall through to the raw path for
+    # local-path users (where the lookup raises HFValidationError).
+    model_dir = None
+    try:
+        revision = vllm_config.model_config.revision
+        cfg = try_to_load_from_cache(
+            repo_id=config.model, filename="config.json", revision=revision
+        )
+        if cfg and isinstance(cfg, str):
+            model_dir = os.path.dirname(cfg)
+    except (HFValidationError, OSError) as exc:
+        logger.debug(
+            "HF cache lookup for %s failed (%s); falling back to raw model arg",
+            config.model,
+            exc,
+        )
+    if model_dir is None:
+        logger.debug(
+            "Resolved model_dir via raw arg fallback: %s",
+            vllm_config.model_config.model,
+        )
+        model_dir = vllm_config.model_config.model
+    return resolve_routing_image_token_id(config.model, model_dir)
 
 
 def setup_kv_event_publisher(

@@ -815,6 +815,57 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 logging.error(f"Failed to resume memory occupation: {e}")
                 return {"status": "error", "message": str(e)}
 
+    async def clear_kv_blocks(self, request: Optional[Dict[str, Any]] = None):
+        """Flush SGLang's local cache when no requests are active."""
+        tokenizer_manager = (
+            getattr(self.engine, "tokenizer_manager", None)
+            if self.engine is not None
+            else None
+        )
+        if tokenizer_manager is None:
+            yield {
+                "status": "error",
+                "message": "KV cache clear not supported on this worker",
+            }
+            return
+
+        try:
+            async with self._pause_lock:
+                if getattr(tokenizer_manager, "rid_to_state", None):
+                    yield {
+                        "status": "error",
+                        "message": "Cannot clear KV cache while requests are active",
+                    }
+                    return
+
+                if hasattr(tokenizer_manager, "auto_create_handle_loop"):
+                    tokenizer_manager.auto_create_handle_loop()
+                result = await tokenizer_manager.flush_cache()
+
+                if not result.success:
+                    yield {
+                        "status": "error",
+                        "message": getattr(result, "message", None)
+                        or "KV cache clear failed",
+                    }
+                    return
+
+                backend = tokenizer_manager.server_args.hicache_storage_backend
+                if backend and backend != "none":
+                    result = await tokenizer_manager.clear_hicache_storage()
+                    if not result.success:
+                        yield {
+                            "status": "error",
+                            "message": getattr(result, "message", None)
+                            or "External KV cache clear failed",
+                        }
+                        return
+
+                yield {"status": "success", "message": "KV cache cleared"}
+        except Exception as e:
+            logging.error("Failed to clear KV cache: %s", e)
+            yield {"status": "error", "message": str(e)}
+
     async def start_profile(self, body: dict) -> dict:
         """Start profiling on the engine.
 
