@@ -272,6 +272,20 @@ async def test_clear_kv_blocks_rejects_active_sglang_requests(handler):
 
 
 @pytest.mark.asyncio
+async def test_clear_kv_blocks_returns_error_without_engine(handler):
+    handler.engine = None
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks({})]
+
+    assert chunks == [
+        {
+            "status": "error",
+            "message": "KV cache clear not supported on this worker",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_clear_kv_blocks_reports_flush_failure(handler):
     handler.engine.tokenizer_manager.flush_cache = AsyncMock(
         return_value=SimpleNamespace(success=False, message="cache busy")
