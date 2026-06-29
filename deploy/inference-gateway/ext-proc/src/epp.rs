@@ -582,11 +582,7 @@ fn prepare_completion_prompt_for_routing(request_json: &mut serde_json::Value) -
 fn extract_priority_jump(nvext: Option<&NvExt>) -> f64 {
     nvext
         .and_then(|n| n.agent_hints.as_ref())
-        .and_then(|h| {
-            h.priority
-                .map(|p| p as f64)
-                .or(h.latency_sensitivity)
-        })
+        .and_then(|h| h.priority.map(|p| p as f64).or(h.latency_sensitivity))
         .map(|p| p.max(0.0))
         .unwrap_or(0.0)
 }
@@ -1245,9 +1241,8 @@ mod tests {
     /// regresses, the GAIE ext-proc path is back to ignoring priority.
     #[test]
     fn priority_jump_lifted_from_agent_hints_priority() {
-        let with_priority: NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
+        let with_priority: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
                     "model": "test",
                     "messages": [{"role": "user", "content": "hi"}],
                     "nvext": {"agent_hints": {"priority": 5}}
@@ -1256,52 +1251,48 @@ mod tests {
         .unwrap();
         assert_eq!(extract_priority_jump(with_priority.nvext.as_ref()), 5.0);
 
-        let with_negative_alias: NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
+        let with_negative_alias: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
                     "model": "test",
                     "messages": [{"role": "user", "content": "hi"}],
                     "nvext": {"agent_hints": {"latency_sensitivity": -3.5}}
                 }"#,
-            )
-            .unwrap();
+        )
+        .unwrap();
         assert_eq!(
             extract_priority_jump(with_negative_alias.nvext.as_ref()),
             0.0
         );
 
-        let without_nvext: NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
+        let without_nvext: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
                     "model": "test",
                     "messages": [{"role": "user", "content": "hi"}]
                 }"#,
-            )
-            .unwrap();
+        )
+        .unwrap();
         assert_eq!(extract_priority_jump(without_nvext.nvext.as_ref()), 0.0);
     }
 
     #[test]
     fn strict_priority_lifted_from_agent_hints() {
-        let with_priority: NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
+        let with_priority: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
                     "model": "test",
                     "messages": [{"role": "user", "content": "hi"}],
                     "nvext": {"agent_hints": {"strict_priority": 9}}
                 }"#,
-            )
-            .unwrap();
+        )
+        .unwrap();
         assert_eq!(extract_strict_priority(with_priority.nvext.as_ref()), 9);
 
-        let without_nvext: NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
+        let without_nvext: NvCreateChatCompletionRequest = serde_json::from_str(
+            r#"{
                     "model": "test",
                     "messages": [{"role": "user", "content": "hi"}]
                 }"#,
-            )
-            .unwrap();
+        )
+        .unwrap();
         assert_eq!(extract_strict_priority(without_nvext.nvext.as_ref()), 0);
     }
 
