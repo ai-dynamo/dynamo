@@ -8,7 +8,7 @@ import logging
 import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
-from vllm_omni.entrypoints.utils import load_stage_configs_from_yaml
+from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 
 from dynamo import prometheus_names
 from dynamo.common.storage import get_fs
@@ -17,7 +17,7 @@ from dynamo.common.utils.output_modalities import (
     get_output_modalities,
     parse_request_type,
 )
-from dynamo.llm import ModelInput, register_model
+from dynamo.llm import ModelInput, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.args import OmniConfig
@@ -38,7 +38,11 @@ class OmniStageRouter:
         stage_configs_path: str,
     ) -> None:
         self.config = config
-        self.stage_configs = load_stage_configs_from_yaml(stage_configs_path)
+        _, self.stage_configs = load_and_resolve_stage_configs(
+            config.model,
+            stage_configs_path,
+            kwargs={},
+        )
         self.stage_clients: Dict[str, Any] = {}
 
         media_fs = (
@@ -204,6 +208,12 @@ async def init_omni_stage_router(
         generate_endpoint,
         config.model,
         config.served_model_name,
+        # OmniStageRouter is the user-visible front for an internal
+        # multi-stage pipeline; the per-stage workers are private. From
+        # the frontend's topology view, the router serves end-to-end as
+        # Aggregated with no peer dependencies.
+        worker_type=WorkerType.Aggregated,
+        needs=[],
     )
     logger.info("OmniStageRouter registered at '%s'", generate_endpoint)
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Rolling Updates
+subtitle: Updates DGD worker images, resources, and arguments with managed rolling updates across Deployment, Grove, and LWS backends.
 ---
 
 This guide covers how rolling updates work for `DynamoGraphDeployment` (DGD) resources. Rolling updates allow you to update worker configurations (images, resources, environment variables, etc.) with minimal downtime by gradually replacing old pods with new ones.
@@ -26,13 +27,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
     VllmDecodeWorker:
       componentType: worker
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           command:
           - python3
           - -m
@@ -48,7 +49,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           command:
           - python3
           - -m
@@ -74,13 +75,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
     VllmDecodeWorker:
       componentType: worker
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           command:
           - python3
           - -m
@@ -98,7 +99,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
           command:
           - python3
           - -m

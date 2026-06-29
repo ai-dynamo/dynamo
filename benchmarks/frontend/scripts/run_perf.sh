@@ -123,7 +123,7 @@ Service Options:
   --workers N               Number of mocker workers (default: 2)
   --speedup-ratio RATIO     Mocker speedup ratio (default: 1.0; use large value for near-instant)
   --data-parallel-size N    Mocker DP workers (default: 1)
-  --request-plane PLANE     nats|http|tcp (default: tcp)
+  --request-plane PLANE     nats|tcp (default: tcp)
   --event-plane PLANE       nats|zmq (default: nats)
   --frontend-port PORT      Frontend HTTP port (default: 8000)
   --planner-profile PATH    Planner profile data path

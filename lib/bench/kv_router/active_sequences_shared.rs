@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::hint::black_box;
 use std::sync::Arc;
 
 use dynamo_kv_router::protocols::{PrefillLoadHint, WorkerWithDpRank};
@@ -10,10 +11,9 @@ use dynamo_mocker::loadgen::Trace;
 use dynamo_tokens::SequenceHash;
 use tokio::time::{Duration, Instant};
 
-use crate::common::{
-    BenchmarkRun, NoopSequencePublisher, compute_benchmark_run, generate_replay_artifacts,
-    make_progress_bar, rescale_trace_timestamps,
-};
+use dynamo_bench::kv_router_common::replay::{NoopSequencePublisher, generate_replay_artifacts};
+use dynamo_bench::kv_router_common::results::{BenchmarkRun, compute_benchmark_run};
+use dynamo_bench::kv_router_common::trace_gen::{ReplayStartGate, WorkerTimelines};
 
 /// A single timestamped entry in a worker's sequence trace.
 #[derive(Clone)]
@@ -137,7 +137,7 @@ pub async fn generate_sequence_events(
 }
 
 /// Run the benchmark: replay sequence trace entries against a shared
-/// ActiveSequencesMultiWorker, measuring potential_blocks_and_tokens /
+/// ActiveSequencesMultiWorker, measuring project_worker_loads /
 /// add_request / mark_prefill_completed / free latency.
 pub async fn run_benchmark(
     traces: &[Vec<SequenceTrace>],
@@ -145,7 +145,7 @@ pub async fn run_benchmark(
     benchmark_duration_ms: u64,
     inference_worker_duplication_factor: usize,
 ) -> anyhow::Result<BenchmarkRun> {
-    let scaled = rescale_trace_timestamps(
+    let scaled = WorkerTimelines::from_rescaled(
         traces,
         benchmark_duration_ms,
         |entry| entry.timestamp_us,
@@ -168,8 +168,6 @@ pub async fn run_benchmark(
         "bench",
     ));
 
-    let total_entries: u64 = scaled.iter().map(|t| t.len() as u64).sum::<u64>()
-        * inference_worker_duplication_factor as u64;
     let total_blocks: usize = scaled
         .iter()
         .flat_map(|t| t.iter())
@@ -180,24 +178,24 @@ pub async fn run_benchmark(
         .sum::<usize>()
         * inference_worker_duplication_factor;
 
-    let progress = make_progress_bar(Some(total_entries));
-
     let mut tasks = Vec::new();
+    let start_gate = ReplayStartGate::new(total_workers);
     for replica in 0..inference_worker_duplication_factor {
         for (trace_idx, worker_trace) in scaled.iter().enumerate() {
             let worker_id = (replica * num_trace_workers + trace_idx) as u64;
             let worker = WorkerWithDpRank::from_worker_id(worker_id);
             let trace = make_unique_trace(worker_trace, worker_id);
-            let progress = progress.clone();
             let multi = Arc::clone(&multi);
+            let start_gate = start_gate.clone();
 
             tasks.push(tokio::spawn(async move {
                 let capacity = trace.len();
                 let mut latencies: Vec<u64> = Vec::with_capacity(capacity);
 
+                start_gate.wait_for_start().await;
+
                 let mut target = Instant::now();
                 let mut iter = trace.into_iter().peekable();
-                let mut local_count: u64 = 0;
 
                 while let Some(entry) = iter.next() {
                     let entry_ts = entry.timestamp_us;
@@ -205,14 +203,12 @@ pub async fn run_benchmark(
                     let start = minstant::Instant::now();
                     apply_entry(&multi, worker, entry.entry).await;
                     latencies.push(start.elapsed().as_nanos() as u64);
-                    local_count += 1;
 
                     while iter.peek().is_some_and(|e| e.timestamp_us == entry_ts) {
                         let e = iter.next().unwrap();
                         let start = minstant::Instant::now();
                         apply_entry(&multi, worker, e.entry).await;
                         latencies.push(start.elapsed().as_nanos() as u64);
-                        local_count += 1;
                     }
 
                     if let Some(next) = iter.peek() {
@@ -222,26 +218,21 @@ pub async fn run_benchmark(
                     if target > Instant::now() {
                         tokio::time::sleep_until(target).await;
                     }
-
-                    if local_count > 100 {
-                        progress.inc(local_count);
-                        local_count = 0;
-                    }
                 }
-
-                progress.inc(local_count);
 
                 Ok::<_, anyhow::Error>(latencies)
             }));
         }
     }
 
+    let started_at = start_gate.start().await;
+
     let mut all_latencies = Vec::new();
     for task in tasks {
         all_latencies.extend(task.await??);
     }
 
-    let total_duration = progress.elapsed();
+    let total_duration = started_at.elapsed();
     multi.assert_completely_drained(Instant::now());
 
     let run = compute_benchmark_run(
@@ -253,7 +244,7 @@ pub async fn run_benchmark(
     );
 
     println!(
-        "Ops Throughput: offered={} ops/s achieved={} ops/s (potential_blocks_and_tokens + add + prefill_complete + free)",
+        "Ops Throughput: offered={} ops/s achieved={} ops/s (project_worker_loads + add + prefill_complete + free)",
         run.results.offered_ops_throughput, run.results.ops_throughput
     );
     println!(
@@ -311,7 +302,7 @@ async fn apply_entry(
             isl,
             output_length,
         } => {
-            let _ = multi.potential_blocks_and_tokens(Some(&block_hashes), isl, HashMap::new());
+            black_box(multi.project_worker_loads(Some(&block_hashes), decay_now));
             let _ = multi.add_request(
                 SequenceRequest {
                     request_id,

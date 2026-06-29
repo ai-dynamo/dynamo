@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.10.0-labs
 # SPDX-FileCopyrightText:  Copyright The Kubernetes Authors.
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -31,7 +32,7 @@
 #     -t dynamo/dynamo-epp:dev .
 
 ARG RUST_IMAGE=rust:1.93.1
-ARG BUILDER_IMAGE=golang:1.25
+ARG BUILDER_IMAGE=golang:1.26.3
 ARG BASE_IMAGE=ubuntu:24.04
 
 # =============================================================================
@@ -76,6 +77,11 @@ COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 
 # Copy all workspace crates (libdynamo_llm depends transitively on many)
 COPY --from=dynamo lib/ lib/
+
+# ext-proc is also a workspace member (referenced from the root Cargo.toml),
+# so cargo needs its manifest on disk to resolve the workspace even when we
+# only build libdynamo_llm.
+COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 
 # Build libdynamo_llm with sccache for cross-run caching. The registry and
 # git caches are content-addressed (safe to persist); no target/ mount --

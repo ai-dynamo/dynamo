@@ -20,7 +20,7 @@ support the current version plus 1 version back (N and N-1). The pattern:
    enough surface area to cover what Dynamo actually calls.
 4. Each fallback branch in `_compat.py` MUST have a comment noting which SGLang
    version it supports and when it can be removed, e.g.:
-   `# Fallback for sglang <= 0.5.9. Remove when min supported version is 0.6.0+`
+   `# Fallback for sglang <= 0.5.12. Remove when min supported version is 0.5.14+`
 5. When a new SGLang version is released and the old N-1 falls outside the support
    window, delete the corresponding fallback branches and polyfills from `_compat.py`.
    If `_compat.py` becomes trivial re-exports, inline the imports and delete the file.
@@ -44,8 +44,12 @@ Worker dispatch (main.py:60-132):
   --image-diffusion-worker    -> init_diffusion.init_image_diffusion()
   --video-generation-worker   -> init_diffusion.init_video_diffusion()
   --embedding-worker          -> init_embedding.init_embedding()
-  --multimodal-encode-worker  -> init_multimodal.init_multimodal_encode_worker()
-  --multimodal-worker         -> init_multimodal.init_multimodal_worker() or _prefill_worker()
+  --enable-multimodal --disaggregation-mode encode
+                              -> init_multimodal.init_multimodal_encode_worker()
+  --enable-multimodal --dedicated-mm-encoder --disaggregation-mode pd/decode
+                              -> init_multimodal.init_multimodal_worker()
+  --enable-multimodal --dedicated-mm-encoder --disaggregation-mode prefill
+                              -> init_multimodal.init_multimodal_prefill_worker()
   --dllm-algorithm <algo>     -> init_diffusion.init_llm_diffusion()
   (default, prefill mode)     -> init_llm.init_prefill()
   (default, decode/agg mode)  -> init_llm.init_decode()
@@ -57,7 +61,7 @@ Worker dispatch (main.py:60-132):
 
 **Two config paths:**
 
-1. **LLM workers** (decode, prefill, embedding, multimodal-worker, dllm): Creates full
+1. **LLM workers** (decode, prefill, embedding, internal multimodal, dllm): Creates full
    `sglang.srt.server_args.ServerArgs` via `ServerArgs.from_cli_args()`. This triggers
    model config loading, tokenizer detection, etc.
 
@@ -68,7 +72,7 @@ Worker dispatch (main.py:60-132):
 
 **DynamoConfig** combines `DynamoRuntimeConfig` (common flags like `--namespace`,
 `--output-modalities`, `--media-output-fs-url`) with `DynamoSGLangConfig` (sglang-specific
-flags like `--multimodal-encode-worker`, `--embedding-worker`).
+flags like `--enable-multimodal`, `--dedicated-mm-encoder`, `--embedding-worker`).
 
 Key gotcha: `--output-modalities` defaults to `["text"]` globally. Image/video diffusion
 workers override this in their init functions to `["image"]`/`["video"]` to ensure correct
@@ -117,8 +121,8 @@ BaseGenerativeHandler (handler_base.py)
 | Worker | Engine | Notes |
 |--------|--------|-------|
 | decode, prefill, dllm, embedding | `sgl.Engine` | Full SGLang inference engine |
-| multimodal-worker, multimodal-prefill | `sgl.Engine` | Plus EmbeddingsProcessor |
-| multimodal-encode-worker | None | `MMEncoder` from SGLang, pre-tokenized input |
+| internal multimodal worker / prefill | `sgl.Engine` | `--dedicated-mm-encoder`; plus EmbeddingsProcessor |
+| multimodal encode worker | None | `--disaggregation-mode encode`; `MMEncoder` from SGLang, pre-tokenized input |
 | image-diffusion-worker | `DiffGenerator` | From `sglang.multimodal_gen` |
 | video-generation-worker | `DiffGenerator` | From `sglang.multimodal_gen` |
 
@@ -140,6 +144,23 @@ BaseGenerativeHandler (handler_base.py)
 
 3. **Video generation** (`register_video_generation_model`): Same fast path with
    `ModelType.Videos`.
+
+### Multinode DP Rank Visibility
+
+SGLang multinode LLM workers have two different DP-rank views:
+
+- **Model registration / router scheduling** is global. In the legacy
+  `python -m dynamo.sglang` path, only the leader process (`node_rank == 0`)
+  serves the Dynamo endpoint and registers the model card. That single routable
+  worker must advertise `[0, dp_size)` via `ModelRuntimeConfig`; otherwise the
+  router cannot schedule remote DP ranks.
+- **KV events, FPM, and component metrics** are local. Each node subscribes only
+  to its own rank slice from `local_dp_rank_bounds(server_args)`, and non-leader
+  nodes publish those events using the leader worker id so the router-visible KV
+  trees remain keyed as `(leader_worker_id, dp_rank)`.
+
+Do not reuse the local per-node rank slice for model registration. Keep
+registration on the global range and local publishers on the local range.
 
 ## Init Flow (typical LLM decode)
 
@@ -228,6 +249,12 @@ absolute sequence position where logprob computation starts: `-1` (default) = ou
 only (`len(prompt) - 1`), `0` = from prompt start. We set it to 0 when `prompt_logprobs`
 is requested.
 
+**Top-logprobs gate**: `logprobs >= 1` (or `prompt_logprobs >= 1`) raises `ValueError`
+by default. SGLang's tokenizer manager detokenizes top-k tokens per-position serially,
+causing severe latency degradation (O(N) per generated token). Callers must use
+`logprobs=0` for chosen-token-only logprobs. Set `DYN_SGL_ALLOW_TOP_LOGPROBS=1` to
+override once upstream batches `detokenize_top_logprobs_tokens`.
+
 **Streaming behavior** (`_extract_logprobs`):
 
 Dynamo forces `stream_output=True` (args.py:374), making `output_ids` disjoint per chunk.
@@ -286,14 +313,10 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
   Always slice with an offset, don't assume per-chunk logprobs.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
-- **Session control graceful degradation**: Session control is request-driven --
-  the router's `AgentController` and `StickySessionRouter` are always created but
-  activate lazily. If no worker has `--enable-streaming-session`, the router warns
-  once and ignores `session_control` in requests. On the handler side,
-  `_session_kwargs()` checks `enable_streaming_session` before injecting
-  `session_params` into SGLang calls. Both layers must agree: the router skips
-  lifecycle RPCs, and the handler skips session params. Without both guards,
-  SGLang errors with "session id does not exist".
+- **Session radix cache**: With `--enable-session-radix-cache`, the handler
+  passes `agent_context.session_id` to SGLang as `session_params.id`. Agent KV
+  hints are forwarded as metadata but are not acted on by the SGLang backend.
+  This path does not create router affinity.
 
 For troubleshooting (CuDNN, config.json errors, OOM, disagg connectivity), see
 `docs/backends/sglang/sglang-examples.md#troubleshooting`.
@@ -341,7 +364,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 
 ```
 sglang/
-  _compat.py               # SGLang version compat shim (network imports + NetworkAddress polyfill)
+  _compat.py               # SGLang version compat shim (signature probing for async_generate kwargs)
   __main__.py              # Entry point
   main.py                  # Worker dispatch
   args.py                  # Config parsing (ServerArgs vs SimpleNamespace)

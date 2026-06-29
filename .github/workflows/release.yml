@@ -19,12 +19,43 @@ on:
         required: false
         type: boolean
         default: false
+      skip_gitlab_pipeline:
+        description: 'Skip the GitLab release automation pipeline trigger. Emergency use only.'
+        required: false
+        type: boolean
+        default: false
+      slack_thread_ts:
+        description: 'Slack thread ts to reply into. Empty skips thread replies. Channel ID is read from secrets.SLACK_RELEASE_CHANNEL_ID.'
+        required: false
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      commit_sha:
+        required: true
+        type: string
+      rc_number:
+        required: false
+        type: string
+      nightly:
+        required: false
+        type: boolean
+        default: false
+      skip_gitlab_pipeline:
+        required: false
+        type: boolean
+        default: false
+      slack_thread_ts:
+        required: false
+        type: string
+        default: ''
 
 # Note: workflow_dispatch can only be triggered from release/* branches (or main when nightly=true)
-# This is enforced in the prepare-release job via branch validation
+# This is enforced in the prepare-release job via branch validation. workflow_call paths
+# (e.g. nightly-ci.yml) inherit the caller's ref — the same branch rules apply.
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   REGISTRY_IMAGE: ai-dynamo/dynamo
@@ -44,13 +75,14 @@ jobs:
       rc_number: ${{ steps.rc_tag.outputs.rc_number }}
       ngc_version_tag: ${{ steps.rc_tag.outputs.ngc_version_tag }}
       helm_chart_version: ${{ steps.rc_tag.outputs.helm_chart_version }}
+      wheel_version: ${{ steps.rc_tag.outputs.wheel_version }}
     steps:
       - name: Extract version and validate inputs
         id: extract
         env:
-          COMMIT_SHA: ${{ github.event.inputs.commit_sha }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
           BRANCH_NAME: ${{ github.ref_name }}
-          NIGHTLY: ${{ github.event.inputs.nightly }}
+          NIGHTLY: ${{ inputs.nightly }}
         run: |
           set -euo pipefail
 
@@ -96,21 +128,35 @@ jobs:
       - name: Determine next RC number
         id: rc_tag
         env:
-          INPUT_RC_NUMBER: ${{ github.event.inputs.rc_number }}
+          INPUT_RC_NUMBER: ${{ inputs.rc_number }}
           VERSION: ${{ steps.extract.outputs.version }}
           COMMIT_SHA: ${{ steps.extract.outputs.commit_sha }}
           NIGHTLY: ${{ steps.extract.outputs.nightly }}
         run: |
           set -euo pipefail
 
+          # Base version pinned in pyproject.toml at the source SHA. Same value
+          # cargo and maturin stamp into the wheel filename / METADATA.
+          BASE_VERSION=$(awk '/^version = / {gsub(/"/, "", $3); print $3; exit}' pyproject.toml)
+          if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: cannot parse base version from pyproject.toml (got '${BASE_VERSION}')"
+            exit 1
+          fi
+
           if [[ "${NIGHTLY}" == "true" ]]; then
             DATE_UTC=$(date -u +%Y%m%d)
             SHORT_SHA="${COMMIT_SHA:0:7}"
-            NGC_VERSION_TAG="nightly-${DATE_UTC}-${SHORT_SHA}"
+            # No `nightly-` prefix on the tag: the NGC repo name itself carries
+            # the `-nightly` suffix (e.g. vllm-runtime-nightly), so the tag stays
+            # the bare date+sha (e.g. 20260520-abc1234).
+            NGC_VERSION_TAG="${DATE_UTC}-${SHORT_SHA}"
+            WHEEL_VERSION="${BASE_VERSION}.dev${DATE_UTC}"
             echo "rc_number=" >> $GITHUB_OUTPUT
             echo "ngc_version_tag=${NGC_VERSION_TAG}" >> $GITHUB_OUTPUT
             echo "helm_chart_version=" >> $GITHUB_OUTPUT
+            echo "wheel_version=${WHEEL_VERSION}" >> $GITHUB_OUTPUT
             echo "Nightly NGC tag: ${NGC_VERSION_TAG}"
+            echo "Nightly wheel version: ${WHEEL_VERSION}"
             exit 0
           fi
 
@@ -143,11 +189,15 @@ jobs:
           SEMVER_VERSION=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
           HELM_CHART_VERSION="${SEMVER_VERSION}-rc${NEXT_RC}"
 
+          WHEEL_VERSION="${BASE_VERSION}"
+
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "helm_chart_version=${HELM_CHART_VERSION}" >> $GITHUB_OUTPUT
+          echo "wheel_version=${WHEEL_VERSION}" >> $GITHUB_OUTPUT
           echo "RC number: ${NEXT_RC}"
           echo "Helm chart version: ${HELM_CHART_VERSION}"
+          echo "RC wheel version: ${WHEEL_VERSION}"
 
   # ============================================================================
   # NGC PUBLISH: crane copy to NGC, Helm chart push
@@ -213,10 +263,19 @@ jobs:
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
 
+          # Nightly builds push ECR tags with a `-nightly` suffix so a missing
+          # or failed nightly build can't fall through to the post-merge image
+          # at the same SHA (which carries stable, non-dev wheel versions).
+          NIGHTLY_TAG_SUFFIX=""
+          if [ "${NIGHTLY}" = "true" ]; then
+            NIGHTLY_TAG_SUFFIX="-nightly"
+          fi
+
           echo "========================================"
           echo "Copying images from ECR to NGC (registry-to-registry)"
           echo "Source commit SHA: ${COMMIT_SHA}"
           echo "NGC Version Tag: ${NGC_VERSION_TAG}"
+          echo "Nightly tag suffix: '${NIGHTLY_TAG_SUFFIX}'"
           echo "========================================"
 
           copy_image() {
@@ -235,80 +294,108 @@ jobs:
             fi
           }
 
-          # ---- CUDA 12 runtime images (vllm and sglang) ----
-          echo ""
-          echo "=== CUDA 12 Runtime Images (vllm, sglang) ==="
-          CUDA12_FRAMEWORKS=("vllm" "sglang")
-          for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
-            NGC_NAME="${FRAMEWORK}-runtime"
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}"
-            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}"
-          done
+          # On nightly, segregate published images into their own NGC repos by
+          # appending `-nightly` to the repo name (e.g. vllm-runtime-nightly).
+          # This keeps consumers from accidentally pulling a nightly image from
+          # the stable repo.
+          NGC_NAME_SUFFIX=""
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            NGC_NAME_SUFFIX="-nightly"
+          fi
 
-          # ---- CUDA 13 runtime images (vllm, sglang, trtllm) ----
+          # ---- CUDA 13 runtime images (vllm, sglang, trtllm) — DEFAULT ----
           echo ""
-          echo "=== CUDA 13 Runtime Images (vllm, sglang, trtllm) ==="
+          echo "=== CUDA 13 Runtime Images (vllm, sglang, trtllm) — default ==="
           CUDA13_FRAMEWORKS=("vllm" "sglang" "trtllm")
           for FRAMEWORK in "${CUDA13_FRAMEWORKS[@]}"; do
             if [ "${FRAMEWORK}" = "trtllm" ]; then
-              NGC_NAME="tensorrtllm-runtime"
+              NGC_NAME="tensorrtllm-runtime${NGC_NAME_SUFFIX}"
+              STABLE_NAME="tensorrtllm-runtime"
             else
-              NGC_NAME="${FRAMEWORK}-runtime"
+              NGC_NAME="${FRAMEWORK}-runtime${NGC_NAME_SUFFIX}"
+              STABLE_NAME="${FRAMEWORK}-runtime"
             fi
 
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda13"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
-            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime${NIGHTLY_TAG_SUFFIX}"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}"
+            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}"
+
+            # Explicit `-cuda13` alias on the same digest so consumers can
+            # pin to cuda13 specifically. The bare tag above stays as the
+            # implicit default and will move to cuda14+ when that flips.
+            EXPLICIT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+            copy_image "${SOURCE}" "${EXPLICIT_TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda13"
+
+            # Mutable `:nightly` floating tag on the stable repo (e.g.
+            # vllm-runtime:nightly). cuda13 is the default so no cuda suffix.
+            if [[ "${NIGHTLY}" == "true" ]]; then
+              MUTABLE_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${STABLE_NAME}:nightly"
+              copy_image "${SOURCE}" "${MUTABLE_TARGET}" "${STABLE_NAME}:nightly"
+
+              # Explicit `:nightly-cuda13` floating alias.
+              EXPLICIT_MUTABLE_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${STABLE_NAME}:nightly-cuda13"
+              copy_image "${SOURCE}" "${EXPLICIT_MUTABLE_TARGET}" "${STABLE_NAME}:nightly-cuda13"
+            fi
           done
 
-          # ---- EFA runtime images ----
-          # vllm/trtllm EFA are amd64 only; sglang EFA is multi-arch (amd64+arm64).
-          # crane copy preserves multi-arch manifests automatically.
-          echo ""
-          echo "=== EFA Runtime Images ==="
+          # Nightly builds only the runtime images above (vllm/sglang/trtllm
+          # cuda13). EFA/frontend/operator/planner/snapshot are built
+          # by post-merge and other workflows on release branches; for nightly
+          # we skip them entirely so we don't try to copy ECR tags that don't
+          # exist for the resolved SHA.
+          if [[ "${NIGHTLY}" != "true" ]]; then
+            # ---- EFA runtime images ----
+            # All EFA runtime images are multi-arch (amd64+arm64).
+            # crane copy preserves multi-arch manifests automatically.
+            echo ""
+            echo "=== EFA Runtime Images ==="
 
-          # vllm EFA (CUDA 12, amd64 only)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
-          copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
+            # vllm EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
+            copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
 
-          # sglang EFA (CUDA 12, multi-arch)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa-cuda12"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
-          copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
+            # sglang EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
+            copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
 
-          # trtllm EFA (CUDA 13, amd64 only)
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa-cuda13"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
-          copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+            # trtllm EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
+            copy_image "${SOURCE}" "${TARGET}" "tensorrtllm-runtime:${NGC_VERSION_TAG}-efa"
 
-          # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
-          echo ""
-          echo "=== Frontend Image ==="
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
-          copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
+            # ---- Frontend image (already multi-arch from build-frontend-image workflow) ----
+            echo ""
+            echo "=== Frontend Image ==="
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-frontend"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
+            copy_image "${SOURCE}" "${TARGET}" "dynamo-frontend:${NGC_VERSION_TAG}"
 
-          # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
-          echo ""
-          echo "=== Operator Image ==="
-          OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-operator"
-          OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
-          copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
+            # ---- Operator image (multi-arch manifest already built by post-merge operator-build) ----
+            echo ""
+            echo "=== Operator Image ==="
+            OPERATOR_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-operator"
+            OPERATOR_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/kubernetes-operator:${NGC_VERSION_TAG}"
+            copy_image "${OPERATOR_SOURCE}" "${OPERATOR_TARGET}" "kubernetes-operator:${NGC_VERSION_TAG}"
 
-          # ---- Planner image (CPU-only, multi-arch from post-merge planner-pipeline) ----
-          echo ""
-          echo "=== Planner Image ==="
-          SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
-          TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
-          copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
-          # ---- Snapshot image ----
-          echo ""
-          echo "=== Snapshot Image ==="
-          SNAPSHOT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-snapshot-agent"
-          SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
-          copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
+            # ---- Planner image (CPU-only, multi-arch from post-merge planner-pipeline) ----
+            echo ""
+            echo "=== Planner Image ==="
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-planner"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-planner:${NGC_VERSION_TAG}"
+            copy_image "${SOURCE}" "${TARGET}" "dynamo-planner:${NGC_VERSION_TAG}"
+
+            # ---- Snapshot image ----
+            echo ""
+            echo "=== Snapshot Image ==="
+            SNAPSHOT_SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-snapshot-agent"
+            SNAPSHOT_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/snapshot-agent:${NGC_VERSION_TAG}"
+            copy_image "${SNAPSHOT_SOURCE}" "${SNAPSHOT_TARGET}" "snapshot-agent:${NGC_VERSION_TAG}"
+          else
+            echo ""
+            echo "=== Skipping EFA / frontend / operator / planner / snapshot (not built by nightly) ==="
+          fi
 
           # ---- Summary ----
           echo "successful_count=${#SUCCESSFUL_COPIES[@]}" >> $GITHUB_OUTPUT
@@ -397,31 +484,40 @@ jobs:
           echo "- **Successful copies**: ${SUCCESSFUL_COUNT}" >> $GITHUB_STEP_SUMMARY
           echo "- **Failed copies**: ${FAILED_COUNT}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          # Mirror the NGC_NAME_SUFFIX logic used in the copy step so the summary
+          # advertises the actual repos that were pushed to.
+          NGC_NAME_SUFFIX=""
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            NGC_NAME_SUFFIX="-nightly"
+          fi
           echo "### Expected Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Runtime images (CUDA 12 - default):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Runtime images (CUDA 13):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "EFA runtime images:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\` (amd64)" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-          echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\` (amd64)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Operator image:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Planner image:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-planner:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+          echo "Runtime images (CUDA 13 - default, bare tag + explicit -cuda13 alias):" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          if [[ "${NIGHTLY}" == "true" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Mutable floating tags (repushed every nightly):" >> $GITHUB_STEP_SUMMARY
+            echo "- \`vllm-runtime:nightly\` / \`vllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`sglang-runtime:nightly\` / \`sglang-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`tensorrtllm-runtime:nightly\` / \`tensorrtllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
+          fi
           if [[ "${NIGHTLY}" != "true" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "EFA runtime images (multi-arch):" >> $GITHUB_STEP_SUMMARY
+            echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Operator image:" >> $GITHUB_STEP_SUMMARY
+            echo "- \`kubernetes-operator:${NGC_VERSION_TAG}\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Planner image:" >> $GITHUB_STEP_SUMMARY
+            echo "- \`dynamo-planner:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Frontend images:" >> $GITHUB_STEP_SUMMARY
+            echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch)" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Helm chart:" >> $GITHUB_STEP_SUMMARY
             echo "- \`dynamo-platform:${HELM_CHART_VERSION}\` (pushed to NGC Helm registry)" >> $GITHUB_STEP_SUMMARY
@@ -472,7 +568,13 @@ jobs:
 
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
           ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-          ECR_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-runtime-cuda12"
+          # Nightly suffix ensures a failed nightly cannot fall through to
+          # the stable image.
+          NIGHTLY_TAG_SUFFIX=""
+          if [ "${NIGHTLY}" = "true" ]; then
+            NIGHTLY_TAG_SUFFIX="-nightly"
+          fi
+          ECR_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-dynamo-runtime${NIGHTLY_TAG_SUFFIX}"
 
           STAGE="${RUNNER_TEMP}/wheels"
           mkdir -p "${STAGE}/amd64" "${STAGE}/arm64"
@@ -516,6 +618,48 @@ jobs:
           ls -la "${OUT}/"
 
           echo "upload_dir=${OUT}" >> $GITHUB_OUTPUT
+
+      - name: Verify wheel versions match prepare-release expected tag
+        env:
+          EXPECTED_WHEEL_VERSION: ${{ needs.prepare-release.outputs.wheel_version }}
+          UPLOAD_DIR: ${{ steps.extract.outputs.upload_dir }}
+        run: |
+          set -euo pipefail
+
+          # Catches UTC-midnight drift between the build-time version stamp and
+          # prepare-release's wheel_version; ai_dynamo and ai_dynamo_runtime must agree.
+          shopt -s nullglob
+          AI_DYNAMO_WHEELS=("${UPLOAD_DIR}"/ai_dynamo-*-py3-none-any.whl)
+          AI_DYNAMO_RUNTIME_WHEELS=("${UPLOAD_DIR}"/ai_dynamo_runtime-*.whl)
+          shopt -u nullglob
+
+          if [ ${#AI_DYNAMO_WHEELS[@]} -eq 0 ] || [ ${#AI_DYNAMO_RUNTIME_WHEELS[@]} -eq 0 ]; then
+            echo "::error::Missing ai_dynamo or ai_dynamo_runtime wheel in ${UPLOAD_DIR}"
+            exit 1
+          fi
+
+          echo "Expected wheel version: ${EXPECTED_WHEEL_VERSION}"
+
+          mismatch=0
+          for path in "${AI_DYNAMO_WHEELS[@]}" "${AI_DYNAMO_RUNTIME_WHEELS[@]}"; do
+            file="$(basename "${path}")"
+            # PEP 427: <dist>-<version>-<tags>.whl; version sits between the 1st and 2nd hyphen.
+            rest="${file#*-}"
+            version="${rest%%-*}"
+            if [ -z "${version}" ]; then
+              echo "::error::Empty version parsed from ${file}"
+              exit 1
+            fi
+            echo "  ${file} -> ${version}"
+            if [ "${version}" != "${EXPECTED_WHEEL_VERSION}" ]; then
+              mismatch=1
+            fi
+          done
+
+          if [ "${mismatch}" -ne 0 ]; then
+            echo "::error::Wheel version mismatch — expected '${EXPECTED_WHEEL_VERSION}' for all wheels above. dynamo-pipeline and prepare-release likely computed dev_suffix on different UTC days."
+            exit 1
+          fi
 
       - name: Upload wheels to Artifactory
         env:
@@ -571,3 +715,255 @@ jobs:
             rm -f "${BODY_FILE}"
           done
 
+  # Combined NGC + Artifactory staging reply on the nightly thread.
+  notify-slack-staging:
+    name: Notify Slack — staging complete
+    runs-on: prod-default-small-v2
+    needs: [prepare-release, release-publish, stage-wheels-artifactory]
+    if: ${{ always() && inputs.slack_thread_ts != '' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Post staging reply
+        continue-on-error: true
+        env:
+          SLACK_BOT_TOKEN:  ${{ secrets.SLACK_RELEASE_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
+          SLACK_THREAD_TS:  ${{ inputs.slack_thread_ts }}
+          NGC_RESULT:       ${{ needs.release-publish.result }}
+          ART_RESULT:       ${{ needs.stage-wheels-artifactory.result }}
+          NGC_VERSION_TAG:  ${{ needs.prepare-release.outputs.ngc_version_tag }}
+          WHEEL_VERSION:    ${{ needs.prepare-release.outputs.wheel_version }}
+          RUN_URL:          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          emoji_for() {
+            case "$1" in
+              success)   echo ":white_check_mark:" ;;
+              failure)   echo ":x:" ;;
+              skipped)   echo ":fast_forward:" ;;
+              cancelled) echo ":no_entry_sign:" ;;
+              *)         echo ":grey_question:" ;;
+            esac
+          }
+          NGC_EMOJI=$(emoji_for "${NGC_RESULT}")
+          ART_EMOJI=$(emoji_for "${ART_RESULT}")
+
+          if [ "${NGC_RESULT}" = "success" ] && [ "${ART_RESULT}" = "success" ]; then
+            HEADER=":package: Staging complete"
+          else
+            HEADER=":warning: Staging finished with issues"
+          fi
+
+          PAYLOAD=$(jq -n \
+            --arg channel    "${SLACK_CHANNEL_ID}" \
+            --arg thread_ts  "${SLACK_THREAD_TS}" \
+            --arg header     "${HEADER}" \
+            --arg ngc_emoji  "${NGC_EMOJI}" \
+            --arg ngc_result "${NGC_RESULT}" \
+            --arg art_emoji  "${ART_EMOJI}" \
+            --arg art_result "${ART_RESULT}" \
+            --arg ngc_tag    "${NGC_VERSION_TAG}" \
+            --arg wheel      "${WHEEL_VERSION}" \
+            --arg run_url    "${RUN_URL}" \
+            '{
+              channel: $channel,
+              thread_ts: $thread_ts,
+              text: $header,
+              blocks: [
+                { type: "section",
+                  text: { type: "mrkdwn", text: ("*" + $header + "*") } },
+                { type: "section",
+                  fields: [
+                    { type: "mrkdwn",
+                      text: ($ngc_emoji + " *NGC publish:* " + $ngc_result + "\n`" + $ngc_tag + "`") },
+                    { type: "mrkdwn",
+                      text: ($art_emoji + " *Artifactory wheels:* " + $art_result + "\n`" + $wheel + "`") }
+                  ] },
+                { type: "context",
+                  elements: [ { type: "mrkdwn", text: ("<" + $run_url + "|GitHub Actions run>") } ] }
+              ]
+            }')
+
+          RESPONSE=$(curl -fsSL -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H "Content-type: application/json; charset=utf-8" \
+            --data "${PAYLOAD}")
+
+          OK=$(echo "${RESPONSE}" | jq -r '.ok')
+          if [ "${OK}" != "true" ]; then
+            ERR=$(echo "${RESPONSE}" | jq -r '.error // "unknown"')
+            echo "::error::Slack chat.postMessage failed: ${ERR}"
+            exit 1
+          fi
+          echo "Posted staging reply"
+
+  # ============================================================================
+  # GITLAB RELEASE AUTOMATION TRIGGER
+  # Fires the GitLab release-automation pipeline once images and wheels are
+  # staged. Variable shape consumed by
+  # GITLAB/release-automation/projects/dynamo.yml. Skipped when
+  # `skip_gitlab_pipeline` is set (emergency bypass).
+  # ============================================================================
+
+  trigger-gitlab-release-pipeline:
+    name: Trigger GitLab Release Pipeline
+    needs: [prepare-release, release-publish, stage-wheels-artifactory]
+    if: ${{ inputs.skip_gitlab_pipeline != true }}
+    runs-on:
+      group: gitlab_ci_runners
+    environment: automated-release
+    outputs:
+      pipeline_id:  ${{ steps.trigger.outputs.pipeline_id }}
+      pipeline_url: ${{ steps.trigger.outputs.pipeline_url }}
+    steps:
+      - name: Trigger GitLab pipeline
+        id: trigger
+        env:
+          # Both come from the automated-release environment. Storing the URL
+          # as a secret (not hardcoded) keeps it masked in logs and lets it be
+          # rotated without a code change.
+          GITLAB_TRIGGER_URL:   ${{ secrets.GITLAB_PIPELINE_URL }}
+          GITLAB_TRIGGER_TOKEN: ${{ secrets.GITLAB_TRIGGER_TOKEN }}
+          VERSION:              ${{ needs.prepare-release.outputs.version }}
+          NGC_VERSION_TAG:      ${{ needs.prepare-release.outputs.ngc_version_tag }}
+          WHEEL_VERSION:        ${{ needs.prepare-release.outputs.wheel_version }}
+          COMMIT_SHA:           ${{ needs.prepare-release.outputs.commit_sha }}
+          NIGHTLY:              ${{ needs.prepare-release.outputs.nightly }}
+          RC_NUMBER:            ${{ needs.prepare-release.outputs.rc_number }}
+          # Forwarded so the GitLab pipeline can reply on the same thread.
+          SLACK_THREAD_TS:      ${{ inputs.slack_thread_ts }}
+          SLACK_CHANNEL_ID:     ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
+        run: |
+          set -euo pipefail
+
+          # PIPELINE_TYPE / RELEASE_TYPE drive every rule in dynamo.yml.
+          # ARTIFACTS gates per-artifact scans and promotions.
+          # NIGHTLY_TAG carries the resolved nightly tag (date+shortsha) for
+          # the GitLab pipeline summary; the nspect version-name is hardcoded
+          # to "Dynamo Nightlies" inside dynamo.yml, so we don't pass it.
+          if [ "${NIGHTLY}" = "true" ]; then
+            PIPELINE_TYPE="security"
+            RELEASE_TYPE="nightly"
+            ARTIFACTS="wheel,container"
+            NIGHTLY_TAG="${NGC_VERSION_TAG}"
+            RC_TAG=""
+          else
+            PIPELINE_TYPE="rc"
+            RELEASE_TYPE="rc"
+            ARTIFACTS="wheel,container,helm"
+            NIGHTLY_TAG=""
+            RC_TAG="v${VERSION}-rc${RC_NUMBER}"
+          fi
+
+          # Pipe the trigger token via @file rather than inline form value so
+          # it never appears in process listings or `set -x` output.
+          # `trap` is registered BEFORE the write so an error between mktemp
+          # and the write (or any later line) still cleans up the file.
+          TOKEN_FILE=$(mktemp)
+          trap 'rm -f "${TOKEN_FILE}"' EXIT
+          chmod 600 "${TOKEN_FILE}"
+          printf '%s' "${GITLAB_TRIGGER_TOKEN}" > "${TOKEN_FILE}"
+
+          RESPONSE=$(curl -fsSL \
+            --request POST \
+            --form "token=<${TOKEN_FILE}" \
+            --form "ref=main" \
+            --form "variables[PIPELINE_TYPE]=${PIPELINE_TYPE}" \
+            --form "variables[RELEASE_TYPE]=${RELEASE_TYPE}" \
+            --form "variables[DRY_RUN]=false" \
+            --form "variables[PROJECT]=dynamo" \
+            --form "variables[NIGHTLY_TAG]=${NIGHTLY_TAG}" \
+            --form "variables[RC_TAG]=${RC_TAG}" \
+            --form "variables[WHEEL_VERSION]=${WHEEL_VERSION}" \
+            --form "variables[CONTAINER_TAG]=${NGC_VERSION_TAG}" \
+            --form "variables[COMMIT_SHA]=${COMMIT_SHA}" \
+            --form "variables[GITHUB_RUN_ID]=${GITHUB_RUN_ID}" \
+            --form "variables[ARTIFACTS]=${ARTIFACTS}" \
+            --form "variables[ENABLE_PULSE_SCAN]=true" \
+            --form "variables[ENABLE_WHEEL_SCAN]=true" \
+            --form "variables[ENABLE_SONARQUBE]=true" \
+            --form "variables[SONAR_BRANCH]=main" \
+            --form "variables[NSPECT_REGISTERED]=false" \
+            --form "variables[SLACK_THREAD_TS]=${SLACK_THREAD_TS}" \
+            --form "variables[SLACK_CHANNEL_ID]=${SLACK_CHANNEL_ID}" \
+            "${GITLAB_TRIGGER_URL}")
+
+          PIPELINE_ID=$(echo "${RESPONSE}" | jq -r '.id // empty')
+          PIPELINE_URL=$(echo "${RESPONSE}" | jq -r '.web_url // empty')
+          if [ -z "${PIPELINE_ID}" ]; then
+            # Don't echo full RESPONSE — GitLab echoes the submitted `variables`
+            # block back, including SLACK_THREAD_TS / SLACK_CHANNEL_ID. Pull
+            # just the error fields. `|| true` survives unparseable bodies.
+            ERR=$(echo "${RESPONSE}" | jq -r '.message // .error_description // .error // "unparseable response"' 2>/dev/null || echo "unparseable response")
+            echo "::error::Failed to trigger GitLab pipeline: ${ERR}"
+            exit 1
+          fi
+
+          echo "pipeline_id=${PIPELINE_ID}"   >> "${GITHUB_OUTPUT}"
+          echo "pipeline_url=${PIPELINE_URL}" >> "${GITHUB_OUTPUT}"
+          echo "GitLab release pipeline triggered: pipeline ID ${PIPELINE_ID}"
+
+          {
+            echo "## GitLab Release Pipeline"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| Pipeline ID | ${PIPELINE_ID} |"
+            echo "| Pipeline URL | ${PIPELINE_URL:-n/a} |"
+            echo "| PIPELINE_TYPE | ${PIPELINE_TYPE} |"
+            echo "| RELEASE_TYPE | ${RELEASE_TYPE} |"
+            echo "| Version | ${VERSION} |"
+            echo "| NGC tag | ${NGC_VERSION_TAG} |"
+            echo "| Commit | ${COMMIT_SHA} |"
+            echo "| Artifacts | ${ARTIFACTS} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Post GitLab trigger reply on Slack thread
+        if: ${{ inputs.slack_thread_ts != '' }}
+        continue-on-error: true
+        env:
+          SLACK_BOT_TOKEN:  ${{ secrets.SLACK_RELEASE_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
+          SLACK_THREAD_TS:  ${{ inputs.slack_thread_ts }}
+          PIPELINE_ID:      ${{ steps.trigger.outputs.pipeline_id }}
+          PIPELINE_URL:     ${{ steps.trigger.outputs.pipeline_url }}
+          NGC_VERSION_TAG:  ${{ needs.prepare-release.outputs.ngc_version_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PAYLOAD=$(jq -n \
+            --arg channel   "${SLACK_CHANNEL_ID}" \
+            --arg thread_ts "${SLACK_THREAD_TS}" \
+            --arg pid       "${PIPELINE_ID}" \
+            --arg purl      "${PIPELINE_URL}" \
+            --arg ngc_tag   "${NGC_VERSION_TAG}" \
+            '{
+              channel: $channel,
+              thread_ts: $thread_ts,
+              text: ("GitLab release pipeline triggered: " + $pid),
+              blocks: [
+                { type: "section",
+                  text: { type: "mrkdwn",
+                          text: (":rocket: *GitLab release pipeline triggered*\n<" + $purl + "|Pipeline " + $pid + ">") } },
+                { type: "context",
+                  elements: [ { type: "mrkdwn",
+                                text: ("NGC tag: `" + $ngc_tag + "`") } ] }
+              ]
+            }')
+
+          RESPONSE=$(curl -fsSL -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H "Content-type: application/json; charset=utf-8" \
+            --data "${PAYLOAD}")
+
+          OK=$(echo "${RESPONSE}" | jq -r '.ok')
+          if [ "${OK}" != "true" ]; then
+            ERR=$(echo "${RESPONSE}" | jq -r '.error // "unknown"')
+            echo "::error::Slack chat.postMessage failed: ${ERR}"
+            exit 1
+          fi
+          echo "Posted GitLab trigger reply"

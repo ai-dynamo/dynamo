@@ -1,17 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# TODO(DIS-2240): Remove deprecated multimodal flags across engine
+
 """Dynamo vLLM wrapper configuration ArgGroup."""
 
+import logging
 import warnings
 from typing import Optional, Union
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
+from dynamo.common.configuration.groups.frontend_decoding_args import (
+    add_frontend_decoding_arg,
+)
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
 from .constants import DisaggregationMode, EmbeddingTransferMode
+
+logger = logging.getLogger(__name__)
+PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
+
+
+def _warn_deprecated(message: str) -> None:
+    logger.warning(message)
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
 
 
 class DynamoVllmArgGroup(ArgGroup):
@@ -33,8 +47,11 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_VLLM_DISAGGREGATION_MODE",
             default=None,
             help="Worker disaggregation mode: 'agg' (default, aggregated), "
-            "'prefill' (prefill-only worker), or 'decode' (decode-only worker).",
-            choices=[m.value for m in DisaggregationMode],
+            "'pd' (combined prefill+decode worker), 'prefill' "
+            "(prefill-only worker), 'decode' (decode-only worker), "
+            "or 'encode' (multimodal encode worker).",
+            choices=[PREFILL_DECODE_DISAGGREGATION_MODE]
+            + [m.value for m in DisaggregationMode],
         )
 
         add_negatable_bool_argument(
@@ -99,6 +116,18 @@ class DynamoVllmArgGroup(ArgGroup):
             default=False,
             help="Enable multimodal processing. If not set, none of the multimodal components can be used.",
         )
+        # Select defaults used by RL-style token-in/token-out deployments.
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-rl",
+            env_var="DYN_ENABLE_RL",
+            default=False,
+            help=(
+                "Enable RL training support. Mirrors --enable-rl on the SGLang "
+                "backend and selects RL-friendly vLLM defaults for TITO and "
+                "per-token logprob parity."
+            ),
+        )
         add_argument(
             g,
             flag_name="--mm-prompt-template",
@@ -114,17 +143,7 @@ class DynamoVllmArgGroup(ArgGroup):
             ),
         )
 
-        add_negatable_bool_argument(
-            g,
-            flag_name="--frontend-decoding",
-            env_var="DYN_VLLM_FRONTEND_DECODING",
-            default=False,
-            help=(
-                "Enable frontend decoding of multimodal images. "
-                "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
-                "Without this flag, images are decoded in the Python backend (default behavior)."
-            ),
-        )
+        add_frontend_decoding_arg(g, env_prefix="VLLM")
 
         add_argument(
             g,
@@ -134,6 +153,16 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Worker embedding transfer mode: 'local' (default, local file system), "
             "'nixl-write' (NIXL transfer with WRITE), or 'nixl-read' (NIXL transfer with READ).",
             choices=[m.value for m in EmbeddingTransferMode],
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--embedding-worker",
+            env_var="DYN_VLLM_EMBEDDING_WORKER",
+            default=False,
+            help="Run as a text-embedding worker. Engine must be started with "
+            "vLLM's --runner pooling. Skips KV-events, KV router registration, "
+            "and InstrumentedScheduler injection (none apply to pooling models).",
         )
 
         # Headless mode for multi-node TP/PP
@@ -153,8 +182,8 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--model-express-url",
             env_var="MODEL_EXPRESS_URL",
             default=None,
-            help="ModelExpress P2P server URL (e.g., http://mx-server:8080). "
-            "Required when using --load-format=mx-source or --load-format=mx-target.",
+            help="DEPRECATED: accepted for compatibility with older ModelExpress "
+            "manifests. The vLLM ModelExpress plugin reads its own configuration.",
         )
 
         # GMS (GPU Memory Service) shadow mode
@@ -165,8 +194,8 @@ class DynamoVllmArgGroup(ArgGroup):
             default=False,
             help=(
                 "Enable GMS shadow/standby mode. Shadow engines skip KV cache "
-                "allocation at startup, automatically sleep after initialization, "
-                "and wake on demand when the active engine dies. "
+                "allocation at startup, automatically pause after initialization, "
+                "and resume on demand when the active engine dies. "
                 "Requires --load-format=gms."
             ),
         )
@@ -261,11 +290,14 @@ class DynamoVllmConfig(ConfigBase):
     multimodal_worker: bool
     multimodal_decode_worker: bool
     enable_multimodal: bool
+    # Enables RL-style token-in/token-out defaults.
+    enable_rl: bool = False
     mm_prompt_template: str
     frontend_decoding: bool
     embedding_transfer_mode: Union[
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
+    embedding_worker: bool = False
 
     # Headless mode for multi-node TP/PP
     headless: bool = False
@@ -291,6 +323,7 @@ class DynamoVllmConfig(ConfigBase):
         self._resolve_embedding_transfer_mode()
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
+        self._validate_embedding_worker_exclusivity()
 
     def _resolve_embedding_transfer_mode(self) -> None:
         """Resolve embedding_transfer_mode from string to enum."""
@@ -316,7 +349,10 @@ class DynamoVllmConfig(ConfigBase):
         # Convert string to enum (non-None means explicitly provided)
         explicit_mode = self.disaggregation_mode is not None
         if isinstance(self.disaggregation_mode, str):
-            self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
+            if self.disaggregation_mode == PREFILL_DECODE_DISAGGREGATION_MODE:
+                self.disaggregation_mode = DisaggregationMode.AGGREGATED
+            else:
+                self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
 
         # Check for legacy boolean flags
         has_legacy = self.is_prefill_worker or self.is_decode_worker
@@ -375,10 +411,10 @@ class DynamoVllmConfig(ConfigBase):
            --disaggregation-mode is set.
         """
         if self.multimodal_decode_worker:
-            warnings.warn(
-                "--multimodal-decode-worker is deprecated, use --disaggregation-mode=decode and --enable-multimodal",
-                DeprecationWarning,
-                stacklevel=2,
+            _warn_deprecated(
+                "--multimodal-decode-worker is deprecated; use "
+                "--enable-multimodal --disaggregation-mode=decode. "
+                "This release will map the legacy flag to the new arguments.",
             )
             if (
                 self.disaggregation_mode is not None
@@ -388,11 +424,12 @@ class DynamoVllmConfig(ConfigBase):
                     f"Cannot set --multimodal-decode-worker while --disaggregation-mode is not '{DisaggregationMode.DECODE.value}'"
                 )
             self.disaggregation_mode = DisaggregationMode.DECODE
+            self.enable_multimodal = True
         if self.multimodal_encode_worker:
-            warnings.warn(
-                "--multimodal-encode-worker is deprecated, use --disaggregation-mode=encode and --enable-multimodal",
-                DeprecationWarning,
-                stacklevel=2,
+            _warn_deprecated(
+                "--multimodal-encode-worker is deprecated; use "
+                "--enable-multimodal --disaggregation-mode=encode. "
+                "This release will map the legacy flag to the new arguments.",
             )
             if (
                 self.disaggregation_mode is not None
@@ -402,11 +439,12 @@ class DynamoVllmConfig(ConfigBase):
                     f"Cannot set --multimodal-encode-worker while --disaggregation-mode is not '{DisaggregationMode.ENCODE.value}'"
                 )
             self.disaggregation_mode = DisaggregationMode.ENCODE
+            self.enable_multimodal = True
         if self.multimodal_worker:
-            warnings.warn(
-                "--multimodal-worker is deprecated, use --disaggregation-mode=agg or --disaggregation-mode=prefill and --enable-multimodal",
-                DeprecationWarning,
-                stacklevel=2,
+            _warn_deprecated(
+                "--multimodal-worker is deprecated; use --enable-multimodal "
+                "with --disaggregation-mode=pd or --disaggregation-mode=prefill. "
+                "This release will map the legacy flag to the new arguments.",
             )
             if (
                 self.disaggregation_mode is not None
@@ -420,6 +458,7 @@ class DynamoVllmConfig(ConfigBase):
             # '--disaggregation-mode=prefill' as prefill workers in P/D disaggregation or without for aggregation.
             if self.disaggregation_mode is None:
                 self.disaggregation_mode = DisaggregationMode.AGGREGATED
+            self.enable_multimodal = True
 
     def _count_multimodal_roles(self) -> int:
         """Return the number of multimodal worker roles set (0 or 1 allowed).
@@ -447,4 +486,27 @@ class DynamoVllmConfig(ConfigBase):
         if self._count_multimodal_roles() == 1 and not self.enable_multimodal:
             raise ValueError(
                 "Use --enable-multimodal when enabling any multimodal component"
+            )
+
+    def _validate_embedding_worker_exclusivity(self) -> None:
+        """Embedding worker is aggregated-only and exclusive of multimodal roles."""
+        if not self.embedding_worker:
+            return
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            raise ValueError(
+                "--embedding-worker is only valid with --disaggregation-mode=agg "
+                f"(got {self.disaggregation_mode.value if isinstance(self.disaggregation_mode, DisaggregationMode) else self.disaggregation_mode}). "
+                "Pooling models do not have prefill/decode phases."
+            )
+        if self._count_multimodal_roles() > 0 or self.enable_multimodal:
+            raise ValueError(
+                "--embedding-worker cannot be combined with multimodal flags."
+            )
+        if self.benchmark_mode is not None:
+            raise ValueError(
+                "--embedding-worker cannot be combined with --benchmark-mode. "
+                "Benchmark mode injects InstrumentedScheduler, which is a "
+                "generation scheduler and not compatible with pooling engines. "
+                "Embedding workers do not run generation, so prefill/decode "
+                "benchmark sweeps are not meaningful."
             )

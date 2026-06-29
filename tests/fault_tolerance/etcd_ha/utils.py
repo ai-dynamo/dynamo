@@ -19,6 +19,7 @@ from tests.utils.managed_process import (
     DynamoFrontendProcess as BaseDynamoFrontendProcess,
 )
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,11 @@ logger = logging.getLogger(__name__)
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
     """Process manager for Dynamo frontend with ETCD HA support."""
 
-    def __init__(self, request, etcd_endpoints: list[str]):
+    def __init__(
+        self,
+        request,
+        etcd_endpoints: list[str],
+    ):
         extra_env = {
             "DYN_LOG": "debug",
             "ETCD_ENDPOINTS": ",".join(etcd_endpoints),
@@ -104,11 +109,12 @@ class EtcdReplicaServer(ManagedProcess):
     def get_status(self) -> dict:
         """Get the status of this ETCD node"""
         try:
-            response = requests.post(
-                f"http://127.0.0.1:{self.client_port}/v3/maintenance/status",
-                json={},
-                timeout=2,
-            )
+            with requests.Session() as session:
+                response = session.post(
+                    f"http://127.0.0.1:{self.client_port}/v3/maintenance/status",
+                    json={},
+                    timeout=2,
+                )
             if response.status_code == 200:
                 return response.json()
         except Exception as e:
@@ -141,7 +147,11 @@ class EtcdCluster:
     ):
         self.request = request
         self.num_replicas = num_replicas
-        self.base_port = base_port
+        # Reserve contiguous ports for the full cluster to avoid collisions with
+        # other tests that may also run local etcd instances.
+        reserved_ports = allocate_contiguous_ports(1, num_replicas * 2, base_port)
+        self._reserved_ports = reserved_ports
+        self.base_port = reserved_ports[0]
         self.replicas: List[Optional[EtcdReplicaServer]] = []
         self.data_dirs: List[str] = []
         self.log_base_dir = resolve_test_output_path(
@@ -399,8 +409,16 @@ class EtcdCluster:
                 logger.warning(f"Error removing data directory {data_dir}: {e}")
         self.data_dirs = []
 
+        if getattr(self, "_reserved_ports", None):
+            deallocate_ports(self._reserved_ports)
+            self._reserved_ports = []
+
     def __enter__(self):
-        self.start()
+        try:
+            self.start()
+        except Exception:
+            self.stop()
+            raise
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

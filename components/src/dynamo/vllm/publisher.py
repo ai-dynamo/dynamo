@@ -85,6 +85,50 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         pass
 
 
+class NoopStatLogger(StatLoggerBase):
+    """Stat logger that drops every record.
+
+    vLLM's ``AsyncLLM`` always invokes a ``StatLoggerBase`` subclass
+    during engine init, but for some worker shapes the chat-style
+    publish path (KV cache usage, scheduler gauges) is meaningless --
+    embedding/pooling workers are the current driver, but the same
+    no-op semantics fit any future worker that wants to satisfy vLLM's
+    factory contract without registering Prometheus collectors. Reach
+    for this class instead of writing a new throwaway subclass each
+    time.
+    """
+
+    def __init__(
+        self,
+        vllm_config: Optional[VllmConfig] = None,
+        engine_index: int = 0,
+    ) -> None:
+        # vLLM's ``StatLoggerBase`` declares ``__init__`` as abstract, so
+        # subclasses must provide one even when they hold no state.
+        # Without this, instantiation raises ``TypeError: Can't
+        # instantiate abstract class NoopStatLogger without an
+        # implementation for abstract method '__init__'``. The
+        # ``(vllm_config, engine_index)`` signature mirrors what vLLM
+        # passes to concrete ``StatLoggerBase`` subclasses, so this
+        # logger remains a drop-in if vLLM ever wires the factory call
+        # to invoke the constructor directly.
+        del vllm_config, engine_index
+
+    def record(
+        self,
+        scheduler_stats: Optional[SchedulerStats],
+        iteration_stats: Optional[IterationStats],
+        mm_cache_stats: object = None,
+        engine_idx: int = 0,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        return
+
+    def log_engine_initialized(self) -> None:
+        pass
+
+
 class StatLoggerFactory:
     """Factory for creating stat logger publishers. Required by vLLM."""
 
@@ -92,12 +136,19 @@ class StatLoggerFactory:
         self,
         endpoint: Endpoint,
         component_gauges: Optional[LLMBackendMetrics] = None,
+        embedding_worker: bool = False,
     ) -> None:
         self.endpoint = endpoint
         self.component_gauges = component_gauges
+        self.embedding_worker = embedding_worker
         self.created_logger: Optional[DynamoStatLoggerPublisher] = None
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
+        # Embedding workers have no KV cache and no scheduler stats worth
+        # publishing -- short-circuit before constructing the chat-shaped
+        # WorkerMetricsPublisher and skipping the component_gauges check.
+        if self.embedding_worker:
+            return NoopStatLogger()
         # component_gauges must be set by setup_vllm_engine() before vLLM
         # calls create_stat_logger() during engine initialization.
         assert (

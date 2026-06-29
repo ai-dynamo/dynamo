@@ -4,7 +4,7 @@
 import asyncio
 import json
 import logging
-from typing import Any, AsyncIterator, Callable, Optional
+from typing import Any, AsyncIterator, Callable, Literal, Optional, Protocol
 
 import sglang as sgl
 import torch
@@ -14,7 +14,6 @@ from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferRequest
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
@@ -43,6 +42,29 @@ class MultimodalConfig:
 
     EMBEDDINGS_DTYPE = torch.float16
     EMBEDDINGS_DEVICE = "cpu"
+
+
+class EmbeddingsProcessorLike(Protocol):
+    async def process_embeddings(
+        self, request: SglangMultimodalRequest
+    ) -> tuple[torch.Tensor, int]:
+        ...
+
+    def create_multimodal_image_item(
+        self,
+        embeddings: torch.Tensor,
+        image_grid_thw: list[Any],
+    ) -> dict[str, Any]:
+        ...
+
+    def create_multimodal_video_item(
+        self,
+        embeddings: torch.Tensor,
+        video_grid_thw: list[Any],
+        second_per_grid_ts: list[float] | None = None,
+        video_timestamps: list[list[float]] | None = None,
+    ) -> dict[str, Any]:
+        ...
 
 
 class SglangUtils:
@@ -89,7 +111,7 @@ class EmbeddingsProcessor:
         self, request: SglangMultimodalRequest
     ) -> tuple[torch.Tensor, int]:
         """Process one concatenated embedding tensor from serialized request."""
-        logger.debug("Processing embeddings with shape: " f"{request.embeddings_shape}")
+        logger.debug(f"Processing embeddings with shape: {request.embeddings_shape}")
 
         multimodal_groups = request.multimodal_inputs
         if not multimodal_groups:
@@ -117,23 +139,59 @@ class EmbeddingsProcessor:
         self.embedding_receiver.release_tensor(tensor_id)
 
     @staticmethod
-    def create_multimodal_item(embeddings: torch.Tensor, image_grid_thw) -> dict:
-        """Create mm_item dict for SGLang's engine.async_generate(image_data=[...]).
-
-        Uses format="processor_output" with precomputed_embeddings so SGLang
-        bypasses get_image_feature() entirely (model-agnostic path).
-        """
+    def _create_processor_output_item(
+        embeddings: torch.Tensor,
+        grid_key: Literal["image_grid_thw", "video_grid_thw"],
+        grid_values: list[Any],
+        modality: Literal["IMAGE", "VIDEO"],
+    ) -> dict[str, Any]:
+        """Create shared processor_output fields for SGLang async_generate."""
         precomputed = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
+        grid_payload = torch.tensor(grid_values)
 
-        mm_item: dict[str, Any] = {"image_grid_thw": torch.tensor(image_grid_thw)}
-        mm_item.update(
-            {
-                "format": "processor_output",
-                "precomputed_embeddings": precomputed,
-                "modality": "IMAGE",
-            }
+        mm_item: dict[str, Any] = {
+            grid_key: grid_payload,
+            "format": "processor_output",
+            "precomputed_embeddings": precomputed,
+            "modality": modality,
+        }
+
+        return mm_item
+
+    @staticmethod
+    def create_multimodal_image_item(
+        embeddings: torch.Tensor,
+        image_grid_thw: list[Any],
+    ) -> dict[str, Any]:
+        """Create an image processor_output mm_item for SGLang async_generate."""
+        return EmbeddingsProcessor._create_processor_output_item(
+            embeddings,
+            "image_grid_thw",
+            image_grid_thw,
+            "IMAGE",
         )
 
+    @staticmethod
+    def create_multimodal_video_item(
+        embeddings: torch.Tensor,
+        video_grid_thw: list[Any],
+        second_per_grid_ts: list[float] | None = None,
+        video_timestamps: list[list[float]] | None = None,
+    ) -> dict[str, Any]:
+        """Create a video processor_output mm_item for SGLang async_generate."""
+        mm_item = EmbeddingsProcessor._create_processor_output_item(
+            embeddings,
+            "video_grid_thw",
+            video_grid_thw,
+            "VIDEO",
+        )
+        if second_per_grid_ts is not None:
+            mm_item["second_per_grid_ts"] = torch.tensor(
+                second_per_grid_ts, dtype=torch.float32
+            )
+        if video_timestamps is not None:
+            # Keep per-video timestamp lists nested; Qwen VL indexes by video.
+            mm_item["video_timestamps"] = video_timestamps
         return mm_item
 
 
@@ -245,20 +303,108 @@ class ErrorResponseBuilder:
 
 
 async def _build_mm_items(
-    request: SglangMultimodalRequest, embeddings_processor: EmbeddingsProcessor
-) -> tuple[list[dict], torch.Tensor, int]:
-    """Process embeddings and build a single multimodal item for SGLang."""
-    embeddings, tensor_id = await embeddings_processor.process_embeddings(request)
+    request: SglangMultimodalRequest, embeddings_processor: EmbeddingsProcessorLike
+) -> tuple[list[dict], list[dict], Optional[torch.Tensor], Optional[int]]:
+    """Process embeddings and build multimodal items for SGLang.
 
-    image_grid_thw_list = [group.image_grid_thw for group in request.multimodal_inputs]
-    if any(item is None for item in image_grid_thw_list):
-        raise ValueError("image_grid_thw is required")
+    Returns:
+        Tuple of (image_mm_items, video_data_items, combined_embeddings, tensor_id).
+    """
+    image_mm_items: list[dict] = []
+    video_data_items: list[dict] = []
 
-    mm_items = [
-        embeddings_processor.create_multimodal_item(embeddings, image_grid_thw_list)
-    ]
+    encoded_groups: list[tuple[str, Any, int, float | None, list[float] | None]] = []
 
-    return mm_items, embeddings, tensor_id
+    for group in request.multimodal_inputs:
+        if group.num_mm_tokens is not None and group.num_mm_tokens > 0:
+            if group.image_grid_thw is not None:
+                encoded_groups.append(
+                    (
+                        "IMAGE",
+                        group.image_grid_thw,
+                        group.num_mm_tokens,
+                        None,
+                        None,
+                    )
+                )
+            elif group.video_grid_thw is not None:
+                encoded_groups.append(
+                    (
+                        "VIDEO",
+                        group.video_grid_thw,
+                        group.num_mm_tokens,
+                        group.second_per_grid_ts,
+                        group.video_timestamps,
+                    )
+                )
+            else:
+                raise ValueError("Encoded multimodal group missing grid metadata")
+
+    embeddings: Optional[torch.Tensor] = None
+    tensor_id: Optional[int] = None
+
+    if encoded_groups:
+        embeddings, tensor_id = await embeddings_processor.process_embeddings(request)
+
+        grouped_grids: dict[str, list[Any]] = {"IMAGE": [], "VIDEO": []}
+        grouped_embeds: dict[str, list[torch.Tensor]] = {"IMAGE": [], "VIDEO": []}
+        video_second_per_grid_ts: list[float] = []
+        # SGLang expects one timestamp list per video in the grouped item.
+        video_timestamps: list[list[float]] = []
+
+        offset = 0
+        for (
+            modality,
+            grid_item,
+            token_count,
+            second_per_grid_ts,
+            timestamps,
+        ) in encoded_groups:
+            next_offset = offset + int(token_count)
+            if next_offset > embeddings.shape[0]:
+                raise ValueError("Encoded token counts exceed received embedding rows")
+            grouped_grids[modality].append(grid_item)
+            grouped_embeds[modality].append(embeddings[offset:next_offset])
+            if modality == "VIDEO":
+                if second_per_grid_ts is not None:
+                    video_second_per_grid_ts.append(second_per_grid_ts)
+                if timestamps is not None:
+                    video_timestamps.append(timestamps)
+            offset = next_offset
+
+        if offset != embeddings.shape[0]:
+            raise ValueError("Encoded token counts do not match received embeddings")
+
+        if grouped_embeds["IMAGE"]:
+            image_mm_items.append(
+                embeddings_processor.create_multimodal_image_item(
+                    torch.cat(grouped_embeds["IMAGE"], dim=0),
+                    grouped_grids["IMAGE"],
+                )
+            )
+        if grouped_embeds["VIDEO"]:
+            video_group_count = len(grouped_grids["VIDEO"])
+            if (
+                video_second_per_grid_ts
+                and len(video_second_per_grid_ts) != video_group_count
+            ):
+                raise ValueError(
+                    "second_per_grid_ts must be present for every video group"
+                )
+            if video_timestamps and len(video_timestamps) != video_group_count:
+                raise ValueError(
+                    "video_timestamps must be present for every video group"
+                )
+            video_data_items.append(
+                embeddings_processor.create_multimodal_video_item(
+                    torch.cat(grouped_embeds["VIDEO"], dim=0),
+                    grouped_grids["VIDEO"],
+                    second_per_grid_ts=video_second_per_grid_ts or None,
+                    video_timestamps=video_timestamps or None,
+                )
+            )
+
+    return image_mm_items, video_data_items, embeddings, tensor_id
 
 
 class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
@@ -374,7 +520,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         )
 
         trace_header = (
-            build_trace_headers(context) if context and self.enable_trace else None
+            context.trace_headers() if context and self.enable_trace else None
         )
 
         # Start decode generation with bootstrap info (no image data needed)
@@ -417,28 +563,39 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         try:
             sampling_params = SglangUtils.build_sampling_params(request)
             with _nvtx.annotate("mm:pd:load_multimodal", color="cyan"):
-                mm_items, combined_embeddings, tensor_id = await _build_mm_items(
-                    request, self.embeddings_processor
-                )
+                (
+                    image_mm_items,
+                    video_data,
+                    combined_embeddings,
+                    tensor_id,
+                ) = await _build_mm_items(request, self.embeddings_processor)
 
-            logger.debug(
-                "Generated combined multimodal item with embeddings shape: "
-                f"{combined_embeddings.shape}"
-            )
+            if combined_embeddings is not None:
+                logger.debug(
+                    "Generated combined multimodal item with embeddings shape: "
+                    f"{combined_embeddings.shape}"
+                )
+            else:
+                logger.debug("No precomputed multimodal embeddings generated")
             logger.debug(f"Input token sequence length: {len(input_ids)}")
 
             trace_header = (
-                build_trace_headers(context) if context and self.enable_trace else None
+                context.trace_headers() if context and self.enable_trace else None
             )
 
-            agg_stream = await self.engine.async_generate(
-                input_ids=input_ids,
-                image_data=mm_items,
-                sampling_params=sampling_params,
-                stream=True,
-                external_trace_header=trace_header,
-                rid=context.trace_id if context else None,
-            )
+            gen_params: dict[str, Any] = {
+                "input_ids": input_ids,
+                "sampling_params": sampling_params,
+                "stream": True,
+                "external_trace_header": trace_header,
+                "rid": context.trace_id if context else None,
+            }
+            if image_mm_items:
+                gen_params["image_data"] = image_mm_items
+            if video_data:
+                gen_params["video_data"] = video_data
+
+            agg_stream = await self.engine.async_generate(**gen_params)
 
             rng_first = _nvtx.start_range("mm:dec:first_token", color="purple")
             first_token = True
@@ -463,7 +620,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
                     "Shape mismatch error - this likely indicates a tokenization/embedding alignment issue"
                 )
                 logger.error(f"Request token IDs length: {len(input_ids)}")
-                logger.error("Embeddings shape: " f"{request.embeddings_shape}")
+                logger.error(f"Embeddings shape: {request.embeddings_shape}")
                 logger.error(f"Token sequence preview: {input_ids[:20]}...")
                 error_msg = (
                     f"Multimodal embedding alignment error: {str(e)}. "
@@ -619,41 +776,50 @@ class MultimodalPrefillWorkerHandler(
 
         # Process embeddings from encode worker using our embeddings processor
         with _nvtx.annotate("mm:prefill:load_multimodal", color="cyan"):
-            mm_items, _, tensor_id = await _build_mm_items(
-                request, self.embeddings_processor
-            )
+            (
+                image_mm_items,
+                video_data,
+                _,
+                tensor_id,
+            ) = await _build_mm_items(request, self.embeddings_processor)
 
         trace_header = (
-            build_trace_headers(context) if context and self.enable_trace else None
+            context.trace_headers() if context and self.enable_trace else None
         )
 
         # Start SGLang prefill generation (like regular SGLang)
         with _nvtx.annotate("mm:prefill:engine_async_generate", color="blue"):
-            results = await self.engine.async_generate(
-                input_ids=input_ids,
-                image_data=mm_items,
-                sampling_params=sampling_params,
-                stream=True,
-                bootstrap_host=self.bootstrap_host,
-                bootstrap_port=self.bootstrap_port,
-                bootstrap_room=bootstrap_room,
-                external_trace_header=trace_header,
-                rid=context.trace_id if context else None,
-            )
+            gen_params = {
+                "input_ids": input_ids,
+                "sampling_params": sampling_params,
+                "stream": True,
+                "bootstrap_host": self.bootstrap_host,
+                "bootstrap_port": self.bootstrap_port,
+                "bootstrap_room": bootstrap_room,
+                "external_trace_header": trace_header,
+                "rid": context.trace_id if context else None,
+            }
+
+            if image_mm_items:
+                gen_params["image_data"] = image_mm_items
+            if video_data:
+                gen_params["video_data"] = video_data
+
+            results = await self.engine.async_generate(**gen_params)
 
         # Consume results without yielding (prefill doesn't return text, just coordinates)
         asyncio.create_task(self._consume_results(results, tensor_id))
 
-    async def _consume_results(self, results, tensor_id: int):
+    async def _consume_results(self, results, tensor_id: Optional[int]):
         """Consume prefill results without returning them (like regular SGLang)"""
         released = False
         try:
             async for _ in results:
-                if not released:
+                if tensor_id is not None and not released:
                     self.embeddings_processor.release_embeddings(tensor_id)
                     released = True
         finally:
-            if not released:
+            if tensor_id is not None and not released:
                 self.embeddings_processor.release_embeddings(tensor_id)
 
     def cleanup(self):

@@ -106,6 +106,11 @@ pub(super) struct SplitLookupData {
     pub(super) suffix: SharedNode,
 }
 
+pub(super) struct RemoveBatchOutcome {
+    pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
+    pub(super) unmatched_hashes: Vec<ExternalSequenceBlockHash>,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum LookupRepairDirection {
     TowardTail,
@@ -113,7 +118,6 @@ pub(super) enum LookupRepairDirection {
 }
 
 pub(super) struct StoreInsertOutcome {
-    pub(super) num_blocks_added: usize,
     pub(super) duplicate_store: bool,
 }
 
@@ -187,7 +191,6 @@ pub(super) enum ChildInsertStep {
     Descend {
         edge_len: usize,
         last_ext_hash: ExternalSequenceBlockHash,
-        num_blocks_added: usize,
         duplicate_store: bool,
     },
     Done(StoreInsertOutcome),

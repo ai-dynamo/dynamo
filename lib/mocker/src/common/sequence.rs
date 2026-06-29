@@ -4,7 +4,7 @@
 use crate::common::protocols::MoveBlock;
 use derive_getters::Getters;
 use dynamo_tokens::blocks::UniqueBlock;
-use dynamo_tokens::{PositionalLineageHash, TokenBlockSequence, Tokens};
+use dynamo_tokens::{BlockHash, PositionalLineageHash, TokenBlockSequence, Tokens};
 use rand::random;
 use validator::Validate;
 
@@ -14,14 +14,17 @@ fn create_sequence_cache(
     tokens: &TokenBlockSequence,
     block_size: usize,
     enable_prefix_caching: bool,
-) -> (Vec<UniqueBlock>, Vec<u64>, Vec<PositionalLineageHash>) {
+) -> (Vec<UniqueBlock>, Vec<BlockHash>, Vec<PositionalLineageHash>) {
     let mut unique_blocks = Vec::with_capacity(tokens.blocks().len() + 1);
-    let mut block_hashes = Vec::with_capacity(tokens.blocks().len());
+    let mut block_hashes = Vec::new();
+    if enable_prefix_caching {
+        block_hashes.reserve(tokens.blocks().len());
+    }
     let mut plhs = Vec::with_capacity(tokens.blocks().len());
 
     for (pos, block) in tokens.blocks().iter().enumerate() {
-        block_hashes.push(block.block_hash());
         if enable_prefix_caching {
+            block_hashes.push(block.block_hash());
             unique_blocks.push(UniqueBlock::FullBlock(block.sequence_hash()));
             plhs.push(block.positional_lineage_hash());
         } else {
@@ -46,7 +49,7 @@ fn create_sequence_cache(
 #[derive(Debug, Getters, Validate)]
 pub struct ActiveSequence {
     unique_blocks: Vec<UniqueBlock>,
-    block_hashes: Vec<u64>,
+    block_hashes: Vec<BlockHash>,
     plhs: Vec<PositionalLineageHash>,
 
     tokens: TokenBlockSequence,
@@ -60,6 +63,8 @@ pub struct ActiveSequence {
 
     #[getter(copy)]
     generated_tokens: usize,
+
+    planned_output_ids: Option<Vec<u32>>,
 
     #[getter(copy)]
     num_input_tokens: usize,
@@ -83,6 +88,24 @@ impl ActiveSequence {
         enable_prefix_caching: bool,
         emit_token_ids: bool,
     ) -> Self {
+        Self::new_with_planned_output_ids(
+            tokens,
+            max_output_tokens,
+            block_size,
+            enable_prefix_caching,
+            emit_token_ids,
+            None,
+        )
+    }
+
+    pub fn new_with_planned_output_ids(
+        tokens: Vec<u32>,
+        max_output_tokens: usize,
+        block_size: Option<usize>,
+        enable_prefix_caching: bool,
+        emit_token_ids: bool,
+        planned_output_ids: Option<Vec<u32>>,
+    ) -> Self {
         let block_size = block_size.unwrap_or(64);
         let num_input_tokens = tokens.len();
 
@@ -98,10 +121,11 @@ impl ActiveSequence {
             block_size,
             max_output_tokens,
             generated_tokens: 0,
+            planned_output_ids,
             num_input_tokens,
             num_allocated_tokens: 0,
             enable_prefix_caching,
-            emit_token_ids,
+            emit_token_ids: emit_token_ids && enable_prefix_caching,
         };
         seq.validate().expect("invalid ActiveSequence");
         seq
@@ -117,6 +141,20 @@ impl ActiveSequence {
 
     pub fn is_empty(&self) -> bool {
         self.tokens.total_tokens() == 0
+    }
+
+    /// Current known sequence footprint in blocks: prompt plus generated tokens.
+    pub(crate) fn current_known_blocks(&self) -> usize {
+        self.len().div_ceil(self.block_size)
+    }
+
+    /// To-completion footprint in blocks: `ceil((prompt + max_output) / block_size)`.
+    ///
+    /// The full physical residency a request needs to run end to end, with no
+    /// prefix-reuse or already-allocated discount. Callers deciding "can it be
+    /// admitted now?" apply their own discounts on top of this primitive.
+    pub(crate) fn to_completion_blocks(&self) -> usize {
+        (self.num_input_tokens + self.max_output_tokens).div_ceil(self.block_size)
     }
 
     /// Build a `MoveBlock::Use` signal for blocks up to `cumulative_tokens`
@@ -141,7 +179,9 @@ impl ActiveSequence {
         let hash_end = target_blocks.min(self.block_hashes.len());
         let hashes = self.block_hashes[hash_start..hash_end].to_vec();
         // Cached per-sequence PLHs (stable across calls).
-        let plhs = self.plhs[hash_start..hash_end].to_vec();
+        let plh_start = prev_blocks.min(self.plhs.len());
+        let plh_end = target_blocks.min(self.plhs.len());
+        let plhs = self.plhs[plh_start..plh_end].to_vec();
 
         let token_ids = if self.emit_token_ids && hash_start < hash_end {
             Some(
@@ -166,6 +206,14 @@ impl ActiveSequence {
     /// Mirrors `block_hashes()` but returns the PLH identity used by kvbm-logical.
     pub fn positional_lineage_hashes(&self) -> &[PositionalLineageHash] {
         &self.plhs
+    }
+
+    pub fn block_token_ids(&self) -> Vec<Vec<u32>> {
+        self.tokens
+            .blocks()
+            .iter()
+            .map(|block| block.tokens().to_vec())
+            .collect()
     }
 
     /// Commit a successful allocation by advancing `num_allocated_tokens`.
@@ -204,6 +252,7 @@ impl ActiveSequence {
     }
 
     /// Push a token to the sequence
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn push(&mut self, token: u32) -> Option<Vec<MoveBlock>> {
         self.tokens.append(token).expect("Token push failed.");
         self.generated_tokens += 1;
@@ -224,7 +273,9 @@ impl ActiveSequence {
             } else {
                 random::<u64>()
             };
-            let last_block_hash = last_complete.block_hash();
+            let last_block_hash = self
+                .enable_prefix_caching
+                .then(|| last_complete.block_hash());
             // Same randomization story as `last_seq_hash`: with prefix caching off,
             // two identical prompts must not share blocks, so the PLH we promote
             // with must also be unique — otherwise `process_promote`'s
@@ -232,14 +283,16 @@ impl ActiveSequence {
             let last_plh = if self.enable_prefix_caching {
                 last_complete.positional_lineage_hash()
             } else {
-                PositionalLineageHash::new(random::<u64>(), None, self.block_hashes.len() as u64)
+                PositionalLineageHash::new(random::<u64>(), None, self.plhs.len() as u64)
             };
             let promote_token_ids = if self.emit_token_ids {
                 Some(last_complete.tokens().to_vec())
             } else {
                 None
             };
-            self.block_hashes.push(last_block_hash);
+            if let Some(last_block_hash) = last_block_hash {
+                self.block_hashes.push(last_block_hash);
+            }
             self.plhs.push(last_plh);
             self.unique_blocks.pop();
 
@@ -284,15 +337,26 @@ impl ActiveSequence {
     ///
     /// Calling this function when max_output_tokens has already been reached will cause a panic.
     /// Always check `generated_tokens < max_output_tokens` before calling this method.
+    #[cfg_attr(feature = "profile", inline(never))]
     pub fn generate(&mut self) -> Vec<MoveBlock> {
+        self.generate_token().1
+    }
+
+    /// Generate the next output token, push it to the sequence, and return the
+    /// token alongside any KV movement signals.
+    #[cfg_attr(feature = "profile", inline(never))]
+    pub fn generate_token(&mut self) -> (u32, Vec<MoveBlock>) {
         // Assert that we haven't reached the maximum output tokens
         assert!(
             self.generated_tokens < self.max_output_tokens,
             "Cannot generate more tokens: reached max_output_tokens limit"
         );
 
-        // Generate a random token
-        let token = random::<u32>();
+        let token = self
+            .planned_output_ids
+            .as_ref()
+            .and_then(|ids| ids.get(self.generated_tokens).copied())
+            .unwrap_or_else(random::<u32>);
 
         // Collect signals
         let mut signals = Vec::new();
@@ -304,12 +368,12 @@ impl ActiveSequence {
 
         // Check if we've reached the limit after pushing
         if self.generated_tokens != self.max_output_tokens {
-            return signals;
+            return (token, signals);
         }
 
         // Free all blocks when we reach max tokens
         signals.extend(self.free_signal_for_tokens(self.len()));
-        signals
+        (token, signals)
     }
 
     fn free_signal_for_tokens(&self, active_tokens: usize) -> Vec<MoveBlock> {
@@ -366,7 +430,7 @@ impl ActiveSequence {
 mod tests {
     use super::*;
 
-    fn block_hashes_from_tokens(seq: &ActiveSequence) -> Vec<u64> {
+    fn block_hashes_from_tokens(seq: &ActiveSequence) -> Vec<BlockHash> {
         seq.tokens
             .blocks()
             .iter()
@@ -390,7 +454,7 @@ mod tests {
     fn assert_use_signal(
         signal: &MoveBlock,
         expected_blocks: &[UniqueBlock],
-        expected_hashes: &[u64],
+        expected_hashes: &[BlockHash],
     ) {
         match signal {
             MoveBlock::Use(blocks, hashes, ..) => {

@@ -24,8 +24,7 @@ from aiconfigurator.generator.enumerate import enumerate_profiling_configs
 from aiconfigurator.sdk.picking import pick_autoscale, pick_default, pick_load_match
 from aiconfigurator.sdk.task import TaskConfig
 
-from deploy.utils.dynamo_deployment import DynamoDeploymentClient
-from dynamo.planner.config.defaults import SubComponentType
+from deploy.utils.dynamo_deployment import DeploymentFailedError, DynamoDeploymentClient
 from dynamo.profiler.rapid import _generate_dgd_from_pick
 from dynamo.profiler.utils.aic_dataframe import (
     build_decode_row,
@@ -37,7 +36,6 @@ from dynamo.profiler.utils.aiperf import (
     get_decode_itl_and_thpt_per_gpu,
     get_prefill_ttft,
 )
-from dynamo.profiler.utils.config import Config, get_service_name_by_type
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
@@ -50,6 +48,8 @@ from dynamo.profiler.utils.profile_common import (
     derive_backend_image,
     get_profiling_job_tolerations,
     inject_tolerations_into_dgd,
+    pick_decode_component,
+    resolve_model_path,
 )
 from dynamo.profiler.utils.profile_decode import get_num_request_range
 from dynamo.profiler.utils.profiler_status import ProfilerStatus, write_profiler_status
@@ -118,6 +118,17 @@ async def _benchmark_prefill_candidates(
             await client.wait_for_deployment_ready(timeout=ops.deployment_timeout)
         except TimeoutError:
             logger.error("Prefill %s with %d GPUs timed out", label, num_gpus)
+            await client.delete_deployment()
+            deployment_clients.remove(client)
+            continue
+        except DeploymentFailedError as e:
+            logger.error(
+                "Prefill %s with %d GPUs entered a terminal failure state, "
+                "skipping to next candidate: %s",
+                label,
+                num_gpus,
+                e,
+            )
             await client.delete_deployment()
             deployment_clients.remove(client)
             continue
@@ -223,14 +234,27 @@ async def _benchmark_decode_candidates(
             await client.delete_deployment()
             deployment_clients.remove(client)
             continue
+        except DeploymentFailedError as e:
+            logger.error(
+                "Decode %s with %d GPUs entered a terminal failure state, "
+                "skipping to next candidate: %s",
+                label,
+                num_gpus,
+                e,
+            )
+            await client.delete_deployment()
+            deployment_clients.remove(client)
+            continue
         logger.info("Decode deployment ready")
 
         await client.get_deployment_logs()
 
-        decode_cfg = Config.model_validate(candidate.dgd_config)
-        decode_service_name = get_service_name_by_type(
-            decode_cfg, backend, SubComponentType.DECODE
-        ).lower()
+        # Log paths are stored under {work_dir}/{deployment_name}/{component}/0.log
+        # where component names are the lowercase versions of the DGD service names.
+        # client.components is populated by create_deployment() based on the actual
+        # deployment spec.
+        decode_service_name = pick_decode_component(client)
+
         max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
             f"{work_dir}/{client.deployment_name}/{decode_service_name}/0.log",
             attention_dp_size=candidate.dp,
@@ -348,8 +372,9 @@ async def run_thorough(
 
     # --- Stage 1: Enumeration ---
     model_cache = dgdr.modelCache or ModelCacheSpec()
-    prefill_candidates, decode_candidates = enumerate_profiling_configs(
-        model_path=model,
+    local_or_hf_model = resolve_model_path(dgdr)
+    enumerated = enumerate_profiling_configs(
+        model_path=local_or_hf_model,
         system=system,
         backend=backend,
         image=derive_backend_image(dgdr.image, backend),
@@ -361,6 +386,7 @@ async def run_thorough(
         k8s_pvc_mount_path=model_cache.pvcMountPath,
         k8s_model_path_in_pvc=model_cache.pvcModelPath,
     )
+    prefill_candidates, decode_candidates = enumerated[:2]
 
     logger.info(
         "Enumerated %d prefill candidates, %d decode candidates",
@@ -383,6 +409,24 @@ async def run_thorough(
             len(decode_candidates),
         )
 
+    config_modifier = CONFIG_MODIFIERS[backend]
+    if backend == "vllm" and hasattr(
+        config_modifier, "apply_model_runtime_constraints"
+    ):
+        for candidate in prefill_candidates:
+            candidate.dgd_config = config_modifier.apply_model_runtime_constraints(
+                candidate.dgd_config, local_or_hf_model
+            )
+        for candidate in decode_candidates:
+            candidate.dgd_config = config_modifier.apply_model_runtime_constraints(
+                candidate.dgd_config, local_or_hf_model
+            )
+        logger.info(
+            "Applied vLLM model runtime constraints to %d prefill + %d decode candidates.",
+            len(prefill_candidates),
+            len(decode_candidates),
+        )
+
     # Propagate profiling-job tolerations to candidate DGDs
     job_tolerations = get_profiling_job_tolerations(dgdr)
     if job_tolerations:
@@ -400,8 +444,6 @@ async def run_thorough(
             len(prefill_candidates),
             len(decode_candidates),
         )
-
-    config_modifier = CONFIG_MODIFIERS[backend]
 
     # --- Stage 2: Benchmarking ---
     ops.current_phase = ProfilingPhase.SweepingPrefill
@@ -475,7 +517,7 @@ async def run_thorough(
     # --- Stage 4: DGD generation ---
     task = TaskConfig(
         serving_mode="disagg",
-        model_path=model,
+        model_path=local_or_hf_model,
         system_name=system,
         backend_name=backend,
         total_gpus=total_gpus,
@@ -486,7 +528,7 @@ async def run_thorough(
         request_latency=request_latency,
     )
     dgd_config = _generate_dgd_from_pick(
-        dgdr, best_config_df, "disagg", {"disagg": task}
+        dgdr, best_config_df, "disagg", {"disagg": task}, picking_mode
     )
 
     return {

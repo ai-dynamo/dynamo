@@ -4,7 +4,8 @@
 use std::time::Duration;
 
 use super::config::RouterQueuePolicy;
-use super::types::SchedulingRequest;
+use super::types::SchedulingContext;
+use crate::protocols::WorkerConfigLike;
 use ordered_float::OrderedFloat;
 /// Pluggable scheduling policy that determines queue ordering.
 /// Monomorphized for zero-cost inlining on the hot comparison path.
@@ -15,10 +16,19 @@ pub trait SchedulingPolicy: Send + Sync + 'static {
     type Key: Ord + Eq + Clone + Send + 'static;
 
     /// Compute priority key at enqueue time.
-    fn enqueue_key(&self, arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key;
+    fn enqueue_key<C: WorkerConfigLike>(
+        &self,
+        arrival_offset: Duration,
+        ctx: SchedulingContext<'_, C>,
+    ) -> Self::Key;
 
     /// Recompute priority key during update(). Default: return old key unchanged.
-    fn rekey(&self, _now: Duration, old_key: &Self::Key, _req: &SchedulingRequest) -> Self::Key {
+    fn rekey<C: WorkerConfigLike>(
+        &self,
+        _now: Duration,
+        old_key: &Self::Key,
+        _ctx: SchedulingContext<'_, C>,
+    ) -> Self::Key {
         old_key.clone()
     }
 
@@ -27,7 +37,8 @@ pub trait SchedulingPolicy: Send + Sync + 'static {
     const DYNAMIC: bool = false;
 }
 
-/// FCFS with priority bumps: key = priority_jump - arrival_offset.
+/// FCFS with priority bumps: policy score = priority_jump - arrival_offset.
+/// The complete key is `(strict_priority, policy_score)`.
 /// Earlier arrival or higher priority_jump produces a higher key, scheduled first.
 ///
 /// Optimizes for tail TTFT — no request waits longer than necessary,
@@ -35,14 +46,22 @@ pub trait SchedulingPolicy: Send + Sync + 'static {
 pub struct FcfsPolicy;
 
 impl SchedulingPolicy for FcfsPolicy {
-    type Key = OrderedFloat<f64>;
+    type Key = (u32, OrderedFloat<f64>);
 
-    fn enqueue_key(&self, arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
-        OrderedFloat(request.priority_jump.max(0.0) - arrival_offset.as_secs_f64())
+    fn enqueue_key<C: WorkerConfigLike>(
+        &self,
+        arrival_offset: Duration,
+        ctx: SchedulingContext<'_, C>,
+    ) -> Self::Key {
+        (
+            ctx.request().strict_priority,
+            OrderedFloat(ctx.request().priority_jump.max(0.0) - arrival_offset.as_secs_f64()),
+        )
     }
 }
 
-/// LCFS with priority bumps: key = priority_jump + arrival_offset.
+/// LCFS with priority bumps: policy score = priority_jump + arrival_offset.
+/// The complete key is `(strict_priority, policy_score)`.
 /// Later arrival or higher priority_jump produces a higher key, scheduled first.
 ///
 /// This intentionally favors newer arrivals under saturation and is mainly useful
@@ -50,16 +69,24 @@ impl SchedulingPolicy for FcfsPolicy {
 pub struct LcfsPolicy;
 
 impl SchedulingPolicy for LcfsPolicy {
-    type Key = OrderedFloat<f64>;
+    type Key = (u32, OrderedFloat<f64>);
 
-    fn enqueue_key(&self, arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
-        OrderedFloat(request.priority_jump.max(0.0) + arrival_offset.as_secs_f64())
+    fn enqueue_key<C: WorkerConfigLike>(
+        &self,
+        arrival_offset: Duration,
+        ctx: SchedulingContext<'_, C>,
+    ) -> Self::Key {
+        (
+            ctx.request().strict_priority,
+            OrderedFloat(ctx.request().priority_jump.max(0.0) + arrival_offset.as_secs_f64()),
+        )
     }
 }
 
 /// Weighted Shortest Processing Time (Smith's rule):
-/// key = (1 + priority_jump) / new_tokens, where new_tokens estimates the
+/// policy score = (1 + priority_jump) / new_tokens, where new_tokens estimates the
 /// actual prefill cost by subtracting the effective KV cache overlap from ISL.
+/// The complete key is `(strict_priority, policy_score)`.
 /// Unpinned requests use the best available overlap. Pinned requests use only
 /// the overlap for their exact target worker so queue ordering matches routing.
 ///
@@ -69,33 +96,19 @@ impl SchedulingPolicy for LcfsPolicy {
 pub struct WsptPolicy;
 
 impl SchedulingPolicy for WsptPolicy {
-    type Key = OrderedFloat<f64>;
+    type Key = (u32, OrderedFloat<f64>);
 
-    fn enqueue_key(&self, _arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
-        let weight = 1.0 + request.priority_jump.max(0.0);
-        let allowed_ids = request.allowed_worker_ids.as_ref();
-        let cached_tokens = request.pinned_worker.map_or_else(
-            || {
-                request
-                    .effective_cached_tokens
-                    .iter()
-                    .filter(|(worker, _)| {
-                        allowed_ids.is_none_or(|ids| ids.contains(&worker.worker_id))
-                    })
-                    .map(|(_, tokens)| *tokens)
-                    .max()
-                    .unwrap_or(0)
-            },
-            |worker| {
-                request
-                    .effective_cached_tokens
-                    .get(&worker)
-                    .copied()
-                    .unwrap_or(0)
-            },
-        );
-        let new_tokens = request.isl_tokens.saturating_sub(cached_tokens).max(1);
-        OrderedFloat(weight / new_tokens as f64)
+    fn enqueue_key<C: WorkerConfigLike>(
+        &self,
+        _arrival_offset: Duration,
+        ctx: SchedulingContext<'_, C>,
+    ) -> Self::Key {
+        let weight = 1.0 + ctx.request().priority_jump.max(0.0);
+        let new_tokens = ctx.best_effective_prefill_tokens().max(1);
+        (
+            ctx.request().strict_priority,
+            OrderedFloat(weight / new_tokens as f64),
+        )
     }
 }
 
@@ -119,23 +132,61 @@ impl RouterSchedulingPolicy {
 }
 
 impl SchedulingPolicy for RouterSchedulingPolicy {
-    type Key = OrderedFloat<f64>;
+    type Key = (u32, OrderedFloat<f64>);
 
-    fn enqueue_key(&self, arrival_offset: Duration, request: &SchedulingRequest) -> Self::Key {
+    fn enqueue_key<C: WorkerConfigLike>(
+        &self,
+        arrival_offset: Duration,
+        ctx: SchedulingContext<'_, C>,
+    ) -> Self::Key {
         match self {
-            Self::Fcfs(p) => p.enqueue_key(arrival_offset, request),
-            Self::Lcfs(p) => p.enqueue_key(arrival_offset, request),
-            Self::Wspt(p) => p.enqueue_key(arrival_offset, request),
+            Self::Fcfs(p) => p.enqueue_key(arrival_offset, ctx),
+            Self::Lcfs(p) => p.enqueue_key(arrival_offset, ctx),
+            Self::Wspt(p) => p.enqueue_key(arrival_offset, ctx),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use rustc_hash::FxHashMap;
 
     use super::*;
+    use crate::SchedulingRequest;
     use crate::protocols::{OverlapScores, WorkerWithDpRank};
+    use crate::scheduling::{OverlapSignals, ScheduleMode};
+    use crate::test_utils::SimpleWorkerConfig;
+
+    fn workers_for_request(request: &SchedulingRequest) -> HashMap<u64, SimpleWorkerConfig> {
+        let mut workers = HashMap::new();
+
+        for worker in request.overlap.effective_cached_tokens.keys() {
+            workers.entry(worker.worker_id).or_default();
+        }
+
+        if let Some(worker) = request.pinned_worker {
+            workers.entry(worker.worker_id).or_default();
+        }
+
+        if let Some(allowed_worker_ids) = request.allowed_worker_ids.as_ref() {
+            for &worker_id in allowed_worker_ids {
+                workers.entry(worker_id).or_default();
+            }
+        }
+
+        workers
+    }
+
+    fn enqueue_key<P: SchedulingPolicy>(
+        policy: &P,
+        arrival_offset: Duration,
+        request: &SchedulingRequest,
+    ) -> P::Key {
+        let workers = workers_for_request(request);
+        policy.enqueue_key(arrival_offset, SchedulingContext::new(request, &workers))
+    }
 
     fn request_with(
         isl_tokens: usize,
@@ -153,25 +204,36 @@ mod tests {
             .map(|(worker, overlap)| (*worker, *overlap as usize * 16))
             .collect();
         SchedulingRequest {
-            maybe_request_id: None,
+            mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks,
-            effective_cached_tokens,
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks,
+                effective_cached_tokens,
+            },
+            worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
             resp_tx: None,
         }
+    }
+
+    fn with_strict_priority(
+        mut request: SchedulingRequest,
+        strict_priority: u32,
+    ) -> SchedulingRequest {
+        request.strict_priority = strict_priority;
+        request
     }
 
     fn overlaps_from(scores: &[(u64, u32)]) -> OverlapScores {
@@ -188,30 +250,6 @@ mod tests {
     // ---- FCFS policy tests ----
 
     #[test]
-    fn fcfs_earlier_arrival_scheduled_first() {
-        let policy = FcfsPolicy;
-        let req = request_with(512, 0.0, OverlapScores::default());
-        let early = policy.enqueue_key(Duration::from_secs(1), &req);
-        let late = policy.enqueue_key(Duration::from_secs(10), &req);
-        assert!(early > late, "earlier arrival should have higher key");
-    }
-
-    #[test]
-    fn fcfs_priority_jump_promotes() {
-        let policy = FcfsPolicy;
-        // Both arrive at the same wall-clock offset (10s), but one has priority.
-        let normal = request_with(512, 0.0, OverlapScores::default());
-        let boosted = request_with(512, 100.0, OverlapScores::default());
-        let t = Duration::from_secs(10);
-        let key_normal = policy.enqueue_key(t, &normal);
-        let key_boosted = policy.enqueue_key(t, &boosted);
-        assert!(
-            key_boosted > key_normal,
-            "priority_jump should produce a higher key"
-        );
-    }
-
-    #[test]
     fn fcfs_priority_jump_beats_earlier_arrival() {
         let policy = FcfsPolicy;
         // Request A arrived at t=0 with no priority.
@@ -219,18 +257,9 @@ mod tests {
         // B should be scheduled first despite arriving later.
         let a = request_with(512, 0.0, OverlapScores::default());
         let b = request_with(512, 50.0, OverlapScores::default());
-        let key_a = policy.enqueue_key(Duration::from_secs(0), &a);
-        let key_b = policy.enqueue_key(Duration::from_secs(5), &b);
+        let key_a = enqueue_key(&policy, Duration::from_secs(0), &a);
+        let key_b = enqueue_key(&policy, Duration::from_secs(5), &b);
         assert!(key_b > key_a);
-    }
-
-    #[test]
-    fn lcfs_later_arrival_scheduled_first() {
-        let policy = LcfsPolicy;
-        let req = request_with(512, 0.0, OverlapScores::default());
-        let early = policy.enqueue_key(Duration::from_secs(1), &req);
-        let late = policy.enqueue_key(Duration::from_secs(10), &req);
-        assert!(late > early, "later arrival should have higher key");
     }
 
     #[test]
@@ -239,8 +268,8 @@ mod tests {
         let normal = request_with(512, 0.0, OverlapScores::default());
         let boosted = request_with(512, 100.0, OverlapScores::default());
         let t = Duration::from_secs(10);
-        let key_normal = policy.enqueue_key(t, &normal);
-        let key_boosted = policy.enqueue_key(t, &boosted);
+        let key_normal = enqueue_key(&policy, t, &normal);
+        let key_boosted = enqueue_key(&policy, t, &boosted);
         assert!(
             key_boosted > key_normal,
             "priority_jump should produce a higher key"
@@ -254,10 +283,35 @@ mod tests {
         let late = Duration::from_secs(10);
 
         let fcfs = RouterSchedulingPolicy::new(RouterQueuePolicy::Fcfs);
-        assert!(fcfs.enqueue_key(early, &req) > fcfs.enqueue_key(late, &req));
+        assert!(enqueue_key(&fcfs, early, &req) > enqueue_key(&fcfs, late, &req));
 
         let lcfs = RouterSchedulingPolicy::new(RouterQueuePolicy::Lcfs);
-        assert!(lcfs.enqueue_key(late, &req) > lcfs.enqueue_key(early, &req));
+        assert!(enqueue_key(&lcfs, late, &req) > enqueue_key(&lcfs, early, &req));
+    }
+
+    #[test]
+    fn strict_priority_precedes_each_policy_score() {
+        let high_fcfs = with_strict_priority(request_with(512, 0.0, OverlapScores::default()), 1);
+        let low_fcfs = request_with(512, 1000.0, OverlapScores::default());
+        assert!(
+            enqueue_key(&FcfsPolicy, Duration::from_secs(1000), &high_fcfs)
+                > enqueue_key(&FcfsPolicy, Duration::ZERO, &low_fcfs)
+        );
+
+        let high_lcfs = with_strict_priority(request_with(512, 0.0, OverlapScores::default()), 1);
+        let low_lcfs = request_with(512, 1000.0, OverlapScores::default());
+        assert!(
+            enqueue_key(&LcfsPolicy, Duration::ZERO, &high_lcfs)
+                > enqueue_key(&LcfsPolicy, Duration::from_secs(1000), &low_lcfs)
+        );
+
+        let high_wspt =
+            with_strict_priority(request_with(10_000, 0.0, OverlapScores::default()), 1);
+        let low_wspt = request_with(1, 1000.0, OverlapScores::default());
+        assert!(
+            enqueue_key(&WsptPolicy, Duration::ZERO, &high_wspt)
+                > enqueue_key(&WsptPolicy, Duration::ZERO, &low_wspt)
+        );
     }
 
     // ---- WSPT policy tests ----
@@ -269,7 +323,7 @@ mod tests {
         let long = request_with(1000, 0.0, OverlapScores::default());
         let t = Duration::ZERO;
         assert!(
-            policy.enqueue_key(t, &short) > policy.enqueue_key(t, &long),
+            enqueue_key(&policy, t, &short) > enqueue_key(&policy, t, &long),
             "shorter request should have higher key"
         );
     }
@@ -281,12 +335,23 @@ mod tests {
         let no_cache = request_with(1024, 0.0, OverlapScores::default());
         let cached = request_with(1024, 0.0, overlaps_from(&[(0, 60)]));
         let t = Duration::ZERO;
-        let key_no_cache = policy.enqueue_key(t, &no_cache);
-        let key_cached = policy.enqueue_key(t, &cached);
+        let key_no_cache = enqueue_key(&policy, t, &no_cache);
+        let key_cached = enqueue_key(&policy, t, &cached);
         assert!(
             key_cached > key_no_cache,
             "request with overlap should have higher key (fewer new tokens)"
         );
+    }
+
+    #[test]
+    fn wspt_overlap_applies_when_prefill_tracking_disabled() {
+        let policy = WsptPolicy;
+        let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60)]));
+        req.track_prefill_tokens = false;
+
+        let key = enqueue_key(&policy, Duration::ZERO, &req);
+        let expected = (0, OrderedFloat(1.0 / 64.0));
+        assert_eq!(key, expected);
     }
 
     #[test]
@@ -296,7 +361,7 @@ mod tests {
         let boosted = request_with(512, 5.0, OverlapScores::default());
         let t = Duration::ZERO;
         assert!(
-            policy.enqueue_key(t, &boosted) > policy.enqueue_key(t, &normal),
+            enqueue_key(&policy, t, &boosted) > enqueue_key(&policy, t, &normal),
             "priority_jump should increase key"
         );
     }
@@ -311,8 +376,8 @@ mod tests {
             0.0,
             overlaps_from(&[(0, 10), (1, 20), (2, 50), (3, 60)]),
         );
-        let key = policy.enqueue_key(Duration::ZERO, &req);
-        let expected = OrderedFloat(1.0 / 64.0);
+        let key = enqueue_key(&policy, Duration::ZERO, &req);
+        let expected = (0, OrderedFloat(1.0 / 64.0));
         assert_eq!(key, expected);
     }
 
@@ -322,8 +387,8 @@ mod tests {
         let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60), (1, 1)]));
         req.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
 
-        let key = policy.enqueue_key(Duration::ZERO, &req);
-        let expected = OrderedFloat(1.0 / 1008.0);
+        let key = enqueue_key(&policy, Duration::ZERO, &req);
+        let expected = (0, OrderedFloat(1.0 / 1008.0));
         assert_eq!(key, expected);
     }
 
@@ -333,8 +398,8 @@ mod tests {
         let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60)]));
         req.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
 
-        let key = policy.enqueue_key(Duration::ZERO, &req);
-        let expected = OrderedFloat(1.0 / 1024.0);
+        let key = enqueue_key(&policy, Duration::ZERO, &req);
+        let expected = (0, OrderedFloat(1.0 / 1024.0));
         assert_eq!(key, expected);
     }
 
@@ -342,8 +407,8 @@ mod tests {
     fn wspt_no_overlap_falls_back_to_isl() {
         let policy = WsptPolicy;
         let req = request_with(512, 0.0, OverlapScores::default());
-        let key = policy.enqueue_key(Duration::ZERO, &req);
-        let expected = OrderedFloat(1.0 / 512.0);
+        let key = enqueue_key(&policy, Duration::ZERO, &req);
+        let expected = (0, OrderedFloat(1.0 / 512.0));
         assert_eq!(key, expected);
     }
 
@@ -352,8 +417,26 @@ mod tests {
         let policy = WsptPolicy;
         // 512 tokens, 64 blocks cached = 1024 cached tokens > ISL → saturating_sub → 0 → max(1)
         let req = request_with(512, 0.0, overlaps_from(&[(0, 64)]));
-        let key = policy.enqueue_key(Duration::ZERO, &req);
-        let expected = OrderedFloat(1.0 / 1.0);
+        let key = enqueue_key(&policy, Duration::ZERO, &req);
+        let expected = (0, OrderedFloat(1.0 / 1.0));
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn wspt_required_taints_ignore_incompatible_overlap() {
+        let policy = WsptPolicy;
+        let mut req = request_with(1024, 0.0, overlaps_from(&[(0, 60), (1, 1)]));
+        req.routing_constraints.required_taints =
+            std::collections::HashSet::from(["mdc-b".to_string()]);
+
+        let mut workers = workers_for_request(&req);
+        workers.get_mut(&0).unwrap().taints =
+            std::collections::HashSet::from(["mdc-a".to_string()]);
+        workers.get_mut(&1).unwrap().taints =
+            std::collections::HashSet::from(["mdc-b".to_string()]);
+
+        let key = policy.enqueue_key(Duration::ZERO, SchedulingContext::new(&req, &workers));
+        let expected = (0, OrderedFloat(1.0 / 1008.0));
         assert_eq!(key, expected);
     }
 }

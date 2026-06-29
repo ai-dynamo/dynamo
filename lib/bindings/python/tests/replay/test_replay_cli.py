@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from types import SimpleNamespace
 
 import pytest
+
+import dynamo.replay.main as replay_main
 
 from .replay_utils import (
     _assert_basic_report_counts,
@@ -22,6 +25,78 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
+
+
+def test_replay_cli_aic_perf_config_includes_moe_kwargs(monkeypatch):
+    captured_kwargs = {}
+
+    def fake_aic_perf_config(**kwargs):
+        captured_kwargs.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(replay_main, "AicPerfConfig", fake_aic_perf_config)
+
+    config = replay_main._load_aic_perf_config(
+        SimpleNamespace(
+            aic_backend="vllm",
+            aic_system="h200_sxm",
+            aic_model_path="moonshotai/Kimi-K2-Instruct",
+            aic_backend_version=None,
+            aic_tp_size=2,
+            aic_moe_tp_size=2,
+            aic_moe_ep_size=1,
+            aic_attention_dp_size=1,
+            aic_nextn=None,
+            aic_nextn_accept_rates=None,
+            aic_gemm_dtype=None,
+            aic_moe_dtype=None,
+            aic_fmha_dtype=None,
+            aic_kv_cache_dtype=None,
+            aic_comm_dtype=None,
+        )
+    )
+
+    assert config == captured_kwargs
+    assert captured_kwargs == {
+        "aic_backend": "vllm",
+        "aic_system": "h200_sxm",
+        "aic_model_path": "moonshotai/Kimi-K2-Instruct",
+        "aic_tp_size": 2,
+        "aic_backend_version": None,
+        "aic_moe_tp_size": 2,
+        "aic_moe_ep_size": 1,
+        "aic_attention_dp_size": 1,
+        "aic_nextn": None,
+        "aic_nextn_accept_rates": None,
+        "aic_gemm_dtype": None,
+        "aic_moe_dtype": None,
+        "aic_fmha_dtype": None,
+        "aic_kv_cache_dtype": None,
+        "aic_comm_dtype": None,
+    }
+
+
+def test_replay_policy_config_flag_overrides_router_json(monkeypatch):
+    captured = []
+
+    class FakeKvRouterConfig:
+        @staticmethod
+        def from_json(value):
+            captured.append(value)
+            return value
+
+    monkeypatch.setattr(replay_main, "KvRouterConfig", FakeKvRouterConfig)
+
+    config = replay_main._load_router_config(
+        '{"router_queue_policy":"wspt","router_policy_config":"embedded.yaml"}',
+        "explicit.yaml",
+    )
+
+    assert config == captured[0]
+    assert json.loads(captured[0]) == {
+        "router_queue_policy": "wspt",
+        "router_policy_config": "explicit.yaml",
+    }
 
 
 @pytest.mark.timeout(30)

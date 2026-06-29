@@ -13,7 +13,6 @@ import torch
 
 from dynamo._core import Context
 from dynamo.common.storage import upload_to_fs
-from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     CreateVideoRequest,
@@ -90,7 +89,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         start_time = time.time()
 
         # Get trace header for distributed tracing (for logging/observability)
-        trace_header = build_trace_headers(context) if self.enable_trace else None
+        trace_header = context.trace_headers() if self.enable_trace else None
         if trace_header:
             logger.debug(f"Video generation request with trace: {trace_header}")
 
@@ -260,7 +259,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         return video_bytes
 
     async def _frames_to_video(
-        self, frames: list, fps: int, codec: str = "libx264"
+        self, frames: list, fps: int, codec: str = "h264_nvenc"
     ) -> bytes:
         """Convert list of frames to video bytes.
 
@@ -286,22 +285,32 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
                 else:
                     raise ValueError(f"Unsupported frame type: {type(frame)}")
 
-            # Use imageio to write video
             import imageio
 
-            output_buffer = io.BytesIO()
-            with imageio.get_writer(
-                output_buffer,
-                format="mp4",  # type: ignore
-                fps=fps,
-                codec=codec,
-                output_params=["-pix_fmt", "yuv420p"],
-            ) as writer:
-                for frame in np_frames:
-                    writer.append_data(frame)  # type: ignore
+            def encode_with_codec(codec_name: str) -> bytes:
+                output_buffer = io.BytesIO()
+                with imageio.get_writer(
+                    output_buffer,
+                    format="mp4",  # type: ignore
+                    fps=fps,
+                    codec=codec_name,
+                    output_params=["-pix_fmt", "yuv420p"],
+                ) as writer:
+                    for frame in np_frames:
+                        writer.append_data(frame)  # type: ignore
 
-            output_buffer.seek(0)
-            return output_buffer.read()
+                output_buffer.seek(0)
+                return output_buffer.read()
+
+            try:
+                return encode_with_codec(codec)
+            except OSError:
+                if codec != "h264_nvenc":
+                    raise
+                logger.warning(
+                    "h264_nvenc failed; retrying video encoding with libx264"
+                )
+                return encode_with_codec("libx264")
 
         except ImportError as e:
             raise RuntimeError(

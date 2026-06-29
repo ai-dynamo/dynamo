@@ -58,7 +58,7 @@ impl LiveRuntime {
             router_config,
             prefill_load_estimator,
             num_workers,
-        ));
+        )?);
         let mut schedulers = Vec::with_capacity(num_workers);
         let mut senders = Vec::with_capacity(num_workers);
 
@@ -169,7 +169,7 @@ impl LiveRuntime {
     /// Drive a multi-turn workload driver until it is drained and all spawned request tasks finish.
     pub(super) async fn run_workload(
         mut self,
-        mut driver: WorkloadDriver,
+        driver: WorkloadDriver,
         total_turns: usize,
     ) -> Result<(TraceSimulationReport, LiveRuntimeStats)> {
         let requests = Arc::new(DashMap::with_capacity(total_turns.max(1)));
@@ -195,13 +195,9 @@ impl LiveRuntime {
             )
             .await
         });
-        let cap_enabled = match self.mode {
-            LiveReplayMode::Trace => false,
-            LiveReplayMode::Concurrency { max_in_flight } => {
-                driver.set_max_in_flight(max_in_flight);
-                true
-            }
-        };
+        // The driver arrives already capped (concurrency drivers are capped at
+        // construction); `cap_enabled` only gates the in-flight guard / arrival stamping.
+        let cap_enabled = matches!(self.mode, LiveReplayMode::Concurrency { .. });
         let workload = Arc::new(WorkloadDispatchState {
             driver: std::sync::Mutex::new(driver),
             wakeup: Notify::new(),
@@ -215,6 +211,12 @@ impl LiveRuntime {
             stats: Arc::clone(&stats),
             workload: Some(Arc::clone(&workload)),
         };
+
+        tracing::debug!(
+            total_turns,
+            num_workers = self.senders.len(),
+            "replay_diag: workload loop starting"
+        );
 
         loop {
             let now = now_ms(start);
@@ -245,6 +247,10 @@ impl LiveRuntime {
                 (driver.is_drained(), driver.next_ready_time_ms())
             };
             if is_drained {
+                tracing::debug!(
+                    tasks_remaining = tasks.len(),
+                    "replay_diag: workload drained, waiting for tasks"
+                );
                 break;
             }
 
@@ -259,9 +265,11 @@ impl LiveRuntime {
         self.cancel_token.cancel();
         self.schedulers.clear();
 
+        tracing::debug!("replay_diag: shutdown awaiting demux");
         let report = demux_task
             .await
             .map_err(|e| anyhow!("online replay demux task failed: {e}"))?;
+        tracing::debug!("replay_diag: shutdown awaiting router");
         router.shutdown().await?;
         Ok((report, stats.snapshot()))
     }

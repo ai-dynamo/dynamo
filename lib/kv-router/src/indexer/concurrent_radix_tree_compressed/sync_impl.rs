@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::indexer::AnchorCapableSyncIndexer;
 
 // ============================================================================
 // SyncIndexer implementation for ConcurrentRadixTreeCompressed
@@ -57,6 +58,14 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 }
                 WorkerTask::DumpEvents(_sender) => {
                     let _ = _sender.send(Ok(Vec::new()));
+                }
+                WorkerTask::Stats(sender) => {
+                    let stats = WorkerLookupStats::from_worker_block_counts(
+                        lookup
+                            .iter()
+                            .map(|(worker, worker_lookup)| (*worker, worker_lookup.len())),
+                    );
+                    let _ = sender.send(stats);
                 }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
@@ -148,17 +157,6 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         cleanup_guard.mark_completed();
     }
 
-    fn worker_count(&self) -> usize {
-        self.tree_sizes.len()
-    }
-
-    fn block_count(&self) -> usize {
-        self.tree_sizes
-            .iter()
-            .map(|e| e.value().load(Ordering::Relaxed))
-            .sum()
-    }
-
     fn timing_report(&self) -> String {
         #[cfg(not(feature = "bench"))]
         {
@@ -189,3 +187,5 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
         Some(self.dump_tree_as_events())
     }
 }
+
+impl AnchorCapableSyncIndexer for ConcurrentRadixTreeCompressed {}

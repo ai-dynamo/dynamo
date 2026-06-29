@@ -41,12 +41,12 @@ If you want to see advanced, framework-specific deployment patterns and best pra
 
 ## Deployment Examples
 
-Platform-specific deployment guides for production environments:
+Platform-specific manifests and templates for production environments. Deployment guides live under `docs/kubernetes/cloud-providers/`; each examples folder links to its guide.
 
-- **[Amazon EKS](/examples/deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
-- **[Azure AKS](/examples/deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
-- **[Amazon ECS](/examples/deployments/ECS/)** - Deploy Dynamo on Amazon Elastic Container Service
-- **[Google GKE](/examples/deployments/GKE/)** - Deploy Dynamo on Google Kubernetes Engine
+- **[Amazon EKS](/examples/deployments/EKS/)** - Manifests and templates ([deployment guide](/docs/kubernetes/cloud-providers/eks/eks.md))
+- **[Azure AKS](/examples/deployments/AKS/)** - Helm values ([deployment guide](/docs/kubernetes/cloud-providers/aks/aks.md))
+- **[Amazon ECS](/examples/deployments/ECS/)** - Task definitions ([deployment guide](/docs/kubernetes/cloud-providers/ecs/ecs.md))
+- **[Google GKE](/examples/deployments/GKE/)** - DGD manifests ([deployment guide](/docs/kubernetes/cloud-providers/gke/gke.md))
 
 ## Runtime Examples
 
@@ -60,7 +60,7 @@ Low-level runtime examples for developers using Python<>Rust bindings:
 
 2. **Set up prerequisites**: Most examples require etcd and NATS services. You can start them using:
    ```bash
-   docker compose -f deploy/docker-compose.yml up -d
+   docker compose -f dev/docker-compose.yml up -d
    ```
 
 3. **Follow the example**: Each directory contains detailed setup instructions and configuration files specific to that deployment pattern.

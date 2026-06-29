@@ -8,7 +8,6 @@ use validator::Validate;
 mod aggregator;
 mod nvext;
 
-pub use aggregator::DeltaAggregator;
 pub use nvext::{NvExt, NvExtProvider};
 
 /// Request for audio speech generation (/v1/audio/speech endpoint).

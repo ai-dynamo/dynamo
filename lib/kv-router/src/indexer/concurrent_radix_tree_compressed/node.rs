@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -9,19 +10,10 @@ use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use super::types::*;
+use crate::indexer::compressed_radix::NodeState;
 use crate::protocols::*;
 
-#[path = "node_state.rs"]
-mod node_state;
-use node_state::NodeState;
-
 type NodeChildren = DashMap<LocalBlockHash, SharedNode, FxBuildHasher>;
-const SHAPE_PLAN_RETRIES: usize = 4;
-
-pub(super) struct RemoveOutcome {
-    pub(super) removed: usize,
-    pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
-}
 
 fn record_last_matched_hash(
     last_matched_hashes: &mut Option<&mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
@@ -127,27 +119,12 @@ impl Node {
 
     fn with_shape_plan<R>(
         &self,
-        mut plan: impl FnMut(&NodeState, &NodeChildren, u64) -> R,
+        plan: impl FnOnce(&NodeState, &NodeChildren, u64) -> R,
     ) -> Option<R> {
-        for attempt in 0..SHAPE_PLAN_RETRIES {
-            let _gate = self.shape_gate.read();
-            let shape_version = self.shape_version.load(Ordering::Acquire);
-            let state = self.state.read();
-            let result = plan(&state, &self.children, shape_version);
-            drop(state);
-
-            if self.shape_version.load(Ordering::Acquire) == shape_version {
-                return Some(result);
-            }
-
-            if attempt > 1 {
-                std::thread::yield_now();
-            } else {
-                std::hint::spin_loop();
-            }
-        }
-
-        None
+        let _gate = self.shape_gate.read();
+        let shape_version = self.shape_version.load(Ordering::Acquire);
+        let state = self.state.read();
+        Some(plan(&state, &self.children, shape_version))
     }
 
     fn validate_shape_read<R>(&self, expected_version: u64, f: impl FnOnce() -> R) -> Option<R> {
@@ -166,20 +143,6 @@ impl Node {
         self.validate_shape_read(expected_version, || {
             let mut state = self.state.write();
             f(&mut state)
-        })
-    }
-
-    fn apply_child_update<R>(
-        &self,
-        expected_version: u64,
-        f: impl FnOnce(&NodeChildren) -> (R, bool),
-    ) -> Option<R> {
-        self.validate_shape_read(expected_version, || {
-            let (result, shape_changed) = f(&self.children);
-            if shape_changed {
-                self.shape_version.fetch_add(1, Ordering::Release);
-            }
-            result
         })
     }
 
@@ -215,12 +178,18 @@ impl Node {
         children
     }
 
+    #[cfg(test)]
     pub(super) fn children_snapshot(&self) -> Vec<SharedNode> {
         let _gate = self.shape_gate.read();
         self.children
             .iter()
             .map(|entry| entry.value().clone())
             .collect()
+    }
+
+    pub(super) fn push_children_into(&self, queue: &mut VecDeque<SharedNode>) {
+        let _gate = self.shape_gate.read();
+        queue.extend(self.children.iter().map(|entry| entry.value().clone()));
     }
 
     pub(super) fn child_edges_snapshot(&self) -> Vec<(LocalBlockHash, SharedNode)> {
@@ -591,19 +560,39 @@ impl Node {
         child: SharedNode,
         shape_version: u64,
     ) -> InsertChildOutcome {
-        self.apply_child_update(shape_version, |children| {
-            match children.entry(first_local) {
-                dashmap::mapref::entry::Entry::Occupied(entry) => {
-                    (InsertChildOutcome::Existing(entry.get().clone()), false)
-                }
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
-                    entry.insert(child.clone());
-                    self.internal.store(true, Ordering::Release);
-                    (InsertChildOutcome::Inserted(child), true)
-                }
+        {
+            let _gate = self.shape_gate.read();
+            if self.shape_version.load(Ordering::Acquire) != shape_version {
+                return InsertChildOutcome::Stale;
             }
-        })
-        .unwrap_or(InsertChildOutcome::Stale)
+            if self.internal.load(Ordering::Acquire) {
+                return match self.children.entry(first_local) {
+                    dashmap::mapref::entry::Entry::Occupied(entry) => {
+                        InsertChildOutcome::Existing(entry.get().clone())
+                    }
+                    dashmap::mapref::entry::Entry::Vacant(entry) => {
+                        entry.insert(child.clone());
+                        InsertChildOutcome::Inserted(child)
+                    }
+                };
+            }
+        }
+
+        let _gate = self.shape_gate.write();
+        if self.shape_version.load(Ordering::Acquire) != shape_version {
+            return InsertChildOutcome::Stale;
+        }
+        match self.children.entry(first_local) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                InsertChildOutcome::Existing(entry.get().clone())
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(child.clone());
+                self.internal.store(true, Ordering::Release);
+                self.shape_version.fetch_add(1, Ordering::Release);
+                InsertChildOutcome::Inserted(child)
+            }
+        }
     }
 
     fn split_at_locked(&self, state: &mut NodeState, pos: usize) -> SplitLookupData {
@@ -667,19 +656,36 @@ impl Node {
         SplitLookupData { suffix }
     }
 
-    pub(super) fn remove_worker_for_hash(
+    pub(super) fn remove_worker_for_hashes(
         &self,
         worker: WorkerWithDpRank,
-        block_hash: ExternalSequenceBlockHash,
-    ) -> Option<RemoveOutcome> {
+        block_hashes: &[ExternalSequenceBlockHash],
+    ) -> Option<RemoveBatchOutcome> {
         let _gate = self.shape_gate.write();
         let mut state = self.state.write();
-        let pos = state.edge_index.get(&block_hash).copied()?;
+        let mut min_match = None;
+        let mut unmatched_hashes = Vec::new();
+
+        for &hash in block_hashes {
+            match state.edge_index.get(&hash).copied() {
+                Some(pos) => {
+                    if min_match.is_none_or(|(min_pos, _)| pos < min_pos) {
+                        min_match = Some((pos, hash));
+                    }
+                }
+                None => unmatched_hashes.push(hash),
+            }
+        }
+
+        let (pos, block_hash) = min_match?;
         let outcome = state.remove_worker_at_pos(worker, pos, block_hash);
         let should_clear_children = state.full_edge_workers.is_empty();
         drop(state);
         self.clear_children_if_unreachable(should_clear_children);
-        Some(outcome)
+        Some(RemoveBatchOutcome {
+            stale_hashes: outcome.stale_hashes,
+            unmatched_hashes,
+        })
     }
 
     #[cfg_attr(feature = "profile", inline(never))]

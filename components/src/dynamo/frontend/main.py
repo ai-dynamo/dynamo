@@ -53,8 +53,6 @@ MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 
 
 def setup_engine_factory(
-    runtime: DistributedRuntime,
-    router_config: RouterConfig,
     config: FrontendConfig,
     vllm_flags: Namespace,
 ) -> "EngineFactory":
@@ -64,12 +62,10 @@ def setup_engine_factory(
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime, router_config, config, vllm_flags)
+    return EngineFactory(config, vllm_flags)
 
 
 def setup_sglang_engine_factory(
-    runtime: DistributedRuntime,
-    router_config: RouterConfig,
     config: FrontendConfig,
     sglang_flags: Optional[Namespace] = None,
 ):
@@ -83,8 +79,6 @@ def setup_sglang_engine_factory(
     reasoning_parser = getattr(sglang_flags, "reasoning_parser", None)
 
     return SglangEngineFactory(
-        runtime,
-        router_config,
         config,
         debug_perf=config.debug_perf,
         tool_call_parser_name=tool_call_parser,
@@ -126,6 +120,21 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
                     "Flag '--chat-processor vllm' requires vllm be installed."
                 )
                 sys.exit(1)
+
+        # On a host with no GPU and a CUDA-built wheel, vllm.platforms
+        # auto-detection picks UnspecifiedPlatform and the
+        # AsyncEngineArgs.add_cli_args call below crashes inside
+        # DeviceConfig.__post_init__. Frontend uses vLLM for parsers
+        # only and never constructs an engine, so coerce CpuPlatform.
+        # Must run before importing vllm.engine.arg_utils, which binds
+        # current_platform at module scope.
+        import vllm.platforms
+
+        if vllm.platforms.current_platform.device_type == "":
+            from vllm.platforms.cpu import CpuPlatform
+
+            vllm.platforms.current_platform = CpuPlatform()
+
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
             from vllm.entrypoints.openai.cli_args import FrontendArgs
@@ -168,12 +177,6 @@ async def async_main():
     os.environ.pop("DYN_SYSTEM_PORT", None)
     config, vllm_flags, sglang_flags = parse_args()
     dump_config(config.dump_config_to, config)
-    if config.event_plane:
-        os.environ["DYN_EVENT_PLANE"] = config.event_plane
-    if config.tokenizer_backend == "fastokens":
-        os.environ["DYN_TOKENIZER"] = "fastokens"
-    else:
-        os.environ.pop("DYN_TOKENIZER", None)
     max_seq_info = (
         f", max_seq_len: {config.migration_max_seq_len}"
         if config.migration_max_seq_len is not None
@@ -193,14 +196,13 @@ async def async_main():
             "Use --http-port to configure the frontend HTTP API port.\n" + "=" * 80
         )
 
-    # Configure Dynamo frontend HTTP service metrics prefix
-    if config.metrics_prefix is not None:
-        prefix = config.metrics_prefix.strip()
-        if prefix:
-            os.environ["DYN_METRICS_PREFIX"] = config.metrics_prefix
-
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.discovery_backend, config.request_plane)
+    runtime = DistributedRuntime(
+        loop,
+        config.discovery_backend,
+        config.request_plane,
+        event_plane=config.event_plane,
+    )
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -234,12 +236,24 @@ async def async_main():
     router_config = RouterConfig(
         router_mode, kv_router_config, **config.router_kwargs()
     )
+
+    metrics_prefix = (
+        config.metrics_prefix
+        if config.metrics_prefix is not None and config.metrics_prefix.strip()
+        else None
+    )
     kwargs: dict[str, Any] = {
         "http_host": config.http_host,
         "http_port": config.http_port,
         "kv_cache_block_size": config.kv_cache_block_size,
         "router_config": router_config,
         "migration_limit": config.migration_limit,
+        "metrics_prefix": metrics_prefix,
+        "enable_anthropic_api": config.enable_anthropic_api,
+        "strip_anthropic_preamble": config.strip_anthropic_preamble,
+        "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
+        "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
+        "tokenizer_backend": config.tokenizer_backend,
     }
     if config.migration_max_seq_len is not None:
         kwargs["migration_max_seq_len"] = config.migration_max_seq_len
@@ -259,35 +273,17 @@ async def async_main():
     if config.kserve_grpc_server and config.grpc_metrics_port:
         kwargs["http_metrics_port"] = config.grpc_metrics_port
 
-    if config.enable_anthropic_api:
-        os.environ["DYN_ENABLE_ANTHROPIC_API"] = "1"
-
-    if config.strip_anthropic_preamble:
-        os.environ["DYN_STRIP_ANTHROPIC_PREAMBLE"] = "1"
-    else:
-        os.environ.pop("DYN_STRIP_ANTHROPIC_PREAMBLE", None)
-
-    if config.enable_streaming_tool_dispatch:
-        os.environ["DYN_ENABLE_STREAMING_TOOL_DISPATCH"] = "1"
-    else:
-        os.environ.pop("DYN_ENABLE_STREAMING_TOOL_DISPATCH", None)
-
-    if config.enable_streaming_reasoning_dispatch:
-        os.environ["DYN_ENABLE_STREAMING_REASONING_DISPATCH"] = "1"
-    else:
-        os.environ.pop("DYN_ENABLE_STREAMING_REASONING_DISPATCH", None)
-
     if config.chat_processor == "vllm":
         assert (
             vllm_flags is not None
         ), "vllm_flags is required when chat processor is vllm"
         chat_engine_factory = setup_engine_factory(
-            runtime, router_config, config, vllm_flags
+            config, vllm_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
     elif config.chat_processor == "sglang":
         chat_engine_factory = setup_sglang_engine_factory(
-            runtime, router_config, config, sglang_flags
+            config, sglang_flags
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
 

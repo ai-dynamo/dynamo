@@ -213,6 +213,9 @@ pub struct LocalKvIndexer {
     /// This stays separate from `event_buffer` so dump wait/build state can be
     /// managed on the async path without holding the buffer lock across `.await`.
     recovery_cache: Arc<RecoverySnapshotCache>,
+    /// Shared metrics handle, also wired into lazily created lower-tier
+    /// indexers so HostPinned/Disk/External traffic is counted too.
+    metrics: Arc<KvIndexerMetrics>,
     /// Maximum number of events to keep in buffer
     max_buffer_size: usize, // Router sets this to WORKER_KV_INDEXER_BUFFER_SIZE
     #[cfg(test)]
@@ -230,7 +233,8 @@ impl LocalKvIndexer {
         max_buffer_size: usize,
     ) -> Self {
         Self {
-            indexer: KvIndexer::new(token, kv_block_size, metrics),
+            indexer: KvIndexer::new(token, kv_block_size, metrics.clone()),
+            metrics,
             lower_tier_indexers: Arc::new(Mutex::new(HashMap::new())),
             event_buffer: Mutex::new(VecDeque::with_capacity(max_buffer_size)),
             recovery_cache: Arc::new(RecoverySnapshotCache::new()),
@@ -248,7 +252,7 @@ impl LocalKvIndexer {
         buffer.iter().cloned().collect()
     }
 
-    /// Query events by ID range, returning events in `[start_id, end_id]` (both inclusive).
+    /// Query events by ID range, returning a recovery-equivalent suffix for `[start_id, end_id]`.
     ///
     /// ### Arguments
     ///
@@ -259,8 +263,10 @@ impl LocalKvIndexer {
     ///
     /// ### Returns
     ///
-    /// - `Events`: Buffered events with original IDs from `start_id` through the
-    ///   current buffered tail, plus the buffered `last_event_id`
+    /// - `Events`: Buffered events with original IDs through the current buffered tail,
+    ///   plus the buffered `last_event_id`. If the buffered suffix contains one or more
+    ///   `Cleared` events, events before the last clear may be omitted because the clear
+    ///   is a worker-wide recovery barrier.
     /// - `TreeDump`: Full tree dump with synthetic IDs and the worker's latest real event ID (when range is too old or unspecified)
     /// - `TooNew`: Error when requested range is newer than available data
     /// - `InvalidRange`: Error when end_id < start_id
@@ -421,12 +427,21 @@ impl LocalKvIndexer {
             Ok(idx) => idx,
             Err(insertion_point) => insertion_point,
         };
-        let events = buffer.iter().skip(start_idx).cloned().collect();
+        let response_start_idx = Self::buffer_response_start_idx(&buffer, start_idx);
+        let events = buffer.iter().skip(response_start_idx).cloned().collect();
 
         DumpPlan::Immediate(WorkerKvQueryResponse::Events {
             events,
             last_event_id: last_buffered,
         })
+    }
+
+    fn buffer_response_start_idx(buffer: &VecDeque<RouterEvent>, start_idx: usize) -> usize {
+        buffer
+            .iter()
+            .skip(start_idx)
+            .rposition(|event| matches!(&event.event.data, KvCacheEventData::Cleared))
+            .map_or(start_idx, |idx| start_idx + idx)
     }
 
     async fn get_cached_or_fresh_dump(&self, fallback_last_event_id: u64) -> WorkerKvQueryResponse {
@@ -560,17 +575,32 @@ impl LocalKvIndexer {
 
     async fn build_fresh_dump(indexer: KvIndexer, last_event_id: u64) -> FreshDumpOutput {
         match indexer.dump_events().await {
-            Ok(events) => FreshDumpOutput {
-                response: WorkerKvQueryResponse::TreeDump {
-                    events: events.clone(),
+            Ok(events) => {
+                let represented_blocks = events
+                    .iter()
+                    .map(|event| match &event.event.data {
+                        KvCacheEventData::Stored(store) => store.blocks.len(),
+                        _ => 0,
+                    })
+                    .sum::<usize>();
+                tracing::info!(
+                    event_count = events.len(),
+                    represented_block_count = represented_blocks,
                     last_event_id,
-                },
-                snapshot: Some(CachedRecoverySnapshot {
-                    events: Arc::new(events),
-                    base_last_event_id: last_event_id,
-                    last_event_id,
-                }),
-            },
+                    "Built compressed radix recovery dump"
+                );
+                FreshDumpOutput {
+                    response: WorkerKvQueryResponse::TreeDump {
+                        events: events.clone(),
+                        last_event_id,
+                    },
+                    snapshot: Some(CachedRecoverySnapshot {
+                        events: Arc::new(events),
+                        base_last_event_id: last_event_id,
+                        last_event_id,
+                    }),
+                }
+            }
             Err(error) => {
                 tracing::warn!("Failed to build recovery dump: {error}");
                 FreshDumpOutput {
@@ -658,10 +688,11 @@ impl LocalKvIndexer {
         indexers
             .entry(storage_tier)
             .or_insert_with(|| {
-                Arc::new(ThreadPoolIndexer::new(
+                Arc::new(ThreadPoolIndexer::new_with_metrics(
                     LowerTierIndexer::new(),
                     1,
                     self.block_size(),
+                    Some(self.metrics.clone()),
                 ))
             })
             .clone()

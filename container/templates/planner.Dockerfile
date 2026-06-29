@@ -13,17 +13,32 @@
 FROM ${PLANNER_BUILD_IMAGE}:${PLANNER_BUILD_IMAGE_TAG} AS planner_builder
 
 ARG PYTHON_VERSION
+ARG TARGETARCH
 
 # Install only the packages needed to resolve and install the planner runtime
 # dependencies in the builder stage. git/git-lfs are only needed because
 # aiconfigurator is currently installed from a Git URL with LFS-backed assets.
+# On arm64, gcc + libc6-dev are added so aiperf's `crick` dep can compile
+# from sdist (crick==0.0.8 publishes no manylinux aarch64 wheel); on amd64
+# the prebuilt wheel from PyPI is used and the toolchain is skipped
+# entirely. Python headers come from the base image's
+# /usr/local/include/python${PYTHON_VERSION} (python:3.X-slim bundles them
+# directly — no apt python*-dev needed, and python${PYTHON_VERSION}-dev is
+# not available in this base's apt index anyway). libc6-dev is required
+# explicitly because on Debian it's a Recommends of gcc, not a Depends, so
+# --no-install-recommends would otherwise skip it and the build fails with
+# "fatal error: stdlib.h: No such file or directory". The toolchain stays
+# in this builder stage and never reaches the final image.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update -y && \
+    EXTRA_PKGS=""; \
+    if [ "$TARGETARCH" = "arm64" ]; then EXTRA_PKGS="gcc libc6-dev"; fi; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
         git \
         git-lfs \
-        libgomp1 && \
+        libgomp1 \
+        $EXTRA_PKGS && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -48,7 +63,7 @@ COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wh
 
 USER dynamo
 
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=locked \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv venv ${VIRTUAL_ENV} --python ${PYTHON_VERSION}
 
@@ -57,7 +72,7 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
 # aiperf is required by the thorough profiler path (profiler/utils/aiperf.py).
 RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=locked \
+    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --requirement /tmp/requirements.planner.txt \
@@ -72,6 +87,7 @@ COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/planner /workspace/compo
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/profiler /workspace/components/src/dynamo/profiler
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/global_planner /workspace/components/src/dynamo/global_planner
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
+COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 
@@ -99,17 +115,3 @@ WORKDIR /workspace
 USER dynamo
 
 CMD []
-
-# planner_test stage: test image with full shell access
-# Extends planner_builder (not the distroless planner stage) so test tools
-# (bash, tar, grep, etc.) are already present without copying individual binaries
-# into the distroless runtime layer.
-FROM planner_builder AS planner_test
-
-RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=locked \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install --requirement /tmp/requirements.test.txt
-
-COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml
-COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/

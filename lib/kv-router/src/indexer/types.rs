@@ -41,7 +41,7 @@ pub enum KvRouterError {
 
 /// Shared structural anchor used by branch-sharded routing when a routed
 /// subtree starts on a different shard from its parent prefix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct AnchorRef {
     pub anchor_id: ExternalSequenceBlockHash,
     pub anchor_local_hash: LocalBlockHash,
@@ -50,7 +50,7 @@ pub struct AnchorRef {
 
 /// Worker task payload that installs an [`AnchorRef`] into a shard-local
 /// backend before dependent suffix events are applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct AnchorTask {
     pub anchor_id: ExternalSequenceBlockHash,
     pub anchor_local_hash: LocalBlockHash,
@@ -66,6 +66,8 @@ pub struct AnchorTask {
 pub struct WorkerKvQueryRequest {
     /// The worker ID of the worker to query.
     pub worker_id: WorkerId,
+    /// Data-parallel rank owned by this worker query endpoint.
+    pub dp_rank: DpRank,
 
     /// Start event ID (inclusive). If `None`, dumps entire tree.
     pub start_event_id: Option<u64>,
@@ -78,10 +80,13 @@ pub struct WorkerKvQueryRequest {
 /// Response from a worker's local KV indexer.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WorkerKvQueryResponse {
-    /// Events served from the circular buffer (with original event IDs),
-    /// always covering the requested `start_event_id` through the current
-    /// buffered tail. `last_event_id` is taken from the same buffer snapshot
-    /// and should be used as the recovery watermark after applying the batch.
+    /// Events served from the circular buffer with original event IDs. The batch
+    /// is recovery-equivalent to replaying the requested `start_event_id` through
+    /// the current buffered tail. If the range contains one or more `Cleared`
+    /// barriers, the worker may omit events before the last clear while preserving
+    /// that clear event and all following events. `last_event_id` is taken from the
+    /// same buffer snapshot and should be used as the recovery watermark after
+    /// applying the batch.
     Events {
         events: Vec<RouterEvent>,
         last_event_id: u64,
@@ -278,6 +283,23 @@ pub struct IndexerRecordRoutingDecisionRequest {
     pub sequence_hashes: Vec<SequenceHash>,
 }
 
+/// Precomputed hashes for recording a route-time indexer update.
+#[derive(Debug, Clone)]
+pub struct RoutingDecisionHashes {
+    pub local_hashes: Vec<LocalBlockHash>,
+    pub sequence_hashes: Vec<SequenceHash>,
+}
+
+impl RoutingDecisionHashes {
+    pub fn from_local_hashes(local_hashes: Vec<LocalBlockHash>) -> Self {
+        let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
+        Self {
+            local_hashes,
+            sequence_hashes,
+        }
+    }
+}
+
 /// Response from a served approximate-mode routing-decision endpoint.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum IndexerRecordRoutingDecisionResponse {
@@ -402,6 +424,41 @@ pub struct GetWorkersRequest {
     pub resp: oneshot::Sender<Vec<WorkerId>>,
 }
 
+#[derive(Debug, Default)]
+pub struct WorkerLookupStats {
+    pub worker_blocks: Vec<(WorkerWithDpRank, usize)>,
+}
+
+impl WorkerLookupStats {
+    pub fn from_worker_block_counts(
+        counts: impl IntoIterator<Item = (WorkerWithDpRank, usize)>,
+    ) -> Self {
+        Self {
+            worker_blocks: counts
+                .into_iter()
+                .filter(|(_, block_count)| *block_count > 0)
+                .collect(),
+        }
+    }
+
+    pub fn worker_count(&self) -> usize {
+        self.worker_blocks.len()
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.worker_blocks
+            .iter()
+            .map(|(_, block_count)| *block_count)
+            .sum()
+    }
+
+    pub fn block_count_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
+        self.worker_blocks
+            .iter()
+            .find_map(|(candidate, block_count)| (*candidate == worker).then_some(*block_count))
+    }
+}
+
 pub enum WorkerTask {
     Event(RouterEvent),
     EventWithAck {
@@ -419,6 +476,7 @@ pub enum WorkerTask {
     /// Best-effort maintenance task for shared-state backends.
     CleanupStaleChildren,
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
+    Stats(oneshot::Sender<WorkerLookupStats>),
     Flush(oneshot::Sender<()>),
     Terminate,
 }

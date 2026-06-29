@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{HashMap, HashSet},
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 
@@ -12,19 +12,11 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use futures::StreamExt;
-use tokio::net::unix::pipe::Receiver;
+use rand::Rng;
 
+use crate::component::{Endpoint, Instance};
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
-use crate::{
-    component::{Endpoint, Instance},
-    pipeline::async_trait,
-    pipeline::{
-        AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
-        SingleIn,
-    },
-    traits::DistributedRuntimeProvider,
-    transports::etcd::Client as EtcdClient,
-};
+use crate::traits::DistributedRuntimeProvider;
 
 /// Shared occupancy state for routing modes that track per-worker in-flight requests.
 #[derive(Debug, Default)]
@@ -41,11 +33,70 @@ impl RoutingOccupancyState {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) async fn select_exact_min(&self, instance_ids: &[u64]) -> Option<u64> {
+        instance_ids
+            .iter()
+            .min_by_key(|&&id| self.load(id))
+            .copied()
+    }
+
     pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
         let _guard = self.exact_selection_lock.lock().await;
-        let id = *instance_ids.iter().min_by_key(|&&id| self.load(id))?;
+
+        let mut min_load = u64::MAX;
+        let mut selected = None;
+        let mut tie_count = 0usize;
+        let mut rng = rand::rng();
+        for &id in instance_ids {
+            let load = self.load(id);
+            if load < min_load {
+                min_load = load;
+                selected = Some(id);
+                tie_count = 1;
+                continue;
+            }
+
+            if load == min_load {
+                tie_count += 1;
+                // Reservoir sampling keeps tied minima uniform without allocating in this locked hot path.
+                if rng.random_range(0..tie_count) == 0 {
+                    selected = Some(id);
+                }
+            }
+        }
+
+        let id = selected?;
         self.increment(id);
         Some(id)
+    }
+
+    /// Least-loaded selection without the increment. Same tie-break policy as
+    /// [`Self::select_exact_min_and_increment`] so peek and select share a
+    /// distribution.
+    pub(crate) fn peek_min(&self, instance_ids: &[u64]) -> Option<u64> {
+        let mut min_load = u64::MAX;
+        let mut selected = None;
+        let mut tie_count = 0usize;
+        let mut rng = rand::rng();
+        for &id in instance_ids {
+            let load = self.load(id);
+            if load < min_load {
+                min_load = load;
+                selected = Some(id);
+                tie_count = 1;
+                continue;
+            }
+
+            if load == min_load {
+                tie_count += 1;
+                // Reservoir sampling keeps tied minima uniform; matches select_exact_min_and_increment.
+                if rng.random_range(0..tie_count) == 0 {
+                    selected = Some(id);
+                }
+            }
+        }
+
+        selected
     }
 
     pub(crate) fn decrement(&self, instance_id: u64) {
@@ -93,20 +144,323 @@ pub(crate) async fn get_or_create_routing_occupancy_state(
 /// Default interval for periodic reconciliation of instance_avail with instance_source
 const DEFAULT_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Shared endpoint discovery state for a single endpoint query.
+///
+/// This wraps both the coalesced instance snapshot used for routing decisions
+/// and a raw, lossless per-subscriber event feed used by the response-stream
+/// cancellation watcher. Both outputs are driven by a single underlying
+/// discovery `list_and_watch` task so clients do not multiply control-plane
+/// watches.
+#[derive(Debug)]
+pub(crate) struct EndpointDiscoverySource {
+    instance_source: tokio::sync::watch::Receiver<Vec<Instance>>,
+    event_subscribers: StdMutex<Vec<tokio::sync::mpsc::UnboundedSender<DiscoveryEvent>>>,
+}
+
+impl EndpointDiscoverySource {
+    fn new(instance_source: tokio::sync::watch::Receiver<Vec<Instance>>) -> Self {
+        Self {
+            instance_source,
+            event_subscribers: StdMutex::new(Vec::new()),
+        }
+    }
+
+    fn instance_receiver(&self) -> tokio::sync::watch::Receiver<Vec<Instance>> {
+        self.instance_source.clone()
+    }
+
+    fn subscribe_events(&self) -> tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.event_subscribers.lock().unwrap().push(tx);
+        rx
+    }
+
+    fn broadcast_event(&self, event: &DiscoveryEvent) {
+        let subscribers = &mut *self.event_subscribers.lock().unwrap();
+        subscribers.retain(|tx| tx.send(event.clone()).is_ok());
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RoutingInstanceCounts {
+    pub discovered: usize,
+    pub routable: usize,
+    pub overloaded: usize,
+    /// IDs not currently reported overloaded, derived from `discovered - overloaded`.
+    pub free: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RoutingInstances {
+    discovered_ids: Vec<u64>,
+    routable_ids: Vec<u64>,
+    overloaded_ids: HashSet<u64>,
+    free_ids: Vec<u64>,
+}
+
+impl RoutingInstances {
+    fn new(discovered_ids: Vec<u64>) -> Self {
+        Self::from_parts(discovered_ids.clone(), discovered_ids, HashSet::new())
+    }
+
+    fn from_parts(
+        discovered_ids: Vec<u64>,
+        routable_ids: Vec<u64>,
+        overloaded_ids: HashSet<u64>,
+    ) -> Self {
+        let free_ids = Self::derive_free_ids(&routable_ids, &overloaded_ids);
+        Self {
+            discovered_ids,
+            routable_ids,
+            overloaded_ids,
+            free_ids,
+        }
+    }
+
+    pub(crate) fn discovered_ids(&self) -> &[u64] {
+        &self.discovered_ids
+    }
+
+    pub(crate) fn routable_ids(&self) -> &[u64] {
+        &self.routable_ids
+    }
+
+    pub(crate) fn free_ids(&self) -> &[u64] {
+        &self.free_ids
+    }
+
+    pub(crate) fn counts(&self) -> RoutingInstanceCounts {
+        RoutingInstanceCounts {
+            discovered: self.discovered_ids.len(),
+            routable: self.routable_ids.len(),
+            overloaded: self.overloaded_ids.len(),
+            free: self.free_ids.len(),
+        }
+    }
+
+    pub(crate) fn is_overloaded(&self, instance_id: u64) -> bool {
+        self.overloaded_ids.contains(&instance_id)
+    }
+
+    fn overloaded_ids(&self) -> Option<HashSet<u64>> {
+        if self.overloaded_ids.is_empty() {
+            return None;
+        }
+
+        Some(self.overloaded_ids.clone())
+    }
+
+    fn reconcile_discovered(&self, discovered_ids: Vec<u64>) -> Self {
+        let old_discovered_ids = self.discovered_ids.iter().copied().collect::<HashSet<_>>();
+        let new_discovered_ids = discovered_ids.iter().copied().collect::<HashSet<_>>();
+        let mut overloaded_ids = self.overloaded_ids.clone();
+        overloaded_ids
+            .retain(|id| !old_discovered_ids.contains(id) || new_discovered_ids.contains(id));
+
+        Self::from_parts(discovered_ids.clone(), discovered_ids, overloaded_ids)
+    }
+
+    fn report_instance_down(&self, instance_id: u64) -> Self {
+        let routable_ids: Vec<u64> = self
+            .routable_ids
+            .iter()
+            .copied()
+            .filter(|id| *id != instance_id)
+            .collect();
+
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            routable_ids,
+            self.overloaded_ids.clone(),
+        )
+    }
+
+    #[cfg(test)]
+    fn override_routable_ids(&self, routable_ids: Vec<u64>) -> Self {
+        // Route through from_parts so `free_ids` is recomputed from the new
+        // routable set instead of carrying the stale value forward.
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            routable_ids,
+            self.overloaded_ids.clone(),
+        )
+    }
+
+    fn set_overloaded(&self, overloaded_ids: HashSet<u64>) -> Self {
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            self.routable_ids.clone(),
+            overloaded_ids,
+        )
+    }
+
+    /// Add a single instance to the overloaded set (immediate
+    /// backpressure mark). Short-lived: the next metric-driven
+    /// `set_overloaded` recompute overwrites the whole set.
+    fn mark_overloaded(&self, instance_id: u64) -> Self {
+        let mut overloaded_ids = self.overloaded_ids.clone();
+        overloaded_ids.insert(instance_id);
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            self.routable_ids.clone(),
+            overloaded_ids,
+        )
+    }
+
+    fn clear_overloaded_for_removed(&self, removed_ids: &HashSet<u64>) -> Self {
+        let mut overloaded_ids = self.overloaded_ids.clone();
+        overloaded_ids.retain(|id| !removed_ids.contains(id));
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            self.routable_ids.clone(),
+            overloaded_ids,
+        )
+    }
+
+    fn derive_free_ids(routable_ids: &[u64], overloaded_ids: &HashSet<u64>) -> Vec<u64> {
+        if overloaded_ids.is_empty() {
+            return routable_ids.to_vec();
+        }
+
+        routable_ids
+            .iter()
+            .copied()
+            .filter(|id| !overloaded_ids.contains(id))
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+struct RoutingInstancesState {
+    snapshot: ArcSwap<RoutingInstances>,
+    update_lock: StdMutex<()>,
+    instance_avail_tx: tokio::sync::watch::Sender<Vec<u64>>,
+    instance_avail_rx: tokio::sync::watch::Receiver<Vec<u64>>,
+}
+
+impl RoutingInstancesState {
+    fn new(discovered_ids: Vec<u64>) -> Self {
+        let snapshot = RoutingInstances::new(discovered_ids);
+        let (instance_avail_tx, instance_avail_rx) =
+            tokio::sync::watch::channel(snapshot.routable_ids().to_vec());
+        Self {
+            snapshot: ArcSwap::from_pointee(snapshot),
+            update_lock: StdMutex::new(()),
+            instance_avail_tx,
+            instance_avail_rx,
+        }
+    }
+
+    fn snapshot(&self) -> arc_swap::Guard<Arc<RoutingInstances>> {
+        self.snapshot.load()
+    }
+
+    fn update(
+        &self,
+        update: impl FnOnce(&RoutingInstances) -> RoutingInstances,
+        publish_routable_ids: bool,
+    ) -> Arc<RoutingInstances> {
+        let _guard = self.update_lock.lock().unwrap();
+        let current = self.snapshot.load();
+        let next = Arc::new(update(&current));
+        self.snapshot.store(next.clone());
+        if publish_routable_ids {
+            self.publish_routable_ids(&next);
+        }
+        next
+    }
+
+    fn publish_routable_ids(&self, routing_instances: &RoutingInstances) {
+        let _ = self
+            .instance_avail_tx
+            .send(routing_instances.routable_ids().to_vec());
+    }
+
+    fn routable_ids(&self) -> Vec<u64> {
+        self.snapshot().routable_ids().to_vec()
+    }
+
+    #[cfg(test)]
+    fn free_ids(&self) -> Vec<u64> {
+        self.snapshot().free_ids.clone()
+    }
+
+    fn counts(&self) -> RoutingInstanceCounts {
+        self.snapshot().counts()
+    }
+
+    fn overloaded_ids(&self) -> Option<HashSet<u64>> {
+        self.snapshot().overloaded_ids()
+    }
+
+    fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
+        self.instance_avail_rx.clone()
+    }
+
+    fn report_instance_down(&self, instance_id: u64) {
+        self.update(|current| current.report_instance_down(instance_id), true);
+    }
+
+    fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) -> bool {
+        let overloaded_ids = overloaded_instance_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let _guard = self.update_lock.lock().unwrap();
+        let current = self.snapshot.load();
+        if current.overloaded_ids == overloaded_ids {
+            return false;
+        }
+
+        let next = Arc::new(current.set_overloaded(overloaded_ids));
+        self.snapshot.store(next);
+        true
+    }
+
+    fn mark_overloaded_immediate(&self, instance_id: u64) {
+        self.update(
+            move |current| current.mark_overloaded(instance_id),
+            // Routable set is unchanged — only the derived free set shrinks —
+            // so there's no need to republish routable_ids.
+            false,
+        );
+    }
+
+    fn clear_overloaded_for_removed(&self, removed_instance_ids: &[u64]) {
+        if removed_instance_ids.is_empty() {
+            return;
+        }
+
+        let removed_ids = removed_instance_ids.iter().copied().collect::<HashSet<_>>();
+        self.update(
+            move |current| current.clear_overloaded_for_removed(&removed_ids),
+            false,
+        );
+    }
+
+    fn reconcile_discovered(&self, discovered_ids: Vec<u64>) -> Arc<RoutingInstances> {
+        self.update(
+            move |current| current.reconcile_discovered(discovered_ids),
+            true,
+        )
+    }
+
+    #[cfg(test)]
+    fn override_routable_ids(&self, ids: Vec<u64>) {
+        self.update(move |current| current.override_routable_ids(ids), true);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Client {
     // This is me
     pub endpoint: Endpoint,
+    // Shared endpoint discovery source backing both snapshots and raw events.
+    endpoint_discovery_source: Arc<EndpointDiscoverySource>,
     // These are the remotes I know about from watching key-value store
     pub instance_source: Arc<tokio::sync::watch::Receiver<Vec<Instance>>>,
-    // These are the instance source ids less those reported as down from sending rpc
-    instance_avail: Arc<ArcSwap<Vec<u64>>>,
-    // These are the instance source ids less those reported as busy (above threshold)
-    instance_free: Arc<ArcSwap<Vec<u64>>>,
-    // Watch sender for available instance IDs (for sending updates)
-    instance_avail_tx: Arc<tokio::sync::watch::Sender<Vec<u64>>>,
-    // Watch receiver for available instance IDs (for cloning to external subscribers)
-    instance_avail_rx: tokio::sync::watch::Receiver<Vec<u64>>,
+    // Immutable routing snapshot. Free IDs are derived from discovered IDs and overloaded IDs.
+    routing_instances: Arc<RoutingInstancesState>,
     /// Interval for periodic reconciliation of instance_avail with instance_source.
     /// This ensures instances removed via `report_instance_down` are eventually restored.
     reconcile_interval: Duration,
@@ -129,7 +483,9 @@ impl Client {
             "Client::new_dynamic: Creating dynamic client for endpoint: {}",
             endpoint.id()
         );
-        let instance_source = Self::get_or_create_dynamic_instance_source(&endpoint).await?;
+        let endpoint_discovery_source =
+            Self::get_or_create_dynamic_discovery_source(&endpoint).await?;
+        let instance_source = Arc::new(endpoint_discovery_source.instance_receiver());
 
         // Seed instance_avail from the current instance_source snapshot so that
         // callers who proceed immediately after wait_for_instances (which reads
@@ -140,14 +496,11 @@ impl Client {
             .iter()
             .map(|instance| instance.id())
             .collect();
-        let (avail_tx, avail_rx) = tokio::sync::watch::channel(initial_ids.clone());
         let client = Client {
             endpoint: endpoint.clone(),
+            endpoint_discovery_source,
             instance_source: instance_source.clone(),
-            instance_avail: Arc::new(ArcSwap::from(Arc::new(initial_ids.clone()))),
-            instance_free: Arc::new(ArcSwap::from(Arc::new(initial_ids))),
-            instance_avail_tx: Arc::new(avail_tx),
-            instance_avail_rx: avail_rx,
+            routing_instances: Arc::new(RoutingInstancesState::new(initial_ids)),
             reconcile_interval,
         };
         client.monitor_instance_source();
@@ -163,17 +516,36 @@ impl Client {
         self.instances().into_iter().map(|ep| ep.id()).collect()
     }
 
-    pub fn instance_ids_avail(&self) -> arc_swap::Guard<Arc<Vec<u64>>> {
-        self.instance_avail.load()
+    pub fn instance_ids_avail(&self) -> Vec<u64> {
+        self.routing_instances.routable_ids()
     }
 
-    pub fn instance_ids_free(&self) -> arc_swap::Guard<Arc<Vec<u64>>> {
-        self.instance_free.load()
+    #[cfg(test)]
+    pub(crate) fn instance_ids_free(&self) -> Vec<u64> {
+        self.routing_instances.free_ids()
+    }
+
+    pub(crate) fn routing_instances(&self) -> arc_swap::Guard<Arc<RoutingInstances>> {
+        self.routing_instances.snapshot()
+    }
+
+    pub fn routing_instance_counts(&self) -> RoutingInstanceCounts {
+        self.routing_instances.counts()
     }
 
     /// Get a watcher for available instance IDs
     pub fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
-        self.instance_avail_rx.clone()
+        self.routing_instances.instance_avail_watcher()
+    }
+
+    /// Subscribe to raw discovery events for this endpoint.
+    ///
+    /// Unlike `instance_source`, this feed does not coalesce remove→add pairs,
+    /// so consumers can react to every removal event exactly once.
+    pub(crate) fn subscribe_discovery_events(
+        &self,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<DiscoveryEvent> {
+        self.endpoint_discovery_source.subscribe_events()
     }
 
     /// Wait for at least one Instance to be available for this Endpoint
@@ -203,27 +575,37 @@ impl Client {
 
     /// Mark an instance as down/unavailable
     pub fn report_instance_down(&self, instance_id: u64) {
-        let filtered = self
-            .instance_ids_avail()
-            .iter()
-            .filter_map(|&id| if id == instance_id { None } else { Some(id) })
-            .collect::<Vec<_>>();
-        self.instance_avail.store(Arc::new(filtered.clone()));
-
-        // Notify watch channel subscribers about the change
-        let _ = self.instance_avail_tx.send(filtered);
-
+        self.routing_instances.report_instance_down(instance_id);
         tracing::debug!("inhibiting instance {instance_id}");
     }
 
-    /// Update the set of free instances based on busy instance IDs
-    pub fn update_free_instances(&self, busy_instance_ids: &[u64]) {
-        let all_instance_ids = self.instance_ids();
-        let free_ids: Vec<u64> = all_instance_ids
-            .into_iter()
-            .filter(|id| !busy_instance_ids.contains(id))
-            .collect();
-        self.instance_free.store(Arc::new(free_ids));
+    /// Replace the set of overloaded instances reported by the worker monitor.
+    /// Returns true when this changes the routing snapshot.
+    pub fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) -> bool {
+        self.routing_instances
+            .set_overloaded_instances(overloaded_instance_ids)
+    }
+
+    /// Mark an instance overloaded immediately. A worker returning
+    /// `ResourceExhausted` is busy ("queue full, retry later"), not faulted, so
+    /// this is the overload path, NOT `report_instance_down`. Short-lived: the
+    /// next `set_overloaded_instances` recompute overwrites the overloaded set.
+    pub fn mark_overloaded_immediate(&self, instance_id: u64) {
+        self.routing_instances
+            .mark_overloaded_immediate(instance_id);
+        tracing::debug!(
+            instance_id,
+            "marking instance overloaded (backpressure); next metric event will re-evaluate"
+        );
+    }
+
+    pub fn clear_overloaded_instances_for_removed(&self, removed_instance_ids: &[u64]) {
+        self.routing_instances
+            .clear_overloaded_for_removed(removed_instance_ids);
+    }
+
+    pub fn overloaded_instance_ids(&self) -> Option<HashSet<u64>> {
+        self.routing_instances.overloaded_ids()
     }
 
     /// Monitor the key-value instance source and update instance_avail.
@@ -246,9 +628,7 @@ impl Client {
                     .map(|instance| instance.id())
                     .collect();
 
-                // TODO: this resets both tracked available and free instances
-                client.instance_avail.store(Arc::new(instance_ids.clone()));
-                client.instance_free.store(Arc::new(instance_ids.clone()));
+                let routing_instances = client.reconcile_discovered_instances(instance_ids);
 
                 // Clean up stale occupancy counters for instances that no longer exist.
                 let registry = client.endpoint.drt().routing_occupancy_states();
@@ -256,11 +636,8 @@ impl Client {
                     && let Some(weak) = registry.get(&client.endpoint)
                     && let Some(state) = weak.upgrade()
                 {
-                    state.retain(&instance_ids);
+                    state.retain(routing_instances.discovered_ids());
                 }
-
-                // Send update to watch channel subscribers
-                let _ = client.instance_avail_tx.send(instance_ids);
 
                 tokio::select! {
                     result = rx.changed() => {
@@ -281,25 +658,29 @@ impl Client {
         });
     }
 
-    /// Override `instance_avail` for testing. This allows creating an inconsistency
-    /// between `instance_ids_avail()` and `instances()` to simulate race conditions.
+    /// Override routable IDs for testing. This allows creating an inconsistency
+    /// between `instance_ids_avail()` and `instances()` to simulate downed workers.
     #[cfg(test)]
     pub(crate) fn override_instance_avail(&self, ids: Vec<u64>) {
-        self.instance_avail.store(Arc::new(ids));
+        self.routing_instances.override_routable_ids(ids);
     }
 
-    async fn get_or_create_dynamic_instance_source(
-        endpoint: &Endpoint,
-    ) -> Result<Arc<tokio::sync::watch::Receiver<Vec<Instance>>>> {
-        let drt = endpoint.drt();
-        let instance_sources = drt.instance_sources();
-        let mut instance_sources = instance_sources.lock().await;
+    fn reconcile_discovered_instances(&self, discovered_ids: Vec<u64>) -> Arc<RoutingInstances> {
+        self.routing_instances.reconcile_discovered(discovered_ids)
+    }
 
-        if let Some(instance_source) = instance_sources.get(endpoint) {
-            if let Some(instance_source) = instance_source.upgrade() {
-                return Ok(instance_source);
+    async fn get_or_create_dynamic_discovery_source(
+        endpoint: &Endpoint,
+    ) -> Result<Arc<EndpointDiscoverySource>> {
+        let drt = endpoint.drt();
+        let sources = drt.endpoint_discovery_sources();
+        let mut sources = sources.lock().await;
+
+        if let Some(source) = sources.get(endpoint) {
+            if let Some(source) = source.upgrade() {
+                return Ok(source);
             } else {
-                instance_sources.remove(endpoint);
+                sources.remove(endpoint);
             }
         }
 
@@ -314,8 +695,10 @@ impl Client {
             .list_and_watch(discovery_query.clone(), None)
             .await?;
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
+        let discovery_source = Arc::new(EndpointDiscoverySource::new(watch_rx));
 
         let secondary = endpoint.component.drt.runtime().secondary().clone();
+        let discovery_source_task = discovery_source.clone();
 
         secondary.spawn(async move {
             tracing::trace!("endpoint_watcher: Starting for discovery query: {:?}", discovery_query);
@@ -342,15 +725,17 @@ impl Client {
                     }
                 };
 
-                match discovery_event {
-                    DiscoveryEvent::Added(discovery_instance) => {
-                        if let DiscoveryInstance::Endpoint(instance) = discovery_instance {
+                discovery_source_task.broadcast_event(&discovery_event);
 
-                                map.insert(instance.instance_id, instance);
-                        }
+                match discovery_event {
+                    DiscoveryEvent::Added(DiscoveryInstance::Endpoint(instance)) => {
+                        map.insert(instance.instance_id, instance);
                     }
+                    DiscoveryEvent::Added(_) => {}
                     DiscoveryEvent::Removed(id) => {
-                        map.remove(&id.instance_id());
+                        if let DiscoveryInstanceId::Endpoint(endpoint_id) = id {
+                            map.remove(&endpoint_id.instance_id);
+                        }
                     }
                 }
 
@@ -362,9 +747,8 @@ impl Client {
             let _ = watch_tx.send(vec![]);
         });
 
-        let instance_source = Arc::new(watch_rx);
-        instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
-        Ok(instance_source)
+        sources.insert(endpoint.clone(), Arc::downgrade(&discovery_source));
+        Ok(discovery_source)
     }
 }
 
@@ -398,13 +782,13 @@ mod tests {
 
         // For this test, we'll directly manipulate instance_avail and verify reconciliation
         // Store some test IDs
-        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+        client.override_instance_avail(vec![1, 2, 3]);
 
-        assert_eq!(**client.instance_ids_avail(), vec![1u64, 2, 3]);
+        assert_eq!(client.instance_ids_avail(), vec![1u64, 2, 3]);
 
         // Simulate report_instance_down removing instance 2
         client.report_instance_down(2);
-        assert_eq!(**client.instance_ids_avail(), vec![1u64, 3]);
+        assert_eq!(client.instance_ids_avail(), vec![1u64, 3]);
 
         // Wait for reconciliation interval + buffer
         // The monitor_instance_source will reset instance_avail to match instance_source
@@ -435,8 +819,8 @@ mod tests {
         let client = endpoint.client().await.unwrap();
 
         // Manually set up instance_avail with test instances
-        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
-        assert_eq!(**client.instance_ids_avail(), vec![1u64, 2, 3]);
+        client.override_instance_avail(vec![1, 2, 3]);
+        assert_eq!(client.instance_ids_avail(), vec![1u64, 2, 3]);
 
         // Report instance 2 as down
         client.report_instance_down(2);
@@ -449,6 +833,257 @@ mod tests {
             "Instance 2 should be removed after report_instance_down"
         );
         assert!(avail.contains(&3), "Instance 3 should still be available");
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_overloaded_instance_ids_returns_none_when_empty() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_overloaded_ids".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        assert_eq!(client.overloaded_instance_ids(), None);
+
+        assert!(client.set_overloaded_instances(&[7]));
+        assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([7])));
+        assert!(!client.set_overloaded_instances(&[7]));
+
+        assert!(client.set_overloaded_instances(&[]));
+        assert_eq!(client.overloaded_instance_ids(), None);
+        assert!(!client.set_overloaded_instances(&[]));
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_instance_reconciliation_preserves_overloaded_existing_instances() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_overloaded_reconciliation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+
+        for _ in 0..10 {
+            if client.instance_ids_free().contains(&worker_id) {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+        assert!(
+            client.instance_ids_free().contains(&worker_id),
+            "worker should be free after initial discovery reconciliation"
+        );
+
+        client.set_overloaded_instances(&[worker_id]);
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "worker should be overloaded before periodic reconciliation"
+        );
+
+        tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
+
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "periodic reconciliation should not mark an existing overloaded worker free"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_report_instance_down_preserves_overloaded_state() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_report_down_preserves_overloaded".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+
+        for _ in 0..10 {
+            if client.instance_ids_avail().contains(&worker_id) {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+
+        client.set_overloaded_instances(&[worker_id]);
+        client.report_instance_down(worker_id);
+
+        assert!(
+            !client.instance_ids_avail().contains(&worker_id),
+            "reported-down worker should leave routable availability"
+        );
+        assert_eq!(
+            client.routing_instance_counts().overloaded,
+            1,
+            "reported-down worker should remain overloaded while still discovered"
+        );
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "reported-down overloaded worker should not become free"
+        );
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        for _ in 0..10 {
+            if client.routing_instance_counts().overloaded == 0 {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+
+        assert_eq!(
+            client.routing_instance_counts().overloaded,
+            0,
+            "stable discovery removal should clear overloaded state"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_instance_reconciliation_prunes_removed_overloaded_instances() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_removed_overloaded_cleanup".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+
+        client.set_overloaded_instances(&[worker_id]);
+        assert_eq!(client.routing_instance_counts().overloaded, 1);
+        assert!(client.instance_ids_free().is_empty());
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        for _ in 0..10 {
+            if client.routing_instance_counts().overloaded == 0 {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+
+        assert_eq!(
+            client.routing_instance_counts().overloaded,
+            0,
+            "removed discovered workers should not remain in overloaded state"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_instance_ids_free_excludes_overloaded_new_instances() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let worker_id = drt.connection_id();
+        let ns = drt
+            .namespace("test_new_overloaded_reconciliation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        client.set_overloaded_instances(&[worker_id]);
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        assert_eq!(instances[0].id(), worker_id);
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "newly discovered overloaded worker should not be free"
+        );
+
+        tokio::time::sleep(TEST_RECONCILE_INTERVAL + Duration::from_millis(50)).await;
+
+        assert!(
+            client.instance_ids_free().is_empty(),
+            "discovery reconciliation should not affect recomputed free workers"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_discovery_add_updates_free_without_overloaded_publish() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_free_updates_on_discovery_add".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instances = client.wait_for_instances().await.unwrap();
+        let worker_id = instances[0].id();
+
+        for _ in 0..10 {
+            if client.instance_ids_free().contains(&worker_id) {
+                break;
+            }
+            tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
+        }
+
+        assert_eq!(
+            client.instance_ids_free(),
+            vec![worker_id],
+            "newly discovered non-overloaded workers should appear free without an overload update"
+        );
 
         rt.shutdown();
     }
@@ -469,7 +1104,7 @@ mod tests {
         let watcher = client.instance_avail_watcher();
 
         // Set initial instances
-        client.instance_avail.store(Arc::new(vec![1, 2, 3]));
+        client.override_instance_avail(vec![1, 2, 3]);
 
         // Report instance down - this should notify the watcher
         client.report_instance_down(2);
@@ -505,6 +1140,31 @@ mod tests {
         assert_eq!(state.load(100), 30);
         assert_eq!(state.load(200), 30);
         assert_eq!(state.load(300), 30);
+    }
+
+    #[tokio::test]
+    async fn test_select_exact_min_and_increment_randomizes_ties() {
+        let mut selected = [false; 3];
+
+        for _ in 0..120 {
+            let state = RoutingOccupancyState::default();
+            let picked = state
+                .select_exact_min_and_increment(&[10, 20, 30])
+                .await
+                .unwrap();
+            match picked {
+                10 => selected[0] = true,
+                20 => selected[1] = true,
+                30 => selected[2] = true,
+                _ => panic!("unexpected worker id: {picked}"),
+            }
+        }
+
+        let selected_count = selected.into_iter().filter(|seen| *seen).count();
+        assert!(
+            selected_count > 1,
+            "tie-breaking should not always select the first minimum-load worker"
+        );
     }
 
     #[tokio::test]

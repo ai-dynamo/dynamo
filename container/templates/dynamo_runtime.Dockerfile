@@ -42,13 +42,17 @@ COPY --chown=dynamo: --from=wheel_builder ${NIXL_PREFIX}/ ${NIXL_PREFIX}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
-# Always copy FFmpeg so libs are available for Rust checks in CI
+# Always copy FFmpeg so libs are available for Rust checks in CI.
+# libvpx.so* is included because the in-tree ffmpeg is built with --enable-libvpx,
+# so libavcodec.so has a runtime dependency on libvpx.so.9.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
     cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
+    ldconfig
 
 {% if target not in ("dev", "local-dev") %}
 # Copy built artifacts (not needed for dev/local-dev; users build from source)
@@ -75,9 +79,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libclang-dev \
         patchelf \
         git \
-        git-lfs && \
+        git-lfs \
+        libjemalloc2 && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3
+
+# libjemalloc2 is installed above so user may opt into jemalloc for memory allocation
+# tuning. We deliberately do NOT set ENV LD_PRELOAD here — that would force jemalloc
+# on every process in the image.
 
 # Switch to dynamo user and create virtual environment
 USER dynamo
@@ -87,7 +96,7 @@ ENV HOME=/home/dynamo
 # Use login shell to pick up umask 002 from /etc/profile.d/00-umask.sh for group-writable files
 SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 # Cache uv downloads; uv handles its own locking for the cache.
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=locked \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv venv /opt/dynamo/venv --python ${PYTHON_VERSION}
 
@@ -98,7 +107,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # Install dynamo wheels (runtime packages only, no test dependencies)
 # uv handles its own locking for the cache, no need to add sharing=locked
 ARG ENABLE_KVBM
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=locked \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
@@ -115,14 +124,14 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sh
 {% else %}
 # Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
 # Install NIXL wheel only (pre-built C++ binary, not buildable from source).
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=locked \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
 {% endif %}
 
 # Install gpu_memory_service wheel if enabled (all targets)
 ARG ENABLE_GPU_MEMORY_SERVICE
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=locked \
+RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
         export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
@@ -139,7 +148,7 @@ RUN git lfs install
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/tmp/requirements.planner.txt \
     --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=locked \
+    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
         --index-strategy unsafe-best-match \
@@ -159,3 +168,11 @@ ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+
+
+# Compliance stages are intentionally NOT included here: dynamo-runtime is an
+# UNPUBLISHED wheel-builder image (release.yml ships vllm/sglang/trtllm-runtime,
+# frontend, operator, planner, snapshot-agent — not this), so it carries no
+# shipped-NOTICES obligation. The Rust-crate attribution that matters lives in
+# the published wheels themselves (maturin SBOM + bundled THIRD-PARTY-RUST-
+# LICENSES, see wheel_builder) and in the published framework images' /legal.

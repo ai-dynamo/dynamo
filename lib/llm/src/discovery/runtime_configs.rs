@@ -51,6 +51,7 @@ pub async fn runtime_config_watch(endpoint: &Endpoint) -> anyhow::Result<Runtime
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => break,
+                _ = tx.closed() => break,
                 result = instance_ids_rx.changed() => { if result.is_err() { break; } }
                 result = configs_rx.changed() => { if result.is_err() { break; } }
             }

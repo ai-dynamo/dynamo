@@ -18,7 +18,7 @@
 #      running container — no full image rebuild needed.
 #
 # Prerequisites:
-#   - Go >= 1.25        — compiles the manager binary locally
+#   - Go >= 1.26.3      — compiles the manager binary locally
 #   - tilt              — live-reload orchestrator (https://docs.tilt.dev/install.html)
 #   - docker            — builds the live-update container image
 #   - A Kubernetes cluster reachable via your current kubeconfig context
@@ -142,20 +142,29 @@ local_resource(
 # CRDs — regenerate & apply via server-side apply on change
 # ---------------------------------------------------------------------------
 SKIP_CODEGEN = settings['skip_codegen']
-_crd_cmd = kubectl_cmd + ' apply --server-side --force-conflicts -f ' + CRD_DIR
+_crd_cmd = (
+    'go run ./cmd/crd-apply --crds-dir=' + CRD_DIR +
+    ' --version=' + OPERATOR_VERSION +
+    ' --conversion-webhook-service-name=dynamo-dynamo-operator-webhook-service' +
+    ' --conversion-webhook-service-namespace=' + NAMESPACE
+)
 if not SKIP_CODEGEN:
     _crd_cmd = 'make generate && make manifests && ' + _crd_cmd
+
+_crds_deps = ['api/']
+if SKIP_CODEGEN:
+    _crds_deps.append(CRD_DIR)
 
 local_resource(
     'crds',
     _crd_cmd,
-    deps=['api/'],
+    deps=_crds_deps,
     ignore=['**/zz_generated.deepcopy.go'],
     labels=['operator'],
 )
 
 # ---------------------------------------------------------------------------
-# Helm dependencies — fetch remote subcharts and package the local operator
+# Helm dependencies — update remote subcharts and package the local operator
 # subchart (file://components/operator).
 # ---------------------------------------------------------------------------
 
@@ -164,13 +173,15 @@ local(helm_cmd + ' repo add --force-update nats https://nats-io.github.io/k8s/he
 local(helm_cmd + ' repo add --force-update bitnami https://charts.bitnami.com/bitnami', quiet=True)
 local(helm_cmd + ' repo update', quiet=True)
 
-# Initial build at load time so render_helm() can succeed.
-local(helm_cmd + ' dependency build ' + HELM_CHART, quiet=True)
+# Initial sync at load time so render_helm() can succeed on a fresh checkout.
+# Chart.lock and packaged charts are ignored local artifacts, so refresh them
+# here before rendering instead of trusting stale workspace state.
+local(helm_cmd + ' dependency update ' + HELM_CHART, quiet=True)
 
-# Re-run when the local operator subchart changes.
+# Re-run when the local operator subchart or dependency list changes.
 local_resource(
     'helm-dep-build',
-    helm_cmd + ' dependency build ' + HELM_CHART,
+    helm_cmd + ' dependency update ' + HELM_CHART,
     deps=[os.path.join(HELM_CHART, 'components', 'operator'), os.path.join(HELM_CHART, 'Chart.yaml')],
     labels=['operator'],
 )
@@ -196,8 +207,7 @@ def render_helm():
         '--namespace', NAMESPACE,
         '--set', 'dynamo-operator.enabled=true',
         # Subcharts — NATS is on by default (workers need it)
-        '--set', 'nats.enabled=%s' % str(ENABLE_NATS).lower(),
-        '--set', 'dynamo-operator.nats.enabled=%s' % str(ENABLE_NATS).lower(),
+        '--set', 'global.nats.install=%s' % str(ENABLE_NATS).lower(),
         '--set', 'global.etcd.install=%s' % str(ENABLE_ETCD).lower(),
         '--set', 'global.kai-scheduler.install=%s' % str(ENABLE_KAI_SCHEDULER).lower(),
         '--set', 'global.grove.install=%s' % str(ENABLE_GROVE).lower(),

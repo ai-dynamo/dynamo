@@ -13,7 +13,8 @@ pub(crate) struct ReplayWorkerCore {
 impl ReplayWorkerCore {
     pub(crate) fn new(args: MockEngineArgs) -> Self {
         let core = match args.engine_type {
-            crate::common::protocols::EngineType::Vllm => {
+            crate::common::protocols::EngineType::Vllm
+            | crate::common::protocols::EngineType::Trtllm => {
                 let mut core = VllmCore::new(args);
                 Self::init_offload_vllm(&mut core);
                 EngineCore::Vllm(core)
@@ -27,7 +28,8 @@ impl ReplayWorkerCore {
 
     pub(crate) fn new_with_kv_capture(args: MockEngineArgs, worker_id: WorkerId) -> Self {
         let core = match args.engine_type {
-            crate::common::protocols::EngineType::Vllm => {
+            crate::common::protocols::EngineType::Vllm
+            | crate::common::protocols::EngineType::Trtllm => {
                 let mut core = VllmCore::new_with_kv_capture(args, worker_id);
                 Self::init_offload_vllm(&mut core);
                 EngineCore::Vllm(core)
