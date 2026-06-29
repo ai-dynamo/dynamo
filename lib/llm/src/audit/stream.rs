@@ -19,9 +19,9 @@ type AuditStream =
     Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>;
 
 /// Resolves to `Some(final_response)` when aggregation succeeds, or `None` when the
-/// client cancels mid-stream / the aggregator fails. Callers use `None` as the
-/// signal to skip the response audit emit (the request record was already
-/// published).
+/// client cancels mid-stream / the aggregator fails. The caller emits the single
+/// combined audit record once either way — with the response on `Some`, or
+/// request-only (`response = None`) on `None`.
 type AuditFuture =
     Pin<Box<dyn std::future::Future<Output = Option<NvCreateChatCompletionResponse>> + Send>>;
 
@@ -101,8 +101,8 @@ where
                 Err(_) => {
                     // tx dropped without sending: either the SSE consumer dropped the
                     // passthrough stream before end-of-stream (client cancel) or the
-                    // spawned `DeltaAggregator::apply` errored. Either way, no
-                    // response record is published; the request record stands alone.
+                    // spawned `DeltaAggregator::apply` errored. Either way, the combined
+                    // record is emitted with `response = None`.
                     tracing::debug!(
                         "audit: response aggregation produced no record (client cancel or aggregation error)"
                     );

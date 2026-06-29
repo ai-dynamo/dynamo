@@ -28,14 +28,20 @@ enabled via the `DYN_LOGGING_SPAN_EVENTS` environment variable.
 | `DYN_SKIP_SGLANG_LOG_FORMATTING` | Disable Dynamo's SGLang log configuration | `false` | `true` |
 | `OTEL_SERVICE_NAME` | Service name for trace and span information | `dynamo` | `dynamo-frontend` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP export of both traces and logs | `false` | `true` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for traces | `http://localhost:4317` | `http://tempo:4317` |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP endpoint for logs. Falls back to the generic `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4317` | `http://localhost:4317` | `http://localhost:4317` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Default OTLP endpoint for traces and logs when signal-specific endpoints are unset | `http://localhost:4317` | `http://collector:4317` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Override endpoint for traces, used as-is | unset | `http://tempo:4317` |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Override endpoint for logs, used as-is | unset | `http://loki-collector:4317` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | Default OTLP protocol for traces and logs | `grpc` | `http/protobuf` |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | Override protocol for traces | unset | `grpc` |
+| `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` | Override protocol for logs | unset | `grpc` |
 
 ## OTLP Log Export
 
 When `OTEL_EXPORT_ENABLED=true`, Dynamo exports both **traces and logs** via OTLP. Logs are sent to an OpenTelemetry Collector which routes them to Grafana Loki for aggregation and querying.
 
-Endpoints resolve per signal: the signal-specific variable wins, then the generic `OTEL_EXPORTER_OTLP_ENDPOINT`, then `http://localhost:4317`. Protocol resolves the same way (`OTEL_EXPORTER_OTLP_{TRACES,LOGS}_PROTOCOL` → `OTEL_EXPORTER_OTLP_PROTOCOL` → `grpc`); for `http/protobuf` the `/v1/traces` or `/v1/logs` path is appended to the generic endpoint.
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` to configure the default OTLP collector endpoint for both traces and logs. To send logs somewhere else, set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`; to send traces somewhere else, set `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`.
+
+Signal-specific endpoints are used as-is. When using the generic `OTEL_EXPORTER_OTLP_ENDPOINT` with `http/protobuf`, Dynamo appends the signal path (`/v1/logs` or `/v1/traces`). With `grpc`, the endpoint is used without a path.
 
 ```bash
 export OTEL_EXPORT_ENABLED=true

@@ -10,23 +10,18 @@ use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
 
-/// One audit record per chat completion, carrying the request and — when the
-/// response completed — the response. On client cancel / gateway timeout /
-/// aggregation failure the record is still emitted with `response = None`, so
-/// those cases remain auditable. Only a hard process crash before emit loses
-/// the record. Existing sinks (stderr/nats/jsonl) see this single combined
-/// record; `OtelSink` maps it to one OTLP `LogRecord`.
+/// One combined audit record per chat completion: the request, plus the response
+/// when it completed (`response = None` on client cancel / timeout / aggregation
+/// failure, so those stay auditable).
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AuditRecord {
     pub schema_version: u32,
     pub request_id: String,
     pub requested_streaming: bool,
     pub model: String,
-    /// When the audited request was received (captured at handle creation, on
-    /// the producing thread). Used as the OTLP `LogRecord` Timestamp so the
-    /// logged time reflects the request itself, not when the sink task drained
-    /// it off the audit bus. `#[serde(skip)]`: it is metadata about the record,
-    /// not part of the audited payload, and `OtelSink` reads it directly.
+    /// Request arrival time, captured at handle creation. Used as the OTLP
+    /// `LogRecord` Timestamp; `#[serde(skip)]` since it is record metadata, not
+    /// audited payload, and only `OtelSink` reads it.
     #[serde(skip, default = "std::time::SystemTime::now")]
     pub event_time: SystemTime,
     #[serde(skip_serializing_if = "Option::is_none")]
