@@ -193,7 +193,9 @@ benchmarks with AIPerf. Takes 2–4 hours.
 
 The rapid strategy relies on AIC system metadata and performance models. Check
 the [AIC support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
-for the latest support.
+for the latest support. Measured profiling still needs AIC system and generator
+support to enumerate and render candidates; rapid also needs performance support
+for the exact model/GPU/backend combination.
 
 ### GPU SKUs
 
@@ -213,7 +215,7 @@ for the latest support.
 > [!NOTE]
 > Some rapid-mode SKUs use AIC estimate-only data until measured profiles are
 > available. Use `searchStrategy: thorough` for measured profiling only when
-> DGDR accepts the SKU and AIC can enumerate it.
+> DGDR accepts the SKU and AIC has system and generator support for it.
 
 When specifying GPU SKUs manually, use lowercase underscore format (e.g.,
 `h100_sxm`, not `H100-SXM5-80GB`). See the
