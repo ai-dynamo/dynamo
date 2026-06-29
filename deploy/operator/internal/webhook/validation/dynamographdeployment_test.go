@@ -1099,11 +1099,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			errMsg:      "Grove is disabled in the operator configuration",
 		},
 		{
-			name:         "inter-pod GMS rejected on non-vLLM backend",
+			name:         "valid inter-pod GMS failover on SGLang backend",
 			groveEnabled: true,
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-gms",
+					Name:      "test-gms-sglang",
 					Namespace: "default",
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
@@ -1127,22 +1127,49 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			wantErr:     true,
-			errContains: true,
-			errMsg:      "currently supported only for vLLM",
+			wantErr: false,
 		},
 		{
-			name:         "inter-pod GMS rejected when backendFramework is unset",
+			name:         "valid inter-pod GMS failover on TRT-LLM backend",
 			groveEnabled: true,
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-gms",
+					Name:      "test-gms-trtllm",
 					Namespace: "default",
 				},
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-					// BackendFramework intentionally left empty — the
-					// inter-pod gate must fail closed rather than silently
-					// accept a deployment whose engine may not speak vLLM.
+					BackendFramework: "trtllm",
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
+							Failover: &nvidiacomv1alpha1.FailoverSpec{
+								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
+								NumShadows: 1,
+							},
+							Resources: &nvidiacomv1alpha1.Resources{
+								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name:         "inter-pod GMS rejected on unsupported backend",
+			groveEnabled: true,
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gms-unsupported",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "noop",
 					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 						"worker": {
 							ComponentType: consts.ComponentTypeWorker,
@@ -1164,7 +1191,42 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: true,
-			errMsg:      "currently supported only for vLLM",
+			errMsg:      "supported only for backendFramework",
+		},
+		{
+			name:         "inter-pod GMS rejected when backendFramework is unset",
+			groveEnabled: true,
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-gms",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					// BackendFramework intentionally left empty — the
+					// inter-pod gate must fail closed rather than silently
+					// accept a deployment whose engine may not speak GMS.
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": {
+							ComponentType: consts.ComponentTypeWorker,
+							GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+								Enabled: true,
+								Mode:    nvidiacomv1alpha1.GMSModeInterPod,
+							},
+							Failover: &nvidiacomv1alpha1.FailoverSpec{
+								Enabled:    true,
+								Mode:       nvidiacomv1alpha1.GMSModeInterPod,
+								NumShadows: 1,
+							},
+							Resources: &nvidiacomv1alpha1.Resources{
+								Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "8"},
+							},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errContains: true,
+			errMsg:      "supported only for backendFramework",
 		},
 		{
 			name: "GMS failover disabled is valid without GPU",

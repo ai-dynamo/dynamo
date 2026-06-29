@@ -1503,6 +1503,7 @@ func GenerateBasePodSpec(
 
 	AddStandardEnvVars(&container, operatorConfig)
 	frontendSidecarMounts := append([]corev1.VolumeMount(nil), container.VolumeMounts...)
+	frontendSidecarEnv := append([]corev1.EnvVar(nil), container.Env...)
 
 	// Apply backend-specific container modifications
 	multinodeDeployer := deployerOverride
@@ -1571,7 +1572,7 @@ func GenerateBasePodSpec(
 	podSpec.Containers = append([]corev1.Container{container}, sidecars...)
 
 	if component.FrontendSidecar != nil {
-		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, operatorConfig, frontendSidecarMounts); err != nil {
+		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, operatorConfig, frontendSidecarMounts, frontendSidecarEnv); err != nil {
 			return nil, err
 		}
 	}
@@ -1600,11 +1601,22 @@ func GenerateBasePodSpec(
 	// claim and injecting a sidecar here would produce a double-wired engine
 	// pod (stray GMS sidecar, conflicting claim).
 	if GetGPUMemoryService(component) != nil && !component.IsInterPodGMSEnabled() {
+		mainResources := resourceRequirementsWithFallback(container.Resources, GetMainContainerResources(component))
+		gpuCount, err := dra.ExtractGPUCountFromResourceRequirements(mainResources)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine GPU count for GMS: %w", err)
+		}
+
 		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
-		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
+		if IsIntraPodFailoverEnabled(component) {
+			gms.EnsureClient(&podSpec, &podSpec.Containers[0])
+			appendIntraPodGMSServerContainers(&podSpec, podSpec.Containers[0], gpuCount)
+		} else {
+			gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
+		}
 		for _, name := range GetGPUMemoryService(component).ExtraClientContainers {
 			var container *corev1.Container
 			for i := range podSpec.Containers {
@@ -1737,7 +1749,7 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 	return ordered
 }
 
-func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, operatorConfig *configv1alpha1.OperatorConfiguration, parentMounts []corev1.VolumeMount) error {
+func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, operatorConfig *configv1alpha1.OperatorConfiguration, parentMounts []corev1.VolumeMount, parentEnv []corev1.EnvVar) error {
 	for i := range podSpec.Containers {
 		if podSpec.Containers[i].Name != sidecarName {
 			continue
@@ -1761,7 +1773,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		if err := mergo.Merge(&base, *user, mergo.WithOverride); err != nil {
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
-		base.Env = MergeEnvs(baseEnv, user.Env)
+		base.Env = MergeEnvs(MergeEnvs(parentEnv, baseEnv), user.Env)
 		AddStandardEnvVars(&base, operatorConfig)
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
 		podSpec.Containers[i] = base
@@ -2479,7 +2491,7 @@ func generatePodSpecForRole(
 	}
 
 	if isInterPodGMS {
-		augmentEngineForGMS(podSpec, r.Rank, component.IsInterPodFailoverEnabled())
+		augmentEngineForGMS(podSpec, r.Rank, component.IsInterPodFailoverEnabled(), r.Name)
 	}
 
 	return podSpec, nil

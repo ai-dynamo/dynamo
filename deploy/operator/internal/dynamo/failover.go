@@ -42,41 +42,64 @@ import (
 // ──────────────────────────────────────────────────────────────────────────────
 
 const (
-	gmsSharedVolumeName = "gms-shared"
-	gmsHostPathBase     = "/run/gms"
-	gmsSharedMountPath  = "/run/gms/shared"
-	gmsFailoverLockFile = "failover.lock"
-	gmsPermFixInitName  = "fix-gms-perms"
+	gmsSharedVolumeName                       = "gms-shared"
+	gmsHostPathBase                           = "/run/gms"
+	gmsSharedMountPath                        = "/run/gms/shared"
+	gmsFailoverLockFile                       = "failover.lock"
+	gmsPermFixInitName                        = "fix-gms-perms"
+	gmsFastShutdownGracePeriodEnvVar          = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"
+	gmsFastExitOnSigtermEnvVar                = "DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM"
+	gmsKubeDiscoveryDebounceMsEnvVar          = "DYN_KUBE_DISCOVERY_DEBOUNCE_MS"
+	gmsFastKubeDiscoveryDebounceMsDefault     = "25"
+	gmsGatewayNotreadyGraceMsEnvVar           = "DYN_BULWARK_GATEWAY_NOTREADY_GRACE_MS"
+	gmsGatewayNotreadyGraceMsDefault          = "1000"
+	gmsMigrationRetryConcurrencyEnvVar        = "DYN_MIGRATION_RETRY_CONCURRENCY"
+	gmsMigrationRetryConcurrencyDefault       = "2"
+	gmsMigrationFirstChunkTimeoutMsEnvVar     = "DYN_MIGRATION_FIRST_CHUNK_TIMEOUT_MS"
+	gmsMigrationFirstChunkTimeoutMsDefault    = "500"
+	gmsMigrationRecentFailoverWindowMsEnvVar  = "DYN_MIGRATION_RECENT_FAILOVER_WINDOW_MS"
+	gmsMigrationRecentFailoverWindowMsDefault = "1500"
 )
 
-// gmsWrapperScript generates a bash script that launches the GMS server
-// (gpu_memory_service.cli.server), which auto-discovers DRA-allocated GPUs
-// and exposes both "weights" and "kv_cache" UDS sockets per device. The
-// wrapper cleans up stale sockets from a previous run, forwards SIGTERM/SIGINT
-// to the process group, and propagates the GMS server's exit code so the
-// container's exitCode in the Pod status reflects the actual failure mode
-// (rather than always being 1).
-func gmsWrapperScript() string {
+var gmsServerTags = []string{"weights", "kv_cache"}
+
+func gmsContainerName(tag string) string {
+	return "gms-" + strings.ReplaceAll(tag, "_", "-")
+}
+
+// gmsWrapperScript generates a bash script that launches one logical GMS
+// server group for a single tag. gpu_memory_service.cli.server still
+// auto-discovers DRA-allocated GPUs and supervises one child server per device,
+// but each Kubernetes container owns only one socket namespace (weights or
+// kv_cache).
+func gmsWrapperScript(tag string) string {
+	return gmsWrapperScriptAt(tag, gmsSharedMountPath)
+}
+
+func gmsWrapperScriptAt(tag string, socketDir string) string {
 	return fmt.Sprintf(
-		`rm -f %s/gms_*.sock
+		`rm -f %s/gms_*_%s.sock
 rc=1
 cleanup() { kill -- -$$ 2>/dev/null; exit "$rc"; }
 trap cleanup SIGTERM SIGINT
-python3 -m %s &
-echo "Started GMS server pid=$!"
+GMS_SERVER_TAGS=%s python3 -m %s &
+echo "Started GMS %s server pid=$!"
 wait -n
 rc=$?
-echo "GMS server exited (code=$rc), shutting down"
-cleanup`, gmsSharedMountPath, gmsruntime.ServerModule)
+echo "GMS %s server exited (code=$rc), shutting down"
+cleanup`, socketDir, tag, tag, gmsruntime.ServerModule, tag, tag)
 }
 
-// gmsStartupProbeCommand returns the exec probe command that verifies the GMS
-// server has opened both the weights and kv_cache UDS sockets for every
-// allocated GPU (2 sockets per device).
-func gmsStartupProbeCommand(gpuCount int) []string {
+// gmsProbeCommand returns the exec probe command that verifies the GMS server
+// has opened its tag-specific UDS socket for every allocated GPU.
+func gmsProbeCommand(tag string, gpuCount int) []string {
+	return gmsProbeCommandAt(tag, gpuCount, gmsSharedMountPath)
+}
+
+func gmsProbeCommandAt(tag string, gpuCount int, socketDir string) []string {
 	return []string{
 		"sh", "-c",
-		fmt.Sprintf("test $(ls %s/gms_*.sock 2>/dev/null | wc -l) -ge %d", gmsSharedMountPath, 2*gpuCount),
+		fmt.Sprintf("test $(ls %s/gms_*_%s.sock 2>/dev/null | wc -l) -ge %d", socketDir, tag, gpuCount),
 	}
 }
 
@@ -93,17 +116,18 @@ func applyGMSSharedResources(podSpec *corev1.PodSpec, c *corev1.Container, rank 
 	podSpec.InitContainers = append(podSpec.InitContainers, gmsPermFixInitContainer(rank, c.Image))
 }
 
-// gmsWeightServerPodSpec builds a GMS weight server pod spec by cloning and
-// modifying a base engine pod spec. The GMS pod runs a different command,
-// has no liveness/readiness probes, and uses a startup probe that checks
-// for the expected number of GMS UDS sockets.
+// gmsWeightServerPodSpec builds a GMS server pod spec by cloning and
+// modifying a base engine pod spec. The GMS pod runs one container per logical
+// memory namespace so weights and kv_cache have independent process lifecycles
+// and Kubernetes probes while still sharing the same DRA GPU allocation and
+// rank-local socket directory.
 //
 // RestartPolicy is intentionally left unset here (i.e. inherits the base /
 // Grove default, which is Always). A GMS server process holds only local
 // state — GPU allocations (via DRA, which survive the container), hostPath
 // UDS sockets (recreated by gmsWrapperScript on startup), and in-memory
-// weight buffers (re-sharded on reconnection by the engine clients). So an
-// in-place kubelet restart is a fast, correct recovery path.
+// buffers (re-sharded/re-attached on reconnection by the engine clients). So
+// an in-place kubelet restart is a fast, correct recovery path.
 //
 // The paired engine pod mirrors this policy in the standalone inter-pod GMS
 // layout (a restarted engine re-imports IPC handles from the still-running
@@ -116,37 +140,139 @@ func gmsWeightServerPodSpec(basePodSpec *corev1.PodSpec, rank int32, gpuCount in
 		return podSpec
 	}
 
-	c := &podSpec.Containers[0]
-	c.Command = []string{"bash", "-c"}
-	c.Args = []string{gmsWrapperScript()}
+	baseContainer := podSpec.Containers[0].DeepCopy()
+	vol, mount := gmsSharedVolume(rank)
+	podSpec.Volumes = append(podSpec.Volumes, vol)
+	podSpec.InitContainers = append(podSpec.InitContainers, gmsPermFixInitContainer(rank, baseContainer.Image))
+	addGPUToleration(podSpec)
 
-	c.StartupProbe = &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			Exec: &corev1.ExecAction{Command: gmsStartupProbeCommand(gpuCount)},
-		},
-		PeriodSeconds:    2,
-		TimeoutSeconds:   2,
-		FailureThreshold: 150, // 2s * 150 = 5 min
+	containers := make([]corev1.Container, 0, len(gmsServerTags))
+	for _, tag := range gmsServerTags {
+		c := baseContainer.DeepCopy()
+		c.Name = gmsContainerName(tag)
+		c.Command = []string{"bash", "-c"}
+		c.Args = []string{gmsWrapperScript(tag)}
+		c.Ports = nil
+		removeGPUFromLimits(c)
+
+		probeCommand := gmsProbeCommand(tag, gpuCount)
+		c.StartupProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: probeCommand},
+			},
+			PeriodSeconds:    2,
+			TimeoutSeconds:   2,
+			FailureThreshold: 150, // 2s * 150 = 5 min
+		}
+		c.ReadinessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: probeCommand},
+			},
+			PeriodSeconds:  5,
+			TimeoutSeconds: 2,
+		}
+		c.LivenessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: probeCommand},
+			},
+			PeriodSeconds:    10,
+			TimeoutSeconds:   2,
+			FailureThreshold: 3,
+		}
+
+		c.Env = append(c.Env,
+			corev1.EnvVar{Name: gmsruntime.EnvSocketDir, Value: gmsSharedMountPath},
+			corev1.EnvVar{Name: "GMS_SERVER_TAGS", Value: tag},
+		)
+		c.VolumeMounts = append(c.VolumeMounts, mount)
+		containers = append(containers, *c)
 	}
-	c.LivenessProbe = nil
-	c.ReadinessProbe = nil
-
-	c.Env = append(c.Env, corev1.EnvVar{
-		Name:  gmsruntime.EnvSocketDir,
-		Value: gmsSharedMountPath,
-	})
-
-	applyGMSSharedResources(podSpec, c, rank)
+	podSpec.Containers = containers
 
 	return podSpec
+}
+
+// appendIntraPodGMSServerContainers adds one regular container per logical GMS
+// namespace inside an intra-pod failover worker pod. This mirrors the inter-pod
+// split (weights + kv_cache) while using the intra-pod emptyDir socket volume
+// instead of a hostPath shared across pods.
+func appendIntraPodGMSServerContainers(podSpec *corev1.PodSpec, baseContainer corev1.Container, gpuCount int) {
+	if podSpec == nil {
+		return
+	}
+	if gpuCount <= 0 {
+		gpuCount = 1
+	}
+
+	existing := map[string]bool{}
+	for _, c := range podSpec.Containers {
+		existing[c.Name] = true
+	}
+
+	mount := corev1.VolumeMount{
+		Name:      gmsruntime.SharedVolumeName,
+		MountPath: gmsruntime.SharedMountPath,
+	}
+	for _, tag := range gmsServerTags {
+		name := gmsContainerName(tag)
+		if existing[name] {
+			continue
+		}
+
+		c := *baseContainer.DeepCopy()
+		c.Name = name
+		c.Command = []string{"bash", "-c"}
+		c.Args = []string{gmsWrapperScriptAt(tag, gmsruntime.SharedMountPath)}
+		c.Ports = nil
+		removeGPUFromLimits(&c)
+
+		probeCommand := gmsProbeCommandAt(tag, gpuCount, gmsruntime.SharedMountPath)
+		c.StartupProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: probeCommand},
+			},
+			PeriodSeconds:    2,
+			TimeoutSeconds:   2,
+			FailureThreshold: 150,
+		}
+		c.ReadinessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: probeCommand},
+			},
+			PeriodSeconds:  5,
+			TimeoutSeconds: 2,
+		}
+		c.LivenessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: probeCommand},
+			},
+			PeriodSeconds:    10,
+			TimeoutSeconds:   2,
+			FailureThreshold: 3,
+		}
+
+		appendOrReplaceEnvVars(&c,
+			corev1.EnvVar{Name: gmsruntime.EnvSocketDir, Value: gmsruntime.SharedMountPath},
+			corev1.EnvVar{Name: "GMS_SERVER_TAGS", Value: tag},
+		)
+		c.VolumeMounts = appendMissingVolumeMounts(c.VolumeMounts, []corev1.VolumeMount{mount})
+		podSpec.Containers = append(podSpec.Containers, c)
+	}
 }
 
 // gmsEngineEnvVars returns the backend-agnostic environment variables injected
 // into engine pods when GMS failover is enabled. Backend-specific switches
 // (e.g. the vLLM DYN_VLLM_GMS_SHADOW_MODE flag) are injected by the backend's
 // UpdateContainer path so non-vLLM backends do not inherit stray env vars.
-func gmsEngineEnvVars() []corev1.EnvVar {
-	return []corev1.EnvVar{
+func gmsLogicalInstanceKey(roleName string) string {
+	// The key intentionally excludes grove.io/podclique-pod-index / ENGINE_ID so
+	// primary and shadow pods in the same failover cohort publish one logical
+	// worker identity to routers and KV indexers.
+	return fmt.Sprintf("$(POD_NAMESPACE)/$(GROVE_PCSG_NAME)/$(GROVE_PCSG_INDEX)/%s", roleName)
+}
+
+func gmsEngineEnvVars(logicalInstanceKey string) []corev1.EnvVar {
+	envs := []corev1.EnvVar{
 		{
 			Name: "ENGINE_ID",
 			ValueFrom: &corev1.EnvVarSource{
@@ -157,8 +283,21 @@ func gmsEngineEnvVars() []corev1.EnvVar {
 		},
 		{Name: gmsruntime.EnvSocketDir, Value: gmsSharedMountPath},
 		{Name: "FAILOVER_LOCK_PATH", Value: gmsSharedMountPath + "/" + gmsFailoverLockFile},
+		{Name: "GMS_KV_LEASES", Value: "1"},
+		{Name: "GMS_KV_LEASE_SHM_DIR", Value: gmsSharedMountPath},
 		{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "notready"},
 	}
+	if logicalInstanceKey != "" {
+		envs = append(envs, corev1.EnvVar{
+			Name:  commonconsts.DynamoDiscoveryLogicalInstanceKeyEnvVar,
+			Value: logicalInstanceKey,
+		})
+		envs = append(envs, corev1.EnvVar{
+			Name:  "DYN_GMS_FAILOVER_SHADOW_MODE",
+			Value: "true",
+		})
+	}
+	return envs
 }
 
 // augmentEngineForGMS modifies an engine pod spec in-place to work with the
@@ -191,17 +330,22 @@ func gmsEngineEnvVars() []corev1.EnvVar {
 //     isInterPodFailover is true, so forcing Never in the standalone case
 //     would strand engine pods in Failed state with nothing listening to
 //     force-delete them.
-func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32, isInterPodFailover bool) {
+func augmentEngineForGMS(podSpec *corev1.PodSpec, rank int32, isInterPodFailover bool, roleName string) {
 	if len(podSpec.Containers) == 0 {
 		return
 	}
 	c := &podSpec.Containers[0]
 
-	c.Env = append(c.Env, gmsEngineEnvVars()...)
+	logicalInstanceKey := ""
+	if isInterPodFailover {
+		logicalInstanceKey = gmsLogicalInstanceKey(roleName)
+	}
+	appendOrReplaceEnvVars(c, gmsEngineEnvVars(logicalInstanceKey)...)
 	removeEnvVar(c, "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS")
 
 	applyGMSSharedResources(podSpec, c, rank)
 	if isInterPodFailover {
+		addDefaultFastFailoverShutdown(c)
 		podSpec.RestartPolicy = corev1.RestartPolicyNever
 	}
 }
@@ -282,6 +426,76 @@ func removeEnvVar(c *corev1.Container, name string) {
 		}
 	}
 	c.Env = filtered
+}
+
+func appendOrReplaceEnvVars(c *corev1.Container, envs ...corev1.EnvVar) {
+	for _, env := range envs {
+		removeEnvVar(c, env.Name)
+		c.Env = append(c.Env, env)
+	}
+}
+
+func applyTRTLLMFailoverOverrides(podSpec *corev1.PodSpec, numberOfNodes int32) {
+	if numberOfNodes <= 1 {
+		return
+	}
+
+	basePort := commonconsts.MpiRunSshPort
+	for i := range podSpec.Containers {
+		c := &podSpec.Containers[i]
+		if !strings.HasPrefix(c.Name, "engine-") {
+			continue
+		}
+
+		engineID, err := strconv.Atoi(strings.TrimPrefix(c.Name, "engine-"))
+		if err != nil || engineID <= 0 {
+			continue
+		}
+
+		retargetTRTLLMSshPort(c, basePort, basePort+engineID)
+	}
+}
+
+func retargetTRTLLMSshPort(c *corev1.Container, from int, to int) {
+	fromText := strconv.Itoa(from)
+	toText := strconv.Itoa(to)
+
+	for i, arg := range c.Args {
+		c.Args[i] = strings.ReplaceAll(arg, "Port "+fromText, "Port "+toText)
+		c.Args[i] = strings.ReplaceAll(c.Args[i], "-p "+fromText, "-p "+toText)
+	}
+	for i, cmd := range c.Command {
+		c.Command[i] = strings.ReplaceAll(cmd, "Port "+fromText, "Port "+toText)
+		c.Command[i] = strings.ReplaceAll(c.Command[i], "-p "+fromText, "-p "+toText)
+	}
+
+	if c.ReadinessProbe != nil && c.ReadinessProbe.TCPSocket != nil {
+		c.ReadinessProbe.TCPSocket.Port = intstr.FromInt(to)
+	}
+}
+
+func containerHasEnvVar(c *corev1.Container, name string) bool {
+	for _, e := range c.Env {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func addDefaultFastFailoverShutdown(c *corev1.Container) {
+	if !containerHasEnvVar(c, gmsFastShutdownGracePeriodEnvVar) {
+		c.Env = append(c.Env, corev1.EnvVar{
+			Name:  gmsFastShutdownGracePeriodEnvVar,
+			Value: "0",
+		})
+	}
+	if !containerHasEnvVar(c, gmsFastExitOnSigtermEnvVar) {
+		c.Env = append(c.Env, corev1.EnvVar{
+			Name:  gmsFastExitOnSigtermEnvVar,
+			Value: "1",
+		})
+	}
 }
 
 // getGPUCount extracts the GPU count from the component's Kubernetes resource requirements.
@@ -443,14 +657,47 @@ func buildFailoverPod(
 		engines[i] = buildEngineContainer(mainContainer, i, commonconsts.DynamoSystemPort+i)
 	}
 
+	for i := range sidecars {
+		if sidecars[i].Name == commonconsts.FrontendSidecarContainerName {
+			appendOrReplaceEnvVars(&sidecars[i],
+				corev1.EnvVar{
+					Name:  gmsKubeDiscoveryDebounceMsEnvVar,
+					Value: gmsFastKubeDiscoveryDebounceMsDefault,
+				},
+				corev1.EnvVar{
+					Name:  gmsGatewayNotreadyGraceMsEnvVar,
+					Value: gmsGatewayNotreadyGraceMsDefault,
+				},
+				corev1.EnvVar{
+					Name:  gmsMigrationRetryConcurrencyEnvVar,
+					Value: gmsMigrationRetryConcurrencyDefault,
+				},
+				corev1.EnvVar{
+					Name:  gmsMigrationFirstChunkTimeoutMsEnvVar,
+					Value: gmsMigrationFirstChunkTimeoutMsDefault,
+				},
+				corev1.EnvVar{
+					Name:  gmsMigrationRecentFailoverWindowMsEnvVar,
+					Value: gmsMigrationRecentFailoverWindowMsDefault,
+				},
+			)
+		}
+	}
+
 	podSpec.Containers = append(engines, sidecars...)
 
-	// Backend-specific overrides
+	// Backend-specific overrides. vLLM needs extra port staggering for its
+	// side-channel and torch.distributed sockets; SGLang and TRT-LLM use the
+	// backend-neutral system/FPM port staggering above in aggregated mode.
 	switch backendFramework {
 	case BackendFrameworkVLLM:
 		applyVLLMOverrides(podSpec, numberOfNodes)
+	case BackendFrameworkTRTLLM:
+		applyTRTLLMFailoverOverrides(podSpec, numberOfNodes)
+	case BackendFrameworkSGLang:
+		applySGLangFailoverOverrides(podSpec)
 	default:
-		return fmt.Errorf("failover is currently supported only for vLLM (detected: %s)", backendFramework)
+		return fmt.Errorf("failover is not supported for backend framework %s", backendFramework)
 	}
 
 	return nil
@@ -492,19 +739,33 @@ func buildEngineContainer(base corev1.Container, engineID int, systemPort int) c
 		}
 	}
 
+	lockBeforeInit := "0"
+	if engineID == 0 {
+		lockBeforeInit = "1"
+	}
+
 	failoverEnvs := []corev1.EnvVar{
 		{Name: "ENGINE_ID", Value: strconv.Itoa(engineID)},
 		{Name: "CONTAINER_NAME", Value: engine.Name},
 		{Name: "FAILOVER_LOCK_PATH", Value: intraPodFailoverLockFile},
+		{Name: "GMS_KV_LEASES", Value: "1"},
+		{Name: "GMS_KV_LEASE_SHM_DIR", Value: gmsruntime.SharedMountPath},
+		{Name: "DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", Value: "0"},
+		{Name: "DYN_GMS_FAILOVER_SHADOW_MODE", Value: "true"},
 		{Name: "DYN_SYSTEM_STARTING_HEALTH_STATUS", Value: "notready"},
 		{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(systemPort)},
 		{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
+		{Name: gmsKubeDiscoveryDebounceMsEnvVar, Value: gmsFastKubeDiscoveryDebounceMsDefault},
+		{Name: "DYN_VLLM_GMS_LOCK_BEFORE_INIT", Value: lockBeforeInit},
+		{Name: "DYN_SGLANG_GMS_LOCK_BEFORE_INIT", Value: lockBeforeInit},
+		{Name: "DYN_TRTLLM_GMS_LOCK_BEFORE_INIT", Value: lockBeforeInit},
 		// Per-engine FPM port. data_parallel_index is 0 for both failover
 		// engines (orthogonal axis), so without this override both bind to
 		// the same base port and engine-1 fails with EADDRINUSE.
 		{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: strconv.Itoa(commonconsts.DynamoFPMBasePort + engineID)},
 	}
-	engine.Env = append(filtered, failoverEnvs...)
+	engine.Env = filtered
+	appendOrReplaceEnvVars(&engine, failoverEnvs...)
 
 	// Retarget HTTP probes to this engine's named port. Each engine runs its
 	// system server on a staggered port (e.g. 9090, 9091), and the probes

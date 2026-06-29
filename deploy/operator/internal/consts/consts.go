@@ -131,12 +131,13 @@ const (
 	KubeAnnotationTopologyClusterTopologyName = "nvidia.com/topology-cluster-topology-name"
 	KubeLabelDynamoTopologyPrefix             = "nvidia.com/dynamo-topology."
 
-	DynamoDeploymentConfigEnvVar      = "DYN_DEPLOYMENT_CONFIG"
-	DynamoNamespaceEnvVar             = "DYN_NAMESPACE"
-	DynamoNamespacePrefixEnvVar       = "DYN_NAMESPACE_PREFIX"
-	DynamoNamespaceWorkerSuffixEnvVar = "DYN_NAMESPACE_WORKER_SUFFIX"
-	DynamoComponentEnvVar             = "DYN_COMPONENT"
-	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
+	DynamoDeploymentConfigEnvVar            = "DYN_DEPLOYMENT_CONFIG"
+	DynamoNamespaceEnvVar                   = "DYN_NAMESPACE"
+	DynamoNamespacePrefixEnvVar             = "DYN_NAMESPACE_PREFIX"
+	DynamoNamespaceWorkerSuffixEnvVar       = "DYN_NAMESPACE_WORKER_SUFFIX"
+	DynamoComponentEnvVar                   = "DYN_COMPONENT"
+	DynamoDiscoveryBackendEnvVar            = "DYN_DISCOVERY_BACKEND"
+	DynamoDiscoveryLogicalInstanceKeyEnvVar = "DYN_DISCOVERY_LOGICAL_INSTANCE_KEY"
 
 	// DynamoOperatorAllowGMSSnapshotEnvVar enables the temporary internal
 	// GMS + Snapshot admission gate when set to "1".
