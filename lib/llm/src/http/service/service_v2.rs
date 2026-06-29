@@ -19,7 +19,7 @@ use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
 use super::metrics::{register_lora_allocation_metrics, register_worker_timing_metrics};
-use super::system_extension::SystemRouteExtension;
+use super::system_extension::{SystemRouteContext, SystemRouteExtension, SystemRouteSet};
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
@@ -870,7 +870,37 @@ static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
 /// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
 static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
 
+fn append_route_docs(
+    all_docs: &mut Vec<RouteDoc>,
+    seen_routes: &mut HashMap<(axum::http::Method, String), String>,
+    route_docs: Vec<RouteDoc>,
+) -> Result<()> {
+    for route_doc in route_docs {
+        let key = (route_doc.method().clone(), route_doc.path().to_string());
+        if let Some(existing) = seen_routes.get(&key) {
+            anyhow::bail!(
+                "duplicate HTTP route registered: {} conflicts with {}",
+                route_doc,
+                existing
+            );
+        }
+        seen_routes.insert(key, route_doc.to_string());
+        all_docs.push(route_doc);
+    }
+    Ok(())
+}
+
 impl HttpServiceConfigBuilder {
+    pub fn add_system_route_extension<F>(mut self, extension: F) -> Self
+    where
+        F: Fn(SystemRouteContext) -> SystemRouteSet + Send + Sync + 'static,
+    {
+        self.system_route_extensions
+            .get_or_insert_with(Vec::new)
+            .push(Arc::new(extension));
+        self
+    }
+
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
         let metrics_config = config.metrics_config.clone();
@@ -968,6 +998,7 @@ impl HttpServiceConfigBuilder {
         }
 
         let mut all_docs = Vec::new();
+        let mut route_doc_keys = HashMap::new();
 
         // Shared on_response callback for both system and inference routes
         let on_response = |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
@@ -1010,12 +1041,13 @@ impl HttpServiceConfigBuilder {
             );
         }
         for extension in &config.system_route_extensions {
-            system_routes.push(extension(state.clone()));
+            let route_set = extension(SystemRouteContext::new(state.clone()));
+            system_routes.push(route_set.into_parts());
         }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
+            append_route_docs(&mut all_docs, &mut route_doc_keys, route_docs)?;
             system_router = system_router.merge(route);
-            all_docs.extend(route_docs);
         }
         // Inference routes (completions, chat, embeddings, etc.) — info-level spans
         let endpoint_routes = HttpServiceConfigBuilder::get_endpoints_router(
@@ -1025,8 +1057,8 @@ impl HttpServiceConfigBuilder {
         );
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
+            append_route_docs(&mut all_docs, &mut route_doc_keys, route_docs)?;
             inference_router = inference_router.merge(route);
-            all_docs.extend(route_docs);
         }
         inference_router = inference_router.layer(
             TraceLayer::new_for_http()
@@ -1041,8 +1073,8 @@ impl HttpServiceConfigBuilder {
         // OpenAPI documentation routes (system)
         let (openapi_docs, openapi_route) =
             super::openapi_docs::openapi_router(all_docs.clone(), None);
+        append_route_docs(&mut all_docs, &mut route_doc_keys, openapi_docs)?;
         system_router = system_router.merge(openapi_route);
-        all_docs.extend(openapi_docs);
 
         system_router = system_router.layer(
             TraceLayer::new_for_http()
@@ -1394,7 +1426,14 @@ mod tests {
         handle.abort();
     }
 
-    fn test_system_extension(state: Arc<State>) -> (Vec<RouteDoc>, axum::Router) {
+    fn make_chat_engine()
+    -> crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine {
+        Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        ))
+    }
+
+    fn readiness_extension(context: SystemRouteContext) -> SystemRouteSet {
         let route_docs = vec![RouteDoc::new(
             axum::http::Method::GET,
             "/test/system-extension",
@@ -1402,13 +1441,13 @@ mod tests {
         let route = axum::Router::new()
             .route(
                 "/test/system-extension",
-                axum::routing::get(test_system_extension_handler),
+                axum::routing::get(readiness_extension_handler),
             )
-            .with_state(state);
-        (route_docs, route)
+            .with_state(context.state_clone());
+        SystemRouteSet::new(route_docs, route)
     }
 
-    async fn test_system_extension_handler(
+    async fn readiness_extension_handler(
         axum::extract::State(state): axum::extract::State<Arc<State>>,
     ) -> axum::http::StatusCode {
         if state.manager().has_any_ready_model() {
@@ -1418,24 +1457,199 @@ mod tests {
         }
     }
 
+    fn first_test_extension(context: SystemRouteContext) -> SystemRouteSet {
+        test_status_extension(context, "/test/system-extension/one")
+    }
+
+    fn second_test_extension(context: SystemRouteContext) -> SystemRouteSet {
+        test_status_extension(context, "/test/system-extension/two")
+    }
+
+    fn duplicate_health_extension(context: SystemRouteContext) -> SystemRouteSet {
+        test_status_extension(context, "/health")
+    }
+
+    fn duplicate_test_extension(context: SystemRouteContext) -> SystemRouteSet {
+        test_status_extension(context, "/test/system-extension/duplicate")
+    }
+
+    fn draining_extension(context: SystemRouteContext) -> SystemRouteSet {
+        let route_docs = vec![RouteDoc::new(
+            axum::http::Method::GET,
+            "/test/system-extension/draining",
+        )];
+        let route = axum::Router::new()
+            .route(
+                "/test/system-extension/draining",
+                axum::routing::get(draining_extension_handler),
+            )
+            .with_state(context.state_clone());
+        SystemRouteSet::new(route_docs, route)
+    }
+
+    fn test_status_extension(context: SystemRouteContext, path: &str) -> SystemRouteSet {
+        let route_docs = vec![RouteDoc::new(axum::http::Method::GET, path)];
+        let route = axum::Router::new()
+            .route(path, axum::routing::get(no_content_extension_handler))
+            .with_state(context.state_clone());
+        SystemRouteSet::new(route_docs, route)
+    }
+
+    async fn no_content_extension_handler(
+        axum::extract::State(_state): axum::extract::State<Arc<State>>,
+    ) -> axum::http::StatusCode {
+        axum::http::StatusCode::NO_CONTENT
+    }
+
+    async fn draining_extension_handler(
+        axum::extract::State(state): axum::extract::State<Arc<State>>,
+    ) -> axum::http::StatusCode {
+        if state.is_ready() {
+            axum::http::StatusCode::OK
+        } else {
+            axum::http::StatusCode::ACCEPTED
+        }
+    }
+
+    async fn get_status(port: u16, path: &str) -> reqwest::StatusCode {
+        reqwest::Client::new()
+            .get(format!("http://localhost:{}{}", port, path))
+            .send()
+            .await
+            .expect("request failed")
+            .status()
+    }
+
+    fn build_error_message(builder: HttpServiceConfigBuilder) -> String {
+        match builder.build() {
+            Ok(_) => panic!("service build unexpectedly succeeded"),
+            Err(err) => err.to_string(),
+        }
+    }
+
     #[tokio::test]
-    async fn test_system_route_extension_can_serve_from_frontend_state() {
-        let extension: SystemRouteExtension = Arc::new(test_system_extension);
+    async fn test_system_route_extension_uses_live_frontend_state() {
         let cancel_token = Arc::new(CancellationToken::new());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let service = HttpService::builder()
             .port(port)
-            .system_route_extensions(vec![extension])
+            .add_system_route_extension(readiness_extension)
             .build()
             .unwrap();
 
+        assert!(
+            service
+                .route_docs()
+                .iter()
+                .any(|doc| doc.to_string() == "GET /test/system-extension")
+        );
+
+        let running_service = service.clone();
+        let service_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            running_service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert_eq!(
+            get_status(port, "/test/system-extension").await,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let mut card = crate::model_card::ModelDeploymentCard::default();
+        card.display_name = "pending-llama".to_string();
+        service
+            .model_manager()
+            .save_model_card("instance-pending", card)
+            .unwrap();
+        assert_eq!(
+            get_status(port, "/test/system-extension").await,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "card-only model registration must not make the extension report ready"
+        );
+
+        service
+            .model_manager()
+            .add_chat_completions_model("ready-llama", "abc", make_chat_engine())
+            .unwrap();
+        assert_eq!(
+            get_status(port, "/test/system-extension").await,
+            reqwest::StatusCode::OK
+        );
+
+        let openapi = reqwest::Client::new()
+            .get(format!("http://localhost:{}/openapi.json", port))
+            .send()
+            .await
+            .expect("openapi request failed")
+            .text()
+            .await
+            .expect("openapi body failed");
+        assert!(openapi.contains("/test/system-extension"));
+
+        cancel_token.cancel();
+        handle.abort();
+    }
+
+    #[test]
+    fn test_multiple_system_route_extensions_are_registered() {
+        let service = HttpService::builder()
+            .add_system_route_extension(first_test_extension)
+            .add_system_route_extension(second_test_extension)
+            .build()
+            .unwrap();
         let route_doc_strings = service
             .route_docs()
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        assert!(route_doc_strings.contains(&"GET /test/system-extension".to_string()));
+
+        assert!(route_doc_strings.contains(&"GET /test/system-extension/one".to_string()));
+        assert!(route_doc_strings.contains(&"GET /test/system-extension/two".to_string()));
+    }
+
+    #[test]
+    fn test_system_route_extension_rejects_builtin_route_conflict() {
+        let error = build_error_message(
+            HttpService::builder().add_system_route_extension(duplicate_health_extension),
+        );
+
+        assert!(
+            error.contains("duplicate HTTP route registered: GET /health"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_system_route_extension_rejects_extension_route_conflict() {
+        let error = build_error_message(
+            HttpService::builder()
+                .add_system_route_extension(duplicate_test_extension)
+                .add_system_route_extension(duplicate_test_extension),
+        );
+
+        assert!(
+            error.contains("duplicate HTTP route registered: GET /test/system-extension/duplicate"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_system_route_extension_stays_available_while_draining() {
+        let cancel_token = Arc::new(CancellationToken::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .add_system_route_extension(draining_extension)
+            .build()
+            .unwrap();
+        let state = service.state_clone();
+        let inflight = state.acquire_inflight();
 
         let service_token = cancel_token.clone();
         let handle = tokio::spawn(async move {
@@ -1446,14 +1660,15 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let resp = reqwest::Client::new()
-            .get(format!("http://localhost:{}/test/system-extension", port))
-            .send()
-            .await
-            .expect("request failed");
-        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-
         cancel_token.cancel();
+        wait_for_service_stage(&state, ServiceStage::Draining).await;
+
+        assert_eq!(
+            get_status(port, "/test/system-extension/draining").await,
+            reqwest::StatusCode::ACCEPTED
+        );
+
+        drop(inflight);
         handle.abort();
     }
 
