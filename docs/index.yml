@@ -53,144 +53,77 @@ navigation:
     layout:
       # ==================== Getting Started ====================
       - section: Getting Started
-        path: getting-started/introduction.mdx
         contents:
-          - page: About
-            path: getting-started/about.md
-          - section: Quickstart
+          - page: Introduction
+            path: getting-started/introduction.mdx
+          - page: Quickstart
+            path: kubernetes/README.md
+          # - page: Local Quickstart
+          #   path: getting-started/quickstart.mdx
+          # - page: Compatibility
+          #   path: getting-started/compatibility.md
+
+      - section: Installation
+        contents:
+        - page: Install Dynamo
+          path: kubernetes/installation-guide.md
+        - page: Multinode Orchestration
+          path: kubernetes/multinode-installation.md
+        - section: RDMA Setup
+          contents:
+            - page: Overview
+              path: kubernetes/cloud-providers/rdma-setup.md
+            - page: Infiniband on Azure
+              path: kubernetes/cloud-providers/aks/rdma-infiniband.md
+            - page: EFA on AWS
+              path: kubernetes/cloud-providers/eks/efa.md
+        - section: Model Storage
+          contents:
+            - page: Overview
+              path: kubernetes/cloud-providers/model-storage-overview.md
+            - page: AKS Storage
+              path: kubernetes/cloud-providers/aks/storage.md
+            - page: Azure Lustre CSI Driver
+              path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
+            - page: EFS
+              path: kubernetes/cloud-providers/eks/efs.md
+        - page: Observability
+          path: observability/README.md
+        - section: Managed Kubernetes
+          collapsed: true
+          contents:
+            - section: EKS
+              collapsed: true
+              contents:
+                - page: EKS Setup
+                  path: kubernetes/cloud-providers/eks/eks.md
+                - page: ECS
+                  path: kubernetes/cloud-providers/ecs/ecs.md
+            - section: Azure
+              collapsed: true
+              contents:
+                - page: AKS Setup
+                  path: kubernetes/cloud-providers/aks/aks.md
+                - page: Spot VMs
+                  path: kubernetes/cloud-providers/aks/spot-vms.md
+            - section: GCP
+              collapsed: true
+              contents:
+                - page: GKE Setup
+                  path: kubernetes/cloud-providers/gke/gke.md
+                  
+      # ==================== Usage ====================
+      - section: Model Deployment # TODO: could be renamed to Deployment or Model Deployment bc this part is more about installation and how to get running with a model as opposed to observability, tuning, or other features.
+        contents:
+          - section: Kubernetes
+            collapsed: open-by-default
             contents:
-              - page: K8s
+              - page: Overview
                 path: getting-started/kubernetes-deployment.md
-              - page: Local 
-                path: getting-started/quickstart.mdx
-              - page: Building from Source
-                path: getting-started/building-from-source.md
-          - section: Compatibility
-            path: getting-started/compatibility.md
-            contents:
-              - page: Release Artifacts
-                path: reference/release-artifacts.md
-      
-      - section: Model Deployment
-        contents:
-          - section: Kubernetes Deployment
-            collapsed: true
-            contents:
-              - section: Start Here
-                contents:
-                  - page: Kubernetes Quickstart
-                    path: kubernetes/README.md
-                  - page: Installation Guide
-                    path: kubernetes/installation-guide.md
-                  - page: Dynamo Operator
-                    path: kubernetes/dynamo-operator.md
-                  - page: Minikube Setup
-                    path: kubernetes/deployment/minikube.md
-              - section: Deploy Models
-                contents:
-                  - page: Deployment Overview
-                    slug: model-deployment-guide
-                    path: kubernetes/model-deployment-guide.md
-                  - page: Managing Models with DynamoModel
-                    path: kubernetes/deployment/dynamomodel-guide.md
-                  - page: DGDR Reference
-                    path: kubernetes/dgdr.md
-                  - page: DGDR Examples
-                    path: kubernetes/dgdr-examples.md
-              - section: Model Loading
-                contents:
-                  - page: Model Caching
-                    path: kubernetes/model-caching.md
-                  - page: ModelExpress
-                    path: kubernetes/modelexpress.md
-              - section: Operate
-                contents:
-                  - page: Autoscaling
-                    path: kubernetes/autoscaling.md
-                  - page: Rolling Update
-                    path: kubernetes/rolling-update.md
-                  - page: Disagg Communication
-                    path: kubernetes/disagg-communication-guide.md
-                  - page: Topology-Aware KV Transfer
-                    path: kubernetes/topology-aware-kv-transfer.md
-                  - section: Observability
-                    contents:
-                      - page: Metrics
-                        path: kubernetes/observability/metrics.md
-                      - page: Logging
-                        path: kubernetes/observability/logging.md
-                      - page: Operator Metrics
-                        path: kubernetes/observability/operator-metrics.md
-              - section: Scale
-                contents:
-                  - page: Multinode Deployments
-                    path: kubernetes/deployment/multinode-deployment.md
-                  - page: Grove
-                    path: kubernetes/grove.md
-                  - page: Topology Aware Scheduling
-                    path: kubernetes/topology-aware-scheduling.md
-              - section: Advanced Platform
-                contents:
-                  - page: Service Discovery
-                    path: kubernetes/service-discovery.md
-                  - page: Webhooks
-                    path: kubernetes/webhooks.md
-                  - page: Snapshotting GPU Workers
-                    slug: snapshot
-                    path: kubernetes/snapshot.md
-                  - page: Shadow Engine Failover
-                    path: kubernetes/shadow-engine-failover.md
-                  - page: Developing with Tilt
-                    path: kubernetes/tilt-dev-setup.md
-              - section: Cloud Provider Guides
-                contents:
-                  - section: AWS
-                    contents:
-                      - page: EKS Setup
-                        path: kubernetes/cloud-providers/eks/eks.md
-                      - page: EFA (RDMA over AWS Fabric)
-                        path: kubernetes/cloud-providers/eks/efa.md
-                      - page: EFS
-                        path: kubernetes/cloud-providers/eks/efs.md
-                      - page: ECS
-                        path: kubernetes/cloud-providers/ecs/ecs.md
-                  - section: Azure
-                    contents:
-                      - page: AKS Setup
-                        path: kubernetes/cloud-providers/aks/aks.md
-                      - page: RDMA / InfiniBand
-                        path: kubernetes/cloud-providers/aks/rdma-infiniband.md
-                      - page: AKS Storage
-                        path: kubernetes/cloud-providers/aks/storage.md
-                      - page: Azure Lustre CSI Driver
-                        path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
-                      - page: Spot VMs
-                        path: kubernetes/cloud-providers/aks/spot-vms.md
-                  - section: GCP
-                    contents:
-                      - page: GKE Setup
-                        path: kubernetes/cloud-providers/gke/gke.md
-          #TODO: Rewrite docs to be quickstarts -> Currently, the inference engine specific deployment guides point elsewhere for quickstarts. 
-          - section: Local Installation
-            collapsed: true
-            contents:
-              - page: Installation
-                path: getting-started/local-installation.md
-              - page: SGLang Deployments
-                path: backends/sglang/sglang-examples.md
-              - page: TRT-LLM Deployments
-                path: backends/trtllm/trtllm-examples.md
-              - page: vLLM Deployments
-                path: backends/vllm/vllm-examples.md
-              - section: Observability Setup
-                collapsed: true
-                contents:
-                  - page: Overview
-                    path: observability/README.md
-                  - page: Prometheus + Grafana
-                    path: observability/prometheus-grafana.md 
-      - section: Feature Guides
-        contents:
+              - page: Model Deployment Guide
+                path: kubernetes/model-deployment-guide.md
+              - page: DGDR Reference
+                path: kubernetes/dgdr.md
           - page: Set up KV aware routing
             path: components/router/router-guide.md
           - section: Set up Disaggregated Serving
@@ -198,86 +131,36 @@ navigation:
             contents:
               - page: Sizing with AIConfigurator
                 path: features/disaggregated-serving/aiconfigurator.md
-          - section: KV Cache Offloading
-            #TODO: add quickstart pointing to native offloading and then add other integrations
-            collapsed: true
+          - section: Set up KV Cache Offloading
             contents:
-              - page: KVBM
-                path: components/kvbm/kvbm-guide.md
-              - page: LMCache
+              - page: LMCache Integration
                 path: integrations/lmcache-integration.md
-              - page: FlexKV
+              - page: Hicache Integration
+                path: backends/sglang/sglang-hicache.md
+              - page: FlexKV Integration
                 path: integrations/flexkv-integration.md
               - page: Custom KV Events
                 path: integrations/kv-events-custom-engines.md
-          - section: Benchmarking
+          - section: Set up Observability
+            path: observability/README.md
             collapsed: true
             contents:
-              - page: Dynamo Benchmarking
-                path: benchmarks/benchmarking.md
-              - page: Mocker Trace Replay
-                path: benchmarks/mocker-trace-replay.md
-              - page: Planner Replay Benchmarking
-                path: benchmarks/planner-replay-benchmarking.md
-          - section: Inference Simulation (DynoSim)
-            slug: dynosim
-            path: dynosim/README.md
+              - page: Prometheus + Grafana
+                path: observability/prometheus-grafana.md
+              - page: Metrics
+                path: observability/metrics.md
+              - page: Health Checks
+                path: observability/health-checks.md
+              - page: Tracing
+                path: observability/tracing.md
+              - page: Logging
+                path: observability/logging.md 
+          - section: Applications
             contents:
-              - page: Live Simulation with Mocker
-                path: dynosim/mocker.md
-              - page: Simulation Runs
-                path: dynosim/runs.md
-              - page: Simulation Sweeps
-                path: dynosim/sweeps.md
-              - page: Planner Simulation Benchmarking
-                path: dynosim/planner-benchmarking.md
-          - section: Fault Tolerance
-            contents:
-              - page: Overview
-                path: fault-tolerance/README.md
-              - page: Request Migration
-                path: fault-tolerance/request-migration.md
-              - page: Request Cancellation
-                path: fault-tolerance/request-cancellation.md
-              - page: Request Rejection
-                path: fault-tolerance/request-rejection.md
-              - page: Graceful Shutdown
-                path: fault-tolerance/graceful-shutdown.md
-              - page: Testing
-                path: fault-tolerance/testing.md
-          - section: More Feature Guides
-            collapsed: open-by-default
-            contents:
-              - section: Tool Calling & Reasoning
-                slug: parsing
-                path: tool-calling/parsing.md
-                contents:
-                  - page: Tool Call Parsing
-                    path: tool-calling/README.md
-                  - page: Reasoning Parsing
-                    path: reasoning/README.md
-                  - page: Parser Engine Fallback
-                    path: tool-calling/engine-fallback.md
-                  - page: Parser Configuration
-                    path: tool-calling/parser-configuration.md
-                  - page: Tool Calling Probe Snapshot (1.2)
-                    path: tool-calling/release-1.2-probe-snapshot.md
-                  - page: Troubleshooting Tool Calls
-                    path: tool-calling/troubleshooting.md
-              - page: Fastokens Tokenizer
-                path: features/tokenizer/README.md
-              - page: LoRA Adapters
-                path: features/lora/README.md
-      - section: Applications
-        collapsed: open-by-default
-        contents:
-          - link: Agents
-            href: /dynamo/dev/applications/agents
-          - link: Multimodal Serving
-            href: /dynamo/dev/applications/multimodal
-          - link: Reinforcement Learning
-            href: /dynamo/dev/applications/reinforcement-learning
-            
+              - page: Agents
+                path: agents/README.md
+              - page: Multimodal Serving
+                path: features/multimodal/README.md
 
   - tab: recipes
     layout:
@@ -318,6 +201,23 @@ navigation:
 
   - tab: developer-guide
     layout:
+    # ==================== Local Deployment ====================
+      - section: Local Deployment
+        collapsed: true
+        contents:
+          - page: Installation
+            path: getting-started/local-installation.md
+          - page: SGLang Deployments
+            path: backends/sglang/sglang-examples.md
+          - page: TRT-LLM Deployments
+            path: backends/trtllm/trtllm-examples.md
+          # - section: Observability Setup
+          #   collapsed: true
+          #   contents:
+          #     - page: Overview
+          #       path: observability/README.md
+          #     - page: Prometheus + Grafana
+          #       path: observability/prometheus-grafana.md
       # ==================== Knowledge Base ====================
       - section: Knowledge Base
         contents:
@@ -364,32 +264,6 @@ navigation:
                     path: components/router/kv-event-replay-comparison.md
                   - page: Router Design
                     path: design-docs/router-design.md
-              - section: Kubernetes Operator
-                collapsed: true
-                contents:
-                  - section: Kubernetes Operator
-                    collapsed: true
-                    contents:
-                      - page: Dynamo Operator
-                        path: kubernetes/dynamo-operator.md
-                      - page: Service Discovery
-                        path: kubernetes/service-discovery.md
-                      - page: Webhooks
-                        path: kubernetes/webhooks.md
-                      - page: Managing Models (DynamoModel)
-                        path: kubernetes/deployment/dynamomodel-guide.md
-                      - page: Autoscaling
-                        path: kubernetes/autoscaling.md
-                      - page: Rolling Update
-                        path: kubernetes/rolling-update.md
-                      - page: Inference Gateway (GAIE)
-                        path: kubernetes/inference-gateway.md
-                      - page: Snapshot
-                        path: kubernetes/snapshot.md
-                      - page: Shadow Engine Failover
-                        path: kubernetes/shadow-engine-failover.md
-                      - page: Disagg Communication
-                        path: kubernetes/disagg-communication-guide.md
               - section: Planner
                 collapsed: true
                 contents:
@@ -467,6 +341,93 @@ navigation:
                         path: backends/vllm/vllm-kv-offloading.md
                       - page: Observability
                         path: backends/vllm/vllm-observability.md
+          - section: Kubernetes
+            collapsed: true
+            contents:
+              - section: Model Loading
+                collapsed: true
+                contents:
+                  - page: Model Caching
+                    path: kubernetes/model-caching.md
+                  - page: ModelExpress
+                    path: kubernetes/modelexpress.md
+              - section: Kubernetes Operator
+                collapsed: true
+                contents:
+                  - page: Dynamo Operator
+                    path: kubernetes/dynamo-operator.md
+                  - page: Service Discovery
+                    path: kubernetes/service-discovery.md
+                  - page: Webhooks
+                    path: kubernetes/webhooks.md
+                  - page: Managing Models (DynamoModel)
+                    path: kubernetes/deployment/dynamomodel-guide.md
+                  - page: Autoscaling
+                    path: kubernetes/autoscaling.md
+                  - page: Rolling Update
+                    path: kubernetes/rolling-update.md
+                  - page: Inference Gateway (GAIE)
+                    path: kubernetes/inference-gateway.md
+                  - page: Snapshot
+                    path: kubernetes/snapshot.md
+                  - page: Shadow Engine Failover
+                    path: kubernetes/shadow-engine-failover.md
+                  - page: Disagg Communication
+                    path: kubernetes/disagg-communication-guide.md
+              - section: Observability
+                collapsed: true
+                contents:
+                  - page: Metrics
+                    path: kubernetes/observability/metrics.md
+                  - page: Logging
+                    path: kubernetes/observability/logging.md
+                  - page: Operator Metrics
+                    path: kubernetes/observability/operator-metrics.md
+              - section: Multinode
+                collapsed: true
+                contents:
+                  - page: Multinode Deployments
+                    path: kubernetes/deployment/multinode-deployment.md
+                  - page: Grove
+                    path: kubernetes/grove.md
+                  - page: Topology Aware Scheduling
+                    path: kubernetes/topology-aware-scheduling.md
+                  - page: Topology-Aware KV Transfer
+                    path: kubernetes/topology-aware-kv-transfer.md
+                  - page: LWS
+                    path: kubernetes/lws.md
+              - section: Cloud Providers
+                collapsed: true
+                contents:
+                  - section: AWS
+                    collapsed: true
+                    contents:
+                      - page: EKS Setup
+                        path: kubernetes/cloud-providers/eks/eks.md
+                      - page: EFA (RDMA over AWS Fabric)
+                        path: kubernetes/cloud-providers/eks/efa.md
+                      - page: EFS
+                        path: kubernetes/cloud-providers/eks/efs.md
+                      - page: ECS
+                        path: kubernetes/cloud-providers/ecs/ecs.md
+                  - section: Azure
+                    collapsed: true
+                    contents:
+                      - page: AKS Setup
+                        path: kubernetes/cloud-providers/aks/aks.md
+                      - page: RDMA / InfiniBand
+                        path: kubernetes/cloud-providers/aks/rdma-infiniband.md
+                      - page: AKS Storage
+                        path: kubernetes/cloud-providers/aks/storage.md
+                      - page: Azure Lustre CSI Driver
+                        path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
+                      - page: Spot VMs
+                        path: kubernetes/cloud-providers/aks/spot-vms.md
+                  - section: GCP
+                    collapsed: true
+                    contents:
+                      - page: GKE Setup
+                        path: kubernetes/cloud-providers/gke/gke.md
           - section: Design Documents
             collapsed: true
             contents:
@@ -485,8 +446,8 @@ navigation:
                     path: design-docs/request-plane.md
                   - page: Event Plane
                     path: design-docs/event-plane.md
-
-      - section: Applications
+      # ==================== Use Cases ====================
+      - section: Features
         contents:
           # - page: "Overview"
           #   path: features/README.md
@@ -504,21 +465,80 @@ navigation:
                 path: agents/pi-mono.md
               - page: ThunderAgent Program Scheduler
                 path: agents/thunderagent-router.md
-          - section: Multimodal Serving
-            slug: multimodal
-            path: features/multimodal/README.md
+          - section: Tool Calling & Reasoning
+            slug: parsing
+            path: tool-calling/parsing.md
             contents:
+              - page: Tool Call Parsing
+                path: tool-calling/README.md
+              - page: Reasoning Parsing
+                path: reasoning/README.md
+              - page: Parser Engine Fallback
+                path: tool-calling/engine-fallback.md
+              - page: Parser Configuration
+                path: tool-calling/parser-configuration.md
+              - page: Tool Calling Probe Snapshot (1.2)
+                path: tool-calling/release-1.2-probe-snapshot.md
+              - page: Troubleshooting Tool Calls
+                path: tool-calling/troubleshooting.md
+          - page: Fastokens Tokenizer
+            path: features/tokenizer/README.md
+          - page: LoRA Adapters
+            path: features/lora/README.md
+          - section: Fault Tolerance
+            contents:
+              - page: Overview
+                path: fault-tolerance/README.md
+              - page: Request Migration
+                path: fault-tolerance/request-migration.md
+              - page: Request Cancellation
+                path: fault-tolerance/request-cancellation.md
+              - page: Request Rejection
+                path: fault-tolerance/request-rejection.md
+              - page: Graceful Shutdown
+                path: fault-tolerance/graceful-shutdown.md
+              - page: Testing
+                path: fault-tolerance/testing.md
+          - section: Inference Simulation (DynoSim)
+            slug: dynosim
+            path: dynosim/README.md
+            contents:
+              - page: Live Simulation with Mocker
+                path: dynosim/mocker.md
+              - page: Simulation Runs
+                path: dynosim/runs.md
+              - page: Simulation Sweeps
+                path: dynosim/sweeps.md
+              - page: Planner Simulation Benchmarking
+                path: dynosim/planner-benchmarking.md
+          - section: Multimodal
+            contents:
+              - page: Overview
+                path: features/multimodal/README.md
               - page: Embedding Cache
                 path: features/multimodal/embedding-cache.md
-              - page: Multimodal KV Routing
-                path: features/multimodal/multimodal-kv-routing.md
               - page: Encoder Disaggregation
                 path: features/multimodal/encoder-disaggregation.md
-          #TODO: add reinforcement learning page
-          - page: Reinforcement Learning
-            path: features/reinforcement-learning/README.md
+              - page: Multimodal KV Routing
+                path: features/multimodal/multimodal-kv-routing.md
+          - section: Diffusion (Preview)
+            slug: diffusion
+            contents:
+              - page: Overview
+                path: features/diffusion/README.md
+              - page: FastVideo
+                slug: fastvideo
+                path: features/diffusion/fastvideo.md
+              - page: vLLM-Omni
+                path: backends/vllm/vllm-omni.md
+              - page: SGLang Diffusion
+                path: backends/sglang/sglang-diffusion.md
+              - page: TRT-LLM Diffusion
+                path: backends/trtllm/trtllm-diffusion.md
       - section: Advanced Customizations
         contents:
+          - page: Building from Source
+            path: getting-started/building-from-source.md
           - section: Writing Custom Backends
             contents:
               - page: Custom Backend Overview
@@ -531,6 +551,10 @@ navigation:
                 path: development/custom-containers.md
           - page: Metrics Developer Guide
             path: observability/metrics-developer-guide.md
+          - page: Minikube Setup
+            path: kubernetes/deployment/minikube.md
+          - page: Developing with Tilt
+            path: kubernetes/tilt-dev-setup.md
       # # ==================== Integrations ====================
       # - section: Integrations
       #   contents:
@@ -582,31 +606,6 @@ navigation:
                 path: features/speculative-decoding/README.md
               - page: Speculative Decoding with vLLM
                 path: features/speculative-decoding/speculative-decoding-vllm.md
-
-  - tab: blog
-    layout:
-      - section: Blog
-        path: digest/index.mdx
-        slug: digest
-        contents:
-          - page: "NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
-            path: digest/snapshot/dynamo-snapshot-fast-startup.md
-            slug: dynamo-snapshot-fast-startup
-          - page: "DynoSim: Simulating the Pareto Frontier"
-            path: digest/dynosim/dynosim-pareto-frontier.md
-            slug: dynosim-pareto-frontier
-          - page: "Dynamo Day 0 support for TokenSpeed"
-            path: digest/tokenspeed/tokenspeed-day-0.md
-            slug: tokenspeed-day-0
-          - page: "Multi-Turn Agentic Harnesses"
-            path: digest/agentic-inference/agentic-harnesses.md
-            slug: agentic-harnesses
-          - page: "Full-Stack Optimizations for Agentic Inference"
-            path: digest/agentic-inference/agentic-inference.md
-            slug: agentic-inference
-          - page: "Flash Indexer: Inter-Galactic KV Routing"
-            path: digest/flash-indexer/flash-indexer.md
-            slug: flash-indexer
 
   - tab: community
     layout:
