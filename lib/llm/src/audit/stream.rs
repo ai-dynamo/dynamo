@@ -134,8 +134,8 @@ where
                 tracing::warn!("fold aggregation failed: {e}");
                 // Drop tx without sending so the audit future resolves to None.
                 // The client still receives a (best-effort) empty fallback chunk so
-                // the HTTP response shape stays valid; audit just skips the
-                // response record rather than logging an empty placeholder.
+                // the HTTP response shape stays valid; the combined audit record is
+                // emitted with `response = None`.
                 drop(tx);
                 let fallback = NvCreateChatCompletionResponse {
                     inner: dynamo_protocols::types::CreateChatCompletionResponse {
@@ -596,9 +596,8 @@ mod tests {
     async fn test_empty_stream_handling() {
         // Empty stream is treated the same as a client-cancel mid-stream: the
         // aggregator has nothing to apply, tx drops without sending, and the
-        // future resolves to None. The caller (preprocessor) is expected to skip
-        // emitting a response audit record in this case — the request record
-        // (published before stream wiring) stands alone.
+        // future resolves to None. The caller (preprocessor) then emits the
+        // combined audit record with `response = None`.
         let chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = vec![];
 
         let input_stream = stream::iter(chunks);

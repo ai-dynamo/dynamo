@@ -213,7 +213,7 @@ mod tests {
             value["response"]["choices"][0]["message"]["content"],
             "final answer"
         );
-        // No event_type discriminator anymore.
+        // The combined record carries no event_type discriminator.
         assert!(value.get("event_type").is_none());
     }
 
