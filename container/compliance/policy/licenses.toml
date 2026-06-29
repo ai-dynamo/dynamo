@@ -139,6 +139,7 @@ allow = [
   "LicenseRef-Khronos",               # libamdhip64 — Khronos permissive license
   "LicenseRef-Lucent",                # libre2 — Lucent's permissive license
   "LicenseRef-Chromium",              # libpsl — Chromium-derived BSD-3
+  "LicenseRef-Intel-ISSL",            # Intel Simplified Software License — oneCCL binary wheels
   "LicenseRef-gnulib",                # libpsl — gnulib permissive
   "LicenseRef-NRL-2-clause",          # libnorm — NRL BSD-2-clause variant
   "LicenseRef-NRL-3-clause",          # libnorm
@@ -2808,16 +2809,5 @@ name = "sudo"
 allow = ["GPL-2.0-or-later"]
 reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
 
-# --- Temporary python UNKNOWN exceptions for local XPU PR workflow ---
-
-[[exceptions]]
-type = "python"
-name = "oneccl"
-allow = ["UNKNOWN"]
-reason = "Intel oneAPI oneCCL runtime package in XPU images currently reports no machine-readable SPDX license in Python package metadata (no License-Expression and no reliable License/Classifiers), so compliance resolves it as UNKNOWN. This is treated as temporary risk acceptance for local XPU CI while we align with Intel upstream metadata/override mapping; package remains third-party runtime content and not linked into Dynamo source."
-
-[[exceptions]]
-type = "python"
-name = "oneccl-devel"
-allow = ["UNKNOWN"]
-reason = "Intel oneAPI oneCCL development package in XPU images currently reports no machine-readable SPDX license in Python package metadata (no License-Expression and no reliable License/Classifiers), so compliance resolves it as UNKNOWN. This is temporary for local XPU CI while metadata/override remediation is completed; scope is build/runtime tooling payload from base image, not Dynamo-authored code."
+# oneccl / oneccl-devel: license now resolved via license_overrides.yaml
+# (LicenseRef-Intel-ISSL). Temporary UNKNOWN exceptions removed.
