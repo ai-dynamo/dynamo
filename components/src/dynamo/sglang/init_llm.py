@@ -15,6 +15,7 @@ from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
+from dynamo.sglang.benchmark import wait_and_load_benchmark
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
@@ -69,6 +70,12 @@ async def init_decode(
                 "a different IPC path than the relay would subscribe to."
             )
             server_args.enable_forward_pass_metrics = False
+        if getattr(server_args, "benchmark_mode", None) is not None:
+            logging.warning(
+                "SGLang self-benchmark disabled in snapshot mode: the engine was "
+                "created before Dynamo could assign a benchmark output path."
+            )
+            server_args.benchmark_mode = None
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -87,8 +94,11 @@ async def init_decode(
     list_loras_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.list_loras"
     )
+    perf_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.get_perf_metrics"
+    )
 
-    shutdown_endpoints[:] = [generate_endpoint]
+    shutdown_endpoints[:] = [generate_endpoint, perf_endpoint]
 
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
@@ -115,6 +125,9 @@ async def init_decode(
         enable_frontend_decoding=dynamo_args.frontend_decoding,
     )
     handler.register_engine_routes(runtime)
+
+    if getattr(server_args, "benchmark_mode", None) is not None:
+        handler._benchmark_results = await wait_and_load_benchmark(server_args)
 
     if config.serving_mode == DisaggregationMode.DECODE:
         health_check_payload = SglangDisaggHealthCheckPayload(
@@ -158,6 +171,10 @@ async def init_decode(
             ),
             list_loras_endpoint.serve_endpoint(
                 handler.list_loras,
+                metrics_labels=metrics_labels,
+            ),
+            perf_endpoint.serve_endpoint(
+                handler.get_perf_metrics,
                 metrics_labels=metrics_labels,
             ),
             register_model_with_readiness_gate(
@@ -216,6 +233,12 @@ async def init_prefill(
                 "a different IPC path than the relay would subscribe to."
             )
             server_args.enable_forward_pass_metrics = False
+        if getattr(server_args, "benchmark_mode", None) is not None:
+            logging.warning(
+                "SGLang self-benchmark disabled in snapshot mode: the engine was "
+                "created before Dynamo could assign a benchmark output path."
+            )
+            server_args.benchmark_mode = None
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -234,8 +257,11 @@ async def init_prefill(
     list_loras_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.list_loras"
     )
+    perf_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.get_perf_metrics"
+    )
 
-    shutdown_endpoints[:] = [generate_endpoint]
+    shutdown_endpoints[:] = [generate_endpoint, perf_endpoint]
 
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, generate_endpoint
@@ -249,6 +275,10 @@ async def init_prefill(
     if server_args.node_rank >= 1:
         await handle_non_leader_node(engine, publisher, metrics_task)
         return
+
+    benchmark_results = None
+    if getattr(server_args, "benchmark_mode", None) is not None:
+        benchmark_results = await wait_and_load_benchmark(server_args)
 
     try:
         await _warmup_prefill_engine(engine, server_args)
@@ -264,6 +294,7 @@ async def init_prefill(
     handler = PrefillWorkerHandler(
         engine, config, publisher, generate_endpoint, shutdown_event
     )
+    handler._benchmark_results = benchmark_results
     handler.register_engine_routes(runtime)
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
@@ -288,6 +319,10 @@ async def init_prefill(
             ),
             list_loras_endpoint.serve_endpoint(
                 handler.list_loras,
+                metrics_labels=metrics_labels,
+            ),
+            perf_endpoint.serve_endpoint(
+                handler.get_perf_metrics,
                 metrics_labels=metrics_labels,
             ),
             register_model_with_readiness_gate(

@@ -26,6 +26,7 @@ from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
+from dynamo.sglang.benchmark import prepare_benchmark_output_path
 from dynamo.sglang.capacity import kv_metrics_block_values, local_dp_rank_bounds
 
 
@@ -45,7 +46,14 @@ def set_forward_pass_metrics_worker_id(
     import tempfile
 
     server_args.forward_pass_metrics_worker_id = str(generate_endpoint.connection_id())
-    ipc_path = tempfile.NamedTemporaryFile(delete=False).name
+    prepare_benchmark_output_path(
+        server_args, server_args.forward_pass_metrics_worker_id
+    )
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    try:
+        ipc_path = tmp.name
+    finally:
+        tmp.close()
     server_args.forward_pass_metrics_ipc_name = f"ipc://{ipc_path}"
 
 

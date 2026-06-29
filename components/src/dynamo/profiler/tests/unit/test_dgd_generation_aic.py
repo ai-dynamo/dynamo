@@ -17,6 +17,7 @@ try:
         _inject_mocker_aic_args,
         build_aic_interpolation_spec,
         build_aic_perf_model_spec,
+        enable_sglang_benchmark_mode,
         enable_vllm_benchmark_mode,
     )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
@@ -526,3 +527,73 @@ class TestEnableVllmBenchmarkMode:
         assert (
             _benchmark_mode(cfg["spec"]["services"]["VllmPrefillWorker"]) == "prefill"
         )
+
+
+class TestEnableSGLangBenchmarkMode:
+    def test_disagg_sets_prefill_and_decode(self):
+        cfg = {
+            "spec": {
+                "services": {
+                    "Frontend": {},
+                    "prefill": {},
+                    "decode": {},
+                }
+            }
+        }
+        enable_sglang_benchmark_mode(cfg)
+        services = cfg["spec"]["services"]
+        assert _benchmark_mode(services["prefill"]) == "prefill"
+        assert _benchmark_mode(services["decode"]) == "decode"
+        assert "env" not in services["Frontend"].get("extraPodSpec", {}).get(
+            "mainContainer", {}
+        )
+
+    def test_agg_sets_single_decode_worker(self):
+        cfg = {"spec": {"services": {"Frontend": {}, "decode": {}}}}
+        enable_sglang_benchmark_mode(cfg)
+        assert _benchmark_mode(cfg["spec"]["services"]["decode"]) == "agg"
+
+    def test_idempotent_replaces_existing_value(self):
+        cfg = {
+            "spec": {
+                "services": {
+                    "decode": {
+                        "extraPodSpec": {
+                            "mainContainer": {
+                                "env": [
+                                    {"name": "SOMETHING_ELSE", "value": "keep"},
+                                    {"name": "DYN_BENCHMARK_MODE", "value": "wrong"},
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        enable_sglang_benchmark_mode(cfg)
+        env = cfg["spec"]["services"]["decode"]["extraPodSpec"]["mainContainer"]["env"]
+        names = [e["name"] for e in env]
+        assert names.count("DYN_BENCHMARK_MODE") == 1
+        assert _benchmark_mode(cfg["spec"]["services"]["decode"]) == "agg"
+        assert {"name": "SOMETHING_ELSE", "value": "keep"} in env
+
+    def test_preserves_unrelated_service_keys(self):
+        cfg = {
+            "spec": {
+                "services": {
+                    "prefill": {
+                        "extraPodSpec": {
+                            "mainContainer": {
+                                "image": "nvcr.io/foo:1.0",
+                                "args": ["--model-path", "x"],
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        enable_sglang_benchmark_mode(cfg)
+        mc = cfg["spec"]["services"]["prefill"]["extraPodSpec"]["mainContainer"]
+        assert mc["image"] == "nvcr.io/foo:1.0"
+        assert mc["args"] == ["--model-path", "x"]
+        assert _benchmark_mode(cfg["spec"]["services"]["prefill"]) == "prefill"

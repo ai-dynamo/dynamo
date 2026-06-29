@@ -26,6 +26,7 @@ from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.backend_components import (
     MockerComponentName,
+    SGLangComponentName,
     VllmComponentName,
 )
 from dynamo.planner.config.parallelization import (
@@ -83,7 +84,7 @@ def assemble_final_config(
     """Apply Dynamo features to the picked DGD config via composable layers.
 
     1. **Mocker** — swap the base to the mocker DGD template if enabled.
-    2. **vLLM self-benchmark** — when the resolved backend is vLLM, set
+    2. **backend self-benchmark** — when the resolved backend supports it, set
        ``DYN_BENCHMARK_MODE`` on each worker so the ``get_perf_metrics``
        endpoint is populated at runtime. The planner consumes this as
        priority 1 of its bootstrap chain, superseding AIC and files.
@@ -121,11 +122,13 @@ def assemble_final_config(
     else:
         base = dgd_config
 
-    # Step 2: for vLLM deployments, turn on the per-worker self-benchmark so
+    # Step 2: for supported backends, turn on the per-worker self-benchmark so
     # the get_perf_metrics endpoint is available to the planner. Mocker
     # workers don't use DYN_BENCHMARK_MODE, so skip when mocker is active.
     if not mocker and resolved_backend == "vllm":
         enable_vllm_benchmark_mode(base)
+    elif not mocker and resolved_backend == "sglang":
+        enable_sglang_benchmark_mode(base)
 
     # Steps 3-4: layer features, collecting ConfigMaps
     config_maps: list[dict] = []
@@ -169,19 +172,35 @@ def _vllm_worker_roles() -> dict[str, str]:
     }
 
 
-def enable_vllm_benchmark_mode(config_dict: dict) -> None:
-    """Set ``DYN_BENCHMARK_MODE`` on every vLLM worker in *config_dict*.
+def _sglang_worker_roles(config_dict: dict) -> dict[str, str]:
+    """Canonical SGLang DGD service name → DYN_BENCHMARK_MODE role.
 
-    Mutates ``config_dict`` in place. Each recognised worker service
-    (``VllmPrefillWorker`` / ``VllmDecodeWorker`` / ``VllmWorker``) gets the
-    mode matching its role so its startup self-benchmark publishes
-    ForwardPassMetrics via the ``get_perf_metrics`` endpoint.
-
-    Idempotent: if ``DYN_BENCHMARK_MODE`` is already set (e.g. via user
-    overrides) the existing entry is replaced with the role-correct value.
+    SGLang uses short service names. In disaggregated configs, both
+    ``prefill`` and ``decode`` exist; in aggregated configs, ``decode`` is
+    the single worker service, so benchmark it in ``agg`` mode.
     """
     services = config_dict.get("spec", {}).get("services", {})
-    for svc_name, mode in _vllm_worker_roles().items():
+    if not isinstance(services, dict):
+        return {}
+
+    roles: dict[str, str] = {}
+    prefill = SGLangComponentName.prefill_worker_k8s_name
+    decode = SGLangComponentName.decode_worker_k8s_name
+    if prefill in services:
+        roles[prefill] = "prefill"
+    if decode in services:
+        roles[decode] = "decode" if prefill in services else "agg"
+    return roles
+
+
+def _set_benchmark_mode_env(
+    config_dict: dict, worker_roles: dict[str, str], backend_label: str
+) -> None:
+    services = config_dict.get("spec", {}).get("services", {})
+    if not isinstance(services, dict):
+        return
+
+    for svc_name, mode in worker_roles.items():
         svc = services.get(svc_name)
         if svc is None:
             continue
@@ -197,10 +216,35 @@ def enable_vllm_benchmark_mode(config_dict: dict) -> None:
         ]
         env_list.append({"name": "DYN_BENCHMARK_MODE", "value": mode})
         logger.info(
-            "Enabled vLLM self-benchmark on service %s (DYN_BENCHMARK_MODE=%s)",
+            "Enabled %s self-benchmark on service %s (DYN_BENCHMARK_MODE=%s)",
+            backend_label,
             svc_name,
             mode,
         )
+
+
+def enable_vllm_benchmark_mode(config_dict: dict) -> None:
+    """Set ``DYN_BENCHMARK_MODE`` on every vLLM worker in *config_dict*.
+
+    Mutates ``config_dict`` in place. Each recognised worker service
+    (``VllmPrefillWorker`` / ``VllmDecodeWorker`` / ``VllmWorker``) gets the
+    mode matching its role so its startup self-benchmark publishes
+    ForwardPassMetrics via the ``get_perf_metrics`` endpoint.
+
+    Idempotent: if ``DYN_BENCHMARK_MODE`` is already set (e.g. via user
+    overrides) the existing entry is replaced with the role-correct value.
+    """
+    _set_benchmark_mode_env(config_dict, _vllm_worker_roles(), "vLLM")
+
+
+def enable_sglang_benchmark_mode(config_dict: dict) -> None:
+    """Set ``DYN_BENCHMARK_MODE`` on every SGLang worker in *config_dict*.
+
+    Mutates ``config_dict`` in place. Disaggregated configs set ``prefill`` and
+    ``decode`` separately; aggregated configs set the single ``decode`` worker
+    to ``agg``.
+    """
+    _set_benchmark_mode_env(config_dict, _sglang_worker_roles(config_dict), "SGLang")
 
 
 def generate_mocker_config(

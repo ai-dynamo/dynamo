@@ -12,8 +12,13 @@ Order (highest → lowest):
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import msgspec
 import pytest
 
+from dynamo.common.forward_pass_metrics import (
+    ForwardPassMetrics,
+    ScheduledRequestMetrics,
+)
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.planner.config.parallelization import PickedParallelConfig
@@ -251,3 +256,35 @@ class TestEndpointDiscoveryWait:
         )
 
         assert got is False
+
+
+class TestBenchmarkExtraction:
+    def test_prefill_kv_read_point_preserves_fpm_kv_tokens(self):
+        fpm = ForwardPassMetrics(
+            wall_time=0.012,
+            scheduled_requests=ScheduledRequestMetrics(
+                num_prefill_requests=1,
+                sum_prefill_tokens=128,
+                sum_prefill_kv_tokens=512,
+            ),
+        )
+        benchmark_data = {
+            "results": [
+                {
+                    "point": {
+                        "point_type": "prefill",
+                        "isl": 640,
+                        "kv_read_tokens": 512,
+                    },
+                    "fpms": [msgspec.to_builtins(fpm)],
+                }
+            ]
+        }
+
+        fpms = pm._extract_fpms_from_benchmark(
+            benchmark_data, SubComponentType.PREFILL
+        )
+
+        assert len(fpms) == 1
+        assert fpms[0].scheduled_requests.sum_prefill_tokens == 128
+        assert fpms[0].scheduled_requests.sum_prefill_kv_tokens == 512
