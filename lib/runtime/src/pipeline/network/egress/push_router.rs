@@ -2064,6 +2064,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_within_rejects_overloaded_constrained_target() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_direct_within_overload_rejection".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        client.set_overloaded_instances(&[worker_id]);
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+        let allowed = HashSet::from([worker_id]);
+        let error = router
+            .direct_within(SingleIn::new(42), worker_id, Some(&allowed))
+            .await
+            .unwrap_err();
+
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::ResourceExhausted],
+            &[]
+        ));
+        assert!(
+            error.to_string().contains("Selected worker is overloaded"),
+            "expected overload rejection, got: {error}"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
     async fn no_workers_is_reported_as_unavailable() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())

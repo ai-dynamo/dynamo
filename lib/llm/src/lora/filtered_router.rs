@@ -186,9 +186,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .filter_worker_ids_for_lora(Some(lora_name.as_str()), &routable);
 
         // Stage 2: among the replica candidates, prefer free (non-overloaded) workers to match
-        // PushRouter's load-aware selection. Only when every replica candidate is busy do we fall
-        // back to the (busy) replica set itself, rather than degrading to non-replica workers —
-        // so the replica-set constraint is preserved even under saturation.
+        // PushRouter's load-aware selection. When every replica candidate is busy, retain that
+        // constrained set rather than degrade to non-replica workers. `direct_within` then rejects
+        // the selected overloaded worker with `ResourceExhausted`; LoRA routing never bypasses
+        // the allocation just to avoid an overload response.
         let free: std::collections::HashSet<u64> =
             self.inner.client.instance_ids_free().into_iter().collect();
         let free_replica_candidates: Vec<u64> = replica_candidates
