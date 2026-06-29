@@ -178,13 +178,14 @@ benchmarks with AIPerf. Takes 2–4 hours.
 
 **Use thorough when:**
 - Tuning for production and you need the most optimal configuration
-- Your DGDR-recognized hardware does not have rapid AIC data
 - You want measured rather than simulated performance data
 
 **Constraints:**
 - **Disaggregated mode only** — thorough does not run aggregated configurations.
 - **`backend: auto` is not supported** — you must specify `vllm`, `sglang`, or
   `trtllm`. The DGDR will be rejected if you use `auto` with `thorough`.
+- **Still requires AIC generator support** — thorough measures candidates on
+  real GPUs, but uses AIC to enumerate candidates and generate the final DGD.
 - **Requires GPU resources** — the profiler deploys real inference engines on
   your cluster during profiling.
 
@@ -192,11 +193,11 @@ benchmarks with AIPerf. Takes 2–4 hours.
 
 The rapid strategy relies on AIC system metadata and performance models. Check
 the [AIC support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
-for the latest support. AIC currently supports:
+for the latest support.
 
 ### GPU SKUs
 
-| Supported (rapid) | Not Yet Supported (use thorough) |
+| Supported (rapid) | No rapid performance data |
 |---|---|
 | H100 SXM | V100 (SXM/PCIe) |
 | H100 PCIe | T4 |
@@ -211,8 +212,8 @@ for the latest support. AIC currently supports:
 
 > [!NOTE]
 > Some rapid-mode SKUs use AIC estimate-only data until measured profiles are
-> available. Use `searchStrategy: thorough` when you need hardware-measured
-> profiling for an estimate-only or unsupported SKU.
+> available. Use `searchStrategy: thorough` for measured profiling only when
+> DGDR accepts the SKU and AIC can enumerate it.
 
 When specifying GPU SKUs manually, use lowercase underscore format (e.g.,
 `h100_sxm`, not `H100-SXM5-80GB`). See the
