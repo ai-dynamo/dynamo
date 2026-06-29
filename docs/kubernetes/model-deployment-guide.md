@@ -160,9 +160,9 @@ GPU resources consumed during profiling.
 
 **Limitations:**
 - Fallback to a naive memory-fit config only applies after DGDR accepts
-  `hardware.gpuSku` and AIC has base system metadata for that GPU SKU. Unknown
-  or metadata-missing GPU SKUs fail before fallback; unsupported
-  model/GPU/backend combinations can fall back but may be suboptimal.
+  `hardware.gpuSku`. Fallback sizing depends on AIC system metadata and does
+  not add support for additional GPU SKUs; unsupported model/GPU/backend
+  combinations can fall back but may be suboptimal.
 - Simulated results may differ from real-hardware performance for unusual
   configurations.
 

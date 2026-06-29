@@ -88,8 +88,8 @@ searchStrategy: rapid
 
 - Supports all backends: vLLM, SGLang, TensorRT-LLM
 - Falls back to a naive config (memory-fit TP calculation) only after DGDR
-  accepts the GPU SKU and AIC has base system metadata for it; unknown or
-  metadata-missing SKUs fail before fallback.
+  accepts the GPU SKU. Fallback sizing depends on AIC system metadata and does
+  not add support for additional GPU SKUs.
 - No GPU resources consumed during profiling
 
 ### Thorough
