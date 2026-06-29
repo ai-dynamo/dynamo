@@ -152,49 +152,6 @@ pub fn validate_no_unsupported_fields(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use serde_json::json;
-
-    use super::*;
-
-    fn unknown_fields() -> HashMap<String, serde_json::Value> {
-        HashMap::from([("experimental_field".to_string(), json!("value"))])
-    }
-
-    #[test]
-    fn validate_no_unsupported_fields_rejects_unknown_fields_by_default() {
-        temp_env::with_var_unset(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS, || {
-            let err = validate_no_unsupported_fields(&unknown_fields()).unwrap_err();
-            assert!(err.to_string().contains("Unsupported parameter(s)"));
-        });
-    }
-
-    #[test]
-    fn validate_no_unsupported_fields_ignores_unknown_fields_when_configured() {
-        for value in ["1", "true", "TRUE", "on", "yes"] {
-            temp_env::with_var(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS, Some(value), || {
-                validate_no_unsupported_fields(&unknown_fields()).unwrap();
-            });
-        }
-    }
-
-    #[test]
-    fn validate_no_unsupported_fields_still_validates_passthrough_fields_when_ignoring_unknowns() {
-        temp_env::with_var(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS, Some("1"), || {
-            let unsupported_fields = HashMap::from([
-                ("experimental_field".to_string(), json!("value")),
-                ("stop_token_ids".to_string(), json!("bad")),
-            ]);
-
-            let err = validate_no_unsupported_fields(&unsupported_fields).unwrap_err();
-            assert!(err.to_string().contains("stop_token_ids"));
-        });
-    }
-}
-
 /// Validates response_format for chat completions.
 ///
 /// Dynamo currently supports translating:
@@ -803,4 +760,47 @@ where
         anyhow::bail!("Value {} is out of range [{}, {}]", value, range.0, range.1);
     }
     Ok(Some(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn unknown_fields() -> HashMap<String, serde_json::Value> {
+        HashMap::from([("experimental_field".to_string(), json!("value"))])
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_unknown_fields_by_default() {
+        temp_env::with_var_unset(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS, || {
+            let err = validate_no_unsupported_fields(&unknown_fields()).unwrap_err();
+            assert!(err.to_string().contains("Unsupported parameter(s)"));
+        });
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_ignores_unknown_fields_when_configured() {
+        for value in ["1", "true", "TRUE", "on", "yes"] {
+            temp_env::with_var(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS, Some(value), || {
+                validate_no_unsupported_fields(&unknown_fields()).unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_still_validates_passthrough_fields_when_ignoring_unknowns() {
+        temp_env::with_var(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS, Some("1"), || {
+            let unsupported_fields = HashMap::from([
+                ("experimental_field".to_string(), json!("value")),
+                ("stop_token_ids".to_string(), json!("bad")),
+            ]);
+
+            let err = validate_no_unsupported_fields(&unsupported_fields).unwrap_err();
+            assert!(err.to_string().contains("stop_token_ids"));
+        });
+    }
 }
