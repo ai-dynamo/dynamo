@@ -25,6 +25,10 @@ use std::{
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
+use crate::protocols::{
+    common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation},
+    openai::chat_completions::NvCreateChatCompletionStreamResponse,
+};
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
 use dynamo_runtime::error::ErrorType as DynamoErrorType;
@@ -503,11 +507,16 @@ impl Metrics {
     /// Metrics are never removed to preserve historical data. Runtime config and MDC
     /// metrics are updated when models are discovered and their configurations are available.
     pub fn new() -> Self {
+        Self::new_with_prefix(std::env::var(env_metrics::DYN_METRICS_PREFIX).ok())
+    }
+
+    /// Create Metrics with an explicit optional prefix. `None` uses the standard
+    /// frontend prefix and does not read environment variables.
+    pub fn new_with_prefix(metrics_prefix: Option<String>) -> Self {
         // TODO: Remove DYN_METRICS_PREFIX env-var override (added in PR #2432 for
         // NIM compatibility with the old "nv_llm_http_service_" prefix). No longer
         // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
-        let raw_prefix = std::env::var(env_metrics::DYN_METRICS_PREFIX)
-            .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
+        let raw_prefix = metrics_prefix.unwrap_or_else(|| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
         if prefix != raw_prefix {
             tracing::warn!(
@@ -1633,35 +1642,28 @@ pub fn process_response_and_observe_metrics<T>(
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
 ) {
-    use crate::preprocessor::LLMMetricAnnotation;
-
-    // update metrics
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-        response_collector.observe_cached_tokens(metrics.cached_tokens);
-        response_collector.observe_tokenize_latencies(
-            metrics.tokenize_latency,
-            metrics.detokenize_total_latency,
-            metrics.detokenize_count,
-        );
-        response_collector.set_worker_info(
-            metrics.prefill_worker_id,
-            metrics.prefill_dp_rank,
-            metrics.prefill_worker_type,
-            metrics.decode_worker_id,
-            metrics.decode_dp_rank,
-            metrics.decode_worker_type,
-        );
+        observe_llm_metrics(&metrics, response_collector, http_queue_guard);
+    }
+}
 
-        // Drop http_queue_guard on first token for non-streaming (same as streaming)
-        if response_collector.is_first_token()
-            && metrics.chunk_tokens > 0
-            && let Some(guard) = http_queue_guard.take()
-        {
-            drop(guard);
-        }
-
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+/// Process streaming metrics for chat-derived responses.
+///
+/// The typed metrics field is the hot path. Annotation parsing remains as a compatibility
+/// fallback for legacy/generated annotation frames.
+pub fn process_chat_response_and_observe_metrics(
+    annotated: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) {
+    if let Some(metrics) = annotated
+        .data
+        .as_ref()
+        .and_then(|data| data.llm_metrics.as_ref())
+    {
+        observe_llm_metrics(metrics, response_collector, http_queue_guard);
+    } else {
+        process_response_and_observe_metrics(annotated, response_collector, http_queue_guard);
     }
 }
 
@@ -1681,57 +1683,53 @@ fn sse_json_data<T: Serialize>(event: Event, data: &T) -> Result<Event, axum::Er
     Ok(event.data(json))
 }
 
-/// Process streaming response with event conversion for SSE
-///
-/// This function handles metrics collection, http_queue_guard management, and converts
-/// annotated responses to SSE events for streaming responses.
-///
-/// Returns None for metrics annotation events (events without SSE data payload).
-pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
-    annotated: EventConverter<T>,
+fn observe_llm_metrics(
+    metrics: &LLMMetricAnnotation,
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
-) -> Result<Option<Event>, axum::Error> {
-    use crate::preprocessor::LLMMetricAnnotation;
+) {
+    response_collector.observe_current_osl(metrics.output_tokens);
+    response_collector.observe_cached_tokens(metrics.cached_tokens);
+    response_collector.observe_tokenize_latencies(
+        metrics.tokenize_latency,
+        metrics.detokenize_total_latency,
+        metrics.detokenize_count,
+    );
+    response_collector.set_worker_info(
+        metrics.prefill_worker_id,
+        metrics.prefill_dp_rank,
+        metrics.prefill_worker_type.clone(),
+        metrics.decode_worker_id,
+        metrics.decode_dp_rank,
+        metrics.decode_worker_type.clone(),
+    );
 
-    let mut annotated = annotated.0;
-
-    // update metrics
-    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
-        response_collector.observe_current_osl(metrics.output_tokens);
-        response_collector.observe_cached_tokens(metrics.cached_tokens);
-        response_collector.observe_tokenize_latencies(
-            metrics.tokenize_latency,
-            metrics.detokenize_total_latency,
-            metrics.detokenize_count,
-        );
-        response_collector.set_worker_info(
-            metrics.prefill_worker_id,
-            metrics.prefill_dp_rank,
-            metrics.prefill_worker_type,
-            metrics.decode_worker_id,
-            metrics.decode_dp_rank,
-            metrics.decode_worker_type,
-        );
-
-        // Drop http_queue_guard on first token for streaming
-        if response_collector.is_first_token()
-            && metrics.chunk_tokens > 0
-            && let Some(guard) = http_queue_guard.take()
-        {
-            drop(guard);
-        }
-
-        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
-
-        // Chomp the LLMMetricAnnotation so it's not returned in the response stream
-        // TODO: add a flag to control what is returned in the SSE stream
-        if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_LLM_METRICS) {
-            annotated.event = None;
-            annotated.comment = None;
-        }
+    if response_collector.is_first_token()
+        && metrics.chunk_tokens > 0
+        && let Some(guard) = http_queue_guard.take()
+    {
+        drop(guard);
     }
 
+    response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+}
+
+fn observe_annotation_metrics<T>(
+    annotated: &crate::types::Annotated<T>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) -> bool {
+    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
+        observe_llm_metrics(&metrics, response_collector, http_queue_guard);
+        true
+    } else {
+        false
+    }
+}
+
+fn annotated_to_sse_event<T: Serialize>(
+    annotated: crate::types::Annotated<T>,
+) -> Result<Option<Event>, axum::Error> {
     let mut event = Event::default();
 
     if let Some(ref data) = annotated.data {
@@ -1772,6 +1770,60 @@ pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
     } else {
         Ok(Some(event))
     }
+}
+
+/// Process streaming response with event conversion for SSE
+///
+/// This function handles metrics collection, http_queue_guard management, and converts
+/// annotated responses to SSE events for streaming responses.
+///
+/// Returns None for metrics annotation events (events without SSE data payload).
+pub fn process_response_using_event_converter_and_observe_metrics<T: Serialize>(
+    annotated: EventConverter<T>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) -> Result<Option<Event>, axum::Error> {
+    let mut annotated = annotated.0;
+
+    if observe_annotation_metrics(&annotated, response_collector, http_queue_guard) {
+        // Preserve the previous SSE behavior: observe legacy metrics annotation
+        // frames internally, then strip them before building the outbound event.
+        if annotated.event.as_deref() == Some(ANNOTATION_LLM_METRICS) {
+            annotated.event = None;
+            annotated.comment = None;
+        }
+    }
+
+    annotated_to_sse_event(annotated)
+}
+
+/// Process chat-derived streaming responses with typed metrics before SSE conversion.
+///
+/// If the typed field is absent, this falls back to the same legacy annotation
+/// frame parsing and stripping behavior as `process_response_using_event_converter_and_observe_metrics`.
+pub fn process_chat_response_using_event_converter_and_observe_metrics(
+    annotated: EventConverter<NvCreateChatCompletionStreamResponse>,
+    response_collector: &mut ResponseMetricCollector,
+    http_queue_guard: &mut Option<HttpQueueGuard>,
+) -> Result<Option<Event>, axum::Error> {
+    let mut annotated = annotated.0;
+
+    if let Some(metrics) = annotated
+        .data
+        .as_ref()
+        .and_then(|data| data.llm_metrics.as_ref())
+    {
+        observe_llm_metrics(metrics, response_collector, http_queue_guard);
+    } else if observe_annotation_metrics(&annotated, response_collector, http_queue_guard)
+        && annotated.event.as_deref() == Some(ANNOTATION_LLM_METRICS)
+    {
+        // Legacy compatibility path: annotation frames were never emitted as
+        // client-visible SSE payloads after metrics collection.
+        annotated.event = None;
+        annotated.comment = None;
+    }
+
+    annotated_to_sse_event(annotated)
 }
 
 /// Create a new router with optional DRT metrics integration.
@@ -2401,6 +2453,117 @@ mod tests {
     }
 
     #[test]
+    fn test_chat_typed_metrics_fast_path_observes_without_annotation() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
+        let mut collector = metrics.clone().create_response_collector(model);
+        let mut annotated = make_chat_stream_annotated("hello");
+        annotated.data.as_mut().unwrap().llm_metrics = Some(LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 20,
+            chunk_tokens: 5,
+            cached_tokens: Some(15),
+            prefill_worker_id: Some(11),
+            prefill_dp_rank: Some(1),
+            prefill_worker_type: Some(WORKER_TYPE_PREFILL.to_string()),
+            decode_worker_id: Some(22),
+            decode_dp_rank: Some(2),
+            decode_worker_type: Some(WORKER_TYPE_DECODE.to_string()),
+            tokenize_latency: Some(Duration::from_millis(8)),
+            detokenize_total_latency: Some(Duration::from_micros(100)),
+            detokenize_count: Some(2),
+        });
+
+        assert!(annotated.event.is_none());
+        assert!(annotated.comment.is_none());
+
+        let mut http_queue_guard = Some(metrics.clone().create_http_queue_guard(model));
+        let result = process_chat_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(annotated),
+            &mut collector,
+            &mut http_queue_guard,
+        );
+
+        assert!(
+            http_queue_guard.is_none(),
+            "first positive chunk should release HTTP queue guard"
+        );
+        let event = result
+            .unwrap()
+            .expect("typed metrics data chunk should still produce an SSE event");
+        let json = extract_sse_data_json(event);
+        assert!(
+            json.get("llm_metrics").is_none(),
+            "typed metrics must be skipped on the SSE wire"
+        );
+
+        drop(collector);
+
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_tokenizer_metric_name)
+            .expect("histogram should be registered");
+        let tokenize_metric = histogram_family
+            .get_metric()
+            .iter()
+            .find(|m| m.get_label().iter().any(|l| l.value() == "tokenize"))
+            .expect("tokenize metric should exist");
+        assert_eq!(tokenize_metric.get_histogram().get_sample_count(), 1);
+        assert!(
+            (tokenize_metric.get_histogram().get_sample_sum() - 8.0).abs() < 0.001,
+            "tokenize latency should be 8.0ms"
+        );
+    }
+
+    #[test]
+    fn test_chat_stream_typed_metrics_are_skipped_in_json() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+
+        let without_metrics = make_chat_stream_annotated("hello").data.unwrap();
+        let mut with_metrics = without_metrics.clone();
+        with_metrics.llm_metrics = Some(LLMMetricAnnotation {
+            input_tokens: 1,
+            output_tokens: 2,
+            chunk_tokens: 1,
+            cached_tokens: Some(1),
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: None,
+            detokenize_total_latency: None,
+            detokenize_count: None,
+        });
+
+        let without_json = serde_json::to_value(&without_metrics).unwrap();
+        let with_json = serde_json::to_value(&with_metrics).unwrap();
+
+        assert_eq!(with_json, without_json);
+        assert!(with_json.get("llm_metrics").is_none());
+    }
+
+    #[test]
     fn test_non_streaming_path_observes_cached_tokens() {
         use crate::preprocessor::LLMMetricAnnotation;
         use crate::types::Annotated;
@@ -2872,7 +3035,7 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
         let mut http_queue_guard: Option<HttpQueueGuard> = None;
-        process_response_using_event_converter_and_observe_metrics(
+        process_chat_response_using_event_converter_and_observe_metrics(
             EventConverter::from(annotated),
             &mut collector,
             &mut http_queue_guard,
@@ -2919,6 +3082,7 @@ mod tests {
                         service_tier: None,
                     },
                     nvext: None,
+                    llm_metrics: None,
                 },
             ),
             event: None,

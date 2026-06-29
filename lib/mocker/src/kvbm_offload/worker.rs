@@ -16,6 +16,8 @@
 //! Remote NIXL and cross-instance methods return `bail!` / all-Err futures.
 
 use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -31,10 +33,11 @@ use kvbm_engine::worker::{
 use kvbm_engine::{BlockId, InstanceId, SequenceHash};
 use kvbm_physical::manager::{LayoutHandle, SerializedLayout};
 use kvbm_physical::transfer::{PhysicalLayout, TransferCompleteNotification, TransferOptions};
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use velo::{Event, EventManager};
 
 use super::bandwidth_sharing_model::{BandwidthSharingModel, TransferId};
+use super::coordinator::SwapInStatus;
 use super::shared_g3::SharedG3Pool;
 use super::shared_g4::SharedG4Store;
 
@@ -112,12 +115,19 @@ pub(crate) struct TransferState {
     /// issued. When the model drains an id on `advance_to`, we
     /// `remove` the `Event` from this map and `trigger()` it.
     awaiters: HashMap<TransferId, PipelineAwaiter>,
-    /// Completion flags for swap-in reservations. Polled synchronously
-    /// by the scheduler via `SwapInHandle::is_complete()` — kept
+    /// Terminal status publishers for swap-in reservations — kept
     /// separate from `awaiters` because swap-in does not feed a velo
     /// notification back into a kvbm-engine pipeline; the scheduler
     /// owns lifecycle directly.
-    swap_in_flags: HashMap<TransferId, Arc<std::sync::atomic::AtomicBool>>,
+    swap_in_status: HashMap<TransferId, watch::Sender<SwapInStatus>>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum WorkerFault {
+    ExecutorError,
+    ExecutorPanic,
+    ChannelClosure,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -170,6 +180,12 @@ pub(crate) struct SharedDrainCounts {
     pub(crate) offload_registration_baseline: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DeferredOwnerDrain {
+    pub(crate) counts: SharedDrainCounts,
+    pub(crate) deadline_ms: f64,
+}
+
 impl SharedDrainCounts {
     pub(crate) fn add_record(&mut self, record: SharedDrainCounts) {
         self.counts.add_counts(record.counts);
@@ -208,7 +224,7 @@ pub(crate) struct CompletedTransfer {
 impl TransferState {
     pub(crate) fn new(offload_gbps: f64, onboard_gbps: f64) -> Self {
         // One shared `TransferId` counter across both models so ids
-        // are globally unique. `awaiters` and `swap_in_flags` below are
+        // are globally unique. `awaiters` and `swap_in_status` below are
         // single maps keyed by TransferId; per-model counters would
         // hand out overlapping ids and cause completion signals to
         // cross-fire between unrelated transfers.
@@ -217,7 +233,7 @@ impl TransferState {
             offload_bw: BandwidthSharingModel::new(offload_gbps, id_counter.clone()),
             onboard_bw: BandwidthSharingModel::new(onboard_gbps, id_counter),
             awaiters: HashMap::new(),
-            swap_in_flags: HashMap::new(),
+            swap_in_status: HashMap::new(),
         }
     }
 
@@ -231,6 +247,10 @@ impl TransferState {
 
     pub(crate) fn earliest_offload_finish(&self) -> Option<f64> {
         self.offload_bw.earliest_finish()
+    }
+
+    pub(crate) fn earliest_offload_finish_with_id(&self) -> Option<(TransferId, f64)> {
+        self.offload_bw.earliest_finish_with_id()
     }
 
     pub(crate) fn earliest_onboard_finish(&self) -> Option<f64> {
@@ -300,8 +320,9 @@ impl TransferState {
                 let _ = awaiter.event.trigger();
                 awaiter_fired += 1;
             }
-            if let Some(flag) = self.swap_in_flags.remove(&id) {
-                flag.store(true, Ordering::Release);
+            if let Some(status) = self.swap_in_status.remove(&id) {
+                let block_count = status.borrow().block_count;
+                status.send_replace(SwapInStatus::completed(block_count));
                 swap_in_flipped += 1;
             }
         }
@@ -357,16 +378,17 @@ pub struct MockWorker {
     /// `reserve_transfer`. Offline replay uses this as a concrete barrier:
     /// enqueue should not let virtual time jump until the worker has
     /// actually reserved the simulated bandwidth slot.
-    reservation_count: AtomicU64,
-    /// Wakes offline barriers waiting for the kvbm-engine pipeline to
-    /// reserve simulated bandwidth after an enqueue.
-    reservation_notify: Arc<Notify>,
+    reservation_count_tx: watch::Sender<u64>,
     /// Bytes per block — used to derive transfer size from block-id counts.
     block_bytes: usize,
     g1_handle: Option<LayoutHandle>,
     g2_handle: Option<LayoutHandle>,
     shared_g3: Option<Arc<SharedG3Pool>>,
     shared_g4: Option<Arc<SharedG4Store>>,
+    #[cfg(test)]
+    fault_script: Mutex<VecDeque<WorkerFault>>,
+    #[cfg(test)]
+    injected_staging_failure: Mutex<Option<Arc<str>>>,
 }
 
 impl MockWorker {
@@ -391,14 +413,41 @@ impl MockWorker {
             now_us: Arc::new(AtomicU64::new(0)),
             state: Arc::new(Mutex::new(TransferState::new(offload_gbps, onboard_gbps))),
             event_manager: EventManager::local(),
-            reservation_count: AtomicU64::new(0),
-            reservation_notify: Arc::new(Notify::new()),
+            reservation_count_tx: watch::channel(0).0,
             block_bytes,
             g1_handle,
             g2_handle,
             shared_g3,
             shared_g4,
+            #[cfg(test)]
+            fault_script: Mutex::new(VecDeque::new()),
+            #[cfg(test)]
+            injected_staging_failure: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_fault(&self, fault: WorkerFault) {
+        self.fault_script
+            .lock()
+            .expect("worker fault script mutex poisoned")
+            .push_back(fault);
+    }
+
+    #[cfg(test)]
+    fn take_fault(&self) -> Option<WorkerFault> {
+        self.fault_script
+            .lock()
+            .expect("worker fault script mutex poisoned")
+            .pop_front()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_injected_staging_failure(&self) -> Option<Arc<str>> {
+        self.injected_staging_failure
+            .lock()
+            .expect("injected staging failure mutex poisoned")
+            .take()
     }
 
     /// Update the worker's notion of current simulation time. Engine calls
@@ -414,17 +463,17 @@ impl MockWorker {
     }
 
     pub fn reservation_count(&self) -> u64 {
-        self.reservation_count.load(Ordering::Acquire)
+        *self.reservation_count_tx.borrow()
     }
 
-    pub(crate) fn reservation_notifier(&self) -> Arc<Notify> {
-        self.reservation_notify.clone()
+    pub(crate) fn subscribe_reservation_count(&self) -> watch::Receiver<u64> {
+        self.reservation_count_tx.subscribe()
     }
 
     /// Advance both models to `now_ms` under PS and notify any
     /// completion sinks registered for drained `TransferId`s: `velo::Event`
-    /// awaiters (for kvbm-engine pipeline transfers) and `AtomicBool`
-    /// flags (for swap-in reservations polled by the scheduler). Called
+    /// awaiters (for kvbm-engine pipeline transfers) and watch statuses
+    /// (for swap-in reservations polled by the scheduler). Called
     /// from `MockOffloadEngine::tick` and implicitly before every new
     /// reservation — both uses need the model's active set to
     /// reflect completed transfers at the queried time.
@@ -453,14 +502,14 @@ impl MockWorker {
         }
     }
 
-    /// Reserve an onboard (G2→G1) transfer whose completion is observed
-    /// via `complete` — `MockOffloadEngine::tick` (or any drain path)
-    /// flips this bool when the PS model drains the reservation.
-    pub fn reserve_swap_in(
+    /// Reserve an onboard (G2→G1) transfer whose completion is published
+    /// through `status` when `MockOffloadEngine::tick` (or any drain path)
+    /// drains the reservation from the PS model.
+    pub(crate) fn reserve_swap_in(
         &self,
         now_ms: f64,
         num_blocks: usize,
-        complete: Arc<std::sync::atomic::AtomicBool>,
+        status: watch::Sender<SwapInStatus>,
     ) -> TransferId {
         let bytes = num_blocks.saturating_mul(self.block_bytes);
         let mut state = self.state.lock().expect("TransferState mutex poisoned");
@@ -477,7 +526,7 @@ impl MockWorker {
             next_deadline_ms = ?next_deadline_ms,
             "kvbm-offload: reserve mock swap-in transfer"
         );
-        state.swap_in_flags.insert(id, complete);
+        state.swap_in_status.insert(id, status);
         id
     }
 
@@ -487,16 +536,31 @@ impl MockWorker {
         let state = self.state.lock().expect("TransferState mutex poisoned");
         let local = state.earliest_finish();
         drop(state);
+        let pending_g3_deadline = self
+            .shared_g3
+            .as_ref()
+            .and_then(|g3| g3.pending_owner_deadline(self.owner_id));
+        let pending_g4_deadline = self
+            .shared_g4
+            .as_ref()
+            .and_then(|g4| g4.pending_owner_deadline(self.owner_id));
         local
             .into_iter()
             .chain(self.shared_g3.as_ref().and_then(|g3| g3.earliest_finish()))
             .chain(self.shared_g4.as_ref().and_then(|g4| g4.earliest_finish()))
+            .chain(pending_g3_deadline)
+            .chain(pending_g4_deadline)
             .reduce(f64::min)
     }
 
-    pub(crate) fn earliest_local_offload_finish(&self) -> Option<f64> {
+    pub(crate) fn earliest_local_offload_finish_with_id(&self) -> Option<(TransferId, f64)> {
         let state = self.state.lock().expect("TransferState mutex poisoned");
-        state.earliest_offload_finish()
+        state.earliest_offload_finish_with_id()
+    }
+
+    pub(crate) fn local_offload_active_count(&self) -> usize {
+        let state = self.state.lock().expect("TransferState mutex poisoned");
+        state.offload_bw.active_count()
     }
 
     pub(crate) fn earliest_shared_g3_offload_finish(&self) -> Option<f64> {
@@ -595,8 +659,9 @@ impl MockWorker {
             next_deadline_ms = ?next_deadline_ms,
             "kvbm-offload: reserve mock transfer"
         );
-        self.reservation_count.fetch_add(1, Ordering::AcqRel);
-        self.reservation_notify.notify_waiters();
+        self.reservation_count_tx.send_modify(|count| {
+            *count = count.checked_add(1).expect("reservation count overflow");
+        });
 
         // Allocate a velo event + awaiter. Store the `Event` so we can
         // `trigger()` it later (triggering consumes `self`).
@@ -632,6 +697,28 @@ impl WorkerTransfers for MockWorker {
         _options: TransferOptions,
     ) -> Result<TransferCompleteNotification> {
         let direction = TransferDirection::try_from((src, dst))?;
+        #[cfg(test)]
+        match self.take_fault() {
+            Some(WorkerFault::ExecutorError) => {
+                bail!("injected mock transfer executor error")
+            }
+            Some(WorkerFault::ExecutorPanic) => {
+                panic!("injected mock transfer executor panic")
+            }
+            Some(WorkerFault::ChannelClosure) => {
+                if direction == TransferDirection::G3ToG2 {
+                    self.injected_staging_failure
+                        .lock()
+                        .expect("injected staging failure mutex poisoned")
+                        .replace(Arc::from("injected lower-tier staging channel closure"));
+                }
+                let event = self.event_manager.new_event()?;
+                let awaiter = event.awaiter()?;
+                let _ = event.poison("injected mock transfer notification failure");
+                return Ok(TransferCompleteNotification::from_awaiter(awaiter));
+            }
+            None => {}
+        }
         let now_ms = self.now_ms();
         self.reserve_transfer(direction, now_ms, src_block_ids.len())
     }
@@ -870,6 +957,7 @@ impl ObjectBlockOps for MockWorker {
 #[cfg(test)]
 mod tests {
     use super::super::config::KvbmOffloadConfig;
+    use super::super::coordinator::SwapInTerminal;
     use super::super::shared_g3::shared_g3_test_guard;
     use super::super::shared_g4::{SharedG4Store, shared_g4_test_guard};
     use super::*;
@@ -894,6 +982,18 @@ mod tests {
             MockWorker::new(1_000_000, 1.0, 1.0, None, None, shared_g3.clone(), None),
             MockWorker::new(1_000_000, 1.0, 1.0, None, None, shared_g3, None),
         )
+    }
+
+    fn reserve_shared_g3(worker: &MockWorker, blocks: usize) {
+        let shared_g3 = worker
+            .shared_g3
+            .as_ref()
+            .expect("test worker should have shared G3");
+        assert!(
+            shared_g3
+                .capacity_reservations()
+                .try_reserve(shared_g3.manager().available_blocks(), blocks)
+        );
     }
 
     fn shared_g4_worker() -> (MockWorker, Arc<SharedG4Store>) {
@@ -1051,6 +1151,7 @@ mod tests {
         let _guard = shared_g3_test_guard().await;
         let (worker_a, worker_b) = shared_g3_two_workers();
         let ids = || -> Arc<[BlockId]> { Arc::from(vec![0usize]) };
+        reserve_shared_g3(&worker_a, 2);
 
         worker_a.set_now_ms(0.0);
         worker_b.set_now_ms(0.0);
@@ -1097,6 +1198,7 @@ mod tests {
         let _guard = shared_g3_test_guard().await;
         let (worker_a, worker_b) = shared_g3_two_workers();
         let ids = || -> Arc<[BlockId]> { Arc::from(vec![0usize]) };
+        reserve_shared_g3(&worker_a, 2);
 
         worker_a.set_now_ms(0.0);
         let a = worker_a
@@ -1137,6 +1239,7 @@ mod tests {
         let _guard = shared_g3_test_guard().await;
         let (worker_a, worker_b) = shared_g3_two_workers();
         let ids = || -> Arc<[BlockId]> { Arc::from(vec![0usize]) };
+        reserve_shared_g3(&worker_b, 1);
 
         worker_a.set_now_ms(0.0);
         let a = worker_a
@@ -1244,7 +1347,7 @@ mod tests {
     #[tokio::test]
     async fn mock_worker_offload_and_swap_in_share_id_keyspace() {
         // Invariant: pipeline transfers (`awaiters`) and G2→G1 swap-ins
-        // (`swap_in_flags`) live in two HashMaps but share one TransferId
+        // (`swap_in_status`) live in two HashMaps but share one TransferId
         // keyspace, because `TransferState::drain_completions` looks up every
         // drained id in both maps. `TransferState::new` enforces this by handing the
         // same Arc<AtomicU64> counter to `offload_bw` and `onboard_bw`.
@@ -1252,15 +1355,15 @@ mod tests {
         // If a future refactor gives each BandwidthSharingModel its own
         // counter, both would start at 0 and the first offload + first
         // swap-in would alias on id=0 — causing a completing offload to
-        // falsely flip the swap-in flag (and vice versa). This test pins
+        // falsely complete the swap-in status (and vice versa). This test pins
         // that invariant: ids drawn across the two models must be disjoint.
-        use std::sync::atomic::AtomicBool;
         let worker = make_worker();
         worker.set_now_ms(0.0);
 
         // Reserve one swap-in (onboard model) and one offload (offload model)
         // at the same virtual time, so both counters are at their initial value.
-        let swap_id = worker.reserve_swap_in(0.0, 1, Arc::new(AtomicBool::new(false)));
+        let (status, _) = watch::channel(SwapInStatus::pending(1));
+        let swap_id = worker.reserve_swap_in(0.0, 1, status);
         let ids: Arc<[BlockId]> = Arc::from(vec![0usize]);
         let _offload = worker
             .execute_local_transfer(
@@ -1285,25 +1388,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_worker_swap_in_flag_flips_on_drain() {
+    async fn mock_worker_swap_in_status_completes_on_drain() {
         // Reserve a G2→G1 swap-in for 1 block (1 MB at 1 GB/s → 1 ms).
-        // Before drain the flag must be false; after advancing past the
-        // finish time the same drain must flip it to true.
-        use std::sync::atomic::{AtomicBool, Ordering};
+        // Before drain the status must be pending; after advancing past the
+        // finish time the same drain must publish completion.
         let worker = make_worker();
         worker.set_now_ms(0.0);
-        let complete = Arc::new(AtomicBool::new(false));
-        let _id = worker.reserve_swap_in(0.0, 1, complete.clone());
-        assert!(!complete.load(Ordering::Acquire));
+        let (status, status_rx) = watch::channel(SwapInStatus::pending(1));
+        let _id = worker.reserve_swap_in(0.0, 1, status);
+        assert_eq!(status_rx.borrow().terminal, SwapInTerminal::Pending);
         worker.drain_completions(0.5);
         assert!(
-            !complete.load(Ordering::Acquire),
+            matches!(status_rx.borrow().terminal, SwapInTerminal::Pending),
             "swap-in must not complete before its finish time"
         );
         worker.drain_completions(1.0);
         assert!(
-            complete.load(Ordering::Acquire),
-            "swap-in flag must flip after drain past finish time"
+            matches!(status_rx.borrow().terminal, SwapInTerminal::Completed),
+            "swap-in status must complete after drain past finish time"
         );
     }
 

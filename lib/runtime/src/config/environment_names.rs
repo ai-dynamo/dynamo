@@ -333,6 +333,12 @@ pub mod llm {
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
 
+    /// \[EXPERIMENTAL\] Route supported tool-call families (Qwen3-Coder, DeepSeek-V4)
+    /// through the `dynamo-parsers-v2` streaming parser for BOTH the batch and the
+    /// streaming path, bypassing the v1 tool-call jail. Off by default; when set, the
+    /// v2 parser owns incremental tool-call emission and drops values truncated at EOF.
+    pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
+
     /// Backend stream inactivity timeout in seconds.
     ///
     /// When set to a positive integer, the frontend will kill the engine context
@@ -505,6 +511,13 @@ pub mod router {
     /// Scheduling policy for the router queue ("fcfs" or "wspt").
     pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
     pub const DYN_ROUTER_POLICY_CONFIG: &str = "DYN_ROUTER_POLICY_CONFIG";
+}
+
+/// Request plane transport environment variables
+pub mod request_plane {
+    /// Request plane payload codec selection: "json" or "msgpack".
+    /// JSON is the compatibility default.
+    pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 }
 
 /// TCP response stream server (CallHome listener) environment variables
@@ -696,6 +709,7 @@ mod tests {
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
+            llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
@@ -737,6 +751,7 @@ mod tests {
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
+            request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,

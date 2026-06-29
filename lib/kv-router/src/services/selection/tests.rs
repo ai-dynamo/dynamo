@@ -17,10 +17,10 @@ use crate::protocols::{
     WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use crate::scheduling::config::RouterConfigOverride;
+use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::services::common::replica_sync::ReplicaSyncConfig;
 
 use super::input::{MmRoutingInfoRequest, PromptRequest};
-use super::scoring::build_overlap_scores_response;
 use super::server::create_router;
 use super::*;
 
@@ -173,7 +173,11 @@ fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
         Some(&override_config),
         &tiered,
         4,
+        2,
         [worker, idle_worker],
+        false,
+        None,
+        None,
     );
 
     assert_eq!(response.workers.len(), 2);
@@ -315,6 +319,7 @@ async fn overlap_scores_returns_all_schedulable_worker_ranks() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
+    assert_eq!(body["num_blocks"], 1);
     let workers = body["workers"].as_array().expect("workers array");
     let ids: Vec<_> = workers
         .iter()

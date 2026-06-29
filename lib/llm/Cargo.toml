@@ -72,6 +72,7 @@ aho-corasick = "1.1"
 anyhow = { workspace = true }
 dynamo-protocols = { workspace = true }
 dynamo-parsers = { workspace = true }
+dynamo-parsers-v2 = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 async-nats = { workspace = true }

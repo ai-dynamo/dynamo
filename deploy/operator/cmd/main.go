@@ -496,11 +496,10 @@ func main() {
 	if restrictedNamespace == "" {
 		factory = informers.NewSharedInformerFactory(kubernetes.NewForConfigOrDie(mgr.GetConfig()), time.Hour*24)
 	} else {
-		factory = informers.NewFilteredSharedInformerFactory(
+		factory = informers.NewSharedInformerFactoryWithOptions(
 			kubernetes.NewForConfigOrDie(mgr.GetConfig()),
 			time.Hour*24,
-			restrictedNamespace,
-			nil,
+			informers.WithNamespace(restrictedNamespace),
 		)
 	}
 	secretInformer := factory.Core().V1().Secrets().Informer()
@@ -818,26 +817,22 @@ func registerWebhookHandlers(
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest conversion webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoGraphDeployment{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeployment{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment conversion webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoComponentDeployment{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoComponentDeployment{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoComponentDeployment conversion webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentScalingAdapter conversion webhook: %w", err)
 	}

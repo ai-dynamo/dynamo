@@ -411,6 +411,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "start_thinking_token_id (u32), end_thinking_token_id (u32), thinking_ratio (0.0-1.0). "
         'Example: \'{"start_thinking_token_id": 123, "end_thinking_token_id": 456, "thinking_ratio": 0.6}\'',
     )
+    parser.add_argument(
+        "--response-replay-trace-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional Mooncake JSONL trace containing output_token_ids for "
+            "output_replay_id annotation lookup."
+        ),
+    )
 
     # Engine type selection
     parser.add_argument(

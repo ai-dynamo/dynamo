@@ -48,6 +48,7 @@ def make_args(**overrides):
         "kv_transfer_bandwidth": 64.0,
         "kv_transfer_timing_mode": "full_prompt",
         "reasoning": None,
+        "response_replay_trace_path": None,
         "sglang_schedule_policy": None,
         "sglang_page_size": None,
         "sglang_max_prefill_tokens": None,
@@ -89,6 +90,7 @@ def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
     assert runtime_config.total_kv_blocks == 16384
     assert runtime_config.max_num_seqs == 256
     assert runtime_config.max_num_batched_tokens == 8192
+    assert runtime_config.runtime_data["output_replay_consumer"] == "true"
 
 
 def test_build_mocker_engine_args_rejects_mismatched_sglang_sizes():
@@ -275,6 +277,7 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         kv_bytes_per_token=131072,
         kv_transfer_bandwidth=123.0,
         kv_transfer_timing_mode="destination_missing",
+        response_replay_trace_path=None,
         num_g2_blocks=8192,
         num_g3_blocks=16384,
         offload_batch_size=32,
