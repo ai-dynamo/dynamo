@@ -6,7 +6,7 @@ use super::progress::ReplayProgress;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::WorkloadDriver;
 use crate::replay::{ReplayTerminalStatus, TraceCollector};
-use anyhow::bail;
+use anyhow::{Context, bail};
 use std::collections::VecDeque;
 use uuid::Uuid;
 
@@ -226,12 +226,22 @@ impl SingleRuntime {
                 if let Some(token_id) = signal.token_id {
                     driver
                         .on_output_token(signal.uuid, token_id)
-                        .expect("workload output must belong to an in-flight session");
+                        .with_context(|| {
+                            format!(
+                                "failed to record output token for workload request {}",
+                                signal.uuid
+                            )
+                        })?;
                 }
                 if signal.completed {
                     driver
                         .on_terminal(signal.uuid, self.current_time_ms, signal.rejected)
-                        .expect("completed workload request must belong to a session");
+                        .with_context(|| {
+                            format!(
+                                "failed to process terminal signal for workload request {}",
+                                signal.uuid
+                            )
+                        })?;
                 }
             }
         }
