@@ -75,7 +75,7 @@ spec:
               git -C "$GEN_SRC" checkout -q FETCH_HEAD
               cd "$GEN_SRC/benchmarks/multimodal/jsonl"
               echo "[gen] using dynamo @ $(git -C $GEN_SRC rev-parse --short HEAD)"
-              python3 main.py --help | head -3
+              python3 main.py --help >/dev/null
               OUTPUT_DIR="/perf-cache/datasets"
               IMAGE_DIR="/perf-cache/images/2400x1080"
               mkdir -p "${OUTPUT_DIR}" "${IMAGE_DIR}"
