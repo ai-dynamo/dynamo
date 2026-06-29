@@ -46,8 +46,9 @@ no `DynamoGraphDeployment`, no Dynamo worker runtime, and no Dynamo event plane 
   [Gateway API getting started guide](https://gateway-api.sigs.k8s.io/guides/getting-started/introduction/)
   and the upstream
   [GAIE guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/index.md).
-- A Gateway API implementation that supports GAIE. This walkthrough shows agentgateway and Istio;
-  see the upstream
+- A Gateway API implementation that supports GAIE `InferencePool` resources and `endpointPickerRef`
+  calls. This walkthrough shows the same verified agentgateway and Istio paths as the GAIE
+  quickstart; other implementations might work when they support that same EPP path. See the upstream
   [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
   for other implementations.
 - A model namespace that can run GPU workloads.
@@ -403,7 +404,7 @@ Use the operator-managed quickstart when you need those properties.
 
 ## Clean Up
 
-If this namespace is only for the on-ramp test, delete it:
+If this namespace is only for the on-ramp experiment, delete it:
 
 ```bash
 kubectl delete namespace "$NAMESPACE"
