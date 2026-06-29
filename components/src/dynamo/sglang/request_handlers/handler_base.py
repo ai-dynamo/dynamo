@@ -816,10 +816,19 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
                 return {"status": "error", "message": str(e)}
 
     async def clear_kv_blocks(self, request: Optional[Dict[str, Any]] = None):
-        """Flush SGLang's local cache and configured HiCache storage backend."""
+        """Flush SGLang's local cache when no requests are active."""
         try:
             async with self._pause_lock:
                 tokenizer_manager = self.engine.tokenizer_manager
+                if getattr(tokenizer_manager, "rid_to_state", None):
+                    yield {
+                        "status": "error",
+                        "message": "Cannot clear KV cache while requests are active",
+                    }
+                    return
+
+                if hasattr(tokenizer_manager, "auto_create_handle_loop"):
+                    tokenizer_manager.auto_create_handle_loop()
                 result = await tokenizer_manager.flush_cache()
 
                 if not result.success:
