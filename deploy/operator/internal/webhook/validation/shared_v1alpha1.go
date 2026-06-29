@@ -34,10 +34,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// SharedSpecValidator validates DynamoComponentDeploymentSharedSpec fields.
+// SharedSpecValidatorV1Alpha1 validates DynamoComponentDeploymentSharedSpec fields.
 // This validator is used by DynamoComponentDeploymentValidator to provide
 // consistent validation logic for v1alpha1 shared spec fields.
-type SharedSpecValidator struct {
+type SharedSpecValidatorV1Alpha1 struct {
 	spec                *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
 	fieldPath           string       // e.g., "spec" for DCD
 	calculatedNamespace string       // Namespace the operator will use for this component
@@ -45,13 +45,13 @@ type SharedSpecValidator struct {
 	grovePathway        bool         // Whether the component is backed by Grove
 }
 
-// NewSharedSpecValidator creates a new validator for DynamoComponentDeploymentSharedSpec.
+// NewSharedSpecValidatorV1Alpha1 creates a validator for v1alpha1 DynamoComponentDeploymentSharedSpec.
 // fieldPath is used to provide context in error messages (e.g., "spec").
 // calculatedNamespace is the namespace the operator will use:
 //   - If GlobalDynamoNamespace is true: "dynamo" (global constant)
 //   - Otherwise: {k8s_namespace}-{dgd_name}
-func NewSharedSpecValidator(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string, calculatedNamespace string, grovePathway bool) *SharedSpecValidator {
-	return &SharedSpecValidator{
+func NewSharedSpecValidatorV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string, calculatedNamespace string, grovePathway bool) *SharedSpecValidatorV1Alpha1 {
+	return &SharedSpecValidatorV1Alpha1{
 		spec:                spec,
 		fieldPath:           fieldPath,
 		calculatedNamespace: calculatedNamespace,
@@ -60,10 +60,10 @@ func NewSharedSpecValidator(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSha
 	}
 }
 
-// NewSharedSpecValidatorWithManager creates a validator with a manager for API group detection.
+// NewSharedSpecValidatorV1Alpha1WithManager creates a validator with a manager for API group detection.
 // This allows the validator to check for API group availability (e.g., inference.networking.k8s.io) when validating EPP components.
-func NewSharedSpecValidatorWithManager(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string, calculatedNamespace string, mgr ctrl.Manager, grovePathway bool) *SharedSpecValidator {
-	return &SharedSpecValidator{
+func NewSharedSpecValidatorV1Alpha1WithManager(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string, calculatedNamespace string, mgr ctrl.Manager, grovePathway bool) *SharedSpecValidatorV1Alpha1 {
+	return &SharedSpecValidatorV1Alpha1{
 		spec:                spec,
 		fieldPath:           fieldPath,
 		calculatedNamespace: calculatedNamespace,
@@ -75,51 +75,15 @@ func NewSharedSpecValidatorWithManager(spec *nvidiacomv1alpha1.DynamoComponentDe
 // Validate performs validation on the shared spec fields.
 // Context is required for any operations that may need to query the cluster (e.g., CRD checks).
 // Returns warnings (e.g., deprecation notices) and error if validation fails.
-func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings, error) {
-	// Collect warnings (e.g., deprecation notices)
+func (v *SharedSpecValidatorV1Alpha1) Validate(ctx context.Context) (admission.Warnings, error) {
 	var warnings admission.Warnings
 
-	// Warn about deprecated dynamoNamespace field
 	if v.spec.DynamoNamespace != nil && *v.spec.DynamoNamespace != "" {
 		warnings = append(warnings, fmt.Sprintf(
 			"%s.dynamoNamespace is deprecated and ignored. Value '%s' will be replaced with '%s'. "+
 				"Remove this field from your configuration",
 			v.fieldPath, *v.spec.DynamoNamespace, v.calculatedNamespace))
 	}
-
-	// Validate replicas if specified
-	if v.spec.Replicas != nil && *v.spec.Replicas < 0 {
-		return nil, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
-	}
-
-	// Validate ingress configuration if enabled
-	if v.spec.Ingress != nil && v.spec.Ingress.Enabled {
-		if err := v.validateIngress(); err != nil {
-			return nil, err
-		}
-	}
-
-	// Validate volume mounts
-	if err := v.validateVolumeMounts(); err != nil {
-		return nil, err
-	}
-
-	if err := v.validateCheckpointConfig(); err != nil {
-		return nil, err
-	}
-
-	if err := v.validateGMSClientContainerNames(); err != nil {
-		return nil, err
-	}
-
-	// Validate shared memory
-	if v.spec.SharedMemory != nil {
-		if err := v.validateSharedMemory(); err != nil {
-			return nil, err
-		}
-	}
-
-	// Check for deprecated autoscaling field
 	//nolint:staticcheck // SA1019: Intentionally checking deprecated field to warn users
 	if v.spec.Autoscaling != nil {
 		warnings = append(warnings, fmt.Sprintf(
@@ -128,36 +92,48 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 			v.fieldPath))
 	}
 
-	// Validate frontend sidecar container name conflicts
-	if err := v.validateFrontendSidecar(); err != nil {
+	if v.spec.Replicas != nil && *v.spec.Replicas < 0 {
+		return nil, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
+	}
+	if err := v.validateMinAvailable(); err != nil {
 		return nil, err
 	}
-
-	// Validate service-level annotations
+	if v.spec.SharedMemory != nil {
+		if err := v.validateSharedMemory(); err != nil {
+			return nil, err
+		}
+	}
+	if err := v.validateCheckpointConfig(); err != nil {
+		return nil, err
+	}
+	if err := v.validateGMSClientContainerNames(); err != nil {
+		return nil, err
+	}
 	if err := v.validateServiceAnnotations(); err != nil {
 		return nil, err
 	}
-
-	// Validate EPP-specific constraints
 	if err := v.validateEPPConfig(ctx); err != nil {
 		return nil, err
 	}
-
-	// Validate GPU memory service configuration (intra-pod GMS)
 	if err := v.validateGPUMemoryService(); err != nil {
 		return nil, err
 	}
-
-	// Validate GMS failover constraints
 	if err := v.validateFailover(); err != nil {
 		return nil, err
 	}
-
 	if err := v.validateSnapshotWithGPUMemoryService(); err != nil {
 		return nil, err
 	}
 
-	if err := v.validateMinAvailable(); err != nil {
+	if v.spec.Ingress != nil && v.spec.Ingress.Enabled {
+		if err := v.validateIngress(); err != nil {
+			return nil, err
+		}
+	}
+	if err := v.validateVolumeMounts(); err != nil {
+		return nil, err
+	}
+	if err := v.validateFrontendSidecar(); err != nil {
 		return nil, err
 	}
 
@@ -165,41 +141,23 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 }
 
 // implied non Grove pathway because Grove does not create DCDs
-func (v *SharedSpecValidator) validateMinAvailable() error {
+func (v *SharedSpecValidatorV1Alpha1) validateMinAvailable() error {
 	if v.spec.MinAvailable != nil && !v.grovePathway {
 		return fmt.Errorf("spec.minAvailable is currently supported only for Grove-backed DynamoGraphDeployment components")
 	}
 	return nil
 }
 
-// validateIngress validates the ingress configuration.
-func (v *SharedSpecValidator) validateIngress() error {
-	if v.spec.Ingress.Host == "" {
-		return fmt.Errorf("%s.ingress.host is required when ingress is enabled", v.fieldPath)
+// validateSharedMemory validates the shared memory configuration.
+func (v *SharedSpecValidatorV1Alpha1) validateSharedMemory() error {
+	// If disabled is false (i.e., shared memory is enabled), size is required
+	if !v.spec.SharedMemory.Disabled && v.spec.SharedMemory.Size.IsZero() {
+		return fmt.Errorf("%s.sharedMemory.size is required when disabled is false", v.fieldPath)
 	}
 	return nil
 }
 
-// validateVolumeMounts validates the volume mount configurations.
-func (v *SharedSpecValidator) validateVolumeMounts() error {
-	for i, volumeMount := range v.spec.VolumeMounts {
-		if err := v.validateVolumeMount(i, &volumeMount); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// validateVolumeMount validates a single volume mount configuration.
-func (v *SharedSpecValidator) validateVolumeMount(index int, volumeMount *nvidiacomv1alpha1.VolumeMount) error {
-	// If useAsCompilationCache is false, mountPoint is required
-	if !volumeMount.UseAsCompilationCache && volumeMount.MountPoint == "" {
-		return fmt.Errorf("%s.volumeMounts[%d].mountPoint is required when useAsCompilationCache is false", v.fieldPath, index)
-	}
-	return nil
-}
-
-func (v *SharedSpecValidator) validateCheckpointConfig() error {
+func (v *SharedSpecValidatorV1Alpha1) validateCheckpointConfig() error {
 	if v.spec.Checkpoint == nil {
 		return nil
 	}
@@ -242,7 +200,7 @@ func (v *SharedSpecValidator) validateCheckpointConfig() error {
 	return nil
 }
 
-func (v *SharedSpecValidator) validateGMSClientContainerNames() error {
+func (v *SharedSpecValidatorV1Alpha1) validateGMSClientContainerNames() error {
 	if v.spec.GPUMemoryService == nil {
 		return nil
 	}
@@ -260,17 +218,13 @@ func (v *SharedSpecValidator) validateGMSClientContainerNames() error {
 	return nil
 }
 
-// validateSharedMemory validates the shared memory configuration.
-func (v *SharedSpecValidator) validateSharedMemory() error {
-	// If disabled is false (i.e., shared memory is enabled), size is required
-	if !v.spec.SharedMemory.Disabled && v.spec.SharedMemory.Size.IsZero() {
-		return fmt.Errorf("%s.sharedMemory.size is required when disabled is false", v.fieldPath)
-	}
-	return nil
+// validateServiceAnnotations validates known annotations on the service-level spec.
+func (v *SharedSpecValidatorV1Alpha1) validateServiceAnnotations() error {
+	return validateVLLMDistributedExecutorBackendAnnotation(v.fieldPath+".annotations", v.spec.Annotations)
 }
 
 // validateEPPConfig validates EPP-specific configuration constraints.
-func (v *SharedSpecValidator) validateEPPConfig(ctx context.Context) error {
+func (v *SharedSpecValidatorV1Alpha1) validateEPPConfig(ctx context.Context) error {
 	// Only validate if this is an EPP component
 	if v.spec.ComponentType != consts.ComponentTypeEPP {
 		return nil
@@ -321,7 +275,7 @@ func (v *SharedSpecValidator) validateEPPConfig(ctx context.Context) error {
 // checkInferencePoolAPIAvailability checks if the inference.networking.k8s.io API group is available in the cluster.
 // Returns an error if the API group is not available, which prevents EPP deployment.
 // This reuses the controller_common.DetectInferencePoolAvailability function.
-func (v *SharedSpecValidator) checkInferencePoolAPIAvailability(ctx context.Context) error {
+func (v *SharedSpecValidatorV1Alpha1) checkInferencePoolAPIAvailability(ctx context.Context) error {
 	if v.mgr == nil {
 		// No manager provided, skip the check (e.g., in controller without webhooks)
 		return nil
@@ -335,25 +289,6 @@ func (v *SharedSpecValidator) checkInferencePoolAPIAvailability(ctx context.Cont
 			epp.InferencePoolGroup)
 	}
 
-	return nil
-}
-
-// validateFrontendSidecar checks that extraPodSpec.containers does not already
-// contain a container whose name collides with the auto-generated frontend sidecar.
-func (v *SharedSpecValidator) validateFrontendSidecar() error {
-	if v.spec.FrontendSidecar == nil {
-		return nil
-	}
-	if v.spec.ExtraPodSpec == nil || v.spec.ExtraPodSpec.PodSpec == nil {
-		return nil
-	}
-	for _, c := range v.spec.ExtraPodSpec.PodSpec.Containers {
-		if c.Name == consts.FrontendSidecarContainerName {
-			return fmt.Errorf(
-				"%s: cannot inject frontend sidecar: a container named %q already exists in extraPodSpec.containers",
-				v.fieldPath, consts.FrontendSidecarContainerName)
-		}
-	}
 	return nil
 }
 
@@ -378,6 +313,39 @@ func parseGPUCount(r *nvidiacomv1alpha1.Resources) (int, error) {
 	return n, nil
 }
 
+// validateGPUMemoryService validates gpuMemoryService constraints.
+//
+// gpuMemoryService declares the GMS layout (intra-pod sidecar vs. inter-pod
+// dedicated weight-server pod) and may be enabled independently of failover:
+// the intra-pod layout gives the engine a GMS sidecar in the same pod, and
+// the inter-pod layout gives it a dedicated weight-server pod paired with one
+// engine pod. Failover adds shadow engine pods on top of the declared layout
+// (see validateFailover); it is not the sole way to request the inter-pod
+// layout.
+func (v *SharedSpecValidatorV1Alpha1) validateGPUMemoryService() error {
+	if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
+		return nil
+	}
+
+	isWorker := v.spec.ComponentType == consts.ComponentTypeWorker ||
+		v.spec.ComponentType == consts.ComponentTypePrefill ||
+		v.spec.ComponentType == consts.ComponentTypeDecode
+	if !isWorker {
+		return fmt.Errorf(
+			"%s.gpuMemoryService: GPU memory service is only supported for worker components (componentType must be worker, prefill, or decode)",
+			v.fieldPath)
+	}
+
+	gpuCount, err := parseGPUCount(v.spec.Resources)
+	if err != nil || gpuCount < 1 {
+		return fmt.Errorf(
+			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
+			v.fieldPath)
+	}
+
+	return nil
+}
+
 // validateFailover validates GMS failover configuration constraints.
 //
 // The layout (intra-pod sidecar vs. inter-pod weight-server pod) is declared
@@ -386,7 +354,7 @@ func parseGPUCount(r *nvidiacomv1alpha1.Resources) (int, error) {
 // consistent topology. It is also valid to configure gpuMemoryService without
 // failover (no shadows; a single engine + GMS server pair) — see
 // validateGPUMemoryService below.
-func (v *SharedSpecValidator) validateFailover() error {
+func (v *SharedSpecValidatorV1Alpha1) validateFailover() error {
 	if v.spec.Failover == nil || !v.spec.Failover.Enabled {
 		// When failover.enabled is false the sub-fields (mode, numShadows)
 		// are dormant configuration and the render path ignores them
@@ -465,58 +433,54 @@ func (v *SharedSpecValidator) validateFailover() error {
 	return errors.Join(errs...)
 }
 
-// validateGPUMemoryService validates gpuMemoryService constraints.
-//
-// gpuMemoryService declares the GMS layout (intra-pod sidecar vs. inter-pod
-// dedicated weight-server pod) and may be enabled independently of failover:
-// the intra-pod layout gives the engine a GMS sidecar in the same pod, and
-// the inter-pod layout gives it a dedicated weight-server pod paired with one
-// engine pod. Failover adds shadow engine pods on top of the declared layout
-// (see validateFailover); it is not the sole way to request the inter-pod
-// layout.
-func (v *SharedSpecValidator) validateGPUMemoryService() error {
-	if v.spec.GPUMemoryService == nil || !v.spec.GPUMemoryService.Enabled {
-		return nil
-	}
-
-	isWorker := v.spec.ComponentType == consts.ComponentTypeWorker ||
-		v.spec.ComponentType == consts.ComponentTypePrefill ||
-		v.spec.ComponentType == consts.ComponentTypeDecode
-	if !isWorker {
-		return fmt.Errorf(
-			"%s.gpuMemoryService: GPU memory service is only supported for worker components (componentType must be worker, prefill, or decode)",
-			v.fieldPath)
-	}
-
-	gpuCount, err := parseGPUCount(v.spec.Resources)
-	if err != nil || gpuCount < 1 {
-		return fmt.Errorf(
-			"%s.gpuMemoryService: GPU memory service requires resources.limits.gpu >= 1",
-			v.fieldPath)
-	}
-
-	return nil
-}
-
-func (v *SharedSpecValidator) validateSnapshotWithGPUMemoryService() error {
+func (v *SharedSpecValidatorV1Alpha1) validateSnapshotWithGPUMemoryService() error {
 	return checkpoint.ValidateGMSSnapshotGate(
 		fmt.Sprintf("%s.checkpoint", v.fieldPath),
 		v.spec.Checkpoint != nil && v.spec.Checkpoint.Enabled,
 		v.spec.GPUMemoryService)
 }
 
-// validateServiceAnnotations validates known annotations on the service-level spec.
-func (v *SharedSpecValidator) validateServiceAnnotations() error {
-	if v.spec.Annotations == nil {
+// validateIngress validates the ingress configuration.
+func (v *SharedSpecValidatorV1Alpha1) validateIngress() error {
+	if v.spec.Ingress.Host == "" {
+		return fmt.Errorf("%s.ingress.host is required when ingress is enabled", v.fieldPath)
+	}
+	return nil
+}
+
+// validateVolumeMounts validates the volume mount configurations.
+func (v *SharedSpecValidatorV1Alpha1) validateVolumeMounts() error {
+	for i, volumeMount := range v.spec.VolumeMounts {
+		if err := v.validateVolumeMount(i, &volumeMount); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateVolumeMount validates a single volume mount configuration.
+func (v *SharedSpecValidatorV1Alpha1) validateVolumeMount(index int, volumeMount *nvidiacomv1alpha1.VolumeMount) error {
+	// If useAsCompilationCache is false, mountPoint is required
+	if !volumeMount.UseAsCompilationCache && volumeMount.MountPoint == "" {
+		return fmt.Errorf("%s.volumeMounts[%d].mountPoint is required when useAsCompilationCache is false", v.fieldPath, index)
+	}
+	return nil
+}
+
+// validateFrontendSidecar checks that extraPodSpec.containers does not already
+// contain a container whose name collides with the auto-generated frontend sidecar.
+func (v *SharedSpecValidatorV1Alpha1) validateFrontendSidecar() error {
+	if v.spec.FrontendSidecar == nil {
 		return nil
 	}
-	if value, exists := v.spec.Annotations[consts.KubeAnnotationVLLMDistributedExecutorBackend]; exists {
-		switch strings.ToLower(value) {
-		case vllmDistributedExecutorBackendMP, vllmDistributedExecutorBackendRay:
-			// valid
-		default:
-			return fmt.Errorf("%s.annotations[%s] has invalid value %q: must be \"mp\" or \"ray\"",
-				v.fieldPath, consts.KubeAnnotationVLLMDistributedExecutorBackend, value)
+	if v.spec.ExtraPodSpec == nil || v.spec.ExtraPodSpec.PodSpec == nil {
+		return nil
+	}
+	for _, c := range v.spec.ExtraPodSpec.PodSpec.Containers {
+		if c.Name == consts.FrontendSidecarContainerName {
+			return fmt.Errorf(
+				"%s: cannot inject frontend sidecar: a container named %q already exists in extraPodSpec.containers",
+				v.fieldPath, consts.FrontendSidecarContainerName)
 		}
 	}
 	return nil

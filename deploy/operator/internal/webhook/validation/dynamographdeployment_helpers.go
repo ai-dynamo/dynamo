@@ -17,15 +17,16 @@
 
 package validation
 
-import "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+)
 
 const (
 	// maxCombinedResourceNameLength is kept as a local alias for readability.
 	maxCombinedResourceNameLength = consts.MaxCombinedGroveResourceNameLength
-
-	// backendFrameworkVLLM is the spec.backendFramework value that identifies
-	// a vLLM deployment. Kept local to avoid reaching into backend renderers.
-	backendFrameworkVLLM = "vllm"
 
 	unsetValue = "<unset>"
 
@@ -59,4 +60,27 @@ func difference(a, b map[string]struct{}) []string {
 		}
 	}
 	return result
+}
+
+func validateVLLMDistributedExecutorBackendAnnotation(fieldPath string, annotations map[string]string) error {
+	if annotations == nil {
+		return nil
+	}
+
+	value, exists := annotations[consts.KubeAnnotationVLLMDistributedExecutorBackend]
+	if !exists {
+		return nil
+	}
+
+	switch strings.ToLower(value) {
+	case vllmDistributedExecutorBackendMP, vllmDistributedExecutorBackendRay:
+		return nil
+	default:
+		if fieldPath == "" {
+			return fmt.Errorf("annotation %s has invalid value %q: must be \"mp\" or \"ray\"",
+				consts.KubeAnnotationVLLMDistributedExecutorBackend, value)
+		}
+		return fmt.Errorf("%s[%s] has invalid value %q: must be \"mp\" or \"ray\"",
+			fieldPath, consts.KubeAnnotationVLLMDistributedExecutorBackend, value)
+	}
 }
