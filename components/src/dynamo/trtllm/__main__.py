@@ -6,6 +6,7 @@ import os
 if "PYTHONHASHSEED" not in os.environ:
     os.environ["PYTHONHASHSEED"] = "0"
 
+
 if __name__ == "__main__":
     from dynamo.common.snapshot.restore_context import maybe_run_restore_standby_mode
 
@@ -13,6 +14,9 @@ if __name__ == "__main__":
     # write selected restore-time env vars to snapshot-control/restore-context.json
     # and exec `sleep infinity` without initializing CUDA or backend/runtime state.
     maybe_run_restore_standby_mode()
+    from dynamo.trtllm.startup import configure_gms_openmpi_defaults
+
+    configure_gms_openmpi_defaults()
 
     from dynamo.trtllm.main import main
 

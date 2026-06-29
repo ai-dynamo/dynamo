@@ -13,10 +13,17 @@ def test_trtllm_entrypoint_checks_snapshot_standby_before_main_import():
         "maybe_run_restore_standby_mode"
     )
     standby_call = "maybe_run_restore_standby_mode()"
+    startup_import = "from dynamo.trtllm.startup import configure_gms_openmpi_defaults"
+    startup_call = "configure_gms_openmpi_defaults()"
     main_import = "from dynamo.trtllm.main import main"
 
     assert standby_import in source
     assert standby_call in source
     assert main_import in source
+    assert startup_import in source
+    assert startup_call in source
     assert source.index(standby_import) < source.index(main_import)
     assert source.index(standby_call) < source.index(main_import)
+    assert source.index(standby_call) < source.index(startup_import)
+    assert source.index(startup_import) < source.index(startup_call)
+    assert source.index(startup_call) < source.index(main_import)

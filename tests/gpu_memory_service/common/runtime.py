@@ -29,7 +29,7 @@ def _tp_size() -> int:
 
     TP=N runs each engine across devices 0..N-1; the GMS weights + kv_cache
     daemons are started on each of those devices. The engine's own collective
-    (vLLM mp executor / sglang tp schedulers) applies
+    (vLLM mp executor / sglang tp schedulers / trtllm MPI proxy) applies
     pause/resume across all ranks, so failover stays group-atomic without the
     harness coordinating per-rank.
     """
@@ -361,7 +361,11 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
     TRTLLM_GMS_MAX_SEQ_LEN = os.environ.get("TRTLLM_GMS_MAX_SEQ_LEN", "256")
     TRTLLM_GMS_MAX_NUM_TOKENS = os.environ.get("TRTLLM_GMS_MAX_NUM_TOKENS", "256")
     TRTLLM_GMS_OVERRIDE_ENGINE_ARGS = os.environ.get(
-        "TRTLLM_GMS_OVERRIDE_ENGINE_ARGS", ""
+        # TRT-LLM 1.3.0rc18's TRTLLM-GEN Blackwell kernel emits both
+        # .maxntid and .reqntid under CUDA 13. FlashInfer avoids that upstream
+        # JIT bug while exercising the same GMS allocation and failover paths.
+        "TRTLLM_GMS_OVERRIDE_ENGINE_ARGS",
+        '{"attn_backend":"FLASHINFER"}',
     )
 
     def __init__(
@@ -390,8 +394,16 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
 
     def env_updates(self) -> dict[str, str]:
         env = {
-            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
-            "TLLM_WORKER_USE_SINGLE_PROCESS": "1",
+            "CUDA_VISIBLE_DEVICES": os.environ.get(
+                "CUDA_VISIBLE_DEVICES", _tp_visible_devices()
+            ),
+            # Single-process executor (GenerationExecutorWorker) has no
+            # collective_rpc, which GMS pause/resume (release_memory_occupation)
+            # requires. The MPI proxy executor implements collective_rpc and
+            # supports model_world_size==1, so the failover repro sets this to 0.
+            "TLLM_WORKER_USE_SINGLE_PROCESS": os.environ.get(
+                "TLLM_WORKER_USE_SINGLE_PROCESS", "1"
+            ),
             "MPI4PY_MPIABI": "openmpi",
             "OMPI_MCA_coll_ucc_enable": "0",
         }
@@ -410,7 +422,9 @@ class TRTLLMWithGMSProcess(GMSEngineProcess):
             "--model",
             self.TRTLLM_GMS_MODEL_NAME,
             "--gpus-per-node",
-            "1",
+            str(_tp_size()),
+            "--tensor-parallel-size",
+            str(_tp_size()),
             "--load-format",
             "gms",
             "--free-gpu-memory-fraction",

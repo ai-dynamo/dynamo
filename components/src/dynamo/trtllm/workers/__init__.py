@@ -35,6 +35,7 @@ async def init_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: Optional[list] = None,
     engine_holder: Optional[list] = None,
+    publisher_holder: Optional[list] = None,
 ) -> None:
     """Initialize the appropriate worker based on modality.
 
@@ -49,6 +50,8 @@ async def init_worker(
         engine_holder: Optional mutable list; when provided, init_llm_worker will
             append the TensorRTLLMEngine instance so that the drain callback
             (installed earlier by main.py) can access it at signal time.
+        publisher_holder: Optional mutable list; when provided, init_llm_worker
+            appends the Publisher so signal cleanup can stop it before engine teardown.
     """
     logging.info(f"Initializing worker with modality={config.modality}")
 
@@ -82,6 +85,7 @@ async def init_worker(
         shutdown_event,
         shutdown_endpoints,
         engine_holder=engine_holder,
+        publisher_holder=publisher_holder,
     )
 
 

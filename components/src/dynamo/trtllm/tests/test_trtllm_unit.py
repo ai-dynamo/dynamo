@@ -4,6 +4,7 @@
 """Unit tests for TRTLLM backend components."""
 
 import asyncio
+import os
 import re
 import warnings
 from pathlib import Path
@@ -21,6 +22,7 @@ if not torch.cuda.is_available():
 
 from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import DisaggregationMode, Modality
+from dynamo.trtllm.startup import configure_gms_openmpi_defaults
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 from dynamo.trtllm.workers.llm_worker import init_llm_worker
@@ -406,6 +408,78 @@ async def test_init_llm_worker_engine_args_with_extra_engine_args(
         assert config.max_seq_len == 32768
         assert config.max_num_tokens == 32768
         assert config.max_batch_size == 512
+
+
+def test_configure_gms_openmpi_defaults_sets_safe_local_transport(monkeypatch):
+    for key in ("OMPI_MCA_pml", "OMPI_MCA_btl", "OMPI_MCA_coll_hcoll_enable"):
+        monkeypatch.delenv(key, raising=False)
+
+    configure_gms_openmpi_defaults()
+
+    assert os.environ["OMPI_MCA_pml"] == "ob1"
+    assert os.environ["OMPI_MCA_btl"] == "self,vader,tcp"
+    assert os.environ["OMPI_MCA_coll_hcoll_enable"] == "0"
+
+
+def test_configure_gms_openmpi_defaults_preserves_user_overrides(monkeypatch):
+    monkeypatch.setenv("OMPI_MCA_pml", "ucx")
+    monkeypatch.setenv("OMPI_MCA_btl", "self,tcp")
+    monkeypatch.setenv("OMPI_MCA_coll_hcoll_enable", "1")
+
+    configure_gms_openmpi_defaults()
+
+    assert os.environ["OMPI_MCA_pml"] == "ucx"
+    assert os.environ["OMPI_MCA_btl"] == "self,tcp"
+    assert os.environ["OMPI_MCA_coll_hcoll_enable"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_gms_forces_trtllm_v2_kv_manager(monkeypatch):
+    """GMS uses TRT-LLM KVCacheManagerV2 and avoids V1 fallback triggers."""
+    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+
+    config = parse_args(["--model", "fake-model", "--load-format", "gms"])
+
+    with (
+        mock.patch("gpu_memory_service.integrations.trtllm.setup_gms") as setup_gms,
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    setup_gms.assert_called_once()
+    engine_args = exc_info.value.engine_args
+    kv_cache_config = engine_args["kv_cache_config"]
+    assert kv_cache_config["use_kv_cache_manager_v2"] is True
+    assert kv_cache_config["event_buffer_max_size"] == 0
+    assert engine_args["kv_connector_config"] is None
+
+
+@pytest.mark.asyncio
+async def test_init_llm_worker_gms_rejects_kv_connector():
+    """TRT-LLM GMS is V2-only, and V2 cannot use kv_connector_config."""
+    config = parse_args(
+        ["--model", "fake-model", "--load-format", "gms", "--connector", "kvbm"]
+    )
+
+    with pytest.raises(ValueError, match="cannot be combined with --connector"):
+        await init_llm_worker(
+            runtime=mock.MagicMock(),
+            config=config,
+            shutdown_event=asyncio.Event(),
+        )
 
 
 class MultimodalProcessorInstantiated(Exception):

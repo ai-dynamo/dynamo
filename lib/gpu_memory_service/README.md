@@ -529,9 +529,9 @@ class GMSClientMemoryManager:
 
 ---
 
-## Framework Integration (vLLM / SGLang)
+## Framework Integration (vLLM / SGLang / TensorRT-LLM)
 
-GMS provides pre-built integrations for vLLM and SGLang. Enable GMS by passing `--load-format gms` when launching an engine.
+GMS provides pre-built integrations for vLLM, SGLang, and TensorRT-LLM. Enable GMS by passing `--load-format gms` when launching an engine.
 
 ### How It Works
 
@@ -579,12 +579,40 @@ The integration patches `torch_memory_saver` to route both weight and KV-cache o
 - Other tags are not supported in GMS mode
 - The `--enable-memory-saver` flag is required to activate the memory saver pathway
 
+#### TensorRT-LLM
+
+```bash
+python -m dynamo.trtllm \
+  --model <model> \
+  --load-format gms
+```
+
+**KV management is KVCacheManager V2 only.** TensorRT-LLM + GMS is supported on
+the V2 KV path exclusively; the legacy V1 KV connector is **not** supported and
+is never used. When `--load-format gms` is set, the worker:
+
+- Loads model weights through GMS (the `weights` tag), identical to vLLM/SGLang.
+- **Forces `use_kv_cache_manager_v2=True`** and sets `event_buffer_max_size=0`
+  (`_configure_gms_v2_kv_cache`). The V1 connector manager and event-buffer
+  paths silently fall back to the V1 manager, so they are kept disabled.
+- **Rejects `--connector` / `kv_connector_config`** in GMS mode (V2 cannot use a
+  KV connector). Passing one is a hard error, not a silent V1 fallback.
+- Coordinates KV cache access through **V2 slot leases** (`install_kv_leases_v2`)
+  rather than a `kv_cache` daemon allocation. The TRT-LLM integration does not
+  connect to the `kv_cache` GMS socket; a generic operator deployment may still
+  render an idle `kv_cache` server container. Enable leases with
+  `GMS_KV_LEASES=1` (or `GMS_TRTLLM_KV_LEASES=1`).
+
+> For TensorRT-LLM, GMS KV management means KVCacheManager V2 plus slot leases;
+> the V1 connector is unsupported.
+
 ### Shadow Engine Failover (Pause / Resume)
 
-Both integrations support releasing and reclaiming GPU memory for shadow engine patterns. The API names differ by framework:
+All integrations support releasing and reclaiming GPU memory for shadow engine patterns. The API names differ by framework:
 
 - **vLLM**: `sleep` / `wake_up` (via `/engine/control/sleep` and `/engine/control/wake_up` HTTP endpoints)
 - **SGLang**: `release_memory_occupation` / `resume_memory_occupation` (via the corresponding HTTP endpoints)
+- **TensorRT-LLM**: `release_memory_occupation` / `resume_memory_occupation` (weights via GMS; KV via V2 slot leases — see above)
 
 Under the hood, pausing calls `unmap_all_vas()` + `abort()` to release GPU memory while preserving VA reservations. Resuming is tag-specific:
 
