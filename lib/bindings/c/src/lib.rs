@@ -18,8 +18,7 @@ use dynamo_kv_router::{
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::extensions::routing_constraints_to_kv;
-use dynamo_llm::protocols::openai::nvext::NvExt;
+use dynamo_llm::protocols::common::extensions::{NvExt, routing_constraints_to_kv};
 use dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest;
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
