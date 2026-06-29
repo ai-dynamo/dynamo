@@ -1142,6 +1142,26 @@ class KvEventPublisher:
         """
         ...
 
+    def publish_gms_placement_stored(
+        self,
+        source_nixl_agent_name: str,
+        source_nixl_agent_metadata_hex: str,
+        blocks: List[Dict[str, Any]],
+        source_nixl_ip: Optional[str] = None,
+        source_nixl_listen_port: Optional[int] = None,
+        dp_rank: Optional[int] = None,
+    ) -> None:
+        """Publish GMS placement descriptors through the KV event plane."""
+        ...
+
+    def publish_gms_placement_removed(
+        self,
+        content_hashes_hex: List[str],
+        dp_rank: Optional[int] = None,
+    ) -> None:
+        """Remove GMS placement descriptors from the router's event-plane index."""
+        ...
+
     def shutdown(self) -> None:
         """
         Shuts down the event publisher, stopping any background tasks.

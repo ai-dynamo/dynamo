@@ -1028,6 +1028,58 @@ impl KvEventPublisher {
         })
     }
 
+    #[pyo3(signature = (source_nixl_agent_name, source_nixl_agent_metadata_hex, blocks, source_nixl_ip=None, source_nixl_listen_port=None, dp_rank=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn publish_gms_placement_stored(
+        &self,
+        py: Python,
+        source_nixl_agent_name: String,
+        source_nixl_agent_metadata_hex: String,
+        blocks: Bound<PyAny>,
+        source_nixl_ip: Option<String>,
+        source_nixl_listen_port: Option<u16>,
+        dp_rank: Option<DpRank>,
+    ) -> PyResult<()> {
+        let blocks: Vec<GmsPlacementBlock> = depythonize(&blocks).map_err(to_pyerr)?;
+        let inner = self.inner.clone();
+        let dp_rank = dp_rank.unwrap_or(self.dp_rank);
+        py.allow_threads(|| {
+            inner
+                .publish_gms_placement(
+                    GmsPlacementEventData::Stored(GmsPlacementStoreData {
+                        source_nixl_agent_name,
+                        source_nixl_agent_metadata_hex,
+                        source_nixl_ip,
+                        source_nixl_listen_port,
+                        blocks,
+                    }),
+                    StorageTier::External,
+                    dp_rank,
+                )
+                .map_err(to_pyerr)
+        })
+    }
+
+    #[pyo3(signature = (content_hashes_hex, dp_rank=None))]
+    fn publish_gms_placement_removed(
+        &self,
+        py: Python,
+        content_hashes_hex: Vec<String>,
+        dp_rank: Option<DpRank>,
+    ) -> PyResult<()> {
+        let inner = self.inner.clone();
+        let dp_rank = dp_rank.unwrap_or(self.dp_rank);
+        py.allow_threads(|| {
+            inner
+                .publish_gms_placement(
+                    GmsPlacementEventData::Removed(GmsPlacementRemoveData { content_hashes_hex }),
+                    StorageTier::External,
+                    dp_rank,
+                )
+                .map_err(to_pyerr)
+        })
+    }
+
     fn shutdown(&mut self) {
         // If no other Arc clones exist, shut down eagerly.
         // Otherwise the Drop impl handles cleanup when the last reference is freed.

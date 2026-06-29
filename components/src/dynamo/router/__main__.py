@@ -213,6 +213,7 @@ async def worker(runtime: DistributedRuntime):
         f"router_track_output_blocks={config.router_track_output_blocks}, "
         f"router_assume_kv_reuse={config.router_assume_kv_reuse}, "
         f"router_track_prefill_tokens={config.router_track_prefill_tokens}, "
+        f"router_gms_decode_transfer={config.router_gms_decode_transfer}, "
         f"router_ttl_secs={config.router_ttl_secs}"
     )
 

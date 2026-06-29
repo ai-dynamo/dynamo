@@ -39,6 +39,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_track_output_blocks",
     "router_assume_kv_reuse",
     "router_track_prefill_tokens",
+    "router_gms_decode_transfer",
     "router_prefill_load_model",
     "router_snapshot_threshold",
     "router_reset_states",
@@ -122,6 +123,7 @@ class KvRouterConfigBase(ConfigBase):
     router_track_output_blocks: bool
     router_assume_kv_reuse: bool
     router_track_prefill_tokens: bool
+    router_gms_decode_transfer: bool
     router_prefill_load_model: str
     router_snapshot_threshold: int
     router_reset_states: bool
@@ -341,6 +343,18 @@ class KvRouterArgGroup(ArgGroup):
                 "KV Router: Include prompt-side prefill tokens in active load accounting. "
                 "Use --no-router-track-prefill-tokens to ignore prompt tokens in router "
                 "prefill-token load, queue pressure, and active_prefill_tokens metrics."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--router-gms-decode-transfer",
+            env_var="DYN_ROUTER_GMS_DECODE_TRANSFER",
+            default=False,
+            dest="router_gms_decode_transfer",
+            help=(
+                "[EXPERIMENTAL] KV Router: Enable GMS decode-to-decode KV transfer "
+                "orchestration for GMS-capable aggregated decode workers. Disabled "
+                "by default so vanilla Dynamo routing behavior is unchanged."
             ),
         )
         add_argument(

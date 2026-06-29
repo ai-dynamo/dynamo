@@ -24,10 +24,18 @@ pub fn process_mooncake_trace(
     let trace = Trace::from_mooncake(std::path::Path::new(path), block_size as usize)?
         .expand_hash_prefix_depth(trace_length_factor)
         .duplicate_hash_space(trace_duplication_factor);
-    Ok(trace.partition_by_session(SessionPartitionSpec::Random {
+    let partitions = trace.partition_by_session(SessionPartitionSpec::Random {
         num_partitions: num_workers,
         seed,
-    }))
+    });
+    let non_empty = partitions
+        .into_iter()
+        .filter(|trace| !trace.sessions.is_empty())
+        .collect::<Vec<_>>();
+    if non_empty.is_empty() {
+        anyhow::bail!("mooncake trace produced no non-empty worker partitions");
+    }
+    Ok(non_empty)
 }
 
 pub fn maybe_rescale_ready_span(
