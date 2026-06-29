@@ -195,36 +195,27 @@ benchmarks with AIPerf. Takes 2–4 hours.
 - **Requires GPU resources** — the profiler deploys real inference engines on
   your cluster during profiling.
 
-## DGDR Detail: AIC Support Gates
+## DGDR Detail: AIC Support
 
 The rapid strategy relies on AIC system metadata and performance models. Check
 the [AIC support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
 for the latest model, GPU, backend, and backend-version support.
 
-### Gate 1: DGDR GPU SKU
+Rapid fallback has three gates:
 
-DGDR accepts only known GPU SKU identifiers. When specifying GPU SKUs manually,
-use lowercase underscore format (e.g., `h100_sxm`, not `H100-SXM5-80GB`). See
-the [DGDR Reference — SKU Format](dgdr.md#sku-format) for the full list.
-
-If hardware discovery cannot map a GPU product name to a recognized DGDR SKU,
-set `hardware.gpuSku`, `hardware.vramMb`, `hardware.numGpusPerNode`, and
-`hardware.totalGpus` manually. If the GPU SKU is not listed in the
-[DGDR Reference](dgdr.md#sku-format), profiling fails before fallback generation
-runs.
-
-### Gate 2: AIC Base System Metadata
-
-AIC must have base system metadata for the GPU SKU before rapid fallback can
-generate a valid deployment. This metadata provides the GPU memory, GPUs per
-node, and hardware facts used by naive memory-fit generation. Without it,
-fallback cannot produce a correct config for that GPU.
-
-### Gate 3: AIC Combination Support
-
-After DGDR accepts the GPU SKU and AIC has base system metadata, AIC checks
-whether the exact model/GPU/backend combination has rapid-mode performance
-support. If it does not, rapid can fall back to naive memory-fit generation.
+- **DGDR GPU SKU:** DGDR must accept `hardware.gpuSku`. If discovery cannot map
+  your GPU product name to a recognized SKU, set `hardware.gpuSku`,
+  `hardware.vramMb`, `hardware.numGpusPerNode`, and `hardware.totalGpus`
+  manually. Use lowercase underscore format (e.g., `h100_sxm`, not
+  `H100-SXM5-80GB`). See the
+  [DGDR Reference — SKU Format](dgdr.md#sku-format) for the full list.
+- **AIC base system metadata:** AIC must know the GPU SKU's memory, GPUs per
+  node, and hardware facts. Naive fallback does not add support for a GPU SKU
+  missing from AIC system metadata.
+- **AIC combination support:** If DGDR accepts the GPU SKU and AIC has base
+  system metadata, but AIC lacks rapid performance support for the exact
+  model/GPU/backend combination, rapid can fall back to naive memory-fit
+  generation.
 
 ### GPU SKUs
 

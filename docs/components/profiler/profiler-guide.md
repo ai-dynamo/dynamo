@@ -92,15 +92,10 @@ searchStrategy: rapid
 ```
 
 - Supports all backends: vLLM, SGLang, TensorRT-LLM
-- DGDR must accept `hardware.gpuSku`, and AIC must have base system metadata
-  for that GPU SKU before fallback can run.
-- If those gates pass but the exact model/GPU/backend combination is not
-  supported by AIC, the profiler falls back to a naive config (memory-fit TP
-  calculation).
-- If hardware discovery produces an unknown GPU product name, set
-  `hardware.gpuSku`, `hardware.vramMb`, `hardware.numGpusPerNode`, and
-  `hardware.totalGpus` manually. Unknown GPU SKUs, and GPU SKUs without AIC
-  base system metadata, fail before naive fallback can produce a valid config.
+- Requires a DGDR-recognized GPU SKU and AIC base system metadata before
+  fallback can run.
+- Falls back to a naive config (memory-fit TP calculation) when the GPU SKU is
+  known but the exact model/GPU/backend combination is not supported by AIC.
 - No GPU resources consumed during profiling
 
 ### Thorough
@@ -434,8 +429,8 @@ hardware:
 > If you don't specify hardware constraints, the controller auto-detects GPU
 > hardware from cluster resources. If discovery cannot map the GPU to a
 > recognized DGDR SKU, provide all hardware fields manually. Unknown GPU SKUs
-> fail validation before rapid naive fallback can run. A recognized GPU SKU also
-> needs AIC base system metadata before fallback can generate a correct config.
+> fail validation before rapid naive fallback can run. AIC also needs base
+> system metadata for the GPU SKU before fallback can generate a correct config.
 
 ### Search Strategy (Optional)
 
