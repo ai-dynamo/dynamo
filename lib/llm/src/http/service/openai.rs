@@ -38,6 +38,8 @@ use super::{
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
+        process_chat_response_and_observe_metrics,
+        process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
@@ -1703,6 +1705,14 @@ async fn chat_completions(
             err_response
         })?;
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -1788,7 +1798,7 @@ async fn chat_completions(
 
                 // Convert to SSE event (this consumes the response).
                 // EventConverter will detect `event: "error"` and convert to SSE error events.
-                let sse_result = process_response_using_event_converter_and_observe_metrics(
+                let sse_result = process_chat_response_using_event_converter_and_observe_metrics(
                     EventConverter::from(response),
                     &mut response_collector,
                     &mut http_queue_guard,
@@ -1830,7 +1840,7 @@ async fn chat_completions(
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
-            process_response_and_observe_metrics(
+            process_chat_response_and_observe_metrics(
                 response,
                 &mut response_collector,
                 &mut http_queue_guard,
@@ -2174,6 +2184,14 @@ async fn responses(
             err_response
         })?;
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -2225,7 +2243,7 @@ async fn responses(
             let mut saw_error = false;
 
             while let Some(annotated_chunk) = engine_stream.next().await {
-                process_response_and_observe_metrics(
+                process_chat_response_and_observe_metrics(
                     &annotated_chunk,
                     &mut response_collector,
                     &mut http_queue_guard,
@@ -2281,7 +2299,7 @@ async fn responses(
 
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
-            process_response_and_observe_metrics(
+            process_chat_response_and_observe_metrics(
                 response,
                 &mut response_collector,
                 &mut http_queue_guard,
@@ -2369,11 +2387,10 @@ pub fn validate_response_unsupported_fields(
 }
 
 // todo - abstract this to the top level lib.rs to be reused
-// todo - move the service_observer to its own state/arc
-pub(crate) fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
-    // if state.service_observer.stage() != ServiceStage::Ready {
-    //     return Err(ErrorMessage::service_unavailable());
-    // }
+pub(crate) fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
+    if !state.is_ready() {
+        return Err(ErrorMessage::_service_unavailable());
+    }
     Ok(())
 }
 
@@ -3327,6 +3344,18 @@ mod tests {
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.message, "custom error message");
+    }
+
+    #[test]
+    fn test_check_ready_rejects_draining_service() {
+        let service = service_v2::HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        assert!(check_ready(&state).is_ok());
+
+        state.start_draining();
+        let response = check_ready(&state).unwrap_err();
+        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
@@ -4380,6 +4409,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -4419,6 +4449,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -4722,6 +4753,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         };
         Annotated {
             id: Some("test-id".to_string()),
@@ -5355,6 +5387,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 

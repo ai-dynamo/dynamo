@@ -156,12 +156,13 @@ mod tests {
     use super::*;
     use crate::SchedulingRequest;
     use crate::protocols::{OverlapScores, WorkerWithDpRank};
+    use crate::scheduling::{OverlapSignals, ScheduleMode};
     use crate::test_utils::SimpleWorkerConfig;
 
     fn workers_for_request(request: &SchedulingRequest) -> HashMap<u64, SimpleWorkerConfig> {
         let mut workers = HashMap::new();
 
-        for worker in request.effective_cached_tokens.keys() {
+        for worker in request.overlap.effective_cached_tokens.keys() {
             workers.entry(worker.worker_id).or_default();
         }
 
@@ -203,16 +204,17 @@ mod tests {
             .map(|(worker, overlap)| (*worker, *overlap as usize * 16))
             .collect();
         SchedulingRequest {
-            maybe_request_id: None,
+            mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks,
-            effective_cached_tokens,
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks,
+                effective_cached_tokens,
+            },
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump,
             strict_priority: 0,

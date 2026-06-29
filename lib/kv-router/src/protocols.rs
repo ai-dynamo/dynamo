@@ -343,7 +343,7 @@ impl StorageTier {
     pub fn from_kv_medium(medium: &str) -> Option<Self> {
         match medium {
             "GPU" | "DEVICE" => Some(Self::Device),
-            "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
+            "CPU" | "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
             "CPU_TIER2" | "DISK" | "NVME" => Some(Self::Disk),
             "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
             _ => None,

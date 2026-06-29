@@ -62,7 +62,8 @@ impl OfflineDisaggReplayConfig {
 
 pub use entrypoints::{
     ReplayKvEventVisibility, generate_trace_worker_artifacts_offline,
-    generate_trace_worker_artifacts_offline_with_kv_event_visibility, simulate_concurrency_file,
+    generate_trace_worker_artifacts_offline_with_kv_event_visibility,
+    simulate_agentic_trace_workload_with_router_mode, simulate_concurrency_file,
     simulate_concurrency_file_disagg_with_router_mode,
     simulate_concurrency_file_disagg_with_router_mode_and_format,
     simulate_concurrency_file_with_router_mode,
@@ -74,7 +75,12 @@ pub use entrypoints::{
     simulate_concurrency_requests_disagg_with_router_mode,
     simulate_concurrency_requests_with_router_mode, simulate_concurrency_workload,
     simulate_concurrency_workload_disagg_with_router_mode,
-    simulate_concurrency_workload_with_router_mode, simulate_trace_file,
+    simulate_concurrency_workload_disagg_with_router_mode_and_options,
+    simulate_concurrency_workload_with_router_mode,
+    simulate_concurrency_workload_with_router_mode_and_options,
+    simulate_loaded_trace_disagg_with_router_mode_and_options,
+    simulate_loaded_trace_live_with_router_mode,
+    simulate_loaded_trace_with_router_mode_and_options, simulate_trace_file,
     simulate_trace_file_disagg_with_router_mode,
     simulate_trace_file_disagg_with_router_mode_and_format, simulate_trace_file_with_router_mode,
     simulate_trace_file_with_router_mode_and_format, simulate_trace_live_file,

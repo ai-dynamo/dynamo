@@ -18,6 +18,105 @@ fn write_trace(lines: &[serde_json::Value]) -> NamedTempFile {
     file
 }
 
+fn request_trace_row(
+    request_id: &str,
+    block_size: usize,
+    agent_context: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut row = serde_json::json!({
+        "schema": "dynamo.request.trace.v1",
+        "event_type": "request_end",
+        "event_time_unix_ms": 1_100,
+        "request": {
+            "request_id": request_id,
+            "request_received_ms": 1_000,
+            "output_tokens": 4,
+            "replay": {
+                "trace_block_size": block_size,
+                "input_length": block_size,
+                "input_sequence_hashes": [11],
+            }
+        }
+    });
+    if let Some(agent_context) = agent_context {
+        row["agent_context"] = agent_context;
+    }
+    row
+}
+
+#[test]
+fn dynamo_trace_input_validation_errors_are_clear() {
+    enum ValidationCase {
+        Validate(TraceFileFormat, Vec<std::path::PathBuf>),
+        Load(Vec<std::path::PathBuf>, Option<usize>),
+    }
+
+    let mixed = write_trace(&[
+        request_trace_row(
+            "contextual",
+            2,
+            Some(serde_json::json!({"session_id": "root"})),
+        ),
+        request_trace_row("context-free", 2, None),
+    ]);
+    let inconsistent = write_trace(&[
+        request_trace_row("block-2", 2, None),
+        request_trace_row("block-4", 4, None),
+    ]);
+    let block_size = write_trace(&[request_trace_row("block-2", 2, None)]);
+    let extra = write_trace(&[serde_json::json!({
+        "timestamp": 0,
+        "input_length": 2,
+        "output_length": 1,
+        "hash_ids": [1],
+    })]);
+
+    let cases = [
+        (
+            "empty",
+            ValidationCase::Validate(TraceFileFormat::Dynamo, vec![]),
+            "at least one trace file",
+        ),
+        (
+            "mixed context",
+            ValidationCase::Load(vec![mixed.path().to_path_buf()], None),
+            "cannot mix requests with and without agent_context",
+        ),
+        (
+            "inconsistent block size",
+            ValidationCase::Load(vec![inconsistent.path().to_path_buf()], None),
+            "mixed replay trace_block_size values",
+        ),
+        (
+            "explicit block size mismatch",
+            ValidationCase::Load(vec![block_size.path().to_path_buf()], Some(4)),
+            "does not match embedded Dynamo request trace block size 2",
+        ),
+        (
+            "multiple non-Dynamo files",
+            ValidationCase::Validate(
+                TraceFileFormat::Mooncake,
+                vec![block_size.path().to_path_buf(), extra.path().to_path_buf()],
+            ),
+            "requires exactly one trace file",
+        ),
+    ];
+
+    for (name, case, expected) in cases {
+        let error = match case {
+            ValidationCase::Validate(format, paths) => validate_trace_files(format, &paths),
+            ValidationCase::Load(paths, block_size) => {
+                DynamoRequestTrace::from_request_trace_files(&paths, block_size).map(|_| ())
+            }
+        }
+        .expect_err(name);
+        assert!(
+            error.to_string().contains(expected),
+            "{name}: unexpected error: {error:#}"
+        );
+    }
+}
+
 #[test]
 fn test_from_mooncake_single_turn_preserves_fields() {
     let file = write_trace(&[serde_json::json!({

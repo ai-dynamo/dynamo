@@ -64,8 +64,9 @@ func NewDGDRDefaulter(operatorVersion string) *DGDRDefaulter {
 }
 
 // Default implements admission.CustomDefaulter.
-// Only called on CREATE (the webhook is not registered for UPDATE).
 // If spec.image is not set, derives a default image from the backend and operator version.
+// UPDATE requests are admitted unchanged so an omitted image is not rewritten after
+// creation.
 func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dgdrDefaultingWebhookName)
 

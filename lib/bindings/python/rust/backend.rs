@@ -86,6 +86,7 @@ pub enum DisaggregationMode {
     Aggregated = 1,
     Prefill = 2,
     Decode = 3,
+    Encode = 4,
 }
 
 impl From<DisaggregationMode> for RsDisaggregationMode {
@@ -94,6 +95,7 @@ impl From<DisaggregationMode> for RsDisaggregationMode {
             DisaggregationMode::Aggregated => RsDisaggregationMode::Aggregated,
             DisaggregationMode::Prefill => RsDisaggregationMode::Prefill,
             DisaggregationMode::Decode => RsDisaggregationMode::Decode,
+            DisaggregationMode::Encode => RsDisaggregationMode::Encode,
         }
     }
 }
@@ -314,6 +316,7 @@ impl WorkerConfig {
         structural_tag_mode = "off".to_string(),
         structural_tag_scope = "auto".to_string(),
         structural_tag_schema = "auto".to_string(),
+        route_to_encoder = false,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -339,6 +342,7 @@ impl WorkerConfig {
         structural_tag_mode: String,
         structural_tag_scope: String,
         structural_tag_schema: String,
+        route_to_encoder: bool,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -416,6 +420,7 @@ impl WorkerConfig {
                 structural_tag_scope: st_scope,
                 structural_tag_schema: st_schema,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
+                route_to_encoder,
             },
         })
     }

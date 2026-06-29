@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -172,6 +173,24 @@ def test_run_trace_replay_rejects_applied_compute_agentic_format_without_concurr
             num_workers=2,
             replay_mode="offline",
             trace_format="applied_compute_agentic",
+        )
+
+
+def test_direct_agentic_dynamo_trace_rejects_replay_concurrency():
+    trace_path = (
+        Path(__file__).resolve().parents[5]
+        / "lib"
+        / "bench"
+        / "testdata"
+        / "pi_request_trace.jsonl.gz"
+    )
+
+    with pytest.raises(Exception, match="not supported with replay_concurrency"):
+        run_trace_replay(
+            trace_path,
+            extra_engine_args=_vllm_args(),
+            replay_concurrency=2,
+            trace_format="dynamo",
         )
 
 

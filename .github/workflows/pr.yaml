@@ -27,6 +27,7 @@ jobs:
       planner: ${{ steps.changes.outputs.planner }}
       operator: ${{ steps.changes.outputs.operator }}
       snapshot: ${{ steps.changes.outputs.snapshot }}
+      power_agent: ${{ steps.changes.outputs.power_agent }}
       deploy: ${{ steps.changes.outputs.deploy }}
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
@@ -59,6 +60,7 @@ jobs:
       - snapshot-agent
       - snapshot-placeholder-vllm
       - snapshot-placeholder-sglang
+      - power-agent
       - vllm-build
       - vllm-dev-build
       - vllm-test
@@ -202,6 +204,67 @@ jobs:
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+
+# ============================================================================
+# Power Agent
+# ============================================================================
+
+  power-agent:
+    needs: changed-files
+    if: needs.changed-files.outputs.power_agent == 'true'
+    name: Power Agent
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
+      - name: Build and push power agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: power-agent
+          target: runtime  # push the slim shipped stage, not the test stage
+          image_tag: ${{ github.sha }}-power-agent
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Refresh BuildKit builder
+        # The runtime build above can leave the remote BuildKit connection stale;
+        # re-establish it (re-routing only if unhealthy) before the test build.
+        uses: ./.github/actions/builder-refresher
+        with:
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
+          flavor: general
+          arch: linux/amd64
+      - name: Run unit tests inside the container image
+        # Build the Dockerfile `test` stage (FROM runtime): its RUN pytest runs
+        # the suite against the exact shipped image (Python 3.12 + baked deps),
+        # validating the container itself rather than a pip-installed runner env.
+        # Reuses the builder + ECR Docker Hub mirror the build step set up above
+        # (runtime layers are a cache hit); no --push/--load runs pytest without
+        # exporting the never-shipped test image.
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker buildx build --builder ${{ needs.changed-files.outputs.builder_name }} \
+            --target test \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            -f deploy/power-agent/Dockerfile deploy/power-agent
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
+        with:
+          version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
+      - name: Lint and render (production + dev)
+        run: |
+          CHART=deploy/helm/charts/power-agent
+          helm lint "$CHART" --set image.tag=ci-test
+          # Production DaemonSet render (default daemonset.enabled=true).
+          helm template power-agent "$CHART" --set image.tag=ci-test >/dev/null
+          # Dev-pod render: uses dev.image.* and must NOT require the production
+          # image.tag (regression guard for the daemonset-gated validation).
+          helm template power-agent "$CHART" \
+            --set daemonset.enabled=false \
+            --set dev.enabled=true \
+            --set dev.nodeName=ci-node >/dev/null
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -1223,6 +1286,7 @@ jobs:
       - snapshot-agent
       - snapshot-placeholder-vllm
       - snapshot-placeholder-sglang
+      - power-agent
       - planner-test
       - vllm-copy-to-acr
       - vllm-multi-gpu-test

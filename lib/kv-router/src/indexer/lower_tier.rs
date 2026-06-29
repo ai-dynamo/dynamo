@@ -20,7 +20,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use super::{KvIndexerMetrics, SyncIndexer, WorkerLookupStats, WorkerTask};
+use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerLookupStats, WorkerTask};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
@@ -499,22 +499,32 @@ impl SyncIndexer for LowerTierIndexer {
     fn worker(
         &self,
         event_receiver: flume::Receiver<WorkerTask>,
-        _metrics: Option<Arc<KvIndexerMetrics>>,
+        metrics: Option<Arc<KvIndexerMetrics>>,
     ) -> anyhow::Result<()> {
         let mut worker_blocks = WorkerBlockIndex::default();
+        let counters = metrics.as_ref().map(|m| m.prebind());
 
         while let Ok(task) = event_receiver.recv() {
             match task {
                 WorkerTask::Event(event) => {
-                    if let Err(error) = self.apply_event(&mut worker_blocks, event) {
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut worker_blocks, event);
+                    if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
                     }
                 }
                 WorkerTask::EventWithAck { event, resp } => {
+                    let kind = EventKind::of(&event.event.data);
                     let result = self.apply_event(&mut worker_blocks, event);
                     let applied = result.is_ok();
-                    if let Err(error) = result {
+                    if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
                     }
                     let _ = resp.send(applied);
                 }

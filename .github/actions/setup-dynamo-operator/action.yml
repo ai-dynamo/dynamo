@@ -11,7 +11,7 @@ inputs:
     required: false
     default: ''
   vcluster_namespace:
-    description: 'Host namespace where the vCluster will be created. When empty, aws-dev-02 uses the shared deploy-test namespace and other clusters use a per-run namespace.'
+    description: 'Host namespace where the vCluster will be created. When empty, aws-dev-01 and aws-dev-02 use the shared deploy-test namespace and other clusters use a per-run namespace.'
     required: false
     default: ''
   registry:
@@ -39,7 +39,7 @@ inputs:
     required: false
     default: 'v1.32.13'
   vcluster_host_priority_class:
-    description: 'Host PriorityClass to set on pods synced from the vCluster. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-02; use an empty value to disable.'
+    description: 'Host PriorityClass to set on pods synced from the vCluster. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-01 or aws-dev-02; use an empty value to disable.'
     required: false
     default: 'auto'
   checkpoint_enabled:
@@ -102,8 +102,12 @@ runs:
           echo "vcluster_name=ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
         fi
 
-        CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
-        if [[ -z "${INPUT_NAMESPACE}" && "${CURRENT_CONTEXT}" == *aws-dev-02* ]]; then
+        CURRENT_CONTEXT="${KUBE_CONTEXT:-}"
+        if [ -z "${CURRENT_CONTEXT}" ]; then
+          CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
+        fi
+
+        if [[ -z "${INPUT_NAMESPACE}" && ( "${CURRENT_CONTEXT}" == *aws-dev-01* || "${CURRENT_CONTEXT}" == *aws-dev-02* ) ]]; then
           echo "namespace=dynamo-deploy-test" >> "$GITHUB_OUTPUT"
         elif [ -n "${INPUT_NAMESPACE}" ]; then
           echo "namespace=${INPUT_NAMESPACE}" >> "$GITHUB_OUTPUT"
@@ -181,7 +185,7 @@ runs:
 
         if [ "${PRIORITY_CLASS}" = "auto" ]; then
           PRIORITY_CLASS=""
-          if [[ "${CURRENT_CONTEXT}" == *aws-dev-02* ]]; then
+          if [[ "${CURRENT_CONTEXT}" == *aws-dev-01* || "${CURRENT_CONTEXT}" == *aws-dev-02* ]]; then
             PRIORITY_CLASS="ci-nightly-high-priority"
           fi
         fi
