@@ -12,18 +12,22 @@ from typing import Optional
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
+    ClaimPersistentAllocationRequest,
     CommitRequest,
     ExportAllocationRequest,
+    ExportPersistentAllocationRequest,
     FreeAllocationRequest,
     GetAllocationRequest,
     GetAllocationStateRequest,
     GetLockStateRequest,
     GetStateHashRequest,
     ListAllocationsRequest,
+    ListPersistentAllocationsRequest,
     MetadataDeleteRequest,
     MetadataGetRequest,
     MetadataListRequest,
     MetadataPutRequest,
+    ReleasePersistentAllocationRequest,
 )
 
 from .fsm import GMSFSM, Connection, ServerState, StateEvent
@@ -57,6 +61,18 @@ RO_ALLOWED: frozenset[type] = frozenset(
 )
 
 RW_ALLOWED: frozenset[type] = RW_REQUIRED | RO_ALLOWED
+
+# Persistent-allocation RPCs are namespace-independent from the
+# RW/RO/COMMITTED lock state — they may be used by any client, in
+# any lock mode (including no lock at all).
+PERSISTENT_ALLOWED: frozenset[type] = frozenset(
+    {
+        ClaimPersistentAllocationRequest,
+        ReleasePersistentAllocationRequest,
+        ExportPersistentAllocationRequest,
+        ListPersistentAllocationsRequest,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -119,6 +135,9 @@ class GMSSessionManager:
     ) -> Optional[GrantedLockType]:
         timeout = timeout_ms / 1000 if timeout_ms is not None else None
 
+        if mode == RequestedLockType.RW_PERSISTENT:
+            return GrantedLockType.RW_PERSISTENT
+
         if mode == RequestedLockType.RW:
             try:
                 async with self._condition:
@@ -177,6 +196,8 @@ class GMSSessionManager:
                 self._condition.notify_all()
 
     def on_connect(self, conn: Connection) -> None:
+        if conn.mode == GrantedLockType.RW_PERSISTENT:
+            return
         if conn.mode == GrantedLockType.RW:
             if self._reserved_rw_session_id != conn.session_id:
                 raise AssertionError(
@@ -194,6 +215,13 @@ class GMSSessionManager:
         self._locking.transition(StateEvent.RW_COMMIT, conn)
 
     def check_operation(self, msg_type: type, conn: Connection) -> None:
+        # Persistent-allocation and KV-lease RPCs are allowed in any session mode.
+        if msg_type in PERSISTENT_ALLOWED:
+            return
+        if conn.mode == GrantedLockType.RW_PERSISTENT:
+            raise OperationNotAllowed(
+                f"{msg_type.__name__} not allowed for RW_PERSISTENT session"
+            )
         if conn.mode == GrantedLockType.RW and msg_type not in RW_ALLOWED:
             raise OperationNotAllowed(
                 f"{msg_type.__name__} not allowed for RW session in state {self.state.name}"

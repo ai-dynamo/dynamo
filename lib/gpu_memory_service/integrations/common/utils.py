@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -21,6 +22,60 @@ if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
+
+
+_FALSEY_ENV_VALUES = {"", "0", "false", "no", "off"}
+
+
+def env_enabled_by_default(name: str, *, default: bool = True) -> bool:
+    """Return true unless an environment variable explicitly disables a feature."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in _FALSEY_ENV_VALUES
+
+
+def get_gms_persistent_kv_socket(device: int, socket_env: str) -> str:
+    """Resolve the existing per-GPU KV-cache server socket."""
+    explicit = os.environ.get(socket_env) or os.environ.get(
+        "DYN_GMS_PERSISTENT_KV_SOCKET"
+    )
+    if explicit:
+        return explicit
+
+    from gpu_memory_service.common.utils import get_socket_path
+
+    return get_socket_path(device, "kv_cache")
+
+
+def get_gms_persistent_kv_engine_id(
+    engine: str,
+    device: int,
+    engine_env: str,
+) -> str:
+    """Return an explicit or deployment-stable persistent-KV engine id."""
+    for name in (
+        engine_env,
+        f"GMS_{engine.upper()}_ENGINE_ID",
+        "DYN_GMS_ENGINE_ID",
+        "DYN_ENGINE_ID",
+    ):
+        value = os.environ.get(name)
+        if value:
+            return value
+
+    parts = [engine, f"cuda={device}"]
+    for name in (
+        "DYN_NAMESPACE",
+        "DYN_COMPONENT",
+        "DYN_SYSTEM_NAME",
+        "DYN_WORKER_ID",
+        "CUDA_VISIBLE_DEVICES",
+    ):
+        value = os.environ.get(name)
+        if value:
+            parts.append(f"{name.lower()}={value}")
+    return "|".join(parts)
 
 
 @dataclass(frozen=True)

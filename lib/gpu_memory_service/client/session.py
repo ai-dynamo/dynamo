@@ -13,10 +13,14 @@ from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
     AllocateResponse,
+    ClaimPersistentAllocationRequest,
+    ClaimPersistentAllocationResponse,
     CommitRequest,
     CommitResponse,
     ExportAllocationRequest,
     ExportAllocationResponse,
+    ExportPersistentAllocationRequest,
+    ExportPersistentAllocationResponse,
     FreeAllocationRequest,
     FreeAllocationResponse,
     GetAllocationRequest,
@@ -30,6 +34,8 @@ from gpu_memory_service.common.protocol.messages import (
     HandshakeResponse,
     ListAllocationsRequest,
     ListAllocationsResponse,
+    ListPersistentAllocationsRequest,
+    ListPersistentAllocationsResponse,
     MetadataDeleteRequest,
     MetadataDeleteResponse,
     MetadataGetRequest,
@@ -38,6 +44,9 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataListResponse,
     MetadataPutRequest,
     MetadataPutResponse,
+    PersistentAllocationInfo,
+    ReleasePersistentAllocationRequest,
+    ReleasePersistentAllocationResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -174,6 +183,75 @@ class _GMSClientSession:
             FreeAllocationRequest(allocation_id=allocation_id),
             FreeAllocationResponse,
         ).success
+
+    # ------------------------------------------------------------------
+    # Persistent allocations (KV-pool namespace; lock-independent)
+    # ------------------------------------------------------------------
+
+    def claim_persistent(
+        self,
+        engine_id: str,
+        tag: str,
+        size: int,
+        *,
+        shared: bool = False,
+    ) -> ClaimPersistentAllocationResponse:
+        """Claim a persistent allocation by (engine_id, tag). If one
+        already exists for that key, returns it (reattached=True);
+        otherwise allocates fresh."""
+        return self._transport.request(
+            ClaimPersistentAllocationRequest(
+                engine_id=engine_id,
+                tag=tag,
+                size=size,
+                shared=shared,
+            ),
+            ClaimPersistentAllocationResponse,
+        )
+
+    def release_persistent(self, engine_id: str, tag: str) -> bool:
+        """Explicitly destroy a persistent allocation. Returns True iff
+        an allocation existed and was freed."""
+        return self._transport.request(
+            ReleasePersistentAllocationRequest(
+                engine_id=engine_id,
+                tag=tag,
+            ),
+            ReleasePersistentAllocationResponse,
+        ).released
+
+    def export_persistent(
+        self,
+        engine_id: str,
+        tag: str,
+    ) -> Tuple[ExportPersistentAllocationResponse, int]:
+        """Export the persistent allocation's FD for cuMemImport. The
+        caller owns the returned FD and must close it after mapping."""
+        response, fd = self._transport.request_with_fd(
+            ExportPersistentAllocationRequest(
+                engine_id=engine_id,
+                tag=tag,
+            ),
+            ExportPersistentAllocationResponse,
+        )
+        if fd < 0:
+            raise RuntimeError(
+                f"GMS export_persistent returned no FD for ({engine_id!r}, {tag!r})"
+            )
+        return response, fd
+
+    def list_persistent(
+        self,
+        engine_id: Optional[str] = None,
+    ) -> List[PersistentAllocationInfo]:
+        return self._transport.request(
+            ListPersistentAllocationsRequest(engine_id=engine_id),
+            ListPersistentAllocationsResponse,
+        ).allocations
+
+    # ------------------------------------------------------------------
+    # KV block leases (shared persistent KV pools)
+    # ------------------------------------------------------------------
 
     def metadata_put(
         self, key: str, allocation_id: str, offset_bytes: int, value: bytes

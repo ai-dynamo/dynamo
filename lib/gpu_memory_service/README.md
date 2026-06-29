@@ -57,15 +57,15 @@ GMS follows a client-server architecture where the **server** owns GPU memory al
 
 ### Server
 
-The GMS server runs as an independent process that manages GPU memory without ever mapping it to its own address space. This design allows the server to:
+The GMS server runs independently from inference workers and owns the exported CUDA VMM handles. Normal weight allocations remain unmapped in the daemon; persistent KV allocations are also mapped into daemon virtual address space for direct-access and storage-tier operations. This design allows the server to:
 
-- **Survive GPU driver failures** - no CUDA context means no vulnerability to driver resets
 - **Outlive client processes** - memory persists across client crashes
 - **Arbitrate access** - enforce single-writer, multiple-reader semantics
+- **Limit daemon mappings** - only persistent allocations that need daemon-side access are mapped
 
 The server consists of three main components:
 
-1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`) and eagerly exports one shareable file descriptor (`cuMemExportToShareableHandle`) per allocation. Later export RPCs `dup()` that cached FD instead of calling back into CUDA again. Critically, it never calls `cuMemMap` - clients handle all virtual address mapping. Allocation requests retry on OOM until they succeed or the optional retry timeout is reached.
+1. **Memory Manager** - Allocates physical GPU memory via CUDA VMM (`cuMemCreate`) and eagerly exports one shareable file descriptor (`cuMemExportToShareableHandle`) per allocation. Later export RPCs `dup()` that cached FD instead of calling back into CUDA again. Weight layouts are mapped only by clients. The persistent-allocation manager additionally maps persistent KV in the daemon for direct-access and storage-tier operations. Allocation requests retry on OOM until they succeed or the optional retry timeout is reached.
 
 2. **State Machine (FSM)** - Manages global lock state, waiter coordination, and disconnect cleanup.
 

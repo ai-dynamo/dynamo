@@ -416,6 +416,10 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
 @pytest.fixture()
 def set_ucx_tls_no_mm():
     """Set UCX env defaults for all tests."""
+    if os.environ.get("DYNAMO_TEST_PRESERVE_UCX_ENV") == "1":
+        yield
+        return
+
     mp = pytest.MonkeyPatch()
     # CI note:
     # - Affected test: tests/fault_tolerance/cancellation/test_vllm.py::test_request_cancellation_vllm_decode_cancel
@@ -463,6 +467,10 @@ def download_models(model_list=None, ignore_weights=False):
 
     failures = []
     for model_id in model_list:
+        if Path(str(model_id)).exists():
+            logging.info("Using local model path; skipping pre-download: %s", model_id)
+            continue
+
         logging.info(
             f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
         )

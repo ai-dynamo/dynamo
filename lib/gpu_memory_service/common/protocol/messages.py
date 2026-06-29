@@ -101,6 +101,100 @@ class FreeAllocationResponse(msgspec.Struct, tag="free_allocation_response"):
     success: bool
 
 
+# ----------------------------------------------------------------------
+# Persistent allocations (separate namespace from the RW/RO/COMMITTED
+# layout machinery). Keyed by (engine_id, tag). Survive client
+# disconnect; can be re-attached. Used for VMM-IPC KV pools.
+# ----------------------------------------------------------------------
+
+
+class ClaimPersistentAllocationRequest(
+    msgspec.Struct,
+    tag="claim_persistent_allocation_request",
+):
+    engine_id: str
+    tag: str
+    size: int
+    # Shared claims allow multiple cooperating engine processes to map the
+    # same persistent KV pool. Writers must then coordinate through KV leases.
+    shared: bool = False
+
+
+class ClaimPersistentAllocationResponse(
+    msgspec.Struct,
+    tag="claim_persistent_allocation_response",
+):
+    allocation_id: str
+    size: int
+    aligned_size: int
+    # True if this claim returned an already-existing allocation
+    # (re-attach). False if a fresh allocation was created.
+    reattached: bool
+
+
+class ReleasePersistentAllocationRequest(
+    msgspec.Struct,
+    tag="release_persistent_allocation_request",
+):
+    engine_id: str
+    tag: str
+
+
+class ReleasePersistentAllocationResponse(
+    msgspec.Struct,
+    tag="release_persistent_allocation_response",
+):
+    released: bool
+
+
+class ExportPersistentAllocationRequest(
+    msgspec.Struct,
+    tag="export_persistent_allocation_request",
+):
+    engine_id: str
+    tag: str
+
+
+class ExportPersistentAllocationResponse(
+    msgspec.Struct,
+    tag="export_persistent_allocation_response",
+):
+    allocation_id: str
+    size: int
+    aligned_size: int
+
+
+class ListPersistentAllocationsRequest(
+    msgspec.Struct,
+    tag="list_persistent_allocations_request",
+):
+    engine_id: Optional[str] = None
+
+
+class PersistentAllocationInfo(
+    msgspec.Struct,
+    tag="persistent_allocation_info",
+):
+    allocation_id: str
+    engine_id: str
+    tag: str
+    size: int
+    aligned_size: int
+    claimed: bool
+
+
+class ListPersistentAllocationsResponse(
+    msgspec.Struct,
+    tag="list_persistent_allocations_response",
+):
+    allocations: List[PersistentAllocationInfo] = []
+
+
+# ----------------------------------------------------------------------
+# KV block leases for shared persistent KV pools.
+# ----------------------------------------------------------------------
+
+
 class ErrorResponse(msgspec.Struct, tag="error_response"):
     error: str
     code: int = 0
@@ -214,6 +308,16 @@ Message = Union[
     GetRuntimeStateResponse,
     GetEventHistoryRequest,
     GetEventHistoryResponse,
+    # Persistent allocations (KV-pool namespace)
+    ClaimPersistentAllocationRequest,
+    ClaimPersistentAllocationResponse,
+    ReleasePersistentAllocationRequest,
+    ReleasePersistentAllocationResponse,
+    ExportPersistentAllocationRequest,
+    ExportPersistentAllocationResponse,
+    ListPersistentAllocationsRequest,
+    ListPersistentAllocationsResponse,
+    PersistentAllocationInfo,
 ]
 
 _encoder = msgspec.msgpack.Encoder()

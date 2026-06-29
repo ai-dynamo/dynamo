@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -28,6 +29,19 @@ class _TagState:
     socket_path: str
     device: int
     is_scratch: bool = False
+    # Persistent-namespace routing: when True, _gms_malloc routes
+    # through create_persistent_mapping (KV-pool flow) keyed by
+    # (persistent_engine_id, per-allocation auto tag) instead of
+    # create_mapping (weights flow).
+    is_persistent: bool = False
+    persistent_engine_id: str = ""
+    # Counter for auto-generated per-allocation tags so multiple
+    # torch.empty() calls inside the same `with` block produce
+    # distinct persistent allocations.
+    persistent_alloc_seq: int = 0
+    persistent_tag_plan: list[str] | None = None
+    persistent_shared: bool = False
+    persistent_defer_physical: bool = False
 
 
 _tag_states: dict[str, _TagState] = {}
@@ -35,13 +49,56 @@ _active_tag: ContextVar[str | None] = ContextVar(
     "gpu_memory_service_active_tag",
     default=None,
 )
+_active_pool: ContextVar[tuple[str, int] | None] = ContextVar(
+    "gpu_memory_service_active_pool",
+    default=None,
+)
 _callbacks_initialized = False
 _pluggable_alloc: Any | None = None
 
 
+def _device_index(torch_mod: Any, device: "torch.device | int") -> int:
+    if isinstance(device, int):
+        return int(device)
+    index = getattr(device, "index", None)
+    if index is not None:
+        return int(index)
+    return int(torch_mod.cuda.current_device())
+
+
+@contextmanager
+def _use_gms_pool_context(
+    tag: str,
+    device: "torch.device | int",
+    mem_pool: "MemPool",
+) -> Iterator[None]:
+    import torch
+
+    device_index = _device_index(torch, device)
+    active_pool = _active_pool.get()
+    if active_pool is not None:
+        if active_pool == (tag, device_index):
+            yield
+            return
+        raise RuntimeError(
+            "Nested GMS mempool contexts must use the same tag and CUDA device: "
+            f"active={active_pool}, requested={(tag, device_index)}"
+        )
+
+    tag_token = _active_tag.set(tag)
+    pool_token = _active_pool.set((tag, device_index))
+    try:
+        with torch.cuda.use_mem_pool(mem_pool, device=device):
+            yield
+    finally:
+        _active_pool.reset(pool_token)
+        _active_tag.reset(tag_token)
+
+
 def _gms_malloc(size: int, device: int, stream: int) -> int:
-    # Tag-context dispatch: the active tag (set by gms_use_mem_pool) selects
-    # the registry; state.is_scratch decides scratch vs server-backed routing.
+    # Tag-context dispatch: the active tag (set by gms_use_mem_pool /
+    # gms_use_persistent_pool) selects the registry; the state's
+    # is_scratch / is_persistent flags decide routing.
     tag = _active_tag.get()
     if tag is None:
         raise RuntimeError("No active GMS allocation tag")
@@ -49,6 +106,54 @@ def _gms_malloc(size: int, device: int, stream: int) -> int:
     state = _tag_states.get(tag)
     if state is None:
         raise RuntimeError(f"Unknown GMS allocation tag: {tag}")
+
+    if state.is_persistent:
+        # Auto-generate a per-allocation sub-tag so successive
+        # torch.empty() calls inside the same persistent scope get
+        # distinct persistent allocations (one per layer / per buffer).
+        # Private-bootstrap shadows allocate VA-only scratch first and later
+        # remap those VAs onto the shared namespace. Their tags must therefore
+        # match the shared pool tags exactly.
+        if state.persistent_tag_plan is not None and state.persistent_alloc_seq < len(
+            state.persistent_tag_plan
+        ):
+            sub_tag = state.persistent_tag_plan[state.persistent_alloc_seq]
+        else:
+            sub_tag = f"{tag}#{state.persistent_alloc_seq}"
+        state.persistent_alloc_seq += 1
+        if state.persistent_defer_physical:
+            scratch_backed = os.environ.get(
+                "GMS_PERSISTENT_DEFER_PHYSICAL_SCRATCH_BACKED", "0"
+            ).lower() not in {"0", "false", "no", "off"}
+            va = state.manager.create_scratch_mapping(
+                size=int(size),
+                tag=sub_tag,
+                map_scratch=scratch_backed,
+            )
+            logger.debug(
+                "[GMS] deferred persistent malloc(eng=%s tag=%s): "
+                "va=0x%x size=%d scratch_backed=%s",
+                state.persistent_engine_id,
+                sub_tag,
+                va,
+                size,
+                scratch_backed,
+            )
+            return va
+        va = state.manager.create_persistent_mapping(
+            engine_id=state.persistent_engine_id,
+            tag=sub_tag,
+            size=int(size),
+            shared=state.persistent_shared,
+        )
+        logger.debug(
+            "[GMS] persistent malloc(eng=%s tag=%s): va=0x%x size=%d",
+            state.persistent_engine_id,
+            sub_tag,
+            va,
+            size,
+        )
+        return va
 
     if state.is_scratch:
         va = state.manager.create_scratch_mapping(size=int(size), tag=tag)
@@ -240,6 +345,51 @@ def is_scratch(manager: "GMSClientMemoryManager") -> bool:
     return state.is_scratch
 
 
+def ensure_scratch_disabled(manager: "GMSClientMemoryManager") -> None:
+    """Flip the manager's tag out of scratch routing.
+
+    After this, _gms_malloc routes via create_mapping (server-backed) on the
+    tag's mempool. Idempotent. Raises if the manager is not registered or
+    not currently RW-connected — server-backed allocations require RW.
+
+    Call after migrating scratch entries into _mappings via
+    prepare_scratch_for_reallocation, before reallocate_all_handles.
+    """
+    if manager.tag is None:
+        raise RuntimeError("manager has no tag; not registered in allocator")
+    state = _tag_states.get(manager.tag)
+    if state is None:
+        raise RuntimeError(f"tag {manager.tag!r} not in _tag_states")
+    if manager.granted_lock_type != GrantedLockType.RW:
+        raise RuntimeError(
+            f"ensure_scratch_disabled requires RW grant on tag={manager.tag!r}; "
+            f"got granted_lock_type={manager.granted_lock_type}. "
+            "Did you forget to .connect(RequestedLockType.RW) first?"
+        )
+    state.is_scratch = False
+
+
+def set_persistent_allocator_tag_plan(tag: str, planned_tags: list[str]) -> None:
+    """Set semantic persistent allocation tags for the next allocation pass.
+
+    vLLM V2 exposes the semantic KV tensor list before it calls torch allocation.
+    Using those tags avoids relying on raw allocation ordinal order, which can
+    differ across primary/private-bootstrap engines for heterogeneous KV specs.
+    """
+    state = _tag_states.get(tag)
+    if state is None or not state.is_persistent:
+        raise RuntimeError(f"GMS persistent allocator tag={tag!r} is not registered")
+    state.persistent_tag_plan = list(planned_tags)
+    state.persistent_alloc_seq = 0
+
+
+def clear_persistent_allocator_tag_plan(tag: str) -> None:
+    state = _tag_states.get(tag)
+    if state is None:
+        return
+    state.persistent_tag_plan = None
+
+
 def get_gms_client_memory_manager(
     tag: str = "weights",
 ) -> "GMSClientMemoryManager | None":
@@ -320,17 +470,138 @@ def evict_gms_client_memory_manager(manager: "GMSClientMemoryManager") -> None:
 
 @contextmanager
 def gms_use_mem_pool(tag: str, device: "torch.device | int") -> Iterator[None]:
-    import torch
-
     state = _tag_states.get(tag)
     if state is None:
         raise RuntimeError(f"No GMS allocator initialized for tag={tag}")
     if state.mem_pool is None:
         raise RuntimeError(f"GMS allocator tag={tag} does not have a mempool")
 
-    token = _active_tag.set(tag)
-    try:
-        with torch.cuda.use_mem_pool(state.mem_pool, device=device):
-            yield
-    finally:
-        _active_tag.reset(token)
+    with _use_gms_pool_context(tag, device, state.mem_pool):
+        yield
+
+
+def get_or_create_persistent_allocator(
+    socket_path: str,
+    device: int,
+    engine_id: str,
+    tag: str = "kv_pool",
+    *,
+    shared: bool = False,
+    defer_physical: bool = False,
+) -> "GMSClientMemoryManager":
+    """Register a Torch-routable allocator that creates persistent
+    allocations on each ``torch.empty()`` inside ``gms_use_persistent_pool``.
+
+    Unlike the weights flow this:
+      - never commits / publishes a layout,
+      - keys allocations by ``(engine_id, sub_tag)`` so engine restart
+        re-attaches to the same physical pages,
+      - allows the daemon to read/write the SAME PHYSICAL PAGES
+        directly via its ``va_daemon`` mapping.
+    """
+    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+
+    state = _tag_states.get(tag)
+    if state is not None:
+        if state.socket_path != socket_path or state.device != device:
+            raise RuntimeError(
+                f"GMS allocator tag={tag} was initialized for "
+                f"{state.socket_path} on device {state.device}, not "
+                f"{socket_path} on device {device}"
+            )
+        if not state.is_persistent:
+            raise RuntimeError(
+                f"GMS allocator tag={tag} already registered as non-persistent; "
+                "use a distinct tag for persistent KV pools"
+            )
+        if state.persistent_engine_id != engine_id:
+            raise RuntimeError(
+                f"GMS allocator tag={tag} already bound to engine_id="
+                f"{state.persistent_engine_id!r}, not {engine_id!r}"
+            )
+        if state.persistent_shared != shared:
+            raise RuntimeError(
+                f"GMS allocator tag={tag} already registered with shared="
+                f"{state.persistent_shared}, not {shared}"
+            )
+        if state.persistent_defer_physical != defer_physical:
+            raise RuntimeError(
+                f"GMS allocator tag={tag} already registered with "
+                f"defer_physical={state.persistent_defer_physical}, not "
+                f"{defer_physical}"
+            )
+        return state.manager
+
+    # Persistent mode uses a KV-only session that bypasses the normal
+    # weights-layout RW/RO FSM. Multiple engines may keep these sessions
+    # open concurrently when shared=True and coordinate writes via KV leases.
+    manager = GMSClientMemoryManager(socket_path, device=device, tag=tag)
+    if not defer_physical:
+        manager.connect(RequestedLockType.RW_PERSISTENT)
+    _ensure_callbacks_initialized()
+    mem_pool = _create_mem_pool()
+
+    _tag_states[tag] = _TagState(
+        manager=manager,
+        mem_pool=mem_pool,
+        socket_path=socket_path,
+        device=device,
+        is_persistent=True,
+        persistent_engine_id=engine_id,
+        persistent_shared=shared,
+        persistent_defer_physical=defer_physical,
+    )
+    logger.info(
+        "[GMS] Registered persistent allocator tag=%s engine_id=%s device=%d "
+        "defer_physical=%s",
+        tag,
+        engine_id,
+        device,
+        defer_physical,
+    )
+    return manager
+
+
+def retarget_persistent_allocator(tag: str, engine_id: str, *, shared: bool) -> None:
+    """Update persistent allocation routing after a VA-preserving remap.
+
+    Warm-standby failover can initialize vLLM on a private bootstrap namespace,
+    sleep/unmap that namespace, then remap the same tensor VAs to the shared
+    primary namespace during wake. The allocator state must follow the remap so
+    any future persistent allocations use the promoted namespace.
+    """
+    state = _tag_states.get(tag)
+    if state is None:
+        raise RuntimeError(f"No GMS persistent allocator for tag={tag}")
+    if not state.is_persistent:
+        raise RuntimeError(f"GMS allocator tag={tag} is not persistent")
+    state.persistent_engine_id = engine_id
+    state.persistent_shared = shared
+    state.persistent_defer_physical = False
+
+
+@contextmanager
+def gms_use_persistent_pool(
+    tag: str,
+    device: "torch.device | int",
+) -> Iterator[None]:
+    """Route torch.empty() / zeros() inside this block through GMS
+    persistent allocations. Re-attach-on-reconnect, daemon owns the
+    physical pages, engine restart preserves bytes.
+
+    Caller must have previously registered the tag via
+    ``get_or_create_persistent_allocator``.
+    """
+    state = _tag_states.get(tag)
+    if state is None:
+        raise RuntimeError(f"No GMS persistent allocator for tag={tag}")
+    if not state.is_persistent:
+        raise RuntimeError(
+            f"GMS allocator tag={tag} is not in persistent mode; "
+            "use gms_use_mem_pool instead"
+        )
+    if state.mem_pool is None:
+        raise RuntimeError(f"GMS persistent allocator tag={tag} has no mempool")
+
+    with _use_gms_pool_context(tag, device, state.mem_pool):
+        yield

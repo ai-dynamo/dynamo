@@ -819,6 +819,18 @@ class ModelRuntimeConfig:
         """Set structural tag schema mode ("auto" or "strict")."""
         ...
 
+    def set_gms_daemon_socket(self, daemon_socket: str) -> None:
+        """Advertise this worker's GMS KV daemon socket for router orchestration"""
+        ...
+
+    def set_gms_placement_enabled(self) -> None:
+        """Advertise that this worker publishes GMS placements on the KV event plane"""
+        ...
+
+    def set_gms_control_enabled(self) -> None:
+        """Deprecated alias for set_gms_placement_enabled."""
+        ...
+
     def set_disaggregated_endpoint(
             self,
             bootstrap_host: str | None = None,
