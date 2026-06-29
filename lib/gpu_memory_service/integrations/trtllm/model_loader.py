@@ -43,6 +43,10 @@ def set_gms_enabled(enabled: bool) -> None:
     _gms_enabled = enabled
 
 
+def gms_enabled() -> bool:
+    return _gms_enabled
+
+
 def set_gms_lock_mode(mode: RequestedLockType) -> None:
     global _gms_lock_mode
     _gms_lock_mode = mode

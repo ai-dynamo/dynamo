@@ -291,7 +291,6 @@ def _trtllm_pause(
     return ws
 
 
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/OPS-4450")
 @pytest.mark.trtllm
 @pytest.mark.e2e
 @pytest.mark.gpu_1
@@ -300,7 +299,14 @@ def _trtllm_pause(
 def test_gms_shadow_engine_failover_trtllm(
     request, runtime_services_dynamic_ports, predownload_models
 ):
-    """Weights-only shadow failover for TRT-LLM (no KV cache GMS)."""
+    """Shadow failover for TRT-LLM.
+
+    TRT-LLM's only supported GMS KV path is KVCacheManagerV2 (the worker forces
+    ``use_kv_cache_manager_v2=True`` and rejects the legacy V1 connector). GMS
+    owns the model weights via the weights daemon; V2 KV slot leases coordinate
+    the KV handoff host-side (no kv_cache GMS daemon, so ``tags=("weights",)``).
+    The shadow pre-activates (resume immediately on primary kill, no KV block).
+    Requires GMS_KV_LEASES=1 for the V2 slot-lease integration to install."""
     with GMSProcessManager(request, TRTLLMWithGMSProcess, tags=("weights",)) as manager:
         frontend_port = manager.frontend_port
         weights_gms = manager.weights_gms

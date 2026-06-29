@@ -166,6 +166,33 @@ async def test_mark_request_finished_is_idempotent():
     assert handler._inflight_requests == 0
 
 
+@pytest.mark.asyncio
+async def test_trtllm_quiesce_fails_when_collective_rpc_missing():
+    controller = TRTLLMEnginePauseController(SimpleNamespace(llm=SimpleNamespace()))
+
+    with pytest.raises(RuntimeError, match="_collective_rpc"):
+        await controller.pause(["kv_cache"])
+
+    assert controller.is_paused is False
+
+
+@pytest.mark.asyncio
+async def test_trtllm_quiesce_fails_closed_for_unsupported_multi_rank_rpc():
+    def collective_rpc(*args, **kwargs):
+        raise NotImplementedError(
+            "MPI collective_rpc only supports model_world_size == 1"
+        )
+
+    controller = TRTLLMEnginePauseController(
+        SimpleNamespace(llm=SimpleNamespace(_collective_rpc=collective_rpc))
+    )
+
+    with pytest.raises(RuntimeError, match="multi-rank KV cache control"):
+        await controller.pause(["kv_cache"])
+
+    assert controller.is_paused is False
+
+
 # ---------------------------------------------------------------------------
 # release_memory_occupation
 # ---------------------------------------------------------------------------
@@ -310,3 +337,37 @@ async def test_generate_locally_rejected_when_sleeping():
 
     assert len(chunks) == 1
     assert "error" in str(chunks[0].get("finish_reason", ""))
+
+
+@pytest.mark.asyncio
+async def test_release_memory_occupation_with_handoff_releases_failover_lock():
+    handler = _make_handler()
+    lock = SimpleNamespace(release=AsyncMock())
+    handler._gms_failover_lock = lock
+
+    result = await handler.release_memory_occupation({"release_failover_lock": True})
+
+    assert result["status"] == "ok"
+    assert result["failover_lock_released"] is True
+    lock.release.assert_awaited_once()
+    assert handler._gms_failover_lock is None
+
+
+@pytest.mark.asyncio
+async def test_fast_handoff_releases_lock_without_memory_release():
+    handler = _make_handler()
+    lock = SimpleNamespace(release=AsyncMock())
+    handler._gms_failover_lock = lock
+
+    result = await handler.release_memory_occupation({"handoff": True})
+
+    assert result == {
+        "status": "ok",
+        "message": "Failover handoff released",
+        "failover_lock_released": True,
+    }
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+    handler._pause_controller.pause.assert_not_called()
+    assert handler._reject_new_requests is True
+    lock.release.assert_awaited_once()
+    assert handler._gms_failover_lock is None

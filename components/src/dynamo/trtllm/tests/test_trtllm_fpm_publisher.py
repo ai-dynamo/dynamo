@@ -320,9 +320,12 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     pub.publish_kv_cache_events_thread = None
     pub.publish_stats_thread = None
     pub.partial_block_hashes = set()
+    pub.synthetic_block_hashes = {}
     pub.error_queue = queue.Queue()
     pub._stop_event = threading.Event()
     pub._last_engine_event_id_by_rank = {}
+    pub._cleanup_lock = asyncio.Lock()
+    pub._cleanup_started = False
 
     fake_fpm_cls = MagicMock()
     monkeypatch.setattr(publisher_mod, "FpmDirectPublisher", fake_fpm_cls)
@@ -375,6 +378,7 @@ def _publisher_for_kv_event_test():
     pub._last_engine_event_id_by_rank = {}
     pub.processing_initial_created_events = False
     pub.partial_block_hashes = set()
+    pub.synthetic_block_hashes = {}
     pub.kv_block_size = 4
     pub.max_window_size = None
     return pub
@@ -586,6 +590,7 @@ def test_partial_only_removed_event_does_not_publish_empty_batch():
     pub.should_drop_event = MagicMock(return_value=False)
     pub.processing_initial_created_events = True
     pub.partial_block_hashes = {123}
+    pub.synthetic_block_hashes = {}
     pub.zmq_kv_event_publisher = None
     pub.kv_event_publishers = {0: kv_event_publisher}
 
@@ -763,3 +768,160 @@ def test_invoke_handler_matches_publisher_keyword_set():
         "wall_time_secs",
     }
     assert set(fpm.publish.call_args.kwargs.keys()) == expected_kwargs
+
+
+# ---------------------------------------------------------------------------
+# KV event normalization
+# ---------------------------------------------------------------------------
+
+
+def _build_kv_event_publisher_stub():
+    """Minimal Publisher instance for direct _handle_kv_event tests."""
+    import threading
+
+    from dynamo.trtllm import publisher as publisher_mod
+
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub.worker_id = "worker-abc"
+    pub.kv_block_size = 32
+    pub.max_window_size = None
+    pub.processing_initial_created_events = True
+    pub.kv_event_publishers = None
+    pub.zmq_kv_event_publisher = MagicMock()
+    pub.partial_block_hashes = set()
+    pub.synthetic_block_hashes = {}
+    pub._last_engine_event_id_by_rank = {}
+    pub._stop_event = threading.Event()
+    return pub, publisher_mod
+
+
+def _token_block(token_ids, block_hash):
+    return {
+        "block_hash": block_hash,
+        "tokens": [{"token_id": token_id} for token_id in token_ids],
+    }
+
+
+def _stored_event(event_id, token_ids, block_hash=0xF00D):
+    return {
+        "event_id": event_id,
+        "attention_dp_rank": 0,
+        "data": {
+            "type": "stored",
+            "parent_hash": None,
+            "blocks": [_token_block(token_ids, block_hash)],
+        },
+    }
+
+
+def test_oversized_trt_block_splits_into_router_hashes():
+    pub, publisher_mod = _build_kv_event_publisher_stub()
+    request_tokens = list(range(100, 164))
+    engine_tokens = [1] + request_tokens
+
+    pub._handle_kv_event(_stored_event(1, engine_tokens))
+
+    expected_local_hashes = publisher_mod.compute_block_hash_for_seq(
+        request_tokens, pub.kv_block_size
+    )
+    expected_sequence_hashes = [
+        publisher_mod._to_signed_i64(h)
+        for h in publisher_mod._compute_router_sequence_hashes(expected_local_hashes)
+    ]
+    pub.zmq_kv_event_publisher.publish_stored.assert_called_once_with(
+        request_tokens,
+        [32, 32],
+        expected_sequence_hashes,
+        None,
+        [None, None],
+        0,
+        None,
+        None,
+    )
+
+
+def test_oversized_trt_block_remove_uses_synthetic_router_hashes():
+    pub, publisher_mod = _build_kv_event_publisher_stub()
+    request_tokens = list(range(200, 264))
+    engine_hash = 0xABCDEF
+
+    pub._handle_kv_event(_stored_event(1, [1] + request_tokens, engine_hash))
+    expected_hashes = list(
+        pub.synthetic_block_hashes[publisher_mod._to_signed_i64(engine_hash)]
+    )
+
+    pub._handle_kv_event(
+        {
+            "event_id": 2,
+            "attention_dp_rank": 0,
+            "data": {"type": "removed", "block_hashes": [engine_hash]},
+        }
+    )
+
+    pub.zmq_kv_event_publisher.publish_removed.assert_called_once_with(
+        expected_hashes, 0
+    )
+    assert pub.synthetic_block_hashes == {}
+
+
+def test_oversized_trt_block_drops_trailing_partial_router_block():
+    pub, _publisher_mod = _build_kv_event_publisher_stub()
+    request_tokens = list(range(300, 370))
+
+    pub._handle_kv_event(_stored_event(1, [1] + request_tokens))
+
+    call = pub.zmq_kv_event_publisher.publish_stored.call_args
+    assert call.args[0] == request_tokens[:64]
+    assert call.args[1] == [32, 32]
+    assert len(call.args[2]) == 2
+
+
+class _FakeManagedThread:
+    def __init__(self, name: str, events: list[str], peers: list["_FakeManagedThread"]):
+        self.name = name
+        self.events = events
+        self.peers = peers
+        self._alive = True
+        self.stopped = False
+
+    def is_alive(self):
+        return self._alive
+
+    def stop(self):
+        self.events.append(f"stop:{self.name}")
+        self.stopped = True
+
+    def join(self, timeout=None):
+        assert all(peer.stopped for peer in self.peers)
+        self.events.append(f"join:{self.name}")
+        self._alive = False
+
+
+def test_publisher_cleanup_stops_threads_before_join_and_is_idempotent():
+    from dynamo.trtllm.publisher import Publisher
+
+    async def run_cleanup():
+        events: list[str] = []
+        threads: list[_FakeManagedThread] = []
+        stats_thread = _FakeManagedThread("stats", events, threads)
+        kv_thread = _FakeManagedThread("kv", events, threads)
+        threads.extend([stats_thread, kv_thread])
+
+        pub = Publisher.__new__(Publisher)
+        pub._cleanup_lock = asyncio.Lock()
+        pub._cleanup_started = False
+        pub._stop_event = threading.Event()
+        pub.publish_stats_thread = stats_thread
+        pub.publish_kv_cache_events_thread = kv_thread
+        pub.zmq_kv_event_publisher = MagicMock()
+        pub.fpm_publisher = MagicMock()
+
+        await pub.cleanup()
+        await pub.cleanup()
+
+        assert events == ["stop:stats", "stop:kv", "join:stats", "join:kv"]
+        assert pub._stop_event.is_set()
+        pub.zmq_kv_event_publisher.shutdown.assert_called_once()
+        pub.fpm_publisher.shutdown.assert_called_once()
+
+    asyncio.run(run_cleanup())

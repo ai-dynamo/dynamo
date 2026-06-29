@@ -22,6 +22,7 @@ Event Flow:
 import asyncio
 import concurrent.futures
 import logging
+import struct
 import threading
 import time
 import traceback
@@ -32,11 +33,17 @@ from queue import Queue
 from typing import Any, Awaitable, Callable, Dict, Optional, Union
 
 import msgspec
+import xxhash
 import zmq
 from prometheus_client import CollectorRegistry
 
 from dynamo.common.utils.prometheus import LLMBackendMetrics
-from dynamo.llm import FpmDirectPublisher, KvEventPublisher, WorkerMetricsPublisher
+from dynamo.llm import (
+    FpmDirectPublisher,
+    KvEventPublisher,
+    WorkerMetricsPublisher,
+    compute_block_hash_for_seq,
+)
 from dynamo.trtllm.utils.request_utils import stored_event_cache_salt
 
 logger = logging.getLogger(__name__)
@@ -106,6 +113,66 @@ def _to_signed_i64(value: int | None) -> int | None:
     if value < -(2**63):
         return ((value + 2**63) % 2**64) - 2**63
     return value
+
+
+_XXH3_SEED = 1337
+_UINT64_MASK = (1 << 64) - 1
+# TRT-LLM's PyExecutor/VANILLA path can emit request tokens with an
+# engine-added leading special token even when the router request token_ids did
+# not contain it. Strip only common BOS-style ids before computing router
+# hashes for oversized TRT event blocks.
+_TRT_LEADING_SPECIAL_TOKEN_IDS = {0, 1, 2, 128000, 128001, 128002}
+
+
+def _xxh3_u64(data: bytes, seed: int = _XXH3_SEED) -> int:
+    return xxhash.xxh3_64_intdigest(data, seed=seed & _UINT64_MASK) & _UINT64_MASK
+
+
+def _compute_router_sequence_hashes(local_hashes: list[int]) -> list[int]:
+    if not local_hashes:
+        return []
+
+    sequence_hashes = [int(local_hashes[0]) & _UINT64_MASK]
+    for local_hash in local_hashes[1:]:
+        payload = struct.pack(
+            "<QQ", sequence_hashes[-1], int(local_hash) & _UINT64_MASK
+        )
+        sequence_hashes.append(_xxh3_u64(payload))
+    return sequence_hashes
+
+
+def _strip_trt_leading_special_token(
+    token_ids: list[int], kv_block_size: int
+) -> tuple[list[int], bool]:
+    if len(token_ids) <= kv_block_size or not token_ids:
+        return token_ids, False
+    if token_ids[0] in _TRT_LEADING_SPECIAL_TOKEN_IDS:
+        stripped = token_ids[1:]
+        if len(stripped) >= kv_block_size:
+            return stripped, True
+    return token_ids, False
+
+
+def _split_oversized_trt_block_for_router(
+    token_ids: list[int], kv_block_size: int, lora_name: Optional[str] = None
+) -> tuple[list[int], list[int], list[int], bool]:
+    if kv_block_size <= 0:
+        return [], [], [], False
+
+    normalized_tokens, stripped_special = _strip_trt_leading_special_token(
+        token_ids, kv_block_size
+    )
+    usable_len = len(normalized_tokens) - (len(normalized_tokens) % kv_block_size)
+    if usable_len <= 0:
+        return [], [], [], stripped_special
+
+    full_tokens = normalized_tokens[:usable_len]
+    local_hashes = compute_block_hash_for_seq(
+        [int(token) for token in full_tokens], kv_block_size, lora_name=lora_name
+    )
+    sequence_hashes = _compute_router_sequence_hashes(local_hashes)
+    num_block_tokens = [kv_block_size] * len(sequence_hashes)
+    return full_tokens, num_block_tokens, sequence_hashes, stripped_special
 
 
 class ZmqKvEventPublisher:
@@ -430,11 +497,17 @@ class Publisher:
         # A set to store the block hash of partial block (i.e. block containing less than kv_block_size tokens) hashes.
         # It is used to prevent sending remove event to kv router since partial blocks are not stored.
         self.partial_block_hashes: set[int] = set()
+        # Maps oversized TRT engine block hashes to the synthetic router-visible
+        # sequence hashes we publish for those blocks, so later remove events
+        # evict the same hashes from the router indexer.
+        self.synthetic_block_hashes: dict[int, list[int]] = {}
         self.error_queue: Queue = Queue()
         self._stop_event = threading.Event()
         # Track the last engine event_id per attention-DP rank. TRT-LLM emits
         # independent rank-local sequences before gathering them on rank 0.
         self._last_engine_event_id_by_rank: dict[int, int] = {}
+        self._cleanup_lock = asyncio.Lock()
+        self._cleanup_started = False
 
         # Initialize ZMQ publisher if endpoint is provided (consolidator enabled)
         if zmq_endpoint:
@@ -830,26 +903,59 @@ class Publisher:
             block_mm_infos: list[dict | None] = []
             kv_block_size = self.kv_block_size
             partial_block_hashes = self.partial_block_hashes
+            synthetic_block_hashes = self.synthetic_block_hashes
+            lora_name = data.get("lora_name")
+            synthetic_parent_hash = parent_hash
             for block in data["blocks"]:
                 block_tokens = block["tokens"]
                 token_num_in_block = len(block_tokens)
-                if token_num_in_block > kv_block_size:
-                    logging.error(
-                        f"Block contains {token_num_in_block} tokens, which is greater than kv_block_size {kv_block_size}"
-                    )
-                    return
+                raw_token_ids = [int(t["token_id"]) for t in block_tokens]
                 block_hash = _to_signed_i64(block["block_hash"])
                 if block_hash is None:
                     logging.warning(
                         f"Skipping block with None hash containing {token_num_in_block} tokens"
                     )
                     continue
+
+                if token_num_in_block > kv_block_size:
+                    (
+                        full_tokens,
+                        synthetic_num_block_tokens,
+                        synthetic_hashes,
+                        stripped_special,
+                    ) = _split_oversized_trt_block_for_router(
+                        raw_token_ids, kv_block_size, lora_name
+                    )
+                    if not synthetic_hashes:
+                        logging.debug(
+                            "Skipping oversized TRT KV block with no full router blocks: "
+                            f"token_count={token_num_in_block}, kv_block_size={kv_block_size}"
+                        )
+                        partial_block_hashes.add(block_hash)
+                        continue
+
+                    signed_hashes = [_to_signed_i64(h) for h in synthetic_hashes]
+                    token_ids.extend(full_tokens)
+                    num_block_tokens.extend(synthetic_num_block_tokens)
+                    block_hashes.extend(h for h in signed_hashes if h is not None)
+                    block_mm_infos.extend([None] * len(signed_hashes))
+                    synthetic_block_hashes[block_hash] = [
+                        h for h in signed_hashes if h is not None
+                    ]
+                    synthetic_parent_hash = None
+                    logging.debug(
+                        "Split oversized TRT KV block for router indexing: "
+                        f"engine_hash={block_hash}, token_count={token_num_in_block}, "
+                        f"published_blocks={len(signed_hashes)}, stripped_special={stripped_special}"
+                    )
+                    continue
+
                 if token_num_in_block < kv_block_size:
                     partial_block_hashes.add(block_hash)
                     break
                 num_block_tokens.append(token_num_in_block)
                 block_hashes.append(block_hash)
-                token_ids.extend(int(t["token_id"]) for t in block_tokens)
+                token_ids.extend(raw_token_ids)
 
                 mm_keys = block.get("mm_keys")
                 if mm_keys:
@@ -871,7 +977,12 @@ class Publisher:
                 else:
                     block_mm_infos.append(None)
 
-            lora_name = data.get("lora_name")
+            if not block_hashes:
+                logger.debug(
+                    "Skipping stored KV event %s with no full router blocks", event_id
+                )
+                return
+
             try:
                 cache_salt = stored_event_cache_salt(data)
             except ValueError as error:
@@ -904,7 +1015,7 @@ class Publisher:
                     token_ids,
                     num_block_tokens,
                     block_hashes,
-                    parent_hash,
+                    synthetic_parent_hash,
                     block_mm_infos,
                     attention_dp_rank,
                     lora_name,
@@ -919,7 +1030,7 @@ class Publisher:
                         token_ids,
                         num_block_tokens,
                         block_hashes,
-                        parent_hash,
+                        synthetic_parent_hash,
                         block_mm_infos,
                         lora_name=lora_name,
                         cache_salt=cache_salt,
@@ -936,6 +1047,10 @@ class Publisher:
             for block_hash in data["block_hashes"]:
                 block_hash = _to_signed_i64(block_hash)
                 if block_hash is None:
+                    continue
+                synthetic_hashes = self.synthetic_block_hashes.pop(block_hash, None)
+                if synthetic_hashes:
+                    removed_block_hashes.extend(synthetic_hashes)
                     continue
                 if block_hash in self.partial_block_hashes:
                     self.partial_block_hashes.remove(block_hash)
@@ -999,38 +1114,47 @@ class Publisher:
 
     async def cleanup(self) -> None:
         """Cleanup threads and resources"""
-        self._stop_event.set()
-        # Add timeout to prevent hanging
-        cleanup_timeout = 5.0  # seconds
+        async with self._cleanup_lock:
+            if self._cleanup_started:
+                return
+            self._cleanup_started = True
 
-        if self.publish_stats_thread and self.publish_stats_thread.is_alive():
-            self.publish_stats_thread.stop()
-            self.publish_stats_thread.join(timeout=cleanup_timeout)
-            if self.publish_stats_thread.is_alive():
-                logging.warning("Stats thread did not stop within timeout")
+            self._stop_event.set()
+            # Add timeout to prevent hanging
+            cleanup_timeout = 5.0  # seconds
 
-        if (
-            self.publish_kv_cache_events_thread
-            and self.publish_kv_cache_events_thread.is_alive()
-        ):
-            self.publish_kv_cache_events_thread.stop()
-            self.publish_kv_cache_events_thread.join(timeout=cleanup_timeout)
-            if self.publish_kv_cache_events_thread.is_alive():
-                logging.warning("KV cache events thread did not stop within timeout")
+            thread_warnings = (
+                (self.publish_stats_thread, "Stats thread did not stop within timeout"),
+                (
+                    self.publish_kv_cache_events_thread,
+                    "KV cache events thread did not stop within timeout",
+                ),
+            )
+            live_threads = [
+                (thread, warning)
+                for thread, warning in thread_warnings
+                if thread and thread.is_alive()
+            ]
+            for thread, _warning in live_threads:
+                thread.stop()
+            for thread, warning in live_threads:
+                thread.join(timeout=cleanup_timeout)
+                if thread.is_alive():
+                    logging.warning(warning)
 
-        # Shutdown ZMQ publisher if it exists
-        if self.zmq_kv_event_publisher:
-            self.zmq_kv_event_publisher.shutdown()
+            # Shutdown ZMQ publisher if it exists
+            if self.zmq_kv_event_publisher:
+                self.zmq_kv_event_publisher.shutdown()
 
-        # Shutdown FpmDirectPublisher (stops the per-rank serialization tasks
-        # and the event-plane publisher task on the Rust side). PyO3 surfaces
-        # shutdown failures as PyRuntimeError; narrower catch keeps real
-        # programming errors visible.
-        if self.fpm_publisher is not None:
-            try:
-                self.fpm_publisher.shutdown()
-            except RuntimeError as e:
-                logging.warning(f"FpmDirectPublisher shutdown failed: {e}")
+            # Shutdown FpmDirectPublisher (stops the per-rank serialization tasks
+            # and the event-plane publisher task on the Rust side). PyO3 surfaces
+            # shutdown failures as PyRuntimeError; narrower catch keeps real
+            # programming errors visible.
+            if self.fpm_publisher is not None:
+                try:
+                    self.fpm_publisher.shutdown()
+                except RuntimeError as e:
+                    logging.warning(f"FpmDirectPublisher shutdown failed: {e}")
 
     def update_max_window_size(self, event: dict) -> None:
         if "window_size" in event:
