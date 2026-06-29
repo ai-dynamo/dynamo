@@ -8,9 +8,9 @@ resources:
   - sglang-worker.yaml
 images:
   - name: dynamo-image
-    # Replace with a Dynamo image built with the select-service feature.
-    newName: my-registry/dynamo-select-service
-    newTag: my-tag
+    # TODO: Replace with a published Dynamo image built with the select-service feature.
+    newName: nvcr.io/nvidia/ai-dynamo/dynamo-frontend
+    newTag: 1.3.0-dev.1
   - name: sglang-image
     newName: lmsysorg/sglang
     newTag: v0.5.12.post1
