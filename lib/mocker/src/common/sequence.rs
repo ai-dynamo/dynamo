@@ -372,8 +372,14 @@ impl ActiveSequence {
         }
 
         // Free all blocks when we reach max tokens
-        signals.extend(self.free_signal_for_tokens(self.len()));
+        signals.extend(self.terminal_signals());
         (token, signals)
+    }
+
+    /// Release the full sequence footprint after an independent terminal
+    /// condition, such as the model context-length limit, is reached.
+    pub(crate) fn terminal_signals(&self) -> Vec<MoveBlock> {
+        self.free_signal_for_tokens(self.len())
     }
 
     fn free_signal_for_tokens(&self, active_tokens: usize) -> Vec<MoveBlock> {
