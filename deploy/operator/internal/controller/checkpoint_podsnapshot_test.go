@@ -192,12 +192,13 @@ func TestFindOwnedPodSnapshot_FindsOwnedIgnoresForeign(t *testing.T) {
 	assert.Equal(t, ckpt.Name, got.Name)
 }
 
-func TestFindOwnedPodSnapshot_NoneReturnsNil(t *testing.T) {
+func TestFindOwnedPodSnapshot_NoneReturnsNotFound(t *testing.T) {
 	ckpt := newOwnedCheckpoint()
 	r := makeCheckpointReconciler(checkpointTestScheme(), ckpt)
 
 	got, err := r.findOwnedPodSnapshot(context.Background(), ckpt)
-	require.NoError(t, err)
+	require.Error(t, err)
+	assert.True(t, apierrors.IsNotFound(err))
 	assert.Nil(t, got)
 }
 
