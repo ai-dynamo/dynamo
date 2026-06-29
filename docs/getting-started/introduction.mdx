@@ -11,7 +11,7 @@ New here? Pick an install path below. For the full story on Dynamo's design prin
 
 ## Get Started
 
-Dynamo is **Kubernetes-native, but not Kubernetes-only**. The full feature set — operator, CRDs, autoscaling, inference gateway, and multinode scheduling — runs on Kubernetes, while the same frontend/router/worker stack also runs locally for evaluation or incremental adoption. Start on a cluster, or run locally first.
+Dynamo is **Kubernetes-native, but not Kubernetes-only**. The full feature set — operator, CRDs, autoscaling, inference gateway, and multinode scheduling — runs on Kubernetes, while the same frontend/router/worker stack also runs locally for evaluation or incremental adoption. This user guide assumes you're running on a Kubernetes cluster, if you want to build from source or run in your local environment, see the developer's guide.
 
 <CardGroup cols={3}>
   <Card title="Kubernetes Quickstart" icon="regular cubes" href="/dynamo/dev/kubernetes">
@@ -19,6 +19,9 @@ Dynamo is **Kubernetes-native, but not Kubernetes-only**. The full feature set �
   </Card>
   <Card title="Local Quickstart" icon="regular laptop-code" href="/dynamo/dev/getting-started/quickstart">
     Container fast path — running in about five minutes.
+  </Card>
+  <Card title="Build from Source" icon="regular hammer" href="/dynamo/dev/getting-started/building-from-source">
+    Build Dynamo against `main`.
   </Card>
   <Card title="Compatibility" icon="regular table-list" href="/dynamo/dev/reference/compatibility">
     Supported platforms and a feature-by-backend comparison.
@@ -112,57 +115,6 @@ Take Dynamo to production and keep it healthy.
     Measure performance and replay traces.
   </Card>
 </CardGroup>
-
-## Knowledge Base
-
-How Dynamo works under the hood.
-
-<CardGroup cols={3}>
-  <Card title="Architecture Overview" icon="regular sitemap" href="/dynamo/dev/design-docs/architecture">
-    The system model and end-to-end request flow.
-  </Card>
-  <Card title="Concepts" icon="regular diagram-project" href="/dynamo/dev/design-docs/dynamo-flow">
-    Disaggregated serving, the distributed runtime, and communication planes.
-  </Card>
-</CardGroup>
-
-<AccordionGroup>
-  <Accordion title="Components">
-    <CardGroup cols={3}>
-      <Card title="Frontend" icon="regular window" href="/dynamo/dev/components/frontend">
-        OpenAI-compatible API, tokenizer, and configuration.
-      </Card>
-      <Card title="Router" icon="regular route" href="/dynamo/dev/components/router">
-        KV-aware routing, indexing, and slot tracking.
-      </Card>
-      <Card title="Planner" icon="regular calendar-check" href="/dynamo/dev/components/planner">
-        SLA-based autoscaling of prefill and decode.
-      </Card>
-      <Card title="Profiler" icon="regular magnifying-glass-chart" href="/dynamo/dev/components/profiler">
-        Profile deployments to find strong configurations.
-      </Card>
-      <Card title="KVBM" icon="regular layer-group" href="/dynamo/dev/components/kvbm">
-        KV cache management across memory tiers.
-      </Card>
-      <Card title="Kubernetes Operator" icon="regular gears" href="/dynamo/dev/kubernetes/dynamo-operator">
-        Reconciles deployments, discovery, and the gateway.
-      </Card>
-    </CardGroup>
-  </Accordion>
-  <Accordion title="Backends">
-    <CardGroup cols={3}>
-      <Card title="vLLM" icon="regular microchip" href="/dynamo/dev/backends/vllm">
-        Broadest feature coverage, including LoRA and audio.
-      </Card>
-      <Card title="SGLang" icon="regular microchip" href="/dynamo/dev/backends/sglang">
-        High-throughput serving with fast primitives.
-      </Card>
-      <Card title="TensorRT-LLM" icon="regular microchip" href="/dynamo/dev/backends/trtllm">
-        Maximum performance with full KVBM integration.
-      </Card>
-    </CardGroup>
-  </Accordion>
-</AccordionGroup>
 
 ## Build with Dynamo
 

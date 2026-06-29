@@ -208,8 +208,12 @@ navigation:
       - section: Local Deployment
         collapsed: true
         contents:
-          - page: Installation
+          - page: Quickstart
             path: getting-started/local-installation.md
+          - page: Building from Source
+            path: getting-started/building-from-source.md
+          - page: vLLM Deployments
+            path: backends/vllm/vllm-examples.md
           - page: SGLang Deployments
             path: backends/sglang/sglang-examples.md
           - page: TRT-LLM Deployments
@@ -221,6 +225,7 @@ navigation:
           #       path: observability/README.md
           #     - page: Prometheus + Grafana
           #       path: observability/prometheus-grafana.md
+        
       # ==================== Knowledge Base ====================
       - section: Knowledge Base
         contents:
