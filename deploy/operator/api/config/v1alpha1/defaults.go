@@ -24,6 +24,8 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+const defaultBindAddress = "0.0.0.0"
+
 // SetDefaultsOperatorConfiguration sets default values for OperatorConfiguration.
 // IMPORTANT: When changing defaults here, also update the corresponding
 // +kubebuilder:default= markers in types.go to keep API docs in sync.
@@ -33,16 +35,19 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 		obj.Server.Metrics.Port = 8080
 	}
 	if obj.Server.Metrics.BindAddress == "" {
-		obj.Server.Metrics.BindAddress = "127.0.0.1"
+		obj.Server.Metrics.BindAddress = defaultBindAddress
+	}
+	if obj.Server.Metrics.Secure == nil {
+		obj.Server.Metrics.Secure = ptr.To(true)
 	}
 	if obj.Server.HealthProbe.Port == 0 {
 		obj.Server.HealthProbe.Port = 8081
 	}
 	if obj.Server.HealthProbe.BindAddress == "" {
-		obj.Server.HealthProbe.BindAddress = "0.0.0.0"
+		obj.Server.HealthProbe.BindAddress = defaultBindAddress
 	}
 	if obj.Server.Webhook.Host == "" {
-		obj.Server.Webhook.Host = "0.0.0.0"
+		obj.Server.Webhook.Host = defaultBindAddress
 	}
 	if obj.Server.Webhook.Port == 0 {
 		obj.Server.Webhook.Port = 9443
@@ -80,18 +85,17 @@ func SetDefaultsOperatorConfiguration(obj *OperatorConfiguration) {
 		obj.GPU.DiscoveryEnabled = ptr.To(true)
 	}
 
-	// Checkpoint defaults
-	if obj.Checkpoint.ReadyForCheckpointFilePath == "" {
-		obj.Checkpoint.ReadyForCheckpointFilePath = "/tmp/ready-for-checkpoint"
+	// ServiceMesh defaults
+	if ServiceMeshProvider(obj.ServiceMesh.Provider) == ServiceMeshProviderIstio && obj.ServiceMesh.Istio == nil {
+		obj.ServiceMesh.Istio = &IstioMeshConfiguration{}
 	}
-	if obj.Checkpoint.Storage.Type == "" {
-		obj.Checkpoint.Storage.Type = CheckpointStorageTypePVC
-	}
-	if obj.Checkpoint.Storage.PVC.PVCName == "" {
-		obj.Checkpoint.Storage.PVC.PVCName = "chrek-pvc"
-	}
-	if obj.Checkpoint.Storage.PVC.BasePath == "" {
-		obj.Checkpoint.Storage.PVC.BasePath = "/checkpoints"
+	if obj.ServiceMesh.Istio != nil {
+		if obj.ServiceMesh.Istio.TLSMode == "" {
+			obj.ServiceMesh.Istio.TLSMode = "SIMPLE"
+		}
+		if obj.ServiceMesh.Istio.InsecureSkipVerify == nil {
+			obj.ServiceMesh.Istio.InsecureSkipVerify = ptr.To(true)
+		}
 	}
 
 	// Logging defaults

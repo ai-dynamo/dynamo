@@ -147,10 +147,9 @@ kubectl delete pod -l app=benchmark -n ${NAMESPACE}
 
 # Delete deployments
 kubectl delete dynamographdeployment agg-8xtp2 -n ${NAMESPACE}
-kubectl delete dynamographdeployment disagg-router-6p-2d-n ${NAMESPACE}
+kubectl delete dynamographdeployment disagg-router-6p-2d -n ${NAMESPACE}
 ```
 
 ## References
 
 - [Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving](https://github.com/kvcache-ai/Mooncake) - FAST25 paper and trace data
-

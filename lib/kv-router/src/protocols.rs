@@ -1,22 +1,73 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_tokens::{SequenceHash, Token};
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::ops::Range;
+use std::sync::LazyLock;
+use std::time::Duration;
+
+use dynamo_tokens::{SequenceHash, Token, compute_hash_v2, compute_next_sequence_hash};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
 
+const fn default_track_prefill_tokens() -> bool {
+    true
+}
+
+/// The event subject that workers publish KV cache events on.
+pub const KV_EVENT_SUBJECT: &str = "kv-events";
+
 /// Seed for XXH3 hashing, consistent with indexer.rs
 pub const XXH3_SEED: u64 = 1337;
 
-/// Compute hash of data using XXH3 with the standard seed.
-pub fn compute_hash(data: &[u8]) -> u64 {
-    xxh3::xxh3_64_with_seed(data, XXH3_SEED)
-}
-
 /// Compute the hash of a local block.
 pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
-    LocalBlockHash(compute_hash(data))
+    LocalBlockHash(compute_hash_v2(data, XXH3_SEED))
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BlockHashOptions<'a> {
+    pub block_mm_infos: Option<&'a [Option<BlockExtraInfo>]>,
+    pub lora_name: Option<&'a str>,
+    pub is_eagle: Option<bool>,
+}
+
+#[inline]
+fn hash_block_no_mm(chunk: &[u32], seed: u64, scratch_bytes: &mut Vec<u8>) -> LocalBlockHash {
+    #[cfg(target_endian = "little")]
+    {
+        let _ = scratch_bytes;
+        // SAFETY: `u32` is plain-old-data, and on little-endian targets its in-memory
+        // representation matches the `to_le_bytes()` sequence used for hashing.
+        let chunk_bytes = unsafe {
+            std::slice::from_raw_parts(chunk.as_ptr().cast::<u8>(), std::mem::size_of_val(chunk))
+        };
+        LocalBlockHash(xxh3::xxh3_64_with_seed(chunk_bytes, seed))
+    }
+
+    #[cfg(not(target_endian = "little"))]
+    {
+        scratch_bytes.clear();
+        for &token in chunk {
+            scratch_bytes.extend_from_slice(&token.to_le_bytes());
+        }
+        LocalBlockHash(xxh3::xxh3_64_with_seed(scratch_bytes, seed))
+    }
+}
+
+/// sglang's `MultimodalItem._compute_pad_value` constants — must track upstream;
+/// if they drift, MM routing silently degrades to text-prefix. Pinned by
+/// `pad_value_matches_sglang_protocol`.
+pub const MM_PAD_SHIFT_VALUE: u64 = 1_000_000;
+pub const MM_PAD_HASH_MASK: u64 = (1 << 30) - 1;
+
+/// Canonical per-image pad_value from a routing-side `mm_hash`, called by both
+/// the frontend and the kv-router so request- and event-side hashes agree.
+/// Keeps the low 30 bits only (sglang's limit).
+pub fn pad_value_for_mm_hash(mm_hash: u64) -> u32 {
+    (MM_PAD_SHIFT_VALUE + (mm_hash & MM_PAD_HASH_MASK)) as u32
 }
 
 /// Compute the hash for a sequence of tokens, optionally including multimodal metadata
@@ -34,37 +85,70 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
 pub fn compute_block_hash_for_seq(
     tokens: &[u32],
     kv_block_size: u32,
-    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
-    lora_name: Option<&str>,
+    options: BlockHashOptions<'_>,
 ) -> Vec<LocalBlockHash> {
-    let seed = match lora_name.filter(|n| !n.is_empty()) {
+    if kv_block_size == 0 {
+        return Vec::new();
+    }
+
+    let seed = match options.lora_name.filter(|n| !n.is_empty()) {
         Some(name) => XXH3_SEED.wrapping_add(xxh3::xxh3_64(name.as_bytes())),
         None => XXH3_SEED,
     };
-    tokens
-        .chunks_exact(kv_block_size as usize)
-        .enumerate()
-        .map(|(block_idx, chunk)| {
-            let mut bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
+    let is_eagle_flag = options.is_eagle.unwrap_or(false);
+    let stride = kv_block_size as usize;
+    let window_size = if is_eagle_flag { stride + 1 } else { stride };
+    let estimated_blocks = if is_eagle_flag {
+        tokens.len().saturating_sub(1) / stride
+    } else {
+        tokens.len() / stride
+    };
+    let mut hashes = Vec::with_capacity(estimated_blocks);
+    let mut bytes = Vec::with_capacity(window_size * std::mem::size_of::<u32>());
+    let mut mm_hashes = Vec::new();
+    let mut block_idx = 0;
+    let mut start = 0;
 
-            if let Some(mm_infos) = block_mm_infos
-                && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
-            {
-                let mut mm_hashes: Vec<u64> = block_mm_info
-                    .mm_objects
-                    .iter()
-                    .map(|obj| obj.mm_hash)
-                    .collect();
-                mm_hashes.sort_unstable();
-
-                for mm_hash in mm_hashes {
-                    bytes.extend_from_slice(&mm_hash.to_le_bytes());
-                }
+    while start + window_size <= tokens.len() {
+        let chunk = &tokens[start..start + window_size];
+        if let Some(mm_infos) = options.block_mm_infos
+            && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
+        {
+            bytes.clear();
+            for &token in chunk {
+                bytes.extend_from_slice(&token.to_le_bytes());
             }
 
-            LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed))
-        })
-        .collect()
+            mm_hashes.clear();
+            mm_hashes.extend(block_mm_info.mm_objects.iter().map(|obj| obj.mm_hash));
+            mm_hashes.sort_unstable();
+
+            for &mm_hash in &mm_hashes {
+                bytes.extend_from_slice(&mm_hash.to_le_bytes());
+            }
+
+            hashes.push(LocalBlockHash(xxh3::xxh3_64_with_seed(&bytes, seed)));
+        } else {
+            hashes.push(hash_block_no_mm(chunk, seed, &mut bytes));
+        }
+
+        start += stride;
+        block_idx += 1;
+    }
+
+    hashes
+}
+
+/// Compute the next rolling sequence hash from a parent sequence hash and the
+/// current block hash. Delegates to [`dynamo_tokens::compute_next_sequence_hash`] — the
+/// single source of truth for the chain recurrence shared across kv-router,
+/// kvbm-logical, and the universal hashing crate.
+#[inline]
+pub fn compute_next_seq_hash(
+    parent_seq_hash: SequenceHash,
+    current_block_hash: LocalBlockHash,
+) -> SequenceHash {
+    compute_next_sequence_hash(parent_seq_hash, current_block_hash.0)
 }
 
 /// Compute rolling sequence hashes for a vector of block hashes.
@@ -81,12 +165,7 @@ pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<Sequen
 
     for i in 1..block_hashes.len() {
         let parent_seq_hash = sequence_hashes[i - 1];
-        let current_block_hash = block_hashes[i].0;
-
-        let combined = [parent_seq_hash, current_block_hash];
-        let bytes: Vec<u8> = combined.iter().flat_map(|&num| num.to_le_bytes()).collect();
-        let seq_hash = compute_hash(&bytes);
-        sequence_hashes.push(seq_hash);
+        sequence_hashes.push(compute_next_seq_hash(parent_seq_hash, block_hashes[i]));
     }
 
     sequence_hashes
@@ -100,6 +179,126 @@ pub trait WorkerConfigLike {
     fn data_parallel_size(&self) -> u32;
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
+
+    fn taints(&self) -> &HashSet<String> {
+        &EMPTY_WORKER_TAINTS
+    }
+
+    /// Stable identifier for the worker, preserved across process restarts.
+    ///
+    /// In Kubernetes StatefulSet deployments this is the pod hostname (`worker-0`, `worker-1`,
+    /// …). Used by rendezvous-style routing (HRW hashing) so cache assignments survive worker
+    /// restarts and minimise cache movement when the set of live workers churns. Returns
+    /// `None` when the worker did not publish a stable id, in which case callers should fall
+    /// back to the (ephemeral) `worker_id`.
+    fn stable_routing_id(&self) -> Option<&str> {
+        None
+    }
+
+    /// Returns the worker's topology domain labels (e.g. {"zone": "us-east-1a", "rack": "rack1"}).
+    /// Topology-aware routing turns these labels into canonical worker taints such as
+    /// `dynamo.topology/zone=us-east-1a`.
+    /// Returns `None` by default for backward compatibility.
+    fn topology_domains(&self) -> Option<&HashMap<String, String>> {
+        None
+    }
+
+    /// Returns the topology domain to enforce for KV-cache transfers (e.g. "zone").
+    /// When set, decode worker selection is constrained to workers sharing the same
+    /// topology domain value as the prefill worker.
+    fn kv_transfer_domain(&self) -> Option<&str> {
+        None
+    }
+
+    /// Returns the KV transfer topology enforcement mode.
+    fn kv_transfer_enforcement(&self) -> Option<KvTransferEnforcement> {
+        None
+    }
+
+    /// Returns the taint preference weight used when KV transfer topology enforcement is preferred.
+    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KvTransferEnforcement {
+    /// Put the generated topology taint in `RoutingConstraints.required_taints`.
+    Required,
+    /// Put the generated topology taint in `RoutingConstraints.preferred_taints`.
+    Preferred,
+}
+
+/// Request-level taint constraints evaluated against each worker's published taints.
+///
+/// Topology-aware routing uses the same fields with canonical taints such as
+/// `dynamo.topology/zone=us-east-1a`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct RoutingConstraints {
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub required_taints: HashSet<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub preferred_taints: HashMap<String, f32>,
+}
+
+impl RoutingConstraints {
+    pub fn is_empty(&self) -> bool {
+        self.required_taints.is_empty() && self.preferred_taints.is_empty()
+    }
+
+    pub fn has_hard_constraints(&self) -> bool {
+        !self.required_taints.is_empty()
+    }
+
+    pub fn is_compatible_with_worker_taints(&self, worker_taints: &HashSet<String>) -> bool {
+        if self.required_taints.is_empty() {
+            return true;
+        }
+
+        self.required_taints
+            .iter()
+            .all(|taint| worker_taints.contains(taint))
+    }
+
+    pub fn preferred_taint_matches(&self, worker_taints: &HashSet<String>) -> usize {
+        if self.preferred_taints.is_empty() {
+            return 0;
+        }
+
+        self.preferred_taints
+            .keys()
+            .filter(|taint| worker_taints.contains(*taint))
+            .count()
+    }
+
+    pub fn preferred_taint_multiplier(&self, worker_taints: &HashSet<String>) -> Option<f64> {
+        if self.preferred_taints.is_empty() {
+            return None;
+        }
+
+        // Use exp(-tanh(sum)) so equal-magnitude positive and negative preferences
+        // have reciprocal effect around the neutral multiplier 1.0, while keeping the
+        // multiplier strictly positive and bounded to [exp(-1), exp(1)] ~= [0.368, 2.718]
+        // for numerically stable composition with the existing linear work score.
+        let bias = self
+            .preferred_taints
+            .iter()
+            .filter(|(taint, _)| worker_taints.contains(*taint))
+            .map(|(_, weight)| f64::from(*weight))
+            .sum::<f64>()
+            .tanh();
+
+        Some((-bias).exp())
+    }
+}
+
+static EMPTY_WORKER_TAINTS: LazyLock<HashSet<String>> = LazyLock::new(HashSet::new);
+
+/// Transport abstraction for publishing batched router-visible KV cache events.
+pub trait RouterEventSink: Send + Sync {
+    fn publish_event(&self, event: &RouterEvent)
+    -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
 /// A worker identifier.
@@ -130,6 +329,105 @@ impl WorkerWithDpRank {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageTier {
+    #[default]
+    Device,
+    HostPinned,
+    Disk,
+    External,
+}
+
+impl StorageTier {
+    pub fn from_kv_medium(medium: &str) -> Option<Self> {
+        match medium {
+            "GPU" | "DEVICE" => Some(Self::Device),
+            "CPU" | "CPU_PINNED" | "CPU_TIER1" => Some(Self::HostPinned),
+            "CPU_TIER2" | "DISK" | "NVME" => Some(Self::Disk),
+            "EXTERNAL" | "NETWORK" | "REMOTE" | "SHARED" => Some(Self::External),
+            _ => None,
+        }
+    }
+
+    pub fn from_kv_medium_or_default(medium: Option<&str>) -> Self {
+        medium
+            .and_then(Self::from_kv_medium)
+            .unwrap_or(Self::Device)
+    }
+
+    /// Canonical wire-format medium string. `None` for the default GPU tier so
+    /// existing consumers that omit the field continue to round-trip.
+    pub fn to_kv_medium(self) -> Option<&'static str> {
+        match self {
+            Self::Device => None,
+            Self::HostPinned => Some("CPU_PINNED"),
+            Self::Disk => Some("DISK"),
+            Self::External => Some("EXTERNAL"),
+        }
+    }
+
+    pub fn is_gpu(self) -> bool {
+        matches!(self, Self::Device)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PlacementOwner {
+    LocalWorker(WorkerWithDpRank),
+    Shared,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct Placement {
+    pub owner: PlacementOwner,
+    pub tier: StorageTier,
+}
+
+impl Placement {
+    pub fn local_worker(worker_id: WorkerId, dp_rank: DpRank, tier: StorageTier) -> Self {
+        Self {
+            owner: PlacementOwner::LocalWorker(WorkerWithDpRank::new(worker_id, dp_rank)),
+            tier,
+        }
+    }
+
+    pub fn local_gpu(worker_id: WorkerId, dp_rank: DpRank) -> Self {
+        Self::local_worker(worker_id, dp_rank, StorageTier::Device)
+    }
+
+    pub fn is_local_gpu(&self) -> bool {
+        matches!(self.owner, PlacementOwner::LocalWorker(_)) && self.tier.is_gpu()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlacementEvent {
+    pub placement: Placement,
+    pub event: KvCacheEvent,
+}
+
+impl PlacementEvent {
+    pub fn new(placement: Placement, event: KvCacheEvent) -> Self {
+        Self { placement, event }
+    }
+
+    pub fn local_gpu(worker_id: WorkerId, event: KvCacheEvent) -> Self {
+        Self::new(Placement::local_gpu(worker_id, event.dp_rank), event)
+    }
+
+    pub fn into_router_event(self) -> Option<RouterEvent> {
+        let PlacementOwner::LocalWorker(worker) = self.placement.owner else {
+            return None;
+        };
+        Some(RouterEvent::with_storage_tier(
+            worker.worker_id,
+            self.event,
+            self.placement.tier,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RouterRequest {
@@ -138,9 +436,34 @@ pub enum RouterRequest {
         tokens: Vec<Token>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        #[serde(default, skip_serializing_if = "RoutingConstraints::is_empty")]
+        routing_constraints: RoutingConstraints,
+        #[serde(default)]
+        priority_jump: f64,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        strict_priority: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
     },
-    MarkPrefill,
-    MarkFree,
+    PotentialLoads {
+        tokens: Vec<Token>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
+    },
+    MarkPrefill {
+        // once prefill completes, the frontend might not be allowed to send a
+        // request with linking the id. In this case, the request_id is provided in the payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    MarkFree {
+        // once request is cancelled, the frontend might not be allowed to send a
+        // request with linking the id. In this case, the request_id is provided in the payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
 }
 
 impl Default for RouterRequest {
@@ -148,8 +471,26 @@ impl Default for RouterRequest {
         RouterRequest::New {
             tokens: vec![],
             block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 0,
+            lora_name: None,
         }
     }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PotentialLoad {
+    pub worker_id: WorkerId,
+    pub dp_rank: DpRank,
+    pub potential_prefill_tokens: usize,
+    pub potential_decode_blocks: usize,
+    #[serde(default)]
+    pub active_requests: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,11 +502,23 @@ pub enum RouterResponse {
         dp_rank: DpRank,
         overlap_blocks: u32,
     },
+    QueueRejected {
+        rejection: crate::scheduling::QueueRejection,
+    },
     PrefillMarked {
         success: bool,
     },
     FreeMarked {
         success: bool,
+    },
+    PotentialLoads {
+        // loads of every worker tracked by the scheduler.
+        loads: Vec<PotentialLoad>,
+        // the queue sizes for this specific router instance.
+        #[serde(default)]
+        pending_count: usize,
+        #[serde(default)]
+        pending_isl_tokens: usize,
     },
 }
 
@@ -177,24 +530,33 @@ pub struct WorkerSelectionResult {
     /// The total number of blocks required to prefill the request
     pub required_blocks: u64,
 
-    /// The number of blocks that the selected worker may already have cached.
-    /// This is not a guarantee, but an estimate.
-    pub overlap_blocks: u32,
+    /// Approximate effective cache hit on the selected worker in fractional blocks.
+    /// Use `.round() as u32` for a block-count approximation.
+    pub effective_overlap_blocks: f64,
+
+    /// Approximate cached-token count derived from the weighted cache hit.
+    pub cached_tokens: usize,
 }
 
-/// Active load metrics for a worker, used for busy detection.
+/// Active load metrics for a worker, used for overload detection.
 ///
-/// Published by workers (with only `active_decode_blocks`) and by the scheduler
-/// (with both `active_decode_blocks` and `active_prefill_tokens`).
+/// Published by workers (with `kv_used_blocks`) and by the scheduler (with
+/// `active_decode_blocks` and `active_prefill_tokens`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ActiveLoad {
     pub worker_id: WorkerId,
     #[serde(default)]
     pub dp_rank: DpRank,
-    /// Number of active KV cache blocks on the worker (decode phase).
+    /// Scheduler-reported decode block load.
     pub active_decode_blocks: Option<u64>,
     /// Number of active prefill tokens (from scheduler's view).
     pub active_prefill_tokens: Option<u64>,
+    /// Total KV blocks currently in use on the worker.
+    ///
+    /// This is published by workers only and is the authoritative signal for
+    /// backend KV occupancy used by overload detection.
+    #[serde(default)]
+    pub kv_used_blocks: Option<u64>,
 }
 
 /// A [`LocalBlockHash`] is a hash computed from the token IDs, optional multimodal metadata,
@@ -253,14 +615,24 @@ pub struct ActiveSequenceEvent {
     pub lora_name: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillLoadHint {
+    pub initial_effective_prefill_tokens: usize,
+    pub expected_prefill_duration: Option<Duration>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ActiveSequenceEventData {
     AddRequest {
         token_sequence: Option<Vec<SequenceHash>>,
-        isl: usize,
-        overlap: u32,
+        #[serde(default = "default_track_prefill_tokens")]
+        track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,
+        #[serde(default)]
+        prefill_load_hint: Option<PrefillLoadHint>,
     },
+    // NOTE: Output-block growth is intentionally not a replica-sync event. It can occur
+    // at high frequency, and broadcasting it would consume disproportionate network bandwidth.
     Free,
     MarkPrefillCompleted,
 }
@@ -314,6 +686,9 @@ pub enum KvCacheEventData {
 pub struct KvCacheStoreData {
     /// The optional hash of the parent block.
     pub parent_hash: Option<ExternalSequenceBlockHash>,
+    /// Absolute position of the first block in this batch for positional replay.
+    #[serde(default)]
+    pub start_position: Option<u32>,
     /// A list of stored blocked data.
     pub blocks: Vec<KvCacheStoredBlockData>,
 }
@@ -504,6 +879,9 @@ pub enum KvCacheEventError {
 pub struct RouterEvent {
     /// The ID of the worker emitting the event.
     pub worker_id: WorkerId,
+    /// The storage tier associated with the event.
+    #[serde(default)]
+    pub storage_tier: StorageTier,
     /// The cache event associated with the worker.
     pub event: KvCacheEvent,
 }
@@ -520,7 +898,78 @@ impl RouterEvent {
     ///
     /// A new `RouterEvent`.
     pub fn new(worker_id: WorkerId, event: KvCacheEvent) -> Self {
-        Self { worker_id, event }
+        Self::with_storage_tier(worker_id, event, StorageTier::Device)
+    }
+
+    pub fn with_storage_tier(
+        worker_id: WorkerId,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> Self {
+        Self {
+            worker_id,
+            storage_tier,
+            event,
+        }
+    }
+}
+
+/// Shared cache hit information, represented as sorted non-overlapping half-open ranges.
+///
+/// Ranges encode which block positions exist in the external shared KV cache pool.
+/// Using ranges instead of `Vec<bool>` avoids iterating over potentially thousands
+/// of blocks per worker. Typical shared cache patterns produce few contiguous regions,
+/// making `hits_beyond` O(num_ranges) ~ O(1-5).
+#[derive(Debug, Clone, Default)]
+pub struct SharedCacheHits {
+    /// Ranges of block positions that exist in the shared cache.
+    /// Half-open ranges [start, end), sorted and non-overlapping.
+    pub ranges: Vec<Range<u32>>,
+    /// Total number of hits (sum of range lengths).
+    pub total_hits: u32,
+}
+
+impl SharedCacheHits {
+    /// Create from sorted, non-overlapping ranges.
+    pub fn from_ranges(ranges: Vec<Range<u32>>) -> Self {
+        let total_hits = ranges.iter().map(|r| r.end - r.start).sum();
+        Self { ranges, total_hits }
+    }
+
+    /// Create from a boolean hit vector (convenience for tests and simple backends).
+    /// Coalesces consecutive `true` entries into ranges.
+    pub fn from_hits(hits: &[bool]) -> Self {
+        let mut ranges = Vec::new();
+        let mut i = 0;
+        while i < hits.len() {
+            if hits[i] {
+                let start = i as u32;
+                while i < hits.len() && hits[i] {
+                    i += 1;
+                }
+                ranges.push(start..i as u32);
+            } else {
+                i += 1;
+            }
+        }
+        Self::from_ranges(ranges)
+    }
+
+    /// Count hits at positions >= `from_position`.
+    /// O(num_ranges), not O(num_blocks).
+    pub fn hits_beyond(&self, from_position: u32) -> u32 {
+        self.ranges
+            .iter()
+            .map(|r| {
+                if r.end <= from_position {
+                    0
+                } else if r.start >= from_position {
+                    r.end - r.start
+                } else {
+                    r.end - from_position
+                }
+            })
+            .sum()
     }
 }
 
@@ -531,8 +980,6 @@ pub struct OverlapScores {
     pub scores: FxHashMap<WorkerWithDpRank, u32>,
     /// List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
     pub frequencies: Vec<usize>,
-    /// Map of worker to their tree size (number of blocks in the tree for that worker).
-    pub tree_sizes: FxHashMap<WorkerWithDpRank, usize>,
 }
 
 impl Default for OverlapScores {
@@ -550,8 +997,7 @@ impl OverlapScores {
     pub fn new() -> Self {
         Self {
             scores: FxHashMap::default(),
-            frequencies: Vec::with_capacity(32),
-            tree_sizes: FxHashMap::default(),
+            frequencies: Vec::new(),
         }
     }
 
@@ -567,16 +1013,6 @@ impl OverlapScores {
         for worker in workers {
             let score = self.scores.entry(*worker).or_insert(0);
             *score += 1;
-        }
-    }
-
-    /// Add an entry in the frequency list.
-    pub fn add_frequency(&mut self, frequency: usize) {
-        if frequency != 0 {
-            self.frequencies
-                .last()
-                .inspect(|elem| debug_assert!(**elem >= frequency));
-            self.frequencies.push(frequency);
         }
     }
 }
@@ -599,6 +1035,7 @@ pub struct TokensWithHashes {
     lora_name: Option<String>,
     block_hashes: Option<Vec<LocalBlockHash>>,
     seq_hashes: Option<Vec<SequenceHash>>,
+    is_eagle: Option<bool>,
 }
 
 impl TokensWithHashes {
@@ -611,19 +1048,44 @@ impl TokensWithHashes {
             lora_name: None,
             block_hashes: None,
             seq_hashes: None,
+            is_eagle: None,
         }
     }
 
     /// Adds multimodal extra info for blocks.
     pub fn with_mm_infos(mut self, infos: Vec<Option<BlockExtraInfo>>) -> Self {
         self.block_mm_infos = Some(infos);
+        self.invalidate_hashes();
         self
     }
 
     /// Sets the LoRA adapter name for hash computation.
     pub fn with_lora_name(mut self, name: String) -> Self {
         self.lora_name = Some(name);
+        self.invalidate_hashes();
         self
+    }
+
+    /// Sets Eagle hashing semantics for this token sequence.
+    pub fn with_is_eagle(mut self, is_eagle: bool) -> Self {
+        self.set_is_eagle(is_eagle);
+        self
+    }
+
+    /// Updates Eagle hashing semantics and invalidates cached hashes when it changes.
+    pub fn set_is_eagle(&mut self, is_eagle: bool) {
+        let is_eagle = Some(is_eagle);
+        if self.is_eagle == is_eagle {
+            return;
+        }
+
+        self.is_eagle = is_eagle;
+        self.invalidate_hashes();
+    }
+
+    fn invalidate_hashes(&mut self) {
+        self.block_hashes = None;
+        self.seq_hashes = None;
     }
 
     /// Returns a reference to the tokens.
@@ -657,8 +1119,11 @@ impl TokensWithHashes {
             self.block_hashes = Some(compute_block_hash_for_seq(
                 &self.tokens,
                 self.block_size,
-                self.block_mm_infos.as_deref(),
-                self.lora_name.as_deref(),
+                BlockHashOptions {
+                    block_mm_infos: self.block_mm_infos.as_deref(),
+                    lora_name: self.lora_name.as_deref(),
+                    is_eagle: self.is_eagle,
+                },
             ));
         }
         self.block_hashes.as_ref().unwrap()
@@ -696,6 +1161,28 @@ mod tests {
     use rstest::rstest;
     use serde_json;
 
+    /// Pin the sglang pad_value constants and formula against upstream
+    /// `MultimodalItem._compute_pad_value`. If sglang bumps a constant, this
+    /// fails — otherwise routing-side pad_value would silently diverge from
+    /// sglang's `BlockStored` bytes and MM-routing would degrade to text-prefix.
+    #[test]
+    fn pad_value_matches_sglang_protocol() {
+        assert_eq!(MM_PAD_SHIFT_VALUE, 1_000_000);
+        assert_eq!(MM_PAD_HASH_MASK, (1u64 << 30) - 1);
+        assert_eq!(pad_value_for_mm_hash(0), MM_PAD_SHIFT_VALUE as u32);
+        let fits = (1u64 << 30) - 1;
+        assert_eq!(
+            pad_value_for_mm_hash(fits),
+            (MM_PAD_SHIFT_VALUE + fits) as u32
+        );
+        let overflow = (1u64 << 30) | 0xCAFE;
+        assert_eq!(
+            pad_value_for_mm_hash(overflow),
+            (MM_PAD_SHIFT_VALUE + 0xCAFE) as u32,
+            "high bits above the 30-bit mask must be discarded"
+        );
+    }
+
     #[test]
     fn test_router_event_new() {
         let worker_id = 0;
@@ -703,6 +1190,7 @@ mod tests {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
+                start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(0),
                     mm_extra_info: None,
@@ -727,36 +1215,62 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_overlap_scores_default() {
-        let overlap_scores: OverlapScores = Default::default();
-        assert!(overlap_scores.scores.is_empty());
-    }
-
     #[rstest]
     #[case(11)]
     #[case(32)]
     #[case(64)]
     fn test_compute_block_hash_for_seq(#[case] kv_block_size: u32) {
         let sequence = (0..kv_block_size).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
+        let hashes =
+            compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 1);
 
         let sequence = (0..(kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
+        let hashes =
+            compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 1);
 
         let sequence = (0..(2 * kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None, None);
+        let hashes =
+            compute_block_hash_for_seq(&sequence, kv_block_size, BlockHashOptions::default());
         assert_eq!(hashes.len(), 2);
+    }
+
+    #[test]
+    fn test_compute_next_seq_hash_matches_rolling_hash() {
+        let block_hashes = [LocalBlockHash(11), LocalBlockHash(22), LocalBlockHash(33)];
+        let seq_hashes = compute_seq_hash_for_block(&block_hashes);
+
+        assert_eq!(
+            seq_hashes[1],
+            compute_next_seq_hash(seq_hashes[0], block_hashes[1])
+        );
+        assert_eq!(
+            seq_hashes[2],
+            compute_next_seq_hash(seq_hashes[1], block_hashes[2])
+        );
     }
 
     #[test]
     fn test_lora_name_produces_different_hash() {
         let tokens: Vec<u32> = (0..4).collect();
-        let base = compute_block_hash_for_seq(&tokens, 4, None, None);
-        let lora_a = compute_block_hash_for_seq(&tokens, 4, None, Some("adapter-a"));
-        let lora_b = compute_block_hash_for_seq(&tokens, 4, None, Some("adapter-b"));
+        let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let lora_a = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("adapter-a"),
+                ..Default::default()
+            },
+        );
+        let lora_b = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("adapter-b"),
+                ..Default::default()
+            },
+        );
 
         assert_ne!(base[0], lora_a[0]);
         assert_ne!(base[0], lora_b[0]);
@@ -764,18 +1278,17 @@ mod tests {
     }
 
     #[test]
-    fn test_lora_name_none_matches_legacy() {
-        let tokens: Vec<u32> = (0..8).collect();
-        let hashes_none = compute_block_hash_for_seq(&tokens, 4, None, None);
-        let hashes_none2 = compute_block_hash_for_seq(&tokens, 4, None, None);
-        assert_eq!(hashes_none, hashes_none2);
-    }
-
-    #[test]
     fn test_lora_name_empty_string_normalized_to_none() {
         let tokens: Vec<u32> = (0..4).collect();
-        let base = compute_block_hash_for_seq(&tokens, 4, None, None);
-        let empty = compute_block_hash_for_seq(&tokens, 4, None, Some(""));
+        let base = compute_block_hash_for_seq(&tokens, 4, BlockHashOptions::default());
+        let empty = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some(""),
+                ..Default::default()
+            },
+        );
         assert_eq!(
             base, empty,
             "empty lora_name should be treated as base model"
@@ -800,6 +1313,130 @@ mod tests {
     }
 
     #[test]
+    fn test_tokens_with_hashes_lora_change_recomputes_cached_hashes() {
+        let tokens: Vec<u32> = (0..8).collect();
+        let mut with_hashes = TokensWithHashes::new(tokens.clone(), 4);
+        let base_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+
+        let mut with_hashes = with_hashes.with_lora_name("my-adapter".to_string());
+        let actual_block_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let actual_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+        let expected_block_hashes = compute_block_hash_for_seq(
+            &tokens,
+            4,
+            BlockHashOptions {
+                lora_name: Some("my-adapter"),
+                ..Default::default()
+            },
+        );
+        let expected_sequence_hashes = compute_seq_hash_for_block(&expected_block_hashes);
+
+        assert_eq!(actual_block_hashes, expected_block_hashes);
+        assert_eq!(actual_sequence_hashes, expected_sequence_hashes);
+        assert_ne!(actual_sequence_hashes, base_sequence_hashes);
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_mm_change_recomputes_cached_hashes() {
+        let tokens: Vec<u32> = (0..4).collect();
+        let mm_infos = vec![
+            Some(BlockExtraInfo {
+                mm_objects: vec![BlockMmObjectInfo {
+                    mm_hash: 42,
+                    offsets: vec![(0, 1)],
+                }],
+            }),
+            None,
+        ];
+        let mut with_hashes = TokensWithHashes::new(tokens.clone(), 2);
+        let text_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+
+        let mut with_hashes = with_hashes.with_mm_infos(mm_infos.clone());
+        let actual_block_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let actual_sequence_hashes = with_hashes.get_or_compute_seq_hashes().to_vec();
+        let expected_block_hashes = compute_block_hash_for_seq(
+            &tokens,
+            2,
+            BlockHashOptions {
+                block_mm_infos: Some(&mm_infos),
+                ..Default::default()
+            },
+        );
+        let expected_sequence_hashes = compute_seq_hash_for_block(&expected_block_hashes);
+
+        assert_eq!(actual_block_hashes, expected_block_hashes);
+        assert_eq!(actual_sequence_hashes, expected_sequence_hashes);
+        assert_ne!(actual_sequence_hashes, text_sequence_hashes);
+    }
+
+    #[test]
+    fn test_compute_block_hash_for_seq_eagle_windows() {
+        let tokens: Vec<u32> = (0..6).collect();
+
+        let default_hashes = compute_block_hash_for_seq(&tokens, 2, BlockHashOptions::default());
+        let eagle_hashes = compute_block_hash_for_seq(
+            &tokens,
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+        let expected_first = compute_block_hash_for_seq(
+            &[0, 1, 2],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+        let expected_second = compute_block_hash_for_seq(
+            &[2, 3, 4],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(default_hashes.len(), 3);
+        assert_eq!(eagle_hashes.len(), 2);
+        assert_eq!(eagle_hashes, vec![expected_first[0], expected_second[0]]);
+        assert_ne!(default_hashes[0], eagle_hashes[0]);
+    }
+
+    #[test]
+    fn test_tokens_with_hashes_set_is_eagle_invalidates_cache() {
+        let tokens: Vec<u32> = (0..6).collect();
+        let mut with_hashes = TokensWithHashes::new(tokens, 2);
+
+        let default_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        with_hashes.set_is_eagle(true);
+        let eagle_hashes = with_hashes.get_or_compute_block_hashes().to_vec();
+        let expected_first = compute_block_hash_for_seq(
+            &[0, 1, 2],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+        let expected_second = compute_block_hash_for_seq(
+            &[2, 3, 4],
+            2,
+            BlockHashOptions {
+                is_eagle: Some(true),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(default_hashes.len(), 3);
+        assert_eq!(eagle_hashes.len(), 2);
+        assert_eq!(eagle_hashes, vec![expected_first[0], expected_second[0]]);
+        assert_ne!(default_hashes[0], eagle_hashes[0]);
+    }
+
+    #[test]
     fn test_local_block_hash_serialization() {
         let hash = LocalBlockHash(12345);
         let serialized = serde_json::to_string(&hash).unwrap();
@@ -820,54 +1457,346 @@ mod tests {
     }
 
     #[test]
-    fn test_kv_cache_events_serialization() {
-        let event_data = KvCacheEventData::Stored(KvCacheStoreData {
-            parent_hash: Some(ExternalSequenceBlockHash(1)),
-            blocks: vec![KvCacheStoredBlockData {
-                block_hash: ExternalSequenceBlockHash(2),
-                tokens_hash: LocalBlockHash(3),
-                mm_extra_info: None,
-            }],
-        });
+    fn test_router_request_mark_free_backwards_compatible_deserialization() {
+        let request: RouterRequest = serde_json::from_str(r#"{"method":"mark_free"}"#).unwrap();
 
-        let event = KvCacheEvent {
-            event_id: 1,
-            data: event_data,
-            dp_rank: 0,
-        };
-
-        let events = KvCacheEvents {
-            events: vec![event],
-            shutdown: false,
-        };
-
-        let serialized = serde_json::to_string(&events).unwrap();
-        let deserialized: KvCacheEvents = serde_json::from_str(&serialized).unwrap();
-
-        assert_eq!(deserialized.events.len(), 1);
-        assert_eq!(deserialized.events[0].event_id, 1);
-        if let KvCacheEventData::Stored(store_data) = &deserialized.events[0].data {
-            assert_eq!(store_data.parent_hash.unwrap().0, 1);
-            assert_eq!(store_data.blocks.len(), 1);
-            assert_eq!(store_data.blocks[0].block_hash.0, 2);
-            assert_eq!(store_data.blocks[0].tokens_hash.0, 3);
-        } else {
-            panic!("Expected KvCacheEventData::Stored variant");
-        }
-        assert!(!deserialized.shutdown);
+        assert!(matches!(
+            request,
+            RouterRequest::MarkFree { request_id: None }
+        ));
     }
 
     #[test]
-    fn test_kv_cache_remove_data_serialization() {
-        let remove_data = KvCacheRemoveData {
-            block_hashes: vec![ExternalSequenceBlockHash(4), ExternalSequenceBlockHash(5)],
+    fn test_shared_cache_hits_from_hits() {
+        // All hits contiguous
+        let hits = SharedCacheHits::from_hits(&[true, true, true, true]);
+        assert_eq!(hits.ranges, vec![0..4]);
+        assert_eq!(hits.total_hits, 4);
+
+        // Sparse hits
+        let hits = SharedCacheHits::from_hits(&[true, false, true, true, false, true]);
+        assert_eq!(hits.ranges, vec![0..1, 2..4, 5..6]);
+        assert_eq!(hits.total_hits, 4);
+
+        // No hits
+        let hits = SharedCacheHits::from_hits(&[false, false, false]);
+        assert!(hits.ranges.is_empty());
+        assert_eq!(hits.total_hits, 0);
+
+        // Empty
+        let hits = SharedCacheHits::from_hits(&[]);
+        assert!(hits.ranges.is_empty());
+        assert_eq!(hits.total_hits, 0);
+    }
+
+    #[test]
+    fn test_shared_cache_hits_beyond() {
+        // Shared has [A, B, C, D] => range 0..4
+        #[allow(clippy::single_range_in_vec_init)]
+        let hits = SharedCacheHits::from_ranges(vec![0..4]);
+
+        // Device has overlap=2 (positions 0,1 on device) => shared_beyond should count positions 2,3
+        assert_eq!(hits.hits_beyond(2), 2);
+
+        // Device has overlap=0 => all 4 shared hits count
+        assert_eq!(hits.hits_beyond(0), 4);
+
+        // Device has overlap=4 => nothing beyond
+        assert_eq!(hits.hits_beyond(4), 0);
+
+        // Device overlap exceeds range
+        assert_eq!(hits.hits_beyond(10), 0);
+    }
+
+    #[test]
+    fn test_shared_cache_hits_beyond_sparse() {
+        // Ranges: [1..3, 5..8] => positions 1,2,5,6,7
+        let hits = SharedCacheHits::from_ranges(vec![1..3, 5..8]);
+        assert_eq!(hits.total_hits, 5);
+
+        // from_position=0 => all 5 hits
+        assert_eq!(hits.hits_beyond(0), 5);
+        // from_position=2 => pos 2 (from first range) + 5,6,7 (from second) = 4
+        assert_eq!(hits.hits_beyond(2), 4);
+        // from_position=3 => only second range: 3 hits
+        assert_eq!(hits.hits_beyond(3), 3);
+        // from_position=6 => positions 6,7 from second range = 2
+        assert_eq!(hits.hits_beyond(6), 2);
+        // from_position=8 => nothing
+        assert_eq!(hits.hits_beyond(8), 0);
+    }
+
+    #[test]
+    fn test_kv_transfer_enforcement_serde() {
+        assert_eq!(
+            serde_json::to_string(&KvTransferEnforcement::Required).unwrap(),
+            r#""required""#
+        );
+        assert_eq!(
+            serde_json::from_str::<KvTransferEnforcement>(r#""preferred""#).unwrap(),
+            KvTransferEnforcement::Preferred
+        );
+        assert!(serde_json::from_str::<KvTransferEnforcement>(r#""fallback""#).is_err());
+    }
+
+    #[test]
+    fn test_worker_config_like_topology_domains_default() {
+        // A minimal implementor that does NOT override topology_domains()
+        struct MinimalConfig;
+        impl WorkerConfigLike for MinimalConfig {
+            fn data_parallel_start_rank(&self) -> u32 {
+                0
+            }
+            fn data_parallel_size(&self) -> u32 {
+                1
+            }
+            fn max_num_batched_tokens(&self) -> Option<u64> {
+                None
+            }
+            fn total_kv_blocks(&self) -> Option<u64> {
+                None
+            }
+        }
+
+        let config = MinimalConfig;
+        assert!(
+            config.topology_domains().is_none(),
+            "Default topology_domains() should return None"
+        );
+        assert!(
+            config.kv_transfer_domain().is_none(),
+            "Default kv_transfer_domain() should return None"
+        );
+        assert!(
+            config.kv_transfer_enforcement().is_none(),
+            "Default kv_transfer_enforcement() should return None"
+        );
+        assert!(
+            config.kv_transfer_preferred_weight().is_none(),
+            "Default kv_transfer_preferred_weight() should return None"
+        );
+    }
+
+    #[test]
+    fn test_router_request_mark_free_serialization_with_request_id() {
+        let request = RouterRequest::MarkFree {
+            request_id: Some("req-123".to_string()),
         };
 
-        let serialized = serde_json::to_string(&remove_data).unwrap();
-        let deserialized: KvCacheRemoveData = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
 
-        assert_eq!(deserialized.block_hashes.len(), 2);
-        assert_eq!(deserialized.block_hashes[0].0, 4);
-        assert_eq!(deserialized.block_hashes[1].0, 5);
+        assert_eq!(
+            serialized,
+            r#"{"method":"mark_free","request_id":"req-123"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::MarkFree {
+                request_id: Some(ref request_id)
+            } if request_id == "req-123"
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_serialization_with_priority_jump() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 5.0,
+            strict_priority: 0,
+            lora_name: None,
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":5.0}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                priority_jump,
+                ..
+            } if priority_jump == 5.0
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_serialization_with_lora_name() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 0,
+            lora_name: Some("adapter-a".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"lora_name":"adapter-a"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                tokens,
+                lora_name: Some(ref lora_name),
+                ..
+            } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_defaults_lora_name() {
+        let deserialized: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
+
+        assert!(matches!(
+            deserialized,
+            RouterRequest::New {
+                tokens,
+                lora_name: None,
+                ..
+            } if tokens == vec![1, 2, 3]
+        ));
+    }
+
+    #[test]
+    fn test_router_request_new_strict_priority_compatibility() {
+        let request = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 4,
+            lora_name: None,
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serialized,
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0,"strict_priority":4}"#
+        );
+
+        let missing: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
+        assert!(matches!(
+            missing,
+            RouterRequest::New {
+                strict_priority: 0,
+                ..
+            }
+        ));
+
+        let zero = RouterRequest::New {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            routing_constraints: RoutingConstraints::default(),
+            priority_jump: 0.0,
+            strict_priority: 0,
+            lora_name: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&zero).unwrap(),
+            r#"{"method":"new","tokens":[1,2,3],"priority_jump":0.0}"#
+        );
+    }
+
+    #[test]
+    fn test_router_request_potential_loads_serialization_with_lora_name() {
+        let request = RouterRequest::PotentialLoads {
+            tokens: vec![1, 2, 3],
+            block_mm_infos: None,
+            lora_name: Some("adapter-a".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"potential_loads","tokens":[1,2,3],"lora_name":"adapter-a"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::PotentialLoads {
+                tokens,
+                block_mm_infos: None,
+                lora_name: Some(ref lora_name),
+            } if tokens == vec![1, 2, 3] && lora_name == "adapter-a"
+        ));
+    }
+
+    #[test]
+    fn test_router_request_potential_loads_defaults_lora_name() {
+        let deserialized: RouterRequest =
+            serde_json::from_str(r#"{"method":"potential_loads","tokens":[1,2,3]}"#).unwrap();
+
+        assert!(matches!(
+            deserialized,
+            RouterRequest::PotentialLoads {
+                tokens,
+                block_mm_infos: None,
+                lora_name: None,
+            } if tokens == vec![1, 2, 3]
+        ));
+    }
+
+    #[test]
+    fn test_router_request_mark_prefill_serialization_with_request_id() {
+        let request = RouterRequest::MarkPrefill {
+            request_id: Some("req-123".to_string()),
+        };
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        let deserialized: RouterRequest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(
+            serialized,
+            r#"{"method":"mark_prefill","request_id":"req-123"}"#
+        );
+        assert!(matches!(
+            deserialized,
+            RouterRequest::MarkPrefill {
+                request_id: Some(ref request_id)
+            } if request_id == "req-123"
+        ));
+    }
+
+    #[test]
+    fn test_potential_load_defaults_active_requests() {
+        let load = serde_json::from_str::<PotentialLoad>(
+            r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4}"#,
+        )
+        .unwrap();
+
+        assert_eq!(load.worker_id, 1);
+        assert_eq!(load.dp_rank, 0);
+        assert_eq!(load.potential_prefill_tokens, 16);
+        assert_eq!(load.potential_decode_blocks, 4);
+        assert_eq!(load.active_requests, 0);
+    }
+
+    #[test]
+    fn test_potential_load_serializes_active_requests() {
+        let load = PotentialLoad {
+            worker_id: 1,
+            dp_rank: 0,
+            potential_prefill_tokens: 16,
+            potential_decode_blocks: 4,
+            active_requests: 2,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&load).unwrap(),
+            r#"{"worker_id":1,"dp_rank":0,"potential_prefill_tokens":16,"potential_decode_blocks":4,"active_requests":2}"#
+        );
     }
 }

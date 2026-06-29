@@ -9,10 +9,13 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.snapshot.restore_context import (
+    parse_snapshot_restore_runtime_config,
+    refresh_snapshot_restore_config,
+)
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
-from dynamo.sglang.checkpoint_restore import handle_checkpoint_mode
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
     init_llm_diffusion,
@@ -23,16 +26,19 @@ from dynamo.sglang.init_llm import init_decode, init_prefill
 from dynamo.sglang.init_multimodal import (
     init_multimodal_encode_worker,
     init_multimodal_prefill_worker,
-    init_multimodal_processor,
     init_multimodal_worker,
 )
 from dynamo.sglang.shutdown import install_graceful_shutdown
+from dynamo.sglang.snapshot import prepare_snapshot_engine
 
 configure_dynamo_logging()
+logger = logging.getLogger(__name__)
 
 
-async def worker():
-    config = await parse_args(sys.argv[1:])
+async def worker(argv: list[str] | None = None):
+    if argv is None:
+        argv = sys.argv[1:]
+    config = await parse_args(argv)
     dump_config(config.dynamo_args.dump_config_to, config)
 
     if config.server_args.load_format == "gms":
@@ -40,27 +46,31 @@ async def worker():
 
         config.server_args.load_format = setup_gms(config.server_args)
 
-    # Checkpoint mode: engine must be created BEFORE runtime (no NATS/etcd during CRIU)
-    should_exit, checkpoint_restore_engine = await handle_checkpoint_mode(
-        config.server_args
-    )
-    if should_exit:
-        return
+    # Snapshot mode: engine must be created before runtime so CRIU captures no
+    # NATS/etcd connections.
+    snapshot_controller = await prepare_snapshot_engine(config.server_args)
 
     dynamo_args = config.dynamo_args
+    snapshot_engine = None
+    if snapshot_controller is not None:
+        snapshot_engine = snapshot_controller.engine
+        dynamo_args = await refresh_snapshot_restore_config(
+            dynamo_args,
+            lambda: parse_snapshot_restore_runtime_config(argv),
+        )
+
     shutdown_event = asyncio.Event()
     shutdown_endpoints: list = []
     runtime, loop = create_runtime(
         discovery_backend=dynamo_args.discovery_backend,
         request_plane=dynamo_args.request_plane,
         event_plane=dynamo_args.event_plane,
-        use_kv_events=dynamo_args.use_kv_events,
     )
 
     run_deferred_handlers = install_graceful_shutdown(
         loop, runtime, shutdown_endpoints, shutdown_event
     )
-    logging.info(
+    logger.info(
         "Signal handlers set up for graceful shutdown "
         "(discovery unregister + grace period, with chaining)"
     )
@@ -75,14 +85,6 @@ async def worker():
         )
     elif config.dynamo_args.embedding_worker:
         await init_embedding(
-            runtime,
-            config,
-            shutdown_event,
-            shutdown_endpoints,
-            run_deferred_handlers,
-        )
-    elif config.dynamo_args.multimodal_processor:
-        await init_multimodal_processor(
             runtime,
             config,
             shutdown_event,
@@ -129,7 +131,7 @@ async def worker():
             shutdown_event,
             shutdown_endpoints,
             run_deferred_handlers,
-            checkpoint_restore_engine=checkpoint_restore_engine,
+            snapshot_engine=snapshot_engine,
         )
     else:
         await init_prefill(
@@ -138,7 +140,7 @@ async def worker():
             shutdown_event,
             shutdown_endpoints,
             run_deferred_handlers,
-            checkpoint_restore_engine=checkpoint_restore_engine,
+            snapshot_engine=snapshot_engine,
         )
 
 

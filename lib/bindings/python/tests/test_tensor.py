@@ -8,10 +8,16 @@ import os
 import pytest
 import uvloop
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 
 TEST_END_TO_END = os.environ.get("TEST_END_TO_END", 0)
+
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+]
 
 
 @pytest.mark.asyncio
@@ -27,18 +33,14 @@ async def test_register(runtime: DistributedRuntime):
         ],
         "outputs": [{"name": "output_text", "data_type": "Bytes", "shape": [-1]}],
     }
-    runtime_config = ModelRuntimeConfig()
-    runtime_config.set_tensor_model_config(model_config)
-
-    assert model_config == runtime_config.get_tensor_model_config()
-
     # Use register_model for tensor-based backends (skips HuggingFace downloads)
     await register_model(
         ModelInput.Tensor,
         ModelType.TensorBased,
         endpoint,
         "tensor",  # model_path (used as display name for tensor-based models)
-        runtime_config=runtime_config,
+        worker_type=WorkerType.Aggregated,
+        tensor_model_config=model_config,
     )
 
     if TEST_END_TO_END:

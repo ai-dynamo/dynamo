@@ -3,394 +3,317 @@
 # SPDX-License-Identifier: Apache-2.0
 #}
 # === BEGIN templates/vllm_runtime.Dockerfile ===
-##################################################
-########## Runtime Image ########################
-##################################################
-#
-# PURPOSE: Production runtime environment
-#
-# This stage creates a lightweight production-ready image containing:
-# - Pre-compiled vLLM and framework dependencies
-# - Dynamo runtime libraries and Python packages
-# - Essential runtime dependencies and configurations
-# - Optimized for inference workloads and deployment
-#
-# Use this stage when you need:
-# - Production deployment of Dynamo with vLLM
-# - Minimal runtime footprint without build tools
-# - Ready-to-run inference server environment
-# - Base for custom application containers
-#
+##################################
+########## Runtime Image #########
+##################################
 
-FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+{% if platform == "multi" %}
+FROM --platform=linux/amd64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_amd64
+FROM --platform=linux/arm64 ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS vllm_runtime_arm64
+FROM vllm_runtime_${TARGETARCH} AS pre_runtime
+{% else %}
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
+{% endif %}
 
-ARG DEVICE
+ARG PYTHON_VERSION
+ARG ENABLE_KVBM
+ARG ENABLE_GPU_MEMORY_SERVICE
+ARG VLLM_OMNI_REF
+ARG NIXL_REF
+{% if device == "cuda" %}
+ARG CUDA_MAJOR
+{% endif %}
+ARG MODELEXPRESS_VERSION
+
 WORKDIR /workspace
+
 ENV DYNAMO_HOME=/opt/dynamo
-ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV HOME=/home/dynamo
+{% if device != "cuda" %}
+ENV PATH=/usr/local/ucx/bin:/usr/local/bin/etcd:${PATH}
+{% else %}
+ENV PATH=/usr/local/bin/etcd:${PATH}
+{% endif %}
+
+{% if device != "cuda" %}
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
+{% if device == "xpu" %}
+ENV NIXL_PREFIX=/opt/intel/intel_nixl
+ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
+{% elif device == "cpu" %}
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
+{% endif %}
+ENV NIXL_PLUGIN_DIR=${NIXL_LIB_DIR}/plugins
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:${TORCH_LIB_DIR}:${LD_LIBRARY_PATH:-}
+ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+{% else %}
+# Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel through a
+# stable prefix so non-Python consumers use the same NIXL copy that Python imports.
+# This keeps Rust nixl-sys dlopen("libnixl.so") from falling into stub mode in
+# processes that do not import the nixl Python package first.
+ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
+ENV NIXL_PREFIX=/opt/dynamo/nixl \
+    NIXL_LIB_DIR=/opt/dynamo/nixl \
+    NIXL_PLUGIN_DIR=/opt/dynamo/nixl/plugins
+COPY --chmod=755 container/deps/vllm/install_nixl_from_wheel.sh /usr/local/bin/install_nixl_from_wheel
+RUN install_nixl_from_wheel \
+    --cuda-major "${CUDA_MAJOR}" \
+    --site-packages "${SITE_PACKAGES}" \
+    --prefix "${NIXL_PREFIX}" \
+    --skip-headers
+ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
+{% endif %}
+
+# Install NATS and ETCD
+COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+
+# Create dynamo user with group 0 for OpenShift compatibility.
+# Pin -u 1000 explicitly: the vllm/vllm-openai >=0.22 image ships a `vllm` user at
+# UID 2000, so after freeing 1000 (ubuntu) useradd would otherwise auto-assign the
+# next-highest UID (2001) and fail the `id -u dynamo` == 1000 assertion below.
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -u 1000 -m -s /bin/bash -g 0 dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && mkdir -p /home/dynamo/.cache /opt/dynamo \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python \
+    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
+    && mkdir -p /etc/profile.d \
+    && echo 'umask 002' > /etc/profile.d/00-umask.sh
+
+{% if device != "cuda" %}
+# Copy UCX and NIXL from wheel_builder for CPU/XPU devices
+# (CUDA devices use NIXL from upstream vLLM wheels)
+COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo:0 --from=wheel_builder ${NIXL_PREFIX} ${NIXL_PREFIX}
+{% if device == "xpu" %}
+# XPU NIXL uses lib/x86_64-linux-gnu; copy to NIXL_LIB_DIR to ensure lib dir is populated
+COPY --chown=dynamo:0 --from=wheel_builder /opt/intel/intel_nixl/lib/x86_64-linux-gnu/. ${NIXL_LIB_DIR}/
+{% endif %}
+# Copy NIXL Python wheels
+COPY --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+
+# Install RDMA libraries required for UCX to find RDMA devices
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libibverbs1 \
+        rdma-core \
+        ibverbs-utils \
+        libibumad3 \
+        libnuma1 \
+        librdmacm1 \
+        ibverbs-providers && \
+    rm -rf /var/lib/apt/lists/*
+{% endif %}
+
+# Copy attribution files and wheels
+COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+
+{% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
+{% if device != "cuda" %}
+# NIXL meta package always tries to find a cuda-backend
+# https://github.com/ai-dynamo/nixl/blob/v1.1.0/src/bindings/python/nixl-meta/nixl/__init__.py
+#
+# We therefore install nixl-cu* packages, and use LD_LIBRARY_PATH settings to point to our installation of nixl
+# v1.1.0 nixl-cu13 has in-built RPATH point to conflicting built-in libs with symbols unsupported in non-cuda builds.
+# we therefore avoid installing nixl-cu13
+
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eu; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    NIXL_VERSION="${NIXL_REF#v}"; \
+    uv pip install \
+        {{ pip_target }} --force-reinstall --no-deps \
+        "nixl==${NIXL_VERSION}" \
+        "nixl-cu12==${NIXL_VERSION}"
+{% endif %}
+
+# Install device-specific NIXL wheels for non-CUDA devices.
+# These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
+{% if device != "cuda" %}
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl
+{% endif %}
+
+{% if target not in ("dev", "local-dev") %}
+# Keep the upstream Python solve intact: install only Dynamo-owned wheels and
+# suppress transitive dependency resolution unless a later validation proves a
+# missing package must be added explicitly.
+
+# Install Dynamo runtime wheels and optional KVBM/GMS wheels.
+# Use --no-deps to prevent dependency conflicts (e.g., KVBM downgrading nixl).
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    if [ "${ENABLE_KVBM}" = "true" ]; then \
+        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
+        if [ -n "$KVBM_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$KVBM_WHEEL"; fi; \
+    fi && \
+    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -n "$GMS_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$GMS_WHEEL"; fi; \
+    fi
+
+# Launch-script examples use jq for readable curl output like the upstream omni
+# image. SoX is intentionally NOT installed: vLLM-Omni replaced its sox audio path
+# with a pure-numpy peak_normalize() (vllm_omni/utils/audio.py), pysox isn't
+# installed, and nothing shells out to the sox binary — so `sox`/`libsox-fmt-all`
+# were dead weight that only dragged in a GPL-2.0+ codec cluster (sox, libsox*,
+# libao*, libmad0, libid3tag0, libltdl7) we'd then be redistributing. SoX is
+# inherently GPL (no LGPL replacement), so the compliant fix is to not ship it.
+# (sglang_runtime.Dockerfile is the reference codec-compliance pattern.)
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        jq; \
+    rm -rf /var/lib/apt/lists/*
+
+# Layer the released vLLM-Omni package matching the pinned upstream ref while
+# constraining packages already solved in the upstream vLLM image.
+RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
+    --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
+    bash /tmp/install_vllm_omni.sh
 
 {% if device == "xpu" %}
-RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && \
-    echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && \
-    add-apt-repository -y ppa:kobuk-team/intel-graphics
+# Remove conflicting standard triton package for XPU and reinstall triton-xpu
+# This must be done after vLLM-Omni installation to ensure no dependencies re-install triton
+# Reinstalling triton-xpu ensures the triton namespace is properly configured
+RUN uv pip uninstall triton && \
+    uv pip install --force-reinstall --no-deps triton-xpu
+{% endif %}
+
+{% if context.vllm.enable_modelexpress == "true" %}
+# Install only the ModelExpress client package. --no-deps preserves the upstream
+# vLLM runtime dependency stack.
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    set -eux; \
+    export UV_CACHE_DIR=/root/.cache/uv; \
+    uv pip install {{ pip_target }} --no-deps \
+        "modelexpress==${MODELEXPRESS_VERSION}"
+{% endif %}
+
 {% endif %}
 
 {% if device == "cuda" %}
-# Set CUDA_DEVICE_ORDER to ensure CUDA logical device IDs match NVML physical device IDs
-# This fixes NVML InvalidArgument errors when CUDA_VISIBLE_DEVICES is set
-ENV CUDA_DEVICE_ORDER=PCI_BUS_ID
-
-# Copy full CUDA toolkit directories from base devel image.
-# Avoids cherry-picking individual binaries/libs which breaks when new CUDA deps are introduced.
-COPY --from=dynamo_base /usr/local/cuda/bin/ /usr/local/cuda/bin/
-COPY --from=dynamo_base /usr/local/cuda/lib64/ /usr/local/cuda/lib64/
-COPY --from=dynamo_base /usr/local/cuda/include/ /usr/local/cuda/include/
-COPY --from=dynamo_base /usr/local/cuda/nvvm/ /usr/local/cuda/nvvm/
-RUN CUDA_VERSION_MAJOR="${CUDA_VERSION%%.*}" &&\
-    ln -sf /usr/local/cuda/lib64/libcublas.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublas.so &&\
-    ln -sf /usr/local/cuda/lib64/libcublasLt.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublasLt.so
-
-# DeepGemm runs nvcc for JIT kernel compilation, however the CUDA include path
-# is not properly set for complilation. Set CPATH to help nvcc find the headers.
-ENV CPATH=/usr/local/cuda/include \
-    TRITON_CUPTI_PATH=/usr/local/cuda/include \
-    TRITON_CUDACRT_PATH=/usr/local/cuda/include \
-    TRITON_CUOBJDUMP_PATH=/usr/local/cuda/bin/cuobjdump \
-    TRITON_NVDISASM_PATH=/usr/local/cuda/bin/nvdisasm \
-    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
-    TRITON_CUDART_PATH=/usr/local/cuda/include
-{% endif %}
-
-### COPY NATS & ETCD ###
-# Copy nats and etcd from dev image
-COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
-COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-
-{% if device == "xpu" %}
-ENV PATH=/usr/local/bin/etcd/:$PATH
-{% else %}
-# Add ETCD and CUDA binaries to PATH so cicc and other CUDA tools are accessible
-ENV PATH=/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
-{% endif %}
-
-# Copy uv to system /bin
-COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
-
-# Create dynamo user with group 0 for OpenShift compatibility
-RUN userdel -r ubuntu > /dev/null 2>&1 || true \
-    && useradd -m -s /bin/bash -g 0 dynamo \
-    && [ `id -u dynamo` -eq 1000 ] \
-    && mkdir -p /home/dynamo/.cache /opt/dynamo \
-    # Non-recursive chown - only the directories themselves, not contents
-    && chown dynamo:0 /home/dynamo /home/dynamo/.cache /opt/dynamo /workspace \
-    # No chmod needed: umask 002 handles new files, COPY --chmod handles copied content
-    # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
-    # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
-    && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
-
-ARG ARCH_ALT
-ARG PYTHON_VERSION
-ENV PYTHON_VERSION=${PYTHON_VERSION}
-
-# Install Python, build-essential and python3-dev as apt dependencies
-# Cache apt downloads; sharing=locked avoids apt/dpkg races with concurrent builds.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    apt-get update && \
-    if [ "$DEVICE" = "cuda" ]; then \
-        CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*} &&\
-        CUDA_VERSION_MINOR=$(echo "${CUDA_VERSION#*.}" | cut -d. -f1); \
-    fi && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # Python runtime - CRITICAL for virtual environment to work
-        python${PYTHON_VERSION}-dev \
-        build-essential \
-        # jq and curl for polling various endpoints and health checks
-        jq \
-        git \
-        git-lfs \
-        # required for verification of GPG keys
-        gnupg2 \
-        curl \
-        # Libraries required by UCX to find RDMA devices
-        libibverbs1 rdma-core ibverbs-utils libibumad3 \
-        libnuma1 librdmacm1 ibverbs-providers \
-        # JIT Kernel Compilation, flashinfer
-        ninja-build \
-        g++ \
-        # prometheus dependencies
-        ca-certificates \
-        # opencv-python-headless (vLLM dependency) requires libxcb for some functions
-        libxcb1 && \
-    if [ "$DEVICE" = "cuda" ]; then \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # DeepGemm uses 'cuobjdump' which does not come with CUDA image
-        cuda-command-line-tools-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR}; \
-    fi && \
+# The upstream vllm/vllm-openai base image ships a GPL/GPL-3.0 ffmpeg built
+# against libx264/libx265/libmp3lame. Purge ONLY the explicitly-named ffmpeg +
+# codec packages and replace them with the LGPL-only in-tree ffmpeg built in
+# wheel_builder (--disable-gpl --disable-nonfree; H.264 via NVENC, VP9 via
+# libvpx). PyAV, torchaudio, torchvision, soundfile and Pillow all bundle their
+# own libraries and do not link the system ffmpeg/codecs, so removing them is
+# safe. dpkg-query keeps the match robust across base-image/arch version
+# suffixes (e.g. libavcodec58 vs 60).
+#
+# This grep is the COMPLETE, auditable set of what leaves the image: there is
+# deliberately NO apt-get autoremove, so the removal can never cascade into
+# unrelated auto-installed packages. That matters because the base image marks
+# both the gcc/g++/make toolchain (torch.inductor/Triton JIT shell out to it at
+# runtime) and the CUDA math libs (libcublas/libcusolver/libcusparse — the torch
+# wheels here ship no bundled cublas and load the system copies) as
+# auto-installed. A bare `autoremove --purge` sweeps all of those as "orphaned",
+# which broke runtime JIT (missing C compiler) in the 1.3.0 rc image. Any
+# LGPL/BSD media libs left orphaned (libva, libvdpau, ...) are license-clean
+# dead weight, not a compliance issue.
+RUN set -eux; \
+    purge=$(dpkg-query -W -f='${Package}\n' 2>/dev/null \
+        | grep -E '^(ffmpeg|libav[a-z]|libsw[a-z]|libpostproc|libx264|libx265|libmp3lame|libaom|libdav1d|libvpx|libtheora|libvorbis|libopus|libsoxr|libcaca|libcdio|libzvbi|libgme|libvidstab|libdc1394|libraw1394|libiec61883|libtwolame|libshine|libsrt[0-9]|libudfread|libsvtav1|libbs2b|librubberband|libchromaprint|libcodec2|libgsm|libass[0-9]|libbluray|libxvidcore|libflite)' \
+        || true); \
+    if [ -n "$purge" ]; then \
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y $purge; \
+    fi; \
     rm -rf /var/lib/apt/lists/*
 
-{% if device == "xpu" %}
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends --fix-missing \
-    #ffmpeg \
-    libsndfile1 \
-    libsm6 \
-    libxext6 \
-    libgl1 \
-    lsb-release \
-    numactl \
-    wget \
-    vim \
-    linux-libc-dev && \
-    # Install Intel GPU runtime packages
-    apt-get install -y libze1 libze-dev libze-intel-gpu1 intel-opencl-icd libze-intel-gpu-raytracing \
-    intel-ocloc intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# Regression guard for the codec purge above: torch.inductor/Triton JIT shell
+# out to a host C/C++ compiler at runtime, so a missing toolchain only surfaces
+# on the first compile in production. Reproduce that compile path at build time
+# (CPU-only) so a missing compiler aborts the build instead of shipping.
+RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.py,target=/tmp/validate_torch_compile_smoke.py,readonly \
+    python3 /tmp/validate_torch_compile_smoke.py
 
-RUN wget https://github.com/uxlfoundation/oneCCL/releases/download/2021.15.7/intel-oneccl-2021.15.7.8_offline.sh && \
-    bash intel-oneccl-2021.15.7.8_offline.sh -a --silent --eula accept && \
-    echo "source /opt/intel/oneapi/setvars.sh --force" >> /etc/bash.bashrc && \
-    rm -f /opt/intel/oneapi/ccl/latest && \
-    ln -s /opt/intel/oneapi/ccl/2021.15 /opt/intel/oneapi/ccl/latest
-{% endif %}
-
-{% if context.vllm.enable_media_ffmpeg == "true" %}
-# Copy ffmpeg libraries from wheel_builder (requires root, runs before USER dynamo)
+# Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
+# libsw*.so*) + libvpx + the LGPL CLI binary that imageio/diffusers target via
+# IMAGEIO_FFMPEG_EXE. Ungated by enable_media_ffmpeg because the base GPL ffmpeg
+# was just purged, so the LGPL CLI must always be present for the omni
+# video-export path to have something to encode with.
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
-    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/libav*.so* /tmp/usr/local/lib/libsw*.so* /usr/local/lib/ && \
+    cp -nL /tmp/usr/local/lib/lib*vpx*.so* /usr/local/lib/ 2>/dev/null || true && \
     cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/local/lib/pkgconfig/ && \
-    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/
+    cp -nL /tmp/usr/local/bin/ffmpeg /usr/local/bin/ffmpeg && \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/ && \
+    ldconfig
+ENV IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg
 {% endif %}
+
+# Replace the upstream vllm/vllm-openai image's imageio-ffmpeg (which ships a
+# GPL-encumbered prebuilt ffmpeg binary in <site-packages>/imageio_ffmpeg/binaries/)
+# with a source install that leaves no binary on disk. On cuda, IMAGEIO_FFMPEG_EXE
+# (set above) points imageio at the LGPL CLI copied from wheel_builder. The
+# --no-binary directive lives in the requirements file itself.
+RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
+    --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
+        --requirement /tmp/requirements.vllm.txt
+
+# Remove the vLLM source tree shipped in the base image to avoid pytest
+# collection conflicts (duplicate conftest plugin registration) and stale
+# tool scripts referencing files not present in Dynamo's build context.
+RUN rm -rf /workspace/vllm
 
 USER dynamo
-ENV HOME=/home/dynamo
-# This picks up the umask 002 from the /etc/profile.d/00-umask.sh file for subsequent RUN commands
-SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
 
-{% if device == "xpu" %}
-ENV NIXL_PREFIX=/opt/intel/intel_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-{% else %}
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-{% endif %}
-
-# Site-packages path derived from PYTHON_VERSION ARG
-ARG SITE_PACKAGES=${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages
-
-### VIRTUAL ENVIRONMENT SETUP ###
-# Copy virtual environment from framework container, splitting large packages into separate layers
-# to enable parallel downloads. Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as
-# root because COPY --chmod only affects <path>/*, not <path>
-#
-# Layer sizes (uncompressed): nvidia=4.5GB, flashinfer_jit_cache=4.1GB, torch=2.1GB,
-#                             vllm=1.2GB, triton=592MB, flashinfer_cubin=437MB
-{% if device == "cuda" %}
-COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/nvidia ${SITE_PACKAGES}/nvidia
-COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/flashinfer_jit_cache ${SITE_PACKAGES}/flashinfer_jit_cache
-{% endif %}
-COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/torch ${SITE_PACKAGES}/torch
-COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm ${SITE_PACKAGES}/vllm
-{% if platform == "amd64" -%}
-COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm_omni ${SITE_PACKAGES}/vllm_omni
-{% endif -%}
-COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/triton ${SITE_PACKAGES}/triton
-{% if device == "cuda" %}
-COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/flashinfer_cubin ${SITE_PACKAGES}/flashinfer_cubin
-{% endif %}
-# Remaining packages and venv structure (bin/, include/, share/, etc.)
-COPY --chmod=775 --chown=dynamo:0 --from=framework \
-    --exclude=lib/python*/site-packages/nvidia \
-    --exclude=lib/python*/site-packages/flashinfer_jit_cache \
-    --exclude=lib/python*/site-packages/torch \
-    --exclude=lib/python*/site-packages/vllm \
-{%- if platform == "amd64" %}
-    --exclude=lib/python*/site-packages/vllm_omni \
-{%- endif %}
-    --exclude=lib/python*/site-packages/triton \
-    --exclude=lib/python*/site-packages/flashinfer_cubin \
-    ${VIRTUAL_ENV} ${VIRTUAL_ENV}
-
-# Copy vllm with correct ownership (read-only, no group-write needed)
-COPY --chown=dynamo:0 --from=framework /opt/vllm /opt/vllm
-
-# Copy UCX and NIXL to system directories (read-only, no group-write needed)
-COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
-{% if device == "xpu" %}
-COPY --chown=dynamo: --from=wheel_builder /opt/intel/intel_nixl/lib/${ARCH_ALT}-linux-gnu/. ${NIXL_LIB_DIR}/
-{% else %}
-COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
-{% endif %}
-COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
-
-{% if device == "cuda" %}
-# Copy AWS SDK C++ libraries (required for NIXL OBJ backend / S3 support)
-COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libaws* /usr/local/lib/
-COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libs2n* /usr/local/lib/
-COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libcrypto.so.1.1* /usr/local/lib/
-COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libssl.so.1.1* /usr/local/lib/
-{% endif %}
-
-ENV PATH=/usr/local/ucx/bin:$PATH
-
-ENV LD_LIBRARY_PATH=\
-$NIXL_LIB_DIR:\
-$NIXL_PLUGIN_DIR:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-$LD_LIBRARY_PATH
-
-{% if device == "cuda" %}
-ENV LD_LIBRARY_PATH=\
-/opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
-$LD_LIBRARY_PATH
-ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
-{% endif %}
-
-# TODO: skip /workspace COPYs for dev/local-dev (bind-mounted from host, these get shadowed)
-COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
-{% if target not in ("dev", "local-dev") %}
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
-{% endif %}
-
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-
-{% if target not in ("dev", "local-dev") %}
-# Install dynamo, NIXL, and dynamo-specific dependencies
-ARG ENABLE_KVBM
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv pip install \
-      /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-      /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-      /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
-    if [ "${ENABLE_KVBM}" = "true" ]; then \
-        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -z "$KVBM_WHEEL" ]; then \
-            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install "$KVBM_WHEEL"; \
-    fi && \
-    cd /workspace/benchmarks && \
-    export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install . && \
-    chmod -R g+w /workspace/benchmarks
-{% else %}
-# Dev/local-dev: skip dynamo wheel install (users build from source via cargo build + maturin develop).
-# Install NIXL wheel only (pre-built C++ binary, not buildable from source).
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv pip install /opt/dynamo/wheelhouse/nixl/nixl*.whl
-{% endif %}
-
-{% if device == "cuda" %}
-# Install gpu_memory_service wheel if enabled (all targets)
-ARG ENABLE_GPU_MEMORY_SERVICE
-RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
-    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
-        export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
-        if [ -n "$GMS_WHEEL" ]; then uv pip install "$GMS_WHEEL"; fi; \
-    fi
-
-# Install ModelExpress for P2P weight transfer (optional)
-ARG ENABLE_MODELEXPRESS_P2P
-ARG MODELEXPRESS_REF
-RUN if [ "${ENABLE_MODELEXPRESS_P2P}" = "true" ]; then \
-        echo "Installing ModelExpress from ref: ${MODELEXPRESS_REF}" && \
-        uv pip install "modelexpress @ git+https://github.com/ai-dynamo/modelexpress.git@${MODELEXPRESS_REF}#subdirectory=modelexpress_client/python"; \
-    fi
-{% endif %}
-
-# Install common and test dependencies. Cache uv downloads; uv handles its own locking for this cache.
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
-    export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install \
-        --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt
-
-# Copy tests, deploy and components for CI with correct ownership
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
+# Copy the workspace surface needed by the current vLLM pre-merge test image.
+# Keep optional framework trees like planner out of /workspace so the upstream
+# runtime does not look like a fully-expanded generic image.
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
-COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
-COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
-COPY --chmod=775 --chown=dynamo:0 components/ /workspace/components/
-COPY --chmod=775 --chown=dynamo:0 lib/ /workspace/lib/
+COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
+COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/vllm /workspace/components/src/dynamo/vllm
+COPY --chown=dynamo:0 lib /workspace/lib
 
 # Setup launch banner in common directory accessible to all users
-RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
-    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
-
-# Setup environment for all users
 USER root
-# Fix directory permissions: COPY --chmod only affects contents, not the directory itself
-RUN chmod g+w /workspace /workspace/* /opt/dynamo /opt/dynamo/* ${VIRTUAL_ENV} && \
+RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
     chmod 755 /opt/dynamo/.launch_screen && \
-    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
-
-{% if device == "cuda" %}
-# Fix library symlinks that Docker COPY dereferenced (COPY always follows symlinks)
-# This recreates proper symlinks to save space and suppress ldconfig warnings
-RUN cd /usr/local/lib && \
-    # libaws-c-common: .so.1 should symlink to .so.1.0.0
-    if [ -f libaws-c-common.so.1.0.0 ] && [ ! -L libaws-c-common.so.1 ]; then \
-        rm -f libaws-c-common.so.1 libaws-c-common.so && \
-        ln -s libaws-c-common.so.1.0.0 libaws-c-common.so.1 && \
-        ln -s libaws-c-common.so.1 libaws-c-common.so; \
-    fi && \
-    # libaws-c-s3: .so.0unstable should symlink to .so.1.0.0
-    if [ -f libaws-c-s3.so.1.0.0 ] && [ ! -L libaws-c-s3.so.0unstable ]; then \
-        rm -f libaws-c-s3.so.0unstable libaws-c-s3.so && \
-        ln -s libaws-c-s3.so.1.0.0 libaws-c-s3.so.0unstable && \
-        ln -s libaws-c-s3.so.0unstable libaws-c-s3.so; \
-    fi && \
-    # libs2n: .so.1 should symlink to .so.1.0.0
-    if [ -f libs2n.so.1.0.0 ] && [ ! -L libs2n.so.1 ]; then \
-        rm -f libs2n.so.1 libs2n.so && \
-        ln -s libs2n.so.1.0.0 libs2n.so.1 && \
-        ln -s libs2n.so.1 libs2n.so; \
-    fi && \
-    # OpenSSL 1.1: check for versioned files (e.g., .so.1.1.1k)
-    for lib in libcrypto libssl; do \
-        versioned=$(ls -1 ${lib}.so.1.1.* 2>/dev/null | head -1); \
-        if [ -n "$versioned" ] && [ ! -L "${lib}.so.1.1" ]; then \
-            rm -f "${lib}.so.1.1" && \
-            ln -s "$(basename "$versioned")" "${lib}.so.1.1"; \
-        fi; \
-    done && \
-    ldconfig
-{% endif %}
 
 USER dynamo
 
 ARG DYNAMO_COMMIT_SHA
-ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
-{% if device == "xpu" %}
-RUN uv pip uninstall triton triton-xpu && \
-    uv pip install triton-xpu==3.6.0 --extra-index-url=https://download.pytorch.org/whl/test/xpu && \
-    uv pip uninstall oneccl && \
-    uv pip uninstall oneccl-devel
+# Reset the upstream "vllm serve" entrypoint so the derived runtime behaves
+# like other Dynamo images and can execute arbitrary commands directly.
+ENTRYPOINT []
 
-SHELL ["bash", "-c"]
-CMD ["bash", "-c", "source /etc/bash.bashrc && exec bash"]
-{% else %}
-# In vLLM 0.12 the default sampler changed on the forward pass.
-# We need to enable this to enable the cuda kernels.
-ENV VLLM_USE_FLASHINFER_SAMPLER=1
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []
+
+{# Compliance is skipped for dev/local-dev: those images are not shipped (release
+   ships runtime/frontend/operator/planner/snapshot-agent), compliance-extract
+   already skips them, and their pre_runtime carries no dynamo venv to scan. #}
+{% if target not in ("dev", "local-dev") %}
+{% include "templates/compliance.Dockerfile" %}
+{% endif %}
+
+
+FROM pre_runtime AS runtime
+{% if target not in ("dev", "local-dev") %}
+COPY --from=licenses /legal /legal
 {% endif %}

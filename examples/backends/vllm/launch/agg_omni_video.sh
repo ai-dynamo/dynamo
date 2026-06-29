@@ -5,6 +5,9 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
+source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
 MODEL="Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
 
@@ -24,24 +27,23 @@ while [[ $# -gt 0 ]]; do
 done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-echo "=========================================="
-echo "Launching vLLM-Omni Video Generation (1 GPU)"
-echo "=========================================="
-echo "Model:       $MODEL"
-echo "Frontend:    http://localhost:$HTTP_PORT"
-echo "=========================================="
-echo ""
-echo "Example test command:"
-echo ""
-echo "  curl http://localhost:${HTTP_PORT}/v1/chat/completions \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{"
-echo "      \"model\": \"${MODEL}\","
-echo "      \"messages\": [{\"role\": \"user\", \"content\": \"Generate a short video of ocean waves.\"}],"
-echo "      \"max_tokens\": 32"
-echo "    }'"
-echo ""
-echo "=========================================="
+GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+print_launch_banner --no-curl "Launching vLLM-Omni Video Generation (1 GPU)" "$MODEL" "$HTTP_PORT"
+print_curl_footer <<CURL
+curl -s http://localhost:${HTTP_PORT}/v1/videos \\
+  -H 'Content-Type: application/json' \\
+  -d '{
+    "model": "${MODEL}",
+    "prompt": "Dog running on a beach",
+    "size": "832x480",
+    "response_format": "url",
+    "nvext": {
+      "num_inference_steps": 20,
+      "num_frames": 30
+    }
+  }' | jq
+CURL
+
 
 python -m dynamo.frontend &
 FRONTEND_PID=$!
@@ -49,10 +51,19 @@ FRONTEND_PID=$!
 sleep 2
 
 echo "Starting Omni worker..."
+# --enforce-eager works around a CUDA illegal memory access in the upstream
+# vllm-omni Wan2.2 transformer: WanSelfAttention.forward constructs and assigns
+# RotaryEmbeddingWan to self inside the forward pass, mutating self._modules
+# under torch.compile and triggering a graph break. Remove this flag once
+# vllm-omni hoists the rotary embedding into __init__.
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm \
+    python -m dynamo.vllm.omni \
     --model "$MODEL" \
-    --omni \
     --output-modalities video \
     --media-output-fs-url file:///tmp/dynamo_media \
-    "${EXTRA_ARGS[@]}"
+    --enforce-eager \
+    $GPU_MEM_ARGS \
+    "${EXTRA_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit

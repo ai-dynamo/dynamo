@@ -40,7 +40,7 @@ From the Dynamo repository root:
 ```bash
 # Build the base Dynamo image
 python container/render.py --framework=dynamo --target=runtime --output-short-filename
-docker build -f container/rendered.Dockerfile .
+docker build -f container/rendered.Dockerfile -t dynamo-base:latest .
 
 # Build the Triton worker image
 cd examples/backends/tritonserver
@@ -129,6 +129,7 @@ Options:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `BACKEND_DIR` | Path to Triton backends. The container image sets this to `/opt/tritonserver/backends`; local source builds use `backends/`. | `backends/` |
 | `DYN_DISCOVERY_BACKEND` | Discovery backend: `kubernetes`, `etcd`, `file`, or `mem` | `file` |
 | `DYN_LOG` | Log level (debug, info, warn, error) | `info` |
 | `DYN_HTTP_PORT` | Frontend HTTP port | `8000` |

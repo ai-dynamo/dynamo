@@ -7,6 +7,12 @@
 //! by adding endpoint routing to the TCP wire protocol.
 
 use crate::SystemHealth;
+use crate::metrics::work_handler_pool::{
+    ENGINE_REQUEST_GAUGE, REJECTION_REQUEST_TOTAL, REQUEST_QUEUE_GAUGE,
+    WORK_HANDLER_ENQUEUE_REJECTED_TOTAL, WORK_HANDLER_PERMIT_WAIT_SECONDS,
+    WORK_HANDLER_POOL_ACTIVE_TASKS, WORK_HANDLER_POOL_CAPACITY, WORK_HANDLER_QUEUE_CAPACITY,
+    WORK_HANDLER_QUEUE_DEPTH,
+};
 use crate::pipeline::network::PushWorkHandler;
 use anyhow::Result;
 use bytes::Bytes;
@@ -15,30 +21,20 @@ use parking_lot::{Mutex, RwLock};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tokio_util::bytes::BytesMut;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-/// Default maximum message size for TCP server (32 MB)
-const DEFAULT_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
-
 /// Default worker pool size for TCP request handling
-const DEFAULT_WORKER_POOL_SIZE: usize = 1500;
+const DEFAULT_WORKER_POOL_SIZE: usize = 10000;
 
 /// Default work queue size for TCP request handling
 /// this is 4X the worker pool size to handle burst traffic
-const DEFAULT_WORK_QUEUE_SIZE: usize = 6000;
-
-/// Get maximum message size from environment or use default
-fn get_max_message_size() -> usize {
-    std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_MAX_MESSAGE_SIZE)
-}
+const DEFAULT_WORK_QUEUE_SIZE: usize = 40000;
 
 /// Get worker pool size from environment or use default
 fn get_worker_pool_size() -> usize {
@@ -54,6 +50,75 @@ fn get_work_queue_size() -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_WORK_QUEUE_SIZE)
+}
+
+/// Default small overflow queue when the engine-request limit is set but the
+/// queue limit is left unset. Keeps the hard cap close to N.
+const DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT: usize = 16;
+
+/// Resolved worker-pool / overflow-queue sizing for the TCP ingress.
+///
+/// `read_loop` front-acquires a worker-pool permit and dispatches directly when
+/// a worker is free, falls back to the bounded overflow queue, and returns 503
+/// ("Server overloaded") when both are full. The knobs set the *sizes*:
+///
+/// * `DYN_ENGINE_REQUEST_LIMIT` set → pool = engine limit (N), queue = Q
+///   (default 16). Hard cap N+Q.
+/// * unset → large defaults (10000 / 40000), so rejection only triggers under
+///   extreme saturation.
+struct SizingConfig {
+    pool_size: usize,
+    queue_size: usize,
+}
+
+fn resolve_sizing() -> SizingConfig {
+    match std::env::var("DYN_ENGINE_REQUEST_LIMIT")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        Some(engine_limit) => {
+            let queue_limit = std::env::var("DYN_DYNAMO_REQUEST_QUEUE_LIMIT")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT);
+            // The single dispatcher holds one request between `recv()` and
+            // acquiring an engine permit, so size the channel to limit-1:
+            // channel + the dispatcher-held request cap "queued, not in engine"
+            // at exactly `limit`.
+            SizingConfig {
+                pool_size: engine_limit.max(1),
+                queue_size: queue_limit.saturating_sub(1).max(1),
+            }
+        }
+        None => SizingConfig {
+            pool_size: get_worker_pool_size(),
+            queue_size: get_work_queue_size(),
+        },
+    }
+}
+
+/// RAII guard for `WORK_HANDLER_POOL_ACTIVE_TASKS`. `new()` increments and
+/// `Drop` decrements, so a single owner expresses the "task is active" interval.
+/// Constructed in the dispatcher *before* `tokio::spawn` and moved into the
+/// future, the gauge is incremented before any worker thread can poll the task,
+/// and the decrement runs on every exit path — normal return, panic, or
+/// cancellation.
+struct ActiveTaskGuard;
+
+impl ActiveTaskGuard {
+    fn new() -> Self {
+        WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
+        // `dynamo_engine_request`: requests currently in the engine.
+        ENGINE_REQUEST_GAUGE.inc();
+        Self
+    }
+}
+
+impl Drop for ActiveTaskGuard {
+    fn drop(&mut self) {
+        WORK_HANDLER_POOL_ACTIVE_TASKS.dec();
+        ENGINE_REQUEST_GAUGE.dec();
+    }
 }
 
 /// Work item for the worker pool
@@ -79,6 +144,12 @@ pub struct SharedTcpServer {
     cancellation_token: CancellationToken,
     /// Channel for sending work to the worker pool
     work_tx: tokio::sync::mpsc::Sender<WorkItem>,
+    /// Worker-pool semaphore bounding concurrent in-engine requests. Shared with
+    /// `read_loop` so it can front-acquire a permit and dispatch directly.
+    engine_sem: Arc<Semaphore>,
+    /// Overflow-queue capacity; `read_loop` compares against it to tell whether
+    /// the queue is empty for the FIFO direct-dispatch rule.
+    queue_capacity: usize,
 }
 
 struct EndpointHandler {
@@ -94,20 +165,35 @@ struct EndpointHandler {
 
 impl SharedTcpServer {
     pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
-        let worker_pool_size = get_worker_pool_size();
-        let work_queue_size = get_work_queue_size();
+        let SizingConfig {
+            pool_size: worker_pool_size,
+            queue_size: work_queue_size,
+        } = resolve_sizing();
 
         tracing::info!(
             "Initializing TCP server with dispatcher (concurrency={}, queue={})",
             worker_pool_size,
-            work_queue_size
+            work_queue_size,
         );
+
+        // Publish static capacities so dashboards can compute saturation ratios.
+        // These gauges are process-global and harmless to re-set if multiple TCP
+        // servers are spun up in the same process (tests).
+        WORK_HANDLER_POOL_CAPACITY.set(crate::metrics::prometheus_names::clamp_u64_to_i64(
+            worker_pool_size as u64,
+        ));
+        WORK_HANDLER_QUEUE_CAPACITY.set(crate::metrics::prometheus_names::clamp_u64_to_i64(
+            work_queue_size as u64,
+        ));
 
         // Create bounded channel for work items
         let (work_tx, work_rx) = tokio::sync::mpsc::channel(work_queue_size);
 
-        // Start worker pool
-        Self::start_worker_pool(worker_pool_size, work_rx, cancellation_token.clone());
+        // Shared with read_loop, which front-acquires permits for direct dispatch.
+        let engine_sem = Arc::new(Semaphore::new(worker_pool_size));
+
+        // Dispatcher drains the overflow queue.
+        Self::start_worker_pool(engine_sem.clone(), work_rx, cancellation_token.clone());
 
         Arc::new(Self {
             handlers: Arc::new(DashMap::new()),
@@ -117,6 +203,8 @@ impl SharedTcpServer {
             actual_addr: RwLock::new(None),
             cancellation_token,
             work_tx,
+            engine_sem,
+            queue_capacity: work_queue_size,
         })
     }
 
@@ -125,11 +213,11 @@ impl SharedTcpServer {
     /// Uses a single receiver with a semaphore to bound concurrent execution,
     /// avoiding mutex contention that would serialize all workers.
     fn start_worker_pool(
-        pool_size: usize,
+        semaphore: Arc<Semaphore>,
         mut work_rx: tokio::sync::mpsc::Receiver<WorkItem>,
         cancellation_token: CancellationToken,
     ) {
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(pool_size));
+        let pool_size = semaphore.available_permits();
 
         tokio::spawn(async move {
             tracing::trace!(
@@ -151,8 +239,18 @@ impl SharedTcpServer {
                             tracing::trace!("TCP worker dispatcher shutting down: channel closed");
                             break;
                         };
+                        // Item is out of the mpsc channel — drop queue_depth now so the
+                        // gauge strictly reflects channel occupancy. Permit-acquire wait is
+                        // tracked separately by WORK_HANDLER_PERMIT_WAIT_SECONDS.
+                        WORK_HANDLER_QUEUE_DEPTH.dec();
+                        REQUEST_QUEUE_GAUGE.dec();
 
-                        // Acquire permit before spawning (bounds concurrency)
+                        // Acquire permit before spawning (bounds concurrency). Time the wait so
+                        // pool starvation (permit exhaustion) shows up as rising p99 in
+                        // `dynamo_work_handler_permit_wait_seconds`. Only the queued (dispatcher)
+                        // path observes permit-wait; the direct path in read_loop already holds
+                        // a permit before enqueuing is ever considered.
+                        let permit_wait_start = Instant::now();
                         let permit = match semaphore.clone().acquire_owned().await {
                             Ok(p) => p,
                             Err(_) => {
@@ -160,12 +258,10 @@ impl SharedTcpServer {
                                 break;
                             }
                         };
+                        WORK_HANDLER_PERMIT_WAIT_SECONDS
+                            .observe(permit_wait_start.elapsed().as_secs_f64());
 
-                        // Spawn task with owned permit (dropped when task completes)
-                        tokio::spawn(async move {
-                            Self::handle_work_item(work_item).await;
-                            drop(permit);
-                        });
+                        Self::spawn_handle(work_item, permit);
                     }
                 }
             }
@@ -179,12 +275,39 @@ impl SharedTcpServer {
         );
     }
 
+    /// Spawn the worker task for an item that already holds a permit (the
+    /// direct path in `read_loop` and the queued path in the dispatcher). The
+    /// `ActiveTaskGuard` is built synchronously so the gauge increments before
+    /// the task is polled; the permit drops on completion.
+    fn spawn_handle(work_item: WorkItem, permit: OwnedSemaphorePermit) {
+        let active_guard = ActiveTaskGuard::new();
+        tokio::spawn(async move {
+            let _active_guard = active_guard;
+            Self::handle_work_item(work_item).await;
+            drop(permit);
+        });
+    }
+
     /// Handle a single work item
     async fn handle_work_item(work_item: WorkItem) {
         tracing::trace!(
             instance_id = work_item.instance_id,
             "TCP worker processing request"
         );
+
+        // Compute network transit time from the transport header stamped right
+        // before the TCP write on the frontend side.
+        if let Some(t1_str) = work_item.headers.get("x-frontend-send-ts-ns")
+            && let Ok(t1_ns) = t1_str.parse::<u64>()
+        {
+            let t2_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64;
+            let transit_ns = t2_ns.saturating_sub(t1_ns);
+            crate::metrics::work_handler_perf::WORK_HANDLER_NETWORK_TRANSIT_SECONDS
+                .observe(transit_ns as f64 / 1_000_000_000.0);
+        }
 
         // Create span with trace context from headers
         let span = crate::logging::make_handle_payload_span_from_tcp_headers(
@@ -195,9 +318,15 @@ impl SharedTcpServer {
             work_item.instance_id,
         );
 
+        let request_id = work_item
+            .headers
+            .get("request-id")
+            .or_else(|| work_item.headers.get("x-dynamo-request-id"))
+            .cloned();
+
         let result = work_item
             .service_handler
-            .handle_payload(work_item.payload)
+            .handle_payload(work_item.payload, request_id)
             .instrument(span)
             .await;
 
@@ -264,8 +393,10 @@ impl SharedTcpServer {
 
                             let handlers = self.handlers.clone();
                             let work_tx = self.work_tx.clone();
+                            let engine_sem = self.engine_sem.clone();
+                            let queue_capacity = self.queue_capacity;
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, handlers, work_tx).await {
+                                if let Err(e) = Self::handle_connection(stream, handlers, work_tx, engine_sem, queue_capacity).await {
                                     tracing::error!("TCP connection error: {e}");
                                 }
                             });
@@ -294,6 +425,8 @@ impl SharedTcpServer {
         endpoint_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
+        let fqn_endpoint = format!("{namespace}.{component_name}.{endpoint_name}");
+
         let handler = Arc::new(EndpointHandler {
             service_handler,
             instance_id,
@@ -308,14 +441,10 @@ impl SharedTcpServer {
         // Insert handler FIRST to ensure it's ready to receive requests
         self.handlers.insert(endpoint_path, handler);
 
-        // THEN set health status to Ready (after handler is registered and ready)
-        system_health
-            .lock()
-            .set_endpoint_health_status(&endpoint_name, crate::HealthStatus::Ready);
+        system_health.lock().set_endpoint_registered(&endpoint_name);
 
         tracing::info!(
-            "Registered endpoint '{}' with shared TCP server on {}",
-            endpoint_name,
+            "Registered endpoint '{fqn_endpoint}' with shared TCP server on {}",
             self.actual_address().unwrap_or(self.bind_addr)
         );
 
@@ -368,6 +497,8 @@ impl SharedTcpServer {
         stream: TcpStream,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
         work_tx: tokio::sync::mpsc::Sender<WorkItem>,
+        engine_sem: Arc<Semaphore>,
+        queue_capacity: usize,
     ) -> Result<()> {
         use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
 
@@ -381,7 +512,15 @@ impl SharedTcpServer {
         let write_task = tokio::spawn(Self::write_loop(write_half, response_rx));
 
         // Run read task in current context
-        let read_result = Self::read_loop(read_half, handlers, response_tx, work_tx).await;
+        let read_result = Self::read_loop(
+            read_half,
+            handlers,
+            response_tx,
+            work_tx,
+            engine_sem,
+            queue_capacity,
+        )
+        .await;
 
         // Write task will end when response_tx is dropped
         write_task.await??;
@@ -389,16 +528,30 @@ impl SharedTcpServer {
         read_result
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn read_loop(
         mut read_half: tokio::io::ReadHalf<TcpStream>,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
         response_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
         work_tx: tokio::sync::mpsc::Sender<WorkItem>,
+        engine_sem: Arc<Semaphore>,
+        queue_capacity: usize,
     ) -> Result<()> {
         use crate::pipeline::network::codec::{TcpResponseMessage, ZeroCopyTcpDecoder};
 
         // Create zero-copy decoder with optimized buffer size
         let mut decoder = ZeroCopyTcpDecoder::new();
+
+        // Encode and send a response frame; returns false if the write task is gone.
+        let send_response = |msg: TcpResponseMessage| -> bool {
+            match msg.encode() {
+                Ok(encoded) => response_tx.send(encoded).is_ok(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to encode TCP response");
+                    true
+                }
+            }
+        };
 
         loop {
             // Read one complete message with ZERO copies!
@@ -482,51 +635,59 @@ impl SharedTcpServer {
                 endpoint_name: handler.endpoint_name.clone(),
             };
 
-            // Send to worker pool with backpressure - BEFORE sending ACK
-            match work_tx.send(work_item).await {
-                Ok(_) => {
-                    // Send acknowledgment ONLY after successful queuing
-                    let ack_response = TcpResponseMessage::empty();
-                    if let Ok(encoded_ack) = ack_response.encode()
-                        && response_tx.send(encoded_ack).is_err()
-                    {
-                        tracing::debug!("Write task closed, ending read loop");
-                        // Clean up inflight counter since work was queued but ACK failed
-                        handler.inflight.fetch_sub(1, Ordering::SeqCst);
-                        handler.notify.notify_one();
+            // Engine permit free and nothing queued ahead → dispatch directly.
+            // Take the direct path only when the queue is empty so a new request
+            // can't jump ahead of queued ones (FIFO).
+            let queue_empty = work_tx.capacity() == queue_capacity;
+            let direct_permit = if queue_empty {
+                engine_sem.clone().try_acquire_owned().ok()
+            } else {
+                None
+            };
+
+            if let Some(permit) = direct_permit {
+                // Bypass the queue — routing through work_tx would make it a throat.
+                Self::spawn_handle(work_item, permit);
+                if !send_response(TcpResponseMessage::empty()) {
+                    break;
+                }
+                continue;
+            }
+
+            // All engine slots busy (or items already queued): try the overflow queue.
+            match work_tx.try_reserve() {
+                Ok(slot) => {
+                    WORK_HANDLER_QUEUE_DEPTH.inc();
+                    REQUEST_QUEUE_GAUGE.inc();
+                    slot.send(work_item);
+                    // Queued: the dispatcher owns inflight, so don't touch it here.
+                    if !send_response(TcpResponseMessage::empty()) {
                         break;
                     }
-
-                    tracing::trace!(
-                        endpoint = handler.endpoint_name.as_str(),
-                        instance_id = handler.instance_id,
-                        "Request queued and acknowledged"
-                    );
                 }
-                Err(e) => {
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    // Engine and queue both full → shed; keep the connection open.
+                    REJECTION_REQUEST_TOTAL.inc();
                     tracing::warn!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
-                        error = %e,
-                        "Failed to queue work to worker pool, sending error response"
+                        "Worker at capacity (engine + queue full), rejecting request"
                     );
-
-                    // Send error response to client instead of ACK
-                    let error_response =
-                        TcpResponseMessage::new(Bytes::from(format!("Server overloaded: {}", e)));
-                    if let Ok(encoded) = error_response.encode() {
-                        let _ = response_tx.send(encoded);
-                    }
-
-                    // Clean up inflight counter
+                    send_response(TcpResponseMessage::new(Bytes::from_static(
+                        b"Server overloaded: worker at capacity",
+                    )));
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
-
-                    // If channel is closed, break the loop
-                    if matches!(e, tokio::sync::mpsc::error::SendError(_)) {
-                        tracing::error!("Worker pool channel closed, shutting down read loop");
-                        break;
-                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
+                    send_response(TcpResponseMessage::new(Bytes::from_static(
+                        b"Server unavailable: worker pool channel closed",
+                    )));
+                    handler.inflight.fetch_sub(1, Ordering::SeqCst);
+                    handler.notify.notify_one();
+                    tracing::error!("Worker pool channel closed, shutting down read loop");
+                    break;
                 }
             }
         }
@@ -642,7 +803,11 @@ mod tests {
 
     #[async_trait]
     impl PushWorkHandler for SlowMockHandler {
-        async fn handle_payload(&self, _payload: Bytes) -> Result<(), PipelineError> {
+        async fn handle_payload(
+            &self,
+            _payload: Bytes,
+            _request_id: Option<String>,
+        ) -> Result<(), PipelineError> {
             self.request_in_flight.store(true, Ordering::SeqCst);
             self.request_started.notify_one();
 
@@ -692,6 +857,7 @@ mod tests {
         let system_health = Arc::new(Mutex::new(SystemHealth::new(
             crate::HealthStatus::Ready,
             vec![],
+            false, // health_check_enabled
             "/health".to_string(),
             "/live".to_string(),
         )));
@@ -723,7 +889,7 @@ mod tests {
             let handler = handler.clone();
             async move {
                 let payload = Bytes::from("test payload");
-                handler.handle_payload(payload).await
+                handler.handle_payload(payload, None).await
             }
         });
 
@@ -846,7 +1012,11 @@ mod tests {
 
     #[async_trait]
     impl PushWorkHandler for ConcurrencyTrackingHandler {
-        async fn handle_payload(&self, _payload: Bytes) -> Result<(), PipelineError> {
+        async fn handle_payload(
+            &self,
+            _payload: Bytes,
+            _request_id: Option<String>,
+        ) -> Result<(), PipelineError> {
             // Increment concurrent count
             let current = self.concurrent_count.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -885,7 +1055,11 @@ mod tests {
         let cancellation_token = CancellationToken::new();
 
         // Start worker pool with small concurrency limit
-        SharedTcpServer::start_worker_pool(pool_size, work_rx, cancellation_token.clone());
+        SharedTcpServer::start_worker_pool(
+            Arc::new(Semaphore::new(pool_size)),
+            work_rx,
+            cancellation_token.clone(),
+        );
 
         // Create tracking handler
         let handler = Arc::new(ConcurrencyTrackingHandler::new(Duration::from_millis(50)));
@@ -894,9 +1068,12 @@ mod tests {
         let inflight = Arc::new(AtomicU64::new(0));
         let notify = Arc::new(Notify::new());
 
-        // Send more work items than pool size
+        // Send more work items than pool size. Mirror the production read_loop's
+        // queue-depth accounting so `handle_work_item`'s decrement has a matching
+        // increment and the global gauge stays consistent for other tests.
         for i in 0..total_requests {
             inflight.fetch_add(1, Ordering::SeqCst);
+            WORK_HANDLER_QUEUE_DEPTH.inc();
             let work_item = WorkItem {
                 service_handler: handler.clone() as Arc<dyn PushWorkHandler>,
                 payload: Bytes::from(format!("request {}", i)),
@@ -947,6 +1124,87 @@ mod tests {
         );
 
         // Cleanup
+        cancellation_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_worker_pool_metrics_are_observed() {
+        crate::logging::init();
+
+        // Monotonic histogram counters: safe to assert even with parallel tests
+        // moving the gauges.
+        let permit_observations_before = WORK_HANDLER_PERMIT_WAIT_SECONDS.get_sample_count();
+
+        let pool_size = 2;
+        let total_requests = 4;
+        let (work_tx, work_rx) = tokio::sync::mpsc::channel::<WorkItem>(total_requests);
+        let cancellation_token = CancellationToken::new();
+        SharedTcpServer::start_worker_pool(
+            Arc::new(Semaphore::new(pool_size)),
+            work_rx,
+            cancellation_token.clone(),
+        );
+
+        let handler = Arc::new(ConcurrencyTrackingHandler::new(Duration::from_millis(25)));
+        let inflight = Arc::new(AtomicU64::new(0));
+        let notify = Arc::new(Notify::new());
+
+        for i in 0..total_requests {
+            inflight.fetch_add(1, Ordering::SeqCst);
+            // Mirror the production read_loop's inc so handle_work_item's dec has a pair.
+            WORK_HANDLER_QUEUE_DEPTH.inc();
+            let work_item = WorkItem {
+                service_handler: handler.clone() as Arc<dyn PushWorkHandler>,
+                payload: Bytes::from(format!("request {}", i)),
+                headers: std::collections::HashMap::new(),
+                inflight: inflight.clone(),
+                notify: notify.clone(),
+                instance_id: 1,
+                namespace: "test".to_string(),
+                component_name: "test".to_string(),
+                endpoint_name: "test".to_string(),
+            };
+            work_tx.send(work_item).await.expect("send should succeed");
+        }
+
+        // Wait for all work to drain
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while inflight.load(Ordering::SeqCst) > 0 {
+                notify.notified().await;
+            }
+        })
+        .await
+        .expect("all requests should complete");
+
+        // permit_wait histogram is monotonic and records one sample per dispatched
+        // work item — reliable across parallel test threads.
+        assert!(
+            WORK_HANDLER_PERMIT_WAIT_SECONDS.get_sample_count()
+                >= permit_observations_before + total_requests as u64,
+            "permit_wait histogram should record at least one sample per dispatched work item"
+        );
+
+        cancellation_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_capacities_published_on_server_init() {
+        crate::logging::init();
+
+        // SharedTcpServer::new publishes static capacities. Any test that instantiates
+        // a SharedTcpServer will have populated the gauges; we just assert they're > 0.
+        let cancellation_token = CancellationToken::new();
+        let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let _server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
+
+        assert!(
+            WORK_HANDLER_POOL_CAPACITY.get() > 0,
+            "pool_capacity should be set to DEFAULT_WORKER_POOL_SIZE"
+        );
+        assert!(
+            WORK_HANDLER_QUEUE_CAPACITY.get() > 0,
+            "queue_capacity should be set to DEFAULT_WORK_QUEUE_SIZE"
+        );
         cancellation_token.cancel();
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,18 +12,19 @@ use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::utils::get_http_rpc_host_from_env;
+use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as _};
 
+use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::mocker::protocols::{MockEngineArgs, WorkerType};
-use crate::model_card::ModelDeploymentCard;
+use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
 
-use runtime_config::ModelRuntimeConfig;
+use runtime_config::{ModelRuntimeConfig, TokenizerBackend};
 
 /// What we call a model if the user didn't provide a name. Usually this means the name
 /// is invisible, for example in a text chat.
@@ -35,24 +37,44 @@ const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 /// 'pub' because the bindings use it for consistency.
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
+/// Default for `LocalModelBuilder::self_host_metadata`. Truthy values opt in.
+pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
+
+fn env_self_host_metadata_default() -> bool {
+    let value = std::env::var(ENV_SELF_HOST_METADATA).ok();
+    self_host_metadata_default(value.as_deref())
+}
+
+fn self_host_metadata_default(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
 pub struct LocalModelBuilder {
     model_path: Option<PathBuf>,
     source_path: Option<PathBuf>,
     model_name: Option<String>,
     endpoint_id: Option<EndpointId>,
-    context_length: Option<u32>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: u32,
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    metrics_config: MetricsConfig,
+    frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     is_mocker: bool,
     extra_engine_args: Option<PathBuf>,
     runtime_config: ModelRuntimeConfig,
+    self_host_metadata: bool,
     user_data: Option<serde_json::Value>,
     custom_template_path: Option<PathBuf>,
     namespace: Option<String>,
@@ -68,19 +90,22 @@ impl Default for LocalModelBuilder {
             http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
             http_metrics_port: None,
+            metrics_config: Default::default(),
+            frontend_api_config: Default::default(),
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
             model_path: Default::default(),
             source_path: Default::default(),
             model_name: Default::default(),
             endpoint_id: Default::default(),
-            context_length: Default::default(),
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
+            migration_max_seq_len: Default::default(),
             is_mocker: Default::default(),
             extra_engine_args: Default::default(),
             runtime_config: Default::default(),
+            self_host_metadata: env_self_host_metadata_default(),
             user_data: Default::default(),
             custom_template_path: Default::default(),
             namespace: Default::default(),
@@ -116,11 +141,6 @@ impl LocalModelBuilder {
         self
     }
 
-    pub fn context_length(&mut self, context_length: Option<u32>) -> &mut Self {
-        self.context_length = context_length;
-        self
-    }
-
     /// Passing None resets it to default
     pub fn kv_cache_block_size(&mut self, kv_cache_block_size: Option<u32>) -> &mut Self {
         self.kv_cache_block_size = kv_cache_block_size.unwrap_or(DEFAULT_KV_CACHE_BLOCK_SIZE);
@@ -139,6 +159,56 @@ impl LocalModelBuilder {
 
     pub fn http_metrics_port(&mut self, port: Option<u16>) -> &mut Self {
         self.http_metrics_port = port;
+        self
+    }
+
+    pub fn metrics_prefix(&mut self, prefix: Option<String>) -> &mut Self {
+        self.metrics_config.set_prefix(prefix);
+        self
+    }
+
+    pub fn metrics_config(&mut self, metrics_config: MetricsConfig) -> &mut Self {
+        self.metrics_config = metrics_config;
+        self
+    }
+
+    pub fn frontend_api_config(&mut self, frontend_api_config: FrontendApiConfig) -> &mut Self {
+        self.frontend_api_config = frontend_api_config;
+        self
+    }
+
+    pub fn enable_anthropic_api(&mut self, enabled: bool) -> &mut Self {
+        self.frontend_api_config
+            .anthropic_mut()
+            .set_enabled(enabled);
+        self
+    }
+
+    pub fn strip_anthropic_preamble(&mut self, enabled: bool) -> &mut Self {
+        self.frontend_api_config
+            .anthropic_mut()
+            .set_strip_preamble(enabled);
+        self
+    }
+
+    pub fn enable_streaming_tool_dispatch(&mut self, enabled: bool) -> &mut Self {
+        self.frontend_api_config
+            .streaming_dispatch_mut()
+            .set_tool_dispatch(enabled);
+        self
+    }
+
+    pub fn enable_streaming_reasoning_dispatch(&mut self, enabled: bool) -> &mut Self {
+        self.frontend_api_config
+            .streaming_dispatch_mut()
+            .set_reasoning_dispatch(enabled);
+        self
+    }
+
+    /// Opt in or out of self-hosting MDC artifacts. Default `false`.
+    /// Set this at runtime with environment variable DYN_SELF_HOST_METADATA.
+    pub fn self_host_metadata(&mut self, enabled: bool) -> &mut Self {
+        self.self_host_metadata = enabled;
         self
     }
 
@@ -182,6 +252,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn migration_max_seq_len(&mut self, max_seq_len: Option<u32>) -> &mut Self {
+        self.migration_max_seq_len = max_seq_len;
+        self
+    }
+
     pub fn is_mocker(&mut self, is_mocker: bool) -> &mut Self {
         self.is_mocker = is_mocker;
         self
@@ -194,6 +269,13 @@ impl LocalModelBuilder {
 
     pub fn runtime_config(&mut self, runtime_config: ModelRuntimeConfig) -> &mut Self {
         self.runtime_config = runtime_config;
+        self
+    }
+
+    pub fn tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) -> &mut Self {
+        if let Some(tokenizer_backend) = tokenizer_backend {
+            self.runtime_config.tokenizer_backend = Some(tokenizer_backend);
+        }
         self
     }
 
@@ -229,46 +311,20 @@ impl LocalModelBuilder {
             .take()
             .unwrap_or_else(|| internal_endpoint("local_model"));
 
+        // Pick up a stable routing id from `DYN_STABLE_ROUTING_ID`. No-op if the caller
+        // already supplied one or the env var is unset. Published in etcd so routing
+        // layers can keep cache assignments stable across worker restarts.
+        self.runtime_config.populate_stable_routing_id_from_env();
+        self.runtime_config
+            .validate_config()
+            .map_err(anyhow::Error::msg)?;
+        self.runtime_config.add_topology_taints();
+
         let template = self
             .template_file
             .as_deref()
             .map(RequestTemplate::load)
             .transpose()?;
-
-        // Override runtime configs with mocker engine args (applies to both paths)
-        if self.is_mocker
-            && let Some(path) = &self.extra_engine_args
-        {
-            let mocker_engine_args = MockEngineArgs::from_json_file(path)
-                .expect("Failed to load mocker engine args for runtime config overriding.");
-            self.kv_cache_block_size = mocker_engine_args.block_size as u32;
-            self.runtime_config.total_kv_blocks = Some(mocker_engine_args.num_gpu_blocks as u64);
-            self.runtime_config.max_num_seqs = mocker_engine_args.max_num_seqs.map(|v| v as u64);
-            self.runtime_config.max_num_batched_tokens =
-                mocker_engine_args.max_num_batched_tokens.map(|v| v as u64);
-            // Decode workers don't create the WorkerKvQuery endpoint (scheduler_component is None),
-            // so they must not advertise enable_local_indexer=true or the router will hang
-            // trying to query them during initial recovery.
-            self.runtime_config.enable_local_indexer = mocker_engine_args.enable_local_indexer
-                && mocker_engine_args.worker_type != WorkerType::Decode;
-            self.runtime_config.data_parallel_size = mocker_engine_args.dp_size;
-
-            // Set bootstrap endpoint for prefill workers with bootstrap_port configured
-            if mocker_engine_args.worker_type == WorkerType::Prefill
-                && let Some(port) = mocker_engine_args.bootstrap_port
-            {
-                let host = get_http_rpc_host_from_env();
-                self.runtime_config.disaggregated_endpoint =
-                    Some(runtime_config::DisaggregatedEndpoint {
-                        bootstrap_host: Some(host),
-                        bootstrap_port: Some(port),
-                    });
-                tracing::info!(
-                    bootstrap_port = port,
-                    "Mocker prefill worker: publishing bootstrap endpoint to discovery"
-                );
-            }
-        }
 
         // frontend and echo engine don't need a path.
         if self.model_path.is_none() {
@@ -281,6 +337,7 @@ impl LocalModelBuilder {
             card.runtime_config = self.runtime_config.clone();
             card.media_decoder = self.media_decoder.clone();
             card.media_fetcher = self.media_fetcher.clone();
+            card.router_config = self.router_config.clone();
 
             return Ok(LocalModel {
                 card,
@@ -290,6 +347,8 @@ impl LocalModelBuilder {
                 http_host: self.http_host.take(),
                 http_port: self.http_port,
                 http_metrics_port: self.http_metrics_port,
+                metrics_config: self.metrics_config.clone(),
+                frontend_api_config: self.frontend_api_config.clone(),
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
@@ -297,6 +356,8 @@ impl LocalModelBuilder {
                 namespace: self.namespace.clone(),
                 namespace_prefix: self.namespace_prefix.clone(),
                 migration_limit: self.migration_limit,
+                migration_max_seq_len: self.migration_max_seq_len,
+                self_host_metadata: self.self_host_metadata,
             });
         }
 
@@ -324,16 +385,12 @@ impl LocalModelBuilder {
 
         card.kv_cache_block_size = self.kv_cache_block_size;
 
-        // Override max number of tokens in context. We usually only do this to limit kv cache allocation.
-        if let Some(context_length) = self.context_length {
-            card.context_length = context_length;
-        }
-
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
         card.runtime_config = self.runtime_config.clone();
         card.media_decoder = self.media_decoder.clone();
         card.media_fetcher = self.media_fetcher.clone();
+        card.router_config = self.router_config.clone();
 
         Ok(LocalModel {
             card,
@@ -343,6 +400,8 @@ impl LocalModelBuilder {
             http_host: self.http_host.take(),
             http_port: self.http_port,
             http_metrics_port: self.http_metrics_port,
+            metrics_config: self.metrics_config.clone(),
+            frontend_api_config: self.frontend_api_config.clone(),
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
@@ -350,6 +409,8 @@ impl LocalModelBuilder {
             namespace: self.namespace.clone(),
             namespace_prefix: self.namespace_prefix.clone(),
             migration_limit: self.migration_limit,
+            migration_max_seq_len: self.migration_max_seq_len,
+            self_host_metadata: self.self_host_metadata,
         })
     }
 }
@@ -363,6 +424,8 @@ pub struct LocalModel {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    metrics_config: MetricsConfig,
+    frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
@@ -370,6 +433,8 @@ pub struct LocalModel {
     namespace: Option<String>,
     namespace_prefix: Option<String>,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
+    self_host_metadata: bool,
 }
 
 impl LocalModel {
@@ -417,6 +482,38 @@ impl LocalModel {
         self.http_metrics_port
     }
 
+    pub fn metrics_prefix(&self) -> Option<String> {
+        self.metrics_config.prefix()
+    }
+
+    pub fn metrics_config(&self) -> &MetricsConfig {
+        &self.metrics_config
+    }
+
+    pub fn frontend_api_config(&self) -> &FrontendApiConfig {
+        &self.frontend_api_config
+    }
+
+    pub fn enable_anthropic_api(&self) -> bool {
+        self.frontend_api_config.anthropic().enabled()
+    }
+
+    pub fn strip_anthropic_preamble(&self) -> bool {
+        self.frontend_api_config.anthropic().strip_preamble()
+    }
+
+    pub fn enable_streaming_tool_dispatch(&self) -> bool {
+        self.frontend_api_config
+            .streaming_dispatch()
+            .tool_dispatch()
+    }
+
+    pub fn enable_streaming_reasoning_dispatch(&self) -> bool {
+        self.frontend_api_config
+            .streaming_dispatch()
+            .reasoning_dispatch()
+    }
+
     pub fn tls_cert_path(&self) -> Option<&Path> {
         self.tls_cert_path.as_deref()
     }
@@ -435,6 +532,10 @@ impl LocalModel {
 
     pub fn migration_limit(&self) -> u32 {
         self.migration_limit
+    }
+
+    pub fn migration_max_seq_len(&self) -> Option<u32> {
+        self.migration_max_seq_len
     }
 
     pub fn namespace(&self) -> Option<&str> {
@@ -461,15 +562,23 @@ impl LocalModel {
     ///
     /// For base models, pass `lora_name = None`.
     /// For LoRA adapters, pass `lora_name = Some("adapter-name")`.
+    ///
+    /// `worker_type` and `needs` carry the model-serving-readiness fields.
+    /// Cards without a declared `worker_type` are treated as misconfigured
+    /// and do not count toward readiness.
     pub async fn attach(
         &mut self,
         endpoint: &Endpoint,
         model_type: ModelType,
         model_input: ModelInput,
         lora_info: Option<crate::model_card::LoraInfo>,
+        worker_type: Option<crate::worker_type::WorkerType>,
+        needs: Vec<Vec<crate::worker_type::WorkerType>>,
     ) -> anyhow::Result<()> {
         self.card.model_type = model_type;
         self.card.model_input = model_input;
+        self.card.worker_type = worker_type;
+        self.card.needs = needs;
         self.card.lora = lora_info.clone();
 
         // Compute model_suffix from lora_name if present
@@ -489,6 +598,11 @@ impl LocalModel {
             endpoint.drt().connection_id(),
             suffix_for_log
         );
+
+        if self.self_host_metadata {
+            self.move_to_self_host(endpoint, model_suffix.as_deref())
+                .context("move_to_self_host")?;
+        }
 
         let source_path = PathBuf::from(self.card.source_path());
         if !source_path.exists() {
@@ -522,6 +636,111 @@ impl LocalModel {
         Ok(())
     }
 
+    /// Local-path slots register in the registry and get rewritten to
+    /// `http://<worker>/v1/metadata/<slug>/<suffix>/<filename>`. URL slots
+    /// (`hf://`, etc.) are left alone so existing transports keep working.
+    /// `model_suffix` is the LoRA slug, or `None` for the base model
+    /// (recorded as `BASE_SUFFIX` in the registry).
+    fn move_to_self_host(
+        &mut self,
+        endpoint: &Endpoint,
+        model_suffix: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let drt = endpoint.drt();
+        let namespace = endpoint.component().namespace().name().to_string();
+        let component = endpoint.component().name().to_string();
+        let endpoint_name = endpoint.name().to_string();
+        let Some(base_url) = self_host_base_url(drt)? else {
+            tracing::warn!(
+                model_slug = %self.card.slug(),
+                "self_host_metadata enabled but system_status_server is not \
+                 running (DYN_SYSTEM_PORT unset); skipping http rewrites — \
+                 set DYN_SYSTEM_PORT to enable",
+            );
+            return Ok(());
+        };
+        let model_slug = self.card.slug().to_string();
+        let suffix = model_suffix.unwrap_or(dynamo_runtime::metadata_registry::BASE_SUFFIX);
+        let registry = drt.metadata_artifacts();
+        let instance_id = drt.connection_id();
+        let owner = (instance_id, model_suffix.map(str::to_string));
+
+        // Advertise non-typed siblings (preprocessor_config.json,
+        // special_tokens_map.json, …) so external preprocessors that load
+        // via `from_pretrained(slug_dir)` see a complete model dir.
+        let typed_filenames: HashSet<String> = self
+            .card
+            .iter_metadata_files()
+            .iter()
+            .filter_map(|(cf, _)| {
+                cf.path()
+                    .and_then(Path::file_name)
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        let harvested =
+            harvest_extra_files(&self.full_path, &typed_filenames).with_context(|| {
+                format!(
+                    "harvesting extra metadata files from {}",
+                    self.full_path.display()
+                )
+            })?;
+        self.card.extra_files.extend(harvested);
+
+        let mut rewritten = 0usize;
+        for (cf, _) in self.card.iter_metadata_files_mut() {
+            let Some(local_path) = cf.path().map(Path::to_path_buf) else {
+                continue;
+            };
+            let Some(filename) = local_path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
+            let absolute = match std::path::absolute(&local_path) {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::warn!(
+                        path = %local_path.display(),
+                        %err,
+                        "failed to absolutize self-host metadata path; skipping",
+                    );
+                    continue;
+                }
+            };
+
+            let url = url::Url::parse(&format!(
+                "{base_url}/v1/metadata/{namespace}/{component}/{endpoint_name}/{model_slug}/{suffix}/{filename}"
+            ))?;
+            registry
+                .register(
+                    &owner,
+                    &namespace,
+                    &component,
+                    &endpoint_name,
+                    &model_slug,
+                    suffix,
+                    &filename,
+                    absolute,
+                )
+                .context("registering metadata artifact")?;
+            cf.move_to_url(url);
+            rewritten += 1;
+        }
+
+        tracing::debug!(
+            model_slug,
+            suffix,
+            rewritten,
+            base_url,
+            "self-hosting model metadata artifacts"
+        );
+        Ok(())
+    }
+
     /// Helper associated function to detach a model from an endpoint
     ///
     /// For base models, pass `lora_name = None`.
@@ -534,8 +753,8 @@ impl LocalModel {
         let instance_id = drt.connection_id();
         let endpoint_id = endpoint.id();
 
-        // Compute model_suffix from lora_name if present
         let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+        let registry_owner = (instance_id, model_suffix.clone());
 
         let instance = DiscoveryInstance::Model {
             namespace: endpoint_id.namespace,
@@ -548,6 +767,8 @@ impl LocalModel {
 
         let discovery = drt.discovery();
         discovery.unregister(instance).await?;
+        drt.metadata_artifacts()
+            .unregister_for_owner(&registry_owner);
 
         if let Some(lora_name) = lora_name {
             tracing::info!(
@@ -569,5 +790,150 @@ fn internal_endpoint(engine: &str) -> EndpointId {
         namespace: Slug::slugify(&uuid::Uuid::new_v4().to_string()).to_string(),
         component: engine.to_string(),
         name: "generate".to_string(),
+    }
+}
+
+/// `None` when `system_status_server` isn't running (no `DYN_SYSTEM_PORT`)
+/// — lets default-on behavior degrade gracefully without erroring.
+pub(crate) fn self_host_base_url(
+    drt: &dynamo_runtime::DistributedRuntime,
+) -> anyhow::Result<Option<String>> {
+    let Some(info) = drt.system_status_server_info() else {
+        return Ok(None);
+    };
+
+    let configured = dynamo_runtime::RuntimeConfig::from_settings()
+        .unwrap_or_default()
+        .system_host;
+    let host = match configured.as_str() {
+        "0.0.0.0" | "::" | "[::]" => dynamo_runtime::utils::local_ip_for_advertise(),
+        _ => configured,
+    };
+
+    Ok(Some(format!("http://{host}:{}", info.port())))
+}
+
+/// Scan `model_dir` for files to advertise alongside the typed MDC slots.
+/// Skips weights, dotfiles / README (`is_ignored`), already-typed
+/// filenames, and anything that isn't a regular file. Non-recursive.
+/// Returns an empty vec when `model_dir` doesn't exist (e.g. name-only
+/// `LocalModel` placeholders).
+fn harvest_extra_files(
+    model_dir: &Path,
+    typed_filenames: &HashSet<String>,
+) -> anyhow::Result<Vec<CheckedFile>> {
+    if !model_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in
+        fs::read_dir(model_dir).with_context(|| format!("read_dir {}", model_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        // `Path::is_file` uses `fs::metadata` which follows symlinks.
+        // `entry.file_type()` / `entry.metadata()` use lstat on Unix —
+        // they would skip the HF blob symlinks we need to harvest.
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if typed_filenames.contains(name)
+            || is_weight_file(&path)
+            || HuggingFaceProvider::is_ignored(name)
+        {
+            continue;
+        }
+        out.push(CheckedFile::from_disk(&path)?);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod env_self_host_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn env_default_parsing() {
+        assert!(!self_host_metadata_default(None), "unset → default OFF");
+
+        for v in [
+            "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "garbage",
+        ] {
+            assert!(
+                !self_host_metadata_default(Some(v)),
+                "expected OFF for {v:?}"
+            );
+        }
+        for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
+            assert!(self_host_metadata_default(Some(v)), "expected ON for {v:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod harvest_extra_files_tests {
+    use super::*;
+
+    #[test]
+    fn filters_weights_typed_and_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let touch = |name: &str| {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        };
+        // typed slot (excluded by name)
+        touch("config.json");
+        // weights — covers the mx-narrow case (safetensors) and the
+        // ecosystem-wide case (.pt) which mx alone wouldn't catch.
+        touch("model.safetensors");
+        touch("pytorch_lora_weights.pt");
+        // dotfile / README (excluded by is_ignored)
+        touch(".gitattributes");
+        touch("README.md");
+        // genuine extras (kept)
+        touch("preprocessor_config.json");
+        touch("special_tokens_map.json");
+        // subdir (skipped — not a file)
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+        // symlink to a real file (must be followed — HF snapshot dirs
+        // are full of these pointing into blobs/)
+        let target = dir.path().join("target_for_symlink");
+        std::fs::write(&target, b"x").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("added_tokens.json")).unwrap();
+
+        let typed: HashSet<String> = ["config.json".to_string()].into_iter().collect();
+        let mut names: Vec<String> = harvest_extra_files(dir.path(), &typed)
+            .unwrap()
+            .iter()
+            .map(|cf| {
+                cf.path()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "added_tokens.json",
+                "preprocessor_config.json",
+                "special_tokens_map.json",
+                "target_for_symlink",
+            ]
+        );
+    }
+
+    #[test]
+    fn returns_empty_for_missing_dir() {
+        let typed: HashSet<String> = HashSet::new();
+        // bogus path: doesn't exist on disk; must not error
+        let result = harvest_extra_files(Path::new("/nonexistent/dynamo/test/path"), &typed);
+        assert!(result.unwrap().is_empty());
     }
 }

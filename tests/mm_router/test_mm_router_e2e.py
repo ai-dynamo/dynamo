@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import base64
 import os
-import re
 import shutil
 import time
 from io import BytesIO
@@ -26,21 +25,25 @@ import pytest
 import requests
 
 from tests.conftest import EtcdServer, NatsServer
+from tests.utils.gpu_args import build_trtllm_override_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
+from tests.utils.router_logs import (
+    extract_router_kv_overlap_records,
+    wait_for_router_kv_overlap,
+)
 
-TRTLLM_MM_MODEL = "Qwen/Qwen2-VL-2B-Instruct"
-TRTLLM_MM_MODEL_TYPE = "qwen2_vl"
+TRTLLM_MM_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
+TRTLLM_MM_MODEL_TYPE = "qwen3_vl"
 BLOCK_SIZE = 32
 NAMESPACE = "test-mm"
-# Broad guardrails for TRT-LLM + Qwen2-VL-2B under block size 32.
+# Broad guardrails for TRT-LLM + Qwen3-VL-2B under block size 32.
 THREE_IMAGE_TOTAL_BLOCKS_RANGE = (80, 520)
 SINGLE_IMAGE_TOTAL_BLOCKS_RANGE = (20, 260)
 
 pytestmark = [
     pytest.mark.e2e,
-    pytest.mark.pre_merge,
     pytest.mark.trtllm,
     pytest.mark.multimodal,
     pytest.mark.gpu_1,
@@ -61,11 +64,6 @@ _SINGLE_IMAGE_FRESH_COLOR = (123, 45, 67)
 _DOUBLE_IMAGE_FRESH_COLOR = (89, 210, 34)
 _STAIRCASE_IMAGE_FRESH_COLOR = (17, 99, 201)
 _SWAP_ORDER_FRESH_COLORS = [(14, 141, 77), (211, 66, 101), (44, 91, 233)]
-# Contract with lib/llm/src/kv_router/push_router.rs "[ROUTING]" debug log.
-# Keep this parser in sync with the router log format.
-_ROUTING_RECORD_PATTERN = re.compile(
-    r"\[ROUTING\].*with\s*(\d+)/(\d+)\s*blocks overlap"
-)
 
 
 def _check_ready(response) -> bool:
@@ -91,7 +89,8 @@ def _prepare_log_dir(request, suffix: str) -> str:
 
 
 _COMMON_PROCESS_KWARGS: dict[str, Any] = {
-    "display_output": True,
+    # Keep logs file-only; live tee can lag under GPU-parallel CI while tests poll files.
+    "display_output": False,
     "terminate_all_matching_process_names": False,
 }
 
@@ -116,6 +115,7 @@ class TRTLLMWorkerProcess(ManagedProcess):
                 "--publish-events-and-metrics",
                 "--kv-block-size",
                 str(BLOCK_SIZE),
+                *build_trtllm_override_args(),
             ],
             env=_make_process_env(DYN_SYSTEM_PORT=str(system_port)),
             health_check_urls=[
@@ -243,49 +243,16 @@ def _build_payload(
     }
 
 
-def _extract_routing_records(log_text: str) -> list[tuple[int, int]]:
-    return [
-        (int(overlap), int(total))
-        for overlap, total in _ROUTING_RECORD_PATTERN.findall(log_text)
-    ]
-
-
-def _wait_for_new_routing_score(
-    router_proc: ManagedProcess,
-    start_offset: int,
-    pre_request_routing_count: int,
-    timeout_s: float = 120.0,
-) -> tuple[int, int, str]:
-    deadline = time.time() + timeout_s
-    last_segment = ""
-
-    while time.time() < deadline:
-        full_logs = router_proc.read_logs()
-        segment = full_logs[start_offset:]
-        last_segment = segment
-        records = _extract_routing_records(full_logs)
-        if len(records) >= pre_request_routing_count + 1:
-            overlap, total = records[-1]
-            return overlap, total, segment
-        time.sleep(1)
-
-    fallback_records = _extract_routing_records(last_segment)
-    if fallback_records:
-        overlap, total = fallback_records[-1]
-        return overlap, total, last_segment
-    return 0, 0, last_segment
-
-
 def _send_request_get_overlap(
     frontend_port: int,
     router_proc: ManagedProcess,
     payload: dict[str, Any],
     label: str,
 ) -> tuple[int, int, str]:
-    """Send one request and read the new routing overlap score."""
+    """Send one request and read the router's semantic overlap score."""
     pre_request_logs = router_proc.read_logs()
     start_offset = len(pre_request_logs)
-    pre_request_routing_count = len(_extract_routing_records(pre_request_logs))
+    pre_request_record_count = len(extract_router_kv_overlap_records(pre_request_logs))
     resp = requests.post(
         f"http://localhost:{frontend_port}/v1/chat/completions",
         json=payload,
@@ -295,10 +262,11 @@ def _send_request_get_overlap(
     data = resp.json()
     assert "choices" in data, f"Missing choices in response: {data}"
 
-    overlap, total, segment = _wait_for_new_routing_score(
-        router_proc=router_proc,
+    overlap, total, recent_logs = wait_for_router_kv_overlap(
+        router_proc.read_logs,
         start_offset=start_offset,
-        pre_request_routing_count=pre_request_routing_count,
+        pre_request_record_count=pre_request_record_count,
+        context=label,
         timeout_s=120,
     )
     print(f"[MM_ROUTER_E2E] {label}: current={overlap}/{total}")
@@ -309,12 +277,36 @@ def _send_request_get_overlap(
     # visible, causing spurious 0-overlap results.
     time.sleep(2)
 
-    return overlap, total, segment
+    return overlap, total, recent_logs
+
+
+@pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(20.0)
+@pytest.mark.requested_trtllm_vram_gib(20.0)
+@pytest.mark.timeout(1800)
+def test_trtllm_mm_overlap_all(start_trtllm_mm_services, predownload_models):
+    """Run all TRT-LLM MM overlap scenarios under one worker startup."""
+    _check_text_only_overlap_repeated_prompt(
+        start_trtllm_mm_services, predownload_models
+    )
+    _check_repeated_three_images(start_trtllm_mm_services, predownload_models)
+    _check_repeated_single_image(start_trtllm_mm_services, predownload_models)
+    _check_repeated_two_identical_images(start_trtllm_mm_services, predownload_models)
+    _check_staircase_single_to_double_to_triple_identical_image(
+        start_trtllm_mm_services, predownload_models
+    )
+    _check_diff_images_less_than_same(start_trtllm_mm_services, predownload_models)
+    _check_same_images_different_prompt_less_than_same_prompt(
+        start_trtllm_mm_services, predownload_models
+    )
+    _check_swapped_order_less_than_same_order(
+        start_trtllm_mm_services, predownload_models
+    )
 
 
 @pytest.mark.timeout(1800)
 @pytest.mark.nightly
-def test_trtllm_text_only_overlap_repeated_prompt(
+def _check_text_only_overlap_repeated_prompt(
     start_trtllm_mm_services, predownload_models
 ):
     """Text-only routing should increase overlap on repeat and then stabilize."""
@@ -360,9 +352,7 @@ def test_trtllm_text_only_overlap_repeated_prompt(
 
 @pytest.mark.timeout(1800)
 @pytest.mark.nightly
-def test_trtllm_mm_overlap_repeated_three_images(
-    start_trtllm_mm_services, predownload_models
-):
+def _check_repeated_three_images(start_trtllm_mm_services, predownload_models):
     """For repeated same 3-image request: low first overlap, then increase, then stable."""
     frontend_port, router_proc = start_trtllm_mm_services
 
@@ -403,9 +393,7 @@ def test_trtllm_mm_overlap_repeated_three_images(
 
 @pytest.mark.timeout(1800)
 @pytest.mark.nightly
-def test_trtllm_mm_overlap_repeated_single_image(
-    start_trtllm_mm_services, predownload_models
-):
+def _check_repeated_single_image(start_trtllm_mm_services, predownload_models):
     """For repeated same single-image request: low first overlap, then increase, then stable."""
     frontend_port, router_proc = start_trtllm_mm_services
 
@@ -446,9 +434,7 @@ def test_trtllm_mm_overlap_repeated_single_image(
 
 @pytest.mark.timeout(1800)
 @pytest.mark.nightly
-def test_trtllm_mm_overlap_repeated_two_identical_images(
-    start_trtllm_mm_services, predownload_models
-):
+def _check_repeated_two_identical_images(start_trtllm_mm_services, predownload_models):
     """For repeated same two-identical-image request: low first overlap, then increase, then stable."""
     frontend_port, router_proc = start_trtllm_mm_services
 
@@ -487,7 +473,7 @@ def test_trtllm_mm_overlap_repeated_two_identical_images(
 
 @pytest.mark.timeout(1800)
 @pytest.mark.nightly
-def test_trtllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
+def _check_staircase_single_to_double_to_triple_identical_image(
     start_trtllm_mm_services, predownload_models
 ):
     """Single->double->triple identical image requests follow prefix-overlap semantics."""
@@ -542,9 +528,7 @@ def test_trtllm_mm_overlap_staircase_single_to_double_to_triple_identical_image(
 
 @pytest.mark.timeout(1800)
 @pytest.mark.nightly
-def test_trtllm_mm_overlap_diff_images_less_than_same(
-    start_trtllm_mm_services, predownload_models
-):
+def _check_diff_images_less_than_same(start_trtllm_mm_services, predownload_models):
     """Different images should produce lower overlap than repeated identical images."""
     frontend_port, router_proc = start_trtllm_mm_services
     baseline_payload = _build_payload(
@@ -598,7 +582,7 @@ def test_trtllm_mm_overlap_diff_images_less_than_same(
 
 @pytest.mark.timeout(1800)
 @pytest.mark.nightly
-def test_trtllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
+def _check_same_images_different_prompt_less_than_same_prompt(
     start_trtllm_mm_services, predownload_models
 ):
     """Same images but different prompt should produce lower overlap than repeated same prompt."""
@@ -660,7 +644,7 @@ def test_trtllm_mm_overlap_same_images_different_prompt_less_than_same_prompt(
 
 @pytest.mark.timeout(1800)
 @pytest.mark.nightly
-def test_trtllm_mm_overlap_swapped_order_less_than_same_order(
+def _check_swapped_order_less_than_same_order(
     start_trtllm_mm_services, predownload_models
 ):
     """Swapping order of three distinct images should result in near-zero overlap."""

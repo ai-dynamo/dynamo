@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Multinode Deployments
+subtitle: Scales Dynamo inference across multiple GPU nodes with Grove and KAI-Scheduler for large-model tensor parallelism.
 ---
 
 This guide explains how to deploy Dynamo workloads across multiple nodes. Multinode deployments enable you to scale compute-intensive LLM workloads across multiple physical machines, maximizing GPU utilization and supporting larger models.
@@ -38,6 +39,7 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 - Multi-level horizontal auto-scaling
 - Custom startup ordering for components
 - Resource-aware rolling updates
+- [Topology Aware Scheduling](../topology-aware-scheduling.md) — pack pods within a rack, block, or other topology domain for lower latency
 
 
 [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) is a Kubernetes native scheduler optimized for AI workloads at large scale.
@@ -64,7 +66,7 @@ KAI-Scheduler is optional but recommended for advanced scheduling capabilities.
 LWS is a simple multinode deployment mechanism that allows you to deploy a workload across multiple nodes.
 
 - **LWS**: [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
-- **Volcano**: [Volcano Installation](https://volcano.sh/en/docs/installation/)
+- **Volcano**: [Volcano Installation](https://github.com/volcano-sh/volcano#quick-start-guide)
 
 Volcano is a Kubernetes native scheduler optimized for AI workloads at scale. It is used in conjunction with LWS to provide gang scheduling support.
 
@@ -288,8 +290,7 @@ For TensorRT-LLM multinode deployments, the operator configures MPI-based commun
 #### Additional Configuration
 - **Environment Variable**: `OMPI_MCA_orte_keep_fqdn_hostnames=1` is added to all nodes
 - **SSH Volume**: Automatically mounts the SSH keypair secret (typically named `mpirun-ssh-key-<deployment-name>`)
-
-**Important:** TensorRT-LLM requires an SSH keypair secret to be created before deployment. The secret name follows the pattern `mpirun-ssh-key-<component-name>`.
+- **Automatic SSH key generation**: The operator automatically generates the SSH keypair secret when it detects a multi-node `DynamoGraphDeployment`. No manual secret creation is required.
 
 ### Compilation Cache Configuration
 

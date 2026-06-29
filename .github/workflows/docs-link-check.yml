@@ -15,7 +15,7 @@ jobs:
     steps:
 
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Restore lychee cache
         id: restore-cache
@@ -37,6 +37,7 @@ jobs:
             --root-dir ${{ github.workspace }}
             --exclude-path ".*ATTRIBUTIONS.*"
             --exclude-path "./lib/llm/tests/data/.*"
+            --exclude-path "./container/compliance/spdx_licenses/.*"
             --accept "200..=299, 403, 429"
             --exclude-all-private
             --exclude 0.0.0.0
@@ -44,7 +45,6 @@ jobs:
             --host-concurrency 10
             --host-request-interval 1s
             --host-stats
-             ${{ github.event_name == 'pull_request' && '--offline' || '' }}
             .
           fail: true
         env:
@@ -79,7 +79,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Set up Python
         uses: actions/setup-python@v5

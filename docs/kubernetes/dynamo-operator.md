@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Dynamo Operator
+subtitle: Reference for the Dynamo Kubernetes operator covering its controllers, deployment modes, and reconciliation workflow.
 ---
 
 ## Overview
@@ -16,7 +17,10 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 - **Controllers:**
   - `DynamoGraphDeploymentController`: Watches `DynamoGraphDeployment` CRs and orchestrates graph deployments.
   - `DynamoComponentDeploymentController`: Watches `DynamoComponentDeployment` CRs and handles individual component deployments.
+  - `DynamoGraphDeploymentRequestController`: Watches `DynamoGraphDeploymentRequest` CRs and runs the profiling/generation flow that produces a `DynamoGraphDeployment`.
+  - `DynamoGraphDeploymentScalingAdapterController`: Watches scaling adapter CRs used by external autoscalers and Planner-driven scaling flows.
   - `DynamoModelController`: Watches `DynamoModel` CRs and manages model lifecycle (e.g., loading LoRA adapters).
+  - `DynamoCheckpointController`: Watches `DynamoCheckpoint` CRs for GPU worker checkpoint/restore workflows.
 
 - **Workflow:**
   1. A custom resource is created by the user or API server.
@@ -28,7 +32,7 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 
 The Dynamo operator supports three deployment modes to accommodate different cluster environments and use cases:
 
-### 1. Cluster-Wide Mode (Default)
+### 1. Cluster-Wide Mode (Default, Recommended)
 
 The operator monitors and manages DynamoGraph resources across **all namespaces** in the cluster.
 
@@ -39,7 +43,9 @@ The operator monitors and manages DynamoGraph resources across **all namespaces*
 
 ---
 
-### 2. Namespace-Scoped Mode
+### 2. Namespace-Scoped Mode (DEPRECATED)
+
+> **DEPRECATED:** Namespace-scoped mode (`namespaceRestriction.enabled=true`) is deprecated and will be removed in a future release. Use cluster-wide mode instead. Do not use this for new deployments.
 
 The operator monitors and manages DynamoGraph resources **only in a specific namespace**. A lease marker is created to signal the operator's presence to any cluster-wide operators.
 
@@ -59,7 +65,9 @@ helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
 
 ---
 
-### 3. Hybrid Mode
+### 3. Hybrid Mode (DEPRECATED)
+
+> **DEPRECATED:** Hybrid mode relies on namespace-scoped operators, which are deprecated and will be removed in a future release. Use a single cluster-wide operator instead.
 
 A **cluster-wide operator** manages most namespaces, while **one or more namespace-scoped operators** run in specific namespaces (e.g., for testing new versions). The cluster-wide operator automatically detects and excludes namespaces with namespace-scoped operators using lease markers.
 
@@ -106,19 +114,33 @@ kubectl get lease -n my-namespace dynamo-operator-namespace-scope \
 
 ## Custom Resource Definitions (CRDs)
 
-Dynamo provides the following Custom Resources:
+Dynamo installs the following Custom Resources. The main deployment path is:
+create or generate a `DynamoGraphDeployment`, then let the operator create the
+lower-level resources that run it.
 
-- **DynamoGraphDeployment (DGD)**: Deploys complete inference pipelines
-- **DynamoComponentDeployment (DCD)**: Deploys individual components
-- **DynamoModel**: Manages model lifecycle (e.g., loading LoRA adapters)
+| Custom Resource | What it represents | Typical use |
+|---|---|---|
+| `DynamoGraphDeployment` (DGD) | The canonical live deployment for a Dynamo inference graph. | Author directly, apply a tuned recipe, or let DGDR generate it. |
+| `DynamoGraphDeploymentRequest` (DGDR) | A deploy-by-intent request that profiles a model/hardware target and generates a DGD. | Start here when you want Dynamo to choose sizing, parallelism, or Planner-enabled generated config. |
+| `DynamoComponentDeployment` (DCD) | Per-component deployments created from a DGD, such as frontend, router, prefill, decode, and planner components. | Usually inspected for debugging rather than authored directly. |
+| `DynamoModel` | Model and adapter lifecycle management layered onto a running deployment. | Load, unload, or manage model artifacts such as LoRA adapters. |
+| `DynamoCheckpoint` | Checkpoint metadata and job configuration for snapshotting GPU workers. | Use with Snapshotting GPU Workers to restore warm workers faster than cold start. |
+
+Advanced and operator-owned resources:
+
+- `DynamoGraphDeploymentScalingAdapter`: scaling interface used by Planner or external autoscalers to adjust component replicas.
+- `DynamoWorkerMetadata`: discovery metadata written for worker pods.
 
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
 **📖 [Dynamo CRD API Reference](./api-reference.md)**
 
-For a user-focused guide on deploying and managing models with DynamoModel, see:
+For user-focused workflows, see:
 
-**📖 [Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
+- **[Deployment Overview](./model-deployment-guide.md)** for DGD, DCD, DGDR, and recipes
+- **[DGDR Reference](./dgdr.md)** for deploy-by-intent generated deployments
+- **[Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
+- **[Snapshotting GPU Workers](./snapshot.md)** for `DynamoCheckpoint`
 
 ## Webhooks
 
@@ -126,9 +148,8 @@ The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validat
 
 **Key Features:**
 - ✅ Shared certificate infrastructure across all webhook types
-- ✅ Automatic certificate generation (for testing/development)
-- ✅ cert-manager integration (for production)
-- ✅ Multi-operator support with lease-based coordination
+- ✅ Automatic certificate generation and rotation (default, all environments)
+- ✅ cert-manager integration (optional, for custom PKI)
 - ✅ Immutability enforcement for critical fields
 
 For complete documentation on webhooks, certificate management, and troubleshooting, see:
@@ -175,7 +196,7 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
-> **Note:** For shared/multi-tenant clusters or testing scenarios, see [Deployment Modes](#deployment-modes) above for namespace-scoped and hybrid configurations.
+> **Note:** Namespace-scoped and hybrid deployment modes are deprecated. Use cluster-wide mode for all new deployments. See [Deployment Modes](#deployment-modes) above if you need backward-compatible configurations.
 
 ### Building from Source
 
@@ -187,8 +208,11 @@ export IMAGE_TAG=latest
 
 # Build operator image
 cd deploy/operator
-docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG .
-docker push $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG
+docker build -t $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG \
+  --build-context snapshot=../snapshot \
+  --build-arg DOCKER_PROXY="" \
+  .
+docker push $DOCKER_SERVER/kubernetes-operator:$IMAGE_TAG
 cd -
 
 # Install platform with custom operator image (CRDs are automatically installed by the chart)
@@ -196,7 +220,7 @@ cd deploy/helm/charts
 helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
   --create-namespace \
-  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/kubernetes-operator" \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
   --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret
 ```

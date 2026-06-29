@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_async_openai::types::{
+use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionRequestAssistantMessage,
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
 };
@@ -24,13 +24,13 @@ use dynamo_runtime::engine::AsyncEngine;
 use dynamo_runtime::pipeline::{Context as PipelineContext, Error, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 
-use crate::preprocessor::prompt::{OAIChatLikeRequest, OAIPromptFormatter};
 use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
 use crate::tokenizers::traits::Tokenizer;
+use dynamo_renderer::{OAIChatLikeRequest, OAIPromptFormatter};
 
 /// A minimal `OAIChatLikeRequest` for speculative next-turn prefill.
 /// Holds the full conversation (including a new assistant message) and
@@ -111,7 +111,7 @@ pub fn maybe_wrap_stream(
     let mut prefill_tx = Some(tx);
     Box::pin(stream.map(move |item| {
         if let Some(ref resp) = item.data {
-            for choice in &resp.choices {
+            for choice in &resp.inner.choices {
                 if let Some(ChatCompletionMessageContent::Text(ref text)) = choice.delta.content {
                     accumulated_text.push_str(text);
                 }
@@ -174,7 +174,11 @@ async fn prefill_task(
         .annotations(vec![])
         .build()?;
 
-    let context = PipelineContext::with_id(preprocessed, uuid::Uuid::new_v4().to_string());
+    let context = PipelineContext::with_id_and_metadata(
+        preprocessed,
+        uuid::Uuid::new_v4().to_string(),
+        Default::default(),
+    );
     // Drain the stream so the KV router's RequestGuard runs its full lifecycle
     // (mark_prefill_completed, block tracking, free) instead of relying on drop.
     if let Ok(mut stream) = next.generate(context).await {

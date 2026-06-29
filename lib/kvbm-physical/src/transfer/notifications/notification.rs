@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use velo_events::{Event, EventAwaiter, EventManager};
+use velo::{Event, EventAwaiter, EventManager};
 
 pub enum TransferAwaiter {
     Local(EventAwaiter),

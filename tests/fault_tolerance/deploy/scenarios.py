@@ -20,7 +20,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Dict, List, Optional, Pattern
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Pattern
 
 from typing_extensions import Required, TypedDict
 
@@ -95,9 +95,9 @@ WORKER_MAP = {
         "prefill": "prefill",
     },
     "trtllm": {
-        "decode": "TRTLLMDecodeWorker",
+        "decode": "decode",
         "decode_agg": "TRTLLMWorker",  # Aggregated uses different name
-        "prefill": "TRTLLMPrefillWorker",
+        "prefill": "prefill",
     },
 }
 
@@ -121,12 +121,6 @@ WORKER_READY_PATTERNS: Dict[str, Pattern] = {
     ),
     # TensorRT-LLM workers
     "TRTLLMWorker": re.compile(
-        r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
-    ),
-    "TRTLLMDecodeWorker": re.compile(
-        r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
-    ),
-    "TRTLLMPrefillWorker": re.compile(
         r"TrtllmWorker for (?P<model_name>.*?) has been initialized|Model registration succeeded"
     ),
 }
@@ -568,7 +562,7 @@ class TerminateProcessFailure(Failure):
             f"Checking Frontend service health (after {service_name} pod restart)..."
         )
 
-        pod_ports = {}  # Temporary dict for port forward tracking
+        pod_ports: dict[str, Any] = {}  # Temporary dict for port forward tracking
         try:
             logger.info("Getting frontend pod and setting up port forward...")
             frontend_pod_name, local_port, frontend_pod = get_frontend_port(

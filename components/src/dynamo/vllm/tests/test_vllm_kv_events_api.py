@@ -9,9 +9,18 @@ These tests check that the vLLM KV events classes have the expected fields
 that our Rust deserializers depend on. If vLLM changes their API, these tests
 will fail early, before hitting runtime deserialization errors.
 
-The Rust code in kv_router/publisher.rs and kv_consolidator/subscriber.rs
-deserializes vLLM's msgpack-encoded KV events. Since vLLM uses msgspec with
-array_like=True, the field ORDER matters - fields are serialized positionally.
+This test is the early warning for vLLM KV-event wire-format changes.
+
+In the normal case, if this fails, update `lib/kv-router/src/zmq_wire.rs` to
+match the new upstream vLLM event shape, then update this test.
+
+That file is Dynamo's compatibility layer for vLLM KV events:
+- it decodes vLLM's msgpack `array_like=True` wire format
+- it handles field order changes in `BlockStored` / `BlockRemoved` / `EventBatch`
+- it translates upstream `extra_keys` into Dynamo's internal `block_mm_infos`
+
+Only touch consolidator files if we explicitly need the consolidator publisher
+to preserve and republish a new upstream field.
 """
 
 import importlib
@@ -37,6 +46,18 @@ pytestmark = [
 ]
 
 
+def _has_group_idx(event_cls):
+    return "group_idx" in event_cls.__struct_fields__
+
+
+def _has_kv_cache_spec_kind(event_cls):
+    return "kv_cache_spec_kind" in event_cls.__struct_fields__
+
+
+def _has_kv_cache_spec_sliding_window(event_cls):
+    return "kv_cache_spec_sliding_window" in event_cls.__struct_fields__
+
+
 class TestVllmKvEventsApi:
     """Test vLLM KV events API compatibility."""
 
@@ -51,10 +72,14 @@ class TestVllmKvEventsApi:
         5. lora_id
         6. medium
         7. lora_name (added in vLLM 0.14.0)
+        8. extra_keys (added in vLLM 0.17.0)
+        9. group_idx (added for hybrid KV cache groups; optional for older vLLM)
+        10. kv_cache_spec_kind (semantic cache type; optional for older vLLM)
+        11. kv_cache_spec_sliding_window (semantic cache window; optional for older vLLM)
 
         If vLLM adds/removes/reorders fields, this test will fail.
         """
-        expected_fields = (
+        expected_fields = [
             "block_hashes",
             "parent_block_hash",
             "token_ids",
@@ -62,31 +87,49 @@ class TestVllmKvEventsApi:
             "lora_id",
             "medium",
             "lora_name",
-        )
+            "extra_keys",
+        ]
+        if _has_group_idx(BlockStored):
+            expected_fields.append("group_idx")
+        if _has_kv_cache_spec_kind(BlockStored):
+            expected_fields.append("kv_cache_spec_kind")
+        if _has_kv_cache_spec_sliding_window(BlockStored):
+            expected_fields.append("kv_cache_spec_sliding_window")
+        expected_fields = tuple(expected_fields)
 
         actual_fields = BlockStored.__struct_fields__
         assert actual_fields == expected_fields, (
             f"BlockStored fields changed!\n"
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
-            f"If vLLM changed the API, update the Rust deserializers in:\n"
-            f"  - lib/llm/src/kv_router/publisher.rs (RawKvEvent::BlockStored)\n"
-            f"  - lib/llm/src/block_manager/kv_consolidator/subscriber.rs (VllmRawEvent::BlockStored)"
+            f"Required follow-up:\n"
+            f"  - Update lib/kv-router/src/zmq_wire.rs to match the new BlockStored wire format.\n"
+            f"  - Update this test's expected_fields and msgpack position checks.\n"
+            f"  - If needed, add or update a regression test in lib/llm/src/kv_router/publisher.rs."
         )
 
     def test_block_removed_fields(self):
         """Verify BlockRemoved has expected fields in expected order."""
-        expected_fields = (
+        expected_fields = [
             "block_hashes",
             "medium",
-        )
+        ]
+        if _has_group_idx(BlockRemoved):
+            expected_fields.append("group_idx")
+        if _has_kv_cache_spec_kind(BlockRemoved):
+            expected_fields.append("kv_cache_spec_kind")
+        if _has_kv_cache_spec_sliding_window(BlockRemoved):
+            expected_fields.append("kv_cache_spec_sliding_window")
+        expected_fields = tuple(expected_fields)
 
         actual_fields = BlockRemoved.__struct_fields__
         assert actual_fields == expected_fields, (
             f"BlockRemoved fields changed!\n"
             f"Expected: {expected_fields}\n"
             f"Actual:   {actual_fields}\n"
-            f"If vLLM changed the API, update the Rust deserializers."
+            f"Required follow-up:\n"
+            f"  - Update lib/kv-router/src/zmq_wire.rs RawKvEvent::BlockRemoved seq deserializer.\n"
+            f"  - Update this test's expected_fields."
         )
 
     def test_event_batch_fields(self):
@@ -101,7 +144,11 @@ class TestVllmKvEventsApi:
         assert actual_fields == expected_fields, (
             f"EventBatch fields changed!\n"
             f"Expected: {expected_fields}\n"
-            f"Actual:   {actual_fields}"
+            f"Actual:   {actual_fields}\n"
+            f"Required follow-up:\n"
+            f"  - Update lib/kv-router/src/zmq_wire.rs KvEventBatch Deserialize impl.\n"
+            f"  - Update subscriber.rs VllmEventBatch tuple if batch field order changes.\n"
+            f"  - Update this test's expected_fields."
         )
 
     def test_kv_cache_event_uses_array_like(self):
@@ -140,15 +187,23 @@ class TestVllmKvEventsApi:
         """
         import msgspec
 
-        event = BlockStored(
-            block_hashes=[123, 456],
-            parent_block_hash=789,
-            token_ids=[1, 2, 3, 4],
-            block_size=16,
-            lora_id=None,
-            medium="GPU",
-            lora_name=None,
-        )
+        event_kwargs = {
+            "block_hashes": [123, 456],
+            "parent_block_hash": 789,
+            "token_ids": [1, 2, 3, 4],
+            "block_size": 16,
+            "lora_id": None,
+            "medium": "GPU",
+            "lora_name": None,
+            "extra_keys": None,
+        }
+        if _has_group_idx(BlockStored):
+            event_kwargs["group_idx"] = 0
+        if _has_kv_cache_spec_kind(BlockStored):
+            event_kwargs["kv_cache_spec_kind"] = "full_attention"
+        if _has_kv_cache_spec_sliding_window(BlockStored):
+            event_kwargs["kv_cache_spec_sliding_window"] = 128
+        event = BlockStored(**event_kwargs)
 
         encoded = msgspec.msgpack.encode(event)
         decoded = msgspec.msgpack.decode(encoded)
@@ -159,9 +214,14 @@ class TestVllmKvEventsApi:
             decoded[0] == "BlockStored"
         ), f"Expected tag 'BlockStored', got {decoded[0]}"
 
-        # Verify field count (tag + 7 fields = 8 elements)
-        assert len(decoded) == 8, (
-            f"Expected 8 elements (tag + 7 fields), got {len(decoded)}.\n"
+        expected_len = (
+            9
+            + int(_has_group_idx(BlockStored))
+            + int(_has_kv_cache_spec_kind(BlockStored))
+            + int(_has_kv_cache_spec_sliding_window(BlockStored))
+        )
+        assert len(decoded) == expected_len, (
+            f"Expected {expected_len} elements, got {len(decoded)}.\n"
             f"Decoded: {decoded}\n"
             f"If field count changed, update Rust deserializers."
         )
@@ -174,3 +234,115 @@ class TestVllmKvEventsApi:
         assert decoded[5] is None, f"lora_id at wrong position: {decoded[5]}"
         assert decoded[6] == "GPU", f"medium at wrong position: {decoded[6]}"
         assert decoded[7] is None, f"lora_name at wrong position: {decoded[7]}"
+        assert decoded[8] is None, f"extra_keys at wrong position: {decoded[8]}"
+        next_idx = 9
+        if _has_group_idx(BlockStored):
+            assert (
+                decoded[next_idx] == 0
+            ), f"group_idx at wrong position: {decoded[next_idx]}"
+            next_idx += 1
+        if _has_kv_cache_spec_kind(BlockStored):
+            assert (
+                decoded[next_idx] == "full_attention"
+            ), f"kv_cache_spec_kind at wrong position: {decoded[next_idx]}"
+            next_idx += 1
+        if _has_kv_cache_spec_sliding_window(BlockStored):
+            assert (
+                decoded[next_idx] == 128
+            ), f"kv_cache_spec_sliding_window at wrong position: {decoded[next_idx]}"
+
+    def test_block_stored_tuple_extra_keys_serialization_format(self):
+        """Verify multimodal tuple extra_keys keep the vLLM 0.19 wire shape."""
+        import msgspec
+
+        mm_hash = "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+        event_kwargs = {
+            "block_hashes": [123],
+            "parent_block_hash": None,
+            "token_ids": [1, 2, 3, 4],
+            "block_size": 16,
+            "lora_id": None,
+            "medium": "GPU",
+            "lora_name": None,
+            "extra_keys": [((mm_hash, 7),)],
+        }
+        if _has_group_idx(BlockStored):
+            event_kwargs["group_idx"] = 0
+        if _has_kv_cache_spec_kind(BlockStored):
+            event_kwargs["kv_cache_spec_kind"] = "full_attention"
+        if _has_kv_cache_spec_sliding_window(BlockStored):
+            event_kwargs["kv_cache_spec_sliding_window"] = 128
+        event = BlockStored(**event_kwargs)
+
+        decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+
+        assert decoded[0] == "BlockStored"
+        assert decoded[8] == [[[mm_hash, 7]]], (
+            "vLLM multimodal extra_keys no longer serialize as nested tuple/list "
+            f"payloads. Decoded: {decoded[8]!r}"
+        )
+        if _has_group_idx(BlockStored):
+            assert decoded[9] == 0, f"group_idx at wrong position: {decoded[9]}"
+        if _has_kv_cache_spec_kind(BlockStored):
+            kind_idx = 10 if _has_group_idx(BlockStored) else 9
+            assert (
+                decoded[kind_idx] == "full_attention"
+            ), f"kv_cache_spec_kind at wrong position: {decoded[kind_idx]}"
+        if _has_kv_cache_spec_sliding_window(BlockStored):
+            window_idx = 9
+            if _has_group_idx(BlockStored):
+                window_idx += 1
+            if _has_kv_cache_spec_kind(BlockStored):
+                window_idx += 1
+            assert decoded[window_idx] == 128, (
+                "kv_cache_spec_sliding_window at wrong position: "
+                f"{decoded[window_idx]}"
+            )
+
+    def test_block_removed_serialization_format(self):
+        """Verify BlockRemoved serializes to expected msgpack array format."""
+        import msgspec
+
+        event_kwargs = {
+            "block_hashes": [123, 456],
+            "medium": "GPU",
+        }
+        if _has_group_idx(BlockRemoved):
+            event_kwargs["group_idx"] = 0
+        if _has_kv_cache_spec_kind(BlockRemoved):
+            event_kwargs["kv_cache_spec_kind"] = "full_attention"
+        if _has_kv_cache_spec_sliding_window(BlockRemoved):
+            event_kwargs["kv_cache_spec_sliding_window"] = 128
+        event = BlockRemoved(**event_kwargs)
+
+        decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+
+        assert decoded[0] == "BlockRemoved"
+        expected_len = (
+            3
+            + int(_has_group_idx(BlockRemoved))
+            + int(_has_kv_cache_spec_kind(BlockRemoved))
+            + int(_has_kv_cache_spec_sliding_window(BlockRemoved))
+        )
+        assert len(decoded) == expected_len, (
+            f"Expected {expected_len} elements, got {len(decoded)}.\n"
+            f"Decoded: {decoded}\n"
+            f"If field count changed, update Rust deserializers."
+        )
+        assert decoded[1] == [123, 456], f"block_hashes at wrong position: {decoded[1]}"
+        assert decoded[2] == "GPU", f"medium at wrong position: {decoded[2]}"
+        next_idx = 3
+        if _has_group_idx(BlockRemoved):
+            assert (
+                decoded[next_idx] == 0
+            ), f"group_idx at wrong position: {decoded[next_idx]}"
+            next_idx += 1
+        if _has_kv_cache_spec_kind(BlockRemoved):
+            assert (
+                decoded[next_idx] == "full_attention"
+            ), f"kv_cache_spec_kind at wrong position: {decoded[next_idx]}"
+            next_idx += 1
+        if _has_kv_cache_spec_sliding_window(BlockRemoved):
+            assert (
+                decoded[next_idx] == 128
+            ), f"kv_cache_spec_sliding_window at wrong position: {decoded[next_idx]}"

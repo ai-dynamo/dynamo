@@ -97,16 +97,51 @@ pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 // Shared Fields
 //
 
-/// Validates that no unsupported fields are present in the request
+/// Extra-body fields accepted for backend-specific handling.
+pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
+    "cache_salt",
+    "stop_token_ids",
+    "detokenize",
+    "allowed_token_ids",
+    "bad_words_token_ids",
+];
+
+/// Validates that no unsupported fields are present in the request.
+///
+/// Fields in `PASSTHROUGH_EXTRA_FIELDS` are validated by downstream handlers.
 pub fn validate_no_unsupported_fields(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), anyhow::Error> {
-    if !unsupported_fields.is_empty() {
-        let fields: Vec<_> = unsupported_fields
-            .keys()
-            .map(|s| format!("`{}`", s))
-            .collect();
-        anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
+    let unknown: Vec<_> = unsupported_fields
+        .keys()
+        .filter(|k| !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str()))
+        .map(|s| format!("`{}`", s))
+        .collect();
+    if !unknown.is_empty() {
+        anyhow::bail!("Unsupported parameter(s): {}", unknown.join(", "));
+    }
+    if let Some(value) = unsupported_fields.get("cache_salt")
+        && !value.is_string()
+    {
+        anyhow::bail!("`cache_salt` must be a string");
+    }
+    if let Some(value) = unsupported_fields.get("stop_token_ids") {
+        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+            .map_err(|_| anyhow::anyhow!("`stop_token_ids` must be an array of token IDs"))?;
+    }
+    if let Some(value) = unsupported_fields.get("detokenize")
+        && !value.is_boolean()
+    {
+        anyhow::bail!("`detokenize` must be a boolean");
+    }
+    if let Some(value) = unsupported_fields.get("allowed_token_ids") {
+        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+            .map_err(|_| anyhow::anyhow!("`allowed_token_ids` must be an array of token IDs"))?;
+    }
+    if let Some(value) = unsupported_fields.get("bad_words_token_ids") {
+        serde_json::from_value::<Vec<Vec<crate::types::TokenIdType>>>(value.clone()).map_err(
+            |_| anyhow::anyhow!("`bad_words_token_ids` must be an array of token ID arrays"),
+        )?;
     }
     Ok(())
 }
@@ -119,9 +154,9 @@ pub fn validate_no_unsupported_fields(
 ///
 /// `{"type":"text"}` is accepted and means no structured constraint.
 pub fn validate_response_format(
-    response_format: &Option<dynamo_async_openai::types::ResponseFormat>,
+    response_format: &Option<dynamo_protocols::types::ResponseFormat>,
 ) -> Result<(), anyhow::Error> {
-    use dynamo_async_openai::types::ResponseFormat;
+    use dynamo_protocols::types::ResponseFormat;
 
     let Some(fmt) = response_format else {
         return Ok(());
@@ -355,15 +390,15 @@ pub fn validate_user(user: Option<&str>) -> Result<(), anyhow::Error> {
 }
 
 /// Validates stop sequences
-pub fn validate_stop(stop: &Option<dynamo_async_openai::types::Stop>) -> Result<(), anyhow::Error> {
+pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(), anyhow::Error> {
     if let Some(stop_value) = stop {
         match stop_value {
-            dynamo_async_openai::types::Stop::String(s) => {
+            dynamo_protocols::types::Stop::String(s) => {
                 if s.is_empty() {
                     anyhow::bail!("Stop sequence cannot be empty");
                 }
             }
-            dynamo_async_openai::types::Stop::StringArray(sequences) => {
+            dynamo_protocols::types::Stop::StringArray(sequences) => {
                 if sequences.is_empty() {
                     anyhow::bail!("Stop sequences array cannot be empty");
                 }
@@ -380,6 +415,18 @@ pub fn validate_stop(stop: &Option<dynamo_async_openai::types::Stop>) -> Result<
                     }
                 }
             }
+            dynamo_protocols::types::Stop::TokenIdArray(token_ids) => {
+                if token_ids.is_empty() {
+                    anyhow::bail!("Stop token IDs array cannot be empty");
+                }
+                if token_ids.len() > MAX_STOP_SEQUENCES {
+                    anyhow::bail!(
+                        "Maximum of {} stop token IDs allowed, got {}",
+                        MAX_STOP_SEQUENCES,
+                        token_ids.len()
+                    );
+                }
+            }
         }
     }
     Ok(())
@@ -391,7 +438,7 @@ pub fn validate_stop(stop: &Option<dynamo_async_openai::types::Stop>) -> Result<
 
 /// Validates messages array
 pub fn validate_messages(
-    messages: &[dynamo_async_openai::types::ChatCompletionRequestMessage],
+    messages: &[dynamo_protocols::types::ChatCompletionRequestMessage],
 ) -> Result<(), anyhow::Error> {
     if messages.is_empty() {
         anyhow::bail!("Messages array cannot be empty");
@@ -415,7 +462,7 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
 
 /// Validates tools array
 pub fn validate_tools(
-    tools: &Option<&[dynamo_async_openai::types::ChatCompletionTool]>,
+    tools: &Option<&[dynamo_protocols::types::ChatCompletionTool]>,
 ) -> Result<(), anyhow::Error> {
     let tools = match tools {
         Some(val) => val,
@@ -442,13 +489,54 @@ pub fn validate_tools(
         if tool.function.name.trim().is_empty() {
             anyhow::bail!("Function name at index {} cannot be empty", i);
         }
+        if !tool
+            .function
+            .name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            anyhow::bail!(
+                "Function at index {} has an invalid name: \"{}\". \
+                 Only a-z, A-Z, 0-9, underscores, and dashes are allowed.",
+                i,
+                tool.function.name,
+            );
+        }
     }
+    Ok(())
+}
+
+/// Validates that forced tool_choice requests refer to available tools.
+pub fn validate_tool_choice(
+    tool_choice: &Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
+    tools: Option<&[dynamo_protocols::types::ChatCompletionTool]>,
+) -> Result<(), anyhow::Error> {
+    use dynamo_protocols::types::ChatCompletionToolChoiceOption;
+
+    let tools_empty = tools.is_none_or(|tools| tools.is_empty());
+
+    match tool_choice {
+        Some(ChatCompletionToolChoiceOption::Required) if tools_empty => {
+            anyhow::bail!("tool_choice is \"required\" but tools is empty");
+        }
+        Some(ChatCompletionToolChoiceOption::Named(named)) => {
+            let tools = tools.unwrap_or(&[]);
+            if !tools.iter().any(|t| t.function.name == named.function.name) {
+                anyhow::bail!(
+                    "tool named \"{}\" in tool_choice is not present in tools",
+                    named.function.name
+                );
+            }
+        }
+        _ => {}
+    }
+
     Ok(())
 }
 
 /// Validates reasoning effort parameter
 pub fn validate_reasoning_effort(
-    _reasoning_effort: &Option<dynamo_async_openai::types::ReasoningEffort>,
+    _reasoning_effort: &Option<dynamo_protocols::types::ReasoningEffort>,
 ) -> Result<(), anyhow::Error> {
     // TODO ADD HERE
     // ReasoningEffort is an enum, so if it exists, it's valid by definition
@@ -458,7 +546,7 @@ pub fn validate_reasoning_effort(
 
 /// Validates service tier parameter
 pub fn validate_service_tier(
-    _service_tier: &Option<dynamo_async_openai::types::ServiceTier>,
+    _service_tier: &Option<dynamo_protocols::types::ServiceTier>,
 ) -> Result<(), anyhow::Error> {
     // TODO ADD HERE
     // ServiceTier is an enum, so if it exists, it's valid by definition
@@ -471,14 +559,14 @@ pub fn validate_service_tier(
 //
 
 /// Validates prompt
-pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<(), anyhow::Error> {
+pub fn validate_prompt(prompt: &dynamo_protocols::types::Prompt) -> Result<(), anyhow::Error> {
     match prompt {
-        dynamo_async_openai::types::Prompt::String(s) => {
+        dynamo_protocols::types::Prompt::String(s) => {
             if s.is_empty() {
                 anyhow::bail!("Prompt string cannot be empty");
             }
         }
-        dynamo_async_openai::types::Prompt::StringArray(arr) => {
+        dynamo_protocols::types::Prompt::StringArray(arr) => {
             if arr.is_empty() {
                 anyhow::bail!("Prompt string array cannot be empty");
             }
@@ -488,12 +576,12 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
                 }
             }
         }
-        dynamo_async_openai::types::Prompt::IntegerArray(arr) => {
+        dynamo_protocols::types::Prompt::IntegerArray(arr) => {
             if arr.is_empty() {
                 anyhow::bail!("Prompt integer array cannot be empty");
             }
         }
-        dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
+        dynamo_protocols::types::Prompt::ArrayOfIntegerArray(arr) => {
             if arr.is_empty() {
                 anyhow::bail!("Prompt array of integer arrays cannot be empty");
             }
@@ -516,7 +604,7 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
 ///
 /// Format for prompt_embeds: PyTorch tensor serialized with torch.save() and base64-encoded
 pub fn validate_prompt_or_embeds(
-    prompt: Option<&dynamo_async_openai::types::Prompt>,
+    prompt: Option<&dynamo_protocols::types::Prompt>,
     prompt_embeds: Option<&str>,
 ) -> Result<(), anyhow::Error> {
     // Check that at least one is provided

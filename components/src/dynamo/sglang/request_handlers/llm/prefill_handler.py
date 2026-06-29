@@ -8,9 +8,20 @@ from typing import Any, AsyncGenerator, Dict, Optional
 import sglang as sgl
 
 from dynamo._core import Context
+from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
+from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
+    build_disagg_mm_kwargs,
+    raise_if_unextracted_multimodal,
+)
+
+# Sentinel value matching u32::MAX from the C/Go prefill-routing ABI.
+# This remains as a compatibility fallback for older callers that still encode
+# an unresolved data-parallel rank in-band instead of omitting the field.
+_DP_RANK_UNSET = 2**32 - 1
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
@@ -77,19 +88,36 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
             sampling_params = {
-                "temperature": sampling_opts.get("temperature"),
-                "top_p": sampling_opts.get("top_p"),
-                "top_k": sampling_opts.get("top_k"),
+                "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
+                **_sampling_option_params(sampling_opts),
+                **self._get_guided_decoding_params(
+                    sampling_opts.get("guided_decoding")
+                ),
             }
             sampling_params = {
                 k: v for k, v in sampling_params.items() if v is not None
             }
 
-        # Use provided bootstrap_room from bootstrap_info if available, otherwise generate one
+        # Use provided bootstrap_info if available (e.g., for health checks with FAKE_BOOTSTRAP_HOST)
+        # Otherwise use real bootstrap host/port from engine and generate room locally
+        bootstrap_host = self.bootstrap_host
+        bootstrap_port = self.bootstrap_port
         bootstrap_room = None
+
         bootstrap_info_from_req = inner_request.get("bootstrap_info")
         if isinstance(bootstrap_info_from_req, dict):
+            # Allow overriding bootstrap_host for fake-transfer mode (health checks)
+            if "bootstrap_host" in bootstrap_info_from_req:
+                bootstrap_host = bootstrap_info_from_req["bootstrap_host"]
+                logging.debug(
+                    f"Using request-provided bootstrap_host: {bootstrap_host}"
+                )
+            if "bootstrap_port" in bootstrap_info_from_req:
+                bootstrap_port = bootstrap_info_from_req["bootstrap_port"]
+                logging.debug(
+                    f"Using request-provided bootstrap_port: {bootstrap_port}"
+                )
             bootstrap_room = bootstrap_info_from_req.get("bootstrap_room")
             if bootstrap_room is not None:
                 logging.debug(f"Using router-provided bootstrap_room: {bootstrap_room}")
@@ -99,36 +127,64 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             logging.debug(f"Generated bootstrap_room locally: {bootstrap_room}")
 
         bootstrap_info = {
-            "bootstrap_host": self.bootstrap_host,
-            "bootstrap_port": self.bootstrap_port,
+            "bootstrap_host": bootstrap_host,
+            "bootstrap_port": bootstrap_port,
             "bootstrap_room": bootstrap_room,
         }
 
-        # Yield bootstrap_info for PrefillRouter - required for async generator contract
-        # and Rust-side expects disaggregated_params in first output
+        input_param = self._get_input_param(inner_request)
+
+        # Prefill encodes the media so the KV it transfers carries the vision
+        # context; decode extracts the same URLs to match the token layout.
+        mm_kwargs = build_disagg_mm_kwargs(inner_request)
+
+        routing = inner_request.get("routing") or {}
+        priority = routing.get("priority")
+        dp_rank = routing.get("dp_rank")
+
+        if dp_rank is not None and dp_rank == _DP_RANK_UNSET:
+            dp_rank = None
+
+        trace_header = context.trace_headers() if self.enable_trace else None
+
+        lora_path = self._resolve_lora(inner_request)
+        if lora_path:
+            logging.debug(
+                f"Prefill request {context.id()} will use LoRA adapter: {lora_path}"
+            )
+
+        raise_if_unextracted_multimodal(inner_request)
+
+        results = await self.engine.async_generate(
+            **input_param,
+            **mm_kwargs,
+            sampling_params=sampling_params,
+            stream=True,
+            bootstrap_host=bootstrap_host,
+            bootstrap_port=bootstrap_port,
+            bootstrap_room=bootstrap_room,
+            external_trace_header=trace_header,
+            rid=trace_id,
+            data_parallel_rank=dp_rank,
+            **self._session_kwargs(inner_request),
+            lora_path=lora_path,
+            **self._priority_kwargs(priority),
+        )
+        if inner_request.get(HEALTH_CHECK_KEY):
+            # Canary: stream engine output so the Rust canary sees scheduler output.
+            # No _cancellation_monitor — probe is bounded (max_tokens=1, FAKE_BOOTSTRAP_HOST).
+            async for res in results:
+                yield res
+            return
+
+        # Yield bootstrap_info for PrefillRouter - required for async generator
+        # contract and Rust-side expects disaggregated_params in first output.
         yield {
             "token_ids": [],
             "text": None,
             "finish_reason": None,
             "disaggregated_params": bootstrap_info,
         }
-
-        input_param = self._get_input_param(inner_request)
-        priority = (inner_request.get("routing") or {}).get("priority")
-
-        trace_header = self._get_trace_header(context) if self.enable_trace else None
-
-        results = await self.engine.async_generate(
-            **input_param,
-            sampling_params=sampling_params,
-            stream=True,
-            bootstrap_host=self.bootstrap_host,
-            bootstrap_port=self.bootstrap_port,
-            bootstrap_room=bootstrap_room,
-            external_trace_header=trace_header,
-            rid=trace_id,
-            **self._priority_kwargs(priority),
-        )
 
         task = asyncio.create_task(self._consume_results(results, context))
         self._consume_tasks.add(task)

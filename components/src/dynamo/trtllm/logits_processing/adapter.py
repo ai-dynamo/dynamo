@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional, Sequence
 
 import torch
 from tensorrt_llm.sampling_params import LogitsProcessor
 
+from dynamo.common.backend.engine import ForcedTokenSequenceSpec, PythonProcessorSpec
 from dynamo.logits_processing import BaseLogitsProcessor
+from dynamo.logits_processing.examples import ForcedSequenceLogitsProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +33,9 @@ class TrtllmDynamoLogitsAdapter(LogitsProcessor):
         req_ids: int,
         logits: torch.Tensor,
         ids: List[List[int]],
-        stream_ptr,
+        stream_ptr: Optional[int],
         client_id: Optional[int] = None,
-    ):
+    ) -> None:
         """
         TensorRT-LLM logits processor interface.
 
@@ -70,7 +72,7 @@ class TrtllmDynamoLogitsAdapter(LogitsProcessor):
 
 
 def create_trtllm_adapters(
-    processors: List[BaseLogitsProcessor],
+    processors: Sequence[BaseLogitsProcessor],
 ) -> List[TrtllmDynamoLogitsAdapter]:
     """
     Create TensorRT-LLM compatible adapters from Dynamo logits processors.
@@ -86,3 +88,32 @@ def create_trtllm_adapters(
         adapter = TrtllmDynamoLogitsAdapter(processor)
         adapters.append(adapter)
     return adapters
+
+
+def attach_logits_processors(
+    sampling_params: Any,
+    entries: Sequence[Any],
+) -> None:
+    """TRT-LLM realizer for the shared `LogitsProcessorEntry` contract.
+
+    Builds a fresh processor per call (independent per-request state),
+    wraps each in `TrtllmDynamoLogitsAdapter`, and assigns onto
+    ``sampling_params.logits_processor``. No-op on empty input; unknown
+    entry types raise ``TypeError``.
+    """
+    if not entries:
+        return
+    processors: list[BaseLogitsProcessor] = []
+    for d in entries:
+        if isinstance(d, ForcedTokenSequenceSpec):
+            processors.append(
+                ForcedSequenceLogitsProcessor(d.token_ids, d.eos_token_id)
+            )
+        elif isinstance(d, PythonProcessorSpec):
+            processors.append(d.factory())
+        else:
+            raise TypeError(
+                f"TRT-LLM logits-processor adapter cannot realize "
+                f"spec entry of type {type(d).__name__}"
+            )
+    sampling_params.logits_processor = create_trtllm_adapters(processors)

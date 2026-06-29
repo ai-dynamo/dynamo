@@ -8,15 +8,11 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 # Python Libraries
 *.py @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
-# Docs utility scripts (diagram generators, conversion tools — not production code)
-/docs/**/*.py
-
 # Container/Environments
 /container/ @ai-dynamo/Devops @ai-dynamo/dynamo-rust-codeowners @ai-dynamo/python-codeowners @ai-dynamo/dynamo-deploy-codeowners
 
 # Examples
 /examples/ @ai-dynamo/Devops @ai-dynamo/dynamo-rust-codeowners @ai-dynamo/python-codeowners @ai-dynamo/dynamo-deploy-codeowners
-/examples/multimodal/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # Dynamo deploy
 /deploy/ @ai-dynamo/dynamo-deploy-codeowners
@@ -31,9 +27,8 @@ CODEOWNERS @ai-dynamo/Devops
 /components/src/dynamo/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 /components/src/dynamo/global_router/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 /components/src/dynamo/global_planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
-/examples/hierarchical_planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
+/examples/global_planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 /components/src/dynamo/profiler/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
-/tests/planner/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # recipes
 
@@ -47,5 +42,26 @@ CODEOWNERS @ai-dynamo/Devops
 /LICENSE @ai-dynamo/Devops
 /SECURITY.md @ai-dynamo/Devops
 
+# KVBM v2
+/lib/memory/ @grahamking @ryanolson @oandreeva-nv
+/lib/kvbm-*/ @ai-dynamo/kvbm-v2
+/lib/kvbm-logical/ @ai-dynamo/kvbm-v2 @PeaBrane
+
 # Claude Code
 /.claude/ @ishandhanani @alec-flowers @MatejKosec @dagil-nvidia @athreesh @nv-tusharma @ayushag-nv
+
+# Parsers — tool-calling + reasoning parser correctness
+/lib/parsers/ @ai-dynamo/dynamo-parser-codeowners
+/lib/bindings/python/rust/parsers.rs @ai-dynamo/dynamo-parser-codeowners
+/lib/bindings/python/tests/test_parsers.py @ai-dynamo/dynamo-parser-codeowners
+/lib/llm/tests/test_reasoning_parser.rs @ai-dynamo/dynamo-parser-codeowners
+/lib/llm/tests/test_streaming_tool_parsers.rs @ai-dynamo/dynamo-parser-codeowners
+
+# Docs — the docs group owns documentation surfaces: the docs site (docs/, fern/)
+# and the Markdown inside examples/ and recipes/. Code teams above still own all
+# non-Markdown (code, deploy configs) in examples/ and recipes/; only the prose
+# routes to the docs group. Placed last so these rules win (last match wins).
+/docs/ @ai-dynamo/dynamo-docs
+/fern/ @ai-dynamo/dynamo-docs
+/examples/**/*.md @ai-dynamo/dynamo-docs
+/recipes/**/*.md @ai-dynamo/dynamo-docs

@@ -42,6 +42,33 @@ class distributed_runtime:
     UPTIME_SECONDS = "uptime_seconds"
 
 
+class frontend_perf:
+    """Frontend pipeline stage and event-loop metrics"""
+
+    # Per-stage latency histogram (label: stage = preprocess|route|transport_roundtrip|postprocess)
+    STAGE_DURATION_SECONDS = "stage_duration_seconds"
+    # Per-stage inflight request gauge (labels: stage, phase)
+    # Tracks how many requests are currently in each pipeline stage.
+    # Phase values: "prefill", "decode", "aggregated" (for route/dispatch); empty for preprocess.
+    STAGE_REQUESTS = "stage_requests"
+    # Stage label values for STAGE_REQUESTS and STAGE_DURATION_SECONDS.
+    STAGE_PREPROCESS = "preprocess"
+    STAGE_ROUTE = "route"
+    STAGE_DISPATCH = "dispatch"
+    # Tokenization time in preprocessor
+    TOKENIZE_SECONDS = "tokenize_seconds"
+    # Template application time in preprocessor
+    TEMPLATE_SECONDS = "template_seconds"
+    # Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
+    DETOKENIZE_TOTAL_US = "detokenize_total_us"
+    # Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
+    DETOKENIZE_TOKEN_COUNT = "detokenize_token_count"
+    # Event loop delay canary (sleep 10ms, measure drift)
+    EVENT_LOOP_DELAY_SECONDS = "event_loop_delay_seconds"
+    # Count of event loop stalls (delay > 5ms)
+    EVENT_LOOP_STALL_TOTAL = "event_loop_stall_total"
+
+
 class frontend_service:
     """Frontend service metrics (LLM HTTP service)"""
 
@@ -49,11 +76,16 @@ class frontend_service:
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
+    # Total number of LLM requests accepted by the frontend handler
+    REQUESTS_STARTED_TOTAL = "requests_started_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
     QUEUED_REQUESTS = "queued_requests"
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
     # Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
     INFLIGHT_REQUESTS = "inflight_requests"
+    # Number of requests currently being handled by the frontend, from HTTP handler
+    # entry to response completion. Clearer name for what inflight_requests measures.
+    ACTIVE_REQUESTS = "active_requests"
     # Number of disconnected clients (gauge that can go up and down)
     DISCONNECTED_CLIENTS = "disconnected_clients"
     # Duration of LLM requests
@@ -64,6 +96,8 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "kv_hit_rate"
+    # Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
+    KV_TRANSFER_ESTIMATED_LATENCY_SECONDS = "kv_transfer_estimated_latency_seconds"
     # Number of cached tokens (prefix cache hits) per request
     CACHED_TOKENS = "cached_tokens"
     # Tokenizer latency in milliseconds
@@ -74,6 +108,10 @@ class frontend_service:
     TIME_TO_FIRST_TOKEN_SECONDS = "time_to_first_token_seconds"
     # Inter-token latency in seconds
     INTER_TOKEN_LATENCY_SECONDS = "inter_token_latency_seconds"
+    # End-to-end latency of an OpenAI `/v1/embeddings` request, in seconds.
+    # Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
+    # pooling-model latencies (sub-second) without sacrificing resolution.
+    EMBEDDING_LATENCY_SECONDS = "embedding_latency_seconds"
     # Model configuration metrics
     # Runtime config metrics (from ModelRuntimeConfig):
     # Total KV blocks available for a worker serving the model
@@ -91,6 +129,15 @@ class frontend_service:
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
     # Total number of request migrations due to worker unavailability
     MODEL_MIGRATION_TOTAL = "model_migration_total"
+    # Total number of times migration was disabled because the sequence length
+    # exceeded the configured max_seq_len limit
+    MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL = (
+        "model_migration_max_seq_len_exceeded_total"
+    )
+    # Total number of request cancellations
+    MODEL_CANCELLATION_TOTAL = "model_cancellation_total"
+    # Total number of requests rejected due to resource exhaustion
+    MODEL_REJECTION_TOTAL = "model_rejection_total"
     # Active decode blocks (KV cache blocks) per worker
     # Gauge metric tracking current KV cache block utilization for each worker
     WORKER_ACTIVE_DECODE_BLOCKS = "worker_active_decode_blocks"
@@ -113,6 +160,21 @@ class frontend_service:
     MIGRATION_TYPE_LABEL = "migration_type"
     # Label name for tokenizer operation
     OPERATION_LABEL = "operation"
+
+
+class kv_publisher:
+    """KV Publisher metrics"""
+
+    # Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)
+    ENGINES_DROPPED_EVENTS_TOTAL = "kv_publisher_engines_dropped_events_total"
+    # Total number of ZMQ KV events seen by the relay, labeled by stage and event type
+    ZMQ_EVENTS_TOTAL = "kv_publisher_zmq_events_total"
+    # Total number of ZMQ KV events filtered before conversion, labeled by event type and reason
+    ZMQ_FILTERED_EVENTS_TOTAL = "kv_publisher_zmq_filtered_events_total"
+    # Total number of ZMQ KV events dropped due to conversion issues, labeled by event type and reason
+    ZMQ_CONVERSION_ISSUES_TOTAL = "kv_publisher_zmq_conversion_issues_total"
+    # Total number of suspicious-but-forwarded ZMQ KV events, labeled by event type and reason
+    ZMQ_SUSPICIOUS_EVENTS_TOTAL = "kv_publisher_zmq_suspicious_events_total"
 
 
 class kvbm:
@@ -150,6 +212,21 @@ class kvbm:
     OBJECT_WRITE_FAILURES = "object_write_failures"
 
 
+class kvindexer:
+    """Standalone KV indexer HTTP service metrics"""
+
+    # HTTP request latency
+    REQUEST_DURATION_SECONDS = "request_duration_seconds"
+    # Total HTTP requests
+    REQUESTS_TOTAL = "requests_total"
+    # HTTP error responses (4xx/5xx)
+    ERRORS_TOTAL = "errors_total"
+    # Number of active model+tenant indexers
+    MODELS = "models"
+    # Number of registered worker instances
+    WORKERS = "workers"
+
+
 class kvrouter:
     # Number of KV cache events applied to the index (including status)
     KV_CACHE_EVENTS_APPLIED = "kv_cache_events_applied"
@@ -160,6 +237,16 @@ class kvstats:
     TOTAL_BLOCKS = "total_blocks"
     # GPU cache usage as a percentage (0.0-1.0)
     GPU_CACHE_USAGE_PERCENT = "gpu_cache_usage_percent"
+    # Prefix cache hit rate (0.0-1.0), portable across vLLM / SGLang / TRT-LLM
+    KV_CACHE_HIT_RATE = "kv_cache_hit_rate"
+
+
+class lifecycle:
+    """Worker-lifecycle timing gauges. Set once per worker run by the
+    framework, not by the engine."""
+
+    CLEANUP_TIME_SECONDS = "cleanup_time_seconds"
+    DRAIN_TIME_SECONDS = "drain_time_seconds"
 
 
 class labels:
@@ -186,7 +273,7 @@ class labels:
     # to ensure maximum compatibility with both OpenAI standard and engine-native tooling.
     # When a metric already has a label, injection does not overwrite it (original is preserved).
     MODEL_NAME = "model_name"
-    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
+    # Label for worker type (e.g., "aggregated", "prefill", "decode", "encode", etc.)
     WORKER_TYPE = "worker_type"
     # Label for router instance (discovery.instance_id() of the frontend)
     ROUTER_ID = "router_id"
@@ -198,14 +285,43 @@ class model_info:
 
 
 class name_prefix:
-    """Metric name prefixes used across the metrics system"""
+    """Metric name prefixes used across the metrics system."""
 
-    # Prefix for all Prometheus metric names.
+    # Prefix for component-scoped metrics, auto-labeled with namespace/endpoint.
     COMPONENT = "dynamo_component"
-    # Prefix for frontend service metrics
+    # Prefix for frontend HTTP service metrics (requests, TTFT, ITL, disconnects).
     FRONTEND = "dynamo_frontend"
-    # Prefix for KV router metrics (used with router_id label)
+    # Prefix for KV router instance metrics (carries `router_id` label).
     ROUTER = "dynamo_router"
+    # Prefix for standalone KV indexer metrics
+    KVINDEXER = "dynamo_kvindexer"
+    # Prefix for request-plane metrics at AddressedPushRouter.
+    # Transport-agnostic: measures request lifecycle latency and concurrency
+    # (queue → send → roundtrip TTFT, inflight gauge).
+    REQUEST_PLANE = "dynamo_request_plane"
+    # Prefix for transport-layer metrics (TCP / NATS).
+    # Protocol-specific: measures wire-level health (bytes sent/received, error counts).
+    TRANSPORT = "dynamo_transport"
+    # Prefix for work-handler transport breakdown metrics (backend side)
+    WORK_HANDLER = "dynamo_work_handler"
+    # Prefix for tokio runtime metrics (poll times, queue depths, stalls).
+    TOKIO = "dynamo_tokio"
+    # Prefix for per-phase routing overhead latency (hashing, scheduling).
+    # Raw Prometheus, not component-scoped.
+    ROUTING_OVERHEAD = "dynamo_routing_overhead"
+
+
+class request_plane:
+    """Request plane metrics at AddressedPushRouter"""
+
+    # Time from generate() entry to send_request() (serialization + encoding)
+    QUEUE_SECONDS = "queue_seconds"
+    # Time for send_request() to complete (frontend view: network + queue + ack)
+    SEND_SECONDS = "send_seconds"
+    # Time from send_request() to first response item (transport roundtrip TTFT)
+    ROUNDTRIP_TTFT_SECONDS = "roundtrip_ttft_seconds"
+    # Currently in-flight requests (gauge)
+    INFLIGHT_REQUESTS = "inflight_requests"
 
 
 class router:
@@ -213,6 +329,10 @@ class router:
 
     # Total number of requests processed by the router
     REQUESTS_TOTAL = "router_requests_total"
+    # Total number of remote indexer overlap queries that failed
+    REMOTE_INDEXER_QUERY_FAILURES_TOTAL = "router_remote_indexer_query_failures_total"
+    # Total number of remote indexer routing-decision writes that failed
+    REMOTE_INDEXER_WRITE_FAILURES_TOTAL = "router_remote_indexer_write_failures_total"
     # Time to first token observed at the router (seconds)
     TIME_TO_FIRST_TOKEN_SECONDS = "router_time_to_first_token_seconds"
     # Average inter-token latency observed at the router (seconds)
@@ -221,6 +341,10 @@ class router:
     INPUT_SEQUENCE_TOKENS = "router_input_sequence_tokens"
     # Output sequence length in tokens observed at the router
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
+    # Predicted KV cache hit rate at routing time (0.0-1.0)
+    KV_HIT_RATE = "router_kv_hit_rate"
+    # Whether the router currently has a worker/dp_rank registered (1 = registered)
+    WORKER_REGISTERED = "router_worker_registered"
 
 
 class router_request:
@@ -263,6 +387,52 @@ class task_tracker:
     TASKS_REJECTED_TOTAL = "tasks_rejected_total"
 
 
+class tokio_perf:
+    """Tokio runtime metrics"""
+
+    WORKER_MEAN_POLL_TIME_NS = "worker_mean_poll_time_ns"
+    GLOBAL_QUEUE_DEPTH = "global_queue_depth"
+    BUDGET_FORCED_YIELD_TOTAL = "budget_forced_yield_total"
+    WORKER_BUSY_RATIO = "worker_busy_ratio"
+    WORKER_PARK_COUNT_TOTAL = "worker_park_count_total"
+    WORKER_LOCAL_QUEUE_DEPTH = "worker_local_queue_depth"
+    WORKER_STEAL_COUNT_TOTAL = "worker_steal_count_total"
+    WORKER_OVERFLOW_COUNT_TOTAL = "worker_overflow_count_total"
+    BLOCKING_THREADS = "blocking_threads"
+    BLOCKING_IDLE_THREADS = "blocking_idle_threads"
+    BLOCKING_QUEUE_DEPTH = "blocking_queue_depth"
+    ALIVE_TASKS = "alive_tasks"
+
+
+class transport:
+    """Transport-specific metrics (TCP / NATS)"""
+
+
+class trtllm_additional:
+    """Additional TRT-LLM worker metrics beyond what the engine natively provides."""
+
+    # Total number of aborted/cancelled requests
+    NUM_ABORTED_REQUESTS_TOTAL = "trtllm_num_aborted_requests_total"
+    # Total number of requests containing image content
+    REQUEST_TYPE_IMAGE_TOTAL = "trtllm_request_type_image_total"
+    # Total number of requests using guided/structured decoding
+    REQUEST_TYPE_STRUCTURED_OUTPUT_TOTAL = "trtllm_request_type_structured_output_total"
+    # Total number of successful KV cache transfers
+    KV_TRANSFER_SUCCESS_TOTAL = "trtllm_kv_transfer_success_total"
+    # KV cache transfer latency per request in seconds
+    KV_TRANSFER_LATENCY_SECONDS = "trtllm_kv_transfer_latency_seconds"
+    # KV cache transfer size per request in bytes
+    KV_TRANSFER_BYTES = "trtllm_kv_transfer_bytes"
+    # KV cache transfer speed per request in GB/s
+    KV_TRANSFER_SPEED_GB_S = "trtllm_kv_transfer_speed_gb_s"
+    # Configured maximum number of TRT-LLM KV events buffered before older events are dropped
+    KV_EVENT_BUFFER_CAPACITY = "trtllm_kv_event_buffer_capacity"
+    # Number of TRT-LLM KV events returned to Dynamo in one polling drain
+    KV_EVENT_DRAIN_BATCH_SIZE = "trtllm_kv_event_drain_batch_size"
+    # Total number of missing TRT-LLM KV event IDs detected by Dynamo
+    KV_EVENT_ID_GAP_EVENTS_TOTAL = "trtllm_kv_event_id_gap_events_total"
+
+
 class work_handler:
     """Work handler Prometheus metric names"""
 
@@ -279,5 +449,25 @@ class work_handler:
     REQUEST_DURATION_SECONDS = "request_duration_seconds"
     # Total number of errors in work handler processing
     ERRORS_TOTAL = "errors_total"
+    # Total number of requests cancelled by work handler (client stop/kill or disconnect)
+    CANCELLATION_TOTAL = "cancellation_total"
+    # Network transit: frontend send to backend receive (wall-clock, cross-process)
+    NETWORK_TRANSIT_SECONDS = "network_transit_seconds"
+    # Backend processing: handle_payload entry to first response sent
+    TIME_TO_FIRST_RESPONSE_SECONDS = "time_to_first_response_seconds"
+    # Current items in the bounded work queue awaiting dispatcher pickup (gauge)
+    QUEUE_DEPTH = "queue_depth"
+    # Configured capacity of the bounded work queue (gauge, static)
+    QUEUE_CAPACITY = "queue_capacity"
+    # Total times enqueuing work failed because the dispatcher channel was closed.
+    # tokio bounded mpsc applies backpressure on full — saturation shows up as
+    # rising QUEUE_DEPTH toward QUEUE_CAPACITY.
+    ENQUEUE_REJECTED_TOTAL = "enqueue_rejected_total"
+    # Time spent waiting to acquire a worker-pool permit (histogram)
+    PERMIT_WAIT_SECONDS = "permit_wait_seconds"
+    # Current number of active worker-pool tasks holding a permit (gauge)
+    POOL_ACTIVE_TASKS = "pool_active_tasks"
+    # Configured worker-pool size / total permits (gauge, static)
+    POOL_CAPACITY = "pool_capacity"
     # Label name for error type classification
     ERROR_TYPE_LABEL = "error_type"

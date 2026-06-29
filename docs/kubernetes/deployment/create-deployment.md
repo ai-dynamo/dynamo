@@ -7,6 +7,8 @@ title: Creating Deployments
 The scripts in the `examples/<backend>/launch` folder like [agg.sh](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
 The corresponding YAML files like [agg.yaml](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/agg.yaml) show you how you could create a Kubernetes deployment for your inference graph.
 
+`nvidia.com/v1alpha1` is deprecated in favor of `nvidia.com/v1beta1`. Equivalent v1beta1 manifests are available under each backend's `deploy/v1beta1/` directory.
+
 This guide explains how to create your own deployment files.
 
 ## Step 1: Choose Your Architecture Pattern
@@ -122,7 +124,6 @@ Here's a template structure based on the examples:
 
 ```yaml
     YourWorker:
-      dynamoNamespace: your-namespace
       componentType: worker
       replicas: N
       envFromSecret: your-secrets  # e.g., hf-token-secret
@@ -190,6 +191,21 @@ Each worker will launch `python -m dynamo.YOUR_INFERENCE_BACKEND --model YOUR_MO
      - prefill  # For disaggregated prefill workers
 ```
 
+### Topology Aware Scheduling
+
+You can optionally pack related pods within a topology domain (e.g., rack or block) to reduce inter-node latency, which is especially beneficial for disaggregated serving workloads. Add a `topologyConstraint` at the deployment level, the service level, or both:
+
+```yaml
+spec:
+  topologyConstraint:
+    packDomain: rack
+  services:
+    VllmWorker:
+      # ...
+```
+
+This requires Grove and a `ClusterTopology` CR configured by your cluster admin. For full details, available domains, hierarchy rules, and examples, see **[Topology Aware Scheduling](../topology-aware-scheduling.md)**.
+
 ### Image Pull Secret Configuration
 
 #### Automatic Discovery and Injection
@@ -201,7 +217,6 @@ To disable this behavior for a component and manually control image pull secrets
 
 ```yaml
     YourWorker:
-      dynamoNamespace: your-namespace
       componentType: worker
       annotations:
         nvidia.com/disable-image-pull-secret-discovery: "true"
@@ -210,7 +225,6 @@ To disable this behavior for a component and manually control image pull secrets
 When disabled, you can manually specify secrets as you would for a normal pod spec via:
 ```yaml
     YourWorker:
-      dynamoNamespace: your-namespace
       componentType: worker
       annotations:
         nvidia.com/disable-image-pull-secret-discovery: "true"

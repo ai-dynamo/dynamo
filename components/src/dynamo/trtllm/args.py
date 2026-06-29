@@ -4,6 +4,7 @@
 """Argument parsing and typed config for Dynamo TRT-LLM."""
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -17,10 +18,11 @@ from dynamo.common.configuration.groups.runtime_args import (
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.trtllm.backend_args import DynamoTrtllmArgGroup, DynamoTrtllmConfig
 from dynamo.trtllm.constants import DisaggregationMode, Modality
+from dynamo.trtllm.dynamic_flags import parse_dynamic_flags
 
-DEFAULT_ENDPOINT_COMPONENT = "tensorrt_llm"
+DEFAULT_ENDPOINT_COMPONENT = "backend"
 DEFAULT_PREFILL_COMPONENT = "prefill"
-DEFAULT_ENCODE_COMPONENT = "tensorrt_llm_encode"
+DEFAULT_ENCODE_COMPONENT = "encode"
 DEFAULT_DIFFUSION_COMPONENT = "diffusion"
 DEFAULT_ENDPOINT_NAME = "generate"
 VALID_TRTLLM_CONNECTORS = {"none", "kvbm"}
@@ -29,6 +31,7 @@ VALID_TRTLLM_CONNECTORS = {"none", "kvbm"}
 class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
     component: str
     use_kv_events: bool
+    connector: list[str]  # Redeclare for mypy (inherited from DynamoRuntimeConfig)
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
@@ -69,19 +72,76 @@ def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
-    """Parse command-line arguments for the TensorRT-LLM backend."""
+    """Parse command-line arguments for the TensorRT-LLM backend.
+
+    In addition to the known flags, supports dynamic configuration flags
+    of the form ``--trtllm.<group>.<subgroup>.<key> <value>`` which are
+    collected into a nested dict and passed through ``override_engine_args``.
+    Cannot be combined with the explicit ``--override-engine-args`` flag.
+    """
     cli_args = list(argv) if argv is not None else sys.argv[1:]
 
+    # Deprecated alias: --publish-events-and-metrics maps to --publish-kv-events.
+    # Same for the legacy env var. Both are removed in the next release.
+    if any(
+        a.split("=", 1)[0]
+        in ("--publish-events-and-metrics", "--no-publish-events-and-metrics")
+        for a in cli_args
+    ):
+        import warnings
+
+        warnings.warn(
+            "--publish-events-and-metrics is deprecated; use --publish-kv-events. "
+            "The old flag stays as an alias for one release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    if (
+        "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS" in os.environ
+        and "DYN_TRTLLM_PUBLISH_KV_EVENTS" not in os.environ
+    ):
+        import warnings
+
+        warnings.warn(
+            "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated; use "
+            "DYN_TRTLLM_PUBLISH_KV_EVENTS. The old env var stays as an "
+            "alias for one release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] = os.environ[
+            "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS"
+        ]
+
     parser = argparse.ArgumentParser(
-        description="Dynamo TensorRT-LLM worker configuration",
+        description="Dynamo TensorRT-LLM worker configuration\n\n"
+        "Dynamic engine configuration can be passed via dotted flags:\n"
+        "  --trtllm.<group>.<key> <value>\n"
+        "Example:\n"
+        "  --trtllm.kv_cache_config.free_gpu_memory_fraction 0.7\n"
+        "These flags are mutually exclusive with --override-engine-args.",
         formatter_class=argparse.RawTextHelpFormatter,
     )
 
     DynamoRuntimeArgGroup().add_arguments(parser)
     DynamoTrtllmArgGroup().add_arguments(parser)
 
-    parsed_args = parser.parse_args(cli_args)
+    parsed_args, remaining = parser.parse_known_args(cli_args)
     config = Config.from_cli_args(parsed_args)
+
+    # Parse dynamic --trtllm.* flags from the remaining args
+    dynamic_overrides = parse_dynamic_flags(remaining)
+
+    if dynamic_overrides and config.override_engine_args:
+        logging.error(
+            "--override-engine-args and --trtllm.* dynamic flags are mutually "
+            "exclusive. Use one or the other."
+        )
+        sys.exit(1)
+
+    if dynamic_overrides:
+        config.override_engine_args = json.dumps(dynamic_overrides)
+
     config.validate()
 
     # TODO: move this to common configuration.
@@ -115,7 +175,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
 def _default_endpoint(
     namespace: str, modality: Modality, disaggregation_mode: DisaggregationMode
 ) -> str:
-    if modality == Modality.VIDEO_DIFFUSION:
+    if Modality.is_diffusion(modality):
         component_name = DEFAULT_DIFFUSION_COMPONENT
     elif disaggregation_mode == DisaggregationMode.ENCODE:
         component_name = DEFAULT_ENCODE_COMPONENT

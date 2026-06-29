@@ -2,14 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! LoRA Allocation Algorithms - HRW and Random
+//!
+//! Min-Cost Flow placement is implemented separately in [`McfPlacementSolver`]
+//! and is not yet wired into the per-LoRA allocator path. It is not exposed
+//! as a config value until that integration lands.
 
-use crate::kv_router::protocols::WorkerWithDpRank;
+use dynamo_kv_router::protocols::WorkerWithDpRank;
+use std::collections::HashMap;
 use std::str::FromStr;
 
 pub mod hrw;
+pub mod mcf_allocator;
+pub mod min_cost_flow;
 pub mod table;
 
 pub use hrw::RendezvousHasher;
+pub use mcf_allocator::{McfPlacementResult, McfPlacementSolver, McfSolveParams};
 pub use table::{LoraReplicaConfig, LoraRoutingTable};
 
 /// Trait for LoRA allocation algorithms
@@ -22,11 +30,28 @@ pub trait LoraAllocator: Send + Sync {
         replica_factor: usize,
     ) -> Vec<WorkerWithDpRank>;
 
+    /// Slot-aware variant: walks the ranked list, skipping workers that are at capacity.
+    /// Default implementation falls back to the basic `compute_replica_set`.
+    fn compute_replica_set_with_slots(
+        &self,
+        lora_name: &str,
+        workers: &[WorkerWithDpRank],
+        replica_factor: usize,
+        _worker_slot_usage: &HashMap<WorkerWithDpRank, (usize, usize)>,
+    ) -> Vec<WorkerWithDpRank> {
+        self.compute_replica_set(lora_name, workers, replica_factor)
+    }
+
     /// Name of this algorithm (for logging/metrics)
     fn name(&self) -> &str;
 }
 
-/// Factory for creating allocation algorithms
+/// Per-LoRA allocation algorithm selectable via `DYN_LORA_ALLOCATION_ALGORITHM`.
+///
+/// `MinCostFlow` is intentionally absent: `McfPlacementSolver` operates as a
+/// standalone global solver and has no `LoraAllocator` adapter yet. Accepting
+/// the config string while silently running HRW was misleading; it will be
+/// re-added here once the integration is complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocationAlgorithmType {
     /// Rendezvous (Highest Random Weight) hashing
@@ -42,12 +67,17 @@ impl FromStr for AllocationAlgorithmType {
         match s.to_lowercase().as_str() {
             "hrw" => Ok(Self::Hrw),
             "random" => Ok(Self::Random),
-            _ => Err(format!("Unknown allocation algorithm type: {}", s)),
+            "mcf" | "min_cost_flow" | "mincostflow" => Err(
+                "MCF placement is not yet available as a per-LoRA allocator config value; \
+                 use McfPlacementSolver directly for global MCF placement"
+                    .to_string(),
+            ),
+            _ => Err(format!("Unknown allocation algorithm type: {s}")),
         }
     }
 }
 
-/// Create a LoRA allocation algorithm instance
+/// Create a LoRA allocation algorithm instance.
 pub fn create_lora_allocator(algo_type: AllocationAlgorithmType) -> Box<dyn LoraAllocator> {
     match algo_type {
         AllocationAlgorithmType::Hrw => Box::new(RendezvousHasher),
@@ -85,6 +115,21 @@ mod tests {
 
         let random = create_lora_allocator(AllocationAlgorithmType::Random);
         assert_eq!(random.name(), "random");
+    }
+
+    #[test]
+    fn test_mcf_config_string_is_rejected() {
+        for s in &["mcf", "MCF", "min_cost_flow", "mincostflow"] {
+            let result = AllocationAlgorithmType::from_str(s);
+            assert!(
+                result.is_err(),
+                "'{s}' should be rejected until MCF is wired into the allocator path"
+            );
+            assert!(
+                result.unwrap_err().contains("not yet available"),
+                "error message should explain why mcf is rejected"
+            );
+        }
     }
 
     #[test]

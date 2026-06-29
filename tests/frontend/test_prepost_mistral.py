@@ -12,7 +12,7 @@ import pytest
 
 from .common import check_module_available
 
-HAS_VLLM = check_module_available("vllm")
+HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
 if HAS_VLLM:
     from mistral_common.tokens.tokenizers.base import SpecialTokens
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -39,6 +39,7 @@ else:
 
 pytestmark = [
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,  # "Hardware"
     pytest.mark.pre_merge,  # "Lifecyle"
     pytest.mark.unit,  # "Test Type"
@@ -61,7 +62,15 @@ THINK_END_TOKEN_ID = 8
 class _InnerTokenizer:
     """Mimics the inner ``tokenizer.tokenizer`` accessed by MistralReasoningParser."""
 
+    def get_special_token(self, token):
+        # vLLM 0.17.0 renamed get_control_token -> get_special_token
+        return self._token_lookup(token)
+
     def get_control_token(self, token):
+        # kept for older vLLM compat
+        return self._token_lookup(token)
+
+    def _token_lookup(self, token):
         return {
             SpecialTokens.begin_think: THINK_START_TOKEN_ID,
             SpecialTokens.end_think: THINK_END_TOKEN_ID,
@@ -108,191 +117,135 @@ OUTPUTS_INTERVAL_1 = [
         index=0,
         text="[TOOL_CALLS]",
         token_ids=[9],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="search",
         token_ids=[8928],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="_g",
         token_ids=[11898],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="uten",
         token_ids=[8318],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="berg",
         token_ids=[6415],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="_",
         token_ids=[1095],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="books",
         token_ids=[32493],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="",
         token_ids=[32],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='{"',
         token_ids=[19227],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="search",
         token_ids=[8928],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="_",
         token_ids=[1095],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="terms",
         token_ids=[62244],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='":',
         token_ids=[2811],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=' ["',
         token_ids=[12161],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="James",
         token_ids=[31872],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text=" Joyce",
         token_ids=[58617],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text='"]',
         token_ids=[4964],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="}",
         token_ids=[1125],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
         text="",
         token_ids=[2],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     ),
 ]
 
@@ -307,11 +260,8 @@ OUTPUTS_INTERVAL_20 = [
         index=0,
         text="[TOOL_CALLS]",
         token_ids=[9],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
-        finish_reason=None,
-        stop_reason=None,
     ),
     CompletionOutput(
         index=0,
@@ -337,11 +287,9 @@ OUTPUTS_INTERVAL_20 = [
             1125,
             2,
         ],
-        routed_experts=None,
         cumulative_logprob=None,
         logprobs=None,
         finish_reason="stop",
-        stop_reason=None,
     ),
 ]
 
@@ -537,7 +485,6 @@ def sampling_params():
         prompt_logprobs=None,
         skip_special_tokens=True,
         spaces_between_special_tokens=True,
-        truncate_prompt_tokens=None,
     )
 
 
@@ -650,9 +597,9 @@ def test_mistral_tool_call(processor):
         "[TOOL_CALLS]" not in all_content
     ), f"Raw [TOOL_CALLS] markup leaked into content: {all_content!r}"
 
-    # -- finish reason ------------------------------------------------------
+    # -- finish reason: remaps "stop" → "tool_calls" per openai-openapi.
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["tool_calls"]
 
 
 @pytest.mark.vllm
@@ -706,6 +653,6 @@ def test_mistral_tool_call_interval_20(
         "[TOOL_CALLS]" not in all_content
     ), f"Raw [TOOL_CALLS] markup leaked into content: {all_content!r}"
 
-    # -- finish reason ------------------------------------------------------
+    # -- finish reason: remaps "stop" → "tool_calls" per openai-openapi.
     finish_reasons = [r["finish_reason"] for r in results if r.get("finish_reason")]
-    assert "stop" in finish_reasons
+    assert finish_reasons == ["tool_calls"]

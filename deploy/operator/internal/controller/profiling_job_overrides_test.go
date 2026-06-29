@@ -352,6 +352,152 @@ func TestApplyProfilingJobOverrides_DNSConfigAndPolicy(t *testing.T) {
 	}
 }
 
+func TestApplyProfilingJobOverrides_TerminationGracePeriodSeconds(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				TerminationGracePeriodSeconds: ptr.To[int64](120),
+			},
+		},
+	})
+	if job.Spec.Template.Spec.TerminationGracePeriodSeconds == nil || *job.Spec.Template.Spec.TerminationGracePeriodSeconds != 120 {
+		t.Errorf("expected TerminationGracePeriodSeconds=120, got %v", job.Spec.Template.Spec.TerminationGracePeriodSeconds)
+	}
+}
+
+func TestApplyProfilingJobOverrides_TopologySpreadConstraints(t *testing.T) {
+	job := baseJob()
+	tsc := []corev1.TopologySpreadConstraint{
+		{
+			MaxSkew:           1,
+			TopologyKey:       "kubernetes.io/hostname",
+			WhenUnsatisfiable: corev1.DoNotSchedule,
+		},
+	}
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				TopologySpreadConstraints: tsc,
+			},
+		},
+	})
+	if len(job.Spec.Template.Spec.TopologySpreadConstraints) != 1 {
+		t.Error("topologySpreadConstraints not applied")
+	}
+}
+
+func TestApplyProfilingJobOverrides_AutomountServiceAccountToken(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				AutomountServiceAccountToken: ptr.To(false),
+			},
+		},
+	})
+	if job.Spec.Template.Spec.AutomountServiceAccountToken == nil || *job.Spec.Template.Spec.AutomountServiceAccountToken != false {
+		t.Error("expected AutomountServiceAccountToken=false")
+	}
+}
+
+func TestEnsureOutputCopierKubeAPIAccess_AutomountServiceAccountTokenFalse(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				AutomountServiceAccountToken: ptr.To(false),
+			},
+		},
+	})
+	ensureOutputCopierKubeAPIAccess(job)
+
+	spec := job.Spec.Template.Spec
+	tokenVolume := findVolume(spec.Volumes, VolumeNameOutputCopierKubeAPIAccess)
+	if tokenVolume == nil {
+		t.Fatal("expected output-copier kube API access volume")
+	}
+	if tokenVolume.Projected == nil {
+		t.Fatal("expected output-copier kube API access volume to be projected")
+	}
+	if len(tokenVolume.Projected.Sources) != 3 {
+		t.Fatalf("expected service account token, root CA, and namespace projections, got %d", len(tokenVolume.Projected.Sources))
+	}
+	if tokenVolume.Projected.Sources[0].ServiceAccountToken == nil {
+		t.Error("expected service account token projection")
+	}
+	if tokenVolume.Projected.Sources[1].ConfigMap == nil || tokenVolume.Projected.Sources[1].ConfigMap.Name != ConfigMapNameKubeRootCA {
+		t.Error("expected kube root CA ConfigMap projection")
+	}
+	if tokenVolume.Projected.Sources[2].DownwardAPI == nil {
+		t.Error("expected namespace DownwardAPI projection")
+	}
+
+	profiler := findContainer(spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("expected profiler container")
+	}
+	if findOutputCopierKubeAPIAccessMount(profiler.VolumeMounts) != nil {
+		t.Error("profiler should not mount output-copier kube API access token")
+	}
+
+	sidecar := findContainer(spec.Containers, ContainerNameOutputCopier)
+	if sidecar == nil {
+		t.Fatal("expected output-copier container")
+	}
+	sidecarMount := findOutputCopierKubeAPIAccessMount(sidecar.VolumeMounts)
+	if sidecarMount == nil {
+		t.Fatal("expected output-copier kube API access token mount")
+	}
+	if sidecarMount.MountPath != ServiceAccountTokenPath || !sidecarMount.ReadOnly {
+		t.Errorf("unexpected sidecar token mount: %+v", *sidecarMount)
+	}
+}
+
+func TestEnsureOutputCopierKubeAPIAccess_ProtectsTokenVolumeFromOverrides(t *testing.T) {
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				AutomountServiceAccountToken: ptr.To(false),
+				Volumes: []corev1.Volume{{
+					Name:         VolumeNameOutputCopierKubeAPIAccess,
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}},
+				}},
+				Containers: []corev1.Container{{
+					VolumeMounts: []corev1.VolumeMount{{
+						Name:      VolumeNameOutputCopierKubeAPIAccess,
+						MountPath: "/unexpected-token",
+					}},
+				}},
+			},
+		},
+	})
+	ensureOutputCopierKubeAPIAccess(job)
+
+	spec := job.Spec.Template.Spec
+	tokenVolume := findVolume(spec.Volumes, VolumeNameOutputCopierKubeAPIAccess)
+	if tokenVolume == nil || tokenVolume.Projected == nil {
+		t.Fatalf("expected protected volume to be restored as projected volume, got %+v", tokenVolume)
+	}
+
+	profiler := findContainer(spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("expected profiler container")
+	}
+	if findOutputCopierKubeAPIAccessMount(profiler.VolumeMounts) != nil {
+		t.Error("profiler should not retain a mount for the protected output-copier token volume")
+	}
+
+	sidecar := findContainer(spec.Containers, ContainerNameOutputCopier)
+	if sidecar == nil {
+		t.Fatal("expected output-copier container")
+	}
+	if mount := findOutputCopierKubeAPIAccessMount(sidecar.VolumeMounts); mount == nil || mount.MountPath != ServiceAccountTokenPath {
+		t.Errorf("expected output-copier to mount protected token volume at %s, got %+v", ServiceAccountTokenPath, mount)
+	}
+}
+
 func TestApplyProfilingJobOverrides_VolumesDedup(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
@@ -566,6 +712,42 @@ func TestApplyProfilingJobOverrides_ContainerSecurityContext(t *testing.T) {
 	}
 }
 
+func TestApplyProfilingJobOverrides_PodSecurityContext(t *testing.T) {
+	job := baseJob()
+	// Seed a default pod-level security context (mimics what the controller sets).
+	job.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
+		RunAsNonRoot: ptr.To(true),
+		RunAsUser:    ptr.To[int64](1000),
+		RunAsGroup:   ptr.To[int64](1000),
+		FSGroup:      ptr.To[int64](1000),
+	}
+	override := &corev1.PodSecurityContext{
+		RunAsNonRoot: ptr.To(false),
+	}
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				SecurityContext: override,
+			},
+		},
+	})
+	got := job.Spec.Template.Spec.SecurityContext
+	if got == nil {
+		t.Fatal("pod securityContext is nil after override")
+	}
+	// User override wins: RunAsNonRoot should be false.
+	if got.RunAsNonRoot == nil || *got.RunAsNonRoot != false {
+		t.Errorf("expected RunAsNonRoot=false, got %v", got.RunAsNonRoot)
+	}
+	// Controller defaults preserved for fields not specified in the override.
+	if got.RunAsUser == nil || *got.RunAsUser != 1000 {
+		t.Errorf("expected RunAsUser=1000 (controller default preserved), got %v", got.RunAsUser)
+	}
+	if got.FSGroup == nil || *got.FSGroup != 1000 {
+		t.Errorf("expected FSGroup=1000 (controller default preserved), got %v", got.FSGroup)
+	}
+}
+
 func TestApplyProfilingJobOverrides_CommandAndArgsPreserved(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
@@ -743,4 +925,31 @@ func TestMergeNamedSlice_PreservesOrder(t *testing.T) {
 	if result[1].Value != "override" {
 		t.Errorf("A not overridden: %s", result[1].Value)
 	}
+}
+
+func findContainer(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
+}
+
+func findVolume(volumes []corev1.Volume, name string) *corev1.Volume {
+	for i := range volumes {
+		if volumes[i].Name == name {
+			return &volumes[i]
+		}
+	}
+	return nil
+}
+
+func findOutputCopierKubeAPIAccessMount(mounts []corev1.VolumeMount) *corev1.VolumeMount {
+	for i := range mounts {
+		if mounts[i].Name == VolumeNameOutputCopierKubeAPIAccess {
+			return &mounts[i]
+		}
+	}
+	return nil
 }

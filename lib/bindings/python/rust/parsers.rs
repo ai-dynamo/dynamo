@@ -5,7 +5,7 @@ use dynamo_parsers::reasoning::get_available_reasoning_parsers;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
 use pyo3::prelude::*;
 
-/// Get list of available  parser names
+/// Get list of available tool parser names
 #[pyfunction]
 pub fn get_tool_parser_names() -> Vec<&'static str> {
     get_available_tool_parsers()

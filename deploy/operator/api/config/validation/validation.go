@@ -37,10 +37,10 @@ func ValidateOperatorConfiguration(config *configv1alpha1.OperatorConfiguration)
 	allErrs = append(allErrs, validateMPI(&config.MPI, field.NewPath("mpi"))...)
 	allErrs = append(allErrs, validateInfrastructure(&config.Infrastructure, field.NewPath("infrastructure"))...)
 	allErrs = append(allErrs, validateDiscovery(&config.Discovery, field.NewPath("discovery"))...)
-	allErrs = append(allErrs, validateCheckpoint(&config.Checkpoint, field.NewPath("checkpoint"))...)
 	allErrs = append(allErrs, validateRBAC(config)...)
 	allErrs = append(allErrs, validateOrchestrators(&config.Orchestrators, field.NewPath("orchestrators"))...)
 	allErrs = append(allErrs, validateIngress(&config.Ingress, field.NewPath("ingress"))...)
+	allErrs = append(allErrs, validateServiceMesh(&config.ServiceMesh, field.NewPath("serviceMesh"))...)
 
 	return allErrs
 }
@@ -127,33 +127,6 @@ func validateDiscovery(discovery *configv1alpha1.DiscoveryConfiguration, fldPath
 	return allErrs
 }
 
-func validateCheckpoint(checkpoint *configv1alpha1.CheckpointConfiguration, fldPath *field.Path) field.ErrorList {
-	allErrs := field.ErrorList{}
-
-	if !checkpoint.Enabled {
-		return allErrs
-	}
-
-	storagePath := fldPath.Child("storage")
-	switch checkpoint.Storage.Type {
-	case configv1alpha1.CheckpointStorageTypePVC:
-		// PVC is the default, no additional required fields
-	case configv1alpha1.CheckpointStorageTypeS3:
-		if checkpoint.Storage.S3.URI == "" {
-			allErrs = append(allErrs, field.Required(storagePath.Child("s3", "uri"), "S3 URI is required when storage type is s3"))
-		}
-	case configv1alpha1.CheckpointStorageTypeOCI:
-		if checkpoint.Storage.OCI.URI == "" {
-			allErrs = append(allErrs, field.Required(storagePath.Child("oci", "uri"), "OCI URI is required when storage type is oci"))
-		}
-	default:
-		allErrs = append(allErrs, field.NotSupported(storagePath.Child("type"), checkpoint.Storage.Type,
-			[]string{configv1alpha1.CheckpointStorageTypePVC, configv1alpha1.CheckpointStorageTypeS3, configv1alpha1.CheckpointStorageTypeOCI}))
-	}
-
-	return allErrs
-}
-
 // validateRBAC is mode-aware: validates RBAC fields based on namespace mode.
 func validateRBAC(config *configv1alpha1.OperatorConfiguration) field.ErrorList {
 	allErrs := field.ErrorList{}
@@ -192,4 +165,60 @@ func validateIngress(ingress *configv1alpha1.IngressConfiguration, fldPath *fiel
 	_ = fldPath
 	_ = ingress
 	return nil
+}
+
+// validateServiceMesh validates the service mesh configuration. The most
+// important guard is that "MUTUAL" TLS mode requires a client certificate and
+// private key (and optionally a CA certificates file); without them Istio's
+// validation webhook rejects the EPP DestinationRule and the operator can
+// never finish reconciling the DGD.
+func validateServiceMesh(sm *configv1alpha1.ServiceMeshConfiguration, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	if !sm.IsEnabled() {
+		return allErrs
+	}
+
+	// IsEnabled() only checks Provider. If the user set provider="istio" but
+	// omitted the istio block, the controller still treats the mesh as
+	// enabled and GenerateEPPDestinationRule (graph.go) silently emits a
+	// stub DestinationRule with no Host/TrafficPolicy — useless and
+	// confusing. Fail fast here instead of letting reconcile proceed with
+	// an incomplete mesh config. Defaulting normally populates this block,
+	// but validation must not depend on the defaulter having run (e.g.,
+	// hand-written configs, programmatic loaders).
+	istioPath := fldPath.Child("istio")
+	if sm.Istio == nil {
+		allErrs = append(allErrs, field.Required(
+			istioPath,
+			`istio configuration is required when serviceMesh.provider is "istio"`,
+		))
+		return allErrs
+	}
+
+	switch sm.Istio.TLSMode {
+	case "", "SIMPLE", "DISABLE", "ISTIO_MUTUAL":
+		// No additional fields required.
+	case "MUTUAL":
+		if sm.Istio.ClientCertificate == "" {
+			allErrs = append(allErrs, field.Required(
+				istioPath.Child("clientCertificate"),
+				`clientCertificate is required when tlsMode is "MUTUAL"`,
+			))
+		}
+		if sm.Istio.PrivateKey == "" {
+			allErrs = append(allErrs, field.Required(
+				istioPath.Child("privateKey"),
+				`privateKey is required when tlsMode is "MUTUAL"`,
+			))
+		}
+	default:
+		allErrs = append(allErrs, field.NotSupported(
+			istioPath.Child("tlsMode"),
+			sm.Istio.TLSMode,
+			[]string{"DISABLE", "SIMPLE", "ISTIO_MUTUAL", "MUTUAL"},
+		))
+	}
+
+	return allErrs
 }

@@ -2,22 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::handle::AuditRecord;
-use std::sync::OnceLock;
+use crate::telemetry::bus::TelemetryBus;
 use tokio::sync::broadcast;
 
-static BUS: OnceLock<broadcast::Sender<AuditRecord>> = OnceLock::new();
+static BUS: TelemetryBus<AuditRecord> = TelemetryBus::new();
 
 pub fn init(capacity: usize) {
-    let (tx, _rx) = broadcast::channel::<AuditRecord>(capacity);
-    let _ = BUS.set(tx);
+    BUS.init(capacity);
 }
 
 pub fn subscribe() -> broadcast::Receiver<AuditRecord> {
-    BUS.get().expect("audit bus not initialized").subscribe()
+    BUS.subscribe()
 }
 
 pub fn publish(rec: AuditRecord) {
-    if let Some(tx) = BUS.get() {
-        let _ = tx.send(rec);
-    }
+    BUS.publish(rec);
 }

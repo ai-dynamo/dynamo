@@ -41,7 +41,7 @@ use crate::discovery::{
     Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport,
 };
 use crate::traits::DistributedRuntimeProvider;
-use crate::utils::ip_resolver::get_local_ip_for_advertise;
+use crate::utils::local_ip_for_advertise;
 
 /// Scope of the event plane - determines the subject prefix for pub/sub.
 #[derive(Debug, Clone)]
@@ -278,12 +278,13 @@ impl Stream for DeduplicatingStream {
 /// Event publisher for a specific topic.
 pub struct EventPublisher {
     transport_kind: EventTransportKind,
-    scope: EventScope,
     topic: String,
+    subject: String,
     publisher_id: u64,
     sequence: AtomicU64,
     tx: Arc<dyn EventTransportTx>,
     codec: Arc<Codec>,
+    runtime_handle: tokio::runtime::Handle,
     /// Discovery client and registered instance for unregistration on drop
     discovery_client: Option<Arc<dyn Discovery>>,
     discovery_instance: Option<crate::discovery::DiscoveryInstance>,
@@ -291,9 +292,15 @@ pub struct EventPublisher {
 
 impl EventPublisher {
     /// Create a publisher for a component-scoped topic.
+    ///
+    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
+    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
+    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// Use [`for_component_with_transport`](Self::for_component_with_transport) to
+    /// override explicitly.
     pub async fn for_component(comp: &Component, topic: impl Into<String>) -> Result<Self> {
-        Self::for_component_with_transport(comp, topic, EventTransportKind::from_env_or_default())
-            .await
+        let transport_kind = comp.drt().default_event_transport_kind();
+        Self::for_component_with_transport(comp, topic, transport_kind).await
     }
 
     /// Create a publisher with explicit transport.
@@ -311,9 +318,15 @@ impl EventPublisher {
     }
 
     /// Create a publisher for a namespace-scoped topic.
+    ///
+    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
+    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
+    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// Use [`for_namespace_with_transport`](Self::for_namespace_with_transport) to
+    /// override explicitly.
     pub async fn for_namespace(ns: &Namespace, topic: impl Into<String>) -> Result<Self> {
-        Self::for_namespace_with_transport(ns, topic, EventTransportKind::from_env_or_default())
-            .await
+        let transport_kind = ns.drt().default_event_transport_kind();
+        Self::for_namespace_with_transport(ns, topic, transport_kind).await
     }
 
     /// Create a namespace publisher with explicit transport.
@@ -335,6 +348,8 @@ impl EventPublisher {
     ) -> Result<Self> {
         let publisher_id = drt.discovery().instance_id();
         let discovery = Some(drt.discovery());
+        let runtime_handle = drt.runtime().secondary();
+        let subject = format!("{}.{}", scope.subject_prefix(), topic);
 
         // Use Msgpack codec for all transports
         enum TransportSetup {
@@ -345,7 +360,10 @@ impl EventPublisher {
 
         let transport_setup = match transport_kind {
             EventTransportKind::Nats => {
-                let transport = Arc::new(nats_transport::NatsTransport::new(drt.clone()));
+                let transport = Arc::new(nats_transport::NatsTransport::new_publisher(
+                    drt.clone(),
+                    subject.clone(),
+                ));
                 let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
                 TransportSetup::Nats(transport as Arc<dyn EventTransportTx>, codec)
             }
@@ -395,7 +413,7 @@ impl EventPublisher {
                         .next()
                         .and_then(|s| s.parse().ok())
                         .expect("Failed to parse port from bind endpoint");
-                    let local_ip = get_local_ip_for_advertise();
+                    let local_ip = local_ip_for_advertise();
                     let public_endpoint = format!("tcp://{}:{}", local_ip, actual_port);
 
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
@@ -458,12 +476,13 @@ impl EventPublisher {
 
         Ok(Self {
             transport_kind,
-            scope,
             topic,
+            subject,
             publisher_id,
             sequence: AtomicU64::new(0),
             tx,
             codec,
+            runtime_handle,
             discovery_client: discovery,
             discovery_instance,
         })
@@ -472,23 +491,25 @@ impl EventPublisher {
     /// Publish a serializable event.
     pub async fn publish<T: Serialize + Send + Sync>(&self, event: &T) -> Result<()> {
         let payload = self.codec.encode_payload(event)?;
-        self.publish_bytes(payload.to_vec()).await
+        self.publish_bytes_ref(payload.as_ref()).await
     }
 
     /// Publish raw bytes.
     pub async fn publish_bytes(&self, bytes: Vec<u8>) -> Result<()> {
-        let envelope = EventEnvelope {
-            publisher_id: self.publisher_id,
-            sequence: self.sequence.fetch_add(1, Ordering::SeqCst),
-            published_at: current_timestamp_ms(),
-            topic: self.topic.clone(),
-            payload: Bytes::from(bytes),
-        };
+        self.publish_bytes_ref(&bytes).await
+    }
 
-        let envelope_bytes = self.codec.encode_envelope(&envelope)?;
-        let subject = format!("{}.{}", self.scope.subject_prefix(), self.topic);
+    /// Publish raw bytes without taking ownership of the payload buffer.
+    pub async fn publish_bytes_ref(&self, bytes: &[u8]) -> Result<()> {
+        let envelope_bytes = self.codec.encode_envelope_parts(
+            self.publisher_id,
+            self.sequence.fetch_add(1, Ordering::SeqCst),
+            current_timestamp_ms(),
+            &self.topic,
+            bytes,
+        )?;
 
-        self.tx.publish(&subject, envelope_bytes).await
+        self.tx.publish(&self.subject, envelope_bytes).await
     }
 
     /// Get the publisher ID.
@@ -515,27 +536,39 @@ impl Drop for EventPublisher {
         {
             let topic = self.topic.clone();
             let instance_id = instance.instance_id();
+            let runtime_handle = self.runtime_handle.clone();
 
-            // Spawn background task for async unregister since Drop is sync
-            tokio::spawn(async move {
-                match discovery.unregister(instance).await {
-                    Ok(()) => {
-                        tracing::info!(
-                            topic = %topic,
-                            instance_id = %instance_id,
-                            "EventPublisher unregistered from discovery"
-                        );
+            // Drop can run outside any Tokio context (notably via PyO3 finalizers), so use
+            // the runtime that created the publisher rather than the ambient thread state.
+            let spawn_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                runtime_handle.spawn(async move {
+                    match discovery.unregister(instance).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                topic = %topic,
+                                instance_id = %instance_id,
+                                "EventPublisher unregistered from discovery"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                topic = %topic,
+                                instance_id = %instance_id,
+                                error = %e,
+                                "Failed to unregister EventPublisher from discovery"
+                            );
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            topic = %topic,
-                            instance_id = %instance_id,
-                            error = %e,
-                            "Failed to unregister EventPublisher from discovery"
-                        );
-                    }
-                }
-            });
+                });
+            }));
+
+            if spawn_result.is_err() {
+                tracing::warn!(
+                    topic = %self.topic,
+                    instance_id = %instance_id,
+                    "Skipping EventPublisher unregister during drop because the runtime is unavailable"
+                );
+            }
         }
     }
 }
@@ -552,9 +585,15 @@ pub struct EventSubscriber {
 
 impl EventSubscriber {
     /// Create a subscriber for a component-scoped topic.
+    ///
+    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
+    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
+    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// Use [`for_component_with_transport`](Self::for_component_with_transport) to
+    /// override explicitly.
     pub async fn for_component(comp: &Component, topic: impl Into<String>) -> Result<Self> {
-        Self::for_component_with_transport(comp, topic, EventTransportKind::from_env_or_default())
-            .await
+        let transport_kind = comp.drt().default_event_transport_kind();
+        Self::for_component_with_transport(comp, topic, transport_kind).await
     }
 
     /// Create a subscriber with explicit transport.
@@ -572,9 +611,15 @@ impl EventSubscriber {
     }
 
     /// Create a subscriber for a namespace-scoped topic.
+    ///
+    /// The event transport is chosen automatically: if `DYN_EVENT_PLANE` is set that
+    /// value is used; otherwise the runtime's default is used (ZMQ for local backends
+    /// such as `file`/`mem`, NATS for distributed backends such as `etcd`/`kubernetes`).
+    /// Use [`for_namespace_with_transport`](Self::for_namespace_with_transport) to
+    /// override explicitly.
     pub async fn for_namespace(ns: &Namespace, topic: impl Into<String>) -> Result<Self> {
-        Self::for_namespace_with_transport(ns, topic, EventTransportKind::from_env_or_default())
-            .await
+        let transport_kind = ns.drt().default_event_transport_kind();
+        Self::for_namespace_with_transport(ns, topic, transport_kind).await
     }
 
     /// Create a namespace subscriber with explicit transport.
@@ -731,13 +776,21 @@ pub struct TypedEventSubscriber<T> {
 impl<T: DeserializeOwned + Send + 'static> TypedEventSubscriber<T> {
     /// Get the next typed event with its envelope.
     pub async fn next(&mut self) -> Option<Result<(EventEnvelope, T)>> {
-        let envelope = self.stream.next().await?;
-        match envelope {
-            Ok(env) => match self.codec.decode_payload(&env.payload) {
-                Ok(typed) => Some(Ok((env, typed))),
-                Err(e) => Some(Err(e)),
-            },
-            Err(e) => Some(Err(e)),
+        std::future::poll_fn(|cx| self.poll_next(cx)).await
+    }
+
+    /// Poll for the next typed event.
+    pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<(EventEnvelope, T)>>> {
+        match self.stream.as_mut().poll_next(cx) {
+            Poll::Ready(Some(envelope)) => Poll::Ready(Some(match envelope {
+                Ok(env) => match self.codec.decode_payload(&env.payload) {
+                    Ok(typed) => Ok((env, typed)),
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            })),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
     }
 }

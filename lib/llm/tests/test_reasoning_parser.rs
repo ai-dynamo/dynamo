@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_async_openai::types::{
-    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta, Role,
-};
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_protocols::types::{
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta, Role,
+};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{StreamExt, stream};
 
@@ -34,20 +34,22 @@ fn create_mock_response_chunk(
             reasoning_content,
         },
         finish_reason: None,
-        stop_reason: None,
         logprobs: None,
     };
 
     let response = NvCreateChatCompletionStreamResponse {
-        id: "test-id".to_string(),
-        choices: vec![choice],
-        created: 1234567890,
-        model: "test-model".to_string(),
-        system_fingerprint: Some("test-fingerprint".to_string()),
-        object: "chat.completion.chunk".to_string(),
-        usage: None,
-        service_tier: None,
+        inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices: vec![choice],
+            created: 1234567890,
+            model: "test-model".to_string(),
+            system_fingerprint: Some("test-fingerprint".to_string()),
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+        },
         nvext: None,
+        llm_metrics: None,
     };
 
     Annotated {
@@ -118,13 +120,14 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             stream::iter(chunks),
             parser.to_string(),
+            false,
         );
         let mut output_stream = std::pin::pin!(output_stream);
         let mut all_reasoning = String::new();
         let mut all_content = String::new();
         while let Some(item) = output_stream.next().await {
             if let Some(ref data) = item.data {
-                for choice in &data.choices {
+                for choice in &data.inner.choices {
                     if let Some(ref r) = choice.delta.reasoning_content {
                         all_reasoning.push_str(r);
                     }
@@ -162,6 +165,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             runtime_config.reasoning_parser.unwrap(),
+            false,
         );
 
         // Pin the stream and collect all output chunks
@@ -175,15 +179,15 @@ mod tests {
         assert_eq!(output_chunks.len(), 3);
 
         // Chunk 0: "<think>This"
-        let output_choice_0 = &output_chunks[0].data.as_ref().unwrap().choices[0];
+        let output_choice_0 = &output_chunks[0].data.as_ref().unwrap().inner.choices[0];
         assert_choice(output_choice_0, None, Some("This"));
 
         // Chunk 1: " is reasoning content"
-        let output_choice_1 = &output_chunks[1].data.as_ref().unwrap().choices[0];
+        let output_choice_1 = &output_chunks[1].data.as_ref().unwrap().inner.choices[0];
         assert_choice(output_choice_1, None, Some(" is reasoning content"));
 
         // Chunk 2: "</think> Here's my answer."
-        let output_choice_2 = &output_chunks[2].data.as_ref().unwrap().choices[0];
+        let output_choice_2 = &output_chunks[2].data.as_ref().unwrap().inner.choices[0];
         assert_choice(output_choice_2, Some(" Here's my answer."), None);
     }
 
@@ -207,6 +211,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             runtime_config.reasoning_parser.unwrap(),
+            false,
         );
 
         // Pin the stream and collect all output chunks
@@ -220,15 +225,15 @@ mod tests {
         assert_eq!(output_chunks.len(), 3);
 
         // Chunk 0: "<think>Only"
-        let output_choice_0 = &output_chunks[0].data.as_ref().unwrap().choices[0];
+        let output_choice_0 = &output_chunks[0].data.as_ref().unwrap().inner.choices[0];
         assert_choice(output_choice_0, None, Some("Only"));
 
         // Chunk 1: " reasoning"
-        let output_choice_1 = &output_chunks[1].data.as_ref().unwrap().choices[0];
+        let output_choice_1 = &output_chunks[1].data.as_ref().unwrap().inner.choices[0];
         assert_choice(output_choice_1, None, Some(" reasoning"));
 
         // Chunk 2: " here</think>"
-        let output_choice_2 = &output_chunks[2].data.as_ref().unwrap().choices[0];
+        let output_choice_2 = &output_chunks[2].data.as_ref().unwrap().inner.choices[0];
         assert_choice(output_choice_2, None, Some(" here"));
     }
 
@@ -251,6 +256,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             runtime_config.reasoning_parser.unwrap(),
+            false,
         );
 
         // Pin the stream and collect all output chunks
@@ -262,7 +268,7 @@ mod tests {
 
         // Verify that only normal content is present
         assert_eq!(output_chunks.len(), 1);
-        let output_choice = &output_chunks[0].data.as_ref().unwrap().choices[0];
+        let output_choice = &output_chunks[0].data.as_ref().unwrap().inner.choices[0];
         assert_choice(
             output_choice,
             Some("Just normal text without reasoning tags."),
@@ -286,6 +292,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             runtime_config.reasoning_parser.unwrap(),
+            false,
         );
 
         // Pin the stream and collect all output chunks
@@ -299,8 +306,8 @@ mod tests {
         assert_eq!(output_chunks.len(), input_chunks.len());
 
         for (input, output) in input_chunks.iter().zip(output_chunks.iter()) {
-            let input_choice = &input.data.as_ref().unwrap().choices[0];
-            let output_choice = &output.data.as_ref().unwrap().choices[0];
+            let input_choice = &input.data.as_ref().unwrap().inner.choices[0];
+            let output_choice = &output.data.as_ref().unwrap().inner.choices[0];
             assert_choice(
                 output_choice,
                 input_choice.delta.content.as_ref().map(get_text),
@@ -328,6 +335,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             runtime_config.reasoning_parser.unwrap(),
+            false,
         );
 
         // Pin the stream and collect all output chunks
@@ -339,7 +347,7 @@ mod tests {
 
         // Verify that Mistral-style reasoning is parsed correctly
         assert_eq!(output_chunks.len(), 1);
-        let output_choice = &output_chunks[0].data.as_ref().unwrap().choices[0];
+        let output_choice = &output_chunks[0].data.as_ref().unwrap().inner.choices[0];
 
         assert!(
             output_choice.delta.reasoning_content.is_some(),
@@ -397,6 +405,7 @@ mod tests {
         let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             "gpt_oss".to_string(),
+            false,
         );
 
         // Pin the stream and collect all output chunks
@@ -415,7 +424,7 @@ mod tests {
 
         for chunk in output_chunks.iter() {
             if let Some(ref response_data) = chunk.data {
-                for choice in &response_data.choices {
+                for choice in &response_data.inner.choices {
                     // Collect reasoning content
                     if let Some(ref reasoning) = choice.delta.reasoning_content {
                         all_reasoning.push_str(reasoning);
@@ -537,6 +546,7 @@ mod tests {
         let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             "nemotron_deci".to_string(),
+            false,
         );
 
         // Step 2: Apply tool calling jail transformation
@@ -544,6 +554,7 @@ mod tests {
             Some("nemotron_deci".to_string()),
             None, // No tool_choice in this test
             None, // No tool_definitions in this test
+            false,
             reasoning_parsed_stream,
         );
 
@@ -566,7 +577,7 @@ mod tests {
 
         for chunk in output_chunks.iter() {
             if let Some(ref response_data) = chunk.data {
-                for choice in &response_data.choices {
+                for choice in &response_data.inner.choices {
                     // Collect reasoning content
                     if let Some(ref reasoning) = choice.delta.reasoning_content {
                         all_reasoning.push_str(reasoning);
@@ -650,6 +661,7 @@ mod tests {
         let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             "kimi_k25".to_string(),
+            false,
         );
 
         // Step 2: tool calling jail (kimi_k2) extracts tool calls from remaining content
@@ -657,6 +669,7 @@ mod tests {
             Some("kimi_k2".to_string()),
             None,
             None,
+            false,
             reasoning_parsed_stream,
         );
 
@@ -676,7 +689,7 @@ mod tests {
 
         for chunk in output_chunks.iter() {
             if let Some(ref data) = chunk.data {
-                for choice in &data.choices {
+                for choice in &data.inner.choices {
                     if let Some(ref r) = choice.delta.reasoning_content {
                         all_reasoning.push_str(r);
                     }
@@ -741,6 +754,7 @@ mod tests {
         let reasoning_parsed_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
             input_stream,
             "gpt_oss".to_string(),
+            false,
         );
 
         let mut debug_stream = std::pin::pin!(reasoning_parsed_stream);
@@ -755,6 +769,7 @@ mod tests {
             Some("harmony".to_string()),
             None, // No tool_choice in this test
             None, // No tool_definitions in this test
+            false,
             reasoning_parsed_stream,
         );
 
@@ -772,7 +787,7 @@ mod tests {
 
         for chunk in output_chunks.iter() {
             if let Some(ref response_data) = chunk.data {
-                for choice in &response_data.choices {
+                for choice in &response_data.inner.choices {
                     if let Some(ref reasoning) = choice.delta.reasoning_content {
                         all_reasoning.push_str(reasoning);
                     }
@@ -794,5 +809,99 @@ mod tests {
         );
         assert!(all_normal_content.contains("I'll check the weather for you"));
         assert!(found_tool_calls, "Should have found tool calls");
+    }
+
+    /// Run chunks through a reasoning parser with `prompt_injected_reasoning=true`.
+    /// Mirrors `run_parser` but anchors the parser in reasoning mode from the
+    /// first chunk — used to simulate post-tool-call assistant turns where the
+    /// chat template seeded `<think>` so the model's stream begins mid-reasoning
+    /// without an explicit opening tag.
+    async fn run_parser_with_injected_reasoning(
+        chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>>,
+        parser: &str,
+    ) -> (String, String) {
+        let output_stream = OpenAIPreprocessor::parse_reasoning_content_from_stream(
+            stream::iter(chunks),
+            parser.to_string(),
+            true,
+        );
+        let mut output_stream = std::pin::pin!(output_stream);
+        let mut all_reasoning = String::new();
+        let mut all_content = String::new();
+        while let Some(item) = output_stream.next().await {
+            if let Some(ref data) = item.data {
+                for choice in &data.inner.choices {
+                    if let Some(ref r) = choice.delta.reasoning_content {
+                        all_reasoning.push_str(r);
+                    }
+                    if let Some(ref c) = choice.delta.content {
+                        all_content.push_str(get_text(c));
+                    }
+                }
+            }
+        }
+        (all_reasoning, all_content)
+    }
+
+    /// Regression test for the `</think>` leak observed against
+    /// `deepseek-ai/DeepSeek-V4-Pro` on tool-continuation turns.
+    ///
+    /// On the assistant turn that follows a `tool` message, the V4 chat
+    /// template seeds `<think>` after the merged user turn. The model
+    /// re-enters reasoning, emits `<reasoning></think><answer>` as a single
+    /// content stream, and the gateway is supposed to extract reasoning
+    /// into `reasoning_content` and place the answer in `content`.
+    ///
+    /// Bug surface: `OpenAIPreprocessor::postprocessor_parsing_stream`
+    /// previously cleared `prompt_injected_reasoning` whenever the last
+    /// request message was a tool result. That left the non-force
+    /// deepseek_v4 parser in normal mode: it never saw an opening `<think>`
+    /// (the template emitted it), so the `</think>` token was treated as
+    /// plain text and the entire stream flowed into `content`.
+    ///
+    /// This test pins the contract at the parser layer: when started with
+    /// `prompt_injected_reasoning=true`, the `</think>` token must be
+    /// consumed and the answer routed to `content`.
+    #[tokio::test]
+    async fn test_reasoning_parser_deepseek_v4_post_tool_with_prompt_injected_reasoning() {
+        // Exactly the shape we observed on the wire from the gateway: no
+        // opening `<think>` (template emitted it), reasoning text, closing
+        // `</think>`, then the user-facing answer.
+        let chunks = vec![
+            chunk("The script ran successfully and printed \"Hello, world!\"."),
+            chunk("</think>"),
+            chunk("Done. Created `/tmp/hello.py` and ran it — output: `Hello, world!`"),
+        ];
+
+        let (reasoning, content) = run_parser_with_injected_reasoning(chunks, "deepseek_v4").await;
+
+        assert_eq!(
+            reasoning, "The script ran successfully and printed \"Hello, world!\".",
+            "pre-`</think>` text must be captured as reasoning_content",
+        );
+        assert_eq!(
+            content, "Done. Created `/tmp/hello.py` and ran it — output: `Hello, world!`",
+            "post-`</think>` text must be captured as content",
+        );
+        assert!(
+            !content.contains("</think>"),
+            "literal `</think>` token must not leak into content; got: {content:?}",
+        );
+    }
+
+    /// Same scenario as above, fragmented across the `</think>` boundary in
+    /// a single chunk — guards against the parser only working when the
+    /// closing tag arrives in its own chunk.
+    #[tokio::test]
+    async fn test_reasoning_parser_deepseek_v4_post_tool_split_across_close_tag() {
+        let chunks = vec![chunk(
+            "Reasoning before the close tag.</think>Final answer here.",
+        )];
+
+        let (reasoning, content) = run_parser_with_injected_reasoning(chunks, "deepseek_v4").await;
+
+        assert_eq!(reasoning, "Reasoning before the close tag.");
+        assert_eq!(content, "Final answer here.");
+        assert!(!content.contains("</think>"));
     }
 }

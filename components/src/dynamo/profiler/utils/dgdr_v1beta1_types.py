@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, model_validator
 
 # Import canonical planner types - do NOT redefine them here.
-from dynamo.planner.utils.planner_config import (  # noqa: F401 (re-exported)
+from dynamo.planner.config.planner_config import (  # noqa: F401 (re-exported)
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
 )
@@ -52,14 +52,29 @@ class ProfilingPhase(str, Enum):
     Done = "Done"
 
 
-class OptimizationType(str, Enum):
-    Latency = "latency"
-    Throughput = "throughput"
-
-
 class SearchStrategy(str, Enum):
     Rapid = "rapid"
     Thorough = "thorough"
+
+
+class GPUSKUType(str, Enum):
+    GB200SXM = "gb200_sxm"
+    GB10 = "gb10"
+    B200SXM = "b200_sxm"
+    H200SXM = "h200_sxm"
+    H100SXM = "h100_sxm"
+    H100PCIe = "h100_pcie"
+    A100SXM = "a100_sxm"
+    A100PCIe = "a100_pcie"
+    A30 = "a30"
+    L40S = "l40s"
+    L40 = "l40"
+    L4 = "l4"
+    V100SXM = "v100_sxm"
+    V100PCIe = "v100_pcie"
+    T4 = "t4"
+    MI200 = "mi200"
+    MI300 = "mi300"
 
 
 class BackendType(str, Enum):
@@ -67,6 +82,11 @@ class BackendType(str, Enum):
     Sglang = "sglang"
     Trtllm = "trtllm"
     Vllm = "vllm"
+
+
+class OptimizationType(str, Enum):
+    Latency = "latency"
+    Throughput = "throughput"
 
 
 class WorkloadSpec(BaseModel):
@@ -92,16 +112,11 @@ class WorkloadSpec(BaseModel):
 class SLASpec(BaseModel):
     """Service-level agreement targets.
 
-    Provide exactly one of:
+    Provide one of:
 
     - ``ttft`` + ``itl``: explicit latency targets (default: 2000 ms / 30 ms)
-    - ``e2eLatency``: end-to-end latency target
-    - ``optimizationType``: high-level objective without explicit numeric targets"""
+    - ``e2eLatency``: end-to-end latency target (mutually exclusive with ttft/itl)"""
 
-    optimizationType: Optional[OptimizationType] = Field(
-        default=None,
-        description="OptimizationType controls the profiling optimization strategy. Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.",
-    )
     ttft: Optional[float] = Field(
         default=2000,
         description="TTFT is the Time To First Token target in milliseconds.",
@@ -113,23 +128,24 @@ class SLASpec(BaseModel):
         default=None,
         description="E2ELatency is the target end-to-end request latency in milliseconds. Alternative to specifying TTFT + ITL.",
     )
+    optimizationType: Optional[OptimizationType] = Field(
+        default=None,
+        description="OptimizationType is the optimization target for SLA profiling. Valid values: latency, throughput.",
+    )
 
     @model_validator(mode="after")
     def _validate_sla_options(self) -> "SLASpec":
-        """Ensure at most one SLA mode is active."""
+        """Ensure e2eLatency and ttft/itl are not both provided."""
         has_e2e = self.e2eLatency is not None
-        has_opt = self.optimizationType is not None
         ttft_itl_touched = (
             "ttft" in self.model_fields_set or "itl" in self.model_fields_set
         )
-        has_ttft_itl = (self.ttft is not None and self.itl is not None) and (
-            ttft_itl_touched or (not has_e2e and not has_opt)
-        )
-        options_count = sum([has_ttft_itl, has_e2e, has_opt])
-        if options_count > 1:
+        has_ttft_itl = (
+            self.ttft is not None or self.itl is not None
+        ) and ttft_itl_touched
+        if has_e2e and has_ttft_itl:
             raise ValueError(
-                "SLA must specify exactly one of: (ttft and itl), e2eLatency, "
-                "or optimizationType — not multiple."
+                "SLA must specify either (ttft and itl) or e2eLatency, not both."
             )
         if (self.ttft is not None) != (self.itl is not None):
             raise ValueError("ttft and itl must both be provided together.")
@@ -189,7 +205,7 @@ class FeaturesSpec(BaseModel):
 
     planner: Optional[PlannerConfig] = Field(
         default=None,
-        description="Planner is the raw SLA planner configuration passed to the planner service. Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig. Go treats this as opaque bytes; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
+        description="Planner contains the raw Planner configuration passed to the Planner service. Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig. See https://docs.dynamo.nvidia.com/dynamo/components/planner/planner-guide#plannerconfig-reference. DGDR passes this object through without field-level validation; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
     )
     mocker: Optional[MockerSpec] = Field(
         default=None,
@@ -198,21 +214,31 @@ class FeaturesSpec(BaseModel):
 
 
 class HardwareSpec(BaseModel):
-    """HardwareSpec describes the hardware resources available for profiling and deployment. These fields are typically auto-filled by the operator from cluster discovery."""
+    """HardwareSpec describes the GPU hardware for profiling and deployment. All fields are auto-detected from cluster GPU nodes when omitted (requires cluster-wide mode with GPU discovery enabled). gpuSku is a selector (restricts which nodes are considered); the other fields are pure overrides passed to the profiler. If all four fields are set, discovery is skipped."""
 
-    gpuSku: Optional[str] = Field(
+    gpuSku: Optional[GPUSKUType] = Field(
         default=None,
-        description='GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").',
+        description="GPUSKU selects the GPU type to target. When omitted, auto-detected by selecting the GPU with the highest node count, then highest VRAM. In mixed-GPU clusters, set this to choose which GPU type to use. Discovery and totalGpus are then restricted to nodes matching this SKU.",
     )
     vramMb: Optional[float] = Field(
-        default=None, description="VRAMMB is the VRAM per GPU in MiB."
+        default=None,
+        description="VRAMMB is the VRAM per GPU in MiB. When omitted, auto-detected from cluster GPU nodes.",
     )
     totalGpus: Optional[int] = Field(
         default=None,
-        description="TotalGPUs is the total number of GPUs available in the cluster.",
+        description="TotalGPUs is the GPU budget for profiling and deployment. The profiler uses this to determine parallelism and replica count. When omitted, computed by counting GPUs on discovered nodes (filtered by gpuSku when set), temporarily capped at 32 to limit profiler search space. This cap may be removed in a future release. Set this field explicitly to override.",
     )
     numGpusPerNode: Optional[int] = Field(
-        default=None, description="NumGPUsPerNode is the number of GPUs per node."
+        default=None,
+        description="NumGPUsPerNode is the number of GPUs per node. When omitted, auto-detected from cluster GPU nodes.",
+    )
+    interconnect: Optional[str] = Field(
+        default=None,
+        description='Interconnect describes the primary GPU-to-GPU interconnect *within a node*.  Semantics / usage: - This is capability metadata used for profiling, planning, and deployment decisions. - It does NOT configure or enable any GPU interconnect; it only describes what is available/assumed. - When omitted, the operator may attempt best-effort discovery (currently distinguishes "nvlink" vs "pcie" based on DCGM NVLink link count). If discovery is unavailable, it may remain empty.  Impact of wrong / missing values: - If set more optimistically than reality (e.g., "nvlink" when only PCIe is present), performance models may overestimate intra-node bandwidth and choose overly aggressive parallelism or layouts, resulting in degraded performance compared to expectations. - If set more pessimistically than reality (e.g., "pcie" when NVLink is present), the system may choose conservative plans and leave performance on the table. - If unset and undiscovered, consumers should treat the interconnect as unknown and fall back to conservative assumptions.  Example values: "pcie", "nvlink". Other values may be accepted but may not be auto-detected. ',
+    )
+    rdma: Optional[bool] = Field(
+        default=None,
+        description="RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.  Semantics / usage: - This is capability metadata used for profiling, planning, and deployment decisions. - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator, GPUDirect settings). It only expresses availability/intent. - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery is unavailable, it may remain unset.  Impact of wrong / missing values: - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or deployments to assume RDMA is available; depending on the runtime transport selection and fallback behavior, this can lead to connection/setup failures or performance regressions. - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and fall back to non-RDMA transports, usually remaining functional but potentially slower. - If unset and undiscovered, consumers should treat RDMA availability as unknown and use conservative defaults / fallback transports. ",
     )
 
 
@@ -228,7 +254,7 @@ class DynamoGraphDeploymentRequestSpec(BaseModel):
     )
     image: Optional[str] = Field(
         default=None,
-        description='Image is the container image reference for the profiling job (frontend image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".',
+        description='Image is the container image reference for the profiling job (planner image). Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1". For Dynamo < 1.1.0, use dynamo-frontend.',
     )
     modelCache: Optional[ModelCacheSpec] = Field(
         default=None,

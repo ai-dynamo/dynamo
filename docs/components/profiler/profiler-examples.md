@@ -2,15 +2,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Profiler Examples
+subtitle: Complete DGDR profiling examples for dense and MoE models across rapid and thorough search strategies.
 ---
 
 Complete examples for profiling with DGDRs.
 
 ## DGDR Examples
 
-### Dense Model: AIPerf on Real Engines
+### Dense Model: Rapid
 
-Standard online profiling with real GPU measurements:
+Fast profiling (~30 seconds):
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen-0-6b
+spec:
+  model: "Qwen/Qwen3-0.6B"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+```
+
+### Dense Model: Thorough
+
+Profiling with real GPU measurements:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -20,47 +35,18 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
-
-  workload:
-    isl: 3000
-    osl: 150
-
-  sla:
-    ttft: 200.0
-    itl: 20.0
-
-  autoApply: true
-```
-
-### Dense Model: AI Configurator Simulation
-
-Fast offline profiling (~30 seconds, TensorRT-LLM only):
-
-```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: trtllm-aic-offline
-spec:
-  model: "Qwen/Qwen3-32B"
-  backend: trtllm
-  image: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.9.0"
-
-  workload:
-    isl: 4000
-    osl: 500
-
-  sla:
-    ttft: 300.0
-    itl: 10.0
-
-  autoApply: true
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  searchStrategy: thorough
 ```
 
 ### MoE Model
 
 Multi-node MoE profiling with SGLang:
+
+> [!IMPORTANT]
+> The PVC referenced by `modelCache.pvcName` must already exist in the same namespace and contain
+> the model weights at the specified `pvcModelPath`. The DGDR controller does not create or
+> populate the PVC — it only mounts it into the profiling job and deployed workers.
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -70,53 +56,132 @@ metadata:
 spec:
   model: "deepseek-ai/DeepSeek-R1"
   backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.9.0"
-
-  workload:
-    isl: 2048
-    osl: 512
-
-  sla:
-    ttft: 300.0
-    itl: 25.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   hardware:
     numGpusPerNode: 8
 
-  autoApply: true
+  modelCache:
+    pvcName: "model-cache"
+    pvcModelPath: "deepseek-r1"      # path within the PVC
 ```
 
-### Using Existing DGD Config (ConfigMap)
+### Private Model
 
-Reference a custom DGD configuration via ConfigMap:
+For gated or private HuggingFace models, pass your token via an environment variable injected
+into the profiling job. Create the secret first:
 
 ```bash
-# Create ConfigMap from your DGD config file
-kubectl create configmap deepseek-r1-config \
-  --from-file=/path/to/your/disagg.yaml \
-  --namespace $NAMESPACE \
-  --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="${HF_TOKEN}" \
+  -n ${NAMESPACE}
 ```
+
+Then reference it in your DGDR:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeploymentRequest
 metadata:
-  name: deepseek-r1
+  name: llama-private
 spec:
-  model: deepseek-ai/DeepSeek-R1
-  backend: sglang
-  image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.9.0"
+  model: "meta-llama/Llama-3.1-8B-Instruct"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 
-  workload:
-    isl: 4000
-    osl: 500
+  overrides:
+    profilingJob:
+      template:
+        spec:
+          containers: []    # required placeholder; leave empty to inherit defaults
+          initContainers:
+            - name: profiler
+              env:
+                - name: HF_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: hf-token-secret
+                      key: HF_TOKEN
+```
+
+### Custom SLA Targets
+
+Control how the profiler optimizes your deployment by specifying latency targets and workload
+characteristics.
+
+**Explicit TTFT + ITL targets** (default mode):
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: low-latency-dense
+spec:
+  model: "Qwen/Qwen3-0.6B"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   sla:
-    ttft: 300
-    itl: 10
+    ttft: 500      # Time To First Token target in milliseconds
+    itl: 20        # Inter-Token Latency target in milliseconds
 
-  autoApply: true
+  workload:
+    isl: 2000      # expected input sequence length (tokens)
+    osl: 500       # expected output sequence length (tokens)
+```
+
+**End-to-end latency target** (alternative to ttft+itl):
+
+```yaml
+spec:
+  ...
+  sla:
+    e2eLatency: 10000    # total request latency budget in milliseconds
+```
+
+### Overrides
+
+Use `overrides` to customize the profiling job pod spec — for example to add tolerations for
+GPU node taints or inject environment variables.
+
+**GPU node toleration** (common on GKE and shared clusters):
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: dense-with-tolerations
+spec:
+  model: "Qwen/Qwen3-0.6B"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+
+  overrides:
+    profilingJob:
+      template:
+        spec:
+          containers: []    # required placeholder; leave empty to inherit defaults
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+```
+
+**Override the generated DynamoGraphDeployment** (e.g., to inject worker environment variables):
+
+```yaml
+spec:
+  ...
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      spec:
+        envs:
+          - name: TRITON_PTXAS_PATH
+            value: "/usr/local/cuda/bin/ptxas"
+        services:
+          VllmWorker:
+            envs:
+              - name: CUSTOM_ENV
+                value: "my-value"
 ```
 
 ## SGLang Runtime Profiling
@@ -125,14 +190,14 @@ Profile SGLang workers at runtime via HTTP endpoints:
 
 ```bash
 # Start profiling
-curl -X POST http://localhost:9090/engine/start_profile \
+curl -X POST http://localhost:9090/engine/control/start_profile \
   -H "Content-Type: application/json" \
   -d '{"output_dir": "/tmp/profiler_output"}'
 
 # Run inference requests to generate profiling data...
 
 # Stop profiling
-curl -X POST http://localhost:9090/engine/stop_profile
+curl -X POST http://localhost:9090/engine/control/stop_profile
 ```
 
 A test script is provided at `examples/backends/sglang/test_sglang_profile.py`:

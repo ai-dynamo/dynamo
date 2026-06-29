@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Frontend
+subtitle: API gateway that exposes OpenAI HTTP and KServe gRPC endpoints and handles request preprocessing, routing, and response formatting.
 ---
 
 The Dynamo Frontend is the API gateway for serving LLM inference requests. It provides OpenAI-compatible HTTP endpoints and KServe gRPC endpoints, handling request preprocessing, routing, and response formatting.
@@ -10,13 +11,22 @@ The Dynamo Frontend is the API gateway for serving LLM inference requests. It pr
 
 | Feature | Status |
 |---------|--------|
-| OpenAI Chat Completions API | ✅ Supported |
-| OpenAI Completions API | ✅ Supported |
+| OpenAI Chat Completions API (`/v1/chat/completions`) | ✅ Supported |
+| OpenAI Completions API (`/v1/completions`) | ✅ Supported |
+| OpenAI Embeddings API (`/v1/embeddings`) | ✅ Supported |
+| OpenAI Responses API (`/v1/responses`) | ✅ Supported |
+| OpenAI Models API (`/v1/models`) | ✅ Supported |
+| Image Generation (`/v1/images/generations`) | ✅ Supported |
+| Video Generation (`/v1/videos/generations`) | ✅ Supported |
+| Anthropic Messages API (`/v1/messages`) | 🧪 Experimental |
 | KServe gRPC v2 API | ✅ Supported |
-| Streaming responses | ✅ Supported |
+| Streaming responses (SSE) | ✅ Supported |
 | Multi-model serving | ✅ Supported |
-| Integrated routing | ✅ Supported |
+| Integrated KV-aware routing | ✅ Supported |
 | Tool calling | ✅ Supported |
+| TLS (HTTPS) | ✅ Supported |
+| Swagger UI (`/docs`) | ✅ Supported |
+| NVIDIA request extensions (`nvext`) | ✅ Supported |
 
 ## Quick Start
 
@@ -76,7 +86,7 @@ spec:
 |-----------|---------|-------------|
 | `--http-port` | 8000 | HTTP server port |
 | `--kserve-grpc-server` | false | Enable KServe gRPC server |
-| `--router-mode` | `round_robin` | Routing strategy: `round_robin`, `random`, `kv` |
+| `--router-mode` | `round-robin` | Routing strategy: `round-robin`, `random`, `kv`, `direct`, `least-loaded`, `device-aware-weighted` (`power-of-two` and `least-loaded` use synchronous prefill fallback in disaggregated prefill mode) |
 
 See the [Frontend Guide](frontend-guide.md) for full configuration options.
 
@@ -84,5 +94,7 @@ See the [Frontend Guide](frontend-guide.md) for full configuration options.
 
 | Document | Description |
 |----------|-------------|
+| [Configuration Reference](configuration.md) | All CLI arguments, env vars, and HTTP endpoints |
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
+| [NVIDIA Request Extensions (nvext)](nvext.md) | Custom request fields for routing hints and cache control |
 | [Router Documentation](../router/README.md) | KV-aware routing configuration |

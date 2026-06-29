@@ -1,33 +1,46 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Embedding handlers
-from .embedding import EmbeddingWorkerHandler
+from importlib import import_module
+from typing import Any
 
-# Base handlers
-from .handler_base import BaseGenerativeHandler, BaseWorkerHandler
+_EXPORTS = {
+    # Base handlers
+    "BaseGenerativeHandler": ".handler_base",
+    "BaseWorkerHandler": ".handler_base",
+    "RLMixin": ".handler_base",
+    # LLM handlers
+    "DecodeWorkerHandler": ".llm",
+    "DiffusionWorkerHandler": ".llm",
+    "PrefillWorkerHandler": ".llm",
+    # Embedding handlers
+    "EmbeddingWorkerHandler": ".embedding",
+    # Image diffusion handlers
+    "ImageDiffusionWorkerHandler": ".image_diffusion",
+    # Video generation handlers
+    "VideoGenerationWorkerHandler": ".video_generation",
+    # Multimodal handlers
+    "MultimodalEncodeWorkerHandler": ".multimodal",
+    "MultimodalPrefillWorkerHandler": ".multimodal",
+    "MultimodalWorkerHandler": ".multimodal",
+}
 
-# Image diffusion handlers
-from .image_diffusion import ImageDiffusionWorkerHandler
 
-# LLM handlers
-from .llm import DecodeWorkerHandler, DiffusionWorkerHandler, PrefillWorkerHandler
+def __getattr__(name: str) -> Any:
+    if name not in _EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-# Multimodal handlers
-from .multimodal import (
-    MultimodalEncodeWorkerHandler,
-    MultimodalPrefillWorkerHandler,
-    MultimodalProcessorHandler,
-    MultimodalWorkerHandler,
-)
+    module = import_module(_EXPORTS[name], __name__)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
 
-# Video generation handlers
-from .video_generation import VideoGenerationWorkerHandler
 
 __all__ = [
     # Base handlers
     "BaseGenerativeHandler",
     "BaseWorkerHandler",
+    "RLMixin",
     # LLM handlers
     "DecodeWorkerHandler",
     "DiffusionWorkerHandler",
@@ -41,6 +54,5 @@ __all__ = [
     # Multimodal handlers
     "MultimodalEncodeWorkerHandler",
     "MultimodalPrefillWorkerHandler",
-    "MultimodalProcessorHandler",
     "MultimodalWorkerHandler",
 ]

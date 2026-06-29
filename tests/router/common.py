@@ -2,20 +2,34 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import random
-import string
+import threading
 import time
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import aiohttp
 import nats
+import requests
 
-from dynamo.llm import KvRouter, KvRouterConfig
-from dynamo.runtime import DistributedRuntime
-from tests.utils.managed_process import ManagedProcess
+from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
+from dynamo.prometheus_names import frontend_service, name_prefix
+from tests.router.helper import (
+    _nats_server,
+    assert_event_dumps_equal,
+    get_runtime,
+    poll_for_worker_instances,
+    send_inflight_requests,
+    send_request_via_python_kv_router,
+    verify_response_timing,
+    wait_for_frontend_ready,
+    wait_for_indexer_workers_active,
+    wait_for_workers_ready,
+)
+from tests.router.router_process import FrontendRouterProcess, KVRouterProcess
 
 if TYPE_CHECKING:
     from tests.conftest import NatsServer
@@ -24,650 +38,103 @@ logger = logging.getLogger(__name__)
 
 NUM_REQUESTS = 100
 BLOCK_SIZE = 16
+MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
 
 
-def _nats_server() -> str:
-    # Prefer dynamically-started NATS from per-test fixtures when present.
-    return os.environ.get("NATS_SERVER", "nats://localhost:4222")
-
-
-########################################################
-# Helper Classes
-########################################################
-
-
-class KVRouterProcess(ManagedProcess):
-    """Manages the KV router process using dynamo.frontend"""
-
-    def __init__(
-        self,
-        request,
-        block_size: int,
-        frontend_port: int,
-        namespace: str,
-        store_backend: str = "etcd",
-        decode_fallback: bool = False,
-        blocks_threshold: float | None = None,
-        tokens_threshold: float | None = None,
-        tokens_threshold_frac: float | None = None,
-        request_plane: str = "nats",
-        durable_kv_events: bool = False,
-    ):
-        command = [
-            "python3",
-            "-m",
-            "dynamo.frontend",
-            "--kv-cache-block-size",
-            str(block_size),
-            "--router-mode",
-            "kv",
-            "--http-port",
-            str(frontend_port),
-            "--discovery-backend",
-            store_backend,
-            "--namespace",
-            namespace,
-        ]
-
-        if decode_fallback:
-            command.append("--decode-fallback")
-
-        if blocks_threshold is not None:
-            command.extend(["--active-decode-blocks-threshold", str(blocks_threshold)])
-
-        if tokens_threshold is not None:
-            command.extend(["--active-prefill-tokens-threshold", str(tokens_threshold)])
-
-        if tokens_threshold_frac is not None:
-            command.extend(
-                ["--active-prefill-tokens-threshold-frac", str(tokens_threshold_frac)]
-            )
-
-        if durable_kv_events:
-            command.append("--router-durable-kv-events")
-
-        env = os.environ.copy()
-        env["DYN_REQUEST_PLANE"] = request_plane
-
-        super().__init__(
-            command=command,
-            env=env,
-            timeout=60,
-            display_output=True,
-            health_check_ports=[frontend_port],
-            health_check_urls=[
-                (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
-            ],
-            log_dir=request.node.name,
-            terminate_all_matching_process_names=False,
-        )
-        self.port = frontend_port
-
-    def _check_ready(self, response):
-        """Check if KV router is ready"""
-        return response.status_code == 200
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        super().__exit__(exc_type, exc_val, exc_tb)
-
-
-def generate_random_suffix() -> str:
-    """Generate a 10-character random alphabetic suffix for namespace isolation."""
-    return "".join(random.choices(string.ascii_lowercase, k=10))  # noqa: S311
-
-
-def assert_event_dumps_equal(
-    expected: list[dict],
-    actual: list[dict],
-    expected_label: str,
-    actual_label: str,
-) -> None:
-    """Assert two sorted event dump lists are equal, ignoring event_id fields."""
-    assert len(expected) == len(actual), (
-        f"{expected_label} has {len(expected)} events, "
-        f"{actual_label} has {len(actual)} events"
-    )
-
-    differences = []
-    for i, (exp_item, act_item) in enumerate(zip(expected, actual)):
-        exp_compare = exp_item.copy()
-        act_compare = act_item.copy()
-        if "event" in exp_compare and "event_id" in exp_compare["event"]:
-            del exp_compare["event"]["event_id"]
-        if "event" in act_compare and "event_id" in act_compare["event"]:
-            del act_compare["event"]["event_id"]
-        if exp_compare != act_compare:
-            differences.append(
-                {"index": i, expected_label: exp_item, actual_label: act_item}
-            )
-
-    if differences:
-        error_msg = (
-            f"{expected_label} and {actual_label} differ. "
-            f"Found {len(differences)} differences:\n"
-        )
-        for diff in differences:
-            error_msg += f"\nDifference at index {diff['index']}:\n"
-            error_msg += (
-                f"{expected_label}: {json.dumps(diff[expected_label], indent=2)}\n"
-            )
-            error_msg += f"{actual_label}: {json.dumps(diff[actual_label], indent=2)}\n"
-            error_msg += "-" * 80 + "\n"
-        assert False, error_msg
-
-
-def verify_response_worker_ids(
-    response_worker_ids: list[dict[str, Optional[int]]],
-    key: str,
-    expected_worker_id: int,
-) -> None:
-    """Verify that all responses have the same worker ID for a given key.
-
-    Args:
-        response_worker_ids: List of dicts with worker ID info from responses.
-        key: The key to check (e.g., "decode_worker_id" or "prefill_worker_id").
-        expected_worker_id: The expected worker ID value.
-
-    Raises:
-        AssertionError: If any response is missing the key, values differ, or don't match expected.
-    """
-    worker_ids = [r.get(key) for r in response_worker_ids]
-    logger.info(f"Response {key}s: {worker_ids}")
-
-    # All responses should have the key
-    assert all(
-        wid is not None for wid in worker_ids
-    ), f"Expected all {len(response_worker_ids)} responses to have {key}, got: {worker_ids}"
-
-    # All values should be the same (due to prefix reuse routing)
-    unique_ids = set(worker_ids)
-    assert len(unique_ids) == 1, (
-        f"Expected all responses to have the same {key} (due to prefix reuse), "
-        f"but found {len(unique_ids)} unique values: {unique_ids}"
-    )
-
-    # The value should match the expected worker ID
-    actual_worker_id = worker_ids[0]
-    assert actual_worker_id == expected_worker_id, (
-        f"Expected {key}={expected_worker_id} (forced in first request), "
-        f"but got {key}={actual_worker_id}"
-    )
-    logger.info(
-        f"✓ Verified all {len(response_worker_ids)} responses have {key}={actual_worker_id}"
-    )
-
-
-def verify_response_timing(timing_info: dict[str, Any]) -> None:
-    """Verify timing info has valid values (ttft_ms > 0, total_time_ms > 0)."""
-    ttft_ms = timing_info.get("ttft_ms")
-    total_time_ms = timing_info.get("total_time_ms")
-
-    assert ttft_ms is not None and ttft_ms > 0, f"Expected ttft_ms > 0, got: {ttft_ms}"
-    assert (
-        total_time_ms is not None and total_time_ms > 0
-    ), f"Expected total_time_ms > 0, got: {total_time_ms}"
-    assert (
-        total_time_ms >= ttft_ms
-    ), f"Expected total_time_ms >= ttft_ms, got {total_time_ms} < {ttft_ms}"
-    logger.info(
-        f"✓ Verified timing: ttft_ms={ttft_ms:.2f}, total_time_ms={total_time_ms:.2f}"
-    )
-
-
-########################################################
-# Utility functions
-########################################################
-
-
-async def wait_for_frontend_ready(
-    frontend_url: str, expected_num_workers: int = 2, timeout: int = 120
-):
-    """Wait for backend worker(s) to be ready via the HTTP frontend (OpenAI API).
-
-    This function performs a two-phase readiness check through the frontend HTTP server:
-        1. Polls GET /v1/models until at least one model is registered (workers connected)
-        2. Sends a test POST to /v1/chat/completions to verify the request pipeline is functional
-
-    Use this when testing through the HTTP frontend server (dynamo.frontend).
-    For direct Python API testing with KvRouter, use wait_for_workers_ready() instead.
-
-    Args:
-        frontend_url: Base URL of the frontend HTTP server (e.g., "http://localhost:8000")
-        expected_num_workers: Number of workers to wait for (currently logs but doesn't enforce)
-        timeout: Maximum time to wait in seconds for both phases combined
-
-    Raises:
-        TimeoutError: If workers don't register or pipeline doesn't become ready within timeout
-        aiohttp.ClientError: If HTTP requests fail unexpectedly
-    """
-
-    models_url = f"{frontend_url}/v1/models"
-    chat_url = f"{frontend_url}/v1/chat/completions"
-    start_time = asyncio.get_event_loop().time()
-
-    logger.info(
-        f"Waiting for {expected_num_workers} workers to register on HTTP frontend (timeout={timeout}s)..."
-    )
-
-    # Phase 1: Wait for models to appear in /v1/models
-    model_name = None
-    while True:
-        elapsed = asyncio.get_event_loop().time() - start_time
-
-        if elapsed > timeout:
-            raise TimeoutError(
-                f"Timeout waiting for vLLM workers. Waited {elapsed:.1f}s, no workers registered."
-            )
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(models_url) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        models = data.get("data", [])
-                        if len(models) > 0:
-                            model_name = models[0].get("id")
-                            logger.info(
-                                f"Workers registered. Found {len(models)} model(s): {[m.get('id') for m in models]}"
-                            )
-                            break
-                        else:
-                            logger.debug(
-                                f"No models registered yet (elapsed: {elapsed:.1f}s)"
-                            )
-        except Exception as e:
-            logger.debug(f"Error checking models endpoint: {e}")
-
-        # Wait before next poll
-        await asyncio.sleep(1)
-
-    # Phase 2: Wait for chat completions pipeline to be ready
-    logger.info("Waiting for chat completions pipeline to be built...")
-    test_payload = {
-        "model": model_name,
-        "messages": [{"role": "user", "content": "test"}],
-        "max_tokens": 1,
-        "stream": False,
-    }
-
-    while True:
-        elapsed = asyncio.get_event_loop().time() - start_time
-
-        if elapsed > timeout:
-            raise TimeoutError(
-                f"Timeout waiting for chat completions pipeline. Waited {elapsed:.1f}s."
-            )
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(chat_url, json=test_payload) as response:
-                    if response.status == 200:
-                        logger.info("Chat completions pipeline ready!")
-                        return
-                    else:
-                        logger.debug(
-                            f"Chat completions not ready yet, status {response.status} (elapsed: {elapsed:.1f}s)"
-                        )
-        except Exception as e:
-            logger.debug(f"Error testing chat completions: {e}")
-
-        # Wait before next poll
-        await asyncio.sleep(1)
-
-
-async def wait_for_workers_ready(
-    endpoint,
-    router: KvRouter,
-    expected_num_workers: int,
-    model_name: str,
-) -> list[int]:
-    """Wait for workers to be ready and return their instance IDs.
-    Supports mocker and vLLM workers.
-
-    This function polls the endpoint's client for instance IDs until the expected
-    number of workers are available, then sends a warmup request to verify they
-    can handle requests.
-
-    Args:
-        endpoint: The endpoint object to get the client from
-        router: The KvRouter to use for sending warmup requests
-        expected_num_workers: Number of workers to wait for
-
-    Returns:
-        Sorted list of unique instance IDs (ints).
-
-    Raises:
-        AssertionError: If workers don't become ready or warmup request fails.
-    """
-    logger.info("Waiting for workers to be ready")
-
-    # Get the client from the endpoint
-    client = await endpoint.client()
-
-    # Poll for instance IDs until we have the expected number
-    instance_ids: list[int] = []
-    max_wait_time = 60  # seconds
-    start_time = asyncio.get_running_loop().time()
-
-    while len(instance_ids) < expected_num_workers:
-        instance_ids = client.instance_ids()
-        logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
-
-        if len(instance_ids) >= expected_num_workers:
-            break
-
-        # Check timeout
-        if asyncio.get_running_loop().time() - start_time > max_wait_time:
-            raise AssertionError(
-                f"Timeout waiting for workers. Found {len(instance_ids)} instance(s), expected {expected_num_workers}"
-            )
-
-        # Wait 1 second before polling again
-        await asyncio.sleep(1.0)
-
-    # Send a warmup request to verify workers can handle requests
-    test_token_ids = [random.randint(1, 10000) for _ in range(4)]
-    logger.info(f"Sending warmup request with {len(test_token_ids)} tokens")
-
+@contextlib.contextmanager
+def min_initial_workers_env(min_initial_workers: int):
+    previous = os.environ.get(MIN_INITIAL_WORKERS_ENV)
+    os.environ[MIN_INITIAL_WORKERS_ENV] = str(min_initial_workers)
     try:
-        await send_request_via_python_kv_router(
-            kv_python_router=router,
-            model_name=model_name,
-            token_ids=test_token_ids,
-            initial_wait=1.0,
-            max_retries=8,
-            stop_conditions={
-                "ignore_eos": True,
-                "max_tokens": 2,
-            },
-        )
-    except Exception as e:
-        raise AssertionError(f"Warmup request failed: {e}")
-
-    logger.info(f"All {len(instance_ids)} workers are ready")
-    return sorted(instance_ids)
-
-
-async def send_request_with_retry(url: str, payload: dict, max_retries: int = 8):
-    """Send a single request with exponential backoff retry"""
-    wait_time = 1  # Start with 1 second
-
-    for attempt in range(max_retries + 1):
-        await asyncio.sleep(wait_time)
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload) as response:
-                    if response.status == 200:
-                        # Read the response to ensure it's valid
-                        async for _ in response.content:
-                            pass
-                        logger.debug(
-                            f"First request succeeded on attempt {attempt + 1}"
-                        )
-                        return True
-                    else:
-                        logger.warning(
-                            f"Attempt {attempt + 1} failed with status {response.status}"
-                        )
-        except Exception as e:
-            logger.warning(f"Attempt {attempt + 1} failed with error: {e}")
-
-        if attempt < max_retries:
-            wait_time *= 2  # Double the wait time
-
-    return False
-
-
-def get_runtime(store_backend="etcd", request_plane="tcp"):
-    """Create a DistributedRuntime instance for testing.
-
-    Args:
-        store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        request_plane: How frontend talks to backend ("tcp", "http" or "nats"). Defaults to "tcp".
-    """
-    try:
-        # Try to get running loop (works in async context)
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        # No running loop, create a new one (sync context)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return DistributedRuntime(loop, store_backend, request_plane)
-
-
-async def check_nats_consumers(namespace: str, expected_count: Optional[int] = None):
-    """Check NATS consumers for the KV events stream.
-
-    Args:
-        namespace: The namespace to check consumers for
-        expected_count: Optional expected number of consumers. If provided, asserts if count doesn't match.
-
-    Returns:
-        List of consumer names
-    """
-    component_subject = f"namespace.{namespace}.component.mocker"
-    slugified = component_subject.lower().replace(".", "-").replace("_", "-")
-    stream_name = f"{slugified}-kv-events"
-    logger.info(f"Checking consumers for stream: {stream_name}")
-
-    nc = await nats.connect(servers=_nats_server())
-    try:
-        js = nc.jetstream()
-        consumer_infos = await js.consumers_info(stream_name)
-        consumer_names = [info.name for info in consumer_infos]
-        logger.info(f"Found {len(consumer_names)} consumers: {consumer_names}")
-
-        # Log detailed consumer info
-        for info in consumer_infos:
-            logger.info(
-                f"Consumer {info.name}: "
-                f"num_pending={info.num_pending}, "
-                f"num_ack_pending={info.num_ack_pending}, "
-                f"ack_floor={info.ack_floor}, "
-                f"delivered={info.delivered}"
-            )
-
-        if expected_count is not None:
-            assert (
-                len(consumer_names) == expected_count
-            ), f"Expected {expected_count} durable consumers, found {len(consumer_names)}: {consumer_names}"
-            logger.info(f"✓ Verified {expected_count} durable consumers exist")
-
-        return consumer_names
+        yield
     finally:
-        await nc.close()
+        if previous is None:
+            os.environ.pop(MIN_INITIAL_WORKERS_ENV, None)
+        else:
+            os.environ[MIN_INITIAL_WORKERS_ENV] = previous
 
 
-async def send_inflight_requests(urls: list, payload: dict, num_requests: int):
-    """Send multiple requests concurrently, alternating between URLs if multiple provided"""
+def _create_kv_router_with_timeout(
+    router_factory: Callable[[], KvRouter],
+    num_workers: int,
+    engine_workers,
+    timeout: int = 120,
+) -> KvRouter:
+    """Create KvRouter in a daemon thread with worker liveness polling.
 
-    # First, send test requests with retry to ensure all systems are ready
-    for i, url in enumerate(urls):
-        logger.info(f"Sending initial test request to URL {i} ({url}) with retry...")
-        if not await send_request_with_retry(url, payload):
-            raise RuntimeError(f"Failed to connect to URL {i} after multiple retries")
-
-    async def send_single_request(session: aiohttp.ClientSession, request_id: int):
-        # Alternate between URLs based on request_id
-        url = urls[request_id % len(urls)]
-        url_index = request_id % len(urls)
-
-        try:
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
-                    logger.error(
-                        f"Request {request_id} to URL {url_index} failed with status {response.status}"
-                    )
-                    return False
-
-                # For streaming responses, read the entire stream
-                chunks = []
-                async for line in response.content:
-                    if line:
-                        chunks.append(line)
-
-                logger.debug(
-                    f"Request {request_id} to URL {url_index} completed with {len(chunks)} chunks"
-                )
-                return True
-
-        except Exception as e:
-            logger.error(
-                f"Request {request_id} to URL {url_index} failed with error: {e}"
-            )
-            return False
-
-    # Send all requests at once
-    async with aiohttp.ClientSession() as session:
-        tasks = [send_single_request(session, i) for i in range(num_requests)]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        successful = sum(1 for r in results if r if r is True)
-        failed = num_requests - successful
-
-        logger.info(f"Completed all requests: {successful} successful, {failed} failed")
-
-    assert (
-        successful == num_requests
-    ), f"Expected {num_requests} successful requests, got {successful}"
-    logger.info(f"All {num_requests} requests completed successfully")
-
-
-async def send_request_via_python_kv_router(
-    kv_python_router: KvRouter,
-    model_name: str,
-    token_ids: list,
-    initial_wait: float,
-    max_retries: int,
-    stop_conditions: Optional[dict] = None,
-    sampling_options: Optional[dict] = None,
-    output_options: Optional[dict] = None,
-    router_config_override: Optional[dict] = None,
-    worker_id: Optional[
-        int
-    ] = None,  # If None, Router will select the best available worker
-    dp_rank: Optional[int] = None,  # Data parallel rank (defaults to 0)
-    return_worker_ids: bool = False,  # If True, return worker IDs from response
-) -> bool | dict[str, Optional[int]]:
-    """Send a request to the specified worker instance.
-
-    Args:
-        return_worker_ids: If True, returns a dict with prefill_worker_id and decode_worker_id.
-                          If False, returns True on success or False on failure.
-
-    Returns:
-        If return_worker_ids=False: True if workers respond, otherwise raises or returns False.
-        If return_worker_ids=True: Dict with 'prefill_worker_id' and 'decode_worker_id' keys.
+    KvRouter() is a blocking Rust FFI call that waits for min_initial_workers
+    to register.  If a worker crashes (e.g. port conflict, OOM) the call
+    blocks forever because pytest signal-based timeout cannot interrupt
+    Rust FFI.  This helper runs the call in a daemon thread and polls
+    worker liveness every 2 seconds, raising immediately if a worker dies.
     """
+    kv_router = None
+    kv_router_error = None
 
-    wait_time = initial_wait
-
-    log_message = (
-        f"worker with worker_id={worker_id}"
-        if worker_id is not None
-        else "the best available worker"
-    )
-
-    # Retry loop sending request to worker with exponential backoff
-    stream = None
-    for attempt in range(max_retries + 1):
+    def _create():
+        nonlocal kv_router, kv_router_error
         try:
-            logger.debug(f"Sending request to {log_message} (attempt {attempt + 1})")
+            kv_router = router_factory()
+        except Exception as exc:
+            kv_router_error = exc
 
-            stream = await kv_python_router.generate(
-                token_ids=token_ids,
-                model=model_name,
-                stop_conditions=stop_conditions,  # type: ignore[arg-type]
-                sampling_options=sampling_options,  # type: ignore[arg-type]
-                output_options=output_options,  # type: ignore[arg-type]
-                router_config_override=router_config_override,  # type: ignore[arg-type]
-                worker_id=worker_id,
-                dp_rank=dp_rank,
-            )
+    # NOTE: On timeout or worker death we raise while the daemon thread may
+    # still be blocked inside the uninterruptible KvRouter() FFI call.  This is
+    # intentional — daemon threads don't block process exit, and the next test
+    # reinitializes etcd/NATS state so residual ZMQ handles are harmless.
+    with min_initial_workers_env(num_workers):
+        router_thread = threading.Thread(target=_create, daemon=True)
+        router_thread.start()
 
-            if stream is not None:
-                logger.debug(f"Request succeeded on attempt {attempt + 1}")
-                break
+        _router_start = time.monotonic()
 
-        except Exception as e:
-            logger.warning(f"Attempt {attempt + 1} failed with error: {e}")
-            if attempt < max_retries:
-                await asyncio.sleep(wait_time)
-                wait_time *= 2
-            else:
+        while router_thread.is_alive():
+            router_thread.join(timeout=2)
+            elapsed = time.monotonic() - _router_start
+            if elapsed > timeout:
                 raise RuntimeError(
-                    f"Failed to connect to workers after {max_retries + 1} attempts"
-                ) from e
-
-    if stream is None:
-        raise RuntimeError(
-            f"Failed to get a valid stream from workers after {max_retries + 1} attempts"
-        )
-
-    # Collect tokens and worker IDs from the SSE stream
-    generated_tokens = []
-    prefill_worker_id: Optional[int] = None
-    decode_worker_id: Optional[int] = None
-    prefill_dp_rank: Optional[int] = None
-    decode_dp_rank: Optional[int] = None
-
-    async for response in stream:
-        if isinstance(response, dict):
-            # Check if response has token_ids
-            if "token_ids" in response:
-                tokens = response["token_ids"]
-                if isinstance(tokens, list):
-                    generated_tokens.extend(tokens)
-                    logger.debug(f"Received {len(tokens)} tokens: {tokens}")
-
-            # Check for finish reason
-            if "finish_reason" in response:
-                logger.debug(
-                    f"Stream finished with reason: {response['finish_reason']}"
+                    f"KvRouter initialization timed out after {elapsed:.0f}s "
+                    f"waiting for {num_workers} workers to register."
                 )
+            if hasattr(engine_workers, "worker_processes"):
+                for idx, wp in enumerate(engine_workers.worker_processes):
+                    if wp.proc and wp.proc.poll() is not None:
+                        raise RuntimeError(
+                            f"Worker {idx} exited with code {wp.proc.returncode} "
+                            f"while waiting for KvRouter to find "
+                            f"{num_workers} workers."
+                        )
 
-            # Extract worker IDs and dp_ranks from disaggregated_params if present
-            if return_worker_ids and "disaggregated_params" in response:
-                disagg_params = response["disaggregated_params"]
-                if isinstance(disagg_params, dict) and "worker_id" in disagg_params:
-                    worker_id_info = disagg_params["worker_id"]
-                    if isinstance(worker_id_info, dict):
-                        if "prefill_worker_id" in worker_id_info:
-                            prefill_worker_id = worker_id_info["prefill_worker_id"]
-                        if "decode_worker_id" in worker_id_info:
-                            decode_worker_id = worker_id_info["decode_worker_id"]
-                        if "prefill_dp_rank" in worker_id_info:
-                            prefill_dp_rank = worker_id_info["prefill_dp_rank"]
-                        if "decode_dp_rank" in worker_id_info:
-                            decode_dp_rank = worker_id_info["decode_dp_rank"]
+    if kv_router_error is not None:
+        raise kv_router_error
 
-    # Verify if expected number of tokens are generated if max_tokens specified and ignore_eos is True
-    logger.debug(f"Total generated tokens: {len(generated_tokens)}")
-    if (
-        stop_conditions
-        and "max_tokens" in stop_conditions
-        and "ignore_eos" in stop_conditions
-        and stop_conditions["ignore_eos"]
-    ):
-        max_tokens = int(stop_conditions["max_tokens"])
-        assert len(generated_tokens) == max_tokens, (
-            f"Expected exactly {max_tokens} tokens but got {len(generated_tokens)}. "
-            f"Tokens: {generated_tokens}"
-        )
+    return kv_router
 
-        logger.debug(
-            f"Successfully verified {max_tokens} tokens generated as expected via KvRouter with ignore_eos=True"
-        )
 
-    if return_worker_ids:
-        return {
-            "prefill_worker_id": prefill_worker_id,
-            "decode_worker_id": decode_worker_id,
-            "prefill_dp_rank": prefill_dp_rank,
-            "decode_dp_rank": decode_dp_rank,
-        }
+async def _assert_overlap_scores(
+    kv_router,
+    token_ids: list[int],
+    block_size: int,
+    expected_device_blocks: dict[tuple[int, int], int],
+    label: str,
+):
+    scores = await kv_router.get_overlap_scores(token_ids, include_shared=False)
 
-    return True
+    assert scores["block_size"] == block_size
+    assert scores["num_blocks"] == len(token_ids) // block_size
+    assert scores["shared_cache"]["enabled"] is False
+
+    rows = {(row["worker_id"], row["dp_rank"]): row for row in scores["workers"]}
+
+    for key, expected in expected_device_blocks.items():
+        assert key in rows, f"{label}: missing overlap row for {key}"
+        row = rows[key]
+        assert (
+            row["device_blocks"] == expected
+        ), f"{label}: expected {key} device_blocks={expected}, got {row}"
+        assert row["host_pinned_extension_blocks"] == 0
+        assert row["disk_extension_blocks"] == 0
+        assert row["shared_beyond_device_blocks"] is None
 
 
 ########################################################
@@ -685,6 +152,9 @@ def _test_router_basic(
     frontend_timeout: int = 120,
     store_backend: str = "etcd",
     request_plane: str = "nats",
+    router_mode: str = "kv",
+    enforce_disagg: bool = False,
+    min_initial_workers: int | None = None,
 ):
     """Basic router test: start router, wait for workers and send concurrent requests via HTTP frontend.
 
@@ -692,6 +162,9 @@ def _test_router_basic(
 
     This is a shared test implementation for both mocker and vLLM workers.
     Always waits for workers to be properly registered before sending requests to avoid flakiness.
+
+    Supports any router_mode (defaults to "kv" for existing callers).
+    block_size is only sent to the frontend CLI when router_mode is "kv".
 
     Args:
         engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
@@ -702,22 +175,30 @@ def _test_router_basic(
         num_requests: Number of concurrent requests to send
         frontend_timeout: Timeout for frontend readiness check (default: 120s)
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "nats".
+        request_plane: Request plane to use ("nats", "tcp"). Defaults to "nats".
+        router_mode: Router mode ("kv", "round-robin", "random", "power-of-two", "direct"). Defaults to "kv".
+        enforce_disagg: Whether to pass --enforce-disagg to the frontend. Defaults to False.
+        min_initial_workers: Optional frontend startup worker gate. Defaults to None.
 
     Raises:
         AssertionError: If requests fail or frontend doesn't become ready
         TimeoutError: If frontend doesn't become ready within timeout
     """
-    with KVRouterProcess(
+    with FrontendRouterProcess(
         request,
         block_size,
         frontend_port,
         engine_workers.namespace,
         store_backend,
+        enforce_disagg=enforce_disagg,
         request_plane=request_plane,
+        router_mode=router_mode,
+        min_initial_workers=min_initial_workers,
     ):
-        # Start KV router frontend
-        logger.info(f"Starting KV router frontend on port {frontend_port}")
+        # Start router frontend
+        logger.info(
+            f"Starting frontend --router-mode {router_mode} on port {frontend_port}"
+        )
 
         frontend_url = f"http://localhost:{frontend_port}"
 
@@ -728,6 +209,9 @@ def _test_router_basic(
                 frontend_url=frontend_url,
                 expected_num_workers=engine_workers.num_workers,
                 timeout=frontend_timeout,
+                engine_workers=engine_workers,
+                store_backend=store_backend,
+                request_plane=request_plane,
             )
         )
 
@@ -742,6 +226,121 @@ def _test_router_basic(
         )
 
         logger.info(f"Successfully completed {num_requests} requests")
+
+
+def _test_router_override_router_config(
+    endpoint: str,
+    engine_workers,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    num_requests: int,
+    cpu_count_file: str,
+    gpu_count_file: str,
+    block_size: int = BLOCK_SIZE,
+    frontend_timeout: int = 120,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+):
+    """Test that router config overrides are honoured by the frontend by starting frontend
+    with different router config and expect getting results aligning with the router config
+    set by the workers, note that a specific mock worker is used for this test.
+
+    The frontend is started with --router-mode round-robin.
+
+    Workers must already be started with CUDA_VISIBLE_DEVICES="" (CPU) and "0" (GPU)
+    and must call register_model(..., router_config=RouterConfig(RouterMode.DeviceAwareWeighted)),
+    this configures the router to use device-aware-weighted routing.
+
+    With the default cuda-to-cpu ratio of 8, sequential requests all go to the GPU worker because
+    allowed_cpu_inflight = gpu_inflight / 8 = 0, so the CPU worker receives nothing.
+
+    Args:
+        endpoint: Dotted endpoint path (e.g. "namespace.component.generate") used to
+            poll discovery for worker instance registration before starting the frontend.
+        engine_workers: Backend worker instance already initialized with __enter__().
+            Must expose .namespace and .num_workers.
+        request: Pytest request fixture for managing resources.
+        frontend_port: Port to start the HTTP frontend on.
+        test_payload: Payload sent to /v1/chat/completions.
+        num_requests: Number of sequential requests to send.
+        cpu_count_file: Path to the file where the CPU worker writes its request count.
+        gpu_count_file: Path to the file where the GPU worker writes its request count.
+        block_size: KV-cache block size (ignored for device-aware-weighted, kept for
+            interface consistency).
+        frontend_timeout: Seconds to wait for the frontend to become ready.
+        store_backend: "etcd" or "file".
+        request_plane: "nats" or "tcp".
+
+    Raises:
+        AssertionError: If routing distribution does not match expectations.
+    """
+
+    def _read_count(path: str) -> int:
+        try:
+            text = open(path).read().strip()
+            return int(text) if text else 0
+        except (OSError, ValueError):
+            return 0
+
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        engine_workers.namespace,
+        store_backend,
+        request_plane=request_plane,
+        router_mode="round-robin",
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+
+        # Use endpoint polling to make sure all workers are ready before proceeding,
+        # the helper functions will send requests for liveness check which may
+        # affect counting if workers are partially ready.
+        runtime = get_runtime(store_backend, request_plane)
+        endpoint_obj = runtime.endpoint(endpoint)
+        asyncio.run(
+            poll_for_worker_instances(
+                endpoint_obj, engine_workers.num_workers, frontend_timeout
+            )
+        )
+
+        logger.info("Waiting for workers to register with frontend...")
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=engine_workers.num_workers,
+                timeout=frontend_timeout,
+                engine_workers=engine_workers,
+                store_backend=store_backend,
+                request_plane=request_plane,
+            )
+        )
+
+        logger.info(
+            f"Sending {num_requests} requests via device-aware-weighted routing..."
+        )
+        asyncio.run(
+            send_inflight_requests(
+                [f"{frontend_url}/v1/chat/completions"],
+                test_payload,
+                num_requests,
+            )
+        )
+
+    cpu_count = _read_count(cpu_count_file)
+    gpu_count = _read_count(gpu_count_file)
+
+    # There is request sent to indicate liveness, so received request count is
+    # larger than the number of requests.
+    # This test should actually to confirm that no requests are sent to the CPU worker.
+    assert (
+        gpu_count >= num_requests
+    ), f"GPU worker should receive at least {num_requests} requests, got {gpu_count}"
+    assert cpu_count == 0, f"CPU worker should receive 0 requests, got {cpu_count}"
+    logger.info(
+        f"device-aware-weighted routing verified: GPU={gpu_count}, CPU={cpu_count}"
+    )
 
 
 def _test_router_two_routers(
@@ -777,8 +376,6 @@ def _test_router_two_routers(
     Raises:
         AssertionError: If consumer lifecycle verification fails
     """
-    import nats
-
     kv_routers = []
 
     try:
@@ -786,18 +383,15 @@ def _test_router_two_routers(
         for i, port in enumerate(router_ports):
             logger.info(f"Starting KV router frontend on port {port}")
             kv_router = KVRouterProcess(
-                request, block_size, port, engine_workers.namespace, store_backend
+                request,
+                block_size,
+                port,
+                engine_workers.namespace,
+                store_backend,
+                min_initial_workers=engine_workers.num_workers,
             )
             kv_router.__enter__()
             kv_routers.append(kv_router)
-
-            # Add delay between routers for file backend to ensure first router's
-            # registration is visible before second router starts its cleanup
-            if i == 0 and store_backend == "file":
-                logger.info(
-                    "Waiting 0.5s for first router to fully register (file backend)"
-                )
-                time.sleep(0.5)
 
         # Wait for workers to be ready on both routers
         logger.info("Waiting for workers to register with both routers...")
@@ -809,6 +403,8 @@ def _test_router_two_routers(
                     frontend_url=frontend_url,
                     expected_num_workers=engine_workers.num_workers,
                     timeout=120,
+                    engine_workers=engine_workers,
+                    store_backend=store_backend,
                 )
             )
         logger.info("Both routers have discovered workers")
@@ -925,6 +521,248 @@ def _test_router_two_routers(
             kv_router.__exit__(None, None, None)
 
 
+def _test_remote_indexer_decisions(
+    engine_workers,
+    model_name: str,
+    block_size: int = 8,
+    use_kv_events: bool = True,
+    test_dp_rank: bool = True,
+    request_plane: str = "nats",
+    store_backend: str = "etcd",
+    router_predicted_ttl_secs: Optional[float] = None,
+):
+    """Validate remote-indexer-backed routing decisions using direct KvRouter instances."""
+
+    async def wait_for_served_indexer(
+        runtime,
+        expected_query_instances: int,
+        expected_record_instances: int,
+    ) -> None:
+        query_endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_query"
+        )
+        query_client = await query_endpoint.client()
+        record_endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{engine_workers.component_name}.kv_indexer_record_routing_decision"
+        )
+        record_client = await record_endpoint.client()
+
+        for _ in range(120):
+            query_ids = set(query_client.instance_ids())
+            record_ids = set(record_client.instance_ids())
+
+            if use_kv_events:
+                if len(query_ids) >= expected_query_instances and len(record_ids) == 0:
+                    return
+            elif (
+                len(query_ids) == expected_query_instances
+                and len(record_ids) == expected_record_instances
+                and query_ids == record_ids
+            ):
+                return
+
+            await asyncio.sleep(0.5)
+
+        raise TimeoutError("Timed out waiting for served indexer endpoints to register")
+
+    async def test_sync():
+        endpoint_path = (
+            f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+        )
+        expected_num_instances = engine_workers.num_workers
+
+        async def make_router(
+            *,
+            serve_indexer: bool,
+            use_remote_indexer: bool,
+            router_predicted_ttl_secs: Optional[float] = None,
+        ):
+            kv_router_config = KvRouterConfig(
+                router_snapshot_threshold=20,
+                use_kv_events=use_kv_events,
+                router_track_prefill_tokens=True,
+                serve_indexer=serve_indexer,
+                use_remote_indexer=use_remote_indexer,
+                router_predicted_ttl_secs=router_predicted_ttl_secs,
+            )
+            last_error: Exception | None = None
+            for _ in range(60):
+                runtime = get_runtime(
+                    store_backend=store_backend, request_plane=request_plane
+                )
+                endpoint = runtime.endpoint(endpoint_path)
+                try:
+                    with min_initial_workers_env(expected_num_instances):
+                        kv_router = KvRouter(
+                            endpoint=endpoint,
+                            block_size=block_size,
+                            kv_router_config=kv_router_config,
+                        )
+                    return runtime, endpoint, kv_router
+                except Exception as error:
+                    last_error = error
+                    if not (serve_indexer or use_remote_indexer):
+                        raise
+                    del endpoint
+                    del runtime
+                    await asyncio.sleep(1.0)
+
+            raise AssertionError(
+                "Timed out waiting for model discovery before creating remote-indexer router"
+            ) from last_error
+
+        serving_runtimes = []
+        serving_endpoints = []
+        serving_routers = []
+
+        runtime_a, endpoint_a, router_a = await make_router(
+            serve_indexer=True, use_remote_indexer=False
+        )
+        serving_runtimes.append(runtime_a)
+        serving_endpoints.append(endpoint_a)
+        serving_routers.append(router_a)
+
+        if use_kv_events:
+            runtime_b, endpoint_b, router_b = await make_router(
+                serve_indexer=True, use_remote_indexer=False
+            )
+            serving_runtimes.append(runtime_b)
+            serving_endpoints.append(endpoint_b)
+            serving_routers.append(router_b)
+
+        await wait_for_served_indexer(
+            serving_runtimes[0],
+            expected_query_instances=len(serving_routers),
+            expected_record_instances=0 if use_kv_events else 1,
+        )
+
+        _, consumer_endpoint, consumer_router = await make_router(
+            serve_indexer=False,
+            use_remote_indexer=True,
+            router_predicted_ttl_secs=router_predicted_ttl_secs,
+        )
+
+        worker_ids = sorted(
+            await poll_for_worker_instances(
+                serving_endpoints[0], expected_num_instances, max_wait_time=120
+            )
+        )
+        if len(worker_ids) >= 2:
+            worker_a_id = worker_ids[0]
+            worker_b_id = worker_ids[1]
+        elif len(worker_ids) == 1 and test_dp_rank:
+            worker_a_id = worker_ids[0]
+            worker_b_id = worker_ids[0]
+        else:
+            raise AssertionError(
+                f"Need at least 2 routing targets but got {len(worker_ids)} worker(s) "
+                f"with test_dp_rank={test_dp_rank}"
+            )
+
+        dp_rank_a = 0 if test_dp_rank else None
+        dp_rank_b = 1 if test_dp_rank else None
+        logger.info(
+            "Remote-indexer routing targets: worker_a=%s/%s worker_b=%s/%s",
+            worker_a_id,
+            dp_rank_a,
+            worker_b_id,
+            dp_rank_b,
+        )
+
+        blocks = [
+            [random.randint(1, 10000) for _ in range(block_size)] for _ in range(7)
+        ]
+        A, B, C, D, E, F, G = blocks
+        request_specs = [
+            (serving_routers[0], A + B, worker_a_id, dp_rank_a, 0.1),
+            (serving_routers[0], A + C + D, worker_a_id, dp_rank_a, 0.1),
+            (serving_routers[-1], A + C + E, worker_b_id, dp_rank_b, 2.0),
+            (consumer_router, A + C + D + F, None, None, 2.0),
+            (consumer_router, A + C + E + G, None, None, 2.0),
+        ]
+        dp_a = dp_rank_a if dp_rank_a is not None else 0
+        dp_b = dp_rank_b if dp_rank_b is not None else 0
+        expected_overlap_by_request = {
+            4: {(worker_a_id, dp_a): 3, (worker_b_id, dp_b): 2},
+            5: {(worker_a_id, dp_a): 2, (worker_b_id, dp_b): 3},
+        }
+
+        responses: list[dict[str, Optional[int]]] = []
+        for i, (
+            kv_router,
+            token_ids,
+            forced_worker_id,
+            forced_dp_rank,
+            sleep_after,
+        ) in enumerate(request_specs, start=1):
+            logger.info(
+                "Sending remote-indexer request %s/5%s%s",
+                i,
+                (
+                    f" forced_worker_id={forced_worker_id}"
+                    if forced_worker_id is not None
+                    else ""
+                ),
+                (
+                    f" forced_dp_rank={forced_dp_rank}"
+                    if forced_dp_rank is not None
+                    else ""
+                ),
+            )
+            if i in expected_overlap_by_request:
+                await _assert_overlap_scores(
+                    kv_router,
+                    token_ids,
+                    block_size,
+                    expected_overlap_by_request[i],
+                    f"request {i}",
+                )
+            result = await send_request_via_python_kv_router(
+                kv_python_router=kv_router,
+                model_name=model_name,
+                token_ids=token_ids,
+                stop_conditions={
+                    "ignore_eos": True,
+                    "max_tokens": 2,
+                },
+                worker_id=forced_worker_id,
+                dp_rank=forced_dp_rank,
+                return_worker_ids=True,
+            )
+            assert isinstance(result, dict), f"Expected dict result, got {type(result)}"
+            responses.append(result)
+            if sleep_after > 0:
+                await asyncio.sleep(sleep_after)
+
+        req4 = responses[3]
+        assert req4["prefill_worker_id"] == worker_a_id, (
+            f"Request 4: expected prefill_worker_id={worker_a_id} (longest prefix match), "
+            f"got {req4['prefill_worker_id']}"
+        )
+        if test_dp_rank:
+            assert req4["prefill_dp_rank"] == dp_rank_a, (
+                f"Request 4: expected prefill_dp_rank={dp_rank_a} "
+                f"(longest prefix match), got {req4['prefill_dp_rank']}"
+            )
+
+        req5 = responses[4]
+        assert req5["prefill_worker_id"] == worker_b_id, (
+            f"Request 5: expected prefill_worker_id={worker_b_id} (longest prefix match), "
+            f"got {req5['prefill_worker_id']}"
+        )
+        if test_dp_rank:
+            assert req5["prefill_dp_rank"] == dp_rank_b, (
+                f"Request 5: expected prefill_dp_rank={dp_rank_b} "
+                f"(longest prefix match), got {req5['prefill_dp_rank']}"
+            )
+
+        await poll_for_worker_instances(
+            consumer_endpoint, expected_num_instances, max_wait_time=120
+        )
+
+    asyncio.run(test_sync())
+
+
 def _test_python_router_bindings(
     engine_workers,
     endpoint,
@@ -936,7 +774,7 @@ def _test_python_router_bindings(
 
     Assumes engine_workers are already initialized. This test creates a KvRouter
     Python object and sends three test requests to verify:
-    1. Token streaming with full router config overrides (overlap_score_weight, router_temperature)
+    1. Token streaming with full router config overrides (overlap_score_credit, router_temperature)
     2. Token streaming without any overrides (uses default config)
     3. Token streaming with partial override (only router_temperature)
 
@@ -955,11 +793,14 @@ def _test_python_router_bindings(
     # Create KvRouterConfig with default settings
     kv_router_config = KvRouterConfig()
 
-    # Create KvRouter Python object
-    kv_router = KvRouter(
-        endpoint=endpoint,
-        block_size=block_size,
-        kv_router_config=kv_router_config,
+    kv_router = _create_kv_router_with_timeout(
+        router_factory=lambda: KvRouter(
+            endpoint=endpoint,
+            block_size=block_size,
+            kv_router_config=kv_router_config,
+        ),
+        num_workers=num_workers,
+        engine_workers=engine_workers,
     )
 
     logger.info("Created KvRouter Python object")
@@ -973,7 +814,7 @@ def _test_python_router_bindings(
 
     # Set up override parameters
     router_config_override = {
-        "overlap_score_weight": 0.5,  # Override the default weight
+        "overlap_score_credit": 0.5,  # Override the default credit
         "router_temperature": 0.5,  # Override the default temperature
     }
 
@@ -986,8 +827,6 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 20,  # Generate exactly 20 tokens
@@ -1008,8 +847,6 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids[:50],  # Use fewer tokens for second test,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 10,  # Generate exactly 10 tokens for the second test
@@ -1031,8 +868,6 @@ def _test_python_router_bindings(
             kv_python_router=kv_router,
             model_name=model_name,
             token_ids=token_ids[:30],  # Use fewer tokens for third test,
-            initial_wait=1.0,
-            max_retries=8,
             stop_conditions={
                 "ignore_eos": True,  # Don't stop on EOS token
                 "max_tokens": 5,  # Generate exactly 5 tokens for the third test
@@ -1091,9 +926,16 @@ def _test_router_query_instance_id(
 
         url = f"http://localhost:{frontend_port}/v1/chat/completions"
 
-        # Send a warming request first to ensure system is ready
-        logger.info("Sending warming request without annotations...")
-        asyncio.run(send_request_with_retry(url, test_payload))
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=f"http://localhost:{frontend_port}",
+                expected_num_workers=engine_workers.num_workers,
+                timeout=120,
+                test_payload=test_payload,
+                engine_workers=engine_workers,
+                store_backend=store_backend,
+            )
+        )
 
         # Test payload with query_instance_id annotation
         # Format: "query_instance_id:" (colon with empty value) for GAIE aggregated mode
@@ -1210,18 +1052,226 @@ def _test_router_query_instance_id(
         logger.info(f"Token count: {result['token_count']}")
 
 
-def _test_router_overload_503(
+def _parse_frontend_rejection_metric(
+    metrics_text: str, model_name: str, endpoint: str
+) -> int:
+    """Parse frontend model_rejection_total from Prometheus metrics text.
+
+    Args:
+        metrics_text: Raw Prometheus metrics text
+        model_name: The model name label value
+        endpoint: The endpoint label value (e.g. "chat_completions")
+
+    Returns:
+        The metric count, or 0 if not found
+    """
+    metric_name = f"{name_prefix.FRONTEND}_{frontend_service.MODEL_REJECTION_TOTAL}"
+    for line in metrics_text.splitlines():
+        if not line.startswith(f"{metric_name}{{"):
+            continue
+        if f'model="{model_name}"' in line and f'endpoint="{endpoint}"' in line:
+            parts = line.rsplit(None, 1)
+            if len(parts) == 2:
+                try:
+                    return int(float(parts[1]))
+                except ValueError:
+                    pass
+    return 0
+
+
+def _verify_frontend_rejection_metrics(
+    frontend_port: int,
+    model_name: str,
+    endpoint: str,
+    expected_count: int,
+) -> None:
+    """Verify frontend rejection metrics by scraping the /metrics endpoint.
+
+    Args:
+        frontend_port: Port where the frontend /metrics is served
+        model_name: The model name label value
+        endpoint: The endpoint label value (e.g. "chat_completions")
+        expected_count: Expected rejection count to match exactly
+    """
+    metrics_url = f"http://localhost:{frontend_port}/metrics"
+    try:
+        metrics_response = requests.get(metrics_url, timeout=5)
+        metrics_response.raise_for_status()
+    except requests.RequestException as e:
+        raise AssertionError(
+            f"Failed to fetch frontend metrics from {metrics_url}: {e}"
+        ) from e
+
+    metric_count = _parse_frontend_rejection_metric(
+        metrics_response.text, model_name, endpoint
+    )
+    logger.info(f"Frontend rejection metric: model_rejection_total={metric_count}")
+    assert metric_count == expected_count, (
+        f"Frontend model_rejection_total ({metric_count}) does not match "
+        f"expected count ({expected_count})"
+    )
+
+
+def _probe_overload_529_and_assert(
+    frontend_port: int,
+    test_payload: dict,
+    max_tokens: int,
+):
+    """Send staggered streaming requests until the router rejects with 529.
+
+    Shared core for the aggregated and disaggregated overload tests. The caller
+    is responsible for starting the frontend (with the desired thresholds and,
+    for disagg, ``enforce_disagg=True``) and for waiting until it is ready.
+
+    Sends unique (shuffled) prompts 0.1s apart until the router rejects, then
+    asserts:
+    1. At least one request is rejected with 529 (the threshold gates the pool)
+    2. No other status codes appear
+    3. The frontend ``model_rejection_total`` metric matches the 529 count
+
+    Successes are not required: a single overload-shaped request can exceed the
+    threshold before dispatch, so an all-529 burst is a valid outcome.
+    """
+    url = f"http://localhost:{frontend_port}/v1/chat/completions"
+    test_payload_529 = {
+        **test_payload,
+        "max_tokens": max_tokens,
+    }
+
+    logger.info("Launching streaming requests until the router returns 529...")
+
+    async def exhaust_resources_and_verify_529():
+        stop_event = asyncio.Event()
+
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+
+            async def send_request(req_id, payload):
+                try:
+                    async with session.post(url, json=payload) as response:
+                        if response.status == 200:
+                            logger.info("Request %s accepted", req_id)
+                            await stop_event.wait()
+                            return response.status
+
+                        if response.status == 529:
+                            body = await response.text()
+                            logger.info("Request %s got expected 529: %s", req_id, body)
+                            stop_event.set()
+                            return response.status
+
+                        body = await response.text()
+                        logger.info(
+                            "Request %s got unexpected status %s: %s",
+                            req_id,
+                            response.status,
+                            body,
+                        )
+                        return response.status
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.info("Request %s failed: %s", req_id, e)
+                    raise
+
+            try:
+                for i in range(50):
+                    if stop_event.is_set():
+                        break
+
+                    content_words = test_payload["messages"][0]["content"].split()
+                    random.shuffle(content_words)
+                    shuffled_content = " ".join(content_words)
+                    unique_payload = {
+                        **test_payload_529,
+                        "messages": [
+                            {
+                                **test_payload["messages"][0],
+                                "content": shuffled_content,
+                            }
+                        ],
+                    }
+                    tasks.append(asyncio.create_task(send_request(i, unique_payload)))
+                    await asyncio.sleep(0.1)
+
+                if not stop_event.is_set():
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=10)
+                    except asyncio.TimeoutError:
+                        logger.error("Timed out waiting for overload 529")
+            finally:
+                stop_event.set()
+                # Drain quickly and count only requests that received a status.
+                # This does not race the rejection-metric assertion: a 529 is
+                # returned synchronously by send_request (so every rejected
+                # request is in `done`, never `pending`), and the accepted (200)
+                # requests unblock from stop_event and return immediately. Any
+                # task still pending here received no HTTP status yet — cancelling
+                # it can neither drop a counted 529 nor desync model_rejection_total
+                # (which only counts emitted 529s). Some configs (e.g. slow decode
+                # with large max_tokens) leave such in-flight requests, so we must
+                # not block on or fail them.
+                done, pending = await asyncio.wait(tasks, timeout=5)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            return [t.result() for t in done]
+
+    results = asyncio.run(exhaust_resources_and_verify_529())
+
+    # Count outcomes
+    num_succeeded = sum(1 for s in results if s == 200)
+    num_rejected = sum(1 for s in results if s == 529)
+    num_other = sum(1 for s in results if s not in (200, 529))
+
+    logger.info(
+        "Results: %s succeeded, %s rejected (529), %s other",
+        num_succeeded,
+        num_rejected,
+        num_other,
+    )
+
+    # Assert minimum thresholds
+    assert (
+        num_other == 0
+    ), f"Expected only 200 or 529 responses, but got {num_other} other"
+    assert num_rejected > 0, f"Expected at least 1 rejection, but got {num_rejected}"
+
+    # Verify rejection metrics from frontend /metrics endpoint
+    model_name = test_payload.get("model", "")
+    _verify_frontend_rejection_metrics(
+        frontend_port, model_name, "chat_completions", num_rejected
+    )
+
+    logger.info(
+        "Successfully verified overload 529: %s rejected, %s succeeded, metrics match",
+        num_rejected,
+        num_succeeded,
+    )
+
+
+def _test_router_overload_529(
     engine_workers,
     block_size: int,
     request,
     frontend_port: int,
     test_payload: dict,
-    blocks_threshold: float = 0.2,
+    blocks_threshold: float | str | None = 0.2,
+    tokens_threshold: int | str | None = None,
+    tokens_threshold_frac: float | str | None = None,
+    router_queue_threshold: float | str | None = None,
+    max_tokens: int = 50,
 ):
-    """Test that KV router returns 503 when all workers are busy.
+    """Test that 529 is returned when all workers are busy, and verify rejection metrics.
 
     Assumes engine_workers are already initialized. This function manages router lifecycle.
     Uses limited resources to intentionally trigger the overload condition.
+
+    Sends staggered requests (0.1s apart) to exhaust worker resources, then verifies:
+    1. At least one request succeeds (routed before busy state propagates)
+    2. At least one request is rejected with 529 (worker busy)
+    3. The frontend model_rejection_total metric matches the observed 529 count
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -1230,11 +1280,14 @@ def _test_router_overload_503(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
         blocks_threshold: Active decode blocks threshold for the router (default 0.2)
+        tokens_threshold: Active prefill tokens threshold for the router
+        tokens_threshold_frac: Fractional active prefill tokens threshold for the router
+        router_queue_threshold: Router queue threshold, or "None" to disable queueing
+        max_tokens: Output token count for generated overload requests
 
     Raises:
-        AssertionError: If 503 response is not received when expected
+        AssertionError: If success/rejection counts or metrics don't meet expectations
     """
-
     logger.info(
         f"Starting KV router frontend on port {frontend_port} with limited resources"
     )
@@ -1245,101 +1298,369 @@ def _test_router_overload_503(
         frontend_port=frontend_port,
         namespace=engine_workers.namespace,
         blocks_threshold=blocks_threshold,
+        tokens_threshold=tokens_threshold,
+        tokens_threshold_frac=tokens_threshold_frac,
+        router_queue_threshold=router_queue_threshold,
     ):
-        url = f"http://localhost:{frontend_port}/v1/chat/completions"
+        frontend_url = f"http://localhost:{frontend_port}"
 
-        # Custom payload for 503 test with more tokens to consume resources
-        test_payload_503 = {
+        logger.info("Waiting for frontend readiness before overload test...")
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=engine_workers.num_workers,
+                timeout=60,
+                engine_workers=engine_workers,
+            )
+        )
+
+        _probe_overload_529_and_assert(frontend_port, test_payload, max_tokens)
+
+
+def _test_disagg_router_overload_529(
+    prefill_workers,
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    blocks_threshold: float | str | None = None,
+    tokens_threshold: int | str | None = None,
+    tokens_threshold_frac: float | str | None = None,
+    router_queue_threshold: float | str | None = None,
+    max_tokens: int = 50,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+):
+    """Verify disaggregated load-shedding: clients get 529 when the gated pool is busy.
+
+    Assumes the prefill and decode workers are already running (kept alive by the
+    caller); this function owns the frontend (router) lifecycle. The frontend is
+    started with ``--enforce-disagg`` so prefill and decode are routed by separate
+    pools — and so the model only becomes ready (listed in ``/v1/models``) once the
+    prefill router has activated, meaning the readiness wait below already gates on
+    prefill registration.
+
+    Two configurations exercise the two pools (driven by the thresholds the
+    caller passes):
+    - Prefill rejection: low ``tokens_threshold`` (active-prefill-tokens),
+      decode threshold disabled. Gates the prefill pool — the path that was
+      previously a silent no-op.
+    - Decode rejection: low ``blocks_threshold`` (active-decode-blocks), prefill
+      threshold disabled. Gates the decode pool.
+
+    In both cases the shared probe asserts that some requests succeed, some are
+    rejected with 529, and the rejection metric matches.
+
+    Raises:
+        AssertionError: If no 529 is observed (the threshold did not gate the
+        pool) or if any non-200/529 status appears.
+    """
+    with KVRouterProcess(
+        request=request,
+        block_size=block_size,
+        frontend_port=frontend_port,
+        namespace=decode_workers.namespace,
+        store_backend=store_backend,
+        enforce_disagg=True,
+        blocks_threshold=blocks_threshold,
+        tokens_threshold=tokens_threshold,
+        tokens_threshold_frac=tokens_threshold_frac,
+        router_queue_threshold=router_queue_threshold,
+        request_plane=request_plane,
+        min_initial_workers=decode_workers.num_workers,
+    ):
+        logger.info(
+            "Starting disagg KV router frontend on port %s for overload 529 test",
+            frontend_port,
+        )
+        frontend_url = f"http://localhost:{frontend_port}"
+
+        logger.info(
+            "Waiting for prefill and decode workers to register with frontend..."
+        )
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=(
+                    prefill_workers.num_workers + decode_workers.num_workers
+                ),
+                timeout=120,
+                engine_workers=[prefill_workers, decode_workers],
+                store_backend=store_backend,
+                request_plane=request_plane,
+            )
+        )
+
+        _probe_overload_529_and_assert(frontend_port, test_payload, max_tokens)
+
+
+def _test_router_threshold_none_disables_rejection(
+    engine_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    num_requests: int = 4,
+):
+    """Test that explicit CLI "None" thresholds disable busy-based rejection end to end.
+
+    Assumes engine_workers are already initialized. This function manages router lifecycle.
+    Starts the frontend with literal CLI "None" values for all three threshold knobs,
+    verifies the /busy_threshold API reports nulls, then sends overload-shaped traffic and
+    confirms no request is rejected with 529 and the frontend rejection metric stays at 0.
+
+    Args:
+        engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
+        block_size: Block size for KV cache
+        request: Pytest request fixture for managing resources
+        frontend_port: Port for the frontend HTTP server
+        test_payload: Base test payload to send to /v1/chat/completions
+        num_requests: Number of concurrent requests to send under load
+
+    Raises:
+        AssertionError: If thresholds are not null or any request is rejected/fails
+    """
+    logger.info(
+        "Starting KV router frontend on port %s with explicit CLI None thresholds",
+        frontend_port,
+    )
+
+    with KVRouterProcess(
+        request=request,
+        block_size=block_size,
+        frontend_port=frontend_port,
+        namespace=engine_workers.namespace,
+        blocks_threshold="None",
+        tokens_threshold="None",
+        tokens_threshold_frac="None",
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+        busy_threshold_url = f"{frontend_url}/busy_threshold"
+        model_name = test_payload.get("model", "test-model")
+        load_payload = {
             **test_payload,
-            "max_tokens": 50,  # Longer output to consume more blocks
+            "max_tokens": 50,
         }
 
-        # First, send one request with retry to ensure system is ready
-        logger.info("Sending initial request to ensure system is ready...")
-        asyncio.run(send_inflight_requests([url], test_payload_503, 1))
+        logger.info("Waiting for frontend readiness before explicit-None test...")
+        asyncio.run(
+            wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=engine_workers.num_workers,
+                timeout=60,
+                engine_workers=engine_workers,
+            )
+        )
 
-        # Now send 50 concurrent requests to exhaust resources, then verify 503
-        logger.info("Sending 50 concurrent requests to exhaust resources...")
-
-        async def exhaust_resources_and_verify_503():
+        async def verify_thresholds_and_send_load():
             async with aiohttp.ClientSession() as session:
-                # Start 50 long-running requests concurrently
-                tasks = []
-                for i in range(50):
-                    # Create unique shuffled content for each request
-                    content_words = test_payload["messages"][0]["content"].split()
-                    random.shuffle(content_words)
-                    shuffled_content = " ".join(content_words)
-
-                    # Create unique payload for this request
-                    unique_payload = {
-                        **test_payload,
-                        "max_tokens": 50,
-                        "messages": [
-                            {**test_payload["messages"][0], "content": shuffled_content}
-                        ],
-                    }
-
-                    async def send_long_request(req_id, payload):
-                        try:
-                            async with session.post(url, json=payload) as response:
-                                if response.status == 200:
-                                    # Don't read the response fully, just hold the connection
-                                    await asyncio.sleep(
-                                        10
-                                    )  # Hold connection for 10 seconds
-                                    return True
-                                else:
-                                    logger.info(
-                                        f"Request {req_id} got status {response.status}"
-                                    )
-                                    return False
-                        except Exception as e:
-                            logger.info(f"Request {req_id} failed: {e}")
-                            return False
-
-                    tasks.append(
-                        asyncio.create_task(send_long_request(i, unique_payload))
+                logger.info(
+                    "Checking /busy_threshold reports nulls for explicit CLI None thresholds"
+                )
+                async with session.post(
+                    busy_threshold_url,
+                    json={"model": model_name},
+                ) as response:
+                    assert (
+                        response.status == 200
+                    ), f"POST /busy_threshold (get) failed with status {response.status}"
+                    data = await response.json()
+                    assert (
+                        data.get("active_decode_blocks_threshold") is None
+                    ), f"Expected active_decode_blocks_threshold=None: {data}"
+                    assert (
+                        data.get("active_prefill_tokens_threshold") is None
+                    ), f"Expected active_prefill_tokens_threshold=None: {data}"
+                    assert (
+                        data.get("active_prefill_tokens_threshold_frac") is None
+                    ), f"Expected active_prefill_tokens_threshold_frac=None: {data}"
+                    logger.info(
+                        "POST /busy_threshold returned expected null thresholds: %s",
+                        data,
                     )
 
-                # Wait briefly to ensure requests are in-flight
-                await asyncio.sleep(0.2)
+            logger.info(
+                "Launching overload-shaped traffic with explicit None thresholds..."
+            )
+            stop_event = asyncio.Event()
+            response_statuses = asyncio.Queue()
 
-                # Now send one more request that should get 503
-                logger.info("Sending additional request that should receive 503...")
-                try:
-                    async with session.post(url, json=test_payload_503) as response:
-                        status_code = response.status
-                        if status_code == 503:
-                            body = await response.json()
-                            logger.info(f"Got expected 503 response: {body}")
-                            assert "Service temporarily unavailable" in body.get(
-                                "error", ""
-                            ) or "All workers are busy" in body.get(
-                                "error", ""
-                            ), f"Expected service overload error message, got: {body}"
-                            return True
-                        else:
-                            logger.error(f"Expected 503 but got {status_code}")
-                            if status_code == 200:
-                                logger.error(
-                                    "Request unexpectedly succeeded when it should have been rejected"
+            async with aiohttp.ClientSession() as session:
+
+                async def send_request(req_id: int, payload: dict) -> int:
+                    try:
+                        async with session.post(chat_url, json=payload) as response:
+                            if response.status == 200:
+                                logger.info(
+                                    "Request %s accepted without rejection", req_id
                                 )
-                            return False
-                except Exception as e:
-                    logger.error(f"Failed to send overload test request: {e}")
-                    return False
+                                await response_statuses.put(response.status)
+                                await stop_event.wait()
+                                return response.status
+
+                            body = await response.text()
+                            logger.info(
+                                "Request %s got unexpected status %s: %s",
+                                req_id,
+                                response.status,
+                                body,
+                            )
+                            await response_statuses.put(response.status)
+                            return response.status
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.info("Request %s failed with error: %s", req_id, exc)
+                        await response_statuses.put(exc)
+                        raise
+
+                tasks = []
+                try:
+                    for i in range(num_requests):
+                        content_words = test_payload["messages"][0]["content"].split()
+                        random.shuffle(content_words)
+                        unique_payload = {
+                            **load_payload,
+                            "messages": [
+                                {
+                                    **test_payload["messages"][0],
+                                    "content": " ".join(content_words),
+                                }
+                            ],
+                        }
+                        tasks.append(
+                            asyncio.create_task(send_request(i, unique_payload))
+                        )
+                        await asyncio.sleep(0.1)
                 finally:
-                    # Cancel all background tasks
-                    for task in tasks:
-                        task.cancel()
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                    initial_results = [
+                        await response_statuses.get() for _ in range(num_requests)
+                    ]
+                    stop_event.set()
+                    done = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Run the test
-        success = asyncio.run(exhaust_resources_and_verify_503())
-        assert success, "Failed to verify 503 response when resources are exhausted"
+                for result in initial_results + done:
+                    if isinstance(result, Exception):
+                        raise result
 
-        logger.info("Successfully verified 503 response when all workers are busy")
+                return done
+
+        results = asyncio.run(verify_thresholds_and_send_load())
+
+        num_succeeded = sum(1 for status in results if status == 200)
+        num_rejected = sum(1 for status in results if status == 529)
+        num_other = sum(1 for status in results if status not in (200, 529))
+
+        logger.info(
+            "Results with explicit None thresholds: %s succeeded, %s rejected (529), %s other",
+            num_succeeded,
+            num_rejected,
+            num_other,
+        )
+
+        assert num_rejected == 0, f"Expected 0 rejections, but got {num_rejected}"
+        assert (
+            num_other == 0
+        ), f"Expected only 200 or 529 responses, but got {num_other} other"
+        assert num_succeeded > 0, "Expected at least one successful request"
+        assert (
+            num_succeeded == num_requests
+        ), f"Expected {num_requests} successful requests, got {num_succeeded}"
+
+        _verify_frontend_rejection_metrics(
+            frontend_port,
+            model_name,
+            "chat_completions",
+            0,
+        )
+
+        logger.info(
+            "Explicit CLI None thresholds disabled busy rejection as expected: %s successes, metrics clean",
+            num_succeeded,
+        )
+
+
+async def _zmq_replay_cycle(
+    phase: int,
+    router,
+    router_name: str,
+    endpoint,
+    indexer_url: str,
+    engine_workers,
+    send_requests_to_router,
+    model_name: str,
+):
+    """Pause indexer listeners, create gaps, then force each stream to reveal them."""
+    await asyncio.sleep(1)
+    worker_ids = list(engine_workers.worker_id_to_zmq_ports.keys())
+    dp_size = getattr(engine_workers, "dp_size", None) or 1
+
+    logger.info(f"=== ZMQ REPLAY TEST: Phase {phase} ({router_name}) ===")
+    async with aiohttp.ClientSession() as session:
+        for wid in worker_ids:
+            for dp_rank in range(dp_size):
+                async with session.post(
+                    f"{indexer_url}/test/pause_listener",
+                    json={"instance_id": wid, "dp_rank": dp_rank},
+                ) as resp:
+                    assert (
+                        resp.status == 200
+                    ), f"Pause {wid}:{dp_rank} failed: {await resp.text()}"
+
+    logger.info("Sending 10 requests while indexer listeners are paused")
+    successful_gap = await send_requests_to_router(
+        router, 10, f"{router_name} (indexer paused)", endpoint
+    )
+    assert (
+        successful_gap == 10
+    ), f"Expected 10 requests while paused, got {successful_gap}"
+
+    async with aiohttp.ClientSession() as session:
+        for wid in worker_ids:
+            for dp_rank in range(dp_size):
+                async with session.post(
+                    f"{indexer_url}/test/resume_listener",
+                    json={"instance_id": wid, "dp_rank": dp_rank},
+                ) as resp:
+                    assert (
+                        resp.status == 200
+                    ), f"Resume {wid}:{dp_rank} failed: {await resp.text()}"
+
+    replay_targets = [
+        (wid, dp_rank) for wid in worker_ids for dp_rank in range(dp_size)
+    ]
+    logger.info(
+        "Sending %s targeted requests after resume (triggers gap detection + replay)",
+        len(replay_targets),
+    )
+    post_resume_tasks = []
+    for wid, dp_rank in replay_targets:
+        request_tokens = [random.randint(1, 10000) for _ in range(30)]
+        post_resume_tasks.append(
+            asyncio.create_task(
+                send_request_via_python_kv_router(
+                    kv_python_router=router,
+                    model_name=model_name,
+                    token_ids=request_tokens,
+                    stop_conditions={
+                        "ignore_eos": True,
+                        "max_tokens": 10,
+                    },
+                    worker_id=wid,
+                    dp_rank=dp_rank,
+                )
+            )
+        )
+
+    post_resume_results = await asyncio.gather(*post_resume_tasks)
+    successful_post = sum(1 for result in post_resume_results if result)
+    assert successful_post == len(replay_targets), (
+        f"Expected {len(replay_targets)} targeted post-resume requests, "
+        f"got {successful_post}"
+    )
+    await asyncio.sleep(2)
 
 
 def _test_router_indexers_sync(
@@ -1354,6 +1675,8 @@ def _test_router_indexers_sync(
     durable_kv_events: bool = False,
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
+    standalone_indexer_b_url: Optional[str] = None,
+    test_zmq_replay: bool = False,
 ):
     """Test that two KV routers have synchronized indexer states after processing requests.
 
@@ -1400,15 +1723,73 @@ def _test_router_indexers_sync(
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
         )
+        event_plane = "nats" if durable_kv_events else None
 
-        # If standalone indexer mode, launch mockers one-by-one and register.
+        # If standalone indexer mode, launch workers one-by-one and register.
         # We need to create a temporary endpoint just to discover worker IDs.
         if standalone_indexer_url:
-            tmp_runtime = get_runtime(store_backend, request_plane)
+            tmp_runtime = get_runtime(
+                store_backend, request_plane, event_plane=event_plane
+            )
             tmp_endpoint = tmp_runtime.endpoint(
                 f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
             )
-            await engine_workers.launch_mockers_with_indexer(tmp_endpoint)
+            await engine_workers.launch_workers_with_indexer(tmp_endpoint)
+
+        def sort_key(event):
+            data = event["event"]["data"]["stored"]
+            blocks = data["blocks"]
+            first_block = blocks[0]
+            return (
+                event["worker_id"],
+                first_block["tokens_hash"],
+                data["parent_hash"],
+            )
+
+        expected_standalone_key = f"{model_name}:default"
+
+        async def fetch_standalone_events(session, indexer_url, indexer_label):
+            async with session.get(f"{indexer_url}/dump") as resp:
+                assert resp.status == 200, f"GET /dump failed: {resp.status}"
+                dump = await resp.json()
+
+            assert expected_standalone_key in dump, (
+                f"{indexer_label} missing dump key '{expected_standalone_key}', "
+                f"got keys={list(dump.keys())}"
+            )
+            for k, v in dump.items():
+                assert (
+                    isinstance(v, dict) and "events" in v
+                ), f"{indexer_label} dump key '{k}' returned unexpected format: {v}"
+            return sorted(dump[expected_standalone_key]["events"], key=sort_key)
+
+        async def wait_for_standalone_events(
+            indexer_url, expected_events, expected_label, actual_label
+        ):
+            last_error = None
+            async with aiohttp.ClientSession() as session:
+                for attempt in range(50):
+                    try:
+                        actual_events = await fetch_standalone_events(
+                            session, indexer_url, actual_label
+                        )
+                        logger.info(
+                            f"{actual_label} has {len(actual_events)} events "
+                            f"(attempt {attempt + 1})"
+                        )
+                        assert_event_dumps_equal(
+                            expected_events,
+                            actual_events,
+                            expected_label,
+                            actual_label,
+                        )
+                        return actual_events
+                    except (AssertionError, aiohttp.ClientError) as exc:
+                        last_error = exc
+                        await asyncio.sleep(0.2)
+
+            assert last_error is not None
+            raise last_error
 
         async def send_requests_to_router(router, num_requests, router_name, endpoint):
             # Now send the actual requests
@@ -1427,8 +1808,6 @@ def _test_router_indexers_sync(
                             kv_python_router=router,
                             model_name=model_name,
                             token_ids=request_tokens,
-                            initial_wait=1.0,
-                            max_retries=8,
                             stop_conditions={
                                 "ignore_eos": True,  # Don't stop on EOS token
                                 "max_tokens": 10,  # Generate exactly 10 tokens
@@ -1447,15 +1826,19 @@ def _test_router_indexers_sync(
 
         # Create first runtime and endpoint for router 1
         logger.info("Creating first KV router with its own runtime")
-        runtime1 = get_runtime(store_backend, request_plane)
+        runtime1 = get_runtime(store_backend, request_plane, event_plane=event_plane)
         endpoint1 = runtime1.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
 
-        kv_router1 = KvRouter(
-            endpoint=endpoint1,
-            block_size=block_size,
-            kv_router_config=kv_router_config,
+        kv_router1 = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
+                endpoint=endpoint1,
+                block_size=block_size,
+                kv_router_config=kv_router_config,
+            ),
+            num_workers=num_workers,
+            engine_workers=engine_workers,
         )
 
         # Wait for workers to be ready
@@ -1494,6 +1877,18 @@ def _test_router_indexers_sync(
 
             await asyncio.sleep(5)
 
+        if test_zmq_replay and standalone_indexer_url:
+            await _zmq_replay_cycle(
+                1,
+                kv_router1,
+                "Router 1",
+                endpoint1,
+                standalone_indexer_url,
+                engine_workers,
+                send_requests_to_router,
+                model_name,
+            )
+
         # Wait for snapshot to be available before creating second router.
         # In JetStream mode, the background task may purge acknowledged messages
         # from the stream before the snapshot upload completes. Poll the object
@@ -1525,18 +1920,50 @@ def _test_router_indexers_sync(
         else:
             await asyncio.sleep(1)
 
+        if standalone_indexer_url and standalone_indexer_b_url:
+            logger.info(
+                "Waiting for Standalone A to match Router 1 before launching Indexer B"
+            )
+            state1_before_peer_json = await kv_router1.dump_events()
+            sorted_state1_before_peer = sorted(
+                json.loads(state1_before_peer_json), key=sort_key
+            )
+            await wait_for_standalone_events(
+                standalone_indexer_url,
+                sorted_state1_before_peer,
+                "Router 1",
+                "Standalone A",
+            )
+            logger.info("Standalone A matches Router 1 before Indexer B recovery")
+
         # Create second runtime and endpoint for router 2
         logger.info("Creating second KV router with its own runtime")
-        runtime2 = get_runtime(store_backend, request_plane)
+        runtime2 = get_runtime(store_backend, request_plane, event_plane=event_plane)
         endpoint2 = runtime2.endpoint(
             f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
         )
 
-        kv_router2 = KvRouter(
-            endpoint=endpoint2,
-            block_size=block_size,
-            kv_router_config=kv_router_config,
+        kv_router2 = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
+                endpoint=endpoint2,
+                block_size=block_size,
+                kv_router_config=kv_router_config,
+            ),
+            num_workers=num_workers,
+            engine_workers=engine_workers,
         )
+
+        # Launch Indexer B alongside Router 2. Workers are passed via --workers
+        # so ZMQ sockets connect before recovery, avoiding the slow-joiner problem.
+        if standalone_indexer_b_url:
+            engine_workers.launch_indexer()
+            await wait_for_indexer_workers_active(
+                standalone_indexer_b_url, engine_workers.worker_id_to_zmq_ports
+            )
+            logger.info(
+                f"Launched Indexer B at {standalone_indexer_b_url} "
+                f"(P2P recovery from Indexer A)"
+            )
 
         # Send 25 requests to second router with initial retry loop
         logger.info("Sending 25 requests to second router")
@@ -1576,14 +2003,25 @@ def _test_router_indexers_sync(
                 successful_recovery == 5
             ), f"Expected 5 successful requests post-recovery, got {successful_recovery}"
 
-        # Wait for all requests to complete (they should already be complete from gather)
-        # Wait another 1 second for internal synchronization
+        if test_zmq_replay and standalone_indexer_url:
+            await _zmq_replay_cycle(
+                2,
+                kv_router2,
+                "Router 2",
+                endpoint2,
+                standalone_indexer_url,
+                engine_workers,
+                send_requests_to_router,
+                model_name,
+            )
+
+        # Wait for internal synchronization and ZMQ event propagation
         logger.info("Waiting for final synchronization")
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
         # Verify NATS object store bucket was created with snapshot
-        # Skip for NATS interruption test (restarts fresh), and standalone indexer (no JetStream)
-        if not test_nats_interruption and not standalone_indexer_url:
+        # Skip for NATS interruption test (restarts fresh) and non-durable modes
+        if not test_nats_interruption and durable_kv_events:
             # Mirror the Rust bucket naming logic from subscriber.rs:
             # component.subject() -> "namespace.{ns}.component.{comp}"
             # then slugify (convert dots to dashes, lowercase, etc) and append "-radix-bucket"
@@ -1630,25 +2068,13 @@ def _test_router_indexers_sync(
                 "Skipping NATS object store verification (NATS was restarted fresh for interruption test)"
             )
 
-        # Dump states from both routers
-        logger.info("Dumping states from both routers")
+        # Dump states from all sources
+        logger.info("Dumping states from all sources")
         state1_json = await kv_router1.dump_events()
         state2_json = await kv_router2.dump_events()
 
-        # Parse JSON strings for comparison
         state1 = json.loads(state1_json)
         state2 = json.loads(state2_json)
-
-        # Sort both states for comparison (order might differ due to HashMap iteration and sharding)
-        def sort_key(event):
-            data = event["event"]["data"]["stored"]
-            blocks = data["blocks"]
-            first_block = blocks[0]
-            return (
-                event["worker_id"],
-                first_block["tokens_hash"],
-                data["parent_hash"],
-            )
 
         sorted_state1 = sorted(state1, key=sort_key)
         sorted_state2 = sorted(state2, key=sort_key)
@@ -1657,50 +2083,30 @@ def _test_router_indexers_sync(
         logger.info(f"Router 2 has {len(sorted_state2)} events")
 
         assert_event_dumps_equal(sorted_state1, sorted_state2, "Router 1", "Router 2")
-        logger.info("Successfully verified that both router states are equal")
+        logger.info("Successfully verified Router 1 and Router 2 states are equal")
 
-        # Verify standalone HTTP indexer builds the same tree (non-durable with ZMQ)
+        # Verify standalone HTTP indexers build the same tree (via ZMQ)
         if standalone_indexer_url:
-            logger.info("Verifying standalone HTTP indexer tree state via /dump")
+            sorted_standalone_a = await wait_for_standalone_events(
+                standalone_indexer_url, sorted_state1, "Router 1", "Standalone A"
+            )
+            logger.info("Standalone A matches Router 1")
 
-            # Wait for ZMQ events to propagate to the indexer
-            await asyncio.sleep(3)
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{standalone_indexer_url}/dump") as resp:
-                    assert resp.status == 200, f"GET /dump failed: {resp.status}"
-                    dump_by_key = await resp.json()
-
-            # /dump returns {model:tenant -> events}, extract the expected key
-            expected_key = f"{model_name}:default"
-            assert expected_key in dump_by_key, (
-                f"Expected dump key '{expected_key}', "
-                f"got keys={list(dump_by_key.keys())}"
-            )
-            for k, v in dump_by_key.items():
-                assert isinstance(v, list), f"Dump key '{k}' returned error: {v}"
-            standalone_state = dump_by_key[expected_key]
-            sorted_standalone = sorted(standalone_state, key=sort_key)
-            logger.info(f"Standalone HTTP indexer has {len(sorted_standalone)} events")
-
-            assert_event_dumps_equal(
-                sorted_state1, sorted_standalone, "Router 1", "Standalone"
-            )
-            logger.info(
-                "Successfully verified standalone HTTP indexer state matches router states"
-            )
-        elif not durable_kv_events:
-            logger.info(
-                "Skipping standalone indexer verification (no standalone_indexer_url)"
-            )
-        else:
-            logger.info(
-                "Skipping standalone indexer verification (not supported with durable_kv_events)"
-            )
+            if standalone_indexer_b_url:
+                await wait_for_standalone_events(
+                    standalone_indexer_b_url,
+                    sorted_standalone_a,
+                    "Standalone A",
+                    "Standalone B",
+                )
+                logger.info(
+                    "All 4 dumps match: Router 1, Router 2, "
+                    "Standalone A, Standalone B"
+                )
 
         # Verify NATS consumers are created (while routers are still alive)
-        # Skip for NATS interruption test and standalone indexer (neither uses JetStream)
-        if not test_nats_interruption and not standalone_indexer_url:
+        # Skip for NATS interruption test (restarts fresh) and non-durable modes
+        if not test_nats_interruption and durable_kv_events:
             logger.info("Verifying NATS consumers exist for both routers")
             component_subject = f"namespace.{engine_workers.namespace}.component.{engine_workers.component_name}"
             slugified = component_subject.lower().replace(".", "-").replace("_", "-")
@@ -1741,6 +2147,8 @@ def _test_router_decisions_disagg(
     store_backend: str = "etcd",
     request_plane: str = "nats",
     durable_kv_events: bool = False,
+    router_aic_config: Optional[dict[str, Any]] = None,
+    enable_bootstrap: bool = False,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -1763,6 +2171,7 @@ def _test_router_decisions_disagg(
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
+        router_aic_config: Optional AIC router perf-model config for frontend KV routing.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -1774,8 +2183,11 @@ def _test_router_decisions_disagg(
         frontend_port,
         decode_workers.namespace,
         store_backend,
+        enforce_disagg=True,
         request_plane=request_plane,
         durable_kv_events=durable_kv_events,
+        min_initial_workers=decode_workers.num_workers,
+        router_aic_config=router_aic_config,
     ):
         # Start KV router frontend - uses decode_workers namespace for discovery
         # The frontend will auto-discover both prefill and decode workers
@@ -1793,8 +2205,13 @@ def _test_router_decisions_disagg(
         asyncio.run(
             wait_for_frontend_ready(
                 frontend_url=frontend_url,
-                expected_num_workers=decode_workers.num_workers,
+                expected_num_workers=(
+                    prefill_workers.num_workers + decode_workers.num_workers
+                ),
                 timeout=120,
+                engine_workers=[prefill_workers, decode_workers],
+                store_backend=store_backend,
+                request_plane=request_plane,
             )
         )
 
@@ -1884,11 +2301,13 @@ def _test_router_decisions_disagg(
                         if decode_wid is not None:
                             decode_worker_ids.append(decode_wid)
 
-                        # Verify timing info is present and valid
+                        # Verify timing info is present and valid.
+                        # kv_transfer_estimated_latency_ms is measured on both the original
+                        # and bootstrap prefill paths (uses first_token_time as stop).
                         assert (
                             timing_info is not None
                         ), f"Request {i + 1}: Expected timing info in final chunk, got None"
-                        verify_response_timing(timing_info)
+                        verify_response_timing(timing_info, disagg=not enable_bootstrap)
 
                     # Small delay between requests
                     await asyncio.sleep(1)
@@ -1947,6 +2366,274 @@ def _test_router_decisions_disagg(
         )
 
 
+def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    prefill_zone_a_id: int,
+    prefill_zone_b_id: int,
+    shared_namespace: str,
+    request_plane: str = "tcp",
+):
+    """Validate required topology constraints derived from pinned prefill workers."""
+    with KVRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        namespace=decode_workers.namespace,
+        enforce_disagg=True,
+        request_plane=request_plane,
+        min_initial_workers=decode_workers.num_workers,
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+
+        async def run_requests() -> None:
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+                engine_workers=decode_workers,
+                request_plane=request_plane,
+            )
+
+            runtime = get_runtime(request_plane=request_plane)
+            prefill_endpoint = runtime.endpoint(f"{shared_namespace}.prefill.generate")
+
+            await poll_for_worker_instances(
+                prefill_endpoint, decode_workers.num_workers
+            )
+
+            async def post_expect_status(
+                session: aiohttp.ClientSession,
+                payload: dict,
+                expected_status: int,
+                message: str,
+                retry_statuses: set[int] | None = None,
+                timeout_s: float = 30.0,
+            ) -> str:
+                retry_statuses = retry_statuses or set()
+                deadline = asyncio.get_running_loop().time() + timeout_s
+                attempt = 0
+                last_status = None
+                last_body = ""
+
+                while True:
+                    attempt += 1
+                    async with session.post(chat_url, json=payload) as response:
+                        response_body = await response.text()
+                        if response.status == expected_status:
+                            return response_body
+
+                        last_status = response.status
+                        last_body = response_body
+
+                    if (
+                        last_status not in retry_statuses
+                        or asyncio.get_running_loop().time() >= deadline
+                    ):
+                        raise AssertionError(
+                            f"{message}, got status={last_status} body={last_body}"
+                        )
+
+                    logger.info(
+                        "%s not ready yet: status=%s attempt=%s; retrying...",
+                        message,
+                        last_status,
+                        attempt,
+                    )
+                    await asyncio.sleep(1.0)
+
+            zone_a_payload = {
+                **test_payload,
+                "nvext": {
+                    "prefill_worker_id": prefill_zone_a_id,
+                },
+            }
+            topology_ready_payload = {
+                **zone_a_payload,
+                "messages": [{"role": "user", "content": "test"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            logger.info("Waiting for topology-valid frontend readiness...")
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=decode_workers.num_workers,
+                timeout=120,
+                test_payload=topology_ready_payload,
+                engine_workers=decode_workers,
+                request_plane=request_plane,
+            )
+
+            async with aiohttp.ClientSession() as session:
+                await post_expect_status(
+                    session,
+                    zone_a_payload,
+                    200,
+                    "Expected required KV-transfer topology match to succeed",
+                    retry_statuses={404},
+                )
+
+            zone_b_payload = {
+                **test_payload,
+                "nvext": {
+                    "prefill_worker_id": prefill_zone_b_id,
+                },
+            }
+            async with aiohttp.ClientSession() as session:
+                await post_expect_status(
+                    session,
+                    zone_b_payload,
+                    500,
+                    "Expected required KV-transfer topology mismatch to fail",
+                )
+
+        asyncio.run(run_requests())
+
+
+def _test_router_decisions_disagg_round_robin_prefill_dp_rank(
+    prefill_workers,
+    decode_workers,
+    block_size: int,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    expected_prefill_dp_ranks: int,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+):
+    """Verify disaggregated round-robin requests store prefill KV blocks across DP ranks."""
+
+    with FrontendRouterProcess(
+        request,
+        block_size,
+        frontend_port,
+        decode_workers.namespace,
+        store_backend,
+        enforce_disagg=True,
+        request_plane=request_plane,
+        router_mode="round-robin",
+        min_initial_workers=decode_workers.num_workers,
+    ):
+        logger.info(
+            "Starting round-robin frontend on port %s for disagg prefill dp-rank test",
+            frontend_port,
+        )
+
+        async def test_sync():
+            frontend_url = f"http://localhost:{frontend_port}"
+            chat_url = f"{frontend_url}/v1/chat/completions"
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                expected_num_workers=(
+                    prefill_workers.num_workers + decode_workers.num_workers
+                ),
+                timeout=120,
+                engine_workers=[prefill_workers, decode_workers],
+                store_backend=store_backend,
+                request_plane=request_plane,
+            )
+
+            runtime = get_runtime(
+                store_backend=store_backend, request_plane=request_plane
+            )
+            prefill_endpoint = runtime.endpoint(
+                f"{prefill_workers.namespace}.prefill.generate"
+            )
+
+            observer_router = _create_kv_router_with_timeout(
+                router_factory=lambda: KvRouter(
+                    endpoint=prefill_endpoint,
+                    block_size=block_size,
+                    kv_router_config=KvRouterConfig(
+                        router_snapshot_threshold=20,
+                        use_kv_events=True,
+                        durable_kv_events=False,
+                        router_event_threads=4,
+                        router_track_prefill_tokens=True,
+                        router_prefill_load_model="none",
+                    ),
+                ),
+                num_workers=prefill_workers.num_workers,
+                engine_workers=prefill_workers,
+            )
+
+            worker_ids = sorted(
+                await poll_for_worker_instances(
+                    prefill_endpoint,
+                    prefill_workers.num_workers,
+                )
+            )
+            prefill_worker_id = worker_ids[0]
+
+            def stored_blocks_by_dp_rank(events_json: str) -> dict[int, int]:
+                counts = {dp_rank: 0 for dp_rank in range(expected_prefill_dp_ranks)}
+                for event in json.loads(events_json):
+                    if event.get("worker_id") != prefill_worker_id:
+                        continue
+                    stored = event.get("event", {}).get("data", {}).get("stored")
+                    if stored is None:
+                        continue
+                    dp_rank = event.get("event", {}).get("dp_rank", 0)
+                    counts[dp_rank] = counts.get(dp_rank, 0) + len(
+                        stored.get("blocks", [])
+                    )
+                return counts
+
+            await asyncio.sleep(2.0)
+            baseline_counts = stored_blocks_by_dp_rank(
+                await observer_router.dump_events()
+            )
+
+            async with aiohttp.ClientSession() as session:
+                for request_idx in range(expected_prefill_dp_ranks * 2):
+                    prompt_tokens = " ".join(
+                        f"prefill-{request_idx}-token-{token_idx}"
+                        for token_idx in range(block_size * 3)
+                    )
+                    payload = {
+                        **test_payload,
+                        "stream": False,
+                        "max_tokens": 1,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": prompt_tokens,
+                            }
+                        ],
+                    }
+                    async with session.post(chat_url, json=payload) as response:
+                        assert response.status == 200, (
+                            f"Request {request_idx + 1} failed with status "
+                            f"{response.status}: {await response.text()}"
+                        )
+                        await response.text()
+                    await asyncio.sleep(0.5)
+
+            await asyncio.sleep(2.0)
+            final_counts = stored_blocks_by_dp_rank(await observer_router.dump_events())
+            return prefill_worker_id, baseline_counts, final_counts
+
+        prefill_worker_id, baseline_counts, final_counts = asyncio.run(test_sync())
+
+        delta_counts = {
+            dp_rank: final_counts.get(dp_rank, 0) - baseline_counts.get(dp_rank, 0)
+            for dp_rank in range(expected_prefill_dp_ranks)
+        }
+        active_dp_ranks = sorted(
+            dp_rank for dp_rank, block_count in delta_counts.items() if block_count > 0
+        )
+
+        assert active_dp_ranks == list(range(expected_prefill_dp_ranks)), (
+            f"Expected round-robin prefill requests for worker {prefill_worker_id} "
+            f"to store KV blocks on dp_ranks {list(range(expected_prefill_dp_ranks))}, "
+            f"but saw deltas {delta_counts}"
+        )
+
+
 def _test_router_decisions(
     engine_workers,
     endpoint,
@@ -1958,8 +2645,12 @@ def _test_router_decisions(
     durable_kv_events: bool = False,
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
+    standalone_selector_url: Optional[str] = None,
+    router_aic_config: Optional[dict[str, Any]] = None,
+    router_predicted_ttl_secs: Optional[float] = None,
+    initial_wait: float = 0.25,
 ):
-    """Validate cross-worker routing decisions based on longest prefix match and tree-size tiebreaking.
+    """Validate cross-worker routing decisions based on longest prefix match.
 
     Assumes engine workers are already initialized.
     Seeds two routing targets (worker a and worker b) with different prefix trees,
@@ -1970,7 +2661,7 @@ def _test_router_decisions(
     2. [A, C, D]    → force worker a        (branch under A on worker a)
     3. [A, C, E]    → force worker b        (seed worker b's tree)
     4. [A, C, D, F] → router picks          (worker a wins: prefix [A,C,D]=3 vs worker b [A,C]=2)
-    5. [A, C, G]    → router picks          (tie on [A,C], worker b wins by smaller tree: 3 vs 5)
+    5. [A, C, E, G] → router picks          (worker b wins: prefix [A,C,E]=3 vs worker a [A,C]=2)
 
     Args:
         engine_workers: Backend worker instance ({MockerProcess, VLLMProcess, TRTLLMProcess}) (already initialized with __enter__())
@@ -1982,33 +2673,50 @@ def _test_router_decisions(
         use_kv_events: If True (default), uses KV events from workers. If False, uses
             approximate routing with TTL-based expiration (--no-kv-events mode).
         durable_kv_events: If True, use durable KV events (JetStream). Defaults to False.
+        router_aic_config: Optional AIC router perf-model config for direct KvRouter tests.
 
     Raises:
-        AssertionError: If routing decisions don't match expected prefix/tiebreak logic
+        AssertionError: If routing decisions don't match expected prefix logic
     """
 
     # Create KvRouterConfig with lower snapshot threshold for testing
     # Use async to manage the test flow
     async def test_sync():
-        # If standalone indexer mode, launch mockers one-by-one and register.
+        # If standalone indexer mode, launch workers one-by-one and register.
         # Must happen before KvRouter creation since KvRouter blocks until workers appear.
         if standalone_indexer_url:
-            await engine_workers.launch_mockers_with_indexer(endpoint)
+            await engine_workers.launch_workers_with_indexer(endpoint)
+
+        # Workers register one instance per process (not per dp_rank)
+        expected_num_instances = engine_workers.num_workers
 
         kv_router_config = KvRouterConfig(
             router_snapshot_threshold=20,
             use_kv_events=use_kv_events,
             durable_kv_events=durable_kv_events,
             router_event_threads=router_event_threads,
+            router_track_prefill_tokens=True,
+            router_prefill_load_model=(
+                "aic" if router_aic_config is not None else "none"
+            ),
+            router_predicted_ttl_secs=router_predicted_ttl_secs,
         )
-        kv_router = KvRouter(
-            endpoint=endpoint,
-            block_size=block_size,
-            kv_router_config=kv_router_config,
+        aic_perf_config = (
+            AicPerfConfig(**router_aic_config)
+            if router_aic_config is not None
+            else None
         )
 
-        # Workers register one instance per process (not per dp_rank)
-        expected_num_instances = engine_workers.num_workers
+        kv_router = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
+                endpoint=endpoint,
+                block_size=block_size,
+                kv_router_config=kv_router_config,
+                aic_perf_config=aic_perf_config,
+            ),
+            num_workers=expected_num_instances,
+            engine_workers=engine_workers,
+        )
 
         # Wait for workers to be ready and get their instance IDs
         worker_ids = await wait_for_workers_ready(
@@ -2065,8 +2773,19 @@ def _test_router_decisions(
                 None,
                 2.0,
             ),  # req4: router picks (worker a should win)
-            (A + C + G, None, None, 2.0),  # req5: router picks (worker b should win)
+            (
+                A + C + E + G,
+                None,
+                None,
+                2.0,
+            ),  # req5: router picks (worker b should win)
         ]
+        dp_a = dp_rank_a if dp_rank_a is not None else 0
+        dp_b = dp_rank_b if dp_rank_b is not None else 0
+        expected_overlap_by_request = {
+            4: {(worker_a_id, dp_a): 3, (worker_b_id, dp_b): 2},
+            5: {(worker_a_id, dp_a): 2, (worker_b_id, dp_b): 3},
+        }
 
         response_worker_ids: list[dict[str, Optional[int]]] = []
 
@@ -2080,12 +2799,23 @@ def _test_router_decisions(
                     log_msg += f", dp_rank={dp_override}"
             logger.info(log_msg)
 
+            request_idx = i + 1
+            if request_idx in expected_overlap_by_request:
+                await _assert_overlap_scores(
+                    kv_router,
+                    token_ids,
+                    block_size,
+                    expected_overlap_by_request[request_idx],
+                    f"request {request_idx}",
+                )
+
             result = await send_request_via_python_kv_router(
                 kv_python_router=kv_router,
                 model_name=model_name,
                 token_ids=token_ids,
-                initial_wait=1.0,
-                max_retries=8,
+                # XPU workers have longer startup latency; pass as parameter
+                # to avoid affecting CUDA tests.
+                initial_wait=initial_wait,
                 stop_conditions={
                     "ignore_eos": True,
                     "max_tokens": 2,
@@ -2139,10 +2869,10 @@ def _test_router_decisions(
             req4["prefill_dp_rank"] == dp_rank_a
         ), f"Request 4: expected prefill_dp_rank={dp_rank_a}, got {req4['prefill_dp_rank']}"
 
-    # Verify request 5 routed to worker b (tiebreak by smaller tree)
+    # Verify request 5 routed to worker b (longest prefix match)
     req5 = response_worker_ids[4]
     assert req5["prefill_worker_id"] == worker_b_id, (
-        f"Request 5: expected prefill_worker_id={worker_b_id} (tiebreak by smaller tree), "
+        f"Request 5: expected prefill_worker_id={worker_b_id} (longest prefix match), "
         f"got {req5['prefill_worker_id']}"
     )
     if test_dp_rank:
@@ -2168,30 +2898,40 @@ def _test_router_decisions(
             events_by_key[key] = []
         events_by_key[key].append(event)
 
+    def count_stored_blocks(events: list[Any]) -> int:
+        total = 0
+        for event in events:
+            stored = event.get("event", {}).get("data", {}).get("stored")
+            if stored is None:
+                continue
+            total += len(stored.get("blocks", []))
+        return total
+
     logger.info(
-        f"Events by (worker_id, dp_rank): {[(key, len(evts)) for key, evts in events_by_key.items()]}"
+        "Stored blocks by (worker_id, dp_rank): "
+        f"{[(key, count_stored_blocks(evts)) for key, evts in events_by_key.items()]}"
     )
 
-    # Worker a key: 5 events (A, B from req1; C, D from req2; F from req4)
+    # Worker a key: 5 stored blocks (A, B from req1; C, D from req2; F from req4)
     worker_a_key = (worker_a_id, dp_rank_a if dp_rank_a is not None else 0)
-    worker_a_events = len(events_by_key.get(worker_a_key, []))
-    assert worker_a_events == 5, (
-        f"Expected worker_a {worker_a_key} to have 5 events (A,B + C,D + F), "
-        f"but found {worker_a_events}"
+    worker_a_blocks = count_stored_blocks(events_by_key.get(worker_a_key, []))
+    assert worker_a_blocks == 5, (
+        f"Expected worker_a {worker_a_key} to have 5 stored blocks (A,B + C,D + F), "
+        f"but found {worker_a_blocks}"
     )
 
-    # Worker b key: 4 events (A, C, E from req3; G from req5)
+    # Worker b key: 4 stored blocks (A, C, E from req3; G from req5)
     worker_b_key = (worker_b_id, dp_rank_b if dp_rank_b is not None else 0)
-    worker_b_events = len(events_by_key.get(worker_b_key, []))
-    assert worker_b_events == 4, (
-        f"Expected worker_b {worker_b_key} to have 4 events (A,C,E + G), "
-        f"but found {worker_b_events}"
+    worker_b_blocks = count_stored_blocks(events_by_key.get(worker_b_key, []))
+    assert worker_b_blocks == 4, (
+        f"Expected worker_b {worker_b_key} to have 4 stored blocks (A,C,E + G), "
+        f"but found {worker_b_blocks}"
     )
 
     logger.info(
         f"Successfully verified cross-worker routing: "
-        f"worker_a {worker_a_key} has {worker_a_events} events, "
-        f"worker_b {worker_b_key} has {worker_b_events} events"
+        f"worker_a {worker_a_key} has {worker_a_blocks} stored blocks, "
+        f"worker_b {worker_b_key} has {worker_b_blocks} stored blocks"
     )
 
     # Verify standalone indexer scores via HTTP POST /query
@@ -2229,6 +2969,49 @@ def _test_router_decisions(
 
         asyncio.run(_verify_scores())
 
+    # Verify standalone selection service scores via HTTP POST /overlap_scores.
+    if standalone_selector_url:
+        _dp_a = dp_rank_a if dp_rank_a is not None else 0
+        _dp_b = dp_rank_b if dp_rank_b is not None else 0
+
+        async def _verify_selection_service_scores():
+            # The sidecar readiness gate confirms registration; allow KV events to settle.
+            await asyncio.sleep(3)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{standalone_selector_url}/overlap_scores",
+                    json={"token_ids": req4_tokens, "model_name": model_name},
+                ) as resp:
+                    assert (
+                        resp.status == 200
+                    ), f"POST /overlap_scores failed: {resp.status} {await resp.text()}"
+                    body = await resp.json()
+
+                    scores = {
+                        (worker["worker_id"], worker["dp_rank"]): worker
+                        for worker in body["workers"]
+                    }
+                    score_a = scores[(worker_a_id, _dp_a)]["device_blocks"]
+                    score_b = scores[(worker_b_id, _dp_b)]["device_blocks"]
+
+                    logger.info(
+                        "Standalone selection /overlap_scores: %s[%s]=%s, %s[%s]=%s",
+                        worker_a_id,
+                        _dp_a,
+                        score_a,
+                        worker_b_id,
+                        _dp_b,
+                        score_b,
+                    )
+                    assert score_a > score_b, (
+                        f"Expected selection service worker {worker_a_id} dp_rank {_dp_a} "
+                        f"score {score_a} > worker {worker_b_id} dp_rank {_dp_b} "
+                        f"score {score_b} for req4 tokens"
+                    )
+
+        asyncio.run(_verify_selection_service_scores())
+
 
 def _test_busy_threshold_endpoint(
     engine_workers,
@@ -2244,7 +3027,7 @@ def _test_busy_threshold_endpoint(
     TODO: This doesn't actually test any e2e rejection for now. A proper test would:
     1. Set a very low threshold
     2. Send enough requests to exceed the threshold
-    3. Verify that subsequent requests are rejected with 503
+    3. Verify that subsequent requests are rejected with 529
 
     For now, this test only verifies the endpoint is accessible and returns valid responses.
 
@@ -2287,6 +3070,9 @@ def _test_busy_threshold_endpoint(
                 frontend_url=frontend_url,
                 expected_num_workers=engine_workers.num_workers,
                 timeout=120,
+                engine_workers=engine_workers,
+                store_backend=store_backend,
+                request_plane=request_plane,
             )
         )
 
@@ -2536,3 +3322,128 @@ def _test_busy_threshold_endpoint(
                 logger.info("All busy_threshold endpoint tests passed!")
 
         asyncio.run(test_busy_threshold_api())
+
+
+def _test_disagg_direct_mode(
+    prefill_workers,
+    decode_workers,
+    request,
+    frontend_port: int,
+    test_payload: dict,
+    request_plane: str = "nats",
+):
+    """E2E test for disaggregated Direct routing mode (simulating GAIE EPP).
+
+    In Direct mode, the router does not select workers itself.
+    Worker IDs must be provided via x-dynamo-worker-instance-id and
+    x-dynamo-prefill-instance-id
+    HTTP headers. The test verifies:
+      1. Requests with explicit worker ID headers succeed and return a valid response.
+      2. Requests without headers fail (Direct mode rejects unaddressed requests).
+
+    Args:
+        prefill_workers: Prefill mocker workers (already started).
+        decode_workers: Decode mocker workers (already started).
+        request: Pytest request fixture.
+        frontend_port: Port for the Direct-mode frontend HTTP server.
+        test_payload: Base test payload for /v1/chat/completions.
+        request_plane: Transport for request plane ("nats" or "tcp").
+    """
+    with FrontendRouterProcess(
+        request,
+        BLOCK_SIZE,
+        frontend_port,
+        decode_workers.namespace,
+        enforce_disagg=True,
+        request_plane=request_plane,
+        router_mode="direct",
+    ):
+        frontend_url = f"http://localhost:{frontend_port}"
+        chat_url = f"{frontend_url}/v1/chat/completions"
+        runtime = get_runtime(request_plane=request_plane)
+        prefill_endpoint = runtime.endpoint(
+            f"{decode_workers.namespace}.prefill.generate"
+        )
+        decode_endpoint = runtime.endpoint(
+            f"{decode_workers.namespace}.backend.generate"
+        )
+
+        async def wait_for_direct_frontend():
+            prefill_ids = await poll_for_worker_instances(
+                prefill_endpoint,
+                prefill_workers.num_workers,
+            )
+            decode_ids = await poll_for_worker_instances(
+                decode_endpoint,
+                decode_workers.num_workers,
+            )
+            headers = {
+                "x-dynamo-worker-instance-id": str(decode_ids[0]),
+                "x-dynamo-prefill-instance-id": str(prefill_ids[0]),
+                "x-dynamo-dp-rank": "0",
+                "x-dynamo-prefill-dp-rank": "0",
+            }
+            await wait_for_frontend_ready(
+                frontend_url=frontend_url,
+                timeout=120,
+                test_payload={**test_payload, "stream": False},
+                request_headers=headers,
+            )
+            return prefill_ids, decode_ids
+
+        prefill_ids, decode_ids = asyncio.run(wait_for_direct_frontend())
+        logger.info(f"Discovered prefill workers: {prefill_ids}")
+        logger.info(f"Discovered decode workers: {decode_ids}")
+
+        target_prefill = prefill_ids[0]
+        target_decode = decode_ids[0]
+
+        async def run_direct_mode_tests():
+            # Test 1: Request WITH correct headers should succeed.
+            # In direct mode the router is a passthrough — it does not have a
+            # KvRouter and does not record worker IDs on the RequestTracker, so
+            # the response's nvext will not contain worker_id info.  We only
+            # verify that the request is routed successfully (HTTP 200) and
+            # produces a valid chat completion response.
+            payload = {
+                **test_payload,
+                "stream": False,
+            }
+            headers = {
+                "x-dynamo-worker-instance-id": str(target_decode),
+                "x-dynamo-prefill-instance-id": str(target_prefill),
+                "x-dynamo-dp-rank": "0",
+                "x-dynamo-prefill-dp-rank": "0",
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    chat_url, json=payload, headers=headers
+                ) as response:
+                    assert response.status == 200, (
+                        "Direct-mode request with headers failed: "
+                        f"status={response.status}, body={await response.text()}"
+                    )
+                    data = await response.json()
+                    assert "choices" in data, "Expected 'choices' in response data"
+                    assert (
+                        len(data["choices"]) > 0
+                    ), "Expected at least one choice in response"
+
+                # Test 2: Request WITHOUT headers should fail (Direct mode
+                # rejects requests that have no worker ID)
+                logger.info(
+                    "Sending request without headers (should fail in Direct mode)..."
+                )
+                no_header_payload = {**test_payload, "stream": False}
+                async with session.post(chat_url, json=no_header_payload) as response:
+                    assert response.status != 200, (
+                        f"Expected non-200 status without routing headers in Direct mode, "
+                        f"got {response.status}. Direct mode must reject unaddressed requests."
+                    )
+                    logger.info(
+                        f"Correctly rejected headerless request: status={response.status}"
+                    )
+
+        asyncio.run(run_direct_mode_tests())
+        logger.info("Direct-mode disagg E2E test passed")

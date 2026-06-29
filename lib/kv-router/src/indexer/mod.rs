@@ -31,17 +31,44 @@
 //!
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
+mod branch_sharded;
+mod compressed_radix;
+mod shard_handle;
+
+use std::any::Any;
+
+pub(crate) fn panic_payload_message(panic_payload: &(dyn Any + Send)) -> String {
+    if let Some(s) = panic_payload.downcast_ref::<&str>() {
+        return s.to_string();
+    }
+
+    if let Some(s) = panic_payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+
+    "Unknown panic payload".to_string()
+}
+
+fn warn_on_unit_block_size(indexer_type: &'static str, kv_block_size: u32) {
+    if kv_block_size == 1 {
+        tracing::warn!(
+            indexer_type,
+            kv_block_size,
+            "block_size=1 is supported for KV indexers, but consider avoiding it because KV events may saturate network bandwidth",
+        );
+    }
+}
 mod kv_indexer;
 mod local;
+mod lower_tier;
+mod lower_tier_indexers;
 mod metrics;
-mod sharded;
 mod thread_pool;
 mod traits;
 mod types;
 
 pub mod concurrent_radix_tree;
-#[cfg(feature = "bench")]
-pub mod naive;
+pub mod concurrent_radix_tree_compressed;
 pub mod positional;
 pub mod pruning;
 pub mod radix_tree;
@@ -50,10 +77,12 @@ pub mod radix_tree;
 mod tests;
 
 // Re-export everything that was public in the old single-file module.
+pub use branch_sharded::*;
 pub use kv_indexer::*;
 pub use local::*;
+pub use lower_tier::*;
+pub use lower_tier_indexers::*;
 pub use metrics::*;
-pub use sharded::*;
 pub use thread_pool::*;
 pub use traits::*;
 pub use types::*;

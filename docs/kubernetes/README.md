@@ -1,239 +1,253 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Deployment Guide
+title: Kubernetes Quickstart
+subtitle: Quickstart for deploying a model on Kubernetes with Helm and the Dynamo operator.
 ---
 
-High-level guide to Dynamo Kubernetes deployments. Start here, then dive into specific guides.
+Get a model running on Kubernetes in minutes.
 
-## Important Terminology
+Dynamo's production path is Kubernetes-native: you install the platform with
+Helm, submit Dynamo CRDs, and let the operator reconcile inference graphs into
+pods, services, routing, model-loading, and scaling resources. The local and
+container guides remain useful for development, but Kubernetes is the canonical
+path for shared GPU clusters and multi-node serving.
 
-**Kubernetes Namespace**: The K8s namespace where your DynamoGraphDeployment resource is created.
-- Used for: Resource isolation, RBAC, organizing deployments
-- Example: `dynamo-system`, `team-a-namespace`
-
-**Dynamo Namespace**: The logical namespace used by Dynamo components for [service discovery](service-discovery.md).
-- Used for: Runtime component communication, service discovery
-- Specified in: `.spec.services.<ServiceName>.dynamoNamespace` field
-- Example: `my-llm`, `production-model`, `dynamo-dev`
-
-These are independent. A single Kubernetes namespace can host multiple Dynamo namespaces, and vice versa.
+> [!NOTE]
+> **Deployment modes.** Dynamo supports two deployment modes on Kubernetes. This quickstart uses **standalone mode**, where the Dynamo Frontend serves requests and the integrated Dynamo Router does KV-aware routing. Dynamo can also run in **gateway mode** behind a [Gateway API Inference Extension](https://gateway-api-inference-extension.sigs.k8s.io/) gateway, where KV-aware routing happens in the Dynamo Endpoint Picker Plugin (EPP) at the gateway layer and the Frontend runs as a sidecar in `--router-mode direct`. See the [Inference Gateway (GAIE) guide](inference-gateway.md) to set up gateway mode.
 
 ## Prerequisites
 
-Before you begin, ensure you have the following tools installed:
+- Kubernetes cluster (v1.24+) with GPU nodes
+- [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) (v1.24+)
+- [Helm](https://helm.sh/docs/intro/install/) (v3.0+) installed
+- [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html) installed on the cluster
+- HuggingFace token secret on cluster
 
-| Tool | Minimum Version | Installation Guide |
-|------|-----------------|-------------------|
-| **kubectl** | v1.24+ | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
-| **Helm** | v3.0+ | [Install Helm](https://helm.sh/docs/intro/install/) |
+### HuggingFace token secret
 
-Verify your installation:
+Create a HuggingFace token secret for model downloads. If you don't have a token, see the HuggingFace [token guide](https://huggingface.co/docs/hub/en/security-tokens).
+
 ```bash
-kubectl version --client  # Should show v1.24+
-helm version              # Should show v3.0+
+export HF_TOKEN=<your-hf-token>
+
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="$HF_TOKEN"
 ```
 
-For detailed installation instructions, see the [Prerequisites section](installation-guide.md#prerequisites) in the Installation Guide.
+### GPU Operator quick install
 
-## Pre-deployment Checks
+If you don't have the GPU Operator yet:
 
-Before deploying the platform, run the pre-deployment checks to ensure the cluster is ready:
+```bash
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --force-update
+helm repo update nvidia
+helm install gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator --create-namespace \
+  --wait --timeout=600s
+```
+
+> [!TIP]
+> If your cluster already provides GPU drivers (e.g., GKE with `gpu-driver-version=latest`, or AKS), add:
+> ```bash
+> --set driver.enabled=false --set toolkit.enabled=false
+> ```
+
+### Detailed installation
+
+The GPU Operator is the only prerequisite for a basic deployment. For additional features like RDMA, Prometheus, or multinode scheduling with Grove/KAI Scheduler, see the [Installation Guide](installation-guide.md).
+
+> [!TIP]
+> If your GPU SKU and cloud provider are supported, you can use [AICR](https://github.com/NVIDIA/aicr) for rapid installation of prerequisites and the Dynamo Helm chart.
+
+### Verify cluster is ready
+
+Optionally, verify your cluster is ready:
 
 ```bash
 ./deploy/pre-deployment/pre-deployment-check.sh
 ```
 
-This validates kubectl connectivity, StorageClass configuration, and GPU availability. See [pre-deployment checks](https://github.com/ai-dynamo/dynamo/tree/main/deploy/pre-deployment/README.md) for more details.
-
-## 1. Install Platform First
-
-```bash
-# 1. Set environment
-export NAMESPACE=dynamo-system
-export RELEASE_VERSION=0.x.x # any version of Dynamo 0.3.2+ listed at https://github.com/ai-dynamo/dynamo/releases
-
-# 2. Install Platform (CRDs are automatically installed by the chart)
-helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
-helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
-```
-
-> [!WARNING]
-> **v0.9.0 Helm Chart Issue:** The initial v0.9.0 `dynamo-platform` Helm chart sets the operator image to v0.7.1 instead of v0.9.0. Use `RELEASE_VERSION=0.9.0-post1` or add `--set dynamo-operator.controllerManager.manager.image.tag=0.9.0` to your helm install command.
-
-**For Shared/Multi-Tenant Clusters:**
-
-If your cluster has namespace-restricted Dynamo operators, add this flag to step 2:
-```bash
---set dynamo-operator.namespaceRestriction.enabled=true
-```
-
-For more details or customization options (including multinode deployments), see **[Installation Guide for Dynamo Kubernetes Platform](installation-guide.md)**.
-
-## 2. Choose Your Backend
-
-Each backend has deployment examples and configuration options:
-
-| Backend      | Aggregated | Aggregated + Router | Disaggregated | Disaggregated + Router | Disaggregated + Planner | Disaggregated Multi-node |
-|--------------|:----------:|:-------------------:|:-------------:|:----------------------:|:-----------------------:|:------------------------:|
-| **[SGLang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/deploy/README.md)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm/deploy/README.md)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
-| **[vLLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy/README.md)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-
-## 3. Deploy Your First Model
+## Install Dynamo
 
 ```bash
 export NAMESPACE=dynamo-system
-kubectl create namespace ${NAMESPACE}
-
-# to pull model from HF
-export HF_TOKEN=<Token-Here>
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="$HF_TOKEN" \
-  -n ${NAMESPACE};
-
-# Deploy any example (this uses vLLM with Qwen model using aggregated serving)
-kubectl apply -f examples/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
-
-# Check status
-kubectl get dynamoGraphDeployment -n ${NAMESPACE}
-
-# Test it
-kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
-curl http://localhost:8000/v1/models
+helm install dynamo-platform \
+  oci://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform \
+  --version "1.0.2" \
+  --namespace "$NAMESPACE" \
+  --create-namespace
 ```
 
-For SLA-based autoscaling, see [SLA Planner Guide](../components/planner/planner-guide.md).
+Wait for the platform pods:
 
-## Understanding Dynamo's Custom Resources
+```bash
+kubectl get pods -n $NAMESPACE
+# Expected: dynamo-operator-*, etcd-*, nats-* pods all Running
+```
 
-Dynamo provides two main Kubernetes Custom Resources for deploying models:
+## Understand Dynamo Deployment Resources
 
-### DynamoGraphDeploymentRequest (DGDR) - Simplified SLA-Driven Configuration
+Before applying the first YAML, it helps to know the Kubernetes resources Dynamo
+uses. These are Dynamo's native control-plane objects; you describe the
+inference graph, and the operator owns the Kubernetes deployments, services, and
+component rollout around it:
 
-The **recommended approach** for generating optimal configurations. DGDR provides a high-level interface where you specify:
-- Model name and backend framework
-- SLA targets (latency requirements)
-- GPU type (optional)
+| Resource or path | What it does | In this quickstart |
+|---|---|---|
+| `DynamoGraphDeployment` (DGD) | The canonical live deployment. It describes the Dynamo inference graph that serves traffic. | Generated by DGDR in Option A, or applied directly in Option B. |
+| `DynamoComponentDeployment` (DCD) | Per-component deployments created by the operator from the DGD, such as frontend and worker components. | Created for you by the operator. |
+| `DynamoGraphDeploymentRequest` (DGDR) | A generator/profiler that can produce a DGD from a model, backend, workload, hardware, and optional SLA targets. | Option A uses DGDR so Dynamo can generate the first DGD. |
+| Recipes | Tuned `deploy.yaml` manifests that are already DGD specs. | Use these later when a recipe matches your model, backend, and hardware. |
 
-Dynamo automatically handles profiling and generates an optimized DGD spec in the status. Perfect for:
-- SLA-driven configuration generation
-- Automated resource optimization
-- Users who want simplicity over control
+```mermaid
+flowchart LR
+    DGDR["DGDR<br/>generator/profiler"] --> DGD["DGD<br/>live deployment"]
+    DGD --> DCD["DCDs<br/>component deployments"]
+    DCD --> Pods["Pods and Services"]
+```
 
-**Note**: DGDR generates a DGD spec which you can then use to deploy.
+This quickstart uses DGDR because it avoids hand-writing the first DGD. After
+DGDR generates and applies the DGD, the DGDR reaches a terminal state, similar
+to a Kubernetes Job. The DGD persists and serves your model.
 
-### DynamoGraphDeployment (DGD) - Direct Configuration
+DGDR can also carry supported generated-deployment features such as
+`features.planner` for Planner configuration and `features.mocker` for mocker
+mode. KV-aware routing is not currently exposed as a DGDR feature field; use a
+direct DGD, a tuned recipe, or `overrides.dgd` when you need to set router mode
+or other graph-level details explicitly.
 
-A lower-level interface that defines your complete inference pipeline:
-- Model configuration
-- Resource allocation (GPUs, memory)
-- Scaling policies
-- Frontend/backend connections
+For tuned production-style manifests, start from
+[Dynamo recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes). For the
+full deployment model, see the [Deployment Overview](model-deployment-guide.md).
 
-Use this when you need fine-grained control or have already completed profiling.
+## Deploy Your First Model
 
-Refer to the [API Reference and Documentation](api-reference.md) for more details.
+Save this DGDR to generate and deploy a DGD for `Qwen/Qwen3-0.6B`:
 
-## 📖 API Reference & Documentation
-
-For detailed technical specifications of Dynamo's Kubernetes resources:
-
-- **[API Reference](api-reference.md)** - Complete CRD field specifications for all Dynamo resources
-- **[Create Deployment](deployment/create-deployment.md)** - Step-by-step deployment creation with DynamoGraphDeployment
-- **[Operator Guide](dynamo-operator.md)** - Dynamo operator configuration and management
-
-### Choosing Your Architecture Pattern
-
-When creating a deployment, select the architecture pattern that best fits your use case:
-
-- **Development / Testing** - Use `agg.yaml` as the base configuration
-- **Production with Load Balancing** - Use `agg_router.yaml` to enable scalable, load-balanced inference
-- **High Performance / Disaggregated** - Use `disagg_router.yaml` for maximum throughput and modular scalability
-
-### Frontend and Worker Components
-
-You can run the Frontend on one machine (e.g., a CPU node) and workers on different machines (GPU nodes). The Frontend serves as a framework-agnostic HTTP entry point that:
-
-- Provides OpenAI-compatible `/v1/chat/completions` endpoint
-- Auto-discovers backend workers via [service discovery](service-discovery.md) (Kubernetes-native by default)
-- Routes requests and handles load balancing
-- Validates and preprocesses requests
-
-### Customizing Your Deployment
-
-Example structure:
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+# qwen3-quickstart.yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-quickstart
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: auto
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+```
+
+The DGDR generates a DGD similar in shape to the following. If you already know
+the backend and runtime image you want, you can apply this canonical DGD object
+directly instead of using DGDR:
+
+```yaml
+# qwen3-dgd.yaml
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: my-llm
+  name: qwen3-direct
 spec:
-  services:
-    Frontend:
-      dynamoNamespace: my-llm
-      componentType: frontend
+  components:
+    - name: Frontend
+      type: frontend
       replicas: 1
-      extraPodSpec:
-        mainContainer:
-          image: your-image
-    VllmDecodeWorker:  # or SGLangDecodeWorker, TrtllmDecodeWorker
-      dynamoNamespace: dynamo-dev
-      componentType: worker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+    - name: VllmDecodeWorker
+      type: worker
       replicas: 1
-      envFromSecret: hf-token-secret  # for HuggingFace models
-      resources:
-        limits:
-          gpu: "1"
-      extraPodSpec:
-        mainContainer:
-          image: your-image
-          command: ["/bin/sh", "-c"]
-          args:
-            - python3 -m dynamo.vllm --model YOUR_MODEL [--your-flags]
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - Qwen/Qwen3-0.6B
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+                requests:
+                  ephemeral-storage: 2Gi
+              workingDir: /workspace/examples/backends/vllm
 ```
 
-Worker command examples per backend:
-```yaml
-# vLLM worker
-args:
-  - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
+Apply exactly one of the manifests.
 
-# SGLang worker
-args:
-  - >-
-    python3 -m dynamo.sglang
-    --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-    --tp 1
-    --trust-remote-code
+Option A: generate and apply a DGD with DGDR.
 
-# TensorRT-LLM worker
-args:
-  - python3 -m dynamo.trtllm
-    --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-    --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-    --extra-engine-args /workspace/examples/backends/trtllm/engine_configs/deepseek-r1-distill-llama-8b/agg.yaml
+```bash
+kubectl apply -f qwen3-quickstart.yaml -n $NAMESPACE
 ```
 
-Key customization points include:
-- **Model Configuration**: Specify model in the args command
-- **Resource Allocation**: Configure GPU requirements under `resources.limits`
-- **Scaling**: Set `replicas` for number of worker instances
-- **Routing Mode**: Enable KV-cache routing by setting `DYN_ROUTER_MODE=kv` in Frontend envs
-- **Worker Specialization**: Add `--disaggregation-mode prefill` flag for disaggregated prefill workers
+Option B: apply the DGD directly.
 
-## Additional Resources
+```bash
+kubectl apply -f qwen3-dgd.yaml -n $NAMESPACE
+```
 
-- **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/README.md)** - Complete working examples
-- **[Create Custom Deployments](deployment/create-deployment.md)** - Build your own CRDs
-- **[Managing Models with DynamoModel](deployment/dynamomodel-guide.md)** - Deploy LoRA adapters and manage models
-- **[Operator Documentation](dynamo-operator.md)** - How the platform works
-- **[Service Discovery](service-discovery.md)** - Discovery backends and configuration
-- **[Helm Charts](https://github.com/ai-dynamo/dynamo/tree/main/deploy/helm/README.md)** - For advanced users
-- **[Checkpointing](chrek/README.md)** - Fast pod startup with checkpoint/restore
-- **[GitOps Deployment with FluxCD](fluxcd.md)** - For advanced users
-- **[Logging](observability/logging.md)** - For logging setup
-- **[Multinode Deployment](deployment/multinode-deployment.md)** - For multinode deployment
-- **[Grove](grove.md)** - For grove details and custom installation
-- **[Monitoring](observability/metrics.md)** - For monitoring setup
-- **[Model Caching with Fluid](model-caching-with-fluid.md)** - For model caching with Fluid
+If you use DGDR, watch it progress from `Pending` to `Profiling` to `Deploying`
+to `Deployed`:
+
+```bash
+kubectl get dgdr qwen3-quickstart -n $NAMESPACE -w
+```
+
+In both paths, the DGD is the live serving resource:
+
+```bash
+kubectl get dynamographdeployment -n $NAMESPACE
+kubectl get dynamocomponentdeployment -n $NAMESPACE
+```
+
+> [!NOTE]
+> Dynamo supports vLLM, TensorRT-LLM, and SGLang backends. Setting `backend: auto` lets the profiler choose the best one for your model and hardware. See the [vLLM backend guide](../backends/vllm/README.md) for a backend guide example.
+
+
+## Send a Request
+
+Once the DGD is ready, it is serving the model:
+
+```bash
+# Find and port-forward the frontend
+FRONTEND_SVC=$(kubectl get svc -n $NAMESPACE -o name | grep frontend | head -1)
+kubectl port-forward "$FRONTEND_SVC" 8000:8000 -n $NAMESPACE &
+
+# Send a request
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "What is NVIDIA Dynamo?"}],
+    "max_tokens": 200
+  }' | python3 -m json.tool
+```
+
+## Cleanup
+
+```bash
+kubectl delete dgdr qwen3-quickstart -n $NAMESPACE --ignore-not-found
+kubectl delete dynamographdeployment qwen3-quickstart qwen3-direct \
+  -n $NAMESPACE --ignore-not-found
+```
+
+## Next Steps
+
+- **[Installation Guide](installation-guide.md)** — Cloud provider setup, GPU Operator details, optional components (Grove, RDMA, model caching, Prometheus)
+- **[Deployment Overview](model-deployment-guide.md)** — DGD, DCD, DGDR, recipes, strategy selection, and common pitfalls
+- **[DGDR Reference](dgdr.md)** — Spec reference, lifecycle phases, monitoring commands, and generated DGD behavior
+- **[Creating Deployments](deployment/create-deployment.md)** — Hand-craft a DGD spec for full control

@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+## This example demonstrates KV-aware routing with the --no-kv-events flag.
+## Instead of receiving KV events from workers, the router predicts cache state
+## locally based on routing decisions with TTL-based expiration and pruning.
+## Note: This mode does not require NATS or JetStream during dynamo platform deployment.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-router-kv-approx
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - kv
+          - --no-kv-events
+          command:
+          - python3
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --kv-events-config
+          - '{"enable_kv_cache_events": false}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 2
+    type: worker

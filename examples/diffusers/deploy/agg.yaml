@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: fastvideo-agg
+spec:
+  pvcs:
+    - name: huggingface-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      envs:
+        - name: DYN_DISCOVERY_BACKEND
+          value: kubernetes
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/fastvideo-runtime:my-tag
+          imagePullPolicy: IfNotPresent
+          workingDir: /opt/app
+          command:
+            - python
+            - -m
+            - dynamo.frontend
+          args:
+            - --http-port
+            - "8000"
+
+    FastVideoWorker:
+      componentType: worker
+      replicas: 1
+      sharedMemory:
+        size: 8Gi
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+      envs:
+        - name: DYN_DISCOVERY_BACKEND
+          value: kubernetes
+        - name: LD_LIBRARY_PATH
+          value: ""
+        - name: TORCHINDUCTOR_CACHE_DIR
+          value: /cache/torchinductor
+        - name: TRITON_CACHE_DIR
+          value: /cache/triton
+        - name: HF_HOME
+          value: /root/.cache/huggingface
+      volumeMounts:
+        - name: huggingface-cache
+          mountPoint: /root/.cache/huggingface
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/fastvideo-runtime:my-tag
+          imagePullPolicy: IfNotPresent
+          workingDir: /opt/app
+          command:
+            - python
+            - worker.py

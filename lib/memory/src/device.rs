@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Get or create a CUDA context for the given device.
-fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
+pub(crate) fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
     static CONTEXTS: OnceLock<Mutex<HashMap<u32, Arc<CudaContext>>>> = OnceLock::new();
     let mut map = CONTEXTS.get_or_init(Default::default).lock().unwrap();
 

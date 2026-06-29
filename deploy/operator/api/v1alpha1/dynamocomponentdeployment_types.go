@@ -21,6 +21,7 @@ package v1alpha1
 
 import (
 	"fmt"
+	"strings"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -47,6 +48,8 @@ type DynamoComponentDeploymentSpec struct {
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 type DynamoComponentDeploymentSharedSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
@@ -118,6 +121,24 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 	// +kubebuilder:validation:Minimum=0
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// MinAvailable maps to Grove PodClique minAvailable for single-node and
+	// Grove PodCliqueScalingGroup minAvailable for multi-node components.
+	// This field determines 1) the minimum number of replicas guaranteed to be
+	// gang-scheduled, and 2) when violating minAvailable replicas triggers gang
+	// termination.
+	//
+	// For Grove-backed DynamoGraphDeployment components, minAvailable defaults to
+	// 1 when omitted and is immutable after creation. Positive replica counts must
+	// be greater than or equal to minAvailable. Replicas may be scaled to 0 as a
+	// special scale-to-zero state; minAvailable remains configured but is not
+	// enforced again until replicas is scaled back to a positive value.
+	//
+	// For non-Grove deployments, setting this field will result in a validation error.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	MinAvailable *int32 `json:"minAvailable,omitempty"`
+
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
@@ -142,6 +163,24 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// When enabled, pods can be restored from a checkpoint files for faster cold start.
 	// +optional
 	Checkpoint *ServiceCheckpointConfig `json:"checkpoint,omitempty"`
+
+	// TopologyConstraint for this service. packDomain is required.
+	// When both this and spec.topologyConstraint.packDomain are set, packDomain
+	// must be narrower than or equal to the spec-level packDomain.
+	// +optional
+	TopologyConstraint *TopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// GPUMemoryService configures the GPU Memory Service (GMS) sidecar.
+	// When enabled, a GMS sidecar is injected and GPU access is managed via DRA.
+	// +optional
+	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
+
+	// Failover configures GMS (GPU Memory Service) failover for this service.
+	// For intraPod mode: the main container is cloned into two engine containers (active + standby).
+	// For interPod mode: the operator creates a dedicated GMS weight server pod and
+	// multiple engine pods per rank that share GPUs via DRA resource claims.
+	// +optional
+	Failover *FailoverSpec `json:"failover,omitempty"`
 }
 
 type MultinodeSpec struct {
@@ -214,6 +253,7 @@ type DynamoComponentDeploymentStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:storageversion
+// +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoComponentDeployment is deprecated; use nvidia.com/v1beta1 DynamoComponentDeployment"
 // +kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
@@ -244,8 +284,10 @@ func init() {
 }
 
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
-	ready, reason := s.Status.IsReady()
-	return ready, reason
+	if s.Status.ObservedGeneration < s.Generation {
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", s.Generation, s.Status.ObservedGeneration)
+	}
+	return s.Status.IsReady()
 }
 
 // GetState returns "ready" or "not_ready" based on conditions
@@ -326,6 +368,59 @@ func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 	return 1
 }
 
+// IsInterPodGMSEnabled reports whether the inter-pod GMS layout is requested
+// (dedicated GMS weight-server pod per rank + engine pods, sharing GPUs via
+// DRA). This is a layout-only signal and does NOT imply failover is enabled;
+// callers deciding whether to add shadow engine pods or apply failover-group
+// cascade labels must additionally consult IsInterPodFailoverEnabled().
+func (s *DynamoComponentDeploymentSharedSpec) IsInterPodGMSEnabled() bool {
+	return s.GPUMemoryService != nil && s.GPUMemoryService.Enabled &&
+		s.GPUMemoryService.Mode == GMSModeInterPod
+}
+
+// IsInterPodFailoverEnabled reports whether failover with hot-spare shadow
+// engine pods is configured for the inter-pod GMS layout. When true, the
+// service also implies IsInterPodGMSEnabled() (the layout invariant is
+// enforced by admission). Use this to gate shadow-pod expansion and
+// failover-cascade labels; use IsInterPodGMSEnabled() for layout-only
+// decisions (weight-server PCLQ, DRA claims, Grove pathway gating, etc.).
+func (s *DynamoComponentDeploymentSharedSpec) IsInterPodFailoverEnabled() bool {
+	return s.Failover != nil && s.Failover.Enabled && s.Failover.Mode == GMSModeInterPod
+}
+
+// GetNumShadows returns the number of shadow engine replicas configured for
+// inter-pod GMS failover. It returns 0 when inter-pod failover is disabled
+// (including the standalone inter-pod GMS layout and intra-pod failover).
+// Defaults to 1 if inter-pod failover is enabled but NumShadows is unset or <1.
+//
+// Callers that iterate "engine roles" must gate on IsInterPodFailoverEnabled()
+// first — treating a 0 return as "just the primary" is a bug, because the
+// primary is still modeled as a regular single-pod service in that case.
+func (s *DynamoComponentDeploymentSharedSpec) GetNumShadows() int32 {
+	if !s.IsInterPodFailoverEnabled() {
+		return 0
+	}
+	if s.Failover.NumShadows < 1 {
+		return 1
+	}
+	return s.Failover.NumShadows
+}
+
+// GetTotalEnginePods returns the total number of engine pods (primary +
+// shadows) for the inter-pod GMS layout. Returns 1 for the standalone
+// inter-pod layout (no failover) — a single engine pod paired with a
+// dedicated weight-server pod — and N+1 when inter-pod failover is enabled.
+// Returns 1 for non-inter-pod layouts as a sizing convenience.
+//
+// Callers that iterate "engine roles" must gate on IsInterPodGMSEnabled()
+// first — the 1 return for non-inter-pod services is a convenience for sizing
+// math, NOT a signal that there is a "primary role" to iterate over; the
+// non-inter-pod path models the service as a single clique, not as primary +
+// shadows.
+func (s *DynamoComponentDeploymentSharedSpec) GetTotalEnginePods() int32 {
+	return s.GetNumShadows() + 1
+}
+
 func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
 	for _, ownerRef := range s.ObjectMeta.OwnerReferences {
 		if ownerRef.Kind == "DynamoGraphDeployment" {
@@ -351,7 +446,11 @@ func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName st
 	if globalDynamoNamespace {
 		return commonconsts.GlobalDynamoNamespace
 	}
-	return fmt.Sprintf("%s-%s", k8sNamespace, dgdName)
+	// The dynamo namespace is used as the first segment of endpoint paths
+	// (e.g. "namespace.component.endpoint"). Dots in resource names (from model
+	// version strings like "Qwen3-0.6B") would break that parsing, so replace them.
+	sanitized := strings.ReplaceAll(dgdName, ".", "-")
+	return fmt.Sprintf("%s-%s", k8sNamespace, sanitized)
 }
 
 // ModelReference identifies a model served by this component

@@ -29,6 +29,15 @@ logger = logging.getLogger(__name__)
 class CachedEmbedding(NamedTuple):
     tensor: torch.Tensor
     image_grid_thw: list | None = None
+    video_grid_thw: list | None = None
+    second_per_grid_ts: float | None = None
+    video_timestamps: list[float] | None = None
+
+
+class CacheMutation(NamedTuple):
+    stored: bool
+    added_keys: list[str]
+    removed_keys: list[str]
 
 
 class MultimodalEmbeddingCacheManager:
@@ -59,6 +68,7 @@ class MultimodalEmbeddingCacheManager:
         # Stats
         self._hits = 0
         self._misses = 0
+        self._evictions = 0
 
         logger.info(
             f"MultimodalEmbeddingCacheManager initialized: capacity={capacity_bytes / 1024**3:.2f}GB"
@@ -103,7 +113,14 @@ class MultimodalEmbeddingCacheManager:
         self._hits += 1
         return self._cache[key]
 
+    def keys(self) -> list[str]:
+        """Return the current cache keys in LRU order."""
+        return list(self._cache.keys())
+
     def set(self, key: str, entry: CachedEmbedding) -> bool:
+        return self.set_with_delta(key, entry).stored
+
+    def set_with_delta(self, key: str, entry: CachedEmbedding) -> CacheMutation:
         """
         Store a cached embedding in the cache.
 
@@ -116,9 +133,12 @@ class MultimodalEmbeddingCacheManager:
             entry: CachedEmbedding to cache.
 
         Returns:
-            True if the entry was stored, False if it was too large.
+            CacheMutation describing whether the entry was stored plus the
+            authoritative add/remove delta caused by this mutation.
         """
         size = self._tensor_size(entry.tensor)
+        removed_keys: list[str] = []
+        key_already_present = key in self._cache
 
         # Don't cache if single tensor exceeds capacity
         if size > self._capacity_bytes:
@@ -126,10 +146,10 @@ class MultimodalEmbeddingCacheManager:
                 f"Tensor too large to cache: {size / 1024**2:.1f}MB > "
                 f"{self._capacity_bytes / 1024**3:.2f}GB capacity"
             )
-            return False
+            return CacheMutation(False, [], [])
 
         # If key exists, remove old entry first
-        if key in self._cache:
+        if key_already_present:
             old_entry = self._cache.pop(key)
             self._current_bytes -= self._tensor_size(old_entry.tensor)
 
@@ -138,6 +158,8 @@ class MultimodalEmbeddingCacheManager:
             evicted_key, evicted_entry = self._cache.popitem(last=False)
             evicted_size = self._tensor_size(evicted_entry.tensor)
             self._current_bytes -= evicted_size
+            self._evictions += 1
+            removed_keys.append(evicted_key)
             logger.debug(
                 f"Evicted key={evicted_key[:16]}..., size={evicted_size / 1024**2:.2f}MB"
             )
@@ -151,7 +173,8 @@ class MultimodalEmbeddingCacheManager:
             f"size={size / 1024**2:.2f}MB, "
             f"total={self._current_bytes / 1024**3:.3f}GB"
         )
-        return True
+        added_keys = [] if key_already_present else [key]
+        return CacheMutation(True, added_keys, removed_keys)
 
     @property
     def stats(self) -> dict:
@@ -174,5 +197,6 @@ class MultimodalEmbeddingCacheManager:
             else 0,
             "hits": self._hits,
             "misses": self._misses,
+            "evictions": self._evictions,
             "hit_rate": hit_rate,
         }

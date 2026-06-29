@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Profiler
+subtitle: Automated performance analysis that finds optimal prefill and decode parallelism and generates SLA-driven deployment configurations.
 ---
 
 The Dynamo Profiler is an automated performance analysis tool that measures model inference characteristics to optimize deployment configurations. It determines optimal tensor parallelism (TP) settings for prefill and decode phases, generates performance interpolation data, and enables SLA-driven autoscaling through the Planner.
@@ -12,7 +13,7 @@ The Dynamo Profiler is an automated performance analysis tool that measures mode
 |---------|--------|--------------|------|
 | Dense Model Profiling | ✅ | ✅ | ✅ |
 | MoE Model Profiling | ✅ | 🚧 | 🚧 |
-| AI Configurator (Offline) | ❌ | ✅ | ❌ |
+| AI Configurator (Offline) | ✅ | ✅ | ✅ |
 | Online Profiling (AIPerf) | ✅ | ✅ | ✅ |
 | Interactive WebUI | ✅ | ✅ | ✅ |
 | Runtime Profiling Endpoints | ✅ | ❌ | ❌ |
@@ -37,7 +38,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
 
   workload:
     isl: 3000      # Average input sequence length
@@ -74,7 +75,7 @@ AI Configurator enables rapid offline profiling (~30 seconds) and supports all b
 | Method | Duration | Accuracy | GPU Required | Backends |
 |--------|----------|----------|--------------|----------|
 | Online (AIPerf) | 2-4 hours | Highest | Yes | All |
-| Offline (AI Configurator) | 20-30 seconds | Estimated | No | TensorRT-LLM |
+| Offline (AI Configurator) | 20-30 seconds | Estimated | No | All |
 
 ## Output
 

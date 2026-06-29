@@ -27,24 +27,28 @@ import os
 
 import pytest
 
+import dynamo.runtime.logging as dynamo_logging
 from dynamo.runtime.logging import (
     VllmColorFormatter,
     configure_dynamo_logging,
     configure_vllm_logging,
+    python_log_level_mapping,
 )
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
 ]
 
 
 @pytest.fixture(autouse=True)
-def _clean_env(monkeypatch):
+def _clean_env(monkeypatch, tmp_path):
     """Remove logging-related env vars before each test."""
     for var in [
         "DYN_LOG",
+        "DYN_LOGGING_CONFIG_PATH",
         "VLLM_LOGGING_LEVEL",
         "VLLM_CONFIGURE_LOGGING",
         "VLLM_LOGGING_CONFIG_PATH",
@@ -52,6 +56,11 @@ def _clean_env(monkeypatch):
         "SGLANG_LOGGING_CONFIG_PATH",
     ]:
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(
+        dynamo_logging,
+        "_DEFAULT_DYNAMO_LOGGING_CONFIG_PATH",
+        str(tmp_path / "default-dynamo-logging.toml"),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -122,6 +131,67 @@ def test_dyn_log_does_not_affect_vllm_level(monkeypatch):
     assert vllm_logger.level == logging.INFO
     assert isinstance(vllm_logger.handlers[0], logging.StreamHandler)
     assert isinstance(vllm_logger.handlers[0].formatter, VllmColorFormatter)
+
+
+def test_default_dyn_log_filters_python_debug_before_bridge():
+    """Default DYN_LOG=info must avoid formatting Python DEBUG bridge records."""
+    configure_dynamo_logging()
+
+    root_logger = logging.getLogger()
+    assert root_logger.level == logging.INFO
+    assert root_logger.handlers[0].level == logging.INFO
+
+
+def test_scoped_dyn_log_debug_keeps_python_debug_available(monkeypatch):
+    """Scoped Rust debug filters still need Python DEBUG records forwarded."""
+    monkeypatch.setenv("DYN_LOG", "info,dynamo_trtllm=debug")
+
+    configure_dynamo_logging()
+
+    root_logger = logging.getLogger()
+    assert root_logger.level == logging.DEBUG
+    assert root_logger.handlers[0].level == logging.DEBUG
+
+
+@pytest.mark.parametrize(
+    ("filters", "expected"),
+    [
+        ("info", logging.INFO),
+        ("warn", logging.WARNING),
+        ("info,dynamo_trtllm=debug", logging.DEBUG),
+        ("warn,dynamo_trtllm=trace", logging.DEBUG),
+    ],
+)
+def test_python_log_level_mapping(filters, expected):
+    assert python_log_level_mapping(filters) == expected
+
+
+def test_toml_logging_config_keeps_python_debug_available(monkeypatch, tmp_path):
+    config_path = tmp_path / "dynamo-logging.toml"
+    config_path.touch()
+    monkeypatch.setenv("DYN_LOGGING_CONFIG_PATH", str(config_path))
+
+    configure_dynamo_logging()
+
+    root_logger = logging.getLogger()
+    assert root_logger.level == logging.DEBUG
+    assert root_logger.handlers[0].level == logging.DEBUG
+
+
+def test_missing_toml_logging_config_does_not_keep_python_debug(monkeypatch, tmp_path):
+    monkeypatch.setenv("DYN_LOGGING_CONFIG_PATH", str(tmp_path / "missing.toml"))
+
+    assert python_log_level_mapping("info") == logging.INFO
+
+
+def test_default_toml_logging_config_keeps_python_debug(monkeypatch, tmp_path):
+    config_path = tmp_path / "default-dynamo-logging.toml"
+    config_path.touch()
+    monkeypatch.setattr(
+        dynamo_logging, "_DEFAULT_DYNAMO_LOGGING_CONFIG_PATH", str(config_path)
+    )
+
+    assert python_log_level_mapping("info") == logging.DEBUG
 
 
 def test_no_config_file_written():

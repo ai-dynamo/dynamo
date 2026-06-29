@@ -86,7 +86,7 @@ class TritonEchoClient:
 
         class UserData:
             def __init__(self):
-                self._completed_requests = queue.Queue()
+                self._completed_requests: queue.Queue = queue.Queue()
 
         # Define the callback function. Note the last two parameters should be
         # result and error. InferenceServerClient would povide the results of an

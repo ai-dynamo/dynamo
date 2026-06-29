@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Operator Metrics
+subtitle: Monitors Dynamo operator health with Prometheus metrics for controller reconciliation, webhooks, and managed resources.
 ---
 
 ## Overview
@@ -27,7 +28,7 @@ The operator metrics feature requires the same monitoring infrastructure as appl
 
 Operator metrics are automatically collected via a ServiceMonitor, which is created by the Helm chart when `metricsService.enabled: true` (default).
 
-**Unlike application metrics** (which use PodMonitor), the operator uses ServiceMonitor and requires no manual RBAC configuration. The operator's kube-rbac-proxy sidecar is configured with `--ignore-paths=/metrics` to allow Prometheus access.
+**Unlike application metrics** (which use PodMonitor), the operator uses ServiceMonitor and requires no manual RBAC configuration. The operator's metrics endpoint uses controller-runtime's built-in `WithAuthenticationAndAuthorization` filter for secure serving.
 
 To verify the ServiceMonitor is created:
 
@@ -178,7 +179,7 @@ A pre-built Grafana dashboard is available for visualizing operator metrics.
 ### Deploying the Dashboard
 
 ```bash
-kubectl apply -f deploy/observability/k8s/grafana-operator-dashboard-configmap.yaml
+kubectl apply -f deploy/observability/grafana-operator-dashboard-configmap.yaml
 ```
 
 The dashboard will automatically appear in Grafana (assuming you have the Grafana dashboard sidecar configured, which is included in kube-prometheus-stack).

@@ -25,9 +25,11 @@ Usage::
 
 import argparse
 import asyncio
+import errno
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 import yaml
@@ -43,8 +45,25 @@ from .utils.profile_common import (
     DEFAULT_PREFILL_INTERPOLATION_GRANULARITY,
     ProfilerOperationalConfig,
 )
+from .utils.profiler_status import ProfilerStatus, write_profiler_status
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_output_dir() -> str:
+    """Best-effort extraction of ``--output-dir`` from ``sys.argv``.
+
+    Falls back to :data:`DEFAULT_OUTPUT_DIR` when the flag is absent or
+    unparseable.  This is intentionally independent of full argument parsing so
+    it can be called even when ``_parse_args()`` itself has failed.
+    """
+    argv = sys.argv[1:]
+    for i, arg in enumerate(argv):
+        if arg == "--output-dir" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--output-dir="):
+            return arg.split("=", 1)[1]
+    return DEFAULT_OUTPUT_DIR
 
 
 def _parse_dgdr_spec(config_arg: str) -> DynamoGraphDeploymentRequestSpec:
@@ -52,8 +71,29 @@ def _parse_dgdr_spec(config_arg: str) -> DynamoGraphDeploymentRequestSpec:
 
     Accepts a file path (JSON/YAML) or an inline JSON string.
     """
+    # Inline JSON can be very large (for example full DGDR specs marshaled by
+    # the operator). Parse obvious JSON first so we avoid probing it as a path.
+    stripped_arg = config_arg.lstrip()
+    if stripped_arg.startswith("{") or stripped_arg.startswith("["):
+        try:
+            data = json.loads(config_arg)
+            return DynamoGraphDeploymentRequestSpec.model_validate(data)
+        except json.JSONDecodeError:
+            # Fall through to file-path and generic JSON parsing below so the
+            # caller gets the existing consolidated validation error.
+            pass
+
     path = Path(config_arg)
-    if path.is_file():
+    try:
+        is_file = path.is_file()
+    except OSError as e:
+        # Very long inline JSON strings can exceed path-length limits.
+        if e.errno == errno.ENAMETOOLONG:
+            is_file = False
+        else:
+            raise
+
+    if is_file:
         text = path.read_text()
         suffix = path.suffix.lower()
         if suffix in (".yaml", ".yml"):
@@ -136,8 +176,32 @@ def main() -> None:
 
     try:
         dgdr, ops = _parse_args()
+    except SystemExit as e:
+        # argparse calls sys.exit(2) on invalid arguments; catch it so we
+        # can write a status file before the container terminates.
+        if e.code != 0:
+            output_dir = _resolve_output_dir()
+            os.makedirs(output_dir, exist_ok=True)
+            write_profiler_status(
+                output_dir,
+                ProfilerStatus.FAILED,
+                message="Config validation failed",
+                error=f"Argument parsing failed (exit code {e.code})",
+            )
+        raise
     except (ValueError, Exception) as e:
         logger.error("Failed to parse profiler config: %s", e)
+        # Resolve output dir so the sidecar can find profiler_status.yaml
+        # immediately instead of waiting for the profiler container to
+        # time out (~8-9 minutes).
+        output_dir = _resolve_output_dir()
+        os.makedirs(output_dir, exist_ok=True)
+        write_profiler_status(
+            output_dir,
+            ProfilerStatus.FAILED,
+            message="Config validation failed",
+            error=str(e),
+        )
         raise SystemExit(1) from e
 
     os.makedirs(ops.output_dir, exist_ok=True)

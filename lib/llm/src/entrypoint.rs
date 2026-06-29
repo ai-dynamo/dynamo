@@ -6,38 +6,50 @@
 //! - Connect it to an Input
 
 pub mod input;
-pub use input::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
+pub use input::{PreprocessedRouting, build_preprocessed_routing};
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig};
 use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     backend::ExecutionContext, discovery::LoadThresholdConfig, engines::StreamingEngine,
-    kv_router::KvRouterConfig, local_model::LocalModel, model_card::ModelDeploymentCard,
+    local_model::LocalModel, model_card::ModelDeploymentCard,
     types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine,
 };
 
 /// Callback type for chat engine factory (async)
+pub type PrefillRoutedEngine = dynamo_runtime::pipeline::ServiceEngine<
+    dynamo_runtime::pipeline::SingleIn<crate::protocols::common::preprocessor::PreprocessedRequest>,
+    dynamo_runtime::pipeline::ManyOut<
+        crate::types::Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>,
+    >,
+>;
+
 pub type ChatEngineFactoryCallback = Arc<
     dyn Fn(
             ModelCardInstanceId,
             ModelDeploymentCard,
+            PrefillRoutedEngine,
         ) -> Pin<
             Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
         > + Send
         + Sync,
 >;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RouterConfig {
     pub router_mode: RouterMode,
     pub kv_router_config: KvRouterConfig,
-    /// Load threshold configuration for busy detection
+    /// Load threshold configuration for overload detection
     pub load_threshold_config: LoadThresholdConfig,
-    pub decode_fallback: bool,
+    pub enforce_disagg: bool,
+    #[serde(default)]
+    pub session_affinity_ttl_secs: Option<u64>,
 }
 
 impl RouterConfig {
@@ -46,7 +58,8 @@ impl RouterConfig {
             router_mode,
             kv_router_config,
             load_threshold_config: LoadThresholdConfig::default(),
-            decode_fallback: false,
+            enforce_disagg: false,
+            session_affinity_ttl_secs: None,
         }
     }
 
@@ -55,8 +68,13 @@ impl RouterConfig {
         self
     }
 
-    pub fn with_decode_fallback(mut self, decode_fallback: bool) -> Self {
-        self.decode_fallback = decode_fallback;
+    pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
+        self.enforce_disagg = enforce_disagg;
+        self
+    }
+
+    pub fn with_session_affinity_ttl_secs(mut self, ttl_secs: u64) -> Self {
+        self.session_affinity_ttl_secs = Some(ttl_secs);
         self
     }
 }
@@ -67,6 +85,7 @@ pub enum EngineConfig {
     Dynamic {
         model: Box<LocalModel>,
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     },
 
     /// A Text engine receives text, does it's own tokenization and prompt formatting.
@@ -80,6 +99,7 @@ pub enum EngineConfig {
         engine: ExecutionContext,
         model: Box<LocalModel>,
         is_prefill: bool,
+        is_decode: bool,
     },
 }
 

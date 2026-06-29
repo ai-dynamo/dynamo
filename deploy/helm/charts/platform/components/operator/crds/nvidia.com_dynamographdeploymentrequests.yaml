@@ -6,7 +6,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.4
+    controller-gen.kubebuilder.io/version: v0.17.3
     helm.sh/resource-policy: keep
   name: dynamographdeploymentrequests.nvidia.com
 spec:
@@ -131,7 +131,7 @@ spec:
                         WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
                         This image is used for both temporary DGDs created during online profiling and the final DGD.
                         If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1"
                       type: string
                   type: object
                 enableGpuDiscovery:
@@ -206,7 +206,7 @@ spec:
                       description: |-
                         ProfilerImage specifies the container image to use for profiling jobs.
                         This image contains the profiler code and dependencies needed for SLA-based profiling.
-                        Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.9.0"
+                        Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
                       type: string
                     resources:
                       description: |-
@@ -291,9 +291,10 @@ spec:
                           operator:
                             description: |-
                               Operator represents a key's relationship to the value.
-                              Valid operators are Exists and Equal. Defaults to Equal.
+                              Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
                               Exists is equivalent to wildcard for value, so that a pod can
                               tolerate all taints of a particular category.
+                              Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
                             type: string
                           tolerationSeconds:
                             description: |-
@@ -480,11 +481,9 @@ spec:
           type: string
         - jsonPath: .status.conditions[?(@.type=="Succeeded")].reason
           name: Reason
-          priority: 1
           type: string
         - jsonPath: .status.conditions[?(@.type=="Succeeded")].message
           name: Message
-          priority: 1
           type: string
         - jsonPath: .status.dgdName
           name: DGD
@@ -565,9 +564,11 @@ spec:
                       type: object
                     planner:
                       description: |-
-                        Planner is the raw SLA planner configuration passed to the planner service.
-                        Its schema is defined by dynamo.planner.utils.planner_config.PlannerConfig.
-                        Go treats this as opaque bytes; the Planner service validates it at startup.
+                        Planner contains the raw Planner configuration passed to the Planner service.
+                        Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
+                        See https://docs.dynamo.nvidia.com/dynamo/components/planner/planner-guide#plannerconfig-reference.
+                        DGDR passes this object through without field-level validation; the Planner
+                        service validates it at startup.
                         The presence of this field (non-null) enables the planner in the generated DGD.
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
@@ -578,24 +579,119 @@ spec:
                     Typically auto-filled by the operator from cluster discovery.
                   properties:
                     gpuSku:
-                      description: GPUSKU is the GPU SKU identifier (e.g., "H100_SXM", "A100_80GB").
+                      allOf:
+                        - enum:
+                            - gb200_sxm
+                            - gb10
+                            - b200_sxm
+                            - h200_sxm
+                            - h100_sxm
+                            - h100_pcie
+                            - a100_sxm
+                            - a100_pcie
+                            - a30
+                            - l40s
+                            - l40
+                            - l4
+                            - v100_sxm
+                            - v100_pcie
+                            - t4
+                            - mi200
+                            - mi300
+                        - enum:
+                            - gb200_sxm
+                            - gb10
+                            - b200_sxm
+                            - h200_sxm
+                            - h100_sxm
+                            - h100_pcie
+                            - a100_sxm
+                            - a100_pcie
+                            - a30
+                            - l40s
+                            - l40
+                            - l4
+                            - v100_sxm
+                            - v100_pcie
+                            - t4
+                            - mi200
+                            - mi300
+                      description: |-
+                        GPUSKU selects the GPU type to target.
+                        When omitted, auto-detected by selecting the GPU with the highest
+                        node count, then highest VRAM. In mixed-GPU clusters, set this to
+                        choose which GPU type to use. Discovery and totalGpus are then
+                        restricted to nodes matching this SKU.
+                      type: string
+                    interconnect:
+                      description: |-
+                        Interconnect describes the primary GPU-to-GPU interconnect *within a node*.
+
+                        Semantics / usage:
+                          - This is capability metadata used for profiling, planning, and deployment decisions.
+                          - It does NOT configure or enable any GPU interconnect; it only describes what is available/assumed.
+                          - When omitted, the operator may attempt best-effort discovery (currently distinguishes "nvlink"
+                            vs "pcie" based on DCGM NVLink link count). If discovery is unavailable, it may remain empty.
+
+                        Impact of wrong / missing values:
+                          - If set more optimistically than reality (e.g., "nvlink" when only PCIe is present), performance
+                            models may overestimate intra-node bandwidth and choose overly aggressive parallelism or layouts,
+                            resulting in degraded performance compared to expectations.
+                          - If set more pessimistically than reality (e.g., "pcie" when NVLink is present), the system may
+                            choose conservative plans and leave performance on the table.
+                          - If unset and undiscovered, consumers should treat the interconnect as unknown and fall back to
+                            conservative assumptions.
+
+                        Example values: "pcie", "nvlink". Other values may be accepted but may not be auto-detected.
                       type: string
                     numGpusPerNode:
-                      description: NumGPUsPerNode is the number of GPUs per node.
+                      description: |-
+                        NumGPUsPerNode is the number of GPUs per node.
+                        When omitted, auto-detected from cluster GPU nodes.
                       format: int32
                       type: integer
+                    rdma:
+                      description: |-
+                        RDMA indicates whether the cluster has RDMA-capable networking available for Dynamo data movement.
+
+                        Semantics / usage:
+                          - This is capability metadata used for profiling, planning, and deployment decisions.
+                          - It does NOT install, enable, or configure RDMA (e.g., drivers, SR-IOV, NVIDIA network operator,
+                            GPUDirect settings). It only expresses availability/intent.
+                          - When omitted, the operator may attempt best-effort discovery (e.g., via node labels indicating
+                            RDMA/SR-IOV capability and/or presence of NVIDIA network-operator RDMA components). If discovery
+                            is unavailable, it may remain unset.
+
+                        Impact of wrong / missing values:
+                          - False positive (set true when RDMA is not actually usable end-to-end) may cause plans or
+                            deployments to assume RDMA is available; depending on the runtime transport selection and
+                            fallback behavior, this can lead to connection/setup failures or performance regressions.
+                          - False negative (set false when RDMA is available) will typically avoid RDMA-optimized paths and
+                            fall back to non-RDMA transports, usually remaining functional but potentially slower.
+                          - If unset and undiscovered, consumers should treat RDMA availability as unknown and use
+                            conservative defaults / fallback transports.
+                      type: boolean
                     totalGpus:
-                      description: TotalGPUs is the total number of GPUs available in the cluster.
+                      description: |-
+                        TotalGPUs is the GPU budget for profiling and deployment.
+                        The profiler uses this to determine parallelism and replica count.
+                        When omitted, computed by counting GPUs on discovered nodes
+                        (filtered by gpuSku when set), temporarily capped at 32 to
+                        limit profiler search space. This cap may be removed in a future
+                        release. Set this field explicitly to override.
                       format: int32
                       type: integer
                     vramMb:
-                      description: VRAMMB is the VRAM per GPU in MiB.
+                      description: |-
+                        VRAMMB is the VRAM per GPU in MiB.
+                        When omitted, auto-detected from cluster GPU nodes.
                       type: number
                   type: object
                 image:
                   description: |-
-                    Image is the container image reference for the profiling job (frontend image).
-                    Example: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.0.0".
+                    Image is the container image reference for the profiling job (planner image).
+                    Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1".
+                    For Dynamo < 1.1.0, use dynamo-frontend.
                   type: string
                 model:
                   description: |-
@@ -720,9 +816,6 @@ spec:
                             by RFC 1123. All characters trailing the first "/" must be valid HTTP Path
                             characters as defined by RFC 3986. The value cannot exceed 63 characters.
                             This field is immutable.
-
-                            This field is beta-level. The job controller accepts setting the field
-                            when the feature gate JobManagedBy is enabled (enabled by default).
                           type: string
                         manualSelector:
                           description: |-
@@ -859,7 +952,6 @@ spec:
                                             it is required that specified type equals the pod condition type.
                                           type: string
                                       required:
-                                        - status
                                         - type
                                       type: object
                                     type: array
@@ -1006,6 +1098,23 @@ spec:
                               description: |-
                                 Standard object's metadata.
                                 More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+                              properties:
+                                annotations:
+                                  additionalProperties:
+                                    type: string
+                                  type: object
+                                finalizers:
+                                  items:
+                                    type: string
+                                  type: array
+                                labels:
+                                  additionalProperties:
+                                    type: string
+                                  type: object
+                                name:
+                                  type: string
+                                namespace:
+                                  type: string
                               type: object
                             spec:
                               description: |-
@@ -2729,7 +2838,9 @@ spec:
                                             type: integer
                                         type: object
                                       resizePolicy:
-                                        description: Resources resize policy for the container.
+                                        description: |-
+                                          Resources resize policy for the container.
+                                          This field cannot be set on ephemeral containers.
                                         items:
                                           description: ContainerResizePolicy represents resource resize policy for the container.
                                           properties:
@@ -2953,7 +3064,6 @@ spec:
                                               procMount denotes the type of proc mount to use for the containers.
                                               The default value is Default which uses the container runtime defaults for
                                               readonly paths and masked paths.
-                                              This requires the ProcMountType feature flag to be enabled.
                                               Note that this field cannot be set when spec.os.name is windows.
                                             type: string
                                           readOnlyRootFilesystem:
@@ -4448,7 +4558,6 @@ spec:
                                               procMount denotes the type of proc mount to use for the containers.
                                               The default value is Default which uses the container runtime defaults for
                                               readonly paths and masked paths.
-                                              This requires the ProcMountType feature flag to be enabled.
                                               Note that this field cannot be set when spec.os.name is windows.
                                             type: string
                                           readOnlyRootFilesystem:
@@ -4914,7 +5023,6 @@ spec:
                                     When set to false, a new userns is created for the pod. Setting false is useful for
                                     mitigating container breakout vulnerabilities even allowing users to run their
                                     containers as root without actually having root privileges on the host.
-                                    This field is alpha-level and is only honored by servers that enable the UserNamespacesSupport feature.
                                   type: boolean
                                 hostname:
                                   description: |-
@@ -5802,7 +5910,9 @@ spec:
                                             type: integer
                                         type: object
                                       resizePolicy:
-                                        description: Resources resize policy for the container.
+                                        description: |-
+                                          Resources resize policy for the container.
+                                          This field cannot be set on ephemeral containers.
                                         items:
                                           description: ContainerResizePolicy represents resource resize policy for the container.
                                           properties:
@@ -6026,7 +6136,6 @@ spec:
                                               procMount denotes the type of proc mount to use for the containers.
                                               The default value is Default which uses the container runtime defaults for
                                               readonly paths and masked paths.
-                                              This requires the ProcMountType feature flag to be enabled.
                                               Note that this field cannot be set when spec.os.name is windows.
                                             type: string
                                           readOnlyRootFilesystem:
@@ -6563,8 +6672,8 @@ spec:
                                     will be made available to those containers which consume them
                                     by name.
 
-                                    This is an alpha field and requires enabling the
-                                    DynamicResourceAllocation feature gate.
+                                    This is a stable field but requires that the
+                                    DynamicResourceAllocation feature gate is enabled.
 
                                     This field is immutable.
                                   items:
@@ -6575,6 +6684,14 @@ spec:
 
                                       It adds a name to it that uniquely identifies the ResourceClaim inside the Pod.
                                       Containers that need access to the ResourceClaim reference it with this name.
+
+                                      When the DRAWorkloadResourceClaims feature gate is enabled and this Pod
+                                      belongs to a PodGroup, a PodResourceClaim is matched to a
+                                      PodGroupResourceClaim if all of their fields are equal (Name,
+                                      ResourceClaimName, and ResourceClaimTemplateName). A matched claim references
+                                      a single ResourceClaim shared across all Pods in the PodGroup, reserved for
+                                      the PodGroup in ResourceClaimStatus.ReservedFor rather than for individual
+                                      Pods.
                                     properties:
                                       name:
                                         description: |-
@@ -6599,6 +6716,16 @@ spec:
                                           will also be deleted. The pod name and resource name, along with a
                                           generated component, will be used to form a unique name for the
                                           ResourceClaim, which will be recorded in pod.status.resourceClaimStatuses.
+
+                                          When the DRAWorkloadResourceClaims feature gate is enabled and the pod
+                                          belongs to a PodGroup that defines a PodGroupResourceClaim with the same
+                                          Name and ResourceClaimTemplateName, this PodResourceClaim resolves to the
+                                          ResourceClaim generated for the PodGroup. All pods in the group that
+                                          define an equivalent PodResourceClaim matching the
+                                          PodGroupResourceClaim's Name and ResourceClaimTemplateName share the same
+                                          generated ResourceClaim. ResourceClaims generated for a PodGroup are
+                                          owned by the PodGroup and their lifecycles are tied to the PodGroup
+                                          instead of any individual pod.
 
                                           This field is immutable and no changes will be made to the
                                           corresponding ResourceClaim by the control plane after creating the
@@ -6724,6 +6851,28 @@ spec:
                                   x-kubernetes-list-map-keys:
                                     - name
                                   x-kubernetes-list-type: map
+                                schedulingGroup:
+                                  description: |-
+                                    SchedulingGroup provides a reference to the immediate scheduling runtime
+                                    grouping object that this Pod belongs to.
+                                    This field is used by the scheduler to identify the group and apply the
+                                    correct group scheduling policies. The association with a group also
+                                    impacts other lifecycle aspects of a Pod that are relevant in a wider context
+                                    of scheduling like preemption, resource attachment, etc. If not specified,
+                                    the Pod is treated as a single unit in all of these aspects.
+                                    The group object referenced by this field may not exist at the time the
+                                    Pod is created.
+                                    This field is immutable, but a group object with the same name may be
+                                    recreated with different policies. Doing this during pod scheduling
+                                    may result in the placement not conforming to the expected policies.
+                                  properties:
+                                    podGroupName:
+                                      description: |-
+                                        PodGroupName specifies the name of the standalone PodGroup object
+                                        that represents the runtime instance of this group.
+                                        Must be a DNS subdomain.
+                                      type: string
+                                  type: object
                                 securityContext:
                                   description: |-
                                     SecurityContext holds pod-level security attributes and common container settings.
@@ -7016,9 +7165,10 @@ spec:
                                       operator:
                                         description: |-
                                           Operator represents a key's relationship to the value.
-                                          Valid operators are Exists and Equal. Defaults to Equal.
+                                          Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
                                           Exists is equivalent to wildcard for value, so that a pod can
                                           tolerate all taints of a particular category.
+                                          Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
                                         type: string
                                       tolerationSeconds:
                                         description: |-
@@ -7678,6 +7828,23 @@ spec:
                                                   May contain labels and annotations that will be copied into the PVC
                                                   when creating it. No other fields are allowed and will be rejected during
                                                   validation.
+                                                properties:
+                                                  annotations:
+                                                    additionalProperties:
+                                                      type: string
+                                                    type: object
+                                                  finalizers:
+                                                    items:
+                                                      type: string
+                                                    type: array
+                                                  labels:
+                                                    additionalProperties:
+                                                      type: string
+                                                    type: object
+                                                  name:
+                                                    type: string
+                                                  namespace:
+                                                    type: string
                                                 type: object
                                               spec:
                                                 description: |-
@@ -7773,7 +7940,7 @@ spec:
                                                   resources:
                                                     description: |-
                                                       resources represents the minimum resources the volume should have.
-                                                      If RecoverVolumeExpansionFailure feature is enabled users are allowed to specify resource requirements
+                                                      Users are allowed to specify resource requirements
                                                       that are lower than previous value but must still be higher than capacity recorded in the
                                                       status field of the claim.
                                                       More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#resources
@@ -8092,7 +8259,7 @@ spec:
                                           A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff and will be reported on the pod reason and message.
                                           The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported by the container image field.
                                           The OCI object gets mounted in a single directory (spec.containers[*].volumeMounts.mountPath) by merging the manifest layers in the same way as for container images.
-                                          The volume will be mounted read-only (ro) and non-executable files (noexec).
+                                          The volume will be mounted read-only (ro).
                                           Sub path mounts for containers are not supported (spec.containers[*].volumeMounts.subpath) before 1.33.
                                           The field spec.securityContext.fsGroupChangePolicy has no effect on this volume type.
                                         properties:
@@ -8260,8 +8427,7 @@ spec:
                                         description: |-
                                           portworxVolume represents a portworx volume attached and mounted on kubelets host machine.
                                           Deprecated: PortworxVolume is deprecated. All operations for the in-tree portworxVolume type
-                                          are redirected to the pxd.portworx.com CSI driver when the CSIMigrationPortworx feature-gate
-                                          is on.
+                                          are redirected to the pxd.portworx.com CSI driver.
                                         properties:
                                           fsType:
                                             description: |-
@@ -8608,6 +8774,24 @@ spec:
                                                     signerName:
                                                       description: Kubelet's generated CSRs will be addressed to this signer.
                                                       type: string
+                                                    userAnnotations:
+                                                      additionalProperties:
+                                                        type: string
+                                                      description: |-
+                                                        userAnnotations allow pod authors to pass additional information to
+                                                        the signer implementation.  Kubernetes does not restrict or validate this
+                                                        metadata in any way.
+
+                                                        These values are copied verbatim into the `spec.unverifiedUserAnnotations` field of
+                                                        the PodCertificateRequest objects that Kubelet creates.
+
+                                                        Entries are subject to the same validation as object metadata annotations,
+                                                        with the addition that all keys must be domain-prefixed. No restrictions
+                                                        are placed on values, except an overall size limitation on the entire field.
+
+                                                        Signers should document the keys and values they support. Signers should
+                                                        deny requests that contain keys they do not recognize.
+                                                      type: object
                                                   required:
                                                     - keyType
                                                     - signerName
@@ -9061,16 +9245,12 @@ spec:
                       description: ITL is the Inter-Token Latency target in milliseconds.
                       type: number
                     optimizationType:
-                      allOf:
-                        - enum:
-                            - latency
-                            - throughput
-                        - enum:
-                            - latency
-                            - throughput
                       description: |-
-                        OptimizationType controls the profiling optimization strategy.
-                        Use when explicit SLA targets (ttft+itl or e2eLatency) are not known.
+                        OptimizationType is the optimization target for SLA profiling.
+                        Valid values: latency, throughput.
+                      enum:
+                        - latency
+                        - throughput
                       type: string
                     ttft:
                       description: TTFT is the Time To First Token target in milliseconds.
@@ -9250,3 +9430,14 @@ spec:
       storage: true
       subresources:
         status: {}
+  conversion:
+    strategy: Webhook
+    webhook:
+      clientConfig:
+        # CA will be patched in by the Dynamo operator or other means, depending on cert mode auto or manual
+        service:
+          namespace: dynamo-system
+          name: dynamo-operator-webhook-service
+          path: /convert
+      conversionReviewVersions:
+        - v1

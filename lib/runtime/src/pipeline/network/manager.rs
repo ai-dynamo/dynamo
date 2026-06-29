@@ -6,7 +6,7 @@
 //! This module consolidates ALL network-related configuration and creation logic.
 //! It is the ONLY place in the codebase that:
 //! - Reads environment variables for network configuration
-//! - Knows about transport-specific types (SharedHttpServer, TcpRequestClient, etc.)
+//! - Knows about transport-specific types
 //! - Performs mode selection based on RequestPlaneMode
 //! - Creates servers and clients
 //!
@@ -72,18 +72,10 @@ fn set_actual_tcp_rpc_port(port: u16) {
 /// Network configuration loaded from environment variables
 #[derive(Clone)]
 struct NetworkConfig {
-    // HTTP server configuration
-    http_host: String,
-    http_port: u16,
-    http_rpc_root: String,
-
     // TCP server configuration
     tcp_host: String,
     /// TCP port to bind to. If None, the OS will assign a free port.
     tcp_port: Option<u16>,
-
-    // HTTP client configuration
-    http_client_config: super::egress::http_router::Http2Config,
 
     // TCP client configuration
     tcp_client_config: super::egress::tcp_client::TcpRequestConfig,
@@ -98,26 +90,12 @@ impl NetworkConfig {
     /// This is the ONLY place where network-related environment variables are read.
     fn from_env(nats_client: Option<async_nats::Client>) -> Self {
         Self {
-            // HTTP server configuration
-            http_host: std::env::var("DYN_HTTP_RPC_HOST")
-                .unwrap_or_else(|_| crate::utils::get_http_rpc_host_from_env()),
-            http_port: std::env::var("DYN_HTTP_RPC_PORT")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(8888),
-            http_rpc_root: std::env::var("DYN_HTTP_RPC_ROOT_PATH")
-                .unwrap_or_else(|_| "/v1/rpc".to_string()),
-
             // TCP server configuration
             // If DYN_TCP_RPC_PORT is set, use that port; otherwise None means OS will assign a free port
-            tcp_host: std::env::var("DYN_TCP_RPC_HOST")
-                .unwrap_or_else(|_| crate::utils::get_tcp_rpc_host_from_env()),
+            tcp_host: crate::utils::tcp_rpc_host_from_env(),
             tcp_port: std::env::var("DYN_TCP_RPC_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok()),
-
-            // HTTP client configuration (reads DYN_HTTP2_* env vars)
-            http_client_config: super::egress::http_router::Http2Config::from_env(),
 
             // TCP client configuration (reads DYN_TCP_* env vars)
             tcp_client_config: super::egress::tcp_client::TcpRequestConfig::from_env(),
@@ -190,15 +168,6 @@ impl NetworkManager {
         let config = NetworkConfig::from_env(nats_client);
 
         match mode {
-            RequestPlaneMode::Http => {
-                tracing::info!(
-                    %mode,
-                    host = %config.http_host,
-                    port = config.http_port,
-                    rpc_root = %config.http_rpc_root,
-                    "Initializing NetworkManager with HTTP request plane"
-                );
-            }
             RequestPlaneMode::Tcp => {
                 let port_display = config
                     .tcp_port
@@ -235,7 +204,7 @@ impl NetworkManager {
     ///
     /// # Returns
     ///
-    /// Returns a trait object that abstracts over HTTP/TCP/NATS implementations.
+    /// Returns a trait object that abstracts over TCP/NATS implementations.
     ///
     /// # Errors
     ///
@@ -258,7 +227,7 @@ impl NetworkManager {
     ///
     /// # Returns
     ///
-    /// Returns a trait object that abstracts over HTTP/TCP/NATS implementations.
+    /// Returns a trait object that abstracts over TCP/NATS implementations.
     ///
     /// # Errors
     ///
@@ -267,7 +236,6 @@ impl NetworkManager {
     /// - NATS mode is selected but NATS client is not available
     pub fn create_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
         match self.mode {
-            RequestPlaneMode::Http => self.create_http_client(),
             RequestPlaneMode::Tcp => self.create_tcp_client(),
             RequestPlaneMode::Nats => self.create_nats_client(),
         }
@@ -287,36 +255,9 @@ impl NetworkManager {
 
     async fn create_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
         match self.mode {
-            RequestPlaneMode::Http => self.create_http_server().await,
             RequestPlaneMode::Tcp => self.create_tcp_server().await,
             RequestPlaneMode::Nats => self.create_nats_server().await,
         }
-    }
-
-    async fn create_http_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
-        use super::ingress::http_endpoint::SharedHttpServer;
-
-        let bind_addr = format!("{}:{}", self.config.http_host, self.config.http_port)
-            .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid HTTP bind address: {}", e))?;
-
-        tracing::info!(
-            bind_addr = %bind_addr,
-            rpc_root = %self.config.http_rpc_root,
-            "Creating HTTP request plane server"
-        );
-
-        let server = SharedHttpServer::new(bind_addr, self.cancellation_token.clone());
-
-        // Start server in background
-        let server_clone = server.clone();
-        tokio::spawn(async move {
-            if let Err(e) = server_clone.start().await {
-                tracing::error!("HTTP request plane server error: {e}");
-            }
-        });
-
-        Ok(server as Arc<dyn RequestPlaneServer>)
     }
 
     async fn create_tcp_server(&self) -> Result<Arc<dyn RequestPlaneServer>> {
@@ -379,15 +320,6 @@ impl NetworkManager {
     // PRIVATE: Client Creation
     // ============================================================================
 
-    fn create_http_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
-        use super::egress::http_router::HttpRequestClient;
-
-        tracing::debug!("Creating HTTP request plane client with config from NetworkManager");
-        Ok(Arc::new(HttpRequestClient::with_config(
-            self.config.http_client_config.clone(),
-        )?))
-    }
-
     fn create_tcp_client(&self) -> Result<Arc<dyn RequestPlaneClient>> {
         use super::egress::tcp_client::TcpRequestClient;
 
@@ -408,5 +340,36 @@ impl NetworkManager {
 
         tracing::debug!("Creating NATS request plane client");
         Ok(Arc::new(NatsRequestClient::new(nats_client.clone())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manager_for(mode: RequestPlaneMode) -> NetworkManager {
+        NetworkManager::new(
+            CancellationToken::new(),
+            None,
+            crate::component::Registry::new(),
+            mode,
+        )
+    }
+
+    #[test]
+    fn tcp_mode_creates_tcp_client_without_nats_client() {
+        let tcp = manager_for(RequestPlaneMode::Tcp).create_client().unwrap();
+        assert_eq!(tcp.transport_name(), "tcp");
+    }
+
+    #[test]
+    fn nats_mode_requires_nats_client() {
+        match manager_for(RequestPlaneMode::Nats).create_client() {
+            Ok(client) => panic!(
+                "expected NATS mode without NATS client to fail, got {} client",
+                client.transport_name()
+            ),
+            Err(err) => assert!(err.to_string().contains("NATS client required")),
+        }
     }
 }

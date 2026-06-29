@@ -54,6 +54,7 @@ use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
 use std::any::Any;
+use std::env;
 
 use std::collections::BTreeSet;
 
@@ -69,8 +70,55 @@ use derive_builder::Builder;
 use derive_getters::Getters;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
-pub const MAX_CONCURRENT_TRANSFERS: usize = 4;
-pub const MAX_TRANSFER_BATCH_SIZE: usize = 16;
+const DEFAULT_MAX_CONCURRENT_TRANSFERS: usize = 4;
+const DEFAULT_MAX_TRANSFER_BATCH_SIZE: usize = 16;
+
+pub fn max_concurrent_transfers() -> usize {
+    read_usize_env(
+        "DYN_KVBM_MAX_CONCURRENT_TRANSFERS",
+        DEFAULT_MAX_CONCURRENT_TRANSFERS,
+    )
+}
+
+pub fn max_transfer_batch_size() -> usize {
+    read_usize_env(
+        "DYN_KVBM_MAX_TRANSFER_BATCH_SIZE",
+        DEFAULT_MAX_TRANSFER_BATCH_SIZE,
+    )
+}
+
+fn read_usize_env(name: &str, default: usize) -> usize {
+    let value = env::var(name).ok();
+    parse_positive_usize(name, value.as_deref(), default)
+}
+
+fn parse_positive_usize(name: &str, value: Option<&str>, default: usize) -> usize {
+    match value {
+        Some(value) => match value.parse::<usize>() {
+            Ok(parsed) if parsed > 0 => parsed,
+            Ok(_) => {
+                tracing::warn!(
+                    env_var = name,
+                    value = %value,
+                    default,
+                    "Environment variable must be > 0; using default"
+                );
+                default
+            }
+            Err(err) => {
+                tracing::warn!(
+                    env_var = name,
+                    value = %value,
+                    default,
+                    error = %err,
+                    "Failed to parse environment variable as usize; using default"
+                );
+                default
+            }
+        },
+        None => default,
+    }
+}
 
 /// Configuration for creating an OffloadManager
 pub struct OffloadManagerConfig {
@@ -145,10 +193,19 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 
         let cuda_ctx = Cuda::device_or_create(0)?;
 
+        let max_concurrent_transfers = max_concurrent_transfers();
+        let max_transfer_batch_size = max_transfer_batch_size();
+
+        tracing::info!(
+            max_concurrent_transfers,
+            max_transfer_batch_size,
+            "Configured offload transfer settings"
+        );
+
         let pool_config = PoolConfig {
             enable_pool: true,
-            max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
-            max_transfer_batch_size: MAX_TRANSFER_BATCH_SIZE,
+            max_concurrent_transfers,
+            max_transfer_batch_size,
             num_outer_components: config.model_config.outer_dim,
             num_layers: config.model_config.num_layers,
         };
@@ -179,11 +236,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Arc::new(TransferBatcher::new(
                 LocalTransferManager::new(
                     device_offload_transfer_ctx,
-                    MAX_CONCURRENT_TRANSFERS,
+                    max_concurrent_transfers,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                max_transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -225,11 +282,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Arc::new(TransferBatcher::new(
                 LocalTransferManager::new(
                     transfer_ctx.clone(),
-                    MAX_CONCURRENT_TRANSFERS,
+                    max_concurrent_transfers,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                max_transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -256,11 +313,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Arc::new(TransferBatcher::new(
                 LocalTransferManager::new(
                     transfer_ctx.clone(),
-                    MAX_CONCURRENT_TRANSFERS,
+                    max_concurrent_transfers,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                max_transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -282,11 +339,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             Arc::new(TransferBatcher::new(
                 LocalTransferManager::new(
                     transfer_ctx.clone(),
-                    MAX_CONCURRENT_TRANSFERS,
+                    max_concurrent_transfers,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )?,
-                MAX_TRANSFER_BATCH_SIZE,
+                max_transfer_batch_size,
                 &config.async_rt_handle,
                 config.cancellation_token.clone(),
             )),
@@ -313,11 +370,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 Arc::new(TransferBatcher::new(
                     LocalTransferManager::new(
                         transfer_ctx.clone(),
-                        MAX_CONCURRENT_TRANSFERS,
+                        max_concurrent_transfers,
                         &config.async_rt_handle,
                         config.cancellation_token.clone(),
                     )?,
-                    MAX_TRANSFER_BATCH_SIZE,
+                    max_transfer_batch_size,
                     &config.async_rt_handle,
                     config.cancellation_token.clone(),
                 )),
@@ -870,7 +927,7 @@ mod tests {
                 config.clone(),
                 layout_type,
                 agent,
-                &DiskAllocator,
+                &DiskAllocator::from_env()?,
                 duplication_setting,
             )?)
         } else {
@@ -1599,9 +1656,9 @@ mod tests {
     #[tokio::test]
     async fn test_transfer_batcher() -> Result<()> {
         let (offload_manager, device_pool, _, disk_pool) = build_pools(
-            2 * MAX_TRANSFER_BATCH_SIZE + 1,
+            2 * max_transfer_batch_size() + 1,
             None,
-            Some(2 * MAX_TRANSFER_BATCH_SIZE + 1),
+            Some(2 * max_transfer_batch_size() + 1),
             None,
         )?;
 
@@ -1610,7 +1667,7 @@ mod tests {
 
         let mut disk_blocks = Vec::new();
 
-        for i in 0..2 * MAX_TRANSFER_BATCH_SIZE + 1 {
+        for i in 0..2 * max_transfer_batch_size() + 1 {
             let disk_block = completed_block(disk_pool, [i as u32; 4]).await?;
             populate_block(&disk_block, i as u8)?;
             disk_blocks.push(disk_block);
@@ -1621,7 +1678,7 @@ mod tests {
         let device_blocks = offload_manager
             .onboard(immutable_disk_blocks.clone(), None)
             .await??;
-        assert_eq!(device_blocks.len(), 2 * MAX_TRANSFER_BATCH_SIZE + 1);
+        assert_eq!(device_blocks.len(), 2 * max_transfer_batch_size() + 1);
 
         for (i, device_block) in device_blocks.iter().enumerate() {
             let blocks = device_pool
@@ -2633,5 +2690,68 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    // ============================================================================
+    // ENVIRONMENT CONFIGURATION TESTS
+    // ============================================================================
+    #[test]
+    fn test_config_defaults() {
+        assert_eq!(
+            parse_positive_usize(
+                "DYN_KVBM_MAX_CONCURRENT_TRANSFERS",
+                None,
+                DEFAULT_MAX_CONCURRENT_TRANSFERS
+            ),
+            DEFAULT_MAX_CONCURRENT_TRANSFERS
+        );
+        assert_eq!(
+            parse_positive_usize(
+                "DYN_KVBM_MAX_TRANSFER_BATCH_SIZE",
+                None,
+                DEFAULT_MAX_TRANSFER_BATCH_SIZE
+            ),
+            DEFAULT_MAX_TRANSFER_BATCH_SIZE
+        );
+    }
+
+    #[test]
+    fn test_config_custom_values() {
+        assert_eq!(
+            parse_positive_usize(
+                "DYN_KVBM_MAX_CONCURRENT_TRANSFERS",
+                Some("64"),
+                DEFAULT_MAX_CONCURRENT_TRANSFERS
+            ),
+            64
+        );
+        assert_eq!(
+            parse_positive_usize(
+                "DYN_KVBM_MAX_TRANSFER_BATCH_SIZE",
+                Some("128"),
+                DEFAULT_MAX_TRANSFER_BATCH_SIZE
+            ),
+            128
+        );
+    }
+
+    #[test]
+    fn test_config_invalid_values_fallback() {
+        assert_eq!(
+            parse_positive_usize(
+                "DYN_KVBM_MAX_CONCURRENT_TRANSFERS",
+                Some("not_a_number"),
+                DEFAULT_MAX_CONCURRENT_TRANSFERS
+            ),
+            DEFAULT_MAX_CONCURRENT_TRANSFERS
+        );
+        assert_eq!(
+            parse_positive_usize(
+                "DYN_KVBM_MAX_TRANSFER_BATCH_SIZE",
+                Some("0"),
+                DEFAULT_MAX_TRANSFER_BATCH_SIZE
+            ),
+            DEFAULT_MAX_TRANSFER_BATCH_SIZE
+        );
     }
 }

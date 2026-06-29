@@ -21,7 +21,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         self,
         engine: sgl.Engine,
         config: Config,
-        publisher: DynamoSglangPublisher = None,
+        publisher: Optional[DynamoSglangPublisher] = None,
         generate_endpoint=None,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
@@ -76,7 +76,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         sampling_params = self._build_sampling_params(request)
 
         # Generate trace info if tracing is enabled
-        trace_header = self._get_trace_header(context) if self.enable_trace else None
+        trace_header = context.trace_headers() if self.enable_trace else None
         trace_id = context.id() if trace_header else None
 
         async_gen = await self.engine.async_generate(
@@ -88,7 +88,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         )
 
         # Process stream output (token-based or text-based)
-        if self.skip_tokenizer_init:
+        if not self.use_sglang_tokenizer:
             async for out in self._process_token_stream(async_gen, context):
                 yield out
         else:

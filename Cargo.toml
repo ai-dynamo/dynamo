@@ -4,28 +4,33 @@
 [workspace]
 members = [
     "lib/llm",
+    "lib/rl",
     "lib/runtime",
-    "lib/config",
     "lib/tokens",
+    "lib/data-gen",
+    "lib/kv-hashing",
     "lib/mocker",
     "lib/kv-router",
     "lib/memory",
     "lib/kvbm-common",
+    "lib/kvbm-config",
+    "lib/kvbm-engine",
     "lib/kvbm-kernels",
+    "lib/kvbm-consolidator",
     "lib/kvbm-logical",
     "lib/kvbm-physical",
-    "lib/async-openai",
-    "lib/parsers",
     "lib/bench",
+    "lib/backend-common",
+    "lib/backend-common/examples/mocker",
+    "lib/vllm-rs-backend",
     "lib/bindings/c",
     "lib/bindings/python/codegen",
-    "lib/config",
-    "lib/velo-events",
+    "deploy/inference-gateway/ext-proc",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.3.0"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -36,31 +41,46 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "1.0.0" }
-dynamo-llm = { path = "lib/llm", version = "1.0.0" }
-dynamo-config = { path = "lib/config", version = "1.0.0" }
-dynamo-tokens = { path = "lib/tokens", version = "1.0.0" }
-dynamo-memory = { path = "lib/memory", version = "1.0.0" }
-dynamo-mocker = { path = "lib/mocker", version = "1.0.0" }
-dynamo-kv-router = { path = "lib/kv-router", version = "1.0.0", features = ["metrics"] }
-dynamo-async-openai = { path = "lib/async-openai", version = "1.0.0", features = ["byot"] }
-dynamo-parsers = { path = "lib/parsers", version = "1.0.0" }
+dynamo-runtime = { path = "lib/runtime", version = "1.3.0" }
+dynamo-llm = { path = "lib/llm", version = "1.3.0" }
+dynamo-rl = { path = "lib/rl", version = "1.3.0" }
+dynamo-tokenizers = { version = "=1.3.2" }
+dynamo-renderer = { version = "=1.3.5" }
+dynamo-tokens = { path = "lib/tokens", version = "1.3.0" }
+dynamo-data-gen = { path = "lib/data-gen", version = "1.3.0" }
+dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.3.0" }
+dynamo-memory = { path = "lib/memory", version = "1.3.0" }
+dynamo-mocker = { path = "lib/mocker", version = "1.3.0" }
+dynamo-kv-router = { path = "lib/kv-router", version = "1.3.0", features = ["metrics", "runtime-protocols"] }
+dynamo-protocols = { version = "=2.0.1" }
+dynamo-parsers = { version = "2.1.2" }
+# Published on crates.io. To see all available versions:
+#   web:          https://crates.io/crates/dynamo-parsers-v2/versions
+#   sparse index: curl https://index.crates.io/dy/na/dynamo-parsers-v2   (one JSON line per release; read the "vers" field)
+dynamo-parsers-v2 = { version = "0.1.10" }
+dynamo-backend-common = { path = "lib/backend-common", version = "1.3.0" }
+fastokens = { version = "0.2.0" }
+
 
 # kvbm
-kvbm-common = { path = "lib/kvbm-common", version = "1.0.0" }
-kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.0.0" }
-kvbm-logical = { path = "lib/kvbm-logical", version = "1.0.0" }
-kvbm-physical = { path = "lib/kvbm-physical", version = "1.0.0" }
+kvbm-common = { path = "lib/kvbm-common", version = "1.3.0" }
+kvbm-config = { path = "lib/kvbm-config", version = "1.3.0" }
+kvbm-consolidator = { path = "lib/kvbm-consolidator", version = "1.3.0" }
+kvbm-engine = { path = "lib/kvbm-engine", version = "1.3.0" }
+kvbm-kernels = { path = "lib/kvbm-kernels", version = "1.3.0" }
+kvbm-logical = { path = "lib/kvbm-logical", version = "1.3.0" }
+kvbm-physical = { path = "lib/kvbm-physical", version = "1.3.0" }
 
 # velo
-velo-events = { path = "lib/velo-events", version = "1.0.0" }
+velo = { version = "0.1.0" }
 
 # External dependencies
+aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core" }
 anyhow = { version = "1" }
-async-nats = { version = "0.45.0", features = ["service"] }
+lru = { version = "0.16" }
+async-nats = { version = "0.49.1", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
-async_zmq = { version = "0.4.0" }
 blake3 = { version = "1" }
 bytes = { version = "1" }
 chrono = { version = "0.4", default-features = false, features = [
@@ -70,13 +90,15 @@ chrono = { version = "0.4", default-features = false, features = [
     "now",
     "serde",
 ] }
-cudarc = { version = "0.19.2", features = ["cuda-version-from-build-system", "fallback-latest"] }
+cudarc = { version = "=0.19.3", features = ["cuda-version-from-build-system", "fallback-latest"] }
 dashmap = { version = "6.1" }
+moka = { version = "0.12", features = ["future"] }
 derive_builder = { version = "0.20" }
 derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
 etcd-client = { version = "0.17.0", features = ["tls"] }
 futures = { version = "0.3" }
+futures-util = { version = "0.3.32" }
 hf-hub = { version = "0.4.2", default-features = false, features = [
     "tokio",
     "rustls-tls",
@@ -84,37 +106,44 @@ hf-hub = { version = "0.4.2", default-features = false, features = [
 ] }
 
 # ModelExpress for model downloading
-modelexpress-client = { version = "0.2.0" }
-modelexpress-common = { version = "0.2.0" }
+modelexpress-client = { version = "0.3.0" }
+modelexpress-common = { version = "0.3.0" }
 
 humantime = { version = "2.2.0" }
+indexmap = { version = "2" }
+ipnet = { version = "2" }
 libc = { version = "0.2" }
 oneshot = { version = "0.1.13", features = ["std", "async"] }
+ordered-float = "4"
 parking_lot = "0.12.5"
 prometheus = { version = "0.14"}
 rand = { version = "0.9.2" }
 reqwest = { version = "0.12.24", default-features = false, features = [
+    "multipart",
     "json",
     "stream",
     "rustls-tls",
 ] }
 rmp-serde = { version = "1" }
+serde_bytes = { version = "0.11" }
+seqlock = { version = "0.2.0" }
 # "rc" is for async-openai. Allows serializing Rc and Arc. Generally avoid doing that.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1" }
+serde_path_to_error = "0.1"
 strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 thiserror = { version = "2.0.17" }
 tmq = { version = "0.5.0" }
-zmq = { version = "0.10" }
 tokio = { version = "=1.48.0", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.17", features = ["codec", "net", "rt", "io-util"] }
 tower-http = { version = "0.6", features = ["trace"] }
-axum = { version = "=0.8.4", features = ["macros"] }
+axum = { version = "=0.8.4", features = ["macros", "ws"] }
 axum-core = { version = "0.5.2" }
 hyper = { version = "=1.7.0" }
 hyper-util = { version = "=0.1.17" }
+mio = { version = "=1.1.1" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = [
     "env-filter",
@@ -122,13 +151,33 @@ tracing-subscriber = { version = "0.3", features = [
     "json",
 ] }
 tracing-opentelemetry = { version = "0.32.0" }
-opentelemetry = { version = "0.31.0", features = ["trace"] }
-opentelemetry_sdk = { version = "0.31.0", features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.31.0", features = ["trace", "grpc-tonic"] }
+opentelemetry = { version = "0.31.0", features = ["trace", "logs"] }
+opentelemetry_sdk = { version = "0.31.0", features = ["trace", "logs", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.31.0", features = [
+    "trace",
+    "logs",
+    "grpc-tonic",
+    "http-proto",
+    "reqwest-rustls",
+] }
+opentelemetry-appender-tracing = { version = "0.31.0" }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
+
+# ext-proc / Envoy gRPC
+prost = { version = "0.13.5" }
+prost-types = { version = "0.13.5" }
+tonic = { version = "0.13.1" }
+tonic-health = { version = "0.13.1" }
+tonic-build = { version = "0.13.1" }
+kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "aws-lc-rs", "runtime"] }
+k8s-openapi = { version = "0.26.0", features = ["v1_32"] }
+rcgen = { version = "0.13" }
+tokio-rustls = { version = "0.26" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = { version = "2" }
 
 [profile.dev.package]
 insta.opt-level = 3
@@ -141,3 +190,17 @@ insta.opt-level = 3
 # These make the build much slower but shrink the binary, and could help performance
 codegen-units = 1
 lto = "thin"
+
+# Profiling profile: release-like but retains debug symbols for perf/flamegraph/Nsight.
+# Build: cargo build --profile profiling --features nvtx
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
+# Pin llm-multimodal + llm-tokenizer to the smg commit that switches
+# hf-hub from native-tls to rustls-tls (PR #1459, merged 2026-05-05).
+# Remove this block once llm-multimodal ≥1.6.0 is published on crates.io.
+[patch.crates-io]
+llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
+llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }

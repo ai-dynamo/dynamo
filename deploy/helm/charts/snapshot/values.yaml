@@ -1,0 +1,218 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# Dynamo Snapshot - Checkpoint/Restore Infrastructure
+# This chart deploys the checkpoint storage (PVC) and CRIU agent (DaemonSet)
+# in a single namespace. Install this chart in each namespace where you want
+# to enable checkpoint/restore functionality for DynamoGraphDeployments.
+
+# Container runtime backend. Leave socketPath empty to use the conventional
+# path for the chosen type.
+runtime:
+  type: containerd  # containerd | crio
+  socketPath: ""
+
+# Gates the OCP RBAC template and the DS required-scc annotation. Keep false
+# on vanilla Kubernetes (it references an OCP-only built-in SCC).
+openshift:
+  enabled: false
+
+# Storage configuration for checkpoints
+storage:
+  # Storage type stays snapshot-owned for future backend expansion.
+  # Only pvc is implemented today.
+  type: pvc
+
+  # How snapshot-agent accesses checkpoint storage:
+  # - agentMount: snapshot-agent mounts the PVC directly. This is the legacy
+  #   namespace-local mode and requires installing the chart in every workload
+  #   namespace that needs checkpoints. On multi-node clusters this generally
+  #   requires ReadWriteMany storage because DaemonSet pods on multiple nodes
+  #   mount the same PVC.
+  # - podMount: workload checkpoint/restore pods mount their namespace-local
+  #   PVC, and a cluster-level snapshot-agent reaches it through
+  #   /host/proc/<pid>/root. Use this when installing one snapshot-agent
+  #   DaemonSet in an infrastructure namespace. Because the DaemonSet no longer
+  #   mounts the PVC from every GPU node, suitable ReadWriteOnce storage
+  #   classes can be used for sequential checkpoint/restore workflows.
+  accessMode: agentMount
+
+  # PVC configuration (when type=pvc)
+  pvc:
+    # Create a new PVC (set to false if using existing PVC)
+    create: true
+    # PVC name used by the snapshot-agent checkpoint store
+    name: snapshot-pvc
+    # PVC size
+    size: 1Ti
+    # Storage class (leave empty for default)
+    storageClass: ""
+    # Access mode. ReadWriteMany is safest for concurrent multi-node access;
+    # podMount can use ReadWriteOnce for sequential checkpoint/restore when
+    # the storage backend can attach the volume to the active workload node.
+    accessMode: ReadWriteMany
+    # PVC mount path. In agentMount mode this is mounted inside the
+    # snapshot-agent pod. In podMount mode the operator must mount the PVC
+    # into checkpoint/restore workload pods at the same path.
+    basePath: /checkpoints
+
+  # Reserved for future snapshot-owned backends. Unsupported today.
+  s3:
+    uri: ""
+
+  # Reserved for future snapshot-owned backends. Unsupported today.
+  oci:
+    uri: ""
+
+# DaemonSet configuration for snapshot (checkpoint/restore) agent
+daemonset:
+  # Container image
+  image:
+    repository: nvcr.io/nvidia/ai-dynamo/snapshot-agent
+    tag: 1.2.1
+    pullPolicy: Always
+
+  # Snapshot agent and nsrestore log level (trace, debug, info, warn, error)
+  snapshotLogLevel: info
+
+  # Image pull secrets
+  imagePullSecrets:
+    - name: ngc-secret
+
+  # Resource limits and requests
+  resources:
+    limits:
+      cpu: 4
+      memory: 4Gi
+    requests:
+      cpu: 2
+      memory: 1Gi
+
+  # Node selector - target GPU nodes
+  nodeSelector:
+    nvidia.com/gpu.present: "true"
+
+  # Tolerations for GPU nodes
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    - key: dedicated
+      operator: Exists
+      effect: NoSchedule
+
+  # Pod labels
+  podLabels: {}
+
+  # Pod annotations
+  podAnnotations: {}
+
+  # Affinity rules
+  affinity: {}
+
+  # Init container configuration
+  initContainer:
+    # Busybox image for seccomp profile deployment
+    image: busybox:latest
+
+# Seccomp profile configuration
+# CRIU can't checkpoint io_uring; this gates the block-iouring ConfigMap and
+# the initContainer that writes the profile. Set to false on RHCOS 9.6+, which
+# already blocks io_uring at the kernel.
+seccomp:
+  # Deploy seccomp profile for blocking io_uring (required for CRIU).
+  # Use seccomp.deploy; seccomp.enabled is not a chart value.
+  deploy: true
+
+# Service account configuration
+serviceAccount:
+  # Create service account
+  create: true
+  # Service account name (generated if not set)
+  name: ""
+  # Annotations for service account (e.g., for IRSA)
+  annotations: {}
+
+# RBAC configuration
+rbac:
+  # Create RBAC resources
+  create: true
+
+  # Namespace-scoped RBAC (recommended, required for PVC storage)
+  # - true (default): Creates Role/RoleBinding, agent watches pods in chart's namespace only
+  # - false: Creates ClusterRole/ClusterRoleBinding, agent watches all pods on assigned nodes
+  # Note: PVC storage requires namespace-scoped mode (true) as PVCs are namespace-scoped
+  namespaceRestricted: true
+
+# Static configuration (loaded from ConfigMap)
+# Dynamic values (NODE_NAME, RESTRICTED_NAMESPACE, etc.) come from environment variables
+config:
+  overlay:
+    # Rootfs diff tar exclusions. Absolute-looking paths are normalized
+    # relative to the tar root, and patterns starting with * are passed
+    # through as tar globs unchanged.
+    exclusions:
+      - /proc
+      - /sys
+      - /dev
+      - "*/.cache/huggingface"
+      - "*/__pycache__"
+      - "*.pyc"
+
+  restore:
+    # Path to the nsrestore binary in the placeholder image
+    nsRestorePath: /usr/local/bin/nsrestore
+    # Maximum seconds to allow a restore attempt before snapshot-agent marks it failed
+    restoreTimeoutSeconds: 7200
+
+  criu:
+    # Path to the criu binary
+    binaryPath: /usr/local/sbin/criu
+    # Ghost file size limit in bytes. Deleted-but-open files smaller than this
+    # are saved inline in the checkpoint image as ghost files.
+    ghostLimit: 536870912
+    # CRIU logging verbosity (0-4)
+    logLevel: 4
+    # CRIU work directory for temporary files
+    workDir: /var/criu-work
+
+    # K8s-specific options (recommended defaults for containers)
+    leaveRunning: true      # Keep process running after checkpoint
+    shellJob: true          # Containers are often session leaders
+    tcpClose: false         # Do not close non-listening TCP sockets on restore
+    tcpEstablished: true    # Preserve established TCP sockets during restore
+    fileLocks: true         # Applications use file locks
+    orphanPtsMaster: true   # Containers with TTYs
+    extUnixSk: true         # External Unix sockets
+    linkRemap: true         # Required for deleted-but-open files (e.g. POSIX semaphores in /dev/shm)
+    extMasters: true        # External bind mount masters
+    manageCgroupsMode: soft # CRIU cgroup management mode (ignore/soft/full/strict)
+
+    # Restore-specific options (only apply during CRIU restore, not dump)
+    rstSibling: true         # Restore as sibling process (required for go-criu swrk mode)
+    mntnsCompatMode: false   # Mount namespace compatibility mode
+    evasiveDevices: true     # Use any device path if original is inaccessible
+    forceIrmap: true         # Force resolving inotify/fsnotify watch names
+
+    # Advanced options
+    autoDedup: false        # Auto-deduplication of memory pages
+    lazyPages: false        # Lazy page migration (experimental)
+
+    # Config file options (NOT available via RPC - written to criu.conf)
+    # Dedicated directory for Dynamo Snapshot CRIU plugins.
+    # Do not point this at CRIU's global plugin dir, which can load unrelated
+    # plugins such as the CRIU CUDA plugin.
+    libDir: "/usr/local/lib/snapshot/criu-plugins"
+    allowUprobes: true             # Leave enabled for kernel/userspace probe compatibility
+    skipInFlight: true             # Skip in-flight TCP connections

@@ -31,57 +31,66 @@ const (
 	DynamoCheckpointPhasePending DynamoCheckpointPhase = "Pending"
 	// DynamoCheckpointPhaseCreating indicates the checkpoint Job is running
 	DynamoCheckpointPhaseCreating DynamoCheckpointPhase = "Creating"
-	// DynamoCheckpointPhaseReady indicates the checkpoint tar file is available on the PVC
+	// DynamoCheckpointPhaseReady indicates the checkpoint artifact is available
 	DynamoCheckpointPhaseReady DynamoCheckpointPhase = "Ready"
 	// DynamoCheckpointPhaseFailed indicates the checkpoint creation failed
 	DynamoCheckpointPhaseFailed DynamoCheckpointPhase = "Failed"
 )
 
-// DynamoCheckpointStorageType defines the supported storage backends for checkpoints
+// Deprecated: StorageType is retained for compatibility with older
+// DynamoCheckpoint status consumers. The current checkpoint flow publishes
+// PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
 // +kubebuilder:validation:Enum=pvc;s3;oci
 type DynamoCheckpointStorageType string
 
-// DynamoCheckpointIdentity defines the inputs that determine checkpoint equivalence
-// Two checkpoints with the same identity hash are considered equivalent
+// Deprecated: legacy identity metadata. Keep it only where v1alpha1 still
+// requires spec.identity; omit DGD-managed identity and use checkpointRef for
+// explicit restores.
 type DynamoCheckpointIdentity struct {
 	// Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
+	// Deprecated: legacy spec.identity only.
 	// +kubebuilder:validation:Required
 	Model string `json:"model"`
 
 	// BackendFramework is the runtime framework (vllm, sglang, trtllm)
+	// Deprecated: legacy spec.identity only.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	BackendFramework string `json:"backendFramework"`
 
-	// DynamoVersion is the Dynamo platform version (optional)
-	// If not specified, version is not included in identity hash
-	// This ensures checkpoint compatibility across Dynamo releases
+	// DynamoVersion is the Dynamo platform version (optional).
+	// Deprecated: legacy spec.identity only.
 	// +optional
 	DynamoVersion string `json:"dynamoVersion,omitempty"`
 
-	// TensorParallelSize is the tensor parallel configuration
+	// TensorParallelSize is the tensor parallel configuration.
+	// Deprecated: checkpoint launch uses the pod template instead.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	TensorParallelSize int32 `json:"tensorParallelSize,omitempty"`
 
-	// PipelineParallelSize is the pipeline parallel configuration
+	// PipelineParallelSize is the pipeline parallel configuration.
+	// Deprecated: checkpoint launch uses the pod template instead.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	PipelineParallelSize int32 `json:"pipelineParallelSize,omitempty"`
 
-	// Dtype is the data type (fp16, bf16, fp8, etc.)
+	// Dtype is the data type (fp16, bf16, fp8, etc.).
+	// Deprecated: legacy spec.identity only.
 	// +optional
 	Dtype string `json:"dtype,omitempty"`
 
-	// MaxModelLen is the maximum sequence length
+	// MaxModelLen is the maximum sequence length.
+	// Deprecated: legacy spec.identity only.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MaxModelLen int32 `json:"maxModelLen,omitempty"`
 
-	// ExtraParameters are additional parameters that affect the checkpoint hash
-	// Use for any framework-specific or custom parameters not covered above
+	// ExtraParameters are additional parameters that affect the checkpoint hash.
+	// Use for any framework-specific or custom parameters not covered above.
+	// Deprecated: legacy spec.identity only.
 	// +optional
 	ExtraParameters map[string]string `json:"extraParameters,omitempty"`
 }
@@ -90,30 +99,60 @@ type DynamoCheckpointIdentity struct {
 type DynamoCheckpointJobConfig struct {
 	// PodTemplateSpec allows customizing the checkpoint Job pod
 	// This should include the container that runs the workload to be checkpointed
+	// and any workload/runtime env, service account, GMS, or DRA wiring needed
+	// by that container. Auto-created checkpoints from DynamoGraphDeployment
+	// render Dynamo defaults before creating the DynamoCheckpoint.
 	// +kubebuilder:validation:Required
 	PodTemplateSpec corev1.PodTemplateSpec `json:"podTemplateSpec"`
 
+	// TargetContainerName is the container in PodTemplateSpec to snapshot.
+	// +optional
+	// +kubebuilder:default=main
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	TargetContainerName string `json:"targetContainerName,omitempty"`
+
+	// SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.
+	// When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components.
+	// +optional
+	SharedMemory *SharedMemorySpec `json:"sharedMemory,omitempty"`
+
 	// ActiveDeadlineSeconds specifies the maximum time the Job can run
 	// +optional
+	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=3600
 	ActiveDeadlineSeconds *int64 `json:"activeDeadlineSeconds,omitempty"`
 
-	// BackoffLimit specifies the number of retries before marking the Job failed
+	// Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry.
 	// +optional
-	// +kubebuilder:default=3
+	// +kubebuilder:validation:Minimum=0
 	BackoffLimit *int32 `json:"backoffLimit,omitempty"`
 
-	// TTLSecondsAfterFinished specifies how long to keep the Job after completion
+	// Deprecated: TTLSecondsAfterFinished is ignored. Checkpoint Jobs use a fixed
+	// 300 second TTL.
 	// +optional
-	// +kubebuilder:default=300
+	// +kubebuilder:validation:Minimum=0
 	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
 // DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
 type DynamoCheckpointSpec struct {
-	// Identity defines the inputs that determine checkpoint equivalence
+	// Deprecated: required by v1alpha1 for standalone checkpoints. Auto
+	// checkpoints synthesize it; checkpointRef restores use the referenced CR.
 	// +kubebuilder:validation:Required
 	Identity DynamoCheckpointIdentity `json:"identity"`
+
+	// GPUMemoryService records checkpoint-time GPU Memory Service metadata for
+	// a prepared checkpoint Job pod. The DynamoCheckpoint controller does not
+	// inject GMS/DRA resources; auto-created checkpoints from
+	// DynamoGraphDeployment prepare the pod template before creating this object.
+	// Manual GMS-enabled checkpoints must provide the prepared pod template; the
+	// controller fails the checkpoint if the required GMS/DRA wiring is missing.
+	// This field is intentionally outside spec.identity, so it does not affect
+	// the checkpoint identity hash or deduplication.
+	// +optional
+	GPUMemoryService *GPUMemoryServiceSpec `json:"gpuMemoryService,omitempty"`
 
 	// Job defines the configuration for the checkpoint creation Job
 	// +kubebuilder:validation:Required
@@ -124,9 +163,9 @@ type DynamoCheckpointSpec struct {
 type DynamoCheckpointConditionType string
 
 const (
-	// DynamoCheckpointConditionJobCreated indicates whether the checkpoint Job has been created
+	// DEPRECATED: DynamoCheckpointConditionJobCreated is deprecated. Use status.phase instead.
 	DynamoCheckpointConditionJobCreated DynamoCheckpointConditionType = "JobCreated"
-	// DynamoCheckpointConditionJobCompleted indicates whether the checkpoint Job has completed
+	// DEPRECATED: DynamoCheckpointConditionJobCompleted is deprecated. Use status.phase instead.
 	DynamoCheckpointConditionJobCompleted DynamoCheckpointConditionType = "JobCompleted"
 )
 
@@ -136,19 +175,23 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	Phase DynamoCheckpointPhase `json:"phase,omitempty"`
 
-	// IdentityHash is the computed hash of the checkpoint identity
-	// This hash is used to identify equivalent checkpoints
+	// CheckpointID is the artifact ID used by the snapshot protocol.
+	// +optional
+	CheckpointID string `json:"checkpointID,omitempty"`
+
+	// IdentityHash is the computed hash of the checkpoint identity.
+	// Deprecated: use CheckpointID. This field is retained for compatibility
+	// with older status consumers.
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
 
-	// Location is the full URI/path to the checkpoint in the storage backend
-	// For PVC: same as TarPath (e.g., /checkpoints/{hash}.tar)
-	// For S3: s3://bucket/prefix/{hash}.tar
-	// For OCI: oci://registry/repo:{hash}
+	// Deprecated: Location is ignored and no longer populated. It is retained
+	// only so older objects continue to validate.
 	// +optional
 	Location string `json:"location,omitempty"`
 
-	// StorageType indicates the storage backend type used for this checkpoint
+	// Deprecated: StorageType is ignored and no longer populated. It is retained
+	// only so older objects continue to validate.
 	// +optional
 	StorageType DynamoCheckpointStorageType `json:"storageType,omitempty"`
 
@@ -156,7 +199,7 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	JobName string `json:"jobName,omitempty"`
 
-	// CreatedAt is the timestamp when the checkpoint tar was created
+	// CreatedAt is the timestamp when the checkpoint became ready
 	// +optional
 	CreatedAt *metav1.Time `json:"createdAt,omitempty"`
 
@@ -164,7 +207,7 @@ type DynamoCheckpointStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// Conditions represent the latest available observations of the checkpoint's state
+	// DEPRECATED: Conditions are deprecated. Use status.phase instead.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
@@ -175,7 +218,7 @@ type DynamoCheckpointStatus struct {
 // +kubebuilder:printcolumn:name="Model",type="string",JSONPath=".spec.identity.model",description="Model identifier"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=".spec.identity.backendFramework",description="Backend framework"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase of the checkpoint"
-// +kubebuilder:printcolumn:name="Hash",type="string",JSONPath=".status.identityHash",description="Identity hash of the checkpoint"
+// +kubebuilder:printcolumn:name="CheckpointID",type="string",JSONPath=".status.checkpointID",description="Artifact ID of the checkpoint"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec.identity) || self.spec.identity == oldSelf.spec.identity",message="spec.identity is immutable after creation"
 

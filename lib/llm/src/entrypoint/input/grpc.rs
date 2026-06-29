@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::{
@@ -9,6 +10,7 @@ use crate::{
     entrypoint::{EngineConfig, RouterConfig, input::common},
     grpc::service::kserve,
     http::service::metrics::Metrics,
+    local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -24,6 +26,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
+        .metrics_prefix(engine_config.local_model().metrics_prefix())
         .http_cancel_token(Some(distributed_runtime.primary_token()))
         .with_request_template(engine_config.local_model().request_template());
 
@@ -33,21 +36,33 @@ pub async fn run(
     }
 
     let grpc_service = match engine_config {
-        EngineConfig::Dynamic { ref model, .. } => {
+        EngineConfig::Dynamic {
+            ref model,
+            ref prefill_load_estimator,
+            ..
+        } => {
             let grpc_service = grpc_service_builder.build()?;
             let router_config = model.router_config();
             let migration_limit = model.migration_limit();
+            let migration_max_seq_len = model.migration_max_seq_len();
             // Listen for models registering themselves, add them to gRPC service
             let namespace_filter = NamespaceFilter::from_namespace_and_prefix(
                 model.namespace(),
                 model.namespace_prefix(),
             );
+            let local_model_path =
+                (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             run_watcher(
                 distributed_runtime.clone(),
                 grpc_service.state().manager_clone(),
                 router_config.clone(),
                 migration_limit,
+                migration_max_seq_len,
                 namespace_filter,
+                prefill_load_estimator.clone(),
+                local_model_path,
+                model.metrics_prefix(),
+                model.runtime_config().tokenizer_backend,
             )
             .await?;
             grpc_service
@@ -105,23 +120,33 @@ pub async fn run(
 
 /// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
+#[allow(clippy::too_many_arguments)]
 async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
     migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
     namespace_filter: NamespaceFilter,
+    prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
+    local_model_path: Option<PathBuf>,
+    metrics_prefix: Option<String>,
+    tokenizer_backend: Option<TokenizerBackend>,
 ) -> anyhow::Result<()> {
     // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
-    let metrics = Arc::new(Metrics::new());
-    let watch_obj = ModelWatcher::new(
+    let metrics = Arc::new(Metrics::new_with_prefix(metrics_prefix));
+    let mut watch_obj = ModelWatcher::new(
         runtime.clone(),
         model_manager,
         router_config,
         migration_limit,
+        migration_max_seq_len,
         None,
+        prefill_load_estimator,
         metrics,
     );
+    watch_obj.set_local_model_path(local_model_path);
+    watch_obj.set_tokenizer_backend(tokenizer_backend);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery
@@ -136,6 +161,7 @@ async fn run_watcher(
     // only has one kind of inference endpoint.
 
     // Pass the discovery stream to the watcher
+    let watch_obj = Arc::new(watch_obj);
     let _watcher_task = tokio::spawn(async move {
         watch_obj.watch(discovery_stream, namespace_filter).await;
     });

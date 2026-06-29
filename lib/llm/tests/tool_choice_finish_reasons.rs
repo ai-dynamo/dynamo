@@ -3,15 +3,15 @@
 
 //! Tests for tool_choice finish_reason handling.
 
-use dynamo_async_openai::types::{
-    ChatCompletionNamedToolChoice, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
-    ChatCompletionRequestUserMessageContent, ChatCompletionToolChoiceOption,
-    ChatCompletionToolType, CreateChatCompletionRequest, FunctionName,
-};
 use dynamo_llm::protocols::common;
 use dynamo_llm::protocols::common::llm_backend::BackendOutput;
 use dynamo_llm::protocols::openai::DeltaGeneratorExt;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_protocols::types::{
+    ChatCompletionNamedToolChoice, ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
+    ChatCompletionRequestUserMessageContent, ChatCompletionToolChoiceOption,
+    ChatCompletionToolType, CreateChatCompletionRequest, FunctionName,
+};
 
 fn create_test_request() -> NvCreateChatCompletionRequest {
     let messages = vec![ChatCompletionRequestMessage::User(
@@ -32,7 +32,9 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        thinking: None,
         media_io_kwargs: None,
+        return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -50,6 +52,10 @@ fn build_backend_output_with_finish(text: &str, finish: common::FinishReason) ->
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
+        encoder_result: None,
+        worker_trace_link: None,
+        engine_data: None,
+        routing_data: None,
     }
 }
 
@@ -116,8 +122,8 @@ async fn test_named_tool_choice_preserves_length_finish_reason() {
 
     // Critical: Length finish reason should be preserved, NOT replaced with Stop
     assert_eq!(
-        response.choices[0].finish_reason,
-        Some(dynamo_async_openai::types::FinishReason::Length),
+        response.inner.choices[0].finish_reason,
+        Some(dynamo_protocols::types::FinishReason::Length),
         "Length finish reason must be preserved for tool_choice=named"
     );
 }
@@ -139,8 +145,8 @@ fn test_required_tool_choice_preserves_length_finish_reason() {
 
     // Critical: Length finish reason should be preserved, NOT replaced with ToolCalls
     assert_eq!(
-        response.choices[0].finish_reason,
-        Some(dynamo_async_openai::types::FinishReason::Length),
+        response.inner.choices[0].finish_reason,
+        Some(dynamo_protocols::types::FinishReason::Length),
         "Length finish reason must be preserved for tool_choice=required"
     );
 }
@@ -169,8 +175,8 @@ fn test_named_tool_choice_preserves_content_filter() {
 
     // Critical: ContentFilter finish reason should be preserved
     assert_eq!(
-        response.choices[0].finish_reason,
-        Some(dynamo_async_openai::types::FinishReason::ContentFilter),
+        response.inner.choices[0].finish_reason,
+        Some(dynamo_protocols::types::FinishReason::ContentFilter),
         "ContentFilter finish reason must be preserved for tool_choice=named"
     );
 }
@@ -192,16 +198,16 @@ fn test_required_tool_choice_preserves_content_filter() {
 
     // Critical: ContentFilter finish reason should be preserved
     assert_eq!(
-        response.choices[0].finish_reason,
-        Some(dynamo_async_openai::types::FinishReason::ContentFilter),
+        response.inner.choices[0].finish_reason,
+        Some(dynamo_protocols::types::FinishReason::ContentFilter),
         "ContentFilter finish reason must be preserved for tool_choice=required"
     );
 }
 
-#[test]
-fn test_named_tool_choice_normal_stop_becomes_stop() {
+#[tokio::test]
+async fn test_named_tool_choice_normal_stop_becomes_tool_calls() {
     let mut request = create_test_request();
-    request.inner.tool_choice = Some(ChatCompletionToolChoiceOption::Named(
+    let tool_choice = Some(ChatCompletionToolChoiceOption::Named(
         ChatCompletionNamedToolChoice {
             r#type: ChatCompletionToolType::Function,
             function: FunctionName {
@@ -209,6 +215,7 @@ fn test_named_tool_choice_normal_stop_becomes_stop() {
             },
         },
     ));
+    request.inner.tool_choice = tool_choice.clone();
 
     let mut generator = request.response_generator("req-stop-1".to_string());
     let backend_output = build_backend_output_with_finish(
@@ -216,14 +223,17 @@ fn test_named_tool_choice_normal_stop_becomes_stop() {
         common::FinishReason::Stop,
     );
 
-    let response = generator
+    let raw_response = generator
         .choice_from_postprocessor(backend_output)
         .expect("choice generation");
 
-    // Normal completion: Stop should remain Stop for named tool choice
+    let response = apply_jail_transformation(raw_response, tool_choice).await;
+
+    // OpenAI spec: when tool_calls are emitted, finish_reason must be ToolCalls
+    // regardless of whether tool_choice was auto, required, or a named function.
     assert_eq!(
-        response.choices[0].finish_reason,
-        Some(dynamo_async_openai::types::FinishReason::Stop),
+        response.inner.choices[0].finish_reason,
+        Some(dynamo_protocols::types::FinishReason::ToolCalls),
     );
 }
 
@@ -247,7 +257,7 @@ async fn test_required_tool_choice_normal_stop_becomes_tool_calls() {
 
     // Normal completion: Stop should become ToolCalls for required tool choice
     assert_eq!(
-        response.choices[0].finish_reason,
-        Some(dynamo_async_openai::types::FinishReason::ToolCalls),
+        response.inner.choices[0].finish_reason,
+        Some(dynamo_protocols::types::FinishReason::ToolCalls),
     );
 }

@@ -24,16 +24,35 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - nodes
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
   - persistentvolumeclaims
   verbs:
   - create
   - delete
   - get
   - list
+  - watch
 - apiGroups:
   - ""
   resources:
   - pods
+  verbs:
+  - delete
+  - deletecollection
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
   verbs:
   - get
   - list
@@ -50,6 +69,18 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
 - apiGroups:
   - autoscaling
   resources:
@@ -109,6 +140,16 @@ rules:
 - apiGroups:
   - grove.io
   resources:
+  - clustertopologies
+  - podcliques
+  - podcliquescalinggroups
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - grove.io
+  resources:
   - podcliques/scale
   - podcliquescalinggroups/scale
   verbs:
@@ -154,6 +195,7 @@ rules:
 - apiGroups:
   - networking.istio.io
   resources:
+  - destinationrules
   - virtualservices
   verbs:
   - create
@@ -185,6 +227,7 @@ rules:
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
+  - podsnapshotcontents
   verbs:
   - create
   - delete
@@ -201,6 +244,7 @@ rules:
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
+  - podsnapshots/finalizers
   verbs:
   - update
 - apiGroups:
@@ -212,10 +256,42 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
+  - podsnapshotcontents/status
+  - podsnapshots/status
   verbs:
   - get
   - patch
   - update
+- apiGroups:
+  - nvidia.com
+  resources:
+  - podsnapshots
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - resource.k8s.io
+  resources:
+  - deviceclasses
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - resource.k8s.io
+  resources:
+  - resourceclaimtemplates
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - scheduling.run.ai
   resources:
