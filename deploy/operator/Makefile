@@ -55,6 +55,11 @@ help: ## Display this help.
 # Docker build context (../.. relative to this directory), since the images pull
 # in components/, lib/, and container/.
 #
+# DISCLAIMER: These build/push targets are a developer convenience only. They are
+# not the supported/official way to produce release images and carry no stability
+# or compatibility guarantees. For production images, use the official build and
+# release pipeline.
+#
 # Examples:
 #   make docker-build-planner REGISTRY=<your-registry>          # build planner
 #   make docker-build-trtllm  REGISTRY=<your-registry>          # build trtllm runtime
