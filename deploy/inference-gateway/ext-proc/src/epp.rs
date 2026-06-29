@@ -20,7 +20,11 @@ use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
+use dynamo_llm::protocols::common::extensions::{
+    HEADER_TENANT_ID, NvExt, request_cache_salt, routing_constraints_to_kv,
+};
+use dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest;
+use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -209,18 +213,42 @@ impl Router {
 
     /// Tokenize a JSON request body and extract router queue priorities.
     ///
-    /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority)`.
+    /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority, routing_constraints)`.
     /// Priorities default to zero when absent. Mirrors the standalone Dynamo
     /// preprocessor lift in `lib/llm/src/preprocessor.rs`.
-    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, Option<String>, f64, u32)> {
+    pub fn tokenize(
+        &self,
+        request_json: &str,
+    ) -> Result<(Vec<u32>, Option<String>, f64, u32, RoutingConstraints)> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
-        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(request_json)?;
+        let mut request_json: serde_json::Value = serde_json::from_str(request_json)?;
 
-        let priority_jump = extract_priority_jump(&request);
-        let strict_priority = extract_strict_priority(&request);
+        if request_json.get("prompt").is_some() {
+            normalize_completion_prompt_for_routing(&mut request_json);
+            let request: NvCreateCompletionRequest = serde_json::from_value(request_json)?;
+            let nvext = request.nvext.as_ref();
+            let priority_jump = extract_priority_jump(nvext);
+            let strict_priority = extract_strict_priority(nvext);
+            let routing_constraints = extract_routing_constraints(nvext);
+            let cache_namespace = request_cache_salt(&request).map(str::to_owned);
+            let (token_ids, _) = self.preprocessor.gather_tokens(&request, None, None)?;
+
+            return Ok((
+                token_ids,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                routing_constraints,
+            ));
+        }
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(request_json)?;
+        let nvext = request.nvext.as_ref();
+        let priority_jump = extract_priority_jump(nvext);
+        let strict_priority = extract_strict_priority(nvext);
+        let routing_constraints = extract_routing_constraints(nvext);
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
         let formatted_prompt = self
@@ -234,6 +262,7 @@ impl Router {
             cache_namespace,
             priority_jump,
             strict_priority,
+            routing_constraints,
         ))
     }
 
@@ -315,6 +344,7 @@ impl Router {
         priority_jump: f64,
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
+        routing_constraints: RoutingConstraints,
     ) -> Result<(u64, Option<u32>)> {
         if let Some(ref ids) = allowed_worker_ids {
             self.prefill_router.register_workers(ids);
@@ -332,7 +362,7 @@ impl Router {
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
-                RoutingConstraints::default(),
+                routing_constraints,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))?;
@@ -362,6 +392,7 @@ impl Router {
         priority_jump: f64,
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
+        routing_constraints: RoutingConstraints,
     ) -> Result<(WorkerWithDpRank, u32)> {
         if let Some(ref ids) = allowed_worker_ids {
             self.decode_router.register_workers(ids);
@@ -382,7 +413,7 @@ impl Router {
                 strict_priority,
                 None,
                 allowed_worker_ids,
-                RoutingConstraints::default(),
+                routing_constraints,
             )
             .await
             .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))
@@ -480,7 +511,32 @@ impl Router {
     }
 }
 
-/// Extract the router queue `priority_jump` from a chat completion request's
+/// Collapse completion batch prompts into the single prompt shape the router
+/// can score today. Full batch-aware routing needs an explicit policy.
+fn normalize_completion_prompt_for_routing(request_json: &mut serde_json::Value) {
+    let Some(prompt) = request_json.get_mut("prompt") else {
+        return;
+    };
+    let Some(items) = prompt.as_array() else {
+        return;
+    };
+    if items.len() <= 1 {
+        return;
+    }
+
+    if items.iter().all(|item| item.is_string()) {
+        let joined = items
+            .iter()
+            .filter_map(|item| item.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        *prompt = serde_json::Value::String(joined);
+    } else if items.iter().all(|item| item.is_array()) {
+        *prompt = items[0].clone();
+    }
+}
+
+/// Extract the router queue `priority_jump` from an OpenAI request's
 /// `nvext.agent_hints.priority`.
 ///
 /// Negative priorities are clamped to `0.0` so a low-priority hint never
@@ -488,12 +544,8 @@ impl Router {
 /// in `lib/llm/src/preprocessor.rs`). Falls back to the deprecated
 /// `latency_sensitivity` alias for callers still on the old field name.
 /// Returns `0.0` when `nvext` is absent.
-fn extract_priority_jump(
-    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
-) -> f64 {
-    request
-        .nvext
-        .as_ref()
+fn extract_priority_jump(nvext: Option<&NvExt>) -> f64 {
+    nvext
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| {
             h.priority
@@ -503,15 +555,18 @@ fn extract_priority_jump(
         .unwrap_or(0.0)
 }
 
-fn extract_strict_priority(
-    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
-) -> u32 {
-    request
-        .nvext
-        .as_ref()
+fn extract_strict_priority(nvext: Option<&NvExt>) -> u32 {
+    nvext
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| h.strict_priority)
         .unwrap_or(0)
+}
+
+fn extract_routing_constraints(nvext: Option<&NvExt>) -> RoutingConstraints {
+    nvext
+        .and_then(|n| n.routing_constraints.clone())
+        .map(routing_constraints_to_kv)
+        .unwrap_or_default()
 }
 
 struct DiscoveredModelBootstrap {
@@ -931,7 +986,7 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let (tokens, body_cache_namespace, priority_jump, strict_priority) = self
+        let (tokens, body_cache_namespace, priority_jump, strict_priority, routing_constraints) = self
             .tokenize(body_str)
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
         let cache_namespace =
@@ -948,6 +1003,7 @@ impl EndpointPicker for Router {
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids.clone(),
+                routing_constraints.clone(),
             )
             .await;
 
@@ -974,6 +1030,7 @@ impl EndpointPicker for Router {
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
+                routing_constraints,
             )
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
@@ -1144,7 +1201,7 @@ mod tests {
     /// regresses, the GAIE ext-proc path is back to ignoring priority.
     #[test]
     fn priority_jump_lifted_from_agent_hints_priority() {
-        let with_priority: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        let with_priority: NvCreateChatCompletionRequest =
             serde_json::from_str(
                 r#"{
                     "model": "test",
@@ -1153,9 +1210,9 @@ mod tests {
                 }"#,
             )
             .unwrap();
-        assert_eq!(extract_priority_jump(&with_priority), 5.0);
+        assert_eq!(extract_priority_jump(with_priority.nvext.as_ref()), 5.0);
 
-        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        let without_nvext: NvCreateChatCompletionRequest =
             serde_json::from_str(
                 r#"{
                     "model": "test",
@@ -1163,12 +1220,12 @@ mod tests {
                 }"#,
             )
             .unwrap();
-        assert_eq!(extract_priority_jump(&without_nvext), 0.0);
+        assert_eq!(extract_priority_jump(without_nvext.nvext.as_ref()), 0.0);
     }
 
     #[test]
     fn strict_priority_lifted_from_agent_hints() {
-        let with_priority: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        let with_priority: NvCreateChatCompletionRequest =
             serde_json::from_str(
                 r#"{
                     "model": "test",
@@ -1177,9 +1234,9 @@ mod tests {
                 }"#,
             )
             .unwrap();
-        assert_eq!(extract_strict_priority(&with_priority), 9);
+        assert_eq!(extract_strict_priority(with_priority.nvext.as_ref()), 9);
 
-        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        let without_nvext: NvCreateChatCompletionRequest =
             serde_json::from_str(
                 r#"{
                     "model": "test",
@@ -1187,6 +1244,78 @@ mod tests {
                 }"#,
             )
             .unwrap();
-        assert_eq!(extract_strict_priority(&without_nvext), 0);
+        assert_eq!(extract_strict_priority(without_nvext.nvext.as_ref()), 0);
+    }
+
+    #[test]
+    fn completion_agent_hints_are_lifted() {
+        let request: NvCreateCompletionRequest = serde_json::from_str(
+            r#"{
+                "model": "test",
+                "prompt": [101, 102, 103],
+                "nvext": {"agent_hints": {"priority": 5, "strict_priority": 9}}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(extract_priority_jump(request.nvext.as_ref()), 5.0);
+        assert_eq!(extract_strict_priority(request.nvext.as_ref()), 9);
+    }
+
+    #[test]
+    fn completion_string_array_prompt_collapses_to_single_prompt() {
+        let mut request = serde_json::json!({
+            "model": "test",
+            "prompt": ["hello", "world"]
+        });
+
+        normalize_completion_prompt_for_routing(&mut request);
+
+        assert_eq!(request["prompt"], "hello world");
+    }
+
+    #[test]
+    fn completion_token_array_prompt_stays_token_array() {
+        let mut request = serde_json::json!({
+            "model": "test",
+            "prompt": [101, 102, 103]
+        });
+
+        normalize_completion_prompt_for_routing(&mut request);
+
+        assert_eq!(request["prompt"], serde_json::json!([101, 102, 103]));
+    }
+
+    #[test]
+    fn completion_token_batch_prompt_uses_first_prompt() {
+        let mut request = serde_json::json!({
+            "model": "test",
+            "prompt": [[101, 102], [201, 202]]
+        });
+
+        normalize_completion_prompt_for_routing(&mut request);
+
+        assert_eq!(request["prompt"], serde_json::json!([101, 102]));
+    }
+
+    #[test]
+    fn completion_routing_constraints_are_lifted() {
+        let request: NvCreateCompletionRequest = serde_json::from_str(
+            r#"{
+                "model": "test",
+                "prompt": [101, 102, 103],
+                "nvext": {
+                    "routing_constraints": {
+                        "required_taints": ["gpu=A100"],
+                        "preferred_taints": {"zone=west": 0.75}
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let constraints = extract_routing_constraints(request.nvext.as_ref());
+        assert!(constraints.required_taints.contains("gpu=A100"));
+        assert_eq!(constraints.preferred_taints.get("zone=west"), Some(&0.75));
     }
 }
