@@ -875,6 +875,12 @@ def build_sampling_params_openai(
     if "min_tokens" in request and request["min_tokens"] is not None:
         sampling_params.min_tokens = request["min_tokens"]
 
+    nvext_max_thinking_tokens = (request.get("nvext") or {}).get("max_thinking_tokens")
+    if nvext_max_thinking_tokens is not None and hasattr(
+        sampling_params, "thinking_token_budget"
+    ):
+        sampling_params.thinking_token_budget = nvext_max_thinking_tokens
+
     return sampling_params
 
 
@@ -2139,6 +2145,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 base_model_path=self.config.model,
                                 worker_type=lora_worker_type,
                                 needs=lora_needs,
+                                # Publish the worker's per-worker LoRA slot budget so the frontend
+                                # allocator sizes placement against real capacity instead of the
+                                # hard-coded default.
+                                max_gpu_lora_count=getattr(
+                                    self.config.engine_args, "max_loras", None
+                                ),
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
