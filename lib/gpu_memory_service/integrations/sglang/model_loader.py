@@ -28,6 +28,8 @@ from gpu_memory_service.integrations.sglang.memory_saver import (
 )
 from gpu_memory_service.integrations.sglang.patches import (
     patch_model_runner,
+    patch_serving_collective_timeout_for_gms,
+    patch_shared_kv_pool_geometry,
     patch_static_state_for_gms,
     patch_torch_memory_saver,
 )
@@ -42,7 +44,9 @@ logger = logging.getLogger(__name__)
 patch_empty_cache()
 patch_torch_memory_saver()
 patch_model_runner()
+patch_shared_kv_pool_geometry()
 patch_static_state_for_gms()
+patch_serving_collective_timeout_for_gms()
 logger.info("[GMS] Applied patches")
 
 

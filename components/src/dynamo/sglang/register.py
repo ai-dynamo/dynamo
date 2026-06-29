@@ -374,6 +374,10 @@ async def _get_runtime_config(
         dynamo_args.enable_local_indexer and not is_decode_worker
     )
 
+    if os.environ.get("GMS_SGLANG_DAEMON_SOCKET"):
+        runtime_config.set_gms_placement_enabled()
+        logging.info("Publishing GMS placement capability to discovery")
+
     start_dp_rank, end_dp_rank = model_card_dp_rank_bounds(server_args)
     registered_dp_size = end_dp_rank - start_dp_rank
     runtime_config.data_parallel_start_rank = start_dp_rank

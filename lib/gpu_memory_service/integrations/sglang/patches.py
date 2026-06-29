@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 from contextlib import contextmanager
 from typing import Optional
 
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 _torch_memory_saver_patched = False
 _model_runner_patched = False
 _static_state_patched = False
+_kv_pool_geometry_patched = False
 
 
 def patch_torch_memory_saver() -> None:
@@ -243,17 +245,190 @@ def patch_model_runner() -> None:
     logger.info("[GMS] Patched ModelRunner.init_memory_pool")
 
 
+def patch_shared_kv_pool_geometry() -> None:
+    """Make shared-GMS SGLang workers agree on KV page geometry.
+
+    SGLang sizes KV from a local free-memory profile. With GMS shared KV,
+    the first worker owns the persistent physical pool and later workers
+    reattach to it. Later workers must therefore use the first worker's page
+    count instead of their smaller post-attach free-memory profile.
+    """
+    global _kv_pool_geometry_patched
+    if _kv_pool_geometry_patched:
+        return
+
+    try:
+        from gpu_memory_service.integrations.common.kv_lease_client import (
+            kv_leases_enabled,
+            resolve_kv_lease_namespace_total_blocks,
+            resolve_lease_device,
+        )
+        from sglang.srt.model_executor import model_runner_kv_cache_mixin as mixin
+        from sglang.srt.model_executor.pool_configurator import (
+            create_memory_pool_configurator,
+        )
+    except ImportError:
+        logger.warning("[GMS] Could not import SGLang KV geometry hooks", exc_info=True)
+        return
+
+    if hasattr(
+        mixin.ModelRunnerKVCacheMixin,
+        "_gms_shared_kv_pool_geometry_patched",
+    ):
+        _kv_pool_geometry_patched = True
+        return
+
+    original_resolve = mixin.ModelRunnerKVCacheMixin._resolve_memory_pool_config
+
+    def patched_resolve_memory_pool_config(self, pre_model_load_memory):
+        config = original_resolve(self, pre_model_load_memory)
+
+        shared_kv = os.environ.get("GMS_SGLANG_SHARED_KV", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if not shared_kv or not kv_leases_enabled("sglang"):
+            return config
+
+        page_size = int(self.server_args.page_size)
+        proposed_pages = int(config.max_total_num_tokens) // page_size
+        if proposed_pages <= 0:
+            return config
+
+        device_idx = _resolve_shared_kv_geometry_device(self, resolve_lease_device)
+        model_id = (
+            getattr(self.server_args, "served_model_name", None)
+            or getattr(self.server_args, "model_path", None)
+            or "model"
+        )
+        dynamo_namespace = (
+            os.environ.get("DYN_NAMESPACE")
+            or os.environ.get("DYN_PARENT_DGD_K8S_NAME")
+            or "default"
+        )
+        suffix = (
+            f"shared:{dynamo_namespace}:{self.__class__.__name__}:"
+            f"model{model_id}:page{page_size}"
+        )
+        namespace, total_blocks = resolve_kv_lease_namespace_total_blocks(
+            "sglang",
+            device_idx,
+            total_blocks=proposed_pages + 1,
+            namespace_suffix=suffix,
+            reserved_blocks=[0],
+        )
+        target_pages = int(total_blocks) - 1
+        if target_pages == proposed_pages:
+            return config
+
+        target_tokens = target_pages * page_size
+        configurator = create_memory_pool_configurator(self)
+        adjusted = configurator.calculate_pool_sizes_from_max_tokens(
+            target_tokens,
+            page_size,
+        )
+        adjusted.max_running_requests = self._resolve_max_num_reqs(
+            adjusted.max_total_num_tokens
+        )
+        adjusted.mem_fraction_static = self.server_args.mem_fraction_static
+        logger.info(
+            "[GMS] Adjusted SGLang shared KV geometry from %d pages to %d "
+            "pages (namespace=%s)",
+            proposed_pages,
+            target_pages,
+            namespace,
+        )
+        return adjusted
+
+    mixin.ModelRunnerKVCacheMixin._resolve_memory_pool_config = (
+        patched_resolve_memory_pool_config
+    )
+    mixin.ModelRunnerKVCacheMixin._gms_shared_kv_pool_geometry_patched = True
+    _kv_pool_geometry_patched = True
+    logger.info("[GMS] Patched SGLang shared KV pool geometry")
+
+
+def _resolve_shared_kv_geometry_device(runner, resolve_lease_device_fn) -> int:
+    explicit = os.environ.get("GMS_SGLANG_KV_LEASE_DEVICE")
+    if explicit is not None:
+        try:
+            return int(explicit)
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid GMS_SGLANG_KV_LEASE_DEVICE=%r for SGLang KV geometry",
+                explicit,
+            )
+
+    gpu_id = getattr(runner, "gpu_id", None)
+    if gpu_id is not None:
+        try:
+            return int(gpu_id)
+        except (TypeError, ValueError):
+            logger.debug("Unable to parse SGLang runner.gpu_id=%r", gpu_id)
+
+    return int(resolve_lease_device_fn("GMS_SGLANG_KV_LEASE_DEVICE"))
+
+
+_serving_timeout_patched = False
+
+
+def patch_serving_collective_timeout_for_gms() -> None:
+    """Tighten the NCCL collective watchdog to the serving timeout once SGLang is past
+    warmup. Model load + CUDA-graph capture (the heavy/slow collectives) happen in
+    ``Scheduler.__init__``, BEFORE ``run_event_loop``; wrapping ``run_event_loop`` entry
+    therefore applies the low serving timeout only after warmup, in every rank's
+    scheduler process — the precise post-warmup hook for SGLang, analogous to vLLM's
+    ``GMSWorker.compile_or_warm_up_model``. No grace-delay heuristic, so a tight 2-3s
+    serving timeout can never fire during warmup. No-op unless
+    DYN_GMS_SERVING_NCCL_TIMEOUT_S>0 (checked inside ``tighten_now``).
+    """
+    global _serving_timeout_patched
+    if _serving_timeout_patched:
+        return
+    try:
+        from sglang.srt.managers.scheduler import Scheduler
+    except ImportError:
+        logger.debug(
+            "[GMS] Could not import SGLang Scheduler, skipping serving-timeout patch"
+        )
+        return
+    if getattr(Scheduler, "_gms_serving_timeout_patched", False):
+        _serving_timeout_patched = True
+        return
+
+    original_run_event_loop = Scheduler.run_event_loop
+
+    def patched_run_event_loop(self, *args, **kwargs):
+        # First (and only) entry == post-warmup, pre-traffic: tighten now.
+        try:
+            from gpu_memory_service.common.serving_timeout import tighten_now
+
+            tighten_now()
+        except Exception:
+            logger.debug("[GMS serving-timeout] sglang tighten failed", exc_info=True)
+        return original_run_event_loop(self, *args, **kwargs)
+
+    Scheduler.run_event_loop = patched_run_event_loop
+    Scheduler._gms_serving_timeout_patched = True
+    _serving_timeout_patched = True
+    logger.info(
+        "[GMS serving-timeout] patched SGLang Scheduler.run_event_loop "
+        "(post-warmup collective-timeout tighten)"
+    )
+
+
 def patch_static_state_for_gms() -> None:
     """No-op SGLang's _export/_import_static_state when using GMS.
 
-    SGLang's release_memory_occupation clones every named buffer via
-    buffer.detach().clone() through the default CUDA allocator, then restores
-    them during resume_memory_occupation.
-    This patch must run inside the scheduler child process (which uses
-    multiprocessing spawn).  It is triggered by the GMSModelLoader import
-    in model_loader.py, which executes at module level in the child.
+    SGLang's release_memory_occupation clones every named buffer through the
+    default CUDA allocator, then restores them during resume_memory_occupation.
+    GMS preserves the same VAs across unmap/remap, so this static-state backup
+    is unnecessary and can fail after VMM remap. This patch must run inside the
+    scheduler child process, where the weight updater module is imported.
     """
-    import os
+    import importlib
 
     global _static_state_patched
     logger.info(
@@ -264,26 +439,48 @@ def patch_static_state_for_gms() -> None:
     if _static_state_patched:
         return
 
-    try:
-        from sglang.srt.managers import scheduler_update_weights_mixin as _mixin
+    def _export_noop(model):
+        """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
+        return dict(buffers=[])
 
-        def _export_noop(model):
-            """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
-            return dict(buffers=[])
+    def _import_noop(model, static_params):
+        """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
+        pass
 
-        def _import_noop(model, static_params):
-            """NO-OP: GMS preserves buffers via VA-stable unmap/remap."""
-            pass
+    module_names = (
+        "sglang.srt.managers.scheduler_components.weight_updater",
+        "sglang.srt.managers.scheduler_update_weights_mixin",
+    )
+    patched_modules: list[str] = []
+    for module_name in module_names:
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError:
+            logger.debug(
+                "[GMS] %s unavailable; static-state patch skipped", module_name
+            )
+            continue
 
-        _mixin._export_static_state = _export_noop
-        _mixin._import_static_state = _import_noop
+        if not hasattr(module, "_export_static_state") or not hasattr(
+            module, "_import_static_state"
+        ):
+            logger.debug(
+                "[GMS] %s has no static-state helpers; patch skipped",
+                module_name,
+            )
+            continue
+
+        module._export_static_state = _export_noop
+        module._import_static_state = _import_noop
+        patched_modules.append(module_name)
+
+    if patched_modules:
         _static_state_patched = True
         logger.info(
-            "[GMS] Patched _export/_import_static_state -> no-op (pid=%d)",
+            "[GMS] Patched SGLang static-state helpers -> no-op modules=%s pid=%d",
+            patched_modules,
             os.getpid(),
         )
-    except Exception:
-        logger.warning(
-            "[GMS] Could not patch scheduler_update_weights_mixin: ",
-            exc_info=True,
-        )
+        return
+
+    logger.info("[GMS] no SGLang static-state helper module available to patch")

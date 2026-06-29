@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 
 # Per-GPU threshold: absorbs small driver baseline residue, catches any real
 # leak (the bug that motivated the subprocess refactor was ~2.4 GiB).
-_LEAK_THRESHOLD_MIB = 100
+_LEAK_THRESHOLD_MIB = int(
+    __import__("os").environ.get("GMS_TEST_LEAK_THRESHOLD_MIB", "100")
+)
 
 
 @pytest.fixture(scope="module", autouse=True)

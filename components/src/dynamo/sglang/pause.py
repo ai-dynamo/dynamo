@@ -56,6 +56,12 @@ class SGLangEnginePauseController:
         self._is_paused = True
         return True
 
+    async def quiesce(self, tags: list[str] | None = None) -> bool:
+        # GMS failover quiesce == pause: release the engine's memory occupation
+        # (compute/activation) while the GMS-owned KV pool persists, so a shadow
+        # coexists out-of-discovery until it is promoted.
+        return await self.pause(tags)
+
     async def resume(self, tags: list[str] | None = None) -> bool:
         if not self._is_paused and not self._generation_paused:
             return False

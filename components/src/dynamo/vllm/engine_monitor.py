@@ -12,6 +12,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo.common.engine_monitor import EngineHealthMonitorConfig
+from dynamo.common.utils.graceful_shutdown import is_shutdown_in_progress
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -116,6 +117,15 @@ class VllmEngineMonitor:
                     await asyncio.sleep(self.health_config.interval)
 
             except (EngineDeadError, asyncio.TimeoutError) as e:
+                if (
+                    self.shutdown_event and self.shutdown_event.is_set()
+                ) or is_shutdown_in_progress():
+                    logger.info(
+                        "vLLM AsyncLLM health check stopped during graceful shutdown: %s",
+                        e,
+                    )
+                    break
+
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 logger.error(f"vLLM AsyncLLM health check failed: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")

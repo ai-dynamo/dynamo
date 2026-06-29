@@ -322,3 +322,36 @@ async def test_clear_kv_blocks_reports_flush_exception(handler):
     chunks = [chunk async for chunk in handler.clear_kv_blocks({})]
 
     assert chunks == [{"status": "error", "message": "flush crashed"}]
+
+
+@pytest.mark.asyncio
+async def test_release_memory_occupation_with_handoff_releases_failover_lock(handler):
+    lock = SimpleNamespace(release=AsyncMock())
+    handler._gms_failover_lock = lock
+
+    result = await handler.release_memory_occupation({"release_failover_lock": True})
+
+    assert result["status"] == "ok"
+    assert result["failover_lock_released"] is True
+    lock.release.assert_awaited_once()
+    assert handler._gms_failover_lock is None
+
+
+@pytest.mark.asyncio
+async def test_fast_handoff_releases_lock_without_memory_release(handler):
+    lock = SimpleNamespace(release=AsyncMock())
+    handler._gms_failover_lock = lock
+
+    result = await handler.release_memory_occupation({"handoff": True})
+
+    assert result == {
+        "status": "ok",
+        "message": "Failover handoff released",
+        "failover_lock_released": True,
+    }
+    handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
+    lock.release.assert_awaited_once()
+    assert handler._gms_failover_lock is None
+    assert handler._pause_controller.is_paused is False
+    handler.engine.tokenizer_manager.pause_generation.assert_not_awaited()
+    handler.engine.tokenizer_manager.release_memory_occupation.assert_not_awaited()
