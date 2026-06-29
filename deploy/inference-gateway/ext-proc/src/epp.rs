@@ -584,9 +584,10 @@ fn extract_priority_jump(nvext: Option<&NvExt>) -> f64 {
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| {
             h.priority
-                .map(|p| p.max(0) as f64)
+                .map(|p| p as f64)
                 .or(h.latency_sensitivity)
         })
+        .map(|p| p.max(0.0))
         .unwrap_or(0.0)
 }
 
@@ -1251,9 +1252,23 @@ mod tests {
                     "messages": [{"role": "user", "content": "hi"}],
                     "nvext": {"agent_hints": {"priority": 5}}
                 }"#,
+        )
+        .unwrap();
+        assert_eq!(extract_priority_jump(with_priority.nvext.as_ref()), 5.0);
+
+        let with_negative_alias: NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "nvext": {"agent_hints": {"latency_sensitivity": -3.5}}
+                }"#,
             )
             .unwrap();
-        assert_eq!(extract_priority_jump(with_priority.nvext.as_ref()), 5.0);
+        assert_eq!(
+            extract_priority_jump(with_negative_alias.nvext.as_ref()),
+            0.0
+        );
 
         let without_nvext: NvCreateChatCompletionRequest =
             serde_json::from_str(
@@ -1316,6 +1331,32 @@ mod tests {
 
         assert!(!inject_token_data);
         assert_eq!(request["prompt"], "hello");
+    }
+
+    #[test]
+    fn completion_text_prompt_keeps_token_injection() {
+        let mut request = serde_json::json!({
+            "model": "test",
+            "prompt": "hello"
+        });
+
+        let inject_token_data = prepare_completion_prompt_for_routing(&mut request);
+
+        assert!(inject_token_data);
+        assert_eq!(request["prompt"], "hello");
+    }
+
+    #[test]
+    fn completion_single_string_array_prompt_keeps_token_injection() {
+        let mut request = serde_json::json!({
+            "model": "test",
+            "prompt": ["hello"]
+        });
+
+        let inject_token_data = prepare_completion_prompt_for_routing(&mut request);
+
+        assert!(inject_token_data);
+        assert_eq!(request["prompt"], serde_json::json!(["hello"]));
     }
 
     #[test]
