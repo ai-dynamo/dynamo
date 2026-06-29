@@ -1,0 +1,241 @@
+---
+# Source: dynamo-operator/templates/webhook-configuration.yaml
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+---
+# Source: dynamo-operator/templates/webhook-configuration.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: dynamo-operator-mutating
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+    nvidia.com/dynamo-operator-namespace: dynamo-system
+    helm.sh/chart: dynamo-operator-1.3.0
+    app.kubernetes.io/name: dynamo-operator
+    app.kubernetes.io/instance: dynamo-operator
+    app.kubernetes.io/version: "1.3.0"
+    app.kubernetes.io/managed-by: Helm
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: dynamo-operator-webhook-service
+      namespace: dynamo-system
+      path: /mutate-nvidia-com-v1alpha1-dynamographdeployment
+  failurePolicy: Fail
+  name: mdynamographdeployment.kb.io
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamographdeployments
+  sideEffects: None
+  timeoutSeconds: 10
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: dynamo-operator-webhook-service
+      namespace: dynamo-system
+      path: /mutate-nvidia-com-v1beta1-dynamocomponentdeployment
+  failurePolicy: Fail
+  matchPolicy: Exact
+  name: mdynamocomponentdeploymentv1beta1.kb.io
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamocomponentdeployments
+  sideEffects: None
+  timeoutSeconds: 10
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: dynamo-operator-webhook-service
+      namespace: dynamo-system
+      path: /mutate-nvidia-com-v1beta1-dynamographdeploymentrequest
+  failurePolicy: Fail
+  name: mdynamographdeploymentrequestv1beta1.kb.io
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamographdeploymentrequests
+  sideEffects: None
+  timeoutSeconds: 10
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: dynamo-operator-webhook-service
+      namespace: dynamo-system
+      path: /mutate-core-v1-pod-checkpoint-restore
+  failurePolicy: Ignore
+  name: mpodcheckpointrestore.kb.io
+  rules:
+  - apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    # Pod checkpoint restore injects pod spec fields before creation. It is
+    # intentionally CREATE-only because pod UPDATE cannot apply that mutation.
+    operations:
+    - CREATE
+    resources:
+    - pods
+  sideEffects: None
+  timeoutSeconds: 10
+---
+# Source: dynamo-operator/templates/webhook-configuration.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: dynamo-operator-validating
+  labels:
+    app.kubernetes.io/component: webhook
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+    nvidia.com/dynamo-operator-namespace: dynamo-system
+    helm.sh/chart: dynamo-operator-1.3.0
+    app.kubernetes.io/name: dynamo-operator
+    app.kubernetes.io/instance: dynamo-operator
+    app.kubernetes.io/version: "1.3.0"
+    app.kubernetes.io/managed-by: Helm
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: dynamo-operator-webhook-service
+      namespace: dynamo-system
+      path: /validate-nvidia-com-v1alpha1-dynamocomponentdeployment
+  failurePolicy: Fail
+  name: vdynamocomponentdeployment.kb.io
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamocomponentdeployments
+  sideEffects: None
+  timeoutSeconds: 10
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: dynamo-operator-webhook-service
+      namespace: dynamo-system
+      path: /validate-nvidia-com-v1alpha1-dynamographdeployment
+  failurePolicy: Fail
+  name: vdynamographdeployment.kb.io
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamographdeployments
+  sideEffects: None
+  timeoutSeconds: 10
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: dynamo-operator-webhook-service
+      namespace: dynamo-system
+      path: /validate-nvidia-com-v1alpha1-dynamocheckpoint
+  failurePolicy: Fail
+  name: vdynamocheckpoint.kb.io
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamocheckpoints
+  sideEffects: None
+  timeoutSeconds: 10
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: dynamo-operator-webhook-service
+      namespace: dynamo-system
+      path: /validate-nvidia-com-v1alpha1-dynamomodel
+  failurePolicy: Fail
+  name: vdynamomodel.kb.io
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamomodels
+  sideEffects: None
+  timeoutSeconds: 10
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: dynamo-operator-webhook-service
+      namespace: dynamo-system
+      path: /validate-nvidia-com-v1beta1-dynamographdeploymentrequest
+  failurePolicy: Fail
+  name: vdynamographdeploymentrequest.kb.io
+  rules:
+  - apiGroups:
+    - nvidia.com
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - dynamographdeploymentrequests
+  sideEffects: None
+  timeoutSeconds: 10
