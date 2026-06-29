@@ -1571,11 +1571,11 @@ impl JailedStream {
                     .unwrap_or(true);
                 if is_empty_choices && !synthesized {
                     if let Some(template) = &template {
-                        for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, has)| *has) {
+                        for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, has)| **has) {
                             if terminated.contains(index) {
                                 continue;
                             }
-                            yield synthesize_tool_calls_chunk(template, *index);
+                            yield Self::synthesize_tool_calls_chunk(template, *index);
                         }
                     }
                     synthesized = true;
@@ -1593,14 +1593,12 @@ impl JailedStream {
             // complete; without this they hang until their client-side timeout
             // (DGH-967). Choices that never emitted tool calls are left alone — there
             // is no signal to invent a finish_reason from for text-only output.
-            if !synthesized {
-                if let Some(template) = template {
-                    for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, has)| *has) {
-                        if terminated.contains(index) {
-                            continue;
-                        }
-                        yield synthesize_tool_calls_chunk(template, *index);
+            if !synthesized && let Some(template) = template {
+                for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, has)| **has) {
+                    if terminated.contains(index) {
+                        continue;
                     }
+                    yield Self::synthesize_tool_calls_chunk(&template, *index);
                 }
             }
         }
@@ -2231,9 +2229,9 @@ mod tests {
     async fn jail_synthesizes_tool_calls_finish_reason_when_stream_lacks_one() {
         let jail = JailedStream::builder().tool_call_parser("hermes").build();
 
-        let chunks = vec![text_chunk("```
-{"name": "get_weather", "arguments": {"location": "SF"}}
-```")];
+        let chunks = vec![text_chunk(
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"SF\"}}\n</tool_call>",
+        )];
 
         let input_stream = Box::pin(stream::iter(chunks));
         let output_stream = jail.apply_with_finish_reason(input_stream);
@@ -2286,9 +2284,12 @@ mod tests {
     async fn jail_synthesizes_tool_calls_before_usage_only_chunk() {
         let jail = JailedStream::builder().tool_call_parser("hermes").build();
 
-        let chunks = vec![text_chunk("```
-{"name": "get_weather", "arguments": {"location": "SF"}}
-```"), usage_only_chunk()];
+        let chunks = vec![
+            text_chunk(
+                "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"SF\"}}\n</tool_call>",
+            ),
+            usage_only_chunk(),
+        ];
 
         let input_stream = Box::pin(stream::iter(chunks));
         let output_stream = jail.apply_with_finish_reason(input_stream);

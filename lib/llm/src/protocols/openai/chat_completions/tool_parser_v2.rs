@@ -286,7 +286,9 @@ where
         }
 
         // Backstop: the stream ended without a finish_reason for some choice. Flush
-        // each unfinished parser; emit a trailing chunk only when it yields output.
+        // each unfinished parser; emit a trailing chunk when the flush yields output
+        // or when the choice already emitted tool calls and still needs a terminal
+        // `ToolCalls` reason.
         if let Some(template) = template {
             for (index, state) in states.iter_mut() {
                 if finished.contains(index) {
@@ -296,8 +298,8 @@ where
                     continue;
                 };
                 let tool_calls = state.emit_chunks(result.calls);
-                if result.normal_text.is_empty() && tool_calls.is_none() {
-                    continue;
+                if tool_calls.is_some() {
+                    tool_emitted.insert(*index);
                 }
                 // A choice that produced tool calls during the stream must terminate
                 // with `ToolCalls` even when the backend never sent a finish_reason
@@ -312,6 +314,12 @@ where
                 } else {
                     None
                 };
+                if result.normal_text.is_empty()
+                    && tool_calls.is_none()
+                    && finish_reason.is_none()
+                {
+                    continue;
+                }
                 let mut response = template.clone();
                 #[allow(deprecated)]
                 let choice = dynamo_protocols::types::ChatChoiceStream {
