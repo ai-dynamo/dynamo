@@ -5,14 +5,15 @@
 
 This handler expects ``request_stream`` to yield ``RealtimeServerEvent`` frames.
 
-Turn model (matching vLLM-Omni's single-active-generation contract):
+Turn model:
 
   * ``session.update``            -> ``session.updated`` echoing the session;
     also captures the requested ``output_modalities`` for later turns.
   * ``input_audio_buffer.append`` -> base64 PCM16 chunk decoded to a float32
-    waveform and queued for the active turn's audio stream.
-  * ``input_audio_buffer.commit`` -> opens a turn on the first event and, when
-    ``final`` is set, closes the audio stream so the engine drains.
+    waveform and queued for the turn's audio stream. The first ``append`` (or
+    ``commit``) opens the turn and the engine begins draining audio.
+  * ``input_audio_buffer.commit`` -> a final ``commit`` closes the audio stream
+    so the engine drains and produces the response.
 
 Turns run concurrently -- a commit's turn drives the engine as soon as it opens
 -- but their responses are forwarded to the client in turn order: each turn
@@ -27,6 +28,13 @@ event names the frontend's typed reader requires, which differ from
 vLLM-Omni's own ``response.audio.delta`` / ``transcription.delta`` names; the
 PCM16 and cumulative-vs-delta waveform handling below is ported from
 vLLM-Omni's ``realtime_connection.py`` and only the event tags change.
+
+Limitations (MVP): each ``input_audio_buffer.commit`` is transcribed and
+answered independently -- a turn's generation is seeded only by its own audio.
+Prior turns' transcripts/responses are not fed into later turns, and
+``conversation.item.*`` / ``response.create`` are accepted-and-ignored. This is
+a single-utterance transcribe-and-respond bridge, not a stateful multi-turn
+dialogue.
 """
 
 from __future__ import annotations
