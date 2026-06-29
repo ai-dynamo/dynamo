@@ -30,9 +30,11 @@ pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
 pub mod service_v2;
+pub mod system_extension;
 
 pub use axum;
 pub use metrics::Metrics;
+pub use system_extension::SystemRouteExtension;
 
 /// Documentation for a route
 #[derive(Debug, Clone)]

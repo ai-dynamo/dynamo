@@ -19,6 +19,7 @@ use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
 use super::metrics::{register_lora_allocation_metrics, register_worker_timing_metrics};
+use super::system_extension::SystemRouteExtension;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
@@ -514,8 +515,13 @@ pub struct HttpServiceConfig {
     #[builder(default)]
     metrics_config: MetricsConfig,
 
-    // #[builder(default)]
-    // custom: Vec<axum::Router>
+    /// Additional system routes merged with the built-in health, metrics, and model routes.
+    ///
+    /// Extensions receive the shared frontend state, allowing handlers to build
+    /// responses from live model manager and discovery state.
+    #[builder(default)]
+    system_route_extensions: Vec<SystemRouteExtension>,
+
     #[builder(default = "false")]
     enable_chat_endpoints: bool,
 
@@ -1003,6 +1009,9 @@ impl HttpServiceConfigBuilder {
                 "frontend admin API disabled — busy_threshold routes not registered"
             );
         }
+        for extension in &config.system_route_extensions {
+            system_routes.push(extension(state.clone()));
+        }
         let mut system_router = axum::Router::new();
         for (route_docs, route) in system_routes {
             system_router = system_router.merge(route);
@@ -1380,6 +1389,69 @@ mod tests {
             .await
             .expect("request failed");
         assert_eq!(live.status(), reqwest::StatusCode::OK);
+
+        cancel_token.cancel();
+        handle.abort();
+    }
+
+    fn test_system_extension(state: Arc<State>) -> (Vec<RouteDoc>, axum::Router) {
+        let route_docs = vec![RouteDoc::new(
+            axum::http::Method::GET,
+            "/test/system-extension",
+        )];
+        let route = axum::Router::new()
+            .route(
+                "/test/system-extension",
+                axum::routing::get(test_system_extension_handler),
+            )
+            .with_state(state);
+        (route_docs, route)
+    }
+
+    async fn test_system_extension_handler(
+        axum::extract::State(state): axum::extract::State<Arc<State>>,
+    ) -> axum::http::StatusCode {
+        if state.manager().has_any_ready_model() {
+            axum::http::StatusCode::OK
+        } else {
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        }
+    }
+
+    #[tokio::test]
+    async fn test_system_route_extension_can_serve_from_frontend_state() {
+        let extension: SystemRouteExtension = Arc::new(test_system_extension);
+        let cancel_token = Arc::new(CancellationToken::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let service = HttpService::builder()
+            .port(port)
+            .system_route_extensions(vec![extension])
+            .build()
+            .unwrap();
+
+        let route_doc_strings = service
+            .route_docs()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(route_doc_strings.contains(&"GET /test/system-extension".to_string()));
+
+        let service_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            service
+                .run_with_listener((*service_token).clone(), listener)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://localhost:{}/test/system-extension", port))
+            .send()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
         cancel_token.cancel();
         handle.abort();
