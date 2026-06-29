@@ -19,7 +19,7 @@ use std::{collections::HashMap, pin::Pin};
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures::StreamExt;
-use notify::{event, Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event};
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
