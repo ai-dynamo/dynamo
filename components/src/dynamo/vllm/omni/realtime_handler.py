@@ -162,6 +162,12 @@ class Turn:
             audio_chunks = self.extract_audio_chunks(output) or None
             yield transcript, audio_chunks
 
+        # Generation done: release the cumulative reference waveform. It only
+        # de-dups deltas within this drive; nothing client-bound survives on it
+        # (the deltas are already encoded into the queued events), and for long
+        # voice sessions a ~10 MB/turn float32 buffer pinned per turn adds up.
+        self.audio_ref = None
+
     @staticmethod
     def thinker_token_ids(output: Any) -> list[int]:
         """Stage-0 (thinker) per-step token ids to feed back to the talker."""
@@ -506,6 +512,11 @@ class RealtimeOmniHandler:
                         if event is None:
                             break
                         yield event
+                    # Fully forwarded (its task is finishing): drop our reference
+                    # so the turn's buffers are released instead of pinned in
+                    # `turns` for the whole connection.
+                    item.audio_ref = None
+                    turns.remove(item)
                 else:
                     yield item
         finally:
