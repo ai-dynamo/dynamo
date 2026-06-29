@@ -107,6 +107,35 @@ def _disagg_config(
     return config
 
 
+def _heterogeneous_disagg_config() -> dict[str, Any]:
+    return {
+        "mode": "disagg",
+        "reserve_output_tokens_for_context": True,
+        "num_prefill_pools": 2,
+        "num_decode_pools": 2,
+        "prefill_pool_dynamo_namespaces": ["short", "long"],
+        "decode_pool_dynamo_namespaces": ["short", "long"],
+        "prefill_pool_selection_strategy": {
+            "isl_min": 0,
+            "isl_max": 65536,
+            "isl_resolution": 2,
+            "ttft_min": 10,
+            "ttft_max": 3000,
+            "ttft_resolution": 1,
+            "prefill_pool_mapping": [[0], [1]],
+        },
+        "decode_pool_selection_strategy": {
+            "context_length_min": 0,
+            "context_length_max": 65536,
+            "context_length_resolution": 2,
+            "itl_min": 10,
+            "itl_max": 500,
+            "itl_resolution": 1,
+            "decode_pool_mapping": [[0], [1]],
+        },
+    }
+
+
 def _agg_config() -> dict[str, Any]:
     return {
         "mode": "agg",
@@ -175,6 +204,26 @@ async def test_decode_retries_using_custom_pool_priorities(tmp_path):
     assert slow.calls == 1
     assert fast.calls == 1
     assert mid.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_heterogeneous_pools_reserve_output_tokens_for_both_stages(tmp_path):
+    handler = _handler(_write_config(tmp_path, _heterogeneous_disagg_config()))
+    short_prefill = FakeClient("short", outputs=[{"pool": "short-prefill"}])
+    long_prefill = FakeClient("long", outputs=[{"pool": "long-prefill"}])
+    short_decode = FakeClient("short", outputs=[{"pool": "short-decode"}])
+    long_decode = FakeClient("long", outputs=[{"pool": "long-decode"}])
+    handler.prefill_clients = {"short": short_prefill, "long": long_prefill}
+    handler.decode_clients = {"short": short_decode, "long": long_decode}
+
+    request = {"token_ids": [1] * 31_000, "stop_conditions": {"max_tokens": 2_000}}
+    prefill_outputs = await _collect_outputs(handler.handle_prefill(request))
+    decode_outputs = await _collect_outputs(handler.handle_decode(request))
+
+    assert prefill_outputs == [{"pool": "long-prefill"}]
+    assert decode_outputs == [{"pool": "long-decode"}]
+    assert short_prefill.calls == 0
+    assert short_decode.calls == 0
 
 
 @pytest.mark.asyncio

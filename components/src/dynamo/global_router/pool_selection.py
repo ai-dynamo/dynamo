@@ -389,6 +389,12 @@ class GlobalRouterConfig:
 
     mode: str = "disagg"  # "disagg" or "agg"
     enable_priority_retry: bool = False
+    reserve_output_tokens_for_context: bool = False
+    """Route P/D pools by prompt plus the requested completion budget.
+
+    This is required when pools expose different context ceilings. It remains
+    opt-in because existing deployments select a pool using input length only.
+    """
 
     # --- disagg-only fields (required when mode="disagg") ---
     num_prefill_pools: Optional[int] = None
@@ -410,6 +416,8 @@ class GlobalRouterConfig:
         """Validate configuration consistency."""
         if not isinstance(self.enable_priority_retry, bool):
             raise ValueError("enable_priority_retry must be a boolean")
+        if not isinstance(self.reserve_output_tokens_for_context, bool):
+            raise ValueError("reserve_output_tokens_for_context must be a boolean")
 
         if self.mode == "disagg":
             self._validate_disagg()
