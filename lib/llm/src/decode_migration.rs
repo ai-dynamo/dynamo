@@ -25,7 +25,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
@@ -210,16 +210,6 @@ struct ControlResponse {
     pending_input_ids: Option<Vec<TokenIdType>>,
     unforwarded_committed_output_ids: Option<Vec<TokenIdType>>,
     transfer_status: Option<String>,
-    #[serde(default)]
-    pending_token_suppressed: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct SourceState<'a> {
-    committed_input_ids: &'a [TokenIdType],
-    pending_input_ids: &'a [TokenIdType],
-    committed_len: usize,
-    logical_len: usize,
 }
 
 struct PreparedDestination {
@@ -891,45 +881,11 @@ impl
                     destination_worker,
                 );
                 destination_request.decode_migration = None;
-                let destination_json = match serde_json::to_value(&destination_request) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        cleanup.terminate().await;
-                        yield Annotated::from_error(format!("failed to serialize destination request: {error}"));
-                        return;
-                    }
-                };
-
-                let arm = control.call(
-                    ControlEndpoint::Prepare,
-                    destination_worker.worker_id,
-                    json!({
-                        "rid": engine_rid,
-                        "migration_id": migration_id,
-                        "source_state": SourceState {
-                            committed_input_ids: &committed_input_ids,
-                            pending_input_ids: &pending_input_ids,
-                            committed_len,
-                            logical_len,
-                        },
-                        "destination_request": destination_json,
-                        "destination_dp_rank": destination_worker.dp_rank,
-                    }),
-                ).await;
-                let arm_ready = matches!(&arm, Ok(response) if response.success && response.status == "ready");
-                if !arm_ready {
-                    tracing::warn!(request_id = %rid, response = ?arm, "destination arm failed; terminating request");
-                    cleanup.terminate().await;
-                    yield Annotated::from_error("destination arm failed after source quiesced");
-                    return;
-                }
-                let pending_token_suppressed = arm
-                    .as_ref()
-                    .is_ok_and(|response| response.pending_token_suppressed);
-                if pending_token_suppressed {
-                    duplicate_tokens =
-                        duplicate_tokens.saturating_sub(pending_input_ids.len());
-                }
+                // The destination was bootstrapped before the trigger. The source
+                // now sends the exact token frontier in the same auxiliary transfer
+                // as KV, and transfer completion binds the destination request. This
+                // avoids a second scheduler control round trip on the handoff path.
+                duplicate_tokens = duplicate_tokens.saturating_sub(pending_input_ids.len());
 
                 if !unforwarded.is_empty() {
                     yield Annotated::from_data(LLMEngineOutput {
@@ -1520,7 +1476,7 @@ mod tests {
         CancelDuringReserve,
         CancelDuringQuiesce,
         DestinationReserveTransportFailure,
-        DestinationArmFailure,
+        DestinationBootstrapFailure,
         DestinationDispatchFailure,
         CommitFailure,
         DelayedCommit,
@@ -1619,7 +1575,7 @@ mod tests {
                         | Scenario::CancelDuringReserve
                         | Scenario::CancelDuringQuiesce
                         | Scenario::DestinationReserveTransportFailure
-                        | Scenario::DestinationArmFailure
+                        | Scenario::DestinationBootstrapFailure
                         | Scenario::DestinationDispatchFailure
                         | Scenario::CommitFailure
                         | Scenario::CancelAfterArm => vec![
@@ -1669,21 +1625,21 @@ mod tests {
                             vec![Annotated::from_error("injected destination failure")]
                         }
                         Scenario::SuccessCoalesced | Scenario::DelayedCommit => vec![
-                            output(vec![12, 13], None),
+                            output(vec![13], None),
                             output(vec![14], Some(crate::protocols::common::FinishReason::Stop)),
                         ],
                         Scenario::EmptyFirstDestinationChunk => vec![
-                            output(vec![12], None),
+                            output(vec![], None),
                             output(vec![13], Some(crate::protocols::common::FinishReason::Stop)),
                         ],
                         Scenario::CommitFailure | Scenario::CancelAfterArm => {
-                            vec![output(vec![12], None)]
+                            vec![output(vec![13], None)]
                         }
                         Scenario::QuiesceTransportFailure
                         | Scenario::CancelDuringReserve
                         | Scenario::CancelDuringQuiesce
                         | Scenario::DestinationReserveTransportFailure
-                        | Scenario::DestinationArmFailure
+                        | Scenario::DestinationBootstrapFailure
                         | Scenario::FinishAtTrigger
                         | Scenario::FinishDuringQuiesce => {
                             panic!("destination generation must not start in this scenario")
@@ -1814,20 +1770,6 @@ mod tests {
                 );
                 self.state.record("source:prepare");
                 json!({"success": true, "status": "ready"})
-            } else if request.get("source_state").is_some() {
-                assert!(matches!(endpoint, ControlEndpoint::Prepare));
-                assert_eq!(instance_id, 2);
-                assert_control_rank(&request, "destination_dp_rank", DESTINATION_DP_RANK);
-                self.state.record("destination:arm");
-                if self.scenario == Scenario::DestinationArmFailure {
-                    json!({
-                        "success": false,
-                        "status": "error",
-                        "error": "injected destination arm failure",
-                    })
-                } else {
-                    json!({"success": true, "status": "ready", "bootstrap_room": 777})
-                }
             } else if request.get("source").is_some() {
                 assert!(matches!(endpoint, ControlEndpoint::Prepare));
                 assert_eq!(instance_id, 2);
@@ -1861,7 +1803,15 @@ mod tests {
                     12,
                 );
                 self.state.record("destination:bootstrap");
-                json!({"success": true, "status": "bootstrapping"})
+                if self.scenario == Scenario::DestinationBootstrapFailure {
+                    json!({
+                        "success": false,
+                        "status": "error",
+                        "error": "injected destination bootstrap failure",
+                    })
+                } else {
+                    json!({"success": true, "status": "bootstrapping"})
+                }
             } else if side == Some("destination") {
                 assert!(matches!(endpoint, ControlEndpoint::Finalize));
                 assert_eq!(instance_id, 2);
@@ -2228,11 +2178,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integration_destination_arm_failure_terminates_request() {
-        let harness = integration_harness(Scenario::DestinationArmFailure);
+    async fn integration_destination_bootstrap_failure_keeps_source_running() {
+        let harness = integration_harness(Scenario::DestinationBootstrapFailure);
         let (tokens, errors) = collect_tokens(&harness, 4).await;
-        assert_eq!(errors.len(), 1, "{errors:?}");
-        assert_eq!(tokens, vec![10]);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(tokens, vec![10, 11, 12, 13]);
+        wait_for_event(&harness.state, "destination:abort").await;
         let events = harness.state.events();
         assert!(events.contains(&"destination:abort".to_string()));
         assert!(events.contains(&"source:cancel".to_string()));
@@ -2268,7 +2219,7 @@ mod tests {
         let harness = integration_harness(Scenario::CommitFailure);
         let (tokens, errors) = collect_tokens(&harness, 4).await;
         assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(tokens, vec![10, 11, 12]);
+        assert_eq!(tokens, vec![10, 11, 13]);
         wait_for_event(&harness.state, "source:commit").await;
         let events = harness.state.events();
         assert!(!events.contains(&"destination:abort".to_string()));
