@@ -132,9 +132,9 @@ operator:
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 snapshot:
-  - *ci
   - 'deploy/snapshot/**'
   - 'deploy/snapshot/.*'
+  - 'tests/deploy/test_dynamocheckpoint.py'
 
 power_agent:
   - *ci
