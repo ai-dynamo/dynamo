@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{env, fmt::Display, sync::OnceLock};
+use std::fmt::Display;
+
+use dynamo_runtime::config::{
+    env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+};
 
 //
 // Hyperparameter Contraints
@@ -106,20 +110,11 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "bad_words_token_ids",
 ];
 
-static ALLOW_UNSUPPORTED_FIELDS: OnceLock<bool> = OnceLock::new();
-
-fn allow_unsupported_fields() -> bool {
-    *IGNORE_UNSUPPORTED_FIELDS.get_or_init(|| {
-        env::var("DYN_ALLOW_UNSUPPORTED_FIELDS")
-            .ok()
-            .and_then(|value| value.parse::<bool>().ok())
-            .unwrap_or(false)
-    })
-}
-
 /// Validates that no unsupported fields are present in the request.
 ///
 /// Fields in `PASSTHROUGH_EXTRA_FIELDS` are validated by downstream handlers.
+/// Other fields may be ignored and dropped when
+/// `DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS` is truthy.
 pub fn validate_no_unsupported_fields(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), anyhow::Error> {
@@ -128,7 +123,7 @@ pub fn validate_no_unsupported_fields(
         .filter(|k| !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str()))
         .map(|s| format!("`{}`", s))
         .collect();
-    if !unknown.is_empty() && !allow_unsupported_fields() {
+    if !unknown.is_empty() && !env_is_truthy(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS) {
         anyhow::bail!("Unsupported parameter(s): {}", unknown.join(", "));
     }
     if let Some(value) = unsupported_fields.get("cache_salt")
@@ -155,6 +150,49 @@ pub fn validate_no_unsupported_fields(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use serde_json::json;
+
+    use super::*;
+
+    fn unknown_fields() -> HashMap<String, serde_json::Value> {
+        HashMap::from([("experimental_field".to_string(), json!("value"))])
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_unknown_fields_by_default() {
+        temp_env::with_var_unset(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS, || {
+            let err = validate_no_unsupported_fields(&unknown_fields()).unwrap_err();
+            assert!(err.to_string().contains("Unsupported parameter(s)"));
+        });
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_ignores_unknown_fields_when_configured() {
+        for value in ["1", "true", "TRUE", "on", "yes"] {
+            temp_env::with_var(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS, Some(value), || {
+                validate_no_unsupported_fields(&unknown_fields()).unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_still_validates_passthrough_fields_when_ignoring_unknowns() {
+        temp_env::with_var(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS, Some("1"), || {
+            let unsupported_fields = HashMap::from([
+                ("experimental_field".to_string(), json!("value")),
+                ("stop_token_ids".to_string(), json!("bad")),
+            ]);
+
+            let err = validate_no_unsupported_fields(&unsupported_fields).unwrap_err();
+            assert!(err.to_string().contains("stop_token_ids"));
+        });
+    }
 }
 
 /// Validates response_format for chat completions.

@@ -312,6 +312,11 @@ pub mod llm {
     /// `extra_fields` opt-in.
     pub const DYN_ENABLE_FRONTEND_NVEXT: &str = "DYN_ENABLE_FRONTEND_NVEXT";
 
+    /// Ignore unknown OpenAI frontend request fields. Unknown fields are dropped,
+    /// not handled; known pass-through fields remain type-validated.
+    pub const DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: &str =
+        "DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS";
+
     /// Master switch for the frontend's HTTP admin API surface.
     /// Default `true`. Falsy values prevent registration of `GET` /
     /// `POST /busy_threshold`. Inference, metrics, models, health, and
