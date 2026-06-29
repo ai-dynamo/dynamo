@@ -517,8 +517,8 @@ class Context:
         Build W3C trace headers for propagating to downstream inference engines.
 
         Returns:
-            ``{"traceparent": "00-<trace_id>-<span_id>-01"}`` when this request
-            carries trace context, ``None`` otherwise. Also emits ``tracestate``,
+            ``{"traceparent": "00-<trace_id>-<span_id>-<flags>"}`` when this
+            request carries trace context, ``None`` otherwise. Also emits ``tracestate``,
             ``x-request-id``, ``request-id`` when upstream propagated them.
             Forward unchanged to the inference engine's ``trace_headers`` kwarg.
         """
@@ -773,6 +773,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    tokenizer_backend: str | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
@@ -1940,6 +1941,7 @@ class MockEngineArgs:
         kv_transfer_bandwidth: Optional[float] = None,
         kv_transfer_timing_mode: str = "full_prompt",
         reasoning: Optional[ReasoningConfig] = None,
+        response_replay_trace_path: Optional[str | os.PathLike[str]] = None,
         zmq_kv_events_port: Optional[int] = None,
         zmq_replay_port: Optional[int] = None,
         preemption_mode: str = "lifo",
@@ -2003,6 +2005,9 @@ class MockEngineArgs:
 
     @property
     def engine_type(self) -> str: ...
+
+    @property
+    def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
 
     @property
     def num_g2_blocks(self) -> Optional[int]: ...
@@ -2992,8 +2997,16 @@ class EntrypointArgs:
         is_prefill: bool = False,
         is_decode: bool = False,
         migration_limit: int = 0,
+        migration_max_seq_len: Optional[int] = None,
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        *,
+        metrics_prefix: Optional[str] = None,
+        enable_anthropic_api: Optional[bool] = None,
+        strip_anthropic_preamble: Optional[bool] = None,
+        enable_streaming_tool_dispatch: Optional[bool] = None,
+        enable_streaming_reasoning_dispatch: Optional[bool] = None,
+        tokenizer_backend: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3019,8 +3032,15 @@ class EntrypointArgs:
             is_prefill: Whether this is a prefill worker
             is_decode: Whether this is a decode worker (disaggregated); pairs with a prefill peer for readiness
             migration_limit: Maximum number of request migrations (0=disabled)
+            migration_max_seq_len: Optional max sequence length for migration
             chat_engine_factory: Optional Python chat completions engine factory callback
             aic_perf_config: Optional AIC perf-model configuration for default KV routing
+            metrics_prefix: Optional Prometheus metrics prefix override
+            enable_anthropic_api: Optional Anthropic Messages API override
+            strip_anthropic_preamble: Optional Anthropic preamble stripping override
+            enable_streaming_tool_dispatch: Optional streaming tool dispatch override
+            enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
+            tokenizer_backend: Optional tokenizer backend override ("default" or "fastokens")
         """
         ...
 

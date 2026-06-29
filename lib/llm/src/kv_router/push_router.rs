@@ -36,6 +36,9 @@ use cancellation::{cancel_on_stop, cancelled_error};
 use request_guard::RequestGuard;
 use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
+const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
+const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
+
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
@@ -277,6 +280,7 @@ impl KvPushRouter {
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         guard.start_dispatch(&phase_label);
+        self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
@@ -344,6 +348,38 @@ impl KvPushRouter {
             guard.finish().await;
         });
         Ok(ResponseStream::new(wrapped_stream, stream_context))
+    }
+
+    fn warn_if_output_replay_annotation_ignored(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        selection: &WorkerSelection,
+    ) {
+        let Some(replay_key) = request.get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY) else {
+            return;
+        };
+        let consumes_replay = self
+            .chooser
+            .workers_with_configs
+            .borrow()
+            .get(&selection.instance_id)
+            .and_then(|config| {
+                config
+                    .get_engine_specific::<bool>(OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY)
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or(false);
+        if consumes_replay {
+            return;
+        }
+
+        tracing::warn!(
+            replay_key,
+            worker_id = selection.instance_id,
+            dp_rank = selection.dp_rank,
+            "request has output token replay annotation but selected worker has not declared replay-token consumption"
+        );
     }
 
     pub(crate) async fn select_and_dispatch_prefill<M, F>(

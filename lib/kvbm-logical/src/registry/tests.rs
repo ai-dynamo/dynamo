@@ -47,6 +47,27 @@ fn register_one<T: crate::blocks::BlockMetadata + Sync>(
 }
 
 #[test]
+fn test_batch_registration_preserves_order_and_reuses_duplicate_handle() {
+    let registry = BlockRegistry::new();
+    let first = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
+    let second = create_test_token_block(&[5, 6, 7, 8]).kvbm_sequence_hash();
+    let handles = registry.register_sequence_hashes([first, second, first]);
+
+    assert_eq!(
+        handles
+            .iter()
+            .map(BlockRegistrationHandle::seq_hash)
+            .collect::<Vec<_>>(),
+        vec![first, second, first]
+    );
+    handles[0].attach_unique(17_u64).unwrap();
+    assert_eq!(
+        handles[2].get::<u64>().with_unique(|value| *value),
+        Some(17)
+    );
+}
+
+#[test]
 fn test_type_tracking_enforcement() {
     let registry = BlockRegistry::new();
     let seq_hash = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();

@@ -1710,6 +1710,9 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 		if mount.Name == "" {
 			continue
 		}
+		if _, ok := seen[mount.Name]; ok {
+			continue
+		}
 		if volume, ok := volumesByName[mount.Name]; ok {
 			ordered = append(ordered, volume)
 			seen[mount.Name] = struct{}{}

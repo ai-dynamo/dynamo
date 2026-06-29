@@ -507,11 +507,16 @@ impl Metrics {
     /// Metrics are never removed to preserve historical data. Runtime config and MDC
     /// metrics are updated when models are discovered and their configurations are available.
     pub fn new() -> Self {
+        Self::new_with_prefix(std::env::var(env_metrics::DYN_METRICS_PREFIX).ok())
+    }
+
+    /// Create Metrics with an explicit optional prefix. `None` uses the standard
+    /// frontend prefix and does not read environment variables.
+    pub fn new_with_prefix(metrics_prefix: Option<String>) -> Self {
         // TODO: Remove DYN_METRICS_PREFIX env-var override (added in PR #2432 for
         // NIM compatibility with the old "nv_llm_http_service_" prefix). No longer
         // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
-        let raw_prefix = std::env::var(env_metrics::DYN_METRICS_PREFIX)
-            .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
+        let raw_prefix = metrics_prefix.unwrap_or_else(|| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
         if prefix != raw_prefix {
             tracing::warn!(
