@@ -3151,6 +3151,115 @@ def _test_router_decisions(
         asyncio.run(_verify_selection_service_scores())
 
 
+def _test_router_cache_salt_isolation(
+    engine_workers,
+    endpoint,
+    model_name: str,
+    block_size: int,
+):
+    """Verify cache-salted TRT-LLM events remain isolated in the router index."""
+
+    async def test_sync():
+        expected_num_instances = engine_workers.num_workers
+        kv_router = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
+                endpoint=endpoint,
+                block_size=block_size,
+                kv_router_config=KvRouterConfig(
+                    router_snapshot_threshold=20,
+                    use_kv_events=True,
+                    router_event_threads=4,
+                ),
+            ),
+            num_workers=expected_num_instances,
+            engine_workers=engine_workers,
+        )
+
+        worker_ids = await wait_for_workers_ready(
+            endpoint,
+            kv_router,
+            expected_num_workers=expected_num_instances,
+            model_name=model_name,
+        )
+        assert len(worker_ids) >= 2, "cache-salt isolation requires two workers"
+
+        worker_a = (worker_ids[0], 0)
+        worker_b = (worker_ids[1], 0)
+        token_ids = [random.randint(1, 10_000) for _ in range(block_size * 2)]
+        expected_blocks = len(token_ids) // block_size
+
+        async def generate(cache_salt: str, worker_id: int) -> None:
+            request = {
+                "model": model_name,
+                "token_ids": token_ids,
+                "stop_conditions": {"ignore_eos": True, "max_tokens": 2},
+                "sampling_options": {},
+                "output_options": {},
+                "eos_token_ids": [],
+                "extra_args": {"nvext": {"cache_salt": cache_salt}},
+                "routing": {
+                    "backend_instance_id": worker_id,
+                    "cache_salt": cache_salt,
+                },
+            }
+            stream = await kv_router.generate_from_request(request)
+            terminal = None
+            async for response in stream:
+                if (
+                    isinstance(response, dict)
+                    and response.get("finish_reason") is not None
+                ):
+                    terminal = response
+            assert terminal is not None, f"tenant {cache_salt} request did not finish"
+
+        async def device_blocks(
+            cache_salt: Optional[str],
+        ) -> dict[tuple[int, int], int]:
+            scores = await kv_router.get_overlap_scores(
+                token_ids,
+                include_shared=False,
+                cache_namespace=cache_salt,
+            )
+            assert scores["block_size"] == block_size
+            assert scores["num_blocks"] == expected_blocks
+            assert scores["shared_cache"]["enabled"] is False
+            return {
+                (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+                for row in scores["workers"]
+            }
+
+        async def wait_for_scores(
+            cache_salt: Optional[str],
+            expected: dict[tuple[int, int], int],
+        ) -> None:
+            deadline = time.monotonic() + 10
+            last_scores: dict[tuple[int, int], int] = {}
+            expected_nonzero = {key: value for key, value in expected.items() if value}
+            while time.monotonic() < deadline:
+                last_scores = await device_blocks(cache_salt)
+                actual_nonzero = {
+                    key: value for key, value in last_scores.items() if value
+                }
+                if actual_nonzero == expected_nonzero:
+                    return
+                await asyncio.sleep(0.25)
+            raise AssertionError(
+                f"cache_salt={cache_salt!r}: expected {expected}, got {last_scores}"
+            )
+
+        await generate("tenant-a", worker_a[0])
+        await wait_for_scores("tenant-a", {worker_a: expected_blocks})
+        await wait_for_scores("tenant-b", {})
+        await wait_for_scores(None, {})
+
+        await generate("tenant-b", worker_b[0])
+        await wait_for_scores("tenant-b", {worker_b: expected_blocks})
+        await wait_for_scores("tenant-a", {worker_a: expected_blocks})
+        await wait_for_scores(None, {})
+
+    asyncio.run(test_sync())
+
+
 def _test_busy_threshold_endpoint(
     engine_workers,
     block_size: int,
