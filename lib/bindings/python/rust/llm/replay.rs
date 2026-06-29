@@ -1728,7 +1728,15 @@ fn materialize_replay_mocker_args(
             model_name,
             backend_version
         );
-        args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
+        // Offline replay runs a single aggregate engine holding the GLOBAL batch
+        // across all attention-DP ranks (it scales num_gpu_blocks by dp above and
+        // forbids scheduler-level dp_size>1). Record attention_dp_size so the perf
+        // model divides the scheduled batch back to the per-rank batch the AIC SDK
+        // expects. The live path keeps the default of 1 (it replicates per rank).
+        args.perf_model = Arc::new(PerfModel::from_aic_callback_with_attention_dp(
+            callback,
+            attention_dp_size.unwrap_or(1).max(1),
+        ));
     }
 
     Ok(args)

@@ -217,10 +217,11 @@ pub async fn spawn_system_status_server(
     }
 
     // Self-hosted MDC files. Always mounted; empty registry → 404.
-    // Suffix segment scopes per-registration (LoRA slug, or `_base`)
-    // so detaching one registration doesn't wipe another's entries.
+    // The endpoint triple disambiguates multi-LocalModel-per-DRT; the
+    // suffix segment (LoRA slug or `_base`) scopes per-registration so
+    // detaching one doesn't wipe another's entries.
     app = app.route(
-        "/v1/metadata/{model_slug}/{model_suffix}/{*filename}",
+        "/v1/metadata/{namespace}/{component}/{endpoint}/{model_slug}/{model_suffix}/{*filename}",
         get({
             let state = Arc::clone(&server_state);
             move |path| metadata_file_handler(State(state), path)
@@ -487,20 +488,33 @@ async fn list_loras_handler(State(state): State<Arc<SystemStatusState>>) -> impl
     }
 }
 
-/// `GET /v1/metadata/{slug}/{suffix}/{filename}` — 404 on miss,
-/// 500 on read error, raw bytes on hit. Consumer blake3-verifies.
+/// `GET /v1/metadata/{namespace}/{component}/{endpoint}/{slug}/{suffix}/{filename}`
+/// — 404 on miss, 500 on read error, raw bytes on hit. Consumer blake3-verifies.
 async fn metadata_file_handler(
     State(state): State<Arc<SystemStatusState>>,
-    Path((model_slug, model_suffix, filename)): Path<(String, String, String)>,
+    Path((namespace, component, endpoint, model_slug, model_suffix, filename)): Path<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )>,
 ) -> impl IntoResponse {
-    let path = match state
-        .drt()
-        .metadata_artifacts()
-        .get(&model_slug, &model_suffix, &filename)
-    {
+    let path = match state.drt().metadata_artifacts().get(
+        &namespace,
+        &component,
+        &endpoint,
+        &model_slug,
+        &model_suffix,
+        &filename,
+    ) {
         Some(p) => p,
         None => {
             tracing::debug!(
+                namespace,
+                component,
+                endpoint,
                 model_slug,
                 model_suffix,
                 filename,
@@ -514,6 +528,9 @@ async fn metadata_file_handler(
         Ok(bytes) => (StatusCode::OK, bytes).into_response(),
         Err(err) => {
             tracing::error!(
+                namespace,
+                component,
+                endpoint,
                 model_slug,
                 model_suffix,
                 filename,

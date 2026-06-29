@@ -517,8 +517,8 @@ class Context:
         Build W3C trace headers for propagating to downstream inference engines.
 
         Returns:
-            ``{"traceparent": "00-<trace_id>-<span_id>-01"}`` when this request
-            carries trace context, ``None`` otherwise. Also emits ``tracestate``,
+            ``{"traceparent": "00-<trace_id>-<span_id>-<flags>"}`` when this
+            request carries trace context, ``None`` otherwise. Also emits ``tracestate``,
             ``x-request-id``, ``request-id`` when upstream propagated them.
             Forward unchanged to the inference engine's ``trace_headers`` kwarg.
         """
