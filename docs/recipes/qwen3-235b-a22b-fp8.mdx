@@ -155,142 +155,97 @@ kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml -n
 
 <div data-provider="generic">
 
-Select a cloud provider in the picker above for fabric-specific networking setup. These overlays apply to the **disaggregated** topology, where KV transfer crosses the cluster network.
+Pick a cloud provider to fold its **RDMA fabric profile** into the disaggregated deployment above. The profiles ([`recipes/addons/providers/`](https://github.com/ai-dynamo/dynamo/pull/10979)) are **model-agnostic** — an agent (or you) materializes one onto the prefill + decode workers, resolving the per-cluster `@param` values rather than copying them. Step-by-step: [`AGENTS.md`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md).
 
 </div>
 
 <div className="dynamo-provider-agg-note">
 
-Provider overlays apply to the **disaggregated** topology only — aggregated serving keeps KV transfer on-node, so no fabric overrides are needed. Switch **Topology** to **Disaggregated** to see the provider setup.
+Fabric profiles apply to the **disaggregated** topology only — aggregated serving keeps KV transfer on-node, so no fabric layer is needed. Switch **Topology** to **Disaggregated** to see the provider setup.
 
 </div>
 
 <div data-provider="aws" data-variant="disagg">
 
-**AWS · EFA** · `unverified` — validated on Qwen3-32B; the fabric plumbing is model-agnostic. Apply to the prefill + decode worker spec before deploying:
+**AWS · EFA** — fabric profile [`aws-efa.yaml`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/aws-efa.yaml). LIBFABRIC KV backend; arch-suffixed image. Materialize onto the prefill + decode workers:
 
 ```yaml
-# provider-overlay: aws-efa
-status: unverified            # validated on qwen3-32b, not this model
-applies_to: topology=disaggregated
-apply:                        # add to prefill + decode worker spec
-  resources.limits:
-    vpc.amazonaws.com/efa: "32"
-  env:
-    DYN_KVBM_NIXL_BACKEND_LIBFABRIC: "true"
-    DYN_KVBM_NIXL_BACKEND_UCX: "false"
-    FI_PROVIDER: efa
-    FI_EFA_USE_DEVICE_RDMA: "1"
-    FI_EFA_ENABLE_SHM_TRANSFER: "0"
-  libraries: in-image (/opt/amazon/efa/lib*)   # no extra mounts
-derive_per_cluster: none      # EFA does not use UCX_NET_DEVICES
-caveats: []
-reference: recipes/qwen3-32b/vllm/cloud-providers/disagg-1p1d-aws-efa/deploy.yaml
+# recipes/addons/providers/aws-efa.yaml  ->  merge onto prefill + decode workers
+image:    {base_tag}-efa-{arch}        # @param arch: amd64 (H100/B200) | arm64 (GB200); verify the tag exists
+device:   vpc.amazonaws.com/efa: {{ gpus_per_worker * 4 }}   # @param from base GPU count (p5 = 4/GPU)
+env:      FI_PROVIDER=efa, FI_EFA_USE_DEVICE_RDMA=1, FI_EFA_ENABLE_SHM_TRANSFER=0
+kv_backend: LIBFABRIC                   # the one non-UCX fabric -- select per engine (vLLM / TRT-LLM / SGLang)
+securityContext: privileged + IPC_LOCK, SYS_PTRACE
 ```
 
-[Reference deploy.yaml — disagg-1p1d-aws-efa](https://github.com/ai-dynamo/dynamo/pull/10202)
+**Merge** ([`AGENTS.md`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md)): append `env`, apply the image rule (+verify the `-efa` tag), set LIBFABRIC for your engine. After deploy, confirm `NIXL ... Backend LIBFABRIC was instantiated` — UCX is a *silent* slow fallback, not an error.
 
 </div>
 
 <div data-provider="gke" data-variant="disagg">
 
-**GCP GKE · RoCE** · `unverified` — validated on Qwen3-32B; the fabric plumbing is model-agnostic. Apply to the prefill + decode worker spec before deploying:
+**GCP GKE · RoCE** (A4X) — fabric profile [`gke-roce.yaml`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/gke-roce.yaml). UCX over RoCEv2; NIC auto-probe. Materialize onto the prefill + decode workers:
 
 ```yaml
-# provider-overlay: gke-roce
-status: unverified            # validated on qwen3-32b, not this model
-applies_to: topology=disaggregated
-apply:                        # add to prefill + decode worker spec
-  metadata.annotations:
-    networking.gke.io/networks: [rdma-0 ... rdma-3]   # + .IP, interfaces, per-net tolerations
-  volumes:                    # hostPath
-    /usr/local/gib: gib
-    /nvidia: nvidia
-  nixl_backend: ucx           # default
-derive_per_cluster:
-  UCX_NET_DEVICES:
-    from: ibv_devinfo         # tested: mlx5_0:1..3
-caveats: []
-reference: recipes/qwen3-32b/vllm/cloud-providers/disagg-1p1d-gke-roce/deploy.yaml
+# recipes/addons/providers/gke-roce.yaml  ->  merge onto prefill + decode workers
+device:      networking.gke.io.networks/rdma-0..3 (+ .IP)    # @param RDMA network names/count for your A4X pool
+annotations: networking.gke.io/interfaces  [eth2->rdma-0 ... eth5->rdma-3]   # webhook attaches the NICs
+env:         NCCL_SOCKET_IFNAME=eth0, NCCL_CROSS_NIC=0       # no UCX_NET_DEVICES -- UCX auto-probes the RoCE NICs
+kv_backend:  UCX                        # default -- nothing to select
+securityContext: privileged + IPC_LOCK, SYS_PTRACE
 ```
 
-[Reference deploy.yaml — disagg-1p1d-gke-roce](https://github.com/ai-dynamo/dynamo/pull/10202)
+**Merge** ([`AGENTS.md`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md)): the `device` RDMA networks and the `interfaces` annotation must match your A4X pool. The GKE GIB driver host-mounts stay in the base recipe.
 
 </div>
 
 <div data-provider="aks" data-variant="disagg">
 
-**Azure AKS · IB** · `unverified` — validated on Qwen3-32B; the fabric plumbing is model-agnostic. Apply to the prefill + decode worker spec before deploying:
+**Azure AKS · InfiniBand** — fabric profile [`aks-ib.yaml`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/aks-ib.yaml). UCX over IB; **NIC pin required**. Materialize onto the prefill + decode workers:
 
 ```yaml
-# provider-overlay: aks-ib
-status: unverified            # validated on qwen3-32b, not this model
-applies_to: topology=disaggregated
-apply:
-  resources.limits:
-    rdma/shared_ib: "1"       # NOT rdma/ib
-  volumes:
-    - /dev/infiniband
-derive_per_cluster:
-  UCX_NET_DEVICES:
-    from: ibv_devinfo
-caveats:
-  - "rdma/shared_ib, not rdma/ib -- wrong key => pod gets no RDMA resource"
-reference: recipes/qwen3-32b/vllm/cloud-providers/disagg-1p1d-aks-ib/deploy.yaml
+# recipes/addons/providers/aks-ib.yaml  ->  merge onto prefill + decode workers
+device:   rdma/ib: "1"                  # device-plugin slot (grants all HCAs) -- keep "1", not GPU-derived
+env:      UCX_NET_DEVICES: <compute IB NICs>   # @param from ibv_devinfo (default mlx5_0..3 on ND_H100_v5)
+          NCCL_SOCKET_IFNAME: eth0
+kv_backend: UCX                         # default -- nothing to select
+securityContext: privileged + IPC_LOCK, SYS_PTRACE
 ```
 
-[Reference deploy.yaml — disagg-1p1d-aks-ib](https://github.com/ai-dynamo/dynamo/pull/10202)
+**Merge** ([`AGENTS.md`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md)): `UCX_NET_DEVICES` is load-bearing — omit it and UCX binds a side NIC, giving degraded BW + a zeroed KV counter. Prefill + decode must share **one agentpool** (per-agentpool IB pkeys) — pin via `nodeSelector` in the base DGD.
 
 </div>
 
 <div data-provider="nebius" data-variant="disagg">
 
-**Nebius · IB** · `unverified` — validated on Qwen3-32B; the fabric plumbing is model-agnostic. Apply to the prefill + decode worker spec before deploying:
+**Nebius · InfiniBand** — fabric profile [`nebius-ib.yaml`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/nebius-ib.yaml). UCX over IB; NIC auto-probe. Materialize onto the prefill + decode workers:
 
 ```yaml
-# provider-overlay: nebius-ib
-status: unverified            # validated on qwen3-32b, not this model
-applies_to: topology=disaggregated
-apply:
-  resources.limits:
-    rdma/ib: "1"
-  volumes:
-    - /dev/infiniband
-    - /dev/shm
-derive_per_cluster:
-  UCX_NET_DEVICES:
-    from: ibv_devinfo         # tested: mlx5_0:1..7 (8 ports)
-caveats: []
-reference: recipes/qwen3-32b/vllm/cloud-providers/disagg-1p1d-nebius-ib/deploy.yaml
+# recipes/addons/providers/nebius-ib.yaml  ->  merge onto prefill + decode workers
+device:   rdma/ib: "1"                  # slot count (grants all 8 HCAs) -- keep "1"
+env:      NCCL_SOCKET_IFNAME: eth0       # no UCX_NET_DEVICES -- all 8 CX-7 HCAs are compute fabric, UCX auto-probes
+kv_backend: UCX                         # default -- nothing to select
+securityContext: privileged + IPC_LOCK, SYS_PTRACE
 ```
 
-[Reference deploy.yaml — disagg-1p1d-nebius-ib](https://github.com/ai-dynamo/dynamo/pull/10202)
+**Merge** ([`AGENTS.md`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md)): the simplest IB case — base image + the IB device slot; no NIC list to derive.
 
 </div>
 
 <div data-provider="nscale" data-variant="disagg">
 
-**Nscale · IB** · `unverified` — validated on Qwen3-32B; the fabric plumbing is model-agnostic. Apply to the prefill + decode worker spec before deploying:
+**Nscale · InfiniBand** — fabric profile [`nscale-ib.yaml`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/nscale-ib.yaml). UCX over IB; **NIC pin required** (mixed fabric). Materialize onto the prefill + decode workers:
 
 ```yaml
-# provider-overlay: nscale-ib
-status: unverified            # validated on qwen3-32b, not this model
-applies_to: topology=disaggregated
-apply:
-  resources.limits:
-    rdma/ib: "1"
-  volumes:
-    - /dev/infiniband
-    - /dev/shm
-derive_per_cluster:
-  UCX_NET_DEVICES:
-    from: ibv_devinfo         # tested: mlx5_0..5,10,11 (non-contiguous subset)
-caveats:
-  - "non-contiguous subset; mlx5_0..7 hits the side fabric and breaks the cross-rank handshake"
-reference: recipes/qwen3-32b/vllm/cloud-providers/disagg-1p1d-nscale-ib/deploy.yaml
+# recipes/addons/providers/nscale-ib.yaml  ->  merge onto prefill + decode workers
+device:   rdma/ib: "1"                  # slot count (grants all HCAs) -- keep "1"
+env:      UCX_NET_DEVICES: <COMPUTE NICs only>   # @param from ibv_devinfo (default mlx5_0..5,10,11)
+          NCCL_SOCKET_IFNAME: eth0
+kv_backend: UCX                         # default -- nothing to select
+securityContext: privileged + IPC_LOCK, SYS_PTRACE
 ```
 
-[Reference deploy.yaml — disagg-1p1d-nscale-ib](https://github.com/ai-dynamo/dynamo/pull/10202)
+**Merge** ([`AGENTS.md`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md)): Nscale nodes expose a **mixed** fabric — list only the compute NICs (`mlx5_0..5,10,11`) and exclude the side fabric (`mlx5_6..9`), or the first KV transfer fails with `NIXL_ERR_REMOTE_DISCONNECT`.
 
 </div>
 
