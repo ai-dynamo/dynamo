@@ -50,6 +50,60 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out
 }
 
+/// Resolve the static architectural context limit from local HF metadata.
+///
+/// `config.json` is authoritative when it declares `max_position_embeddings`;
+/// multimodal configs may instead nest it under `text_config`; tokenizer
+/// `model_max_length` is only a last resort. Missing fields fall through to the
+/// next source, but malformed present fields return an error so bad model
+/// metadata cannot silently resize request validation and planner limits.
+///
+/// This was added for the MiniMax-M3-VL : its multimodal
+/// Hugging Face config keeps the language model context under
+/// `config.json.text_config.max_position_embeddings`
+fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Result<Option<u32>> {
+    let tokenizer_context_length = || {
+        crate::file_json_field(
+            &local_path.join("tokenizer_config.json"),
+            "model_max_length",
+        )
+        .ok()
+    };
+
+    let config_path = local_path.join("config.json");
+    let config_json = match std::fs::read_to_string(&config_path) {
+        Ok(config_json) => Some(config_json),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err).with_context(|| format!("Failed to read {}", config_path.display()));
+        }
+    };
+    let Some(config_json) = config_json else {
+        return Ok(tokenizer_context_length().filter(|context_length| *context_length > 0));
+    };
+    let config: serde_json::Value = serde_json::from_str(&config_json)
+        .with_context(|| format!("Failed to parse JSON from file: {}", config_path.display()))?;
+
+    let context_length = match config.get("max_position_embeddings") {
+        Some(value) => Some(
+            serde_json::from_value(value.clone())
+                .context("Failed to deserialize max_position_embeddings")?,
+        ),
+        None => match config
+            .get("text_config")
+            .and_then(|text_config| text_config.get("max_position_embeddings"))
+        {
+            Some(value) => Some(
+                serde_json::from_value(value.clone())
+                    .context("Failed to deserialize text_config.max_position_embeddings")?,
+            ),
+            None => tokenizer_context_length(),
+        },
+    };
+
+    Ok(context_length.filter(|context_length| *context_length > 0))
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelInfoType {
@@ -962,8 +1016,9 @@ impl ModelDeploymentCard {
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
-    /// Env-var controls:
-    /// - `DYN_TOKENIZER=fastokens` — use `fastokens` as the encoding backend
+    /// Tokenizer backend controls:
+    /// - `runtime_config.tokenizer_backend=fastokens` — use `fastokens` as the encoding backend
+    /// - `DYN_TOKENIZER=fastokens` — fallback backend for callers without explicit runtime config
     /// - `DYN_TOKENIZER_CACHE=1` — wrap the tokenizer in an L1 prefix cache that records
     ///   tokenizations at special-token boundaries (massive speed-up for shared chat
     ///   prefixes; default off, zero cost when unset)
@@ -974,18 +1029,10 @@ impl ModelDeploymentCard {
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
-        let use_fast = match std::env::var("DYN_TOKENIZER") {
-            Ok(v) if v == "fastokens" => true,
-            Ok(v) if v == "default" || v.is_empty() => false,
-            Ok(v) => {
-                tracing::warn!(
-                    value = %v,
-                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to default"
-                );
-                false
-            }
-            Err(_) => false,
-        };
+        let use_fast = self
+            .runtime_config
+            .effective_tokenizer_backend()
+            .is_fastokens();
 
         let cache_enabled = matches!(
             std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref(),
@@ -1438,18 +1485,12 @@ impl ModelDeploymentCard {
     ) -> anyhow::Result<Self> {
         let local_path = local_path.as_ref();
 
-        // This is usually the right choice
+        // Prefer the model config's architectural context length. Some
+        // multimodal HF configs, including MiniMax-M3-VL, store the language
+        // model config under `text_config`; tokenizer `model_max_length` can
+        // be a much larger sentinel/default and must be a last resort.
         let architectural_max_context_length =
-            crate::file_json_field(&local_path.join("config.json"), "max_position_embeddings")
-                // But sometimes this is
-                .or_else(|_| {
-                    crate::file_json_field(
-                        &local_path.join("tokenizer_config.json"),
-                        "model_max_length",
-                    )
-                })
-                .ok()
-                .filter(|context_length| *context_length > 0);
+            architectural_max_context_length_from_repo(local_path)?;
 
         let is_mistral_model = is_exclusively_mistral_model(local_path);
 
@@ -1743,7 +1784,10 @@ fn resolve_token_id_from_tokenizer_files(model_dir: &Path, token_key: &str) -> O
 }
 
 /// Read `<token_key>` from `tokenizer_config.json` (a string or
-/// `{"content": ...}` object) and look it up in `added_tokens_decoder`.
+/// `{"content": ...}` object) and resolve its id via `added_tokens_decoder`,
+/// falling back to `tokenizer.json:added_tokens`. Some models (e.g.
+/// jina-embeddings-v5-omni) ship the token only as a bare string with no
+/// `added_tokens_decoder`, keeping the id mapping solely in `tokenizer.json`.
 fn resolve_token_id_from_tokenizer_config(
     path: &Path,
     token_key: &str,
@@ -1751,13 +1795,20 @@ fn resolve_token_id_from_tokenizer_config(
     let config = read_json(path)
         .with_context(|| format!("Failed to read or parse tokenizer_config.json: {:?}", path))?;
     let token_str = extract_token_string(config.get(token_key), token_key)?;
-    let added_tokens = config
+    if let Some(added_tokens) = config
         .get("added_tokens_decoder")
         .and_then(|v| v.as_object())
-        .ok_or_else(|| {
-            anyhow::anyhow!("added_tokens_decoder not found in tokenizer_config.json")
-        })?;
-    lookup_id_in_added_tokens_decoder(added_tokens, &token_str)
+        && let Ok(id) = lookup_id_in_added_tokens_decoder(added_tokens, &token_str)
+    {
+        return Ok(id);
+    }
+    let model_dir = path.parent().unwrap_or_else(|| Path::new(""));
+    lookup_id_in_tokenizer_json(model_dir, &token_str).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{token_key} '{token_str}' from tokenizer_config.json not found in \
+             added_tokens_decoder or tokenizer.json added_tokens"
+        )
+    })
 }
 
 /// Read and JSON-parse a file, returning `None` if it is missing or invalid.
@@ -2111,6 +2162,31 @@ mod tests {
         assert!(
             eos.contains(&200),
             "eos should resolve to 200 from special_tokens_map"
+        );
+        Ok(())
+    }
+
+    /// Rung 3, `tokenizer.json` fallback: `tokenizer_config.json` names the
+    /// eos token as a bare string but ships NO `added_tokens_decoder`, so the
+    /// string->id mapping lives only in `tokenizer.json:added_tokens`. With
+    /// `generation_config.json` and `special_tokens_map.json` both absent, this
+    /// is the only path that can recover the id. (bos is null in this model, so
+    /// only eos is exercised here.)
+    ///
+    /// Models in the wild that need this: `jinaai/jina-embeddings-v5-omni-small`
+    /// (https://huggingface.co/jinaai/jina-embeddings-v5-omni-small), reported
+    /// in https://github.com/ai-dynamo/dynamo/issues/10805: its eos `<|im_end|>`
+    /// resolves to 151645 from `tokenizer.json` alone. The fixture mirrors that
+    /// layout (ids/strings kept identical to the real model).
+    #[test]
+    fn test_config_json_eos_bos_from_tokenizer_json_fallback() -> anyhow::Result<()> {
+        let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-tokenizer-json-fallback/config.json");
+        let config = HFConfig::from_json_file(&config_file)?;
+        let eos: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
+        assert!(
+            eos.contains(&151645),
+            "eos should resolve to 151645 (<|im_end|>) from tokenizer.json"
         );
         Ok(())
     }
@@ -2526,6 +2602,87 @@ mod tests {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+
+    #[test]
+    fn architectural_context_prefers_config_then_text_config_then_tokenizer() -> anyhow::Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": 4096}"#,
+        )?;
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"model_max_length": 131072}"#,
+        )?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(4096)
+        );
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": 8192}}"#,
+        )?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(8192)
+        );
+
+        std::fs::write(dir.path().join("config.json"), r#"{"model_type": "mock"}"#)?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        std::fs::write(dir.path().join("config.json"), r#"{"text_config": {}}"#)?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        std::fs::remove_file(dir.path().join("config.json"))?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn architectural_context_errors_on_malformed_present_fields() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"model_max_length": 131072}"#,
+        )?;
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": "not-a-number"}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize max_position_embeddings"),
+            "{err:?}"
+        );
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": "not-a-number"}}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize text_config.max_position_embeddings"),
+            "{err:?}"
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn effective_context_prefers_runtime_then_architecture_then_unknown() {

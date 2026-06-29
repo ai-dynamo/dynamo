@@ -49,8 +49,7 @@ mm-routing = ["dynamo-llm/mm-routing"]
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "1.4.1" }
-dynamo-protocols = { path = "../../protocols" }
+dynamo-parsers = { version = "3.0.0" }
 dynamo-backend-common = { path = "../../backend-common" }
 
 anyhow = { version = "1" }
@@ -114,10 +113,3 @@ dynamo-llm = { path = "../../llm", default-features = false }
 inherits = "release"
 debug = true
 strip = false
-
-# Mirror of root Cargo.toml's patch: sub-workspaces don't inherit
-# [patch.crates-io] from the root, so re-declare here. Remove once
-# llm-multimodal >=1.6.0 is published on crates.io.
-[patch.crates-io]
-llm-multimodal = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }
-llm-tokenizer = { git = "https://github.com/lightseekorg/smg", rev = "e3eccacf96bc6e041a7ec6623e2251dba1129f28" }

@@ -28,7 +28,7 @@ LLMEngine (ABC)                <-- engine boundary (engine.py)
     |   - start(worker_id) -> EngineConfig    (start engine, return metadata)
     |   - generate(request, context)         (streaming inference)
     |   - abort(context)                     (cancel request, optional)
-    |   - drain()                            (pre-cleanup drain, optional)
+    |   - is_quiescent() -> Optional[bool]   (prefill drain early-exit, optional)
     |   - cleanup()                          (shutdown)
     |
     +-- VllmLLMEngine          <-- vllm/llm_engine.py
@@ -42,7 +42,7 @@ Worker                  <-- runtime integration (worker.py)
     - sets up endpoints, signal handlers
     - calls engine.start(worker_id), registers model
     - serves generate endpoint with cancellation monitoring
-    - calls engine.drain() then engine.cleanup() on shutdown
+    - drains prefill workers (polls engine.is_quiescent()) then calls engine.cleanup() on shutdown
 ```
 
 ## Quick Start
@@ -259,7 +259,7 @@ Each backend's protocol is different:
 |---------|---------|--------|
 | **vLLM** | Sets `kv_transfer_params.do_remote_decode=True`, caps `max_tokens=1`, packs the connector's transfer handle into the response. | Pulls `kv_transfer_params` from `request.prefill_result` and feeds it back through `sampling_params.extra_args` so the `NixlConnector` imports KV. |
 | **SGLang** | Yields `{bootstrap_host, bootstrap_port, bootstrap_room}` as the first chunk, then drains the engine stream silently. Warmup happens in `start()`. | Reads bootstrap info from `request.prefill_result`, passes it to `engine.async_generate` so SGLang's NIXL transport pulls KV. |
-| **TRT-LLM** | Builds `LlmDisaggregatedParams(request_type="context_only")`, generates one token, packs the encoded handoff into the response. `drain()` polls the scheduler until idle so in-flight NIXL transfers finish before GPU memory is freed (issue #7319). | Decodes `request.prefill_result.disaggregated_params`, flips `request_type` to `generation_only`, generates normally. |
+| **TRT-LLM** | Builds `LlmDisaggregatedParams(request_type="context_only")`, generates one token, packs the encoded handoff into the response. Inherits the default `is_quiescent` (None), so the prefill drain waits the full budget for transfers to finish. | Decodes `request.prefill_result.disaggregated_params`, flips `request_type` to `generation_only`, generates normally. |
 
 ### Smoke testing without GPUs
 
@@ -437,7 +437,7 @@ Lifecycle and runtime:
 - Model registration with endpoint types
 - Request cancellation via `abort()` + `context.is_stopped()` monitoring
 - Graceful shutdown with signal handling
-- `drain()` hook for pre-cleanup work
+- `is_quiescent()` prefill-drain early-exit hook
 - `DynamoException` error chain wrapping
 - Finish reason normalization handled by the Rust layer
 - Engine control plumbing, with per-backend profiling, pause/resume, and supported weight-update controls

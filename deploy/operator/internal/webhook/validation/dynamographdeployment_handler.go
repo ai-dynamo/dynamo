@@ -62,6 +62,10 @@ func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal stri
 func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentWebhookName)
 
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
+		return nil, err
+	}
+
 	deployment, err := castToDynamoGraphDeployment(obj)
 	if err != nil {
 		return nil, err
@@ -77,6 +81,10 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 // ValidateUpdate validates a DynamoGraphDeployment update request.
 func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentWebhookName)
+
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
+		return nil, err
+	}
 
 	newDeployment, err := castToDynamoGraphDeployment(newObj)
 	if err != nil {
@@ -132,6 +140,10 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 // ValidateDelete validates a DynamoGraphDeployment delete request.
 func (h *DynamoGraphDeploymentHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentWebhookName)
+
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
+		return nil, err
+	}
 
 	deployment, err := castToDynamoGraphDeployment(obj)
 	if err != nil {

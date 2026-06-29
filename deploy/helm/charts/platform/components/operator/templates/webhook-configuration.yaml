@@ -252,6 +252,7 @@ webhooks:
     - v1alpha1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - dynamographdeployments
   sideEffects: None
@@ -286,6 +287,7 @@ webhooks:
     - v1beta1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - dynamocomponentdeployments
   sideEffects: None
@@ -319,6 +321,7 @@ webhooks:
     - v1beta1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - dynamographdeploymentrequests
   sideEffects: None
@@ -350,6 +353,8 @@ webhooks:
     - ""
     apiVersions:
     - v1
+    # Pod checkpoint restore injects pod spec fields before creation. It is
+    # intentionally CREATE-only because pod UPDATE cannot apply that mutation.
     operations:
     - CREATE
     resources:

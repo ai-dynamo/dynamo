@@ -198,10 +198,13 @@ impl ListenerRecord {
         self.watermark.clone()
     }
 
-    pub(super) fn start_pending(&self) -> (u64, CancellationToken) {
+    pub(super) fn start_pending(
+        &self,
+        root_cancel_token: &CancellationToken,
+    ) -> (u64, CancellationToken) {
         let mut runtime = self.runtime.lock();
         runtime.generation += 1;
-        let cancel_token = CancellationToken::new();
+        let cancel_token = root_cancel_token.child_token();
         runtime.status = ListenerStatus::Pending;
         runtime.last_error = None;
         runtime.cancel_token = Some(cancel_token.clone());
@@ -241,12 +244,13 @@ impl ListenerRecord {
         &self,
         instance_id: WorkerId,
         dp_rank: u32,
+        root_cancel_token: &CancellationToken,
     ) -> std::result::Result<(u64, CancellationToken), ListenerControlError> {
         let mut runtime = self.runtime.lock();
         match runtime.status {
             ListenerStatus::Paused | ListenerStatus::Failed => {
                 runtime.generation += 1;
-                let cancel_token = CancellationToken::new();
+                let cancel_token = root_cancel_token.child_token();
                 runtime.status = ListenerStatus::Pending;
                 runtime.last_error = None;
                 runtime.cancel_token = Some(cancel_token.clone());
@@ -318,16 +322,41 @@ pub struct WorkerRegistry {
     indexer_metrics: Arc<KvIndexerMetrics>,
     ready_tx: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
+    root_cancel_token: CancellationToken,
 }
 
 impl WorkerRegistry {
     pub fn new(num_threads: usize) -> Self {
-        Self::new_with_indexer_metrics(num_threads, Arc::new(KvIndexerMetrics::new_unregistered()))
+        Self::new_with_cancel_token(num_threads, CancellationToken::new())
+    }
+
+    pub fn new_with_cancel_token(num_threads: usize, root_cancel_token: CancellationToken) -> Self {
+        Self::new_inner(
+            num_threads,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            root_cancel_token,
+        )
     }
 
     pub fn new_with_indexer_metrics(
         num_threads: usize,
         indexer_metrics: Arc<KvIndexerMetrics>,
+    ) -> Self {
+        Self::new_inner(num_threads, indexer_metrics, CancellationToken::new())
+    }
+
+    pub(super) fn new_with_indexer_metrics_and_cancel_token(
+        num_threads: usize,
+        indexer_metrics: Arc<KvIndexerMetrics>,
+        root_cancel_token: CancellationToken,
+    ) -> Self {
+        Self::new_inner(num_threads, indexer_metrics, root_cancel_token)
+    }
+
+    fn new_inner(
+        num_threads: usize,
+        indexer_metrics: Arc<KvIndexerMetrics>,
+        root_cancel_token: CancellationToken,
     ) -> Self {
         let (ready_tx, ready_rx) = watch::channel(false);
         Self {
@@ -339,6 +368,7 @@ impl WorkerRegistry {
             indexer_metrics,
             ready_tx,
             ready_rx,
+            root_cancel_token,
         }
     }
 
@@ -451,7 +481,7 @@ impl WorkerRegistry {
             indexer,
             watermark,
         ));
-        let attempt = record.start_pending();
+        let attempt = record.start_pending(&self.root_cancel_token);
 
         {
             let mut entry = self
@@ -639,7 +669,7 @@ impl WorkerRegistry {
             return Err(ListenerControlError::WorkerNotFound { instance_id });
         };
 
-        let attempt = record.resume(instance_id, dp_rank)?;
+        let attempt = record.resume(instance_id, dp_rank, &self.root_cancel_token)?;
         self.spawn_listener(instance_id, dp_rank, attempt, record);
         tracing::info!(instance_id, dp_rank, "Resumed ZMQ listener");
         Ok(())
@@ -757,6 +787,20 @@ impl WorkerRegistry {
             .collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn listener_cancelled(&self, instance_id: WorkerId, dp_rank: u32) -> Option<bool> {
+        self.workers.get(&instance_id).and_then(|entry| {
+            entry.listeners.get(&dp_rank).and_then(|record| {
+                record
+                    .runtime
+                    .lock()
+                    .cancel_token
+                    .as_ref()
+                    .map(|t| t.is_cancelled())
+            })
+        })
+    }
+
     fn spawn_listener(
         &self,
         instance_id: WorkerId,
@@ -870,6 +914,51 @@ mod tests {
             !registry.watermarks.contains_key(&(1, 1)),
             "watermark for dp_rank 1 should be removed"
         );
+    }
+
+    #[tokio::test]
+    async fn listener_cancelled_by_root() {
+        let root = CancellationToken::new();
+        let registry = WorkerRegistry::new_with_cancel_token(1, root.clone());
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15560".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(registry.listener_cancelled(1, 0), Some(false));
+
+        root.cancel();
+        assert_eq!(registry.listener_cancelled(1, 0), Some(true));
+    }
+
+    #[tokio::test]
+    async fn listener_inherits_cancelled_root() {
+        let root = CancellationToken::new();
+        root.cancel();
+        let registry = WorkerRegistry::new_with_cancel_token(1, root);
+
+        registry
+            .register(
+                1,
+                "tcp://127.0.0.1:15561".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(registry.listener_cancelled(1, 0), Some(true));
     }
 
     #[tokio::test]

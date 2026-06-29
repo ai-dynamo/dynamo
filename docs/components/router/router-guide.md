@@ -155,9 +155,9 @@ When using KV routing, the router needs to know what each worker has cached. The
 
 | Event Mode | How to Enable | Description |
 |------------|---------------|-------------|
-| **NATS Core (local indexer)** | Router default (no router flag) | Workers maintain a local indexer; configure backend-side KV event publishing so the router can recover state and receive events via NATS Core |
-| **JetStream (durable)** | `--router-durable-kv-events` | Events persisted in NATS JetStream; supports snapshots and durable consumers. *Deprecated.* |
-| **ZMQ** | `--event-plane zmq` | Workers publish via ZMQ PUB sockets; the standalone `dynamo.indexer` service aggregates events |
+| **ZMQ (local indexer)** | Router default (no router flag) | Workers maintain a local indexer and publish KV events via ZMQ PUB sockets; the router recovers state by querying live workers. This is the default event plane for all backends |
+| **NATS Core (local indexer)** | `--event-plane nats` (or `DYN_EVENT_PLANE=nats`) | Same local-indexer model, but events flow over NATS Core instead of ZMQ. |
+| **JetStream (durable)** | `--router-durable-kv-events` (requires `--event-plane nats`) | Events persisted in NATS JetStream; supports snapshots and durable consumers. *Deprecated.* |
 | **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |
 
 ### Aggregated vs. Disaggregated Topology

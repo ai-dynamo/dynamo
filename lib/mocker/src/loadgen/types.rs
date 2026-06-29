@@ -11,16 +11,44 @@ use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
 
-#[derive(Debug, Clone)]
+pub const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
+pub const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
+
+pub fn output_replay_id_annotation(replay_key: &str) -> String {
+    format!("{OUTPUT_REPLAY_ID_ANNOTATION_KEY}:{replay_key}")
+}
+
+pub fn effective_replay_key(
+    request_id: Option<&str>,
+    session_id: Option<&str>,
+    turn_index: usize,
+    line_index: usize,
+) -> String {
+    if let Some(request_id) = request_id.map(str::trim).filter(|value| !value.is_empty()) {
+        return request_id.to_string();
+    }
+    if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
+        return format!("{session_id}:{turn_index}");
+    }
+    format!("line:{line_index}")
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Trace {
     pub block_size: usize,
     pub sessions: Vec<SessionTrace>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgenticTrace {
     pub block_size: usize,
     pub turns: Vec<AgenticTurnTrace>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DynamoRequestTrace {
+    Standard(Trace),
+    Agentic(AgenticTrace),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,36 +65,55 @@ pub enum TraceFileFormat {
     /// authored delay/tool wait.
     AgenticMooncake,
     AppliedComputeAgentic,
+    Dynamo,
 }
 
-#[derive(Debug, Clone)]
+impl TraceFileFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mooncake => "mooncake",
+            Self::MooncakeDelta => "mooncake-delta",
+            Self::AgenticMooncake => "agentic_mooncake",
+            Self::AppliedComputeAgentic => "applied_compute_agentic",
+            Self::Dynamo => "dynamo",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionTrace {
     pub session_id: String,
     pub first_arrival_timestamp_ms: Option<f64>,
     pub turns: Vec<TurnTrace>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TurnTrace {
     pub input_length: usize,
     pub max_output_tokens: usize,
+    pub output_token_ids: Option<Vec<u32>>,
+    pub replay_key: Option<String>,
     pub hash_ids: Vec<u64>,
     pub delay_after_previous_ms: f64,
     pub priority: i32,
     pub strict_priority: u32,
+    pub policy_class: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AgenticTurnTrace {
     pub request_id: String,
     pub session_id: String,
     pub input_length: usize,
     pub max_output_tokens: usize,
+    pub output_token_ids: Option<Vec<u32>>,
+    pub replay_key: Option<String>,
     pub hash_ids: Vec<u64>,
     pub first_ready_timestamp_ms: Option<f64>,
     pub delay_after_dependencies_ms: f64,
     pub priority: i32,
     pub strict_priority: u32,
+    pub policy_class: Option<String>,
     pub wait_for: Vec<String>,
     pub prefix_reset: bool,
 }
@@ -149,6 +196,7 @@ pub struct ReadyTurn {
     pub request_uuid: Uuid,
     pub session_id: String,
     pub turn_index: usize,
+    pub replay_key: Option<String>,
     pub scheduled_ready_at_ms: f64,
     pub replay_hashes: Option<ReplayRequestHashes>,
     pub request: DirectRequest,

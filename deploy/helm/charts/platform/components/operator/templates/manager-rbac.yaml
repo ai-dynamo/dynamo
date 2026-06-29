@@ -349,8 +349,19 @@ rules:
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
+  - podsnapshots/finalizers
   verbs:
   - update
+- apiGroups:
+  - nvidia.com
+  resources:
+  - podsnapshots
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
 - apiGroups:
   - nvidia.com
   resources:
@@ -360,6 +371,7 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
+  - podsnapshots/status
   verbs:
   - get
   - patch
@@ -596,6 +608,59 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-deviceclass-reader
+subjects:
+- kind: ServiceAccount
+  name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
+  namespace: '{{ .Release.Namespace }}'
+---
+# ClusterRole for PodSnapshotContent access
+# This is always a ClusterRole since PodSnapshotContent resources are cluster-scoped,
+# so it must not be folded into the namespace-restricted Role above.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-podsnapshotcontents
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - nvidia.com
+  resources:
+  - podsnapshotcontents
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - podsnapshotcontents/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+# ClusterRoleBinding for PodSnapshotContent access
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-podsnapshotcontents-binding
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: dynamo-operator
+    app.kubernetes.io/part-of: dynamo-operator
+  {{- include "dynamo-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-podsnapshotcontents
 subjects:
 - kind: ServiceAccount
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'

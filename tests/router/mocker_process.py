@@ -14,7 +14,9 @@ from tests.router.helper import (
     generate_random_suffix,
     get_kv_indexer_command,
     get_kv_indexer_test_env,
+    get_runtime,
     get_select_service_command,
+    poll_for_worker_instances,
     wait_for_indexer_workers_active,
     wait_for_selection_service_ready,
 )
@@ -112,6 +114,13 @@ def _build_mocker_command(
         command.extend(["--zmq-kv-events-ports", mocker_args["zmq_kv_events_ports"]])
     if "zmq_replay_ports" in mocker_args:
         command.extend(["--zmq-replay-ports", mocker_args["zmq_replay_ports"]])
+    if "response_replay_trace_path" in mocker_args:
+        command.extend(
+            [
+                "--response-replay-trace-path",
+                str(mocker_args["response_replay_trace_path"]),
+            ]
+        )
 
     return command
 
@@ -643,6 +652,26 @@ class DisaggMockerProcess:
             self._zmq_kv_events_ports = []
 
 
+def _wait_for_disagg_workers(
+    workers: DisaggMockerProcess,
+    store_backend: str,
+    request_plane: str,
+    event_plane: Optional[str],
+) -> None:
+    async def wait_for_workers() -> None:
+        runtime = get_runtime(
+            store_backend=store_backend,
+            request_plane=request_plane,
+            event_plane=event_plane,
+        )
+        endpoint = runtime.endpoint(
+            f"{workers.namespace}.{workers.component_name}.generate"
+        )
+        await poll_for_worker_instances(endpoint, workers.num_workers)
+
+    asyncio.run(wait_for_workers())
+
+
 @contextmanager
 def launch_disagg_workers(
     request,
@@ -677,6 +706,9 @@ def launch_disagg_workers(
             zmq_kv_events=zmq_kv_events,
         ) as prefill_workers:
             logger.info("Prefill workers using endpoint: %s", prefill_workers.endpoint)
+            _wait_for_disagg_workers(
+                prefill_workers, store_backend, request_plane, event_plane
+            )
             logger.info(
                 "Starting %s decode mocker instances (second)", num_decode_mockers
             )
@@ -694,6 +726,9 @@ def launch_disagg_workers(
                 logger.info(
                     "Decode workers using endpoint: %s", decode_workers.endpoint
                 )
+                _wait_for_disagg_workers(
+                    decode_workers, store_backend, request_plane, event_plane
+                )
                 yield prefill_workers, decode_workers
         return
 
@@ -710,6 +745,9 @@ def launch_disagg_workers(
         zmq_kv_events=zmq_kv_events,
     ) as decode_workers:
         logger.info("Decode workers using endpoint: %s", decode_workers.endpoint)
+        _wait_for_disagg_workers(
+            decode_workers, store_backend, request_plane, event_plane
+        )
         logger.info(
             "Starting %s prefill mocker instances (second)", num_prefill_mockers
         )
@@ -726,7 +764,7 @@ def launch_disagg_workers(
             zmq_kv_events=zmq_kv_events,
         ) as prefill_workers:
             logger.info("Prefill workers using endpoint: %s", prefill_workers.endpoint)
+            _wait_for_disagg_workers(
+                prefill_workers, store_backend, request_plane, event_plane
+            )
             yield prefill_workers, decode_workers
-
-
-_launch_disagg_workers = launch_disagg_workers

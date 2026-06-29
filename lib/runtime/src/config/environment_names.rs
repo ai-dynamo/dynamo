@@ -48,12 +48,27 @@ pub mod logging {
         /// Enable OTLP export for traces and logs (set to "1" to enable)
         pub const OTEL_EXPORT_ENABLED: &str = "OTEL_EXPORT_ENABLED";
 
+        /// OTLP exporter transport protocol. Supported values: "grpc", "http/protobuf".
+        pub const OTEL_EXPORTER_OTLP_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_PROTOCOL";
+
+        /// OTLP exporter transport protocol for traces. Defaults to OTEL_EXPORTER_OTLP_PROTOCOL.
+        pub const OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL";
+
+        /// OTLP exporter transport protocol for logs. Defaults to OTEL_EXPORTER_OTLP_PROTOCOL.
+        pub const OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL";
+
+        /// Generic OTLP exporter endpoint URL used when signal-specific endpoints are unset.
+        pub const OTEL_EXPORTER_OTLP_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+
         /// OTLP exporter endpoint URL for traces
         /// Spec: https://opentelemetry.io/docs/specs/otel/protocol/exporter/
         pub const OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
 
-        /// OTLP exporter endpoint URL for logs (defaults to traces endpoint if unset)
+        /// OTLP exporter endpoint URL for logs. Falls back to OTEL_EXPORTER_OTLP_ENDPOINT or the protocol default when unset.
         pub const OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT";
+
+        /// Trace sampling ratio used when set. Example: "0.01" samples roughly 1% of traces.
+        pub const OTEL_TRACES_SAMPLE_RATIO: &str = "OTEL_TRACES_SAMPLE_RATIO";
 
         /// Service name for OTLP traces and logs
         pub const OTEL_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
@@ -69,6 +84,10 @@ pub mod runtime {
 
     /// Maximum number of blocking threads for Tokio runtime
     pub const DYN_RUNTIME_MAX_BLOCKING_THREADS: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
+
+    /// Maximum time to wait for graceful endpoint drain during runtime shutdown.
+    pub const DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
+        "DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
     /// Enable Tokio task poll-time histogram (calls enable_metrics_poll_time_histogram on builder).
     /// Set to "1", "true", or "yes" to enable. Adds ~2× overhead of Instant::now() per task poll.
@@ -124,6 +143,9 @@ pub mod worker {
 pub mod nats {
     /// NATS server address (e.g., "nats://localhost:4222")
     pub const NATS_SERVER: &str = "NATS_SERVER";
+
+    /// NATS request/reply timeout in seconds. Unset = async-nats default (10 s).
+    pub const DYN_NATS_REQUEST_TIMEOUT_SECS: &str = "DYN_NATS_REQUEST_TIMEOUT_SECS";
 
     /// NATS authentication environment variables (checked in priority order)
     pub mod auth {
@@ -288,8 +310,8 @@ pub mod llm {
     /// Default `true`. Falsy values (`0` / `false` / `no` / `off`,
     /// case-insensitive) cause the frontend to drop `request.nvext` at
     /// handler entry, ignore the routing-override headers
-    /// (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,
-    /// `x-prefill-dp-rank`), and silently ignore the response-side
+    /// (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`,
+    /// `x-dynamo-dp-rank`, `x-dynamo-prefill-dp-rank`), and silently ignore the response-side
     /// `extra_fields` opt-in.
     pub const DYN_ENABLE_FRONTEND_NVEXT: &str = "DYN_ENABLE_FRONTEND_NVEXT";
 
@@ -310,6 +332,12 @@ pub mod llm {
     /// Enable streaming reasoning dispatch (`event: reasoning_dispatch` SSE events)
     pub const DYN_ENABLE_STREAMING_REASONING_DISPATCH: &str =
         "DYN_ENABLE_STREAMING_REASONING_DISPATCH";
+
+    /// \[EXPERIMENTAL\] Route supported tool-call families (Qwen3-Coder, DeepSeek-V4)
+    /// through the `dynamo-parsers-v2` streaming parser for BOTH the batch and the
+    /// streaming path, bypassing the v1 tool-call jail. Off by default; when set, the
+    /// v2 parser owns incremental tool-call emission and drops values truncated at EOF.
+    pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
 
     /// Backend stream inactivity timeout in seconds.
     ///
@@ -482,6 +510,14 @@ pub mod router {
 
     /// Scheduling policy for the router queue ("fcfs" or "wspt").
     pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
+    pub const DYN_ROUTER_POLICY_CONFIG: &str = "DYN_ROUTER_POLICY_CONFIG";
+}
+
+/// Request plane transport environment variables
+pub mod request_plane {
+    /// Request plane payload codec selection: "json" or "msgpack".
+    /// JSON is the compatibility default.
+    pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
 }
 
 /// TCP response stream server (CallHome listener) environment variables
@@ -612,12 +648,18 @@ mod tests {
             logging::DYN_LOG_USE_LOCAL_TZ,
             logging::DYN_LOGGING_SPAN_EVENTS,
             logging::otlp::OTEL_EXPORT_ENABLED,
+            logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL,
+            logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
+            logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,
+            logging::otlp::OTEL_EXPORTER_OTLP_ENDPOINT,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
             logging::otlp::OTEL_SERVICE_NAME,
             logging::otlp::OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
+            logging::otlp::OTEL_TRACES_SAMPLE_RATIO,
             // Runtime
             runtime::DYN_RUNTIME_NUM_WORKER_THREADS,
             runtime::DYN_RUNTIME_MAX_BLOCKING_THREADS,
+            runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             runtime::system::DYN_SYSTEM_ENABLED,
             runtime::system::DYN_SYSTEM_HOST,
             runtime::system::DYN_SYSTEM_PORT,
@@ -630,6 +672,7 @@ mod tests {
             worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
             // NATS
             nats::NATS_SERVER,
+            nats::DYN_NATS_REQUEST_TIMEOUT_SECS,
             nats::auth::NATS_AUTH_USERNAME,
             nats::auth::NATS_AUTH_PASSWORD,
             nats::auth::NATS_AUTH_TOKEN,
@@ -666,6 +709,7 @@ mod tests {
             llm::DYN_STRIP_ANTHROPIC_PREAMBLE,
             llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH,
             llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH,
+            llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,
@@ -706,6 +750,8 @@ mod tests {
             router::DYN_ROUTER_PREFILL_LOAD_SCALE,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
+            router::DYN_ROUTER_POLICY_CONFIG,
+            request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
@@ -746,6 +792,7 @@ mod tests {
     fn test_naming_conventions() {
         // Dynamo-specific vars should start with DYN_
         assert!(runtime::DYN_RUNTIME_NUM_WORKER_THREADS.starts_with("DYN_"));
+        assert!(runtime::DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS.starts_with("DYN_"));
         assert!(runtime::system::DYN_SYSTEM_ENABLED.starts_with("DYN_"));
         assert!(kvbm::DYN_KVBM_METRICS.starts_with("DYN_"));
         assert!(worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT.starts_with("DYN_"));

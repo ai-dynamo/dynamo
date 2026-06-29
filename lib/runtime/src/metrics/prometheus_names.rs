@@ -362,8 +362,11 @@ pub mod frontend_service {
         /// Model or resource not found (404)
         pub const NOT_FOUND: &str = "not_found";
 
-        /// Service overloaded, too many requests (503)
+        /// Service overloaded or rate limited (429 or 529)
         pub const OVERLOAD: &str = "overload";
+
+        /// Service unavailable because no backend worker can serve the request
+        pub const UNAVAILABLE: &str = "unavailable";
 
         /// Request cancelled by client or timeout
         pub const CANCELLED: &str = "cancelled";
@@ -608,6 +611,9 @@ pub mod router {
 
     /// Shared cache blocks beyond device overlap for the selected worker
     pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "router_shared_cache_beyond_blocks";
+
+    /// Whether the router currently has a worker/dp_rank registered (1 = registered)
+    pub const WORKER_REGISTERED: &str = "router_worker_registered";
 }
 
 /// Frontend pipeline stage and event-loop metrics

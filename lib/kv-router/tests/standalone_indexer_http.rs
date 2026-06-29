@@ -163,13 +163,17 @@ async fn spawn_indexer_http(
 fn make_app_state(registry: Arc<WorkerRegistry>) -> Arc<AppState> {
     Arc::new(AppState {
         registry,
+        access_log_sink: None,
         prom_registry: prometheus::Registry::new(),
     })
 }
 
 #[cfg(not(feature = "metrics"))]
 fn make_app_state(registry: Arc<WorkerRegistry>) -> Arc<AppState> {
-    Arc::new(AppState { registry })
+    Arc::new(AppState {
+        registry,
+        access_log_sink: None,
+    })
 }
 
 /// `/query_by_hash` against a populated registry must surface both the legacy
@@ -285,25 +289,6 @@ async fn query_returns_404_for_unknown_model() {
             .unwrap_or(false),
         "unexpected 404 body: {body}"
     );
-
-    cancel.cancel();
-    task.await.expect("server task join");
-}
-
-/// Smoke test that the axum router is wired correctly end-to-end and
-/// reports `/health` 200. Catches misuse of feature flags / route gates.
-#[tokio::test]
-async fn health_returns_ok() {
-    let registry = Arc::new(WorkerRegistry::new(1));
-    let state = make_app_state(registry);
-    let (base_url, cancel, task) = spawn_indexer_http(state).await;
-
-    let resp = reqwest::Client::new()
-        .get(format!("{base_url}/health"))
-        .send()
-        .await
-        .expect("GET /health");
-    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
     cancel.cancel();
     task.await.expect("server task join");

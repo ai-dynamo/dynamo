@@ -69,7 +69,6 @@ spec:
                 --extra-inputs "max_tokens:$osl" \
                 --extra-inputs "min_tokens:$osl" \
                 --extra-inputs "ignore_eos:true" \
-                --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
                 --extra-inputs "repetition_penalty:1.0" \
                 --extra-inputs "temperature: 0.0" \
                 --concurrency $concurrency \

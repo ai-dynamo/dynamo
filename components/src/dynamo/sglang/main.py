@@ -9,6 +9,10 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.snapshot.restore_context import (
+    parse_snapshot_restore_runtime_config,
+    refresh_snapshot_restore_config,
+)
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import parse_args
@@ -31,8 +35,10 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-async def worker():
-    config = await parse_args(sys.argv[1:])
+async def worker(argv: list[str] | None = None):
+    if argv is None:
+        argv = sys.argv[1:]
+    config = await parse_args(argv)
     dump_config(config.dynamo_args.dump_config_to, config)
 
     if config.server_args.load_format == "gms":
@@ -40,19 +46,17 @@ async def worker():
 
         config.server_args.load_format = setup_gms(config.server_args)
 
-    # Checkpoint mode: engine must be created BEFORE runtime (no NATS/etcd during CRIU)
+    # Snapshot mode: engine must be created before runtime so CRIU captures no
+    # NATS/etcd connections.
     snapshot_controller = await prepare_snapshot_engine(config.server_args)
 
     dynamo_args = config.dynamo_args
     snapshot_engine = None
     if snapshot_controller is not None:
         snapshot_engine = snapshot_controller.engine
-        (
-            dynamo_args.namespace,
-            dynamo_args.discovery_backend,
-        ) = snapshot_controller.reload_restore_identity(
-            dynamo_args.namespace,
-            dynamo_args.discovery_backend,
+        dynamo_args = await refresh_snapshot_restore_config(
+            dynamo_args,
+            lambda: parse_snapshot_restore_runtime_config(argv),
         )
 
     shutdown_event = asyncio.Event()

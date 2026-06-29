@@ -14,6 +14,7 @@ use super::request::SglangRequest;
 #[derive(Default)]
 pub(super) struct DecodeResult {
     pub(super) requests: Vec<SglangRequest>,
+    pub(super) completed_requests: Vec<SglangRequest>,
     pub(super) output_signals: Vec<OutputSignal>,
     pub(super) retracted_any: bool,
     pub(super) end_ms: f64,
@@ -151,14 +152,44 @@ pub(super) fn simulate_decode_step(
     current_time_ms: f64,
     apply_speedup: bool,
 ) -> DecodeResult {
-    simulate_decode_step_with_sampler(
+    let mut result = simulate_decode_step_with_sampler(
         running,
         kv_manager,
         config,
         None,
         current_time_ms,
         apply_speedup,
-    )
+    );
+    for mut request in result.completed_requests.drain(..) {
+        cleanup_completed_request(&mut request, kv_manager, config.block_size);
+    }
+    result
+}
+
+pub(super) fn cleanup_completed_request(
+    request: &mut SglangRequest,
+    kv_manager: &mut SglangKvManager,
+    block_size: usize,
+) {
+    let sequence = request.sequence_tokens();
+    let tokens_to_cache = floor_to_block(sequence.len(), block_size);
+    if request.kv_indices.len() > tokens_to_cache {
+        kv_manager.free_indices(&request.kv_indices[tokens_to_cache..]);
+    }
+
+    let Some(last_node) = request.last_node.take() else {
+        return;
+    };
+    if tokens_to_cache > 0 {
+        kv_manager.cache_finished_req(
+            &sequence[..tokens_to_cache],
+            &request.kv_indices[..tokens_to_cache],
+            last_node,
+            request.cached_tokens,
+        );
+    } else {
+        kv_manager.free_request(last_node);
+    }
 }
 
 pub(super) fn simulate_decode_step_with_sampler(
@@ -260,12 +291,14 @@ pub(super) fn simulate_decode_step_with_sampler(
             if crossing_page_boundary {
                 req.allocated_tokens += config.block_size;
             }
-            req.append_output_token(req.next_output_token());
+            let token_id = req.next_output_token();
+            req.append_output_token(token_id);
             req.debug_assert_invariants(config.block_size);
 
             let is_complete = req.output_len() >= req.max_output_tokens;
             output_signals.push(OutputSignal {
                 uuid: req.uuid,
+                token_id: Some(token_id),
                 completed: is_complete,
                 rejected: false,
                 handoff_delay_ms: compute_prefill_handoff_delay_ms(
@@ -278,25 +311,6 @@ pub(super) fn simulate_decode_step_with_sampler(
             });
 
             if is_complete {
-                let sequence = req.sequence_tokens();
-                let tokens_to_cache = floor_to_block(sequence.len(), config.block_size);
-                if req.kv_indices.len() > tokens_to_cache {
-                    kv_manager.free_indices(&req.kv_indices[tokens_to_cache..]);
-                }
-
-                if let Some(last_node) = req.last_node.take() {
-                    if tokens_to_cache > 0 {
-                        kv_manager.cache_finished_req(
-                            &sequence[..tokens_to_cache],
-                            &req.kv_indices[..tokens_to_cache],
-                            last_node,
-                            req.cached_tokens,
-                        );
-                    } else {
-                        kv_manager.free_request(last_node);
-                    }
-                }
-
                 completed_indices.push(idx);
                 break;
             }
@@ -312,12 +326,15 @@ pub(super) fn simulate_decode_step_with_sampler(
     );
     kv_manager.release_decode_reservation(reservation);
 
+    let mut completed_requests = Vec::with_capacity(completed_indices.len());
     for &idx in completed_indices.iter().rev() {
-        running.remove(idx);
+        completed_requests.push(running.remove(idx));
     }
+    completed_requests.reverse();
 
     DecodeResult {
         requests: retracted,
+        completed_requests,
         output_signals,
         retracted_any,
         end_ms: current_time_ms + total_time.as_secs_f64() * 1000.0,

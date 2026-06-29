@@ -63,11 +63,14 @@ struct SessionRuntime {
 #[derive(Debug)]
 struct TurnRuntime {
     request_id: Option<String>,
+    replay_key: Option<String>,
     tokens: Vec<u32>,
     max_output_tokens: usize,
+    output_token_ids: Option<Vec<u32>>,
     delay_after_previous_ms: f64,
     priority: i32,
     strict_priority: u32,
+    policy_class: Option<String>,
     replay_hashes: Option<ReplayRequestHashes>,
 }
 
@@ -325,11 +328,14 @@ impl WorkloadDriver {
                 session_id: turn.session_id,
                 turns: vec![TurnRuntime {
                     request_id: Some(turn.request_id),
+                    replay_key: turn.replay_key,
                     tokens,
                     max_output_tokens: turn.max_output_tokens,
+                    output_token_ids: turn.output_token_ids,
                     delay_after_previous_ms: turn.delay_after_dependencies_ms,
                     priority: turn.priority,
                     strict_priority: turn.strict_priority,
+                    policy_class: turn.policy_class,
                     replay_hashes,
                 }],
                 cumulative_tokens: Vec::new(),
@@ -399,10 +405,13 @@ impl WorkloadDriver {
                         Ok(TurnRuntime {
                             request_id: None,
                             tokens: turn.synthesize_tokens(trace_block_size)?,
+                            replay_key: turn.replay_key,
                             max_output_tokens: turn.max_output_tokens,
+                            output_token_ids: turn.output_token_ids,
                             delay_after_previous_ms: turn.delay_after_previous_ms,
                             priority: turn.priority,
                             strict_priority: turn.strict_priority,
+                            policy_class: turn.policy_class,
                             replay_hashes,
                         })
                     })
@@ -514,11 +523,13 @@ impl WorkloadDriver {
             let request = DirectRequest {
                 tokens: request_tokens,
                 max_output_tokens: turn.max_output_tokens,
+                output_token_ids: turn.output_token_ids.clone(),
                 uuid: Some(request_uuid),
                 dp_rank: 0,
                 arrival_timestamp_ms,
                 priority: turn.priority,
                 strict_priority: turn.strict_priority,
+                policy_class: turn.policy_class.clone(),
             };
             session.in_flight = Some(request_uuid);
             session.next_ready_at_ms = None;
@@ -533,6 +544,7 @@ impl WorkloadDriver {
                 request_uuid,
                 session_id: session.session_id.clone(),
                 turn_index,
+                replay_key: turn.replay_key.clone(),
                 scheduled_ready_at_ms,
                 replay_hashes: Some(replay_hashes),
                 request,
@@ -1055,18 +1067,24 @@ mod tests {
                     TurnTrace {
                         input_length: 6,
                         max_output_tokens: 1,
+                        output_token_ids: None,
+                        replay_key: None,
                         hash_ids: vec![10, 11],
                         delay_after_previous_ms: 0.0,
                         priority: 3,
                         strict_priority: 4,
+                        policy_class: None,
                     },
                     TurnTrace {
                         input_length: 3,
                         max_output_tokens: 1,
+                        output_token_ids: None,
+                        replay_key: None,
                         hash_ids: vec![12],
                         delay_after_previous_ms: 5.0,
                         priority: -2,
                         strict_priority: 7,
+                        policy_class: None,
                     },
                 ],
             }],

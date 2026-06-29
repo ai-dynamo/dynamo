@@ -807,10 +807,11 @@ def build_sampling_params(
     provided_max_tokens = request.get("stop_conditions", {}).get("max_tokens", None)
     token_ids = request.get("token_ids", [])
     input_length = len(token_ids)
-    if model_max_len is not None and (provided_max_tokens is None):
+    if model_max_len is not None and provided_max_tokens is None:
         # Ensure at least 1 token generation by default when possible
         dynamic_default = max(1, model_max_len - input_length)
-        sampling_params.max_tokens = dynamic_default
+        configured_default = default_sampling_params.get("max_tokens", dynamic_default)
+        sampling_params.max_tokens = min(configured_default, dynamic_default)
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
@@ -873,6 +874,12 @@ def build_sampling_params_openai(
     # Handle min_tokens (custom extension)
     if "min_tokens" in request and request["min_tokens"] is not None:
         sampling_params.min_tokens = request["min_tokens"]
+
+    nvext_max_thinking_tokens = (request.get("nvext") or {}).get("max_thinking_tokens")
+    if nvext_max_thinking_tokens is not None and hasattr(
+        sampling_params, "thinking_token_budget"
+    ):
+        sampling_params.thinking_token_budget = nvext_max_thinking_tokens
 
     return sampling_params
 
@@ -1825,7 +1832,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     async def clear_kv_blocks(self, request=None):
         try:
-            await self.engine_client.reset_prefix_cache()
+            reset_successful = await self.engine_client.reset_prefix_cache(
+                reset_connector=True
+            )
+            if reset_successful is False:
+                yield {"status": "error", "message": "KV cache reset failed"}
+                return
             yield {"status": "success", "message": "KV cache cleared"}
         except Exception as e:
             yield {"status": "error", "message": str(e)}

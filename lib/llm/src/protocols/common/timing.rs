@@ -20,7 +20,7 @@ use crate::http::service::metrics::{
     WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
-use crate::protocols::openai::nvext::WorkerIdInfo;
+use crate::protocols::common::extensions::WorkerIdInfo;
 
 /// Worker type constants for Prometheus metric labels.
 /// These are stored in RequestTracker at routing time to avoid costly MDC lookups

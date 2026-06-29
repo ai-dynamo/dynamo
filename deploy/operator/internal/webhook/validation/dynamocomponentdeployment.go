@@ -44,9 +44,7 @@ func NewDynamoComponentDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoC
 func (v *DynamoComponentDeploymentValidator) Validate(ctx context.Context) (admission.Warnings, error) {
 	// Validate shared spec fields using SharedSpecValidator
 	calculatedNamespace := v.deployment.GetDynamoNamespace()
-	sharedValidator := NewSharedSpecValidator(&v.deployment.Spec.DynamoComponentDeploymentSharedSpec, "spec", calculatedNamespace)
-
-	// DCD-specific validation would go here (currently none)
+	sharedValidator := NewSharedSpecValidator(&v.deployment.Spec.DynamoComponentDeploymentSharedSpec, "spec", calculatedNamespace, false)
 
 	return sharedValidator.Validate(ctx)
 }

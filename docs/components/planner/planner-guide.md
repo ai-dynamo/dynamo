@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Planner Guide
+subtitle: Configures Planner optimization targets, scaling modes, and PlannerConfig fields for production deployments.
 ---
 
 <p align="left">
