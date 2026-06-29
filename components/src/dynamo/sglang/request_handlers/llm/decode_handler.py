@@ -372,11 +372,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             "_decode_migration_id"
         )
         decode = None
+        first_item_task = None
         if migration_id:
             async with self._decode_migration_lock:
                 reservation = self._decode_migration_reservations.get(migration_id)
                 if reservation is not None:
                     decode = reservation.pop("decode_stream", None)
+                    first_item_task = reservation.pop("first_item_task", None)
         if decode is not None:
             logging.info(
                 "Attached generate stream to prepared decode migration "
@@ -386,6 +388,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 (request.get("bootstrap_info") or {}).get("bootstrap_room"),
             )
             try:
+                if first_item_task is not None:
+                    prepared_decode = decode
+
+                    async def resume_prepared_stream(
+                        first=first_item_task, stream=prepared_decode
+                    ):
+                        try:
+                            yield await first
+                        except StopAsyncIteration:
+                            return
+                        async for item in stream:
+                            yield item
+
+                    decode = resume_prepared_stream()
                 if not self.use_sglang_tokenizer:
                     async for out in self._process_token_stream(
                         decode,
@@ -583,79 +599,138 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 }
 
             source_state = request.get("source_state")
+            destination_request = request.get("destination_request")
+            if (
+                response is None
+                and isinstance(destination_request, dict)
+                and "decode_stream" not in existing
+                and existing["status"] not in ("ready", "active")
+            ):
+                bootstrap_info = destination_request["bootstrap_info"]
+                sampling_params = self._build_sampling_params(destination_request)
+                input_param = self._get_input_param(destination_request)
+                priority = (destination_request.get("routing") or {}).get("priority")
+                logprob_kwargs = self._build_logprob_kwargs(destination_request)
+                lora_path = self._resolve_lora(destination_request)
+                migration_state = (
+                    destination_request.get("decode_migration_state") or {}
+                )
+                existing["status"] = "bootstrapping"
+                try:
+                    decode_stream = await self.engine.async_generate(
+                        **input_param,
+                        sampling_params=sampling_params,
+                        stream=True,
+                        **self._routed_experts_kwargs,
+                        bootstrap_host=bootstrap_info["bootstrap_host"],
+                        bootstrap_port=bootstrap_info["bootstrap_port"],
+                        bootstrap_room=bootstrap_info["bootstrap_room"],
+                        decode_migration_id=migration_id,
+                        disagg_prefill_dp_rank=migration_state.get("source_dp_rank")
+                        if migration_state
+                        else destination_request.get(
+                            "_decode_migration_source_dp_rank"
+                        ),
+                        external_trace_header=None,
+                        rid=migration_state.get("rid")
+                        or destination_request["_decode_migration_rid"],
+                        data_parallel_rank=(
+                            destination_request.get("routing") or {}
+                        ).get("dp_rank"),
+                        **self._session_kwargs(destination_request),
+                        lora_path=lora_path,
+                        **logprob_kwargs,
+                        **self._priority_kwargs(priority),
+                    )
+                    first_item_task = asyncio.create_task(decode_stream.__anext__())
+                except Exception as exc:
+                    existing["status"] = "reserved"
+                    logging.exception(
+                        "Failed to bootstrap decode migration destination "
+                        "rid=%s migration_id=%s",
+                        existing["rid"],
+                        migration_id,
+                    )
+                    response = {
+                        "migration_id": migration_id,
+                        "rid": existing["rid"],
+                        "success": False,
+                        "status": "error",
+                        "error": f"Failed to bootstrap destination: {exc}",
+                    }
+                else:
+                    existing["decode_stream"] = decode_stream
+                    existing["first_item_task"] = first_item_task
+                    logging.info(
+                        "Bootstrapping decode migration destination rid=%s "
+                        "migration_id=%s room=%s",
+                        existing["rid"],
+                        migration_id,
+                        existing["bootstrap_room"],
+                    )
+
             if (
                 response is None
                 and source_state is not None
                 and existing["status"] not in ("ready", "active")
             ):
-                destination_request = request.get("destination_request")
                 if not isinstance(destination_request, dict):
                     response = {
                         "migration_id": migration_id,
                         "rid": existing["rid"],
                         "success": False,
                         "status": "error",
-                        "error": "destination_request is required when arming",
+                        "error": "destination_request is required when binding",
                     }
-                else:
-                    bootstrap_info = destination_request["bootstrap_info"]
+                elif "decode_stream" not in existing:
+                    response = {
+                        "migration_id": migration_id,
+                        "rid": existing["rid"],
+                        "success": False,
+                        "status": "error",
+                        "error": "destination bootstrap is not active",
+                    }
+                elif existing["status"] not in ("ready", "active"):
+                    from sglang.srt.managers.io_struct import (
+                        BindDecodeMigrationReqInput,
+                    )
+
                     sampling_params = self._build_sampling_params(destination_request)
-                    input_param = self._get_input_param(destination_request)
-                    priority = (destination_request.get("routing") or {}).get(
-                        "priority"
+                    bind = BindDecodeMigrationReqInput(
+                        rid=existing["rid"],
+                        migration_id=migration_id,
+                        bootstrap_room=existing["bootstrap_room"],
+                        committed_input_ids=list(
+                            source_state.get("committed_input_ids") or []
+                        ),
+                        pending_input_ids=list(
+                            source_state.get("pending_input_ids") or []
+                        ),
+                        committed_len=int(source_state.get("committed_len") or 0),
+                        logical_len=int(source_state.get("logical_len") or 0),
+                        max_new_tokens=sampling_params.get("max_new_tokens"),
+                        min_new_tokens=sampling_params.get("min_new_tokens"),
+                        routed_dp_rank=destination_dp_rank,
                     )
-                    logprob_kwargs = self._build_logprob_kwargs(destination_request)
-                    lora_path = self._resolve_lora(destination_request)
-                    migration_state = (
-                        destination_request.get("decode_migration_state") or {}
+                    result = await self.engine.tokenizer_manager.bind_decode_migration_destination(
+                        bind
                     )
-                    existing["status"] = "arming"
-                    try:
-                        decode_stream = await self.engine.async_generate(
-                            **input_param,
-                            sampling_params=sampling_params,
-                            stream=True,
-                            **self._routed_experts_kwargs,
-                            bootstrap_host=bootstrap_info["bootstrap_host"],
-                            bootstrap_port=bootstrap_info["bootstrap_port"],
-                            bootstrap_room=bootstrap_info["bootstrap_room"],
-                            disagg_prefill_dp_rank=migration_state.get("source_dp_rank")
-                            if migration_state
-                            else destination_request.get(
-                                "_decode_migration_source_dp_rank"
-                            ),
-                            external_trace_header=None,
-                            rid=migration_state.get("rid")
-                            or destination_request["_decode_migration_rid"],
-                            data_parallel_rank=(
-                                destination_request.get("routing") or {}
-                            ).get("dp_rank"),
-                            **self._session_kwargs(destination_request),
-                            lora_path=lora_path,
-                            **logprob_kwargs,
-                            **self._priority_kwargs(priority),
-                        )
-                    except Exception as exc:
-                        existing["status"] = "reserved"
-                        logging.exception(
-                            "Failed to arm decode migration destination "
-                            "rid=%s migration_id=%s",
-                            existing["rid"],
-                            migration_id,
-                        )
+                    if not result.success:
                         response = {
                             "migration_id": migration_id,
                             "rid": existing["rid"],
                             "success": False,
-                            "status": "error",
-                            "error": f"Failed to arm destination: {exc}",
+                            "status": result.status,
+                            "error": result.error,
                         }
                     else:
-                        existing["decode_stream"] = decode_stream
                         existing["source_state"] = dict(source_state)
+                        existing[
+                            "pending_token_suppressed"
+                        ] = result.pending_token_suppressed
                         existing["status"] = "ready"
                         logging.info(
-                            "Armed decode migration destination rid=%s "
+                            "Bound decode migration destination rid=%s "
                             "migration_id=%s room=%s committed_len=%s",
                             existing["rid"],
                             migration_id,
@@ -675,6 +750,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "bootstrap_room": existing["bootstrap_room"],
                     "destination_dp_rank": existing["destination_dp_rank"],
                     "reserve_tokens": existing["reserve_tokens"],
+                    "pending_token_suppressed": existing.get(
+                        "pending_token_suppressed", False
+                    ),
                 }
 
         yield response
@@ -716,6 +794,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             target_sequence_length=(
                 int(request["target_sequence_length"])
                 if request.get("target_sequence_length") is not None
+                else None
+            ),
+            target_token_id=(
+                int(request["target_token_id"])
+                if request.get("target_token_id") is not None
                 else None
             ),
             routed_dp_rank=source_dp_rank,
@@ -760,6 +843,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 yield response
                 return
             if action == "abort":
+                first_item_task = record.get("first_item_task")
+                if first_item_task is not None:
+                    first_item_task.cancel()
                 tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
                 if tokenizer_manager is not None:
                     tokenizer_manager.abort_request(rid=record["rid"], abort_all=False)

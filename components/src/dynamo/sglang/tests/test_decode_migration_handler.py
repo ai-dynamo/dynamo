@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from sglang.srt.managers.io_struct import (
+    BindDecodeMigrationReqOutput,
     FinalizeDecodeMigrationReqOutput,
     PrepareDecodeMigrationReqOutput,
 )
@@ -33,6 +34,16 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
         handler.engine = SimpleNamespace(
             tokenizer_manager=SimpleNamespace(
                 abort_request=Mock(),
+                bind_decode_migration_destination=AsyncMock(
+                    return_value=BindDecodeMigrationReqOutput(
+                        rid="request",
+                        migration_id="migration",
+                        success=True,
+                        status="ready",
+                        source_dp_rank=1,
+                        pending_token_suppressed=True,
+                    )
+                ),
                 prepare_decode_migration=AsyncMock(),
                 finalize_decode_migration=AsyncMock(),
             )
@@ -355,7 +366,12 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
         return {
             "migration_id": "migration",
             "rid": "request",
-            "source_state": {"committed_len": 3},
+            "source_state": {
+                "committed_input_ids": [1, 2, 3],
+                "pending_input_ids": [4],
+                "committed_len": 3,
+                "logical_len": 4,
+            },
             "destination_dp_rank": 1,
             "destination_request": {
                 "model": "model",
@@ -415,6 +431,47 @@ class DecodeMigrationHandlerTests(IsolatedAsyncioTestCase):
         self.assertEqual(
             handler.engine.async_generate.await_args.kwargs["disagg_prefill_dp_rank"],
             3,
+        )
+
+    async def test_destination_bootstrap_starts_before_exact_source_state(self):
+        handler = self.handler()
+        self.configure_destination_handler(handler)
+        started = asyncio.Event()
+
+        async def prepared_stream():
+            started.set()
+            await asyncio.Event().wait()
+            yield {"token_ids": [9]}
+
+        handler.engine.async_generate = AsyncMock(return_value=prepared_stream())
+        handler._decode_migration_reservations["migration"] = {
+            "migration_id": "migration",
+            "rid": "request",
+            "bootstrap_room": 17,
+            "source": {"bootstrap_host": "127.0.0.1", "bootstrap_port": 8998},
+            "reserve_tokens": 128,
+            "destination_dp_rank": 1,
+            "status": "reserved",
+        }
+        request = self.arm_request()
+        request.pop("source_state")
+
+        responses = await collect(handler.prepare_decode_migration(request))
+
+        await asyncio.wait_for(started.wait(), timeout=1)
+        self.assertEqual(responses[0]["status"], "bootstrapping")
+        self.assertEqual(
+            handler.engine.async_generate.await_args.kwargs["decode_migration_id"],
+            "migration",
+        )
+        await collect(
+            handler.finalize_decode_migration(
+                {
+                    "side": "destination",
+                    "action": "abort",
+                    "migration_id": "migration",
+                }
+            )
         )
 
     async def test_abort_waits_for_inflight_arm_then_cancels_engine_request(self):

@@ -210,6 +210,8 @@ struct ControlResponse {
     pending_input_ids: Option<Vec<TokenIdType>>,
     unforwarded_committed_output_ids: Option<Vec<TokenIdType>>,
     transfer_status: Option<String>,
+    #[serde(default)]
+    pending_token_suppressed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -237,7 +239,7 @@ async fn prepare_destination(
     source_worker: WorkerWithDpRank,
     rid: String,
     migration_id: String,
-    source_target_sequence_length: Option<u32>,
+    source_trigger: DecodeMigrationTrigger,
 ) -> Result<PreparedDestination> {
     let destination_worker = selector
         .select_destination(&request, &request.token_ids, &constraints, source_worker)
@@ -339,36 +341,97 @@ async fn prepare_destination(
         .bootstrap_room
         .context("destination reservation omitted bootstrap_room")?;
 
-    if let Some(target_sequence_length) = source_target_sequence_length {
-        let output_tokens_seen =
-            (target_sequence_length as usize).saturating_sub(request.token_ids.len());
-        let armed = control
-            .call(
-                ControlEndpoint::Sync,
-                source_worker.worker_id,
-                json!({
-                    "rid": rid,
-                    "migration_id": migration_id,
-                    "phase": "arm",
-                    "bootstrap_room": bootstrap_room,
-                    "target_sequence_length": target_sequence_length,
-                    "output_tokens_seen": output_tokens_seen,
-                    "source_dp_rank": source_dp_rank,
-                }),
-            )
-            .await
-            .context("source migration arm failed")?;
-        if !armed.success || !matches!(armed.status.as_str(), "armed" | "prepared") {
-            bail!(
-                "source migration arm declined with status {}: {}",
-                armed.status,
-                armed.error.as_deref().unwrap_or("unknown error")
-            );
+    let mut source_arm = json!({
+        "rid": rid,
+        "migration_id": migration_id,
+        "phase": "arm",
+        "bootstrap_room": bootstrap_room,
+        "source_dp_rank": source_dp_rank,
+        "output_tokens_seen": 0,
+    });
+    match &source_trigger {
+        DecodeMigrationTrigger::SequenceLength { tokens } => {
+            source_arm["target_sequence_length"] = json!(tokens);
+            source_arm["output_tokens_seen"] =
+                json!((*tokens as usize).saturating_sub(request.token_ids.len()));
         }
-        // The source may park itself at any point after a successful arm.
-        // Cleanup must therefore disarm or cancel it even before the frontend
-        // observes the trigger token.
-        cleanup.mark_source_quiesce_started();
+        DecodeMigrationTrigger::TokenId { token_id } => {
+            source_arm["target_token_id"] = json!(token_id);
+        }
+    }
+    let armed = control
+        .call(ControlEndpoint::Sync, source_worker.worker_id, source_arm)
+        .await
+        .context("source migration arm failed")?;
+    if !armed.success || !matches!(armed.status.as_str(), "armed" | "prepared") {
+        bail!(
+            "source migration arm declined with status {}: {}",
+            armed.status,
+            armed.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+    cleanup.mark_source_quiesce_started();
+
+    let reserved_committed_len = match &source_trigger {
+        DecodeMigrationTrigger::SequenceLength { tokens } => (*tokens as usize).saturating_sub(1),
+        DecodeMigrationTrigger::TokenId { .. } => {
+            let max_output_tokens = request
+                .stop_conditions
+                .max_tokens
+                .context("token-ID migration requires a bounded max_tokens")?
+                as usize;
+            request
+                .token_ids
+                .len()
+                .saturating_add(max_output_tokens)
+                .saturating_sub(1)
+        }
+    };
+    if reserved_committed_len < request.token_ids.len() {
+        bail!("decode migration boundary must extend beyond the prompt");
+    }
+    let reserved_output_tokens = reserved_committed_len - request.token_ids.len();
+    let mut reserved_input_ids = request.token_ids.clone();
+    reserved_input_ids.resize(reserved_committed_len, 0);
+    let mut reserved_request = build_destination_request(
+        &request,
+        reserved_input_ids,
+        BootstrapInfo {
+            bootstrap_host: source_host.clone(),
+            bootstrap_port: source_port,
+            bootstrap_room,
+        },
+        DecodeMigrationRequestState {
+            rid: rid.clone(),
+            migration_id: migration_id.clone(),
+            source_dp_rank,
+            is_destination: true,
+        },
+        reserved_output_tokens,
+        destination_worker,
+    );
+    reserved_request.decode_migration = None;
+    let reserved_request = serde_json::to_value(reserved_request)
+        .context("failed to serialize reserved destination request")?;
+    let started = control
+        .call(
+            ControlEndpoint::Prepare,
+            destination_worker.worker_id,
+            json!({
+                "rid": rid,
+                "migration_id": migration_id,
+                "destination_request": reserved_request,
+                "destination_dp_rank": destination_worker.dp_rank,
+            }),
+        )
+        .await
+        .context("destination early bootstrap failed")?;
+    if !started.success || !matches!(started.status.as_str(), "bootstrapping" | "ready") {
+        bail!(
+            "destination early bootstrap declined with status {}: {}",
+            started.status,
+            started.error.as_deref().unwrap_or("unknown error")
+        );
     }
 
     Ok(PreparedDestination {
@@ -625,10 +688,7 @@ impl
         let setup_constraints = policy.destination.clone();
         let setup_rid = engine_rid.clone();
         let setup_migration_id = migration_id.clone();
-        let source_target_sequence_length = match policy.trigger {
-            DecodeMigrationTrigger::SequenceLength { tokens } => Some(tokens),
-            DecodeMigrationTrigger::TokenId { .. } => None,
-        };
+        let source_trigger = policy.trigger.clone();
         let output = async_stream::stream! {
             let mut setup = Box::pin(prepare_destination(
                 setup_selector,
@@ -638,12 +698,11 @@ impl
                 source_worker,
                 setup_rid,
                 setup_migration_id,
-                source_target_sequence_length,
+                source_trigger,
             ));
             let mut setup_result = None;
             let mut forwarded_tokens = 0usize;
             let mut attempted = false;
-            let mut token_trigger_armed = false;
 
             'request_stream: loop {
                 let source_item = if setup_result.is_none() && !attempted {
@@ -670,12 +729,11 @@ impl
                     let source_finished = data.finish_reason.is_some();
                     trigger_now = !attempted
                         && !source_finished
-                        && trigger_ready_after_emission(
+                        && trigger_matches(
                             &policy_for_stream.trigger,
                             original_request.token_ids.len(),
                             forwarded_tokens,
                             &data.token_ids,
-                            &mut token_trigger_armed,
                         );
                 }
 
@@ -861,6 +919,13 @@ impl
                     yield Annotated::from_error("destination arm failed after source quiesced");
                     return;
                 }
+                let pending_token_suppressed = arm
+                    .as_ref()
+                    .is_ok_and(|response| response.pending_token_suppressed);
+                if pending_token_suppressed {
+                    duplicate_tokens =
+                        duplicate_tokens.saturating_sub(pending_input_ids.len());
+                }
 
                 if !unforwarded.is_empty() {
                     yield Annotated::from_data(LLMEngineOutput {
@@ -906,7 +971,7 @@ impl
                         }
                         continue;
                     }
-                    let (trimmed, dropped) = match trim_annotated_prefix(destination_item, duplicate_tokens) {
+                    let (mut trimmed, dropped) = match trim_annotated_prefix(destination_item, duplicate_tokens) {
                         Ok(value) => value,
                         Err(error) => {
                             tracing::warn!(request_id = %rid, "destination prefix reconciliation failed: {error:#}");
@@ -915,6 +980,11 @@ impl
                         }
                     };
                     duplicate_tokens -= dropped;
+                    normalize_migrated_usage(
+                        &mut trimmed,
+                        original_request.token_ids.len(),
+                        committed_output_tokens,
+                    );
 
                     if !destination_ready {
                         // A decode result proves that SGLang has admitted the
@@ -1029,39 +1099,6 @@ fn trigger_matches(
     }
 }
 
-fn trigger_ready_after_emission(
-    trigger: &DecodeMigrationTrigger,
-    prompt_tokens: usize,
-    forwarded_tokens: usize,
-    chunk_tokens: &[TokenIdType],
-    token_trigger_armed: &mut bool,
-) -> bool {
-    match trigger {
-        DecodeMigrationTrigger::TokenId { token_id } => {
-            if *token_trigger_armed {
-                if chunk_tokens.is_empty() {
-                    return false;
-                }
-                *token_trigger_armed = false;
-                return true;
-            }
-
-            let Some(position) = chunk_tokens.iter().position(|token| token == token_id) else {
-                return false;
-            };
-            if position + 1 < chunk_tokens.len() {
-                true
-            } else {
-                *token_trigger_armed = true;
-                false
-            }
-        }
-        DecodeMigrationTrigger::SequenceLength { .. } => {
-            trigger_matches(trigger, prompt_tokens, forwarded_tokens, chunk_tokens)
-        }
-    }
-}
-
 fn build_destination_request(
     original: &PreprocessedRequest,
     committed_input_ids: Vec<TokenIdType>,
@@ -1121,6 +1158,29 @@ fn trim_annotated_prefix(
         top_logprobs.drain(..dropped.min(top_logprobs.len()));
     }
     Ok((item, dropped))
+}
+
+fn normalize_migrated_usage(
+    item: &mut Annotated<LLMEngineOutput>,
+    original_prompt_tokens: usize,
+    committed_output_tokens: usize,
+) {
+    let Some(usage) = item
+        .data
+        .as_mut()
+        .and_then(|output| output.completion_usage.as_mut())
+    else {
+        return;
+    };
+    let prompt_tokens = u32::try_from(original_prompt_tokens).unwrap_or(u32::MAX);
+    let committed_output_tokens = u32::try_from(committed_output_tokens).unwrap_or(u32::MAX);
+    usage.prompt_tokens = prompt_tokens;
+    usage.completion_tokens = usage
+        .completion_tokens
+        .saturating_add(committed_output_tokens);
+    usage.total_tokens = prompt_tokens.saturating_add(usage.completion_tokens);
+    usage.prompt_tokens_details = None;
+    usage.completion_tokens_details = None;
 }
 
 struct MigrationCleanup {
@@ -1399,64 +1459,10 @@ mod tests {
     }
 
     #[test]
-    fn token_trigger_waits_for_first_post_boundary_token() {
+    fn token_trigger_fires_on_boundary_token_without_waiting() {
         let trigger = DecodeMigrationTrigger::TokenId { token_id: 7 };
-        let mut armed = false;
-
-        assert!(!trigger_ready_after_emission(
-            &trigger,
-            10,
-            1,
-            &[7],
-            &mut armed,
-        ));
-        assert!(armed);
-        assert!(!trigger_ready_after_emission(
-            &trigger,
-            10,
-            1,
-            &[],
-            &mut armed,
-        ));
-        assert!(armed);
-        assert!(trigger_ready_after_emission(
-            &trigger,
-            10,
-            2,
-            &[8],
-            &mut armed,
-        ));
-        assert!(!armed);
-    }
-
-    #[test]
-    fn token_trigger_fires_after_coalesced_post_boundary_token() {
-        let trigger = DecodeMigrationTrigger::TokenId { token_id: 7 };
-        let mut armed = false;
-
-        assert!(trigger_ready_after_emission(
-            &trigger,
-            10,
-            4,
-            &[4, 7, 9, 10],
-            &mut armed,
-        ));
-        assert!(!armed);
-    }
-
-    #[test]
-    fn sequence_trigger_timing_is_unchanged() {
-        let trigger = DecodeMigrationTrigger::SequenceLength { tokens: 8 };
-        let mut armed = false;
-
-        assert!(trigger_ready_after_emission(
-            &trigger,
-            3,
-            5,
-            &[14],
-            &mut armed,
-        ));
-        assert!(!armed);
+        assert!(trigger_matches(&trigger, 10, 1, &[7]));
+        assert!(!trigger_matches(&trigger, 10, 2, &[8]));
     }
 
     #[tokio::test]
@@ -1802,7 +1808,16 @@ mod tests {
                 assert!(matches!(endpoint, ControlEndpoint::Sync));
                 assert_eq!(instance_id, 1);
                 assert_control_rank(&request, "source_dp_rank", SOURCE_DP_RANK);
-                assert!(request["target_sequence_length"].as_u64().unwrap() > 0);
+                assert!(
+                    request
+                        .get("target_sequence_length")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|value| value > 0)
+                        || request
+                            .get("target_token_id")
+                            .and_then(Value::as_u64)
+                            .is_some()
+                );
                 self.state.record("source:arm");
                 json!({"success": true, "status": "armed"})
             } else if request.get("source_state").is_some() {
@@ -1838,6 +1853,14 @@ mod tests {
                     "bootstrap_room": 777,
                     "destination_dp_rank": DESTINATION_DP_RANK,
                 })
+            } else if request.get("destination_request").is_some()
+                && request.get("source_state").is_none()
+            {
+                assert!(matches!(endpoint, ControlEndpoint::Prepare));
+                assert_eq!(instance_id, 2);
+                assert_control_rank(&request, "destination_dp_rank", DESTINATION_DP_RANK);
+                self.state.record("destination:bootstrap");
+                json!({"success": true, "status": "bootstrapping"})
             } else if side == Some("destination") {
                 assert!(matches!(endpoint, ControlEndpoint::Finalize));
                 assert_eq!(instance_id, 2);
