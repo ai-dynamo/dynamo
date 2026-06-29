@@ -209,9 +209,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             ));
         }
 
-        let target = self
-            .select_from(&candidates)
-            .expect("candidates is non-empty");
+        let Some(target) = self.select_from(&candidates) else {
+            return Err(anyhow::anyhow!(
+                "No workers available after LoRA filtering (lora={})",
+                lora_name
+            ));
+        };
         tracing::debug!(
             lora = %lora_name,
             worker_id = target,

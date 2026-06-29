@@ -2403,7 +2403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_transport_resolution_never_falls_back() {
+    async fn transport_resolution_honors_fallback_policy() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
@@ -2430,6 +2430,20 @@ mod tests {
                 .resolve_transport(stale_id, TransportFallback::Allow)
                 .is_ok(),
             "normal dispatch should preserve transport fallback"
+        );
+        let allowed = HashSet::from([real_id]);
+        assert!(
+            router
+                .resolve_transport(stale_id, TransportFallback::Within(&allowed))
+                .is_ok(),
+            "constrained dispatch should fall back within the allowed worker set"
+        );
+        let disallowed = HashSet::new();
+        assert!(
+            router
+                .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
+                .is_err(),
+            "constrained dispatch must not fall back outside the allowed worker set"
         );
         let error = router
             .resolve_transport(stale_id, TransportFallback::Deny)

@@ -1015,7 +1015,7 @@ mod tests {
         est.increment_load("new-adapter"); // request arrives
         est.decrement_load("new-adapter"); // request completes immediately
         assert!(
-            est.get_inflight_counts().get("new-adapter").is_none(),
+            !est.get_inflight_counts().contains_key("new-adapter"),
             "no in-flight requests remain after the short request completes"
         );
 

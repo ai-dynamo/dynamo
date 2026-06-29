@@ -1470,7 +1470,6 @@ fn seed_lora_state_from_card(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::WorkerSet;
     use crate::model_card::ModelDeploymentCard;
 
     #[test]
@@ -1530,14 +1529,6 @@ mod tests {
         assert_eq!(adapter.as_deref(), Some("adapter-x"));
         assert!(st.is_loaded("adapter-x", &worker));
         assert_eq!(st.total_lora_slots(), 2);
-    }
-
-    fn make_worker_set(namespace: &str) -> WorkerSet {
-        WorkerSet::new(
-            namespace.to_string(),
-            "test-checksum".to_string(),
-            ModelDeploymentCard::default(),
-        )
     }
 
     #[test]
