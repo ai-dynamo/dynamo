@@ -61,7 +61,7 @@ where
                     // Aggregate all collected chunks
                     let chunks = std::mem::take(&mut self.chunks);
                     if chunks.is_empty() {
-                        tracing::debug!("audit: empty response stream produced no response record");
+                        tracing::debug!("audit: empty response stream, no response to aggregate");
                         drop(tx);
                         return Poll::Ready(None);
                     }
