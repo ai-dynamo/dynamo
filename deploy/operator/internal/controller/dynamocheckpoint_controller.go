@@ -337,54 +337,46 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		return ctrl.Result{}, err
 	}
 
-	// Locate this checkpoint's PodSnapshot by owner label (never by reconstructed name). A list/owner
-	// error (including the >1-owned invariant violation) is non-terminal: return it to requeue.
+	// Locate this checkpoint's PodSnapshot by owner label (never by status, never by reconstructed
+	// name). A NotFound means none exists yet — create it. Any other list/owner error (including the
+	// >1-owned invariant violation) is non-terminal: return it to requeue.
 	snap, err := r.findOwnedPodSnapshot(ctx, ckpt)
 	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if snap != nil {
-		return r.observePodSnapshot(ctx, ckpt, job, snap, checkpointID)
-	}
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
 
-	// No owned PodSnapshot found. status.podSnapshotName distinguishes the two reasons:
-	//  - set: one was created and has gone missing (deleted / cache lag) — guard against a hung Job,
-	//    then wait for a watch event (Owns(&Job) re-enqueues on the Job's terminal transition).
-	//  - unset: never created — create it.
-	if ckpt.Status.PodSnapshotName != "" {
+		// No owned PodSnapshot exists. A failed Job can never produce a capture, so fail now whether or
+		// not the source pod has appeared (k8s sets JobFailed/DeadlineExceeded on unschedulable Jobs).
 		if failed, message := checkpointJobFailed(job); failed {
 			return r.failCreating(ctx, ckpt, "JobFailed", message)
 		}
-		return ctrl.Result{}, nil
-	}
 
-	pod, err := r.findSourcePod(ctx, job)
-	if err != nil {
-		if client.IgnoreNotFound(err) == nil {
-			// The source pod has not been created yet. Do not poll: the scoped pod watch re-enqueues
-			// when it appears, and the Owns(&Job) watch fails the checkpoint if the Job never produces
-			// a pod (e.g. unschedulable → k8s sets JobFailed/DeadlineExceeded).
-			if failed, message := checkpointJobFailed(job); failed {
-				return r.failCreating(ctx, ckpt, "JobFailed", message)
+		pod, perr := r.findSourcePod(ctx, job)
+		if perr != nil {
+			if client.IgnoreNotFound(perr) == nil {
+				// The source pod has not been created yet. Do not poll: the scoped pod watch re-enqueues
+				// when it appears, and the Owns(&Job) watch fails the checkpoint if the Job never
+				// produces a pod.
+				return ctrl.Result{}, nil
 			}
-			return ctrl.Result{}, nil
+			return ctrl.Result{}, perr
 		}
-		return ctrl.Result{}, err
+
+		created, cerr := r.createPodSnapshot(ctx, ckpt, checkpointID, pod.Name)
+		if cerr != nil {
+			if commonController.IgnoreIntermediateError(cerr) != nil {
+				r.updateFailedStatus(ctx, ckpt, cerr)
+			}
+			return ctrl.Result{}, cerr
+		}
+		// Record the pointer for observability (write-only; never read back). The Owns(&PodSnapshot)
+		// watch re-enqueues for observation.
+		ckpt.Status.PodSnapshotName = created.Name
+		return ctrl.Result{}, r.Status().Update(ctx, ckpt)
 	}
 
-	created, err := r.createPodSnapshot(ctx, ckpt, checkpointID, pod.Name)
-	if err != nil {
-		if commonController.IgnoreIntermediateError(err) != nil {
-			r.updateFailedStatus(ctx, ckpt, err)
-		}
-		return ctrl.Result{}, err
-	}
-	// Record the authoritative pointer; the Owns(&PodSnapshot) watch re-enqueues for observation.
-	ckpt.Status.PodSnapshotName = created.Name
-	if err := r.Status().Update(ctx, ckpt); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
+	return r.observePodSnapshot(ctx, ckpt, job, snap, checkpointID)
 }
 
 // observePodSnapshot maps the owned PodSnapshot's status (and the Job's failure hang guard) onto the
@@ -393,18 +385,6 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 // PodSnapshot → DynamoCheckpoint, so this never reads the Job's terminal annotation. The Job is read
 // only on the non-terminal path (the terminal PodSnapshot result always wins).
 func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job, snap *nvidiacomv1alpha1.PodSnapshot, checkpointID string) (ctrl.Result, error) {
-	// Heal the authoritative pointer: if the PodSnapshot was created but the status write that records
-	// its name did not land, this is the only path that observes it again — record it now so a checkpoint
-	// can never reach Ready with an empty status.podSnapshotName. Return so the next watch event observes
-	// a consistent object.
-	if ckpt.Status.PodSnapshotName != snap.Name {
-		ckpt.Status.PodSnapshotName = snap.Name
-		if err := r.Status().Update(ctx, ckpt); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-
 	// A PodSnapshot can fail before it is bound (e.g. the PodSnapshotReconciler rejects the
 	// source pod), so always observe Failed. Ready is only meaningful once bound.
 	if nvidiacomv1alpha1.IsPodSnapshotFailed(snap) {

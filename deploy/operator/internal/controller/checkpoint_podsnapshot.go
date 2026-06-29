@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -61,7 +62,7 @@ func (r *CheckpointReconciler) findSourcePod(ctx context.Context, job *batchv1.J
 }
 
 // findOwnedPodSnapshot returns this checkpoint's PodSnapshot, located by the SnapshotOwnerLabel and
-// confirmed via IsControlledBy. It returns (nil, nil) when none exists. List and Get share the
+// confirmed via IsControlledBy. It returns a NotFound error when none exists. List and Get share the
 // informer cache, so this is foreign-object isolation (never act on a snapshot that is not ours), not
 // a staleness fix — the authoritative existence signal for a just-created object is the Create
 // AlreadyExists in createPodSnapshot. More than one owned match is a controller invariant violation
@@ -80,7 +81,10 @@ func (r *CheckpointReconciler) findOwnedPodSnapshot(ctx context.Context, ckpt *n
 	})
 	switch len(owned) {
 	case 0:
-		return nil, nil
+		return nil, apierrors.NewNotFound(
+			schema.GroupResource{Group: nvidiacomv1alpha1.GroupVersion.Group, Resource: "podsnapshots"},
+			ckpt.Name,
+		)
 	case 1:
 		return &owned[0], nil
 	default:

@@ -869,9 +869,6 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 				Message: condType + " from agent",
 			}}
 		}
-		// Observe tests start from a checkpoint that already recorded its pointer, so the heal in
-		// observePodSnapshot is a no-op and the observed transition is exercised directly.
-		ckpt.Status.PodSnapshotName = snap.Name
 		return snap
 	}
 
@@ -889,23 +886,6 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseReady, updated.Status.Phase)
 		assert.Equal(t, testHash, updated.Status.CheckpointID)
 		assert.NotNil(t, updated.Status.CreatedAt)
-	})
-
-	t.Run("missing podSnapshotName is healed before observing", func(t *testing.T) {
-		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
-		job := newCheckpointJob(defaultCheckpointJobName)
-		snap := ownedSnapshot(ckpt, nvidiacomv1alpha1.PodSnapshotConditionReady)
-		ckpt.Status.PodSnapshotName = "" // a prior create whose status write did not land
-
-		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
-		_, err := r.handleCreating(ctx, ckpt)
-		require.NoError(t, err)
-
-		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
-		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
-		// The pointer is recorded and the terminal transition is deferred to the next reconcile.
-		assert.Equal(t, snap.Name, updated.Status.PodSnapshotName)
-		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
 	})
 
 	t.Run("PodSnapshot Failed transitions checkpoint to Failed", func(t *testing.T) {
@@ -1009,9 +989,8 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
 	})
 
-	t.Run("previously-created snapshot now missing with failed Job transitions to Failed", func(t *testing.T) {
+	t.Run("no snapshot with source pod and failed Job transitions to Failed", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
-		ckpt.Status.PodSnapshotName = ckpt.Name // created before, but no snapshot object exists now
 		job := newCheckpointJob(defaultCheckpointJobName)
 		job.Status = batchv1.JobStatus{
 			Conditions: []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Message: "boom"}},
@@ -1023,21 +1002,26 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
+		// The hang guard fails the checkpoint before creating a doomed snapshot, even with a pod present.
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
 	})
 
-	t.Run("previously-created snapshot now missing with healthy Job stays Creating, no requeue", func(t *testing.T) {
+	t.Run("no snapshot with source pod and healthy Job creates the snapshot, no requeue", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
-		ckpt.Status.PodSnapshotName = ckpt.Name
 		job := newCheckpointJob(defaultCheckpointJobName)
 		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
 
 		result, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
-		assert.Zero(t, result.RequeueAfter, "watch-driven: Owns(&Job) re-enqueues on the Job's terminal transition")
+		assert.Zero(t, result.RequeueAfter, "watch-driven: Owns(&PodSnapshot) re-enqueues for observation")
 
+		// A missing snapshot is recreated (not treated as terminal), and its name is recorded.
+		snap := &nvidiacomv1alpha1.PodSnapshot{}
+		require.NoError(t, r.Get(ctx,
+			types.NamespacedName{Name: podSnapshotName(ckpt), Namespace: testNamespace}, snap))
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
+		assert.Equal(t, snap.Name, updated.Status.PodSnapshotName)
 		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
 	})
 
