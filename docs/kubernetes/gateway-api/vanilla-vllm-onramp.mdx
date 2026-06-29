@@ -7,7 +7,7 @@ subtitle: Preview Dynamo EPP routing for existing GAIE deployments that run stoc
 ---
 
 This experimental on-ramp is for Kubernetes stacks that already use
-[Gateway API Inference Extension (GAIE)](https://gateway-api-inference-extension.sigs.k8s.io/) with
+[Gateway API Inference Extension (GAIE)](https://github.com/kubernetes-sigs/gateway-api-inference-extension) with
 stock `vLLM serve` pods, or that want to evaluate that shape without installing the Dynamo operator
 first. GAIE still owns endpoint selection at the Gateway API layer. The difference is that the
 Endpoint Picker Plugin is a Dynamo EPP image running in a lightweight router-only mode.
@@ -44,10 +44,11 @@ no `DynamoGraphDeployment`, no Dynamo worker runtime, and no Dynamo event plane 
   [jq](https://jqlang.org/download/) configured for the cluster.
 - Baseline Gateway API knowledge from the upstream
   [Gateway API getting started guide](https://gateway-api.sigs.k8s.io/guides/getting-started/introduction/)
-  and the upstream [GAIE guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
+  and the upstream
+  [GAIE guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/index.md).
 - A Gateway API implementation that supports GAIE. This walkthrough shows agentgateway and Istio;
   see the upstream
-  [GAIE gateway implementation list](https://gateway-api-inference-extension.sigs.k8s.io/implementations/gateways/)
+  [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
   for other implementations.
 - A model namespace that can run GPU workloads.
 - Hugging Face credentials if the model requires them. The
