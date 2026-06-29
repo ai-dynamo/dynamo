@@ -121,6 +121,14 @@ logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
+_DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
+    {
+        "allow_unpaused",
+        "engine_rpc",
+        "reset_prefix_cache",
+        "weight_version",
+    }
+)
 
 
 class _DeferredAbort:
@@ -1669,13 +1677,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             rpc_kwargs = {
                 k: v
                 for k, v in body.items()
-                if k
-                not in (
-                    "allow_unpaused",
-                    "engine_rpc",
-                    "reset_prefix_cache",
-                    "weight_version",
-                )
+                if k not in _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS
             }
             try:
                 await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
