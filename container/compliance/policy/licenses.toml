@@ -2809,5 +2809,3 @@ name = "sudo"
 allow = ["GPL-2.0-or-later"]
 reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
 
-# oneccl / oneccl-devel: license now resolved via license_overrides.yaml
-# (LicenseRef-Intel-ISSL). Temporary UNKNOWN exceptions removed.
