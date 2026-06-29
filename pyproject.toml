@@ -67,7 +67,7 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.13.post1",
+    "sglang[diffusion]==0.5.14",
     # sglang[diffusion] dropped accelerate in 0.5.12; diffusers still needs it.
     "accelerate>=0.17.0",
     "blake3>=1.0.0,<2.0.0",
