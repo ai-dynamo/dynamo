@@ -591,17 +591,6 @@ class SglangProcessor:
                             dynamo_out["nvext"] = response_nvext
 
                         envelope["data"] = dynamo_out
-                    elif pending_usage and finish_reason:
-                        # Final chunk had no decodable tokens (e.g. pure EOS)
-                        # but usage must still propagate to the Rust aggregator.
-                        envelope["data"] = {
-                            "id": request_id,
-                            "choices": [],
-                            "created": created_ts,
-                            "model": request["model"],
-                            "object": "chat.completion.chunk",
-                            "usage": pending_usage,
-                        }
 
                     metrics: dict[str, Any] = {
                         "input_tokens": input_tokens,
