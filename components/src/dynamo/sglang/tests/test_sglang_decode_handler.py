@@ -457,6 +457,31 @@ async def test_metadata_upload_normalizes_numpy_values(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_process_token_stream_treats_completion_usage_as_optional():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert chunks == [{"index": 0, "finish_reason": "stop", "token_ids": []}]
+
+
+@pytest.mark.asyncio
 async def test_process_token_stream_tracks_logprobs_per_choice_index():
     handler = _new_decode_handler()
 
