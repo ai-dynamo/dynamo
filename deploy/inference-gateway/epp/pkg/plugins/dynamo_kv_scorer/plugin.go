@@ -332,9 +332,7 @@ func addCompletionPrompt(requestBody map[string]any, prompt fwkrh.Prompt) {
 	}
 
 	if prompt.Strings != nil {
-		stringsPrompt := make([]string, len(prompt.Strings))
-		copy(stringsPrompt, prompt.Strings)
-		requestBody["prompt"] = stringsPrompt
+		requestBody["prompt"] = prompt.PlainText()
 		return
 	}
 

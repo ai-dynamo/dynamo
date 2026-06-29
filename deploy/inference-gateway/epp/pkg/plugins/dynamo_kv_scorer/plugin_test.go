@@ -113,7 +113,7 @@ func TestBuildOpenAIRequest_CompletionsTextPromptUsesPromptField(t *testing.T) {
 	}
 }
 
-func TestBuildOpenAIRequest_CompletionsStringArrayPromptUsesPromptField(t *testing.T) {
+func TestBuildOpenAIRequest_CompletionsStringArrayPromptCollapsesToSinglePrompt(t *testing.T) {
 	req := &schedtypes.InferenceRequest{
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
@@ -131,7 +131,7 @@ func TestBuildOpenAIRequest_CompletionsStringArrayPromptUsesPromptField(t *testi
 	if _, ok := body["messages"]; ok {
 		t.Fatalf("did not expect string-array completions to synthesize messages: %v", body["messages"])
 	}
-	if got := body["prompt"]; !reflect.DeepEqual(got, []string{"hello", "world"}) {
-		t.Fatalf("expected prompt string array, got %#v", got)
+	if got := body["prompt"]; got != "hello world" {
+		t.Fatalf("expected collapsed prompt=hello world, got %#v", got)
 	}
 }
