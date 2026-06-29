@@ -177,7 +177,7 @@ func TestSelectionTopologyReconcilerAllowsMissingKVEventsWhenExplicitlyOptional(
 	defer selectionServer.Close()
 
 	service, pod, slice := rawSGLangWorkerObjects(t, sglangServer.URL, selectionServer.URL)
-	service.Annotations[consts.KubeAnnotationDynamoSelectionRequireKVEvents] = "false"
+	service.Annotations[consts.KubeAnnotationDynamoSelectionRequireKVEvents] = consts.KubeLabelValueFalse
 	reconciler := newSelectionTopologyTestReconciler(t, service, pod, slice)
 
 	result := reconcileWorkerService(t, reconciler, service)
@@ -823,7 +823,7 @@ func TestSelectionTopologyReconcilerRegistersFixtureWorkerOnEverySelectorReplica
 
 	service, pod, workerSlice := rawNamespacedSGLangWorkerObjects(t, sglangServer.URL, "http://selector.selection.svc", "workers")
 	service.Annotations[consts.KubeAnnotationDynamoSelectionServiceURL] = " http://selector.selection.svc/ "
-	service.Annotations[consts.KubeAnnotationDynamoSelectionRequireKVEvents] = "true"
+	service.Annotations[consts.KubeAnnotationDynamoSelectionRequireKVEvents] = consts.KubeLabelValueTrue
 	selectorService := rawSelectorService()
 	selectorService.Namespace = testSelectorNamespace
 	selectorSliceA := selectorEndpointSliceForURL(t, "selector-a", selectorA.URL, selectorService.Namespace)
@@ -849,7 +849,7 @@ func TestSelectionTopologyReconcilerUsesSelectorEndpointSliceTargetPort(t *testi
 	defer selectorServer.Close()
 
 	service, pod, workerSlice := rawNamespacedSGLangWorkerObjects(t, sglangServer.URL, "http://selector.selection.svc:80", "workers")
-	service.Annotations[consts.KubeAnnotationDynamoSelectionRequireKVEvents] = "true"
+	service.Annotations[consts.KubeAnnotationDynamoSelectionRequireKVEvents] = consts.KubeLabelValueTrue
 	selectorService := rawSelectorService()
 	selectorService.Namespace = testSelectorNamespace
 	selectorHost, selectorTargetPort := splitTestServerAddress(t, selectorServer.URL)
@@ -859,6 +859,33 @@ func TestSelectionTopologyReconcilerUsesSelectorEndpointSliceTargetPort(t *testi
 			Name:       consts.DynamoSystemPortName,
 			Port:       80,
 			TargetPort: intstr.FromInt(int(selectorTargetPort)),
+		},
+	}
+	reconciler := newSelectionTopologyTestReconciler(t, service, pod, workerSlice, selectorService, selectorSlice)
+
+	reconcileWorkerService(t, reconciler, service)
+
+	posts := recorderPosts(recorder)
+	require.Len(t, posts, 1)
+	assert.Equal(t, selectorServiceScopeKey(testSelectorNamespace, "selector", "80"), posts[0].Metadata[selectionMetadataSelectorURL])
+}
+
+func TestSelectionTopologyReconcilerFallsBackToEndpointSlicePortForNamedSelectorTargetPort(t *testing.T) {
+	sglangServer := newFixtureSGLangServer(t, nil)
+	defer sglangServer.Close()
+	selectorServer, recorder := newFakeSelectionServer(t)
+	defer selectorServer.Close()
+
+	service, pod, workerSlice := rawNamespacedSGLangWorkerObjects(t, sglangServer.URL, "http://selector.selection.svc:80", "workers")
+	service.Annotations[consts.KubeAnnotationDynamoSelectionRequireKVEvents] = consts.KubeLabelValueTrue
+	selectorService := rawSelectorService()
+	selectorService.Namespace = testSelectorNamespace
+	selectorHost, selectorTargetPort := splitTestServerAddress(t, selectorServer.URL)
+	selectorSlice := selectorEndpointSlice("selector-a", selectorHost, selectorTargetPort, selectorService.Namespace)
+	selectorService.Spec.Ports = []corev1.ServicePort{
+		{
+			Port:       80,
+			TargetPort: intstr.FromString(consts.DynamoSystemPortName),
 		},
 	}
 	reconciler := newSelectionTopologyTestReconciler(t, service, pod, workerSlice, selectorService, selectorSlice)

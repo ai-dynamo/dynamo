@@ -949,7 +949,7 @@ func selectorEndpointSlicePort(service *corev1.Service, slice *discoveryv1.Endpo
 			if port.TargetPort.IntVal > 0 {
 				return port.TargetPort.IntVal, true
 			}
-			return 0, false
+			return firstEndpointSlicePort(slice)
 		}
 		return 0, false
 	}
