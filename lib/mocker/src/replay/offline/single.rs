@@ -222,10 +222,17 @@ impl SingleRuntime {
             || !pass.output_signals.is_empty()
             || !pass.kv_events.is_empty();
         if let AdmissionSource::Workload(driver) = &mut self.admission {
-            for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
-                driver
-                    .on_complete(signal.uuid, self.current_time_ms)
-                    .expect("completed workload request must belong to a session");
+            for signal in &pass.output_signals {
+                if let Some(token_id) = signal.token_id {
+                    driver
+                        .on_output_token(signal.uuid, token_id)
+                        .expect("workload output must belong to an in-flight session");
+                }
+                if signal.completed {
+                    driver
+                        .on_terminal(signal.uuid, self.current_time_ms, signal.rejected)
+                        .expect("completed workload request must belong to a session");
+                }
             }
         }
         let completed_requests = pass
