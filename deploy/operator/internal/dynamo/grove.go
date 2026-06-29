@@ -260,6 +260,33 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 	return true, "", serviceStatus
 }
 
+// AggregatePlacementScore reads PodGangStatutes from the given PodCliqueSet and
+// derives the DGD-level placement score. The score is sourced from the
+// scheduler-reported PodGang placement score mirrored into
+// PodCliqueSet.status.podGangStatuses. When multiple PodGangs report a score
+// the minimum is used (conservative: one poorly placed unit lowers the DGD
+// score). Absence is non-failing — it sets state to Unsupported or NotReported
+// and does not touch the score pointer.
+//
+// NOTE: The current Grove alpha.8 PodGangStatus has no PlacementScore field.
+// When Grove adds it, replace the TODO below with the actual field read and
+// remove the forced Unsupported state.
+func AggregatePlacementScore(pcs *grovev1alpha1.PodCliqueSet) (score *float64, state v1beta1.PlacementScoreState) {
+	if pcs == nil {
+		return nil, v1beta1.PlacementScoreStateUnsupported
+	}
+
+	gangs := pcs.Status.PodGangStatutes
+	if len(gangs) == 0 {
+		return nil, v1beta1.PlacementScoreStateNotReported
+	}
+
+	// TODO: read gang.PlacementScore once Grove PodGangStatus exposes the
+	// field. Until then, report Unsupported so absence is explicit and
+	// non-failing.
+	return nil, v1beta1.PlacementScoreStateUnsupported
+}
+
 // specToGroveTopologyConstraint converts a deployment-level SpecTopologyConstraint
 // to a Grove TopologyConstraint, extracting only the PackDomain.
 func specToGroveTopologyConstraint(tc *v1beta1.SpecTopologyConstraint) *grovev1alpha1.TopologyConstraint {

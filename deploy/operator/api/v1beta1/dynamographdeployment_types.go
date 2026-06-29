@@ -125,6 +125,15 @@ type DynamoGraphDeploymentStatus struct {
 	// Currently only supported for single-node, non-Grove deployments (DCD/Deployment).
 	// +optional
 	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
+
+	// placementScore is the DGD-level scheduler placement score aggregated from
+	// relevant scheduler placement units when reported.
+	// +optional
+	PlacementScore *float64 `json:"placementScore,omitempty"`
+
+	// placementScoreState indicates placement score reporting state.
+	// +optional
+	PlacementScoreState PlacementScoreState `json:"placementScoreState,omitempty"`
 }
 
 // +kubebuilder:object:root=true

@@ -54,6 +54,17 @@ const (
 	DGDStateFailed       DGDState = "failed"
 )
 
+// +kubebuilder:validation:Enum=Reported;Partial;Unsupported;NotReported;Unknown
+type PlacementScoreState string
+
+const (
+	PlacementScoreStateReported    PlacementScoreState = "Reported"
+	PlacementScoreStatePartial     PlacementScoreState = "Partial"
+	PlacementScoreStateUnsupported PlacementScoreState = "Unsupported"
+	PlacementScoreStateNotReported PlacementScoreState = "NotReported"
+	PlacementScoreStateUnknown     PlacementScoreState = "Unknown"
+)
+
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
 type DynamoGraphDeploymentSpec struct {
 	// Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
@@ -168,6 +179,13 @@ type DynamoGraphDeploymentStatus struct {
 	// Currently only supported for singl-node, non-Grove deployments (DCD/Deployment).
 	// +optional
 	RollingUpdate *RollingUpdateStatus `json:"rollingUpdate,omitempty"`
+	// PlacementScore is the DGD-level scheduler placement score aggregated from
+	// relevant scheduler placement units when reported.
+	// +optional
+	PlacementScore *float64 `json:"placementScore,omitempty"`
+	// PlacementScoreState indicates placement score reporting state.
+	// +optional
+	PlacementScoreState PlacementScoreState `json:"placementScoreState,omitempty"`
 }
 
 // ServiceCheckpointStatus contains checkpoint information for a single service.

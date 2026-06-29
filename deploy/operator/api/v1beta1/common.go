@@ -564,6 +564,19 @@ const (
 	DGDStateFailed       DGDState = "failed"
 )
 
+// PlacementScoreState describes whether placement score is available and how
+// complete the reported score is for a graph deployment.
+// +kubebuilder:validation:Enum=Reported;Partial;Unsupported;NotReported;Unknown
+type PlacementScoreState string
+
+const (
+	PlacementScoreStateReported    PlacementScoreState = "Reported"
+	PlacementScoreStatePartial     PlacementScoreState = "Partial"
+	PlacementScoreStateUnsupported PlacementScoreState = "Unsupported"
+	PlacementScoreStateNotReported PlacementScoreState = "NotReported"
+	PlacementScoreStateUnknown     PlacementScoreState = "Unknown"
+)
+
 // RestartPhase enumerates phases of a graph-level restart.
 type RestartPhase string
 

@@ -893,6 +893,8 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 		Status: v1beta1.DynamoGraphDeploymentStatus{
 			ObservedGeneration: 7,
 			State:              v1beta1.DGDStateSuccessful,
+			PlacementScore:     ptr.To(0.87),
+			PlacementScoreState: v1beta1.PlacementScoreStateUnsupported,
 			Conditions: []metav1.Condition{
 				{
 					Type:               "Ready",

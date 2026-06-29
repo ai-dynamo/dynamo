@@ -286,6 +286,20 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	dynamoDeployment.Status.Components = reconcileResult.ComponentStatus
 	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
 
+	// Compute DGD-level placement score from the Grove PodCliqueSet when on
+	// the Grove pathway. Score is sourced from scheduler PodGang statuses and
+	// is purely informational — it does not affect readiness.
+	if r.isGrovePathway(dynamoDeployment) {
+		pcs, pcsErr := r.getExistingGrovePodCliqueSet(ctx, dynamoDeployment)
+		if pcsErr != nil {
+			logger.V(1).Info("Failed to get PodCliqueSet for placement score", "error", pcsErr)
+		} else {
+			score, state := dynamo.AggregatePlacementScore(pcs)
+			dynamoDeployment.Status.PlacementScore = score
+			dynamoDeployment.Status.PlacementScoreState = state
+		}
+	}
+
 	if err != nil {
 		logger.Error(err, "failed to reconcile the resources")
 		reason = "failed_to_reconcile_the_resources"
