@@ -72,6 +72,7 @@ serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 dynamo-tokens = { workspace = true }
+bincode = { version = "1" }
 tower = { version = "0.5", features = ["util"] }
 
 [[bench]]

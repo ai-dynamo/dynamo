@@ -8,7 +8,7 @@ use anyhow::Result;
 
 use dynamo_kv_router::RouterEventSink;
 use dynamo_kv_router::indexer::LocalKvIndexer;
-use dynamo_kv_router::protocols::{KvCacheEvent, RouterEvent, StorageTier};
+use dynamo_kv_router::protocols::{GmsPlacementEventData, KvCacheEvent, RouterEvent, StorageTier};
 use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_runtime::transports::nats::NatsQueue;
 
@@ -30,20 +30,41 @@ impl RouterEventSink for JetStreamPublisher {
     }
 }
 
+pub(super) async fn emit_router_event<P: RouterEventSink>(
+    publisher: &P,
+    local_indexer: &Option<Arc<LocalKvIndexer>>,
+    router_event: RouterEvent,
+) {
+    if let Some(indexer) = local_indexer
+        && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await
+    {
+        tracing::warn!(
+            worker_id = router_event.worker_id,
+            error = %e,
+            "Failed to apply event to local indexer"
+        );
+    }
+    if let Err(e) = publisher.publish_event(&router_event).await {
+        tracing::error!(
+            worker_id = router_event.worker_id,
+            error = %e,
+            "Failed to publish event"
+        );
+    }
+}
+
 pub(super) async fn emit<P: RouterEventSink>(
     publisher: &P,
     local_indexer: &Option<Arc<LocalKvIndexer>>,
     worker_id: u64,
     storage_tier: StorageTier,
     event: KvCacheEvent,
+    _gms_placement: Option<GmsPlacementEventData>,
 ) {
-    let router_event = RouterEvent::with_storage_tier(worker_id, event, storage_tier);
-    if let Some(indexer) = local_indexer
-        && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await
-    {
-        tracing::warn!(worker_id, error = %e, "Failed to apply event to local indexer");
-    }
-    if let Err(e) = publisher.publish_event(&router_event).await {
-        tracing::error!(worker_id, error = %e, "Failed to publish event");
-    }
+    emit_router_event(
+        publisher,
+        local_indexer,
+        RouterEvent::with_storage_tier(worker_id, event, storage_tier),
+    )
+    .await;
 }

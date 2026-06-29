@@ -17,7 +17,7 @@ use crate::kv_router::metrics::kv_publisher_metrics;
 use super::DEFAULT_MAX_BATCH_BLOCKS;
 use super::batching::BatchingState;
 use super::dedup::EventDedupFilter;
-use super::sinks::{JetStreamPublisher, emit};
+use super::sinks::{JetStreamPublisher, emit, emit_router_event};
 
 pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 'static>(
     publisher: P,
@@ -71,12 +71,37 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                 last_raw_input_id = Some(raw_event_id);
 
                 let storage_tier = placement_event.placement.tier;
+                let gms_placement = placement_event.gms_placement;
                 let event = placement_event.event;
                 tracing::trace!(
                     "Event processor for worker_id {} processing event: {:?}",
                     worker_id,
                     event.data
                 );
+
+                if let Some(gms_placement) = gms_placement {
+                    batching_state.flush(&publisher, &local_indexer, worker_id, &mut dedup).await;
+                    let dp_rank = event.dp_rank;
+                    emit_router_event(
+                        &publisher,
+                        &local_indexer,
+                        RouterEvent::with_gms_placement(
+                            worker_id,
+                            KvCacheEvent {
+                                event_id: batching_state.next_publish_id,
+                                data: event.data,
+                                dp_rank,
+                            },
+                            storage_tier,
+                            gms_placement,
+                        ),
+                    )
+                    .await;
+                    batching_state.next_publish_id += 1;
+                    batching_state.last_dp_rank = dp_rank;
+                    batching_state.last_storage_tier = storage_tier;
+                    continue;
+                }
 
                 let dp_rank_changed =
                     batching_state.has_pending() && event.dp_rank != batching_state.last_dp_rank;
@@ -128,6 +153,7 @@ pub(super) async fn run_event_processor_loop<P: RouterEventSink + Send + Sync + 
                                 data: KvCacheEventData::Cleared,
                                 dp_rank: event.dp_rank,
                             },
+                            None,
                         )
                         .await;
                         batching_state.next_publish_id += 1;

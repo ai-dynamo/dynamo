@@ -411,11 +411,29 @@ impl Placement {
 pub struct PlacementEvent {
     pub placement: Placement,
     pub event: KvCacheEvent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gms_placement: Option<GmsPlacementEventData>,
 }
 
 impl PlacementEvent {
     pub fn new(placement: Placement, event: KvCacheEvent) -> Self {
-        Self { placement, event }
+        Self {
+            placement,
+            event,
+            gms_placement: None,
+        }
+    }
+
+    pub fn with_gms_placement(
+        placement: Placement,
+        event: KvCacheEvent,
+        gms_placement: GmsPlacementEventData,
+    ) -> Self {
+        Self {
+            placement,
+            event,
+            gms_placement: Some(gms_placement),
+        }
     }
 
     pub fn local_gpu(worker_id: WorkerId, event: KvCacheEvent) -> Self {
@@ -426,11 +444,10 @@ impl PlacementEvent {
         let PlacementOwner::LocalWorker(worker) = self.placement.owner else {
             return None;
         };
-        Some(RouterEvent::with_storage_tier(
-            worker.worker_id,
-            self.event,
-            self.placement.tier,
-        ))
+        let mut event =
+            RouterEvent::with_storage_tier(worker.worker_id, self.event, self.placement.tier);
+        event.gms_placement = self.gms_placement;
+        Some(event)
     }
 }
 
@@ -830,6 +847,72 @@ pub struct KvCacheRemoveData {
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GmsPlacementMemoryRegion {
+    pub remote_ptr: u64,
+    pub size: u64,
+    pub tier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GmsPlacementDescriptor {
+    pub remote_ptr: u64,
+    pub size: u64,
+    pub tier: String,
+    #[serde(default)]
+    pub ranges: Vec<GmsPlacementMemoryRegion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GmsPlacementBlock {
+    /// Stable GMS content hash for the full prefix ending at this block.
+    pub content_hash_hex: String,
+    pub descriptor: GmsPlacementDescriptor,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GmsPlacementStoreData {
+    pub source_nixl_agent_name: String,
+    pub source_nixl_agent_metadata_hex: String,
+    #[serde(default)]
+    pub source_nixl_ip: Option<String>,
+    #[serde(default)]
+    pub source_nixl_listen_port: Option<u16>,
+    pub blocks: Vec<GmsPlacementBlock>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GmsPlacementRemoveData {
+    pub content_hashes_hex: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GmsPlacementMatch {
+    pub source_nixl_agent_name: String,
+    pub source_nixl_agent_metadata_hex: String,
+    #[serde(default)]
+    pub source_nixl_ip: Option<String>,
+    #[serde(default)]
+    pub source_nixl_listen_port: Option<u16>,
+    pub descriptors: Vec<Option<GmsPlacementDescriptor>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum GmsPlacementEventData {
+    Stored(GmsPlacementStoreData),
+    Removed(GmsPlacementRemoveData),
+    Cleared,
+}
+
 impl Serialize for LocalBlockHash {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -895,6 +978,17 @@ pub struct RouterEvent {
     pub storage_tier: StorageTier,
     /// The cache event associated with the worker.
     pub event: KvCacheEvent,
+    /// Optional GMS placement metadata published on the KV event plane.
+    ///
+    /// This is orthogonal to `event.data`: ordinary radix indexes keep using
+    /// `KvCacheEventData`, while GMS-aware routers can learn the NIXL
+    /// bootstrap descriptors needed to build request-local `gms_placement`
+    /// without querying the source worker on each request. Keep this field last
+    /// so older positional MessagePack payloads deserialize with the default.
+    /// Always serialize the `None` value for bincode-backed snapshots, where
+    /// skipped positional fields are not recoverable.
+    #[serde(default)]
+    pub gms_placement: Option<GmsPlacementEventData>,
 }
 
 impl RouterEvent {
@@ -920,6 +1014,21 @@ impl RouterEvent {
         Self {
             worker_id,
             storage_tier,
+            gms_placement: None,
+            event,
+        }
+    }
+
+    pub fn with_gms_placement(
+        worker_id: WorkerId,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+        gms_placement: GmsPlacementEventData,
+    ) -> Self {
+        Self {
+            worker_id,
+            storage_tier,
+            gms_placement: Some(gms_placement),
             event,
         }
     }
@@ -1234,6 +1343,82 @@ mod tests {
         } else {
             panic!("Expected KvCacheEventData::Stored");
         }
+    }
+
+    #[test]
+    fn router_event_msgpack_accepts_legacy_three_field_payload() {
+        let worker_id = 7;
+        let kv_cache_event = KvCacheEvent {
+            event_id: 11,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(99)],
+            }),
+            dp_rank: 2,
+        };
+        let payload =
+            rmp_serde::to_vec(&(worker_id, StorageTier::Device, kv_cache_event.clone())).unwrap();
+
+        let router_event: RouterEvent = rmp_serde::from_slice(&payload).unwrap();
+
+        assert_eq!(router_event.worker_id, worker_id);
+        assert_eq!(router_event.storage_tier, StorageTier::Device);
+        assert_eq!(router_event.event, kv_cache_event);
+        assert_eq!(router_event.gms_placement, None);
+    }
+
+    #[test]
+    fn router_event_bincode_round_trips_none_gms_placement_snapshot() {
+        let events = vec![RouterEvent::new(
+            7,
+            KvCacheEvent {
+                event_id: 11,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(99)],
+                }),
+                dp_rank: 2,
+            },
+        )];
+
+        let payload = bincode::serialize(&events).unwrap();
+        let decoded: Vec<RouterEvent> = bincode::deserialize(&payload).unwrap();
+
+        assert_eq!(decoded, events);
+        assert_eq!(decoded[0].gms_placement, None);
+    }
+
+    #[test]
+    fn router_event_msgpack_round_trips_gms_placement_tail_field() {
+        let router_event = RouterEvent::with_gms_placement(
+            7,
+            KvCacheEvent {
+                event_id: 11,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: Vec::new(),
+                }),
+                dp_rank: 2,
+            },
+            StorageTier::External,
+            GmsPlacementEventData::Stored(GmsPlacementStoreData {
+                source_nixl_agent_name: "agent-a".to_string(),
+                source_nixl_agent_metadata_hex: "00".to_string(),
+                source_nixl_ip: None,
+                source_nixl_listen_port: None,
+                blocks: Vec::new(),
+            }),
+        );
+        let payload = rmp_serde::to_vec(&router_event).unwrap();
+
+        let decoded: RouterEvent = rmp_serde::from_slice(&payload).unwrap();
+
+        assert_eq!(decoded, router_event);
+    }
+
+    #[test]
+    fn test_overlap_scores_default() {
+        let overlap_scores: OverlapScores = Default::default();
+        assert!(overlap_scores.scores.is_empty());
     }
 
     #[rstest]

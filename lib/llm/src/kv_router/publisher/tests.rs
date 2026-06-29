@@ -950,6 +950,85 @@ mod tests_startup_helpers {
         token.cancel();
     }
 
+    #[tokio::test]
+    async fn test_gms_cleared_does_not_clear_normal_local_indexer() {
+        let (component, published) = MockComponent::new();
+
+        let token = CancellationToken::new();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let local_indexer = Arc::new(LocalKvIndexer::new(token.clone(), 4, metrics, 100));
+
+        let store_event = KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                start_position: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(100),
+                    tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        };
+
+        let gms_clear_event = KvCacheEvent {
+            event_id: 2,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: Vec::new(),
+            }),
+            dp_rank: 0,
+        };
+
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        tx.send(local_gpu_event(1, store_event)).unwrap();
+        tx.send(PlacementEvent::with_gms_placement(
+            Placement::local_worker(1, 0, StorageTier::External),
+            gms_clear_event,
+            GmsPlacementEventData::Cleared,
+        ))
+        .unwrap();
+        drop(tx);
+
+        let handle = tokio::spawn(start_event_processor(
+            component,
+            1,
+            token.clone(),
+            rx,
+            Some(local_indexer.clone()),
+            Some(10_000),
+        ));
+
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let mut found = false;
+        for _ in 0..20 {
+            let scores = local_indexer
+                .find_matches(vec![LocalBlockHash(200)])
+                .await
+                .unwrap();
+            if !scores.scores.is_empty() {
+                found = true;
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+        assert!(found, "GMS clear should not clear ordinary KV index state");
+
+        let published = published.lock().unwrap();
+        assert_eq!(
+            published.len(),
+            2,
+            "expected 2 published events, found {}",
+            published.len()
+        );
+
+        token.cancel();
+    }
+
     //--------------------------------------------------------------------
     // Test that local indexer failure doesn't break NATS publishing
     //--------------------------------------------------------------------
@@ -1868,6 +1947,83 @@ mod event_processor_tests {
             Placement::local_worker(1, event.dp_rank, StorageTier::HostPinned),
             event,
         )
+    }
+
+    fn gms_store_event(content_hash_hex: &str) -> GmsPlacementEventData {
+        GmsPlacementEventData::Stored(GmsPlacementStoreData {
+            source_nixl_agent_name: "agent-a".to_string(),
+            source_nixl_agent_metadata_hex: "00".to_string(),
+            source_nixl_ip: None,
+            source_nixl_listen_port: None,
+            blocks: vec![GmsPlacementBlock {
+                content_hash_hex: content_hash_hex.to_string(),
+                descriptor: GmsPlacementDescriptor {
+                    remote_ptr: 0x1000,
+                    size: 4096,
+                    tier: "device".to_string(),
+                    ranges: Vec::new(),
+                    generation: Some(3),
+                    sealed: Some(true),
+                },
+            }],
+        })
+    }
+
+    #[tokio::test]
+    async fn test_run_event_processor_loop_preserves_gms_placement() {
+        let (tx, rx) = mpsc::unbounded_channel::<PlacementEvent>();
+        let publisher = MockPublisher::new();
+        let publisher_clone = publisher.clone();
+        let cancellation_token = CancellationToken::new();
+
+        let handle = tokio::spawn(async move {
+            run_event_processor_loop(
+                publisher_clone,
+                1,
+                cancellation_token,
+                rx,
+                None,
+                Some(100),
+                DEFAULT_MAX_BATCH_BLOCKS,
+            )
+            .await
+        });
+
+        tx.send(local_gpu_event(KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Removed(KvCacheRemoveData {
+                block_hashes: vec![ExternalSequenceBlockHash(10)],
+            }),
+            dp_rank: 0,
+        }))
+        .unwrap();
+
+        let gms_placement = gms_store_event("abc123");
+        tx.send(PlacementEvent::with_gms_placement(
+            Placement::local_worker(1, 0, StorageTier::External),
+            KvCacheEvent {
+                event_id: 2,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: Vec::new(),
+                }),
+                dp_rank: 0,
+            },
+            gms_placement.clone(),
+        ))
+        .unwrap();
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let events = publisher.get_events();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0].event.data, KvCacheEventData::Removed(_)));
+        assert_eq!(events[0].gms_placement, None);
+        assert_eq!(events[1].storage_tier, StorageTier::External);
+        assert_eq!(events[1].event.event_id, 2);
+        assert_eq!(events[1].gms_placement, Some(gms_placement));
     }
 
     /// Test that pushing N removed events results in batched output

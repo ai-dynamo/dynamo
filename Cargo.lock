@@ -2491,6 +2491,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.8.4",
+ "bincode 1.3.3",
  "chrono",
  "criterion",
  "dashmap",

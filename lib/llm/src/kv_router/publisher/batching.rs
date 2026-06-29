@@ -96,6 +96,7 @@ impl BatchingState {
                     data: KvCacheEventData::Removed(filtered),
                     dp_rank,
                 },
+                None,
             )
             .await;
             emitted = true;
@@ -112,6 +113,7 @@ impl BatchingState {
                     data: KvCacheEventData::Stored(data),
                     dp_rank,
                 },
+                None,
             )
             .await;
             emitted = true;

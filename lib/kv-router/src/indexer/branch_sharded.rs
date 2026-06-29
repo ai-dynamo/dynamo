@@ -680,6 +680,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             let shard_event = RouterEvent {
                 worker_id: event.worker_id,
                 storage_tier: event.storage_tier,
+                gms_placement: None,
                 event: KvCacheEvent {
                     event_id: event.event.event_id,
                     dp_rank: event.event.dp_rank,
@@ -699,6 +700,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                 let broadcast_event = RouterEvent {
                     worker_id: event.worker_id,
                     storage_tier: event.storage_tier,
+                    gms_placement: None,
                     event: KvCacheEvent {
                         event_id: event.event.event_id,
                         dp_rank: event.event.dp_rank,

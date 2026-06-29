@@ -536,6 +536,7 @@ impl ConcurrentRadixTree {
                 let event = RouterEvent {
                     worker_id: worker.worker_id,
                     storage_tier: crate::protocols::StorageTier::Device,
+                    gms_placement: None,
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
