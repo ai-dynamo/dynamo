@@ -43,6 +43,7 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `--router-assume-kv-reuse` / `--no-router-assume-kv-reuse` | `DYN_ROUTER_ASSUME_KV_REUSE` | `true` | Assume KV cache reuse when tracking active blocks |
 | `--router-track-output-blocks` / `--no-router-track-output-blocks` | `DYN_ROUTER_TRACK_OUTPUT_BLOCKS` | `false` | Track output blocks with fractional decay during generation |
 | `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `DYN_ROUTER_TRACK_PREFILL_TOKENS` | `true` | Track prompt-side prefill load in worker load accounting |
+| `--router-gms-decode-transfer` / `--no-router-gms-decode-transfer` | `DYN_ROUTER_GMS_DECODE_TRANSFER` | `false` | Experimental GMS decode-to-decode transfer orchestration for GMS-capable aggregated decode workers |
 | `--router-prefill-load-model` | `DYN_ROUTER_PREFILL_LOAD_MODEL` | `none` | Prompt-side load model: `none` for static load, `aic` for oldest-prefill decay using an AIC prediction |
 | `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | KV indexer worker threads. >1 enables the concurrent radix tree, including with `--no-router-kv-events` |
 | `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | `16.0` | Queue threshold fraction of prefill capacity. Priority hints only affect requests waiting in this queue |
@@ -74,6 +75,7 @@ For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
 | `--migration-limit` | `DYN_MIGRATION_LIMIT` | `0` | Max request migrations per worker disconnect. 0 = disabled |
+| — | `DYN_MIGRATION_RETRY_CONCURRENCY` | `0` | Optional process-wide cap for concurrent migrated retry streams. 0 = unlimited |
 | `--active-decode-blocks-threshold` | `DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD` | `1.0` | KV cache utilization fraction (0.0–1.0) for busy detection. Pass `None` to disable |
 | `--active-prefill-tokens-threshold` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD` | `10000000` | Absolute token count for prefill busy detection. Pass `None` to disable |
 | `--active-prefill-tokens-threshold-frac` | `DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC` | `64.0` | Fraction of `max_num_batched_tokens` for prefill busy detection. OR logic with absolute threshold. Pass `None` to disable |

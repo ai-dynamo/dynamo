@@ -31,6 +31,15 @@ The migration limit is configured at the **frontend** level and applies globally
 - Set via `--migration-limit` flag on the frontend
 - Applies to all models served by the frontend
 
+### Retry Concurrency Configuration
+
+During worker failover, many in-flight streams can disconnect at the same time and retry against the newly active worker. `DYN_MIGRATION_RETRY_CONCURRENCY` optionally caps the number of migrated retry streams that can run concurrently in a frontend process:
+
+- Default behavior: unlimited retry concurrency (`DYN_MIGRATION_RETRY_CONCURRENCY=0` or unset)
+- Set via `DYN_MIGRATION_RETRY_CONCURRENCY` on the frontend or Bulwark gateway
+- The cap applies only after a request has entered migration/retry; first-attempt traffic is not throttled
+- A migrated stream holds a permit until that stream completes, which prevents a failover replay burst from overwhelming a warm shadow worker
+
 ### Max Sequence Length Configuration
 
 The max sequence length setting controls how long the migration system will cache token state for a request. Once the total sequence length (prompt + generated tokens) exceeds this limit, migration is disabled for that request and token tracking stops:
