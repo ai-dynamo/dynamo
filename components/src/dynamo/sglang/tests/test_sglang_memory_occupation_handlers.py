@@ -11,7 +11,7 @@ import pytest
 
 from dynamo.sglang.request_handlers.handler_base import (
     BaseWorkerHandler,
-    SGLangEngineQuiesceController,
+    SGLangEnginePauseController,
 )
 
 pytestmark = [
@@ -60,8 +60,8 @@ def handler():
         unregister_endpoint_instance=AsyncMock(),
         register_endpoint_instance=AsyncMock(),
     )
-    handler._quiesce_controller = SGLangEngineQuiesceController(handler.engine)
-    handler._quiesce_lock = asyncio.Lock()
+    handler._pause_controller = SGLangEnginePauseController(handler.engine)
+    handler._pause_lock = asyncio.Lock()
     return handler
 
 
@@ -148,8 +148,8 @@ async def test_resume_recovers_generation_pause_after_failed_release_rollback(ha
     release_result = await handler.release_memory_occupation({})
 
     assert release_result["status"] == "error"
-    assert handler._quiesce_controller.is_quiesced is False
-    assert handler._quiesce_controller.needs_resume_recovery is True
+    assert handler._pause_controller.is_paused is False
+    assert handler._pause_controller.needs_resume_recovery is True
     failed_continue.assert_awaited_once()
     handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
 
@@ -160,11 +160,11 @@ async def test_resume_recovers_generation_pause_after_failed_release_rollback(ha
     manager.resume_memory_occupation.assert_not_awaited()
     manager.continue_generation.assert_awaited_once()
     handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
-    assert handler._quiesce_controller.needs_resume_recovery is False
+    assert handler._pause_controller.needs_resume_recovery is False
 
 
 @pytest.mark.asyncio
-async def test_release_reregisters_after_clean_quiesce_rollback(handler):
+async def test_release_reregisters_after_clean_pause_rollback(handler):
     manager = handler.engine.tokenizer_manager
     manager.release_memory_occupation = AsyncMock(
         side_effect=RuntimeError("release failed")
@@ -174,8 +174,8 @@ async def test_release_reregisters_after_clean_quiesce_rollback(handler):
 
     # Rollback continued generation cleanly, so the engine is serving-safe again.
     assert release_result["status"] == "error"
-    assert handler._quiesce_controller.is_quiesced is False
-    assert handler._quiesce_controller.needs_resume_recovery is False
+    assert handler._pause_controller.is_paused is False
+    assert handler._pause_controller.needs_resume_recovery is False
     manager.continue_generation.assert_awaited_once()
     handler.generate_endpoint.unregister_endpoint_instance.assert_awaited_once()
     # The endpoint must rejoin the routing pool since resume will early-return.
@@ -190,13 +190,13 @@ async def test_release_reregisters_after_clean_quiesce_rollback(handler):
         ("resume_memory_occupation", "register_endpoint_instance"),
     ],
 )
-async def test_memory_control_returns_error_without_quiesce_controller(
+async def test_memory_control_returns_error_without_pause_controller(
     handler,
     method_name,
     endpoint_method,
 ):
     handler.engine = None
-    handler._quiesce_controller = None
+    handler._pause_controller = None
 
     result = await getattr(handler, method_name)({})
 
@@ -208,7 +208,7 @@ async def test_memory_control_returns_error_without_quiesce_controller(
 
 
 @pytest.mark.asyncio
-async def test_resume_keeps_quiesced_state_when_register_fails(handler):
+async def test_resume_keeps_paused_state_when_register_fails(handler):
     await handler.release_memory_occupation({})
     handler.generate_endpoint.register_endpoint_instance = AsyncMock(
         side_effect=RuntimeError("discovery write timeout")
@@ -217,5 +217,5 @@ async def test_resume_keeps_quiesced_state_when_register_fails(handler):
     result = await handler.resume_memory_occupation({})
 
     assert result["status"] == "error"
-    assert handler._quiesce_controller is not None
-    assert handler._quiesce_controller.is_quiesced is True
+    assert handler._pause_controller is not None
+    assert handler._pause_controller.is_paused is True

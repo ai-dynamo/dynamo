@@ -13,7 +13,7 @@ use dynamo_parsers::tool_calling::json::try_tool_call_parse_basic_json;
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
 use dynamo_parsers::tool_calling::{
     detect_tool_call_start, find_tool_call_end_position, try_tool_call_parse_aggregate,
-    try_tool_call_parse_aggregate_stream_finalize,
+    try_tool_call_parse_aggregate_finalize,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
@@ -847,6 +847,7 @@ impl JailedStream {
                     system_fingerprint: None,
                     },
                     nvext: None,
+                    llm_metrics: None,
                 };
 
                 let final_metadata = (last_annotated_id, last_annotated_event, last_annotated_comment);
@@ -912,6 +913,26 @@ impl JailedStream {
             return split_partial_call_prefix_gemma4(content);
         }
         None
+    }
+
+    /// Whether this parser must never surface tool-call markup to the user, so
+    /// finalize strips residual markers rather than releasing the raw buffer.
+    ///
+    /// The real source of truth is `dynamo-parsers`'
+    /// `JsonParserConfig::discard_unparseable_wrapper`, set by that crate's
+    /// `hermes()` / `qwen25()` / `jamba()` configs (ai-dynamo/frontend-crates,
+    /// `parsers/src/tool_calling/config.rs`) and already honored by the batch
+    /// parser. We allowlist by name here only because the pinned `dynamo-parsers`
+    /// version predates that exported field, so it can't be read yet; extend the
+    /// list when a new family opts into the never-leak contract.
+    // TODO: read `discard_unparseable_wrapper` from the parser config and drop
+    // this name allowlist (hermes/qwen25/jamba) once the `dynamo-parsers`
+    // dependency is bumped to a version that exports the field.
+    fn suppresses_tool_call_markup(&self) -> bool {
+        matches!(
+            self.tool_call_parser.as_deref(),
+            Some("hermes") | Some("qwen25") | Some("jamba")
+        )
     }
 
     fn should_start_jail(&self, content: &str) -> bool {
@@ -1048,7 +1069,7 @@ impl JailedStream {
                 // Traditional marker-based tool call parsing
                 let tools_slice = self.tool_definitions.as_deref();
                 let parse_result = if is_finalize {
-                    try_tool_call_parse_aggregate_stream_finalize(
+                    try_tool_call_parse_aggregate_finalize(
                         accumulated_content,
                         self.tool_call_parser.as_deref(),
                         tools_slice,
@@ -1137,7 +1158,7 @@ impl JailedStream {
                         // stripping Harmony envelopes when no reasoning parser is configured.
                         // In zero-call Harmony marker cases, emit the stripped normal_text rather
                         // than accumulated_content, which still contains raw protocol markers.
-                        let content = if is_finalize
+                        let content: String = if is_finalize
                             && self.tool_call_parser.as_deref() == Some("minimax_m2")
                             && self
                                 .prefix_before_first_tool_call_marker(accumulated_content)
@@ -1148,19 +1169,46 @@ impl JailedStream {
                             // still protocol markup, so keep only pre-call prose at stream end.
                             self.prefix_before_first_tool_call_marker(accumulated_content)
                                 .unwrap_or("")
+                                .to_string()
                         } else if normal_text.as_deref() == Some("") {
-                            ""
+                            String::new()
                         } else if is_harmony_parser(self.tool_call_parser.as_deref())
                             && contains_harmony_protocol(accumulated_content)
                         {
-                            normal_text.as_deref().unwrap_or("")
+                            normal_text.as_deref().unwrap_or("").to_string()
+                        } else if self.suppresses_tool_call_markup() {
+                            // No call parsed out of a jailed buffer: strip the markers rather
+                            // than leak the raw text. Handled in the jail so it holds regardless
+                            // of the installed parser version.
+                            if let Some(prefix) =
+                                self.prefix_before_first_tool_call_marker(accumulated_content)
+                            {
+                                // Truncated / unparseable wrapper: keep the prose before the
+                                // opening marker, drop the rest.
+                                prefix.trim_end().to_string()
+                            } else if self.jail_end_sequences.iter().any(|seq| {
+                                !seq.is_empty() && accumulated_content.contains(seq.as_str())
+                            }) {
+                                // Orphan close marker(s) with no opener: remove every occurrence
+                                // (not just trailing) so a mid-buffer marker can't leak.
+                                let mut cleaned = accumulated_content.to_string();
+                                for seq in self.jail_end_sequences.iter().filter(|s| !s.is_empty())
+                                {
+                                    cleaned = cleaned.replace(seq.as_str(), "");
+                                }
+                                cleaned.trim().to_string()
+                            } else {
+                                // No markers: false-positive jail entry on prose, pass through.
+                                accumulated_content.to_string()
+                            }
                         } else {
-                            accumulated_content
+                            // Other parsers / generic jails: release the buffer verbatim.
+                            accumulated_content.to_string()
                         };
                         create_choice_stream(
                             choice_index,
                             Some(Role::Assistant),
-                            content,
+                            &content,
                             None,
                             base_choice.finish_reason,
                             base_choice.logprobs.clone(),
@@ -1718,6 +1766,7 @@ mod tests {
                     system_fingerprint: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: None,
             event: None,
@@ -1818,6 +1867,7 @@ mod tests {
                     system_fingerprint: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: None,
             event: None,

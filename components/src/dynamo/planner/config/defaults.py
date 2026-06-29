@@ -89,12 +89,15 @@ class SLAPlannerDefaults(BasePlannerDefaults):
         16  # must be a perfect square; total buckets across input axes
     )
     load_scaling_down_sensitivity = 80  # 0-100
-    load_metric_samples = 10  # number of samples per interval
     load_min_observations = 5  # cold start threshold
     prefill_scale_up_queue_tokens = None
     prefill_scale_down_queue_tokens = None
     decode_scale_up_kv_rate = None
     decode_scale_down_kv_rate = None
+
+    # Speculative decoding. 0 disables planner-side spec decode discounts unless
+    # worker MDC publishes a positive runtime_config.runtime_data.spec_decode.nextn.
+    speculative_nextn = 0
 
     # Advisory mode: compute and log decisions without executing scaling
     advisory = False

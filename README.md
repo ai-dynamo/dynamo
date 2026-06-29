@@ -33,9 +33,10 @@ limitations under the License.
 
 # Dynamo
 
-<!-- TEMPORARY BANNER: remove once V4 recipes mature. -->
+<!-- TEMPORARY BANNER: remove once Nemotron Ultra 3 recipes mature. -->
 > [!NOTE]
-> **Day-0 DeepSeek-V4 recipes available.** Tested Kubernetes deployment paths for [DeepSeek-V4-Pro](recipes/deepseek-v4/deepseek-v4-pro/) and [DeepSeek-V4-Flash](recipes/deepseek-v4/deepseek-v4-flash/) are merged to main on both **vLLM** and **SGLang**, with a prebuilt SGLang container image published on NGC.
+> **Day-0 Nemotron 3 Ultra recipes available.** Tested and performance optimized Kubernetes deployment paths for [Nemotron 3 Ultra](recipes/nemotron-3-ultra/) are merged to main for **vLLM**, with a prebuilt container image published on NGC.\
+> Recipes include KV-aware routing, multi-token prediction (MTP), and disaggregated prefill/decode
 
 **The open-source, datacenter-scale inference stack.** Dynamo is the orchestration layer above inference engines — it doesn't replace SGLang, TensorRT-LLM, or vLLM, it turns them into a coordinated multi-node inference system. Disaggregated serving, intelligent routing, multi-tier KV caching, and automatic scaling work together to maximize throughput and minimize latency for LLM, reasoning, multimodal, and video generation workloads.
 
@@ -100,8 +101,8 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 
 ### New in 1.0
 
-- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
-- **Agentic inference:** Per-request hints for latency priority, expected output length, and cache pinning TTL. [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
+- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
+- **Agentic inference:** Per-request hints for priority, expected output length, and speculative prefill, plus session metadata for tracing and SGLang subagent KV isolation. [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
 - **Multimodal E/P/D:** Disaggregated encode/prefill/decode with embedding cache — 30% faster TTFT on image workloads
 - **Video generation:** Native [FastVideo](https://github.com/hao-ai-lab/FastVideo) + [SGLang Diffusion](https://lmsys.org/blog/2026-02-16-sglang-diffusion-advanced-optimizations/) support — real-time 1080p on single B200
 - **K8s Inference Gateway plugin:** KV-aware routing inside the standard Kubernetes gateway
@@ -126,7 +127,7 @@ See the [Inference Gateway (GAIE) guide](docs/kubernetes/inference-gateway.md) f
 
 ```bash
 # Pull a prebuilt container (SGLang example)
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -140,7 +141,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.1.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.1.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+Also available: [`tensorrtllm-runtime:1.2.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.2.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 
@@ -156,7 +157,7 @@ Then start the frontend and a worker as shown above. See the [full installation 
 
 ### Option C: Kubernetes (recommended)
 
-For production multi-node clusters, install the [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide) and deploy with a single manifest:
+For production multi-node clusters, install the [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/start-here/installation-guide) and deploy with a single manifest:
 
 ```yaml
 # Zero-config deploy: specify model + SLA, Dynamo handles the rest
@@ -181,7 +182,7 @@ Pre-built recipes for common models:
 | DeepSeek-R1 | SGLang | Disaggregated | [View](recipes/deepseek-r1/sglang/) |
 | Qwen3-32B-FP8 | TensorRT-LLM | Aggregated | [View](recipes/qwen3-32b-fp8/trtllm/) |
 
-See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](examples/deployments/EKS/) · [Google GKE](examples/deployments/GKE/)
+See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](docs/kubernetes/cloud-providers/eks/eks.md) · [Google GKE](docs/kubernetes/cloud-providers/gke/gke.md) · [Azure AKS](docs/kubernetes/cloud-providers/aks/aks.md) · [Amazon ECS](docs/kubernetes/cloud-providers/ecs/ecs.md)
 
 ## Building from Source
 
@@ -196,7 +197,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && source $HOME/.
 
 # Create venv and build
 uv venv dynamo && source dynamo/bin/activate
-uv pip install pip maturin
+uv pip install pip 'maturin[patchelf]'
 cd lib/bindings/python && maturin develop --uv && cd $PROJECT_ROOT
 uv pip install -e lib/gpu_memory_service
 uv pip install -e .
@@ -211,7 +212,7 @@ Dynamo is built in the open with an OSS-first development model. We welcome cont
 - **[Contribution Guide](https://docs.nvidia.com/dynamo/getting-started/contribution-guide)** — How to contribute code, docs, and recipes
 - **[Design Proposals](https://github.com/ai-dynamo/enhancements)** — RFCs for major features
 - **[Office Hours](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)** — Biweekly calls
-- **[Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view)** – Weekly (Wed 10:30 AM PT) development community meetings
+- **[Community Meetings](https://docs.google.com/document/d/1uR8xD_hlYGwV6QspvSc36k1H-wo1BUcVmFbHH9xlXd8/view)** ([Youtube](https://www.youtube.com/@ai-dynamo-community)) – Weekly (Wed 10:30 AM PT) development community meetings
 - **[Discord](https://discord.gg/D92uqZRjCZ)** — Chat with the team and community
 - **[Dynamo Day Recordings](https://nvevents.nvidia.com/dynamoday)** — Deep dives from production users
 
@@ -275,7 +276,7 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 - **[Support Matrix](https://docs.nvidia.com/dynamo/resources/support-matrix)** — Hardware, OS, CUDA, and backend versions
 - **[Feature Matrix](https://docs.nvidia.com/dynamo/resources/feature-matrix)** — Detailed backend compatibility
 - **[Release Artifacts](https://docs.nvidia.com/dynamo/resources/release-artifacts)** — Containers, wheels, Helm charts
-- **[Service Discovery](https://docs.nvidia.com/dynamo/kubernetes-deployment/deployment-guide/service-discovery)** — K8s-native vs etcd vs file-based discovery
+- **[Service Discovery](https://docs.nvidia.com/dynamo/kubernetes-deployment/advanced-platform/service-discovery)** — K8s-native vs etcd vs file-based discovery
 - **[Benchmarking Guide](https://docs.nvidia.com/dynamo/user-guides/benchmarking)** — Compare deployment topologies with AIPerf
 
 <!-- Reference links for Feature Compatibility Matrix -->

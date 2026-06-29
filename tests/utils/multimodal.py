@@ -70,14 +70,16 @@ def make_image_payload_cached_tokens(
     min_cached_tokens: int = 1,
     require_rust_processor_init: bool = False,
     require_vllm_mm_processor_init: bool = False,
+    min_routing_total_blocks: int = 0,
     min_avg_kv_hit_rate: float = 0.0,
 ) -> CachedTokensChatPayload:
     """Image payload that asserts MM-aware KV cache reuse on repeats.
 
     ``require_rust_processor_init`` / ``require_vllm_mm_processor_init`` assert
-    the MM-routing init log fired. ``min_avg_kv_hit_rate`` asserts the
-    post-R1 mean of router_kv_hit_rate >= threshold (fails closed when
-    router-side hashes diverge from the worker).
+    the MM-routing init log fired. ``min_routing_total_blocks`` asserts the
+    [ROUTING] block count is well above text-prefix fallback (~1-3 blocks).
+    ``min_avg_kv_hit_rate`` asserts the post-R1 mean of router_kv_hit_rate
+    >= threshold (fails closed when router-side hashes diverge from the worker).
     """
     return CachedTokensChatPayload(
         body={
@@ -102,6 +104,7 @@ def make_image_payload_cached_tokens(
         min_cached_tokens=min_cached_tokens,
         require_rust_processor_init=require_rust_processor_init,
         require_vllm_mm_processor_init=require_vllm_mm_processor_init,
+        min_routing_total_blocks=min_routing_total_blocks,
         min_avg_kv_hit_rate=min_avg_kv_hit_rate,
     )
 
@@ -270,6 +273,7 @@ class TopologyConfig:
     marks: list[Any] = field(default_factory=list)  # default for cases
     profiled_vram_gib: Optional[float] = None
     requested_vllm_kv_cache_bytes: Optional[int] = None
+    requested_sglang_kv_tokens: Optional[int] = None
     delayed_start: int = 0
     directory: Optional[str] = None  # override profile-level directory
     gpu_marker: Optional[str] = None  # override profile-level gpu_marker
@@ -355,6 +359,12 @@ def make_multimodal_configs(
                 marks.append(
                     pytest.mark.requested_vllm_kv_cache_bytes(
                         topo_cfg.requested_vllm_kv_cache_bytes
+                    )
+                )
+            if topo_cfg.requested_sglang_kv_tokens is not None:
+                marks.append(
+                    pytest.mark.requested_sglang_kv_tokens(
+                        topo_cfg.requested_sglang_kv_tokens
                     )
                 )
             if profile.gated:

@@ -5,7 +5,6 @@ import json
 
 import pytest
 
-from dynamo import _core
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     QueuedRequestMetrics,
@@ -19,8 +18,14 @@ pytestmark = [
     pytest.mark.unit,
 ]
 
-RustEnginePerfModel = getattr(_core, "RustEnginePerfModel", None)
-if RustEnginePerfModel is None:
+try:
+    from dynamo.mocker import (
+        EngineCapacityRequest,
+        EnginePerfLimits,
+        RustEnginePerfModel,
+        RustEnginePerfOptions,
+    )
+except ImportError:
     pytest.skip(
         "RustEnginePerfModel requires the aic-forward-pass Cargo feature",
         allow_module_level=True,
@@ -48,10 +53,10 @@ def decode_fpm(
 
 
 def test_regression_decode_helpers_and_capacity() -> None:
-    model = _core.RustEnginePerfModel.best_available(
+    model = RustEnginePerfModel.best_available(
         worker_type="decode",
-        limits=_core.EnginePerfLimits(),
-        options=_core.RustEnginePerfOptions(min_observations=2, max_observations=16),
+        limits=EnginePerfLimits(),
+        options=RustEnginePerfOptions(min_observations=2, max_observations=16),
         bootstrap_fpms=[
             [decode_fpm(1, 100, 0.010)],
             [decode_fpm(2, 200, 0.020)],
@@ -77,7 +82,7 @@ def test_regression_decode_helpers_and_capacity() -> None:
     assert isinstance(diagnostics, dict)
 
     capacity = model.find_engine_capacity_rps(
-        _core.EngineCapacityRequest(isl=100, osl=10, itl_sla_ms=1000.0)
+        EngineCapacityRequest(isl=100, osl=10, itl_sla_ms=1000.0)
     )
     assert capacity is not None
     assert capacity.rps > 0.0
@@ -86,10 +91,10 @@ def test_regression_decode_helpers_and_capacity() -> None:
 
 
 def test_tune_with_fpms_accepts_rank_mapping() -> None:
-    model = _core.RustEnginePerfModel.best_available(
+    model = RustEnginePerfModel.best_available(
         worker_type="decode",
-        limits=_core.EnginePerfLimits(),
-        options=_core.RustEnginePerfOptions(min_observations=2, max_observations=16),
+        limits=EnginePerfLimits(),
+        options=RustEnginePerfOptions(min_observations=2, max_observations=16),
     )
 
     model.tune_with_fpms({0: decode_fpm(1, 100, 0.010)})
@@ -100,7 +105,12 @@ def test_tune_with_fpms_accepts_rank_mapping() -> None:
 
 def test_capacity_request_rejects_non_finite_sla() -> None:
     with pytest.raises(ValueError, match="finite"):
-        _core.EngineCapacityRequest(isl=100, osl=10, ttft_sla_ms=float("nan"))
+        EngineCapacityRequest(isl=100, osl=10, ttft_sla_ms=float("nan"))
+
+
+def test_capacity_request_rejects_non_finite_accept_length() -> None:
+    with pytest.raises(ValueError, match="accept_length must be finite"):
+        EngineCapacityRequest(isl=100, osl=10, accept_length=float("nan"))
 
 
 @pytest.mark.parametrize(
@@ -113,4 +123,4 @@ def test_capacity_request_rejects_non_finite_sla() -> None:
 )
 def test_engine_perf_limits_reject_zero_values(kwargs: dict[str, int]) -> None:
     with pytest.raises(ValueError, match="invalid engine perf limits"):
-        _core.EnginePerfLimits(**kwargs)
+        EnginePerfLimits(**kwargs)

@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::transport::{EventTransportRx, WireStream};
 use super::zmq_transport::ZmqSubTransport;
+use crate::config::environment_names::event_plane::DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     EventTransport,
@@ -41,7 +42,20 @@ impl DynamicSubscriber {
 
     /// Start watching discovery and create a merged stream of events.
     pub async fn start_zmq(self: Arc<Self>) -> Result<WireStream> {
-        let (event_tx, event_rx) = mpsc::unbounded_channel::<Bytes>();
+        // Bounded merged channel. Many peer publishers (e.g. every other
+        // frontend under replica-sync) feed this single-consumer channel; an
+        // unbounded channel grows RSS without limit when the consumer can't keep
+        // up (observed ~80 GiB/frontend at 168 frontends). Cap it and drop on
+        // overflow — the event plane is already best-effort/lossy (ZMQ RCVHWM),
+        // so a dropped event costs routing-estimate freshness, not correctness.
+        // Configurable via DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY (default
+        // 100_000, matching ZMQ_RCVHWM).
+        let channel_cap = std::env::var(DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY)
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(100_000);
+        let (event_tx, event_rx) = mpsc::channel::<Bytes>(channel_cap);
 
         // Track active endpoint connections with instance ID to endpoint mapping
         let active_endpoints: Arc<RwLock<HashMap<String, (String, CancellationToken)>>> =
@@ -200,7 +214,7 @@ impl DynamicSubscriber {
     async fn consume_endpoint_stream(
         endpoint: &str,
         zmq_topic: &str,
-        event_tx: mpsc::UnboundedSender<Bytes>,
+        event_tx: mpsc::Sender<Bytes>,
         cancel_token: CancellationToken,
     ) -> Result<()> {
         // Connect to the endpoint
@@ -219,9 +233,18 @@ impl DynamicSubscriber {
                 event = stream.next() => {
                     match event {
                         Some(Ok(bytes)) => {
-                            if event_tx.send(bytes).is_err() {
-                                tracing::warn!(endpoint = %endpoint, "Event channel closed, stopping endpoint stream");
-                                break;
+                            match event_tx.try_send(bytes) {
+                                Ok(()) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    // Consumer is behind; drop to bound memory.
+                                    // Best-effort plane — a stale estimate
+                                    // self-corrects on subsequent events.
+                                    tracing::trace!(endpoint = %endpoint, "Event subscriber channel full; dropping event");
+                                }
+                                Err(mpsc::error::TrySendError::Closed(_)) => {
+                                    tracing::warn!(endpoint = %endpoint, "Event channel closed, stopping endpoint stream");
+                                    break;
+                                }
                             }
                         }
                         Some(Err(e)) => {

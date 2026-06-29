@@ -196,6 +196,7 @@ impl EngineCapacityRequest {
         e2e_latency_sla_ms=None,
         kv_hit_rate=None,
         optimization_target=OptimizationTarget::Throughput,
+        accept_length=1.0,
     ))]
     fn new(
         isl: u32,
@@ -205,7 +206,13 @@ impl EngineCapacityRequest {
         e2e_latency_sla_ms: Option<f64>,
         kv_hit_rate: Option<f64>,
         optimization_target: OptimizationTarget,
+        accept_length: f64,
     ) -> PyResult<Self> {
+        if !accept_length.is_finite() {
+            return Err(PyValueError::new_err(format!(
+                "accept_length must be finite, got {accept_length}"
+            )));
+        }
         Ok(Self {
             inner: rs_engine_perf::EngineCapacityRequest {
                 isl,
@@ -213,6 +220,7 @@ impl EngineCapacityRequest {
                 ttft_sla: ttft_sla_ms.map(ms_to_duration).transpose()?,
                 itl_sla: itl_sla_ms.map(ms_to_duration).transpose()?,
                 e2e_latency_sla: e2e_latency_sla_ms.map(ms_to_duration).transpose()?,
+                accept_length: accept_length.max(1.0),
                 kv_hit_rate,
                 optimization_target: optimization_target.into(),
             },

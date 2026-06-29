@@ -374,7 +374,7 @@ TRT-LLM workers register with Dynamo using:
 # TRT-LLM Worker - Register with Tokens
 await register_model(
     ModelInput.Tokens,      # Rust does minimal preprocessing
-    model_type,             # ModelType.Chat or ModelType.Prefill
+    model_type,             # ModelType.Chat or ModelType.Empty
     generate_endpoint,
     model_name,
     ...

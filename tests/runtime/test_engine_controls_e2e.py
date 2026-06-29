@@ -53,13 +53,13 @@ async def test_engine_control_route_invokes_registered_callback(
         calls.append(body)
         return {"status": "ok", "control": "sleep", "body": body}
 
-    runtime.register_engine_route("sleep", sleep_control)
+    runtime.register_engine_route("control/sleep", sleep_control)
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await _post_with_retry(
                 client,
-                f"http://127.0.0.1:{system_port}/engine/sleep",
+                f"http://127.0.0.1:{system_port}/engine/control/sleep",
                 {"level": 1},
             )
 

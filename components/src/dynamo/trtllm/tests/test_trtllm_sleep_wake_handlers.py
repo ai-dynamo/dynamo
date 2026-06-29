@@ -4,7 +4,7 @@
 """Unit tests for TRT-LLM sleep/wake handler logic.
 
 Tests cover in-flight tracking, reject-flag, and sleep/wake delegation to
-TRTLLMEngineQuiesceController without requiring a real GPU or TRT-LLM engine.
+TRTLLMEnginePauseController without requiring a real GPU or TRT-LLM engine.
 """
 
 import asyncio
@@ -31,7 +31,7 @@ pytest.importorskip("tensorrt_llm")
 
 from dynamo.trtllm.request_handlers.handler_base import (  # noqa: E402
     HandlerBase,
-    TRTLLMEngineQuiesceController,
+    TRTLLMEnginePauseController,
 )
 
 pytestmark = [
@@ -53,43 +53,43 @@ class _ConcreteHandler(HandlerBase):
 
 
 def _make_handler() -> _ConcreteHandler:
-    """Create a HandlerBase subclass with mocked quiesce controller and endpoint."""
+    """Create a HandlerBase subclass with mocked pause controller and endpoint."""
     handler = _ConcreteHandler.__new__(_ConcreteHandler)
     handler.generate_endpoint = SimpleNamespace(
         unregister_endpoint_instance=AsyncMock(),
         register_endpoint_instance=AsyncMock(),
     )
-    handler._quiesce_lock = asyncio.Lock()
+    handler._pause_lock = asyncio.Lock()
     handler._inflight_lock = asyncio.Lock()
     handler._inflight_requests = 0
     handler._no_inflight_requests = asyncio.Event()
     handler._no_inflight_requests.set()
     handler._reject_new_requests = False
-    # Mock the quiesce controller that release/resume delegate to.
-    # quiesce side_effect mirrors the real implementation;
+    # Mock the pause controller that release/resume delegate to.
+    # pause side_effect mirrors the real implementation;
     # tests don't need to manually update state after a release call.
-    handler._quiesce_controller = MagicMock()
-    handler._quiesce_controller.is_quiesced = False
-    handler._quiesce_controller.needs_resume_recovery = False
+    handler._pause_controller = MagicMock()
+    handler._pause_controller.is_paused = False
+    handler._pause_controller.needs_resume_recovery = False
 
-    async def _quiesce(tags=None):
-        handler._quiesce_controller.is_quiesced = True
+    async def _pause(tags=None):
+        handler._pause_controller.is_paused = True
         return True
 
-    handler._quiesce_controller.quiesce = AsyncMock(side_effect=_quiesce)
-    handler._quiesce_controller.resume = AsyncMock(return_value=True)
-    handler._quiesce_controller.mark_resumed = MagicMock()
+    handler._pause_controller.pause = AsyncMock(side_effect=_pause)
+    handler._pause_controller.resume = AsyncMock(return_value=True)
+    handler._pause_controller.mark_resumed = MagicMock()
     return handler
 
 
 # ---------------------------------------------------------------------------
-# TRTLLMEngineQuiesceController recovery state
+# TRTLLMEnginePauseController recovery state
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_quiesce_tracks_partial_state_for_resume_recovery():
-    controller = TRTLLMEngineQuiesceController(MagicMock())
+async def test_pause_tracks_partial_state_for_resume_recovery():
+    controller = TRTLLMEnginePauseController(MagicMock())
     controller._collective_rpc = MagicMock()
     controller._release_gms_weights = MagicMock(
         side_effect=RuntimeError("weights failed")
@@ -97,9 +97,9 @@ async def test_quiesce_tracks_partial_state_for_resume_recovery():
     controller._restore_gms_weights = MagicMock()
 
     with pytest.raises(RuntimeError, match="weights failed"):
-        await controller.quiesce()
+        await controller.pause()
 
-    assert controller.is_quiesced is False
+    assert controller.is_paused is False
     assert controller.needs_resume_recovery is True
 
     resumed = await controller.resume()
@@ -114,13 +114,13 @@ async def test_quiesce_tracks_partial_state_for_resume_recovery():
 
 
 @pytest.mark.asyncio
-async def test_resume_restores_completed_quiesce_domains():
-    controller = TRTLLMEngineQuiesceController(MagicMock())
+async def test_resume_restores_completed_pause_domains():
+    controller = TRTLLMEnginePauseController(MagicMock())
     controller._collective_rpc = MagicMock()
     controller._release_gms_weights = MagicMock()
     controller._restore_gms_weights = MagicMock()
 
-    assert await controller.quiesce(["kv_cache"]) is True
+    assert await controller.pause(["kv_cache"]) is True
 
     resumed = await controller.resume(["weights"])
 
@@ -130,7 +130,7 @@ async def test_resume_restores_completed_quiesce_domains():
     )
     controller._restore_gms_weights.assert_not_called()
     controller.mark_resumed()
-    assert controller.is_quiesced is False
+    assert controller.is_paused is False
     assert controller.needs_resume_recovery is False
 
 
@@ -172,13 +172,13 @@ async def test_mark_request_finished_is_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_release_is_noop_when_already_quiesced():
+async def test_release_is_noop_when_already_paused():
     handler = _make_handler()
-    handler._quiesce_controller.is_quiesced = True
+    handler._pause_controller.is_paused = True
     result = await handler.release_memory_occupation({})
     assert result["status"] == "ok"
     assert "already released" in result["message"]
-    handler._quiesce_controller.quiesce.assert_not_called()
+    handler._pause_controller.pause.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -189,11 +189,11 @@ async def test_release_returns_error_for_non_numeric_timeout():
 
 
 @pytest.mark.asyncio
-async def test_release_delegates_to_quiesce_controller():
+async def test_release_delegates_to_pause_controller():
     handler = _make_handler()
     result = await handler.release_memory_occupation({})
     assert result["status"] == "ok"
-    handler._quiesce_controller.quiesce.assert_awaited_once_with(None)
+    handler._pause_controller.pause.assert_awaited_once_with(None)
 
 
 @pytest.mark.asyncio
@@ -201,13 +201,13 @@ async def test_release_passes_tags_to_controller():
     handler = _make_handler()
     result = await handler.release_memory_occupation({"tags": ["weights"]})
     assert result["status"] == "ok"
-    handler._quiesce_controller.quiesce.assert_awaited_once_with(["weights"])
+    handler._pause_controller.pause.assert_awaited_once_with(["weights"])
 
 
 @pytest.mark.asyncio
 async def test_release_unregisters_endpoint_and_restores_on_error():
     handler = _make_handler()
-    handler._quiesce_controller.quiesce = AsyncMock(
+    handler._pause_controller.pause = AsyncMock(
         side_effect=RuntimeError("engine error")
     )
     result = await handler.release_memory_occupation({})
@@ -220,37 +220,37 @@ async def test_release_unregisters_endpoint_and_restores_on_error():
 @pytest.mark.asyncio
 async def test_release_rejected_while_resume_recovery_pending():
     handler = _make_handler()
-    # A prior release left the controller half-quiesced; quiesce() would no-op.
-    handler._quiesce_controller.needs_resume_recovery = True
+    # A prior release left the controller half-paused; pause() would no-op.
+    handler._pause_controller.needs_resume_recovery = True
 
     result = await handler.release_memory_occupation({})
 
     assert result["status"] == "error"
     assert "resume_memory_occupation required" in result["message"]
-    handler._quiesce_controller.quiesce.assert_not_called()
+    handler._pause_controller.pause.assert_not_called()
     handler.generate_endpoint.unregister_endpoint_instance.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_release_recovers_partial_quiesce_before_restoring_endpoint():
+async def test_release_recovers_partial_pause_before_restoring_endpoint():
     handler = _make_handler()
 
-    async def _quiesce_failed(tags=None):
-        handler._quiesce_controller.needs_resume_recovery = True
+    async def _pause_failed(tags=None):
+        handler._pause_controller.needs_resume_recovery = True
         raise RuntimeError("engine error")
 
     async def _resume(tags=None):
-        handler._quiesce_controller.needs_resume_recovery = False
+        handler._pause_controller.needs_resume_recovery = False
         return True
 
-    handler._quiesce_controller.quiesce = AsyncMock(side_effect=_quiesce_failed)
-    handler._quiesce_controller.resume = AsyncMock(side_effect=_resume)
+    handler._pause_controller.pause = AsyncMock(side_effect=_pause_failed)
+    handler._pause_controller.resume = AsyncMock(side_effect=_resume)
 
     result = await handler.release_memory_occupation({})
 
     assert result["status"] == "error"
-    handler._quiesce_controller.resume.assert_awaited_once_with(None)
-    handler._quiesce_controller.mark_resumed.assert_called_once_with()
+    handler._pause_controller.resume.assert_awaited_once_with(None)
+    handler._pause_controller.mark_resumed.assert_called_once_with()
     handler.generate_endpoint.unregister_endpoint_instance.assert_called_once()
     handler.generate_endpoint.register_endpoint_instance.assert_called_once()
     assert not handler._reject_new_requests
@@ -262,12 +262,12 @@ async def test_release_recovers_partial_quiesce_before_restoring_endpoint():
 
 
 @pytest.mark.asyncio
-async def test_resume_is_noop_when_not_quiesced():
+async def test_resume_is_noop_when_not_paused():
     handler = _make_handler()
     result = await handler.resume_memory_occupation({})
     assert result["status"] == "ok"
     assert "already resumed" in result["message"]
-    handler._quiesce_controller.resume.assert_not_called()
+    handler._pause_controller.resume.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -278,8 +278,8 @@ async def test_release_and_resume_round_trip():
 
     resume = await handler.resume_memory_occupation({})
     assert resume["status"] == "ok"
-    handler._quiesce_controller.resume.assert_awaited_once()
-    handler._quiesce_controller.mark_resumed.assert_called_once()
+    handler._pause_controller.resume.assert_awaited_once()
+    handler._pause_controller.mark_resumed.assert_called_once()
     assert not handler._reject_new_requests
     handler.generate_endpoint.register_endpoint_instance.assert_called_once()
 
@@ -287,10 +287,10 @@ async def test_release_and_resume_round_trip():
 @pytest.mark.asyncio
 async def test_resume_passes_tags_to_controller():
     handler = _make_handler()
-    handler._quiesce_controller.is_quiesced = True
+    handler._pause_controller.is_paused = True
     result = await handler.resume_memory_occupation({"tags": ["kv_cache"]})
     assert result["status"] == "ok"
-    handler._quiesce_controller.resume.assert_awaited_once_with(["kv_cache"])
+    handler._pause_controller.resume.assert_awaited_once_with(["kv_cache"])
 
 
 # ---------------------------------------------------------------------------

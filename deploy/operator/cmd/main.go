@@ -24,7 +24,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -79,6 +78,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
+	webhookmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/mutation"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
@@ -263,6 +263,11 @@ func main() {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
 		}
+		// PodSnapshotContent is cluster-scoped, so DefaultNamespaces does not cover it.
+		// Register it cluster-wide explicitly so the PodSnapshotReconciler can watch it.
+		mgrOpts.Cache.ByObject = map[client.Object]cache.ByObject{
+			&nvidiacomv1alpha1.PodSnapshotContent{}: {},
+		}
 		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
 
 		banner := strings.Repeat("=", 80)
@@ -299,7 +304,9 @@ func main() {
 		setupLog.Error(err, "unable to create cert manager")
 		os.Exit(1)
 	}
-	if err = certMgr.Setup(mainCtx, mgr); err != nil {
+	// Auto mode runs one synchronous certificate refresh with the direct client,
+	// then registers the cert-controller with the not-yet-started manager.
+	if err = certMgr.SetupAndRunOnce(mainCtx, mgr); err != nil {
 		setupLog.Error(err, "failed to setup webhook certificate management")
 		os.Exit(1)
 	}
@@ -378,9 +385,15 @@ func main() {
 		runtimeConfig.ExcludedNamespaces = leaseWatcher
 	}
 
-	// Start resource counter background goroutine (after ExcludedNamespaces is set)
-	setupLog.Info("Starting resource counter")
-	go observability.StartResourceCounter(mainCtx, mgr.GetClient(), runtimeConfig.ExcludedNamespaces)
+	// Register after ExcludedNamespaces is set so cluster-wide metrics skip restricted namespaces.
+	setupLog.Info("Registering resource counter")
+	if err := mgr.Add(observability.NewResourceCounter(
+		mgr.GetClient(),
+		runtimeConfig.ExcludedNamespaces,
+	)); err != nil {
+		setupLog.Error(err, "unable to register resource counter")
+		os.Exit(1)
+	}
 
 	// Detect orchestrators availability using discovery client.
 	// Config overrides (*bool) take precedence over auto-detection:
@@ -483,11 +496,10 @@ func main() {
 	if restrictedNamespace == "" {
 		factory = informers.NewSharedInformerFactory(kubernetes.NewForConfigOrDie(mgr.GetConfig()), time.Hour*24)
 	} else {
-		factory = informers.NewFilteredSharedInformerFactory(
+		factory = informers.NewSharedInformerFactoryWithOptions(
 			kubernetes.NewForConfigOrDie(mgr.GetConfig()),
 			time.Hour*24,
-			restrictedNamespace,
-			nil,
+			informers.WithNamespace(restrictedNamespace),
 		)
 	}
 	secretInformer := factory.Core().V1().Secrets().Informer()
@@ -570,15 +582,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	webhooksReady := make(chan struct{})
-	if err := mgr.AddReadyzCheck("readyz", func(req *http.Request) error {
-		select {
-		case <-webhooksReady:
-			return nil
-		default:
-			return fmt.Errorf("webhook handlers not yet registered")
-		}
-	}); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
@@ -593,30 +597,47 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Webhooks require TLS certificates to serve HTTPS. Register them in a
-	// goroutine that blocks until the cert-controller has written the certs.
-	go func() {
-		certMgr.WaitReady()
+	if err := registerWebhookHandlers(mgr, operatorCfg, runtimeConfig, operatorVersion); err != nil {
+		setupLog.Error(err, "failed to register webhooks")
+		os.Exit(1)
+	}
 
-		if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-			injector, err := internalcert.NewCABundleInjector(mgr.GetClient(), operatorCfg)
-			if err != nil {
-				setupLog.Error(err, "unable to create CA bundle injector")
-				os.Exit(1)
-			}
-			if err := injector.InjectAll(mainCtx); err != nil {
-				setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
-				os.Exit(1)
-			}
-		}
-
-		if err := registerWebhooks(mgr, operatorCfg, runtimeConfig, operatorVersion); err != nil {
-			setupLog.Error(err, "failed to register webhooks")
+	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS
+	// secrets before this point. Auto mode can therefore patch admission and
+	// conversion CAs immediately; manual mode waits for externally provided
+	// ca.crt and only patches conversion, leaving admission CA management
+	// out-of-band.
+	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
+	if err != nil {
+		setupLog.Error(err, "unable to create CA bundle injector")
+		os.Exit(1)
+	}
+	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
+		if err := caInjector.InjectAll(mainCtx); err != nil {
+			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
 			os.Exit(1)
 		}
-		close(webhooksReady)
-	}()
+	} else {
+		// Manual mode gets webhook CA material out-of-band. Missing ca.crt
+		// blocks startup instead of running with unauthenticated conversion.
+		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
+			setupLog.Error(err, "failed to inject CRD conversion CA bundle")
+			os.Exit(1)
+		}
+	}
 
+	// mgr.Start reads tls.crt and tls.key from the projected Secret volume
+	// synchronously. Secret API updates are not enough because kubelet projects
+	// them into already-running pods asynchronously.
+	if err := certMgr.WaitForMountedCertificate(mainCtx); err != nil {
+		setupLog.Error(err, "failed waiting for mounted webhook TLS certificate")
+		os.Exit(1)
+	}
+
+	// Kubernetes propagates webhook configuration asynchronously, especially
+	// with HA apiservers. A missing or stale CA must fail closed during manager
+	// cache startup rather than allowing the operator to run without conversion
+	// or admission.
 	setupLog.Info("starting manager")
 	if err := mgr.Start(mainCtx); err != nil {
 		setupLog.Error(err, "problem running manager")
@@ -703,6 +724,15 @@ func registerControllers(
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
 	}
 
+	if err = (&controller.PodSnapshotReconciler{
+		Client:        mgr.GetClient(),
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
+		Recorder:      mgr.GetEventRecorderFor("snapshot"),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
+	}
+
 	if runtimeConfig.GroveEnabled {
 		if err = controller.NewFailoverCascadeReconciler(
 			mgr.GetClient(),
@@ -726,7 +756,7 @@ func registerControllers(
 	return nil
 }
 
-func registerWebhooks(
+func registerWebhookHandlers(
 	mgr ctrl.Manager,
 	operatorCfg *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
@@ -787,26 +817,22 @@ func registerWebhooks(
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest conversion webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoGraphDeployment{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeployment{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment conversion webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoComponentDeployment{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoComponentDeployment{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoComponentDeployment conversion webhook: %w", err)
 	}
 
-	if err := ctrl.NewWebhookManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}).
+	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}).
 		Complete(); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentScalingAdapter conversion webhook: %w", err)
 	}
@@ -818,7 +844,7 @@ func registerWebhooks(
 		return fmt.Errorf("unable to register DynamoComponentDeployment defaulting webhook: %w", err)
 	}
 
-	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion)
+	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion, runtimeConfig.GroveEnabled)
 	if err := dgdDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeployment defaulting webhook: %w", err)
 	}
@@ -826,6 +852,13 @@ func registerWebhooks(
 	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(operatorVersion)
 	if err := dgdrDefaulter.RegisterWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest defaulting webhook: %w", err)
+	}
+
+	setupLog.Info("Registering mutation webhooks")
+
+	podCheckpointRestoreMutator := webhookmutation.NewPodCheckpointRestoreMutator(mgr.GetClient(), operatorCfg)
+	if err := podCheckpointRestoreMutator.RegisterWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to register Pod checkpoint restore mutating webhook: %w", err)
 	}
 
 	setupLog.Info("Webhooks registered successfully")

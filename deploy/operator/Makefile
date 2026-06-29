@@ -3,7 +3,7 @@
 IMG ?= controller:latest
 
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.29.0
+ENVTEST_K8S_VERSION = 1.30.0
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -89,6 +89,10 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
+	done
+	echo "Adding CA-less conversion webhook to multi-version CRD files"
+	for file in config/crd/bases/*.yaml; do \
+		$(YQ) eval 'with(select(.spec.versions | length > 1); .spec.conversion = {"strategy": "Webhook", "webhook": {"clientConfig": {"service": {"namespace": "dynamo-system", "name": "dynamo-operator-webhook-service", "path": "/convert"}}, "conversionReviewVersions": ["v1"]}} | .spec.conversion.webhook.clientConfig head_comment = "CA will be patched in by the Dynamo operator or other means, depending on cert mode auto or manual")' -i --indent 2 $$file || exit 1; \
 	done
 	echo "Adding NVIDIA header to CRD files"
 	for file in config/crd/bases/*.yaml; do \
@@ -391,7 +395,7 @@ KUBECTL_VERSION ?= v1.31.4
 HELM_VERSION ?= v3.17.3
 YQ_VERSION ?= v4.45.4
 KUSTOMIZE_VERSION ?= v5.5.0
-CONTROLLER_TOOLS_VERSION ?= v0.16.4
+CONTROLLER_TOOLS_VERSION ?= v0.17.3
 ENVTEST_VERSION ?= release-0.19
 GOLANGCI_LINT_VERSION ?= v1.64.8
 

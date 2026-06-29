@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("vllm.v1.engine.async_llm")
 pytest.importorskip("vllm.usage.usage_lib")
 
-from dynamo.vllm.handlers import VllmEngineQuiesceController  # noqa: E402
+from dynamo.vllm.handlers import VllmEnginePauseController  # noqa: E402
 from dynamo.vllm.llm_engine import VllmLLMEngine  # noqa: E402
 
 pytestmark = [
@@ -35,8 +35,8 @@ def _make_engine(include_scale: bool = False) -> VllmLLMEngine:
         engine_client.scale_elastic_ep = AsyncMock()
 
     engine.engine_client = engine_client
-    engine._quiesce_controller = VllmEngineQuiesceController(engine_client)
-    engine._quiesce_lock = asyncio.Lock()
+    engine._pause_controller = VllmEnginePauseController(engine_client)
+    engine._pause_lock = asyncio.Lock()
     engine._scale_ep_lock = asyncio.Lock()
     return engine
 
@@ -76,8 +76,8 @@ async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
     sleep_result = await engine.sleep({"level": 1})
 
     assert sleep_result["status"] == "error"
-    assert engine._quiesce_controller.is_quiesced is False
-    assert engine._quiesce_controller.needs_resume_recovery is True
+    assert engine._pause_controller.is_paused is False
+    assert engine._pause_controller.needs_resume_recovery is True
     failed_resume.assert_awaited_once()
 
     engine.engine_client.resume_generation = AsyncMock()
@@ -86,7 +86,7 @@ async def test_wake_up_recovers_generation_pause_after_failed_sleep_rollback():
     assert wake_result["status"] == "ok"
     engine.engine_client.wake_up.assert_not_awaited()
     engine.engine_client.resume_generation.assert_awaited_once()
-    assert engine._quiesce_controller.needs_resume_recovery is False
+    assert engine._pause_controller.needs_resume_recovery is False
 
 
 @pytest.mark.asyncio

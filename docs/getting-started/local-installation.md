@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Local Installation
 sidebar-title: Local Installation
 description: Install and run Dynamo on a local machine or VM with containers or PyPI
 ---
@@ -8,8 +9,6 @@ description: Install and run Dynamo on a local machine or VM with containers or 
 <p align="left">
   <a href="./local-installation.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
 </p>
-
-# Local Installation
 
 This guide walks through installing and running Dynamo on a local machine or VM with one or more GPUs. By the end, you'll have a working OpenAI-compatible endpoint serving a model.
 
@@ -38,13 +37,13 @@ Containers have all dependencies pre-installed. No setup required.
 
 ```bash
 # SGLang
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
 # TensorRT-LLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
 
 # vLLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
 ```
 
 To run frontend and worker in the same container, either:
@@ -220,10 +219,10 @@ Ensure you passed `--gpus all` to `docker run`. Without this flag, the container
 
 ```bash
 # Correct
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
 # Wrong -- no GPU access
-docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
+docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 ```
 
 ## Next Steps

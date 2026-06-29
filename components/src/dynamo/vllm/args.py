@@ -120,6 +120,22 @@ def parse_args(argv: list[str] | None = None) -> Config:
     return dynamo_config
 
 
+def configure_rl_logprobs_mode(config: Config) -> None:
+    if not config.enable_rl:
+        return
+
+    if config.engine_args.logprobs_mode == "raw_logprobs":
+        config.engine_args.logprobs_mode = "processed_logprobs"
+        logger.info("Defaulting logprobs_mode=processed_logprobs (--enable-rl active).")
+        return
+
+    if config.engine_args.logprobs_mode != "processed_logprobs":
+        raise ValueError(
+            "--enable-rl requires logprobs_mode=processed_logprobs; "
+            f"got {config.engine_args.logprobs_mode!r}."
+        )
+
+
 def cross_validate_config(
     dynamo_config: Config, engine_config: AsyncEngineArgs
 ) -> None:
@@ -208,14 +224,6 @@ def update_dynamo_config_with_engine(
 
     # Clear connector list (no longer used for vLLM)
     dynamo_config.connector = []  # type: ignore[assignment]
-
-    # Validate ModelExpress P2P server URL
-    if getattr(engine_config, "load_format", None) in ("mx-source", "mx-target"):
-        if not dynamo_config.model_express_url:
-            raise ValueError(
-                f"--model-express-url or MODEL_EXPRESS_URL env var is required "
-                f"when using --load-format={engine_config.load_format}"
-            )
 
 
 def update_engine_config_with_dynamo(

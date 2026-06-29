@@ -52,21 +52,13 @@ const (
 // This validator can be used by both webhooks and controllers for consistent validation.
 type DynamoGraphDeploymentValidator struct {
 	deployment   *nvidiacomv1alpha1.DynamoGraphDeployment
-	mgr          ctrl.Manager // Optional: for API group detection via discovery client
+	mgr          ctrl.Manager
 	groveEnabled bool
 }
 
 // NewDynamoGraphDeploymentValidator creates a new validator for DynamoGraphDeployment.
-// groveEnabled should reflect the operator's runtime config (global.grove.enabled).
-func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, groveEnabled bool) *DynamoGraphDeploymentValidator {
-	return &DynamoGraphDeploymentValidator{
-		deployment:   deployment,
-		groveEnabled: groveEnabled,
-	}
-}
-
-// NewDynamoGraphDeploymentValidatorWithManager creates a validator with a manager for API group detection.
-func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager, groveEnabled bool) *DynamoGraphDeploymentValidator {
+// groveEnabled should reflect the operator's runtime Grove configuration.
+func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager, groveEnabled bool) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
 		deployment:   deployment,
 		mgr:          mgr,
@@ -75,7 +67,7 @@ func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.
 }
 
 // Validate performs validation on the DynamoGraphDeployment.
-// The ClusterTopology CRD check only runs on CREATE (Generation == 1). On UPDATE
+// The ClusterTopology CRD check only runs on CREATE (Generation <= 1). On UPDATE
 // (Generation > 1) it is skipped because TAS fields are immutable — domains were
 // already validated at creation time and the topology may have changed since.
 func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admission.Warnings, error) {
@@ -99,13 +91,18 @@ func (v *DynamoGraphDeploymentValidator) Validate(ctx context.Context) (admissio
 		return nil, err
 	}
 
+	// Validate priority class pass-through
+	if err := v.validatePriorityClassName(); err != nil {
+		return nil, err
+	}
+
 	// Validate topology constraints
 	if err := v.validateTopologyConstraints(ctx); err != nil {
 		return nil, err
 	}
 
 	// Validate KV transfer policy
-	if err := v.validateKvTransferPolicy(); err != nil {
+	if err := v.validateKvTransferPolicy(ctx); err != nil {
 		return nil, err
 	}
 
@@ -185,6 +182,15 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 				serviceName,
 			))
 		}
+
+		if v.isGrovePathway() && oldService.MinAvailable != nil {
+			if newService.MinAvailable == nil || *newService.MinAvailable != *oldService.MinAvailable {
+				errs = append(errs, fmt.Errorf(
+					"spec.services[%s].minAvailable is immutable after creation",
+					serviceName,
+				))
+			}
+		}
 	}
 
 	// Validate inter-pod GMS layout and failover immutability.
@@ -227,6 +233,10 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 
 	// Validate topology constraint immutability
 	if err := v.validateTopologyConstraintImmutability(old); err != nil {
+		errs = append(errs, err)
+	}
+
+	if err := v.validateKvTransferPolicyImmutability(old); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -333,22 +343,31 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 	// templates are all wired at the PodCliqueScalingGroup level, which only
 	// the Grove renderer produces.
 	if service.IsInterPodGMSEnabled() && !v.isGrovePathway() {
-		if !v.groveEnabled {
-			return nil, fmt.Errorf(
-				"spec.services[%s]: gpuMemoryService.mode=%q requires the Grove pathway, but Grove is disabled at the operator level (global.grove.enabled=false)",
-				serviceName, nvidiacomv1alpha1.GMSModeInterPod)
+		return nil, v.grovePathwayRequiredError(fmt.Sprintf(
+			"spec.services[%s]: gpuMemoryService.mode=%q",
+			serviceName, nvidiacomv1alpha1.GMSModeInterPod))
+	}
+	if service.MinAvailable != nil && !v.isGrovePathway() {
+		return nil, v.grovePathwayRequiredError(fmt.Sprintf("spec.services[%s].minAvailable", serviceName))
+	}
+	if service.MinAvailable != nil && v.isGrovePathway() {
+		if *service.MinAvailable <= 0 {
+			return nil, fmt.Errorf("spec.services[%s].minAvailable must be greater than 0", serviceName)
 		}
-		return nil, fmt.Errorf(
-			"spec.services[%s]: gpuMemoryService.mode=%q requires the Grove pathway; remove or unset the %q annotation (currently %q)",
-			serviceName, nvidiacomv1alpha1.GMSModeInterPod,
-			consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
+		replicas := int32(1)
+		if service.Replicas != nil {
+			replicas = *service.Replicas
+		}
+		if replicas > 0 && replicas < *service.MinAvailable {
+			return nil, fmt.Errorf("spec.services[%s].replicas must be 0 or greater than or equal to minAvailable", serviceName)
+		}
 	}
 
 	// The inter-pod GMS layout is currently implemented only for vLLM (the
-	// engine relies on vLLM-specific runtime hooks like --load-format gms and
-	// DYN_VLLM_GMS_SHADOW_MODE that activate the GMS client path). Fail fast
-	// at admission rather than producing a broken deployment when another or
-	// no backend is configured — an empty BackendFramework means the operator
+	// engine relies on vLLM-specific runtime hooks like --load-format gms; the
+	// failover variant additionally enables vLLM shadow mode). Fail fast at
+	// admission rather than producing a broken deployment when another or no
+	// backend is configured — an empty BackendFramework means the operator
 	// cannot confirm the engine speaks vLLM, which is a hard prerequisite for
 	// inter-pod GMS (both standalone and with failover).
 	if service.IsInterPodGMSEnabled() &&
@@ -377,9 +396,9 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 
 	var sharedValidator *SharedSpecValidator
 	if v.mgr != nil {
-		sharedValidator = NewSharedSpecValidatorWithManager(service, fieldPath, calculatedNamespace, v.mgr)
+		sharedValidator = NewSharedSpecValidatorWithManager(service, fieldPath, calculatedNamespace, v.mgr, v.isGrovePathway())
 	} else {
-		sharedValidator = NewSharedSpecValidator(service, fieldPath, calculatedNamespace)
+		sharedValidator = NewSharedSpecValidator(service, fieldPath, calculatedNamespace, v.isGrovePathway())
 	}
 
 	return sharedValidator.Validate(ctx)
@@ -466,14 +485,19 @@ func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName s
 }
 
 // isGrovePathway determines if Grove pathway may be used for this deployment.
-// Grove requires both operator-level enablement (global.grove.enabled) and the
-// per-DGD annotation not being explicitly set to "false".
+// Grove requires both operator-level enablement and the per-DGD annotation not
+// being explicitly set to "false".
 func (v *DynamoGraphDeploymentValidator) isGrovePathway() bool {
+	return v.groveEnabled && (v.deployment.Annotations == nil ||
+		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
+}
+
+func (v *DynamoGraphDeploymentValidator) grovePathwayRequiredError(subject string) error {
 	if !v.groveEnabled {
-		return false
+		return fmt.Errorf("%s requires the Grove pathway, but Grove is disabled in the operator configuration", subject)
 	}
-	return v.deployment.Annotations == nil ||
-		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse
+	return fmt.Errorf("%s requires the Grove pathway; remove or unset the %q annotation (currently %q)",
+		subject, consts.KubeAnnotationEnableGrove, v.deployment.Annotations[consts.KubeAnnotationEnableGrove])
 }
 
 // validatePVCs validates the PVC configurations.
@@ -558,6 +582,13 @@ func (v *DynamoGraphDeploymentValidator) validateRestartStrategyOrder() error {
 	}
 
 	return err
+}
+
+func (v *DynamoGraphDeploymentValidator) validatePriorityClassName() error {
+	if v.deployment.Spec.PriorityClassName == "" || v.isGrovePathway() {
+		return nil
+	}
+	return v.grovePathwayRequiredError("spec.priorityClassName")
 }
 
 // validateAnnotations validates known DGD annotations have valid values.
@@ -677,13 +708,54 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyConstraints(ctx context
 	// Validate domains and hierarchy against the framework's topology CRD (CREATE only).
 	// On UPDATE (Generation > 1) this is skipped because TAS fields are immutable.
 	// Skip when prior validation errors exist to avoid redundant "domain not found" messages.
-	if len(errs) == 0 && v.mgr != nil && v.isGrovePathway() && v.deployment.Generation == 1 {
+	if v.shouldValidateGroveClusterTopology(errs, specConstraint.TopologyProfile != "") {
 		if err := v.validateTopologyDomainsAgainstGroveClusterTopology(ctx); err != nil {
 			errs = append(errs, err)
 		}
 	}
 
 	return errors.Join(errs...)
+}
+
+type clusterTopologyInfo struct {
+	domainIndex map[string]int
+	domains     []string
+}
+
+func (v *DynamoGraphDeploymentValidator) shouldValidateGroveClusterTopology(errs []error, hasClusterTopologyRef bool) bool {
+	return len(errs) == 0 &&
+		hasClusterTopologyRef &&
+		v.deployment.Generation <= 1 &&
+		v.isGrovePathway()
+}
+
+func (v *DynamoGraphDeploymentValidator) readGroveClusterTopology(ctx context.Context, name string) (*clusterTopologyInfo, error) {
+	ct := &grovev1alpha1.ClusterTopology{}
+	if err := v.mgr.GetClient().Get(ctx, types.NamespacedName{Name: name}, ct); err != nil {
+		return nil, err
+	}
+
+	info := &clusterTopologyInfo{
+		domainIndex: make(map[string]int, len(ct.Spec.Levels)),
+		domains:     make([]string, 0, len(ct.Spec.Levels)),
+	}
+	for i, level := range ct.Spec.Levels {
+		domain := string(level.Domain)
+		info.domainIndex[domain] = i
+		info.domains = append(info.domains, domain)
+	}
+	sort.Strings(info.domains)
+	return info, nil
+}
+
+func (i *clusterTopologyInfo) domainIndexFor(domain nvidiacomv1alpha1.TopologyDomain) (int, bool) {
+	idx, ok := i.domainIndex[string(domain)]
+	return idx, ok
+}
+
+func (i *clusterTopologyInfo) hasDomain(domain nvidiacomv1alpha1.TopologyDomain) bool {
+	_, ok := i.domainIndexFor(domain)
+	return ok
 }
 
 // validateTopologyDomainsAgainstGroveClusterTopology reads the Grove ClusterTopology
@@ -695,9 +767,7 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyDomainsAgainstGroveClus
 		return nil
 	}
 
-	cl := v.mgr.GetClient()
-	ct := &grovev1alpha1.ClusterTopology{}
-	err := cl.Get(ctx, types.NamespacedName{Name: profileName}, ct)
+	info, err := v.readGroveClusterTopology(ctx, profileName)
 	if err != nil {
 		if k8serrors.IsNotFound(err) {
 			return fmt.Errorf("topology-aware scheduling requires a ClusterTopology resource %q but it was not found; "+
@@ -705,11 +775,8 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyDomainsAgainstGroveClus
 		}
 		return fmt.Errorf("failed to read ClusterTopology %q for topology validation: %w", profileName, err)
 	}
-
-	// Build a map from domain name to its index in the levels array (broadest = 0).
-	domainIndex := make(map[string]int, len(ct.Spec.Levels))
-	for i, level := range ct.Spec.Levels {
-		domainIndex[string(level.Domain)] = i
+	if info == nil {
+		return nil
 	}
 
 	// Collect all (fieldPath, domain) pairs to validate.
@@ -744,16 +811,16 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyDomainsAgainstGroveClus
 
 	var errs []error
 	for _, c := range checks {
-		if _, ok := domainIndex[string(c.domain)]; !ok {
+		if !info.hasDomain(c.domain) {
 			errs = append(errs, fmt.Errorf("%s: domain %q does not exist in ClusterTopology %q; "+
-				"available domains: %v", c.fieldPath, c.domain, profileName, topologyLevelDomains(ct)))
+				"available domains: %v", c.fieldPath, c.domain, profileName, info.domains))
 		}
 	}
 
 	// Validate hierarchy: service packDomain must be at equal or higher index than spec packDomain.
 	specDomain := v.deployment.Spec.TopologyConstraint.PackDomain
 	if specDomain != "" {
-		specIdx, specOk := domainIndex[string(specDomain)]
+		specIdx, specOk := info.domainIndexFor(specDomain)
 		if specOk {
 			for _, serviceName := range serviceNames {
 				service := v.deployment.Spec.Services[serviceName]
@@ -761,7 +828,7 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyDomainsAgainstGroveClus
 					continue
 				}
 				svcDomain := service.TopologyConstraint.PackDomain
-				svcIdx, svcOk := domainIndex[string(svcDomain)]
+				svcIdx, svcOk := info.domainIndexFor(svcDomain)
 				if svcOk && svcIdx < specIdx {
 					errs = append(errs, fmt.Errorf("spec.services[%s]: topologyConstraint.packDomain %q is broader "+
 						"than spec-level %q; service constraints must be equal to or narrower than the "+
@@ -772,16 +839,6 @@ func (v *DynamoGraphDeploymentValidator) validateTopologyDomainsAgainstGroveClus
 	}
 
 	return errors.Join(errs...)
-}
-
-// topologyLevelDomains returns the list of domain names from a ClusterTopology for error messages.
-func topologyLevelDomains(ct *grovev1alpha1.ClusterTopology) []string {
-	domains := make([]string, 0, len(ct.Spec.Levels))
-	for _, level := range ct.Spec.Levels {
-		domains = append(domains, string(level.Domain))
-	}
-	sort.Strings(domains)
-	return domains
 }
 
 // validateTopologyConstraintImmutability validates that topology constraints are not changed on UPDATE.
@@ -850,6 +907,52 @@ func topologyConstraintsEqual(a, b *nvidiacomv1alpha1.TopologyConstraint) bool {
 	return a.PackDomain == b.PackDomain
 }
 
+func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicyImmutability(old *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	if kvTransferPoliciesEqual(kvTransferPolicyFor(old), kvTransferPolicyFor(v.deployment)) {
+		return nil
+	}
+	return fmt.Errorf("spec.experimental.kvTransferPolicy is immutable and cannot be added, removed, or changed after creation; " +
+		"delete and recreate the DynamoGraphDeployment to change the KV transfer policy")
+}
+
+func kvTransferPolicyFor(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) *nvidiacomv1alpha1.KvTransferPolicy {
+	if dgd == nil || dgd.Spec.Experimental == nil {
+		return nil
+	}
+	return dgd.Spec.Experimental.KvTransferPolicy
+}
+
+func kvTransferPoliciesEqual(a, b *nvidiacomv1alpha1.KvTransferPolicy) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return a.ClusterTopologyName == b.ClusterTopologyName &&
+		a.LabelKey == b.LabelKey &&
+		a.Domain == b.Domain &&
+		effectiveKvTransferEnforcement(a) == effectiveKvTransferEnforcement(b) &&
+		kvTransferPreferredWeightsEqual(a.PreferredWeight, b.PreferredWeight)
+}
+
+func effectiveKvTransferEnforcement(kvt *nvidiacomv1alpha1.KvTransferPolicy) nvidiacomv1alpha1.KvTransferEnforcement {
+	if kvt == nil || kvt.Enforcement == "" {
+		return nvidiacomv1alpha1.KvTransferEnforcementRequired
+	}
+	return kvt.Enforcement
+}
+
+func kvTransferPreferredWeightsEqual(a, b *float32) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
 func getUnique[T comparable](slice []T) []T {
 	seen := make(map[T]struct{}, len(slice))
 	uniqueSlice := make([]T, 0, len(slice))
@@ -913,9 +1016,8 @@ func (v *DynamoGraphDeploymentValidator) validateNoRestartDuringRollingUpdate(ol
 }
 
 // validateKvTransferPolicy validates the spec.experimental.kvTransferPolicy
-// configuration when set. In this phase only the `labelKey` path is supported
-// (clusterTopologyName is added in a future PR).
-func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
+// configuration when set.
+func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy(ctx context.Context) error {
 	if v.deployment.Spec.Experimental == nil {
 		return nil
 	}
@@ -927,12 +1029,31 @@ func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
 	var errs []error
 	const fieldPath = "spec.experimental.kvTransferPolicy"
 
-	// labelKey is required (only supported path in this phase)
-	if kvt.LabelKey == "" {
-		errs = append(errs, fmt.Errorf("%s.labelKey is required", fieldPath))
-	} else if labelKeyErrs := k8svalidation.IsQualifiedName(kvt.LabelKey); len(labelKeyErrs) > 0 {
-		errs = append(errs, fmt.Errorf("%s.labelKey %q is not a valid Kubernetes label key: %s",
-			fieldPath, kvt.LabelKey, strings.Join(labelKeyErrs, "; ")))
+	hasLabelKey := kvt.LabelKey != ""
+	hasClusterTopologyName := kvt.ClusterTopologyName != ""
+	if hasLabelKey == hasClusterTopologyName {
+		errs = append(errs, fmt.Errorf("%s: exactly one of labelKey or clusterTopologyName is required", fieldPath))
+	}
+
+	if hasLabelKey {
+		if labelKeyErrs := k8svalidation.IsQualifiedName(kvt.LabelKey); len(labelKeyErrs) > 0 {
+			errs = append(errs, fmt.Errorf("%s.labelKey %q is not a valid Kubernetes label key: %s",
+				fieldPath, kvt.LabelKey, strings.Join(labelKeyErrs, "; ")))
+		}
+	}
+
+	if hasClusterTopologyName {
+		if nameErrs := k8svalidation.IsDNS1123Subdomain(kvt.ClusterTopologyName); len(nameErrs) > 0 {
+			errs = append(errs, fmt.Errorf("%s.clusterTopologyName %q is not a valid Kubernetes resource name: %s",
+				fieldPath, kvt.ClusterTopologyName, strings.Join(nameErrs, "; ")))
+		}
+		if !v.isGrovePathway() {
+			errs = append(errs, v.grovePathwayRequiredError("spec.experimental.kvTransferPolicy.clusterTopologyName"))
+		}
+	}
+
+	if !hasLabelKey && !hasClusterTopologyName {
+		return errors.Join(errs...)
 	}
 
 	// domain is required and must be a valid topology domain format
@@ -967,7 +1088,33 @@ func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicy() error {
 		}
 	}
 
+	if v.shouldValidateGroveClusterTopology(errs, hasClusterTopologyName) {
+		if err := v.validateKvTransferPolicyAgainstGroveClusterTopology(ctx, kvt); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
 	return errors.Join(errs...)
+}
+
+func (v *DynamoGraphDeploymentValidator) validateKvTransferPolicyAgainstGroveClusterTopology(ctx context.Context, kvt *nvidiacomv1alpha1.KvTransferPolicy) error {
+	info, err := v.readGroveClusterTopology(ctx, kvt.ClusterTopologyName)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return fmt.Errorf("spec.experimental.kvTransferPolicy.clusterTopologyName %q references a ClusterTopology resource that was not found",
+				kvt.ClusterTopologyName)
+		}
+		return fmt.Errorf("failed to read ClusterTopology %q for kvTransferPolicy validation: %w", kvt.ClusterTopologyName, err)
+	}
+	if info == nil {
+		return nil
+	}
+
+	if info.hasDomain(kvt.Domain) {
+		return nil
+	}
+	return fmt.Errorf("spec.experimental.kvTransferPolicy.domain %q does not exist in ClusterTopology %q; available domains: %v",
+		kvt.Domain, kvt.ClusterTopologyName, info.domains)
 }
 
 // validateFailoverRequiresDiscoveryMode checks that when any service has

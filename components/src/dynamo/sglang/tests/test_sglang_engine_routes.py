@@ -42,7 +42,7 @@ except ImportError:
     sys.modules.setdefault("sglang.srt.managers.io_struct", _make_io_struct_stub())
 
 from dynamo.sglang.llm_engine import SglangLLMEngine  # noqa: E402
-from dynamo.sglang.quiesce import SGLangEngineQuiesceController  # noqa: E402
+from dynamo.sglang.pause import SGLangEnginePauseController  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
@@ -58,10 +58,10 @@ def _stub_sglang_io_struct(monkeypatch):
     monkeypatch.setitem(
         sys.modules, "sglang.srt.managers.io_struct", _make_io_struct_stub()
     )
-    monkeypatch.setattr("dynamo.sglang.quiesce.PauseGenerationReqInput", _Req)
-    monkeypatch.setattr("dynamo.sglang.quiesce.ReleaseMemoryOccupationReqInput", _Req)
-    monkeypatch.setattr("dynamo.sglang.quiesce.ResumeMemoryOccupationReqInput", _Req)
-    monkeypatch.setattr("dynamo.sglang.quiesce.ContinueGenerationReqInput", _Req)
+    monkeypatch.setattr("dynamo.sglang.pause.PauseGenerationReqInput", _Req)
+    monkeypatch.setattr("dynamo.sglang.pause.ReleaseMemoryOccupationReqInput", _Req)
+    monkeypatch.setattr("dynamo.sglang.pause.ResumeMemoryOccupationReqInput", _Req)
+    monkeypatch.setattr("dynamo.sglang.pause.ContinueGenerationReqInput", _Req)
     monkeypatch.setattr("dynamo.sglang.llm_engine.UpdateWeightFromDiskReqInput", _Req)
     monkeypatch.setattr(
         "dynamo.sglang.llm_engine.UpdateWeightsFromTensorReqInput", _Req
@@ -91,8 +91,8 @@ def _make_engine() -> SglangLLMEngine:
         server_args=SimpleNamespace(weight_version=None),
     )
     engine.engine = SimpleNamespace(tokenizer_manager=tokenizer_manager)
-    engine._quiesce_controller = SGLangEngineQuiesceController(engine.engine)
-    engine._quiesce_lock = asyncio.Lock()
+    engine._pause_controller = SGLangEnginePauseController(engine.engine)
+    engine._pause_lock = asyncio.Lock()
     return engine
 
 
@@ -152,8 +152,8 @@ async def test_resume_recovers_generation_pause_after_failed_release_rollback():
     release_result = await engine.release_memory_occupation({})
 
     assert release_result["status"] == "error"
-    assert engine._quiesce_controller.is_quiesced is False
-    assert engine._quiesce_controller.needs_resume_recovery is True
+    assert engine._pause_controller.is_paused is False
+    assert engine._pause_controller.needs_resume_recovery is True
     failed_continue.assert_awaited_once()
 
     manager.continue_generation = AsyncMock()
@@ -162,7 +162,7 @@ async def test_resume_recovers_generation_pause_after_failed_release_rollback():
     assert resume_result["status"] == "ok"
     manager.resume_memory_occupation.assert_not_awaited()
     manager.continue_generation.assert_awaited_once()
-    assert engine._quiesce_controller.needs_resume_recovery is False
+    assert engine._pause_controller.needs_resume_recovery is False
 
 
 @pytest.mark.asyncio

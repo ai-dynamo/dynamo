@@ -404,16 +404,34 @@ class CachedTokensChatPayload(ChatPayload):
         expected_log: Optional[List[str]] = None,
         timeout: int = 60,
         min_cached_tokens: int = 1,
+        min_routing_total_blocks: int = 0,
         router_nvext_expectation: RouterNvextExpectation | None = None,
         require_rust_processor_init: bool = False,
         require_vllm_mm_processor_init: bool = False,
         min_avg_kv_hit_rate: float = 0.0,
     ):
+        # MM-aware routing checks: piggyback on engine_process.validate_expected_logs.
         log_patterns: List[str] = list(expected_log or [])
         if require_rust_processor_init:
             log_patterns.append(r"MM-aware KV routing enabled")
         if require_vllm_mm_processor_init:
             log_patterns.append(r"\[mm-routing\] Transfer mode:")
+        if min_routing_total_blocks > 0:
+            # The regex below gates by digit-count, so the threshold must
+            # be a power of 10 (1, 10, 100, ...). Reject any non-conforming
+            # value at construction time — otherwise the assertion would
+            # under-enforce (e.g. min_routing_total_blocks=25 would still
+            # only require 2-digit counts ≥10, not ≥25).
+            n_str = str(min_routing_total_blocks)
+            if n_str[0] != "1" or any(c != "0" for c in n_str[1:]):
+                raise ValueError(
+                    f"min_routing_total_blocks must be a power of 10 "
+                    f"(1, 10, 100, ...); got {min_routing_total_blocks}"
+                )
+            min_digits = len(n_str)
+            log_patterns.append(
+                rf"\[ROUTING\].*with\s+\d+/[1-9]\d{{{min_digits - 1},}}\s+blocks overlap"
+            )
         super().__init__(
             body=body,
             repeat_count=repeat_count,
@@ -453,18 +471,27 @@ class CachedTokensChatPayload(ChatPayload):
 
         # Check usage field for cached tokens
         # Expected structure: usage.prompt_tokens_details.cached_tokens
-        usage = result.get("usage", {})
-        prompt_tokens_details = usage.get("prompt_tokens_details") or {}
+        usage = result.get("usage")
+        prompt_tokens_details = (usage or {}).get("prompt_tokens_details") or {}
         cached_tokens = prompt_tokens_details.get("cached_tokens", 0) or 0
+        prompt_tokens = (usage or {}).get("prompt_tokens")
 
         logger.info(
-            f"Request {self._request_count}: prompt_tokens={usage.get('prompt_tokens')}, "
+            f"Request {self._request_count}: prompt_tokens={prompt_tokens}, "
             f"cached_tokens={cached_tokens}, prompt_tokens_details={prompt_tokens_details}"
         )
 
-        # For requests after the first one, we expect cached tokens > 0
-        # (since identical prompts should hit the prefix cache)
-        if self._request_count > 1:
+        # On repeats we expect a cache hit. Require usage with prompt_tokens > 0
+        # so a backend that reports no usage fails instead of passing by default.
+        # An absent cached_tokens field is a legit miss (vLLM/SGLang omit it when
+        # cached==0), so treat it as a soft miss below, not a hard error.
+        if self._request_count > 1 and self.min_cached_tokens > 0:
+            if usage is None or prompt_tokens is None or prompt_tokens <= 0:
+                raise AssertionError(
+                    f"Request {self._request_count}: response carried no usage "
+                    f"evidence (usage={usage!r}); cannot validate cached tokens. "
+                    f"Expected a usage block with prompt_tokens > 0."
+                )
             if cached_tokens >= self.min_cached_tokens:
                 self._cached_tokens_found = True
                 logger.info(
@@ -516,19 +543,23 @@ class CachedTokensChatPayload(ChatPayload):
         )
 
     def final_validation(self) -> None:
-        """Assert cached_tokens >= min_cached_tokens on at least one repeat,
-        and (if set) router_kv_hit_rate post-R1 mean >= min_avg_kv_hit_rate.
+        """Assert cached_tokens >= min_cached_tokens on at least one repeat
+        (only when min_cached_tokens > 0), and (if set) router_kv_hit_rate
+        post-R1 mean >= min_avg_kv_hit_rate.
         """
-        if self.repeat_count > 1 and not self._cached_tokens_found:
-            raise AssertionError(
-                f"Expected cached_tokens >= {self.min_cached_tokens} in "
-                f"prompt_tokens_details for at least one repeated request, "
-                f"but none found after {self._request_count} requests. "
-                f"Verify that prefix caching is enabled and working correctly."
+        # Only assert cached tokens when a positive threshold is set; a caller
+        # validating purely via the router metric passes min_cached_tokens=0.
+        if self.min_cached_tokens > 0:
+            if self.repeat_count > 1 and not self._cached_tokens_found:
+                raise AssertionError(
+                    f"Expected cached_tokens >= {self.min_cached_tokens} in "
+                    f"prompt_tokens_details for at least one repeated request, "
+                    f"but none found after {self._request_count} requests. "
+                    f"Verify that prefix caching is enabled and working correctly."
+                )
+            logger.info(
+                "✓ Final validation PASSED: cached_tokens found in repeated requests"
             )
-        logger.info(
-            "✓ Final validation PASSED: cached_tokens found in repeated requests"
-        )
 
         if self.min_avg_kv_hit_rate <= 0:
             return
@@ -673,6 +704,32 @@ class CompletionPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return CompletionPayload.extract_text(response)
+
+
+@dataclass
+class ImagesPayload(BasePayload):
+    """Payload for the image-generation endpoint (raw-media / DiffusionEngine).
+
+    Targets ``/v1/images/generations`` and validates the OpenAI-shaped
+    response: a non-empty ``data`` list whose first item carries either a
+    ``b64_json`` or a ``url``.
+    """
+
+    endpoint: str = "/v1/images/generations"
+
+    @staticmethod
+    def extract_image(response):
+        response.raise_for_status()
+        result = response.json()
+        assert "data" in result, "Missing 'data' in image response"
+        assert len(result["data"]) > 0, "Empty 'data' in image response"
+        item = result["data"][0]
+        # Return whichever representation the engine produced — either is a
+        # valid image result.
+        return item.get("b64_json") or item.get("url") or ""
+
+    def response_handler(self, response: Any) -> str:
+        return ImagesPayload.extract_image(response)
 
 
 @dataclass

@@ -34,7 +34,7 @@ pytestmark = [
 
 def _make_engine() -> TrtllmLLMEngine:
     engine = TrtllmLLMEngine.__new__(TrtllmLLMEngine)
-    engine._quiesce_lock = asyncio.Lock()
+    engine._pause_lock = asyncio.Lock()
     engine._inflight_lock = asyncio.Lock()
     engine._inflight_requests = 0
     engine._no_inflight_requests = asyncio.Event()
@@ -43,23 +43,23 @@ def _make_engine() -> TrtllmLLMEngine:
     engine._resume_recovery_required = False
 
     controller = MagicMock()
-    controller.is_quiesced = False
+    controller.is_paused = False
     controller.needs_resume_recovery = False
 
-    async def _quiesce(tags=None):
-        controller.is_quiesced = True
+    async def _pause(tags=None):
+        controller.is_paused = True
         return True
 
     async def _resume(tags=None):
         return True
 
     def _mark_resumed():
-        controller.is_quiesced = False
+        controller.is_paused = False
 
-    controller.quiesce = AsyncMock(side_effect=_quiesce)
+    controller.pause = AsyncMock(side_effect=_pause)
     controller.resume = AsyncMock(side_effect=_resume)
     controller.mark_resumed = MagicMock(side_effect=_mark_resumed)
-    engine._quiesce_controller = controller
+    engine._pause_controller = controller
     return engine
 
 
@@ -74,7 +74,7 @@ async def test_engine_controls_expose_trtllm_management_capabilities():
 
 
 @pytest.mark.asyncio
-async def test_release_and_resume_delegate_to_quiesce_controller():
+async def test_release_and_resume_delegate_to_pause_controller():
     engine = _make_engine()
 
     release_result = await engine.engine_control(
@@ -86,9 +86,9 @@ async def test_release_and_resume_delegate_to_quiesce_controller():
 
     assert release_result["status"] == "ok"
     assert resume_result["status"] == "ok"
-    engine._quiesce_controller.quiesce.assert_awaited_once_with(["kv_cache"])
-    engine._quiesce_controller.resume.assert_awaited_once_with(["kv_cache"])
-    engine._quiesce_controller.mark_resumed.assert_called_once_with()
+    engine._pause_controller.pause.assert_awaited_once_with(["kv_cache"])
+    engine._pause_controller.resume.assert_awaited_once_with(["kv_cache"])
+    engine._pause_controller.mark_resumed.assert_called_once_with()
     assert engine._reject_new_requests is False
 
 
@@ -106,11 +106,9 @@ async def test_release_rejects_new_requests_until_resume():
 
 
 @pytest.mark.asyncio
-async def test_resume_clears_reject_after_failed_quiesce():
+async def test_resume_clears_reject_after_failed_pause():
     engine = _make_engine()
-    engine._quiesce_controller.quiesce = AsyncMock(
-        side_effect=RuntimeError("sleep failed")
-    )
+    engine._pause_controller.pause = AsyncMock(side_effect=RuntimeError("sleep failed"))
 
     release = await engine.release_memory_occupation({})
 
@@ -122,26 +120,26 @@ async def test_resume_clears_reject_after_failed_quiesce():
     resume = await engine.resume_memory_occupation({})
 
     assert resume["status"] == "ok"
-    engine._quiesce_controller.resume.assert_not_awaited()
-    engine._quiesce_controller.mark_resumed.assert_called_once_with()
+    engine._pause_controller.resume.assert_not_awaited()
+    engine._pause_controller.mark_resumed.assert_called_once_with()
     assert engine._reject_new_requests is False
     assert engine._resume_recovery_required is False
 
 
 @pytest.mark.asyncio
-async def test_resume_recovers_partial_quiesce_before_accepting_requests():
+async def test_resume_recovers_partial_pause_before_accepting_requests():
     engine = _make_engine()
 
-    async def _quiesce_failed(tags=None):
-        engine._quiesce_controller.needs_resume_recovery = True
+    async def _pause_failed(tags=None):
+        engine._pause_controller.needs_resume_recovery = True
         raise RuntimeError("weights failed")
 
     async def _resume(tags=None):
-        engine._quiesce_controller.needs_resume_recovery = False
+        engine._pause_controller.needs_resume_recovery = False
         return True
 
-    engine._quiesce_controller.quiesce = AsyncMock(side_effect=_quiesce_failed)
-    engine._quiesce_controller.resume = AsyncMock(side_effect=_resume)
+    engine._pause_controller.pause = AsyncMock(side_effect=_pause_failed)
+    engine._pause_controller.resume = AsyncMock(side_effect=_resume)
 
     release = await engine.release_memory_occupation({})
 
@@ -152,8 +150,8 @@ async def test_resume_recovers_partial_quiesce_before_accepting_requests():
     resume = await engine.resume_memory_occupation({})
 
     assert resume["status"] == "ok"
-    engine._quiesce_controller.resume.assert_awaited_once_with(None)
-    engine._quiesce_controller.mark_resumed.assert_called_once_with()
+    engine._pause_controller.resume.assert_awaited_once_with(None)
+    engine._pause_controller.mark_resumed.assert_called_once_with()
     assert engine._reject_new_requests is False
     assert engine._resume_recovery_required is False
 

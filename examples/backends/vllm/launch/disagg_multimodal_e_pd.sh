@@ -128,8 +128,8 @@ echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utiliza
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
 python -m dynamo.vllm \
-  --multimodal-encode-worker \
   --enable-multimodal \
+  --disaggregation-mode encode \
   --model "$MODEL_NAME" \
   --gpu-memory-utilization "$DYN_ENCODE_GPU_MEM" \
   $EXTRA_ARGS &
@@ -141,6 +141,7 @@ CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \
   --enable-multimodal \
+  --disaggregation-mode pd \
   --enable-mm-embeds \
   --model "$MODEL_NAME" \
   $PD_GPU_MEM_ARGS \

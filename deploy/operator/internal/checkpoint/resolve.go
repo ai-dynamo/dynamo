@@ -36,12 +36,13 @@ type CheckpointInfo struct {
 	ArtifactVersion  string
 	CheckpointName   string
 	Ready            bool
+	StartupPolicy    nvidiacomv1alpha1.CheckpointStartupPolicy
 	// Empty means the restore pod targets the default main container.
 	RestoreTargetContainers []string
 }
 
 func checkpointInfoFromObject(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (*CheckpointInfo, error) {
-	hash, err := checkpointIdentityHash(ckpt)
+	hash, err := CheckpointID(ckpt)
 	if err != nil {
 		return nil, err
 	}
@@ -71,6 +72,10 @@ func ResolveCheckpointForService(
 	namespace string,
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
 ) (*CheckpointInfo, error) {
+	startupPolicy := nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+	if config != nil && config.StartupPolicy != "" {
+		startupPolicy = config.StartupPolicy
+	}
 	switch {
 	case config == nil || !config.Enabled:
 		return &CheckpointInfo{Enabled: false}, nil
@@ -93,9 +98,13 @@ func ResolveCheckpointForService(
 		if config.TargetContainerName != "" {
 			info.RestoreTargetContainers = []string{config.TargetContainerName}
 		}
+		info.StartupPolicy = startupPolicy
 		return info, nil
 	case config.Identity == nil:
-		return nil, fmt.Errorf("checkpoint enabled but no checkpointRef or identity provided")
+		return &CheckpointInfo{
+			Enabled:       true,
+			StartupPolicy: startupPolicy,
+		}, nil
 	}
 
 	hash, err := ComputeIdentityHash(*config.Identity)
@@ -109,9 +118,10 @@ func ResolveCheckpointForService(
 	}
 	if existing == nil {
 		return &CheckpointInfo{
-			Enabled:  true,
-			Identity: config.Identity,
-			Hash:     hash,
+			Enabled:       true,
+			Identity:      config.Identity,
+			Hash:          hash,
+			StartupPolicy: startupPolicy,
 		}, nil
 	}
 
@@ -126,6 +136,7 @@ func ResolveCheckpointForService(
 	if config.TargetContainerName != "" {
 		info.RestoreTargetContainers = []string{config.TargetContainerName}
 	}
+	info.StartupPolicy = startupPolicy
 	return info, nil
 }
 

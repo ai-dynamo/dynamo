@@ -33,7 +33,7 @@ workloads — while iterating on controller logic with sub-second feedback.
 |------|---------|---------|
 | [Tilt](https://docs.tilt.dev/install.html) | v0.33+ | Development orchestration |
 | [Helm](https://helm.sh/docs/intro/install/) | v3 | Chart rendering |
-| [Go](https://go.dev/dl/) | 1.25+ | Compiling the operator |
+| [Go](https://go.dev/dl/) | 1.26.3+ | Compiling the operator |
 | [kubectl](https://kubernetes.io/docs/tasks/tools/) | — | Cluster access |
 | A Kubernetes cluster | — | kind, minikube, or remote cluster |
 

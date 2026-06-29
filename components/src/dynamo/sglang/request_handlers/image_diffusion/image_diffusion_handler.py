@@ -84,7 +84,14 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         Yields:
             Response dict with generated images (OpenAI-compatible format).
         """
-        logger.info(f"Image diffusion request: {request}")
+        prompt = request.get("prompt")
+        logger.info(
+            "Image diffusion request: prompt_len=%s has_n=%s has_input_reference=%s has_nvext=%s",
+            len(prompt) if isinstance(prompt, str) else None,
+            "n" in request,
+            request.get("input_reference") is not None,
+            "nvext" in request,
+        )
 
         # Get trace header for distributed tracing (for logging/observability)
         trace_header = context.trace_headers() if self.enable_trace else None

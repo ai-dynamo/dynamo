@@ -4,8 +4,8 @@
 
 """Load-based scaling logic (FPM-driven, reactive).
 
-Mixin consumed by ``PlannerStateMachine``.  All methods access state
-via ``self._config``, ``self._capabilities``, and perf models.
+Mixin consumed by ``PlannerScalingState``.  All methods access state via
+``self._config``, ``self._capabilities``, and perf models.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ _DECODE_LATENCY_SCALE_DOWN = 0.1  # util < 10%
 class LoadScalingMixin:
     """FPM-driven load-based scaling decisions."""
 
-    # Scratch fields owned by PlannerStateMachine, declared here for mypy
+    # Scratch fields owned by PlannerScalingState, declared here for mypy
     _diag_estimated_ttft_ms: Optional[float]
     _diag_estimated_itl_ms: Optional[float]
     _diag_load_reason: Optional[str]
@@ -502,6 +502,7 @@ class LoadScalingMixin:
         consolidation = num_workers / (num_workers - 1) if num_workers > 1 else 1.0
         d_caps = self._capabilities.decode
         max_kv = d_caps.max_kv_tokens if d_caps else None
+        accept_length = self._current_decode_accept_length()
 
         estimates: list[float] = []
         # Consolidation-aware scale-down. Two safety checks per worker:
@@ -522,11 +523,12 @@ class LoadScalingMixin:
                 include_queued_decode=True,
             )
             if est is not None:
-                est_ms = est * 1000
+                est_ms = est * 1000 / accept_length
                 estimates.append(est_ms)
                 logger.info(
                     f"Decode engine {label}: estimated ITL {est_ms:.2f}ms "
-                    f"(sched_kv={sched_kv}, queued_kv={queued_kv})"
+                    f"(sched_kv={sched_kv}, queued_kv={queued_kv}, "
+                    f"accept_length={accept_length:.2f})"
                 )
 
             if can_scale_down:
@@ -544,7 +546,9 @@ class LoadScalingMixin:
                 )
                 if post_itl is None:
                     can_scale_down = False
-                elif post_itl * 1000 >= self._config.itl_ms * sensitivity:
+                elif (
+                    post_itl * 1000 / accept_length >= self._config.itl_ms * sensitivity
+                ):
                     can_scale_down = False
                     consolidation_refused = True
 
@@ -650,6 +654,7 @@ class LoadScalingMixin:
         consolidation = num_workers / (num_workers - 1) if num_workers > 1 else 1.0
         d_caps = self._capabilities.decode
         max_kv = d_caps.max_kv_tokens if d_caps else None
+        accept_length = self._current_decode_accept_length()
 
         estimates: list[float] = []
         # Agg-decode consolidation. Combined cache pressure (sched_decode_kv
@@ -672,7 +677,7 @@ class LoadScalingMixin:
                 include_queued_decode=True,
             )
             if est is not None:
-                estimates.append(est * 1000)
+                estimates.append(est * 1000 / accept_length)
 
             if can_scale_down:
                 post_combined_kv = int(
@@ -692,7 +697,9 @@ class LoadScalingMixin:
                 )
                 if post_itl is None:
                     can_scale_down = False
-                elif post_itl * 1000 >= self._config.itl_ms * sensitivity:
+                elif (
+                    post_itl * 1000 / accept_length >= self._config.itl_ms * sensitivity
+                ):
                     can_scale_down = False
                     consolidation_refused = True
 

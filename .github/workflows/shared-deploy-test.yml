@@ -15,7 +15,7 @@ on:
         type: string
         required: true
       image_suffix:
-        description: 'Image suffix (e.g. vllm-runtime-cuda12-amd64)'
+        description: 'Image suffix (e.g. vllm-runtime-cuda13-amd64)'
         type: string
         required: true
       namespace:

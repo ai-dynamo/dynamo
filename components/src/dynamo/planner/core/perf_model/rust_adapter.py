@@ -38,12 +38,12 @@ RustEnginePerfModel: Any = None
 RustEnginePerfOptions: Any = None
 
 try:  # pragma: no cover - availability depends on the optional Rust feature.
-    from dynamo.llm import AicEngineConfig as _AicEngineConfig
-    from dynamo.llm import EngineCapacityRequest as _EngineCapacityRequest
-    from dynamo.llm import EnginePerfLimits as _EnginePerfLimits
-    from dynamo.llm import OptimizationTarget as _OptimizationTarget
-    from dynamo.llm import RustEnginePerfModel as _RustEnginePerfModel
-    from dynamo.llm import RustEnginePerfOptions as _RustEnginePerfOptions
+    from dynamo.mocker import AicEngineConfig as _AicEngineConfig
+    from dynamo.mocker import EngineCapacityRequest as _EngineCapacityRequest
+    from dynamo.mocker import EnginePerfLimits as _EnginePerfLimits
+    from dynamo.mocker import OptimizationTarget as _OptimizationTarget
+    from dynamo.mocker import RustEnginePerfModel as _RustEnginePerfModel
+    from dynamo.mocker import RustEnginePerfOptions as _RustEnginePerfOptions
 
     AicEngineConfig = _AicEngineConfig
     EngineCapacityRequest = _EngineCapacityRequest
@@ -60,6 +60,7 @@ _RUST_SHIM_FALLBACK_EXCEPTIONS = (RuntimeError, ValueError, TypeError)
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 DEFAULT_MAX_NUM_SEQS = 512
 DEFAULT_MAX_KV_TOKENS = 2_000_000
+RAW_AIC_NEXTN_ACCEPT_RATES = "0,0,0,0,0"
 
 
 @dataclass(frozen=True)
@@ -117,7 +118,9 @@ class PlannerEnginePerfModel:
         self._config = config
         self._capabilities = capabilities
         self._rust_model: Optional[Any] = None
+        self._rust_model_key: Optional[tuple[Any, ...]] = None
         self._pending_iterations: list[list[ForwardPassMetrics]] = []
+        self._retained_iterations: list[list[ForwardPassMetrics]] = []
         self._avg_isl = _MovingAverage(config.max_num_fpm_samples)
         self._avg_decode_length = _MovingAverage(config.max_num_fpm_samples)
 
@@ -131,12 +134,18 @@ class PlannerEnginePerfModel:
         self._capabilities = capabilities
         if self._rust_model is None:
             self._init_rust_model()
+            return
+        if self._model_key() != self._rust_model_key:
+            self._rust_model = None
+            self._rust_model_key = None
+            self._init_rust_model()
 
     def _init_rust_model(self) -> None:
         if not _RUST_SHIM_AVAILABLE or RustEnginePerfModel is None:
             logger.debug("Rust engine perf shim unavailable")
             return
 
+        model_key = self._model_key()
         limits = self._build_limits()
         if limits is None:
             logger.debug(
@@ -160,9 +169,12 @@ class PlannerEnginePerfModel:
                 diagnostics.get("source", "unknown"),
                 diagnostics.get("readiness", "unknown"),
             )
+            self._rust_model_key = model_key
             if self._pending_iterations:
                 self._rust_model.tune_with_fpms(self._pending_iterations)
                 self._pending_iterations.clear()
+            elif self._retained_iterations:
+                self._rust_model.tune_with_fpms(self._retained_iterations)
         except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
             logger.warning(
                 "Failed to initialize Rust engine perf model for %s; "
@@ -171,6 +183,7 @@ class PlannerEnginePerfModel:
                 e,
             )
             self._rust_model = None
+            self._rust_model_key = None
 
     def _rust_diagnostics(self) -> dict[str, Any]:
         if self._rust_model is None:
@@ -246,6 +259,10 @@ class PlannerEnginePerfModel:
         pick = self._pick_for_worker(spec)
         if pick is None:
             return None
+        extra = {"nextn_accept_rates": RAW_AIC_NEXTN_ACCEPT_RATES}
+        nextn = self._effective_speculative_nextn()
+        if self._worker_type != "prefill" and nextn > 0:
+            extra["nextn"] = str(nextn)
         return AicEngineConfig(
             model_name=spec.hf_id,
             backend=spec.backend,
@@ -266,7 +283,60 @@ class PlannerEnginePerfModel:
             moe_dtype=spec.moe_dtype,
             activation_dtype=spec.activation_dtype,
             kv_cache_dtype=spec.kv_cache_dtype,
+            extra=extra,
         )
+
+    def _model_key(self) -> Optional[tuple[Any, ...]]:
+        values = self._limit_values()
+        if values is None:
+            return None
+        spec = self._config.aic_perf_model
+        pick = self._pick_for_worker(spec) if spec is not None else None
+        aic_key = None
+        if spec is not None and pick is not None:
+            aic_extra: tuple[tuple[str, str], ...] = (
+                ("nextn_accept_rates", RAW_AIC_NEXTN_ACCEPT_RATES),
+            )
+            nextn = self._effective_speculative_nextn()
+            if self._worker_type != "prefill" and nextn > 0:
+                aic_extra = (
+                    ("nextn", str(nextn)),
+                    ("nextn_accept_rates", RAW_AIC_NEXTN_ACCEPT_RATES),
+                )
+            aic_key = (
+                spec.hf_id,
+                spec.backend,
+                spec.system,
+                spec.backend_version,
+                spec.model_arch,
+                spec.weight_dtype,
+                spec.moe_dtype,
+                spec.activation_dtype,
+                spec.kv_cache_dtype,
+                pick.tp,
+                pick.pp,
+                pick.moe_tp,
+                pick.moe_ep,
+                pick.dp,
+                self._capabilities.kv_cache_block_size
+                if self._capabilities is not None
+                else None,
+                aic_extra,
+            )
+        return (
+            self._worker_type,
+            values,
+            self._config.max_num_fpm_samples,
+            self._config.load_min_observations,
+            self._config.fpm_sample_bucket_size,
+            aic_key,
+        )
+
+    def _effective_speculative_nextn(self) -> int:
+        caps = self._capabilities
+        if caps is not None and caps.speculative_nextn and caps.speculative_nextn > 0:
+            return int(caps.speculative_nextn)
+        return max(0, int(self._config.speculative_nextn or 0))
 
     def _pick_for_worker(
         self, spec: AICPerfModelSpec
@@ -324,6 +394,7 @@ class PlannerEnginePerfModel:
     def _tune(self, iterations: list[list[ForwardPassMetrics]]) -> None:
         if not iterations:
             return
+        self._remember_iterations(iterations)
         if self._rust_model is not None:
             try:
                 self._rust_model.tune_with_fpms(iterations)
@@ -335,6 +406,13 @@ class PlannerEnginePerfModel:
                 self._pending_iterations = self._pending_iterations[
                     -self._config.max_num_fpm_samples :
                 ]
+
+    def _remember_iterations(self, iterations: list[list[ForwardPassMetrics]]) -> None:
+        self._retained_iterations.extend(iterations)
+        if len(self._retained_iterations) > self._config.max_num_fpm_samples:
+            self._retained_iterations = self._retained_iterations[
+                -self._config.max_num_fpm_samples :
+            ]
 
     def _is_supported_fpm(self, fpm: ForwardPassMetrics) -> bool:
         if fpm.version != FPM_VERSION:
@@ -505,6 +583,7 @@ class PlannerEnginePerfModel:
         itl_sla_ms: Optional[float] = None,
         e2e_latency_sla_ms: Optional[float] = None,
         kv_hit_rate: Optional[float] = None,
+        accept_length: float = 1.0,
     ) -> Optional[PlannerEngineCapacity]:
         """Estimate sustainable single-engine RPS for one request shape.
 
@@ -517,26 +596,32 @@ class PlannerEnginePerfModel:
             return None
         if self._worker_type != "prefill" and osl <= 0:
             return None
+        accept_length = max(1.0, float(accept_length))
+        request_kwargs: dict[str, Any] = {
+            "isl": int(math.ceil(isl)),
+            "osl": max(1, int(math.ceil(osl))),
+            "ttft_sla_ms": ttft_sla_ms,
+            "itl_sla_ms": itl_sla_ms,
+            "e2e_latency_sla_ms": e2e_latency_sla_ms,
+            "kv_hit_rate": kv_hit_rate,
+            "optimization_target": OptimizationTarget.Throughput,
+        }
+        if self._worker_type != "prefill":
+            request_kwargs["accept_length"] = accept_length
         try:
-            request = EngineCapacityRequest(
-                isl=int(math.ceil(isl)),
-                osl=max(1, int(math.ceil(osl))),
-                ttft_sla_ms=ttft_sla_ms,
-                itl_sla_ms=itl_sla_ms,
-                e2e_latency_sla_ms=e2e_latency_sla_ms,
-                kv_hit_rate=kv_hit_rate,
-                optimization_target=OptimizationTarget.Throughput,
-            )
+            request = EngineCapacityRequest(**request_kwargs)
             result = self._rust_model.find_engine_capacity_rps(request)
         except _RUST_SHIM_FALLBACK_EXCEPTIONS as e:
             logger.warning("Rust capacity query failed: %s", e)
             return None
         if result is None:
             return None
+        rps = result.rps
+        itl_ms = result.itl_ms
         return PlannerEngineCapacity(
-            rps=result.rps,
+            rps=rps,
             ttft_ms=result.ttft_ms,
-            itl_ms=result.itl_ms,
+            itl_ms=itl_ms,
             e2e_latency_ms=result.e2e_latency_ms,
             eligible=result.eligible,
         )

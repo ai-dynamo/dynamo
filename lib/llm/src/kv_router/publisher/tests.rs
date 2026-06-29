@@ -28,8 +28,15 @@ mod test_event_processing {
         let token_ids = vec![10, 20, 30, 40];
         let blk_hash = 0xdead_beef;
 
-        let stored =
-            create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, None, None, None);
+        let stored = create_stored_block_from_parts(
+            kv_block_size,
+            blk_hash,
+            &token_ids,
+            None,
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(stored.block_hash.0, blk_hash);
         let expected_hash =
@@ -58,6 +65,7 @@ mod test_event_processing {
             &Arc::new(AtomicU32::new(0)),
             None,
             None,
+            None,
         );
 
         assert_eq!(blocks.len(), 2);
@@ -80,6 +88,7 @@ mod test_event_processing {
             &block_hashes,
             None,
             &warning_count,
+            None,
             None,
             None,
         );
@@ -115,6 +124,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
         )
         .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Stored(_)));
@@ -159,6 +169,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
         )
         .unwrap();
         let lora_out = convert_event(
@@ -167,6 +178,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
         )
         .unwrap();
 
@@ -223,6 +235,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
         )
         .unwrap();
         let out2 = convert_event(
@@ -231,6 +244,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &wc,
+            None,
         )
         .unwrap();
 
@@ -320,6 +334,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
         )
         .unwrap();
 
@@ -336,6 +351,7 @@ mod test_event_processing {
             kv_block_size,
             WorkerWithDpRank::from_worker_id(1),
             &Arc::new(AtomicU32::new(0)),
+            None,
         )
         .unwrap();
         assert!(matches!(out.event.data, KvCacheEventData::Cleared));
@@ -920,8 +936,7 @@ mod tests_startup_helpers {
     }
 
     //--------------------------------------------------------------------
-    // Test start_zmq_listener without a real socket
-    //   (feed it frames through a ZMQ PAIR tcp socket)
+    // Test start_zmq_listener with a real ZMQ publisher
     //--------------------------------------------------------------------
     #[tokio::test]
     async fn test_start_zmq_listener_pushes_to_channel() {
@@ -940,16 +955,8 @@ mod tests_startup_helpers {
         // Prepare channel that listener should fill
         let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
 
-        // ZMQ TCP endpoint using localhost with an ephemeral port
-        let reserved_listener = reserve_open_port();
-        let endpoint = format!(
-            "tcp://127.0.0.1:{}",
-            reserved_listener
-                .local_addr()
-                .expect("failed to read reserved listener address")
-                .port()
-        );
-        drop(reserved_listener);
+        // Keep the unique IPC directory alive until the sockets shut down.
+        let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let topic = "".to_string(); // subscribe to all
 
         // Publisher side - set up first
@@ -963,7 +970,16 @@ mod tests_startup_helpers {
         // Spawn async listener (connects to publisher bound above)
         let listener_handle = tokio::spawn({
             let token = token.clone();
-            start_zmq_listener(endpoint.to_string(), topic, 1, tx, token, 4, next_event_id)
+            start_zmq_listener(
+                endpoint.to_string(),
+                topic,
+                1,
+                tx,
+                token,
+                4,
+                next_event_id,
+                None,
+            )
         });
 
         // Build synthetic 3-frame message: [topic, seq(8B), payload]
@@ -1047,15 +1063,8 @@ mod tests_startup_helpers {
     #[tokio::test]
     async fn test_start_zmq_listener_connects_before_publisher_bind() {
         let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
-        let reserved_listener = reserve_open_port();
-        let endpoint = format!(
-            "tcp://127.0.0.1:{}",
-            reserved_listener
-                .local_addr()
-                .expect("failed to read reserved listener address")
-                .port()
-        );
-        drop(reserved_listener);
+        // Keep the unique IPC directory alive until the sockets shut down.
+        let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let topic = String::new();
         let token = dynamo_runtime::CancellationToken::new();
         let next_event_id = Arc::new(AtomicU64::new(0));
@@ -1063,7 +1072,7 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id)
+            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None)
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
@@ -1118,8 +1127,10 @@ mod tests_startup_helpers {
         let _ = listener_handle.await;
     }
 
-    fn reserve_open_port() -> std::net::TcpListener {
-        std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind probe listener")
+    fn unique_ipc_endpoint() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("failed to create temporary ZMQ directory");
+        let endpoint = format!("ipc://{}", dir.path().join("events.sock").display());
+        (dir, endpoint)
     }
 
     //--------------------------------------------------------------------

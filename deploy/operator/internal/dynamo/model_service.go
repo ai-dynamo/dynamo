@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"maps"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -65,10 +66,18 @@ func ReconcileModelServicesForComponents(
 		}
 		seenBaseModels[baseModelName] = true
 
+		annotations := make(map[string]string)
+		if dgd, ok := owner.(*v1beta1.DynamoGraphDeployment); ok {
+			if dgd.Spec.Annotations != nil {
+				maps.Copy(annotations, dgd.Spec.Annotations)
+			}
+		}
+
 		// Generate headless service with deterministic name based on model name
 		headlessService := generateHeadlessServiceForModel(
 			namespace,
 			baseModelName,
+			annotations,
 		)
 
 		// Sync the service (create or update)
@@ -87,6 +96,25 @@ func ReconcileModelServicesForComponents(
 			return fmt.Errorf("failed to sync headless service for model %s: %w", baseModelName, err)
 		}
 
+		if syncedService.Annotations == nil {
+			syncedService.Annotations = make(map[string]string)
+		}
+		var updateAnnotations bool
+		for key, value := range annotations {
+			if val, ok := syncedService.Annotations[key]; !ok || val != value {
+				syncedService.Annotations[key] = value
+				updateAnnotations = true
+			}
+		}
+		if updateAnnotations {
+			err = reconciler.Update(ctx, syncedService)
+			if err != nil {
+				logger.Error(err, fmt.Sprintf("Failed to update model service %s.", componentName))
+				reconciler.GetRecorder().Eventf(owner, corev1.EventTypeWarning, "UpdateService", "Failed to update model Service %s: %s", componentName, err)
+				return fmt.Errorf("failed to update main component service %s: %w", componentName, err)
+			}
+		}
+
 		logger.Info("Synced headless service for model",
 			"serviceName", syncedService.GetName(),
 			"baseModelName", baseModelName,
@@ -103,12 +131,22 @@ func ReconcileModelServicesForComponents(
 func generateHeadlessServiceForModel(
 	namespace string,
 	baseModelName string,
+	annotations map[string]string,
 ) *corev1.Service {
 	// Generate deterministic service name from model name
 	serviceName := GenerateServiceName(baseModelName)
 
 	// Hash the base model name for use in labels (no length or character restrictions)
 	modelHash := HashModelName(baseModelName)
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	serviceAnnotations := make(map[string]string)
+	if annotations != nil {
+		serviceAnnotations = maps.Clone(annotations)
+	}
+	// Original name for humans
+	serviceAnnotations[commonconsts.KubeAnnotationDynamoBaseModel] = baseModelName
 
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -118,9 +156,7 @@ func generateHeadlessServiceForModel(
 				commonconsts.KubeLabelDynamoBaseModelHash: modelHash,
 				"nvidia.com/managed-by":                   "dynamo-operator",
 			},
-			Annotations: map[string]string{
-				commonconsts.KubeAnnotationDynamoBaseModel: baseModelName, // Original name for humans
-			},
+			Annotations: serviceAnnotations,
 		},
 		Spec: corev1.ServiceSpec{
 			// Headless service - no ClusterIP, no load balancing

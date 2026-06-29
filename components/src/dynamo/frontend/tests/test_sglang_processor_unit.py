@@ -25,6 +25,7 @@ import dynamo.frontend.sglang_processor as sglang_processor_module
 from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
+    _flatten_message_content,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
     _parse_json_array_buffer,
@@ -248,6 +249,25 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
             None,
         )
         assert result["output_options"]["logprobs"] is None
+
+    def test_metadata_upload_nvext_is_forwarded_to_backend(self):
+        result = _build_dynamo_preproc(
+            {
+                "model": "test",
+                "nvext": {
+                    "metadata_upload": {
+                        "url": "s3://bucket/root/rollouts",
+                    },
+                },
+            },
+            [1],
+            "test",
+            None,
+        )
+
+        assert result["extra_args"]["nvext"]["metadata_upload"] == {
+            "url": "s3://bucket/root/rollouts",
+        }
 
     def test_model_name_and_token_ids(self):
         """Model name and token_ids are set correctly."""
@@ -933,6 +953,41 @@ class TestNormalizePromptTokenIds:  # FRONTEND.6 — prompt-token-id normalizati
         ) == [1, 2, 3]
 
 
+class TestFlattenMessageContent:  # FRONTEND.1 — DSv4 content-parts array → string
+    # Mirrors SGLang's "string" content format (serving_chat._process_messages):
+    # text parts joined by a single space, non-text parts dropped.
+    def test_string_passes_through(self):
+        assert _flatten_message_content("hello") == "hello"
+
+    def test_none_passes_through(self):
+        assert _flatten_message_content(None) is None
+
+    def test_single_text_part(self):
+        # The common case that crashed the DSv4 encoder.
+        assert _flatten_message_content([{"type": "text", "text": "hi"}]) == "hi"
+
+    def test_text_parts_array_is_space_joined(self):
+        content = [
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"},
+        ]
+        assert _flatten_message_content(content) == "first second"
+
+    def test_non_text_parts_are_dropped(self):
+        content = [
+            {"type": "text", "text": "caption"},
+            {"type": "image_url", "image_url": {"url": "http://x/y.png"}},
+        ]
+        assert _flatten_message_content(content) == "caption"
+
+    def test_bare_string_items_are_ignored(self):
+        # SGLang's string format only flattens {"type": "text"} dict parts.
+        assert _flatten_message_content(["a", "b"]) == ""
+
+    def test_empty_array_becomes_empty_string(self):
+        assert _flatten_message_content([]) == ""
+
+
 class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from runtime config
     def test_missing_runtime_config_returns_none(self):
         class FakeMdc:
@@ -1364,6 +1419,232 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert captured["messages"][0]["tools"][0]["function"]["name"] == "get_weather"
         assert captured["messages"][1]["role"] == "user"
 
+    def test_deepseek_v4_tool_call_arguments_reach_encoder_as_json_string(
+        self, monkeypatch
+    ):
+        """Assistant tool_call arguments must reach the V4 encoder as a JSON
+        string, not a dict.
+
+        _materialize_messages parses ``arguments`` from the OpenAI-wire JSON
+        string to a dict (for Jinja templates that iterate ``arguments|items``),
+        but the V4 encoder's ``encode_arguments_to_dsml`` ``json.loads()``es a
+        string; a dict trips its fallback into a single ``name="arguments"``
+        parameter wrapping the whole object, which the model then imitates as a
+        spurious nested ``{"arguments": {...}}`` call. The render path must
+        re-serialize to a string.
+        """
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["messages"] = messages
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError("apply_chat_template should not be called")
+
+            def encode(self, prompt):
+                return [1, 2, 3]
+
+        tool_args = {"city": "Paris", "unit": "celsius"}
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [
+                {"role": "user", "content": "Weather in Paris?"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                # OpenAI wire format: arguments is a JSON string.
+                                "arguments": json.dumps(tool_args),
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "{}"},
+                {"role": "user", "content": "And in Tokyo?"},
+            ],
+        }
+
+        preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="deepseek-v4",
+        )
+
+        assistant = next(
+            m for m in captured["messages"] if m.get("role") == "assistant"
+        )
+        args = assistant["tool_calls"][0]["function"]["arguments"]
+        # Must arrive as the JSON *string* the V4 encoder expects (not a dict),
+        # round-tripping to the original arguments.
+        assert isinstance(args, str)
+        assert json.loads(args) == tool_args
+
+    def test_deepseek_v4_accepts_openai_thinking_payload(self, monkeypatch):
+        """OpenAI-style thinking payload maps to DS-V4 thinking."""
+        captured = {}
+        fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
+
+        def fake_encode_messages(messages, *, thinking_mode, reasoning_effort=None):
+            captured["thinking_mode"] = thinking_mode
+            captured["reasoning_effort"] = reasoning_effort
+            return "<dsv4-prompt>"
+
+        fake_module.encode_messages = fake_encode_messages
+        monkeypatch.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.openai.encoding_dsv4",
+            fake_module,
+        )
+
+        class NoTemplateTokenizer:
+            chat_template = None
+
+            def apply_chat_template(self, *args, **kwargs):
+                raise AssertionError("apply_chat_template should not be called")
+
+            def encode(self, prompt):
+                assert prompt == "<dsv4-prompt>"
+                return [1, 2, 3]
+
+        request = {
+            "model": "deepseek-ai/DeepSeek-V4-Pro",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "max",
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=NoTemplateTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="deepseek-v4",
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["thinking_mode"] == "thinking"
+        assert captured["reasoning_effort"] == "max"
+
+    def test_openai_thinking_payload_reaches_generic_chat_template(self):
+        """Root thinking payload is normalized before generic rendering."""
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["messages"] = messages
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        request = {
+            "model": "generic-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "enabled"},
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.prompt_token_ids == [1, 2, 3]
+        assert captured["kwargs"]["thinking"] is True
+        assert captured["kwargs"]["enable_thinking"] is True
+        assert result.request["chat_template_kwargs"]["thinking"] is True
+        assert result.request["chat_template_kwargs"]["enable_thinking"] is True
+        assert "chat_template_kwargs" not in request
+
+    @pytest.mark.parametrize(
+        "request_update",
+        [
+            {"thinking": {"type": "disabled"}},
+            {"reasoning_effort": "none"},
+        ],
+    )
+    def test_reasoning_disabled_openai_inputs_set_qwen3_template_flags(
+        self, request_update
+    ):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        request.update(request_update)
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="qwen3",
+        )
+
+        assert captured["kwargs"]["thinking"] is False
+        assert captured["kwargs"]["enable_thinking"] is False
+        assert result.request["chat_template_kwargs"]["thinking"] is False
+        assert result.request["chat_template_kwargs"]["enable_thinking"] is False
+        assert result.force_reasoning is False
+
+    def test_reasoning_effort_none_keeps_explicit_template_flags(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_kwargs": {
+                "thinking": True,
+                "enable_thinking": True,
+            },
+            "reasoning_effort": "none",
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="qwen3",
+        )
+
+        assert captured["kwargs"]["thinking"] is True
+        assert captured["kwargs"]["enable_thinking"] is True
+        assert result.request["chat_template_kwargs"]["thinking"] is True
+        assert result.request["chat_template_kwargs"]["enable_thinking"] is True
+        assert result.force_reasoning is True
+
     def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
         captured = {}
         fake_module = types.ModuleType("sglang.srt.entrypoints.openai.encoding_dsv4")
@@ -1680,8 +1961,9 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         items = asyncio.run(collect())
 
         assert len(items) == 1
-        assert items[0]["nvext"]["stop_reason"] == "END"
-        assert "stop_reason" not in items[0]["choices"][0]
+        chunk = items[0]["data"]
+        assert chunk["nvext"]["stop_reason"] == "END"
+        assert "stop_reason" not in chunk["choices"][0]
 
     def _run_stream(self, tokenizer, items):
         processor = SglangProcessor(
@@ -1696,11 +1978,17 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         )
 
         async def collect():
-            return [
+            raw_items = [
                 item
                 async for item in processor._generate_and_stream(
                     "req-err", {"model": "test-model"}, {}, [], post
                 )
+            ]
+            return [
+                item["data"]
+                if item.get("_dynamo_annotated") and "data" in item
+                else item
+                for item in raw_items
             ]
 
         return asyncio.run(collect())

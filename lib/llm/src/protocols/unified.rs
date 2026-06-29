@@ -40,9 +40,9 @@ use serde::{Deserialize, Serialize};
 use crate::preprocessor::media::MediaDecoder;
 use dynamo_renderer::{OAIChatLikeRequest, TextInput};
 
+use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::common_ext::{CommonExt, CommonExtProvider};
-use crate::protocols::openai::nvext::{NvExt, NvExtProvider};
 use crate::protocols::openai::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
 };
@@ -548,6 +548,7 @@ mod tests {
             common: CommonExt::default(),
             nvext: None,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -571,6 +572,7 @@ mod tests {
                     content: "Hello".to_string(),
                 },
             }],
+            nvext: None,
             system: None,
             temperature: Some(0.7),
             top_p: None,

@@ -6,10 +6,12 @@ pub mod multi_worker;
 mod prefill_tracker;
 mod prompt_membership_trie;
 mod prompt_registry;
+mod replica_sync;
 mod request_maps;
 pub mod single;
-mod topology;
+pub mod topology;
 
 pub use multi_worker::*;
 pub use prefill_tracker::PrefillTokenDeltas;
+pub use prompt_registry::{PotentialLoadMaps, WorkerLoadProjection};
 pub use single::*;

@@ -11,7 +11,7 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
-#[cfg(feature = "lightseek-mm")]
+#[cfg(feature = "mm-routing")]
 pub mod lightseek_mm;
 pub mod media;
 pub mod prompt;
@@ -31,7 +31,7 @@ use dynamo_renderer::OAIPromptFormatter;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
 use futures::stream::{self, StreamExt};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::metrics::frontend_perf::{
@@ -39,10 +39,10 @@ use dynamo_runtime::metrics::frontend_perf::{
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
 use std::borrow::Cow;
-use std::{collections::HashMap, pin::Pin, sync::Arc};
+use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
-#[cfg(feature = "lightseek-mm")]
+#[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
@@ -52,15 +52,21 @@ use crate::protocols::common::preprocessor::{
 use crate::protocols::common::timing::RequestTracker;
 use crate::tokenizers::Encoding;
 
-use dynamo_parsers::{ReasoningParser, ReasoningParserType};
+use dynamo_parsers::{
+    ReasoningParser, ReasoningParserType, tool_calling::parsers::get_tool_parser_map,
+};
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
-    AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
+    AsyncEngineContext, Context as PipelineContext, Error, ManyOut, Operator, SingleIn, async_trait,
 };
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
-    common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
+    TokenIdType,
+    common::{
+        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+        extensions::{AgentHints, NvExtProvider, routing_constraints_to_kv},
+    },
     openai::{
         DeltaGeneratorExt,
         chat_completions::{
@@ -68,7 +74,6 @@ use crate::protocols::{
         },
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
-        nvext::NvExtProvider,
     },
 };
 use crate::tokenizers::traits::Tokenizer;
@@ -77,9 +82,21 @@ use crate::preprocessor::prompt::{MediaRequestExt, prompt_formatter_from_mdc};
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
+pub use crate::protocols::common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation};
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
+
+fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, Option<i32>) {
+    let priority_jump = hints.and_then(|h| {
+        h.priority
+            .map(|priority| priority.max(0) as f64)
+            .or(h.latency_sensitivity)
+    });
+    let strict_priority = hints.and_then(|h| h.strict_priority);
+    let priority = hints.and_then(|h| h.priority);
+    (priority_jump, strict_priority, priority)
+}
 
 /// Encode a slice of `f32` values as a base64 string per the OpenAI
 /// `encoding_format=base64` spec: the raw little-endian byte
@@ -96,73 +113,67 @@ fn encode_floats_to_base64(floats: &[f32]) -> String {
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
-pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LLMMetricAnnotation {
-    pub input_tokens: usize,
-    pub output_tokens: usize,
-    pub chunk_tokens: usize,
-    pub cached_tokens: Option<usize>,
-    /// Prefill worker ID (for TTFT attribution in disaggregated mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_worker_id: Option<u64>,
-    /// Prefill worker DP rank
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_dp_rank: Option<u32>,
-    /// Prefill worker type ("prefill" or "decode") for Prometheus metric labeling.
-    /// Stored at routing time to avoid expensive MDC lookup when updating TTFT metrics.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_worker_type: Option<String>,
-    /// Decode worker ID (for ITL attribution in disaggregated mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decode_worker_id: Option<u64>,
-    /// Decode worker DP rank
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decode_dp_rank: Option<u32>,
-    /// Decode worker type ("prefill" or "decode") for Prometheus metric labeling.
-    /// Stored at routing time to avoid expensive MDC lookup when updating ITL metrics.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decode_worker_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokenize_latency: Option<Duration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detokenize_total_latency: Option<Duration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detokenize_count: Option<u64>,
+
+/// Drain a standalone router's forwarded `routing_data` onto this request's tracker so the
+/// frontend's timing/worker/token surfaces populate, then drop the field to keep it off the
+/// client wire. Worker attribution is drained so `build_response_nvext` can surface it on the
+/// split-router query-only (`query_instance_id`) path; it is first-write-wins, so the
+/// frontend's own recordings (when present) take precedence over the forwarded values.
+fn drain_router_routing_data(
+    data: &mut Option<BackendOutput>,
+    tracker: Option<&std::sync::Arc<crate::protocols::common::timing::RequestTracker>>,
+) {
+    let Some(routing_data) = data.as_mut().and_then(|d| d.routing_data.take()) else {
+        return;
+    };
+    let Some(tracker) = tracker else {
+        return;
+    };
+    if let Some(timing) = routing_data.timing {
+        tracker.set_external_timing(timing);
+    }
+    if let Some(worker_id) = routing_data.worker_id {
+        tracker.set_external_worker_info(worker_id);
+    }
+    if let Some(token_ids) = routing_data.token_ids {
+        tracker.set_external_query_token_ids(token_ids);
+    }
 }
 
-impl LLMMetricAnnotation {
-    /// Convert this metrics struct to an Annotated event
-    pub fn to_annotation<T>(&self) -> Result<Annotated<T>, serde_json::Error> {
-        Annotated::from_annotation(ANNOTATION_LLM_METRICS, self)
+fn attach_metrics_annotation<Resp>(response: &mut Annotated<Resp>, metrics: &LLMMetricAnnotation) {
+    if let Ok(metrics_annotated) = metrics.to_annotation::<()>() {
+        response.event = metrics_annotated.event;
+        response.comment = metrics_annotated.comment;
+    } else {
+        tracing::warn!("Failed to serialize LLM metrics annotation");
+    }
+}
+
+fn attach_llm_metrics<Resp>(response: &mut Annotated<Resp>, metrics: LLMMetricAnnotation)
+where
+    Resp: 'static,
+{
+    if response.event.is_some() {
+        return;
     }
 
-    /// Extract LLM metrics from an Annotated event, if present
-    pub fn from_annotation<T>(
-        annotation: &Annotated<T>,
-    ) -> Result<Option<LLMMetricAnnotation>, Box<dyn std::error::Error>> {
-        if annotation.event.is_none() {
-            return Ok(None);
-        }
-        if annotation.event.as_ref().unwrap() != ANNOTATION_LLM_METRICS {
-            return Ok(None);
-        }
-        let comments = annotation
-            .comment
-            .as_ref()
-            .ok_or("missing comments block")?;
-        if comments.len() != 1 {
-            return Err("malformed comments block - expected exactly 1 comment".into());
-        }
-        let metrics: LLMMetricAnnotation = serde_json::from_str(&comments[0])?;
-        Ok(Some(metrics))
+    if let Some(data) = response.data.as_mut()
+        && let Some(chat_response) =
+            (data as &mut dyn Any).downcast_mut::<NvCreateChatCompletionStreamResponse>()
+    {
+        chat_response.llm_metrics = Some(metrics);
+        return;
     }
+
+    attach_metrics_annotation(response, &metrics);
 }
 
 // Reasoning State for reasoning parsing transformation step
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
+    bypass_bare_guided_json: bool,
+    guided_json_bypass_decision: Option<bool>,
 }
 
 /// Per-image routing payload accumulated by `gather_multi_modal_data` and
@@ -179,7 +190,7 @@ pub struct MmImageEntry {
 /// and contains the other artifacts MM-aware routing reads at startup
 /// (`tokenizer.json`, `processor_config.json`, `preprocessor_config.json`).
 /// Returns `None` for cards built from non-disk sources.
-#[cfg(feature = "lightseek-mm")]
+#[cfg(feature = "mm-routing")]
 fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
     let ModelInfoType::HfConfigJson(cf) = mdc.model_info.as_ref()?;
     cf.path()?.parent().map(std::path::PathBuf::from)
@@ -196,11 +207,11 @@ fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
 /// init / env-misconfig failures at deployment time, not on the first MM
 /// request 20 minutes in. Text-only deployments skip the force, leaving
 /// the LazyLock dormant.
-#[cfg(feature = "lightseek-mm")]
+#[cfg(feature = "mm-routing")]
 static DIM_FETCH_MEDIA_FETCHER: std::sync::LazyLock<crate::preprocessor::media::MediaFetcher> =
     std::sync::LazyLock::new(crate::preprocessor::media::MediaFetcher::from_env);
 
-#[cfg(feature = "lightseek-mm")]
+#[cfg(feature = "mm-routing")]
 static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
     std::sync::LazyLock::new(|| {
         DIM_FETCH_MEDIA_FETCHER
@@ -210,6 +221,17 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
+
+fn attach_agent_context_from_context(
+    request: &mut PreprocessedRequest,
+    context: &PipelineContext<()>,
+) {
+    if let Ok(agent_context) = context.get::<crate::protocols::common::extensions::AgentContext>(
+        crate::protocols::common::extensions::AGENT_CONTEXT_CONTEXT_KEY,
+    ) {
+        request.agent_context = Some(agent_context.as_ref().clone());
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct PreprocessRequestOptions {
@@ -233,32 +255,25 @@ pub struct OpenAIPreprocessor {
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
     /// Image-placeholder token id the routing-side sequence fills per image.
     /// Resolved from `config.json`'s `image_token_id` field when present,
-    /// otherwise falls back to lightseek's `ModelProcessorSpec` value. This
+    /// otherwise falls back to the `ModelProcessorSpec` registry value. This
     /// is the id the backend's HF processor emits in the expanded sequence
     /// (per-patch token for Qwen-VL families, the single placeholder for
-    /// LLaVA/Phi-3), so block hashes align bit-for-bit with the worker.
+    /// LLaVA), so block hashes align bit-for-bit with the worker.
     ///
     /// `None` disables MM-aware routing for this model and the router falls
     /// back to text-prefix routing.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     routing_image_token_id: Option<crate::protocols::TokenIdType>,
-    /// Per-family flatten-time image placeholder template (e.g.
-    /// `"<|image_{n}|>"` for Phi-3, `"<image>"` for LLaVA-1.5). Threaded
-    /// through from the formatter so the routing path can reverse the
-    /// BPE-encoded numbered form (Phi-3) back into single placeholder
-    /// tokens when the chat template uses numbered markers.
-    #[cfg(feature = "lightseek-mm")]
-    image_placeholder_template: Option<&'static str>,
     /// BOS token id to prepend to the routing-side sequence so per-block
     /// hashes match the backend's HF processor output on models with
-    /// `add_bos_token: true` (Phi-3-vision and other `LlamaTokenizer`
+    /// `add_bos_token: true` (LLaVA-1.5 and other `LlamaTokenizer`
     /// families). `None` when the model doesn't need it or `bos_token`
     /// doesn't round-trip to a single id.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     routing_prepend_bos: Option<crate::protocols::TokenIdType>,
 }
 
@@ -274,6 +289,22 @@ impl OpenAIPreprocessor {
         Some(context_length.saturating_sub(prompt_len as u32))
     }
 
+    /// Prompt length for sizing the omitted-`max_tokens` cap. Prefers the
+    /// MM-expanded length; a 0 (serde-default / absent) counts as missing. With
+    /// images but no expanded length, defers to the backend (`None`); text-only
+    /// uses `token_ids_len`.
+    fn effective_prompt_len_for_cap(
+        expanded_prompt_len: Option<usize>,
+        has_images: bool,
+        token_ids_len: usize,
+    ) -> Option<usize> {
+        match expanded_prompt_len {
+            Some(n) if n > 0 => Some(n),
+            _ if has_images => None,
+            _ => Some(token_ids_len),
+        }
+    }
+
     fn nvext_passthrough_args<R: NvExtProvider>(
         request: &R,
     ) -> Option<serde_json::Map<String, serde_json::Value>> {
@@ -285,6 +316,12 @@ impl OpenAIPreprocessor {
             }
             if let Some(ref salt) = nvext.cache_salt {
                 nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
+            }
+            if let Some(ref metadata_upload) = nvext.metadata_upload {
+                nvext_passthrough.insert(
+                    "metadata_upload".to_string(),
+                    serde_json::json!(metadata_upload),
+                );
             }
             if nvext.token_data.is_some() {
                 nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
@@ -385,22 +422,22 @@ impl OpenAIPreprocessor {
 
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
         // model_type comes from config.json (e.g. "qwen3_vl") and lets the
-        // lightseek registry resolve fine-tunes loaded from custom-named
-        // directories where the family substring isn't in the path.
-        #[cfg(feature = "lightseek-mm")]
+        // image-processor registry resolve fine-tunes loaded from
+        // custom-named directories where the family substring isn't in the path.
+        #[cfg(feature = "mm-routing")]
         let model_dir_for_routing: Option<std::path::PathBuf> = mdc_model_dir(&mdc);
         // TODO(mm-routing): fastokens lacks a special-token mutator, so it
         // can't merge tokenizer_config.json specials and would BPE-shatter
         // placeholders (e.g. Qwen2-VL `<|image_pad|>`). Disable MM-routing
         // here; remove once fastokens upstream exposes the mutator.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
-            let fastokens_active = std::env::var("DYN_TOKENIZER").as_deref() == Ok("fastokens");
+            let fastokens_active = runtime_config.effective_tokenizer_backend().is_fastokens();
             if fastokens_active && model_dir_for_routing.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
-                    "DYN_TOKENIZER=fastokens is set; MM-aware KV routing disabled. \
-                     Unset DYN_TOKENIZER (or set it to 'default') to re-enable."
+                    "fastokens tokenizer backend is active; MM-aware KV routing disabled. \
+                     Use the default tokenizer backend to re-enable."
                 );
                 None
             } else {
@@ -414,14 +451,14 @@ impl OpenAIPreprocessor {
             }
         };
 
+        let context_length = mdc.effective_context_length();
+
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
             None => None,
         };
 
-        let context_length = mdc.context_length;
-
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let (image_token_counter, routing_image_token_id, bos_token_string) =
             match image_token_inputs {
                 Some((model_id, model_type, model_dir)) => {
@@ -439,8 +476,8 @@ impl OpenAIPreprocessor {
                         Err(e) => (None, Some(e.to_string())),
                     };
                     // One-shot config/tokenizer_config read for all
-                    // routing-side token info. Parsing lives in
-                    // `lightseek_mm`, next to the spec resolution.
+                    // routing-side token info. Parsing lives next to the
+                    // spec resolution in the MM-routing module.
                     let routing_tokens =
                         lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
                     // `chat_placeholder_token_id` already prefers config.json's
@@ -497,16 +534,13 @@ impl OpenAIPreprocessor {
                 }
             };
 
-        #[cfg(feature = "lightseek-mm")]
-        let image_placeholder_template = formatter.image_placeholder_template();
-
         // Force the dim-fetch HTTP client to build at startup for any
         // MM-routable preprocessor, so TLS / env-var / reqwest-init
         // failures fail the deployment instead of crashing the first
         // MM request 20 minutes in. Text-only preprocessors skip the
-        // force (both lightseek hooks resolved to `None`) — no point
+        // force (both MM-routing hooks resolved to `None`) — no point
         // building a client they'll never use.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         if image_token_counter.is_some() || routing_image_token_id.is_some() {
             std::sync::LazyLock::force(&DIM_FETCH_MEDIA_FETCHER);
             std::sync::LazyLock::force(&DIM_FETCH_HTTP_CLIENT);
@@ -517,7 +551,7 @@ impl OpenAIPreprocessor {
         // when the configured `bos_token` round-trips to a single id. The
         // BOS string was harvested above by `resolve_routing_tokens` from
         // the same `tokenizer_config.json` pass.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let routing_prepend_bos = match bos_token_string {
             Some(bos_text) => match tokenizer.encode(&bos_text) {
                 Ok(enc) if enc.token_ids().len() == 1 => {
@@ -563,13 +597,11 @@ impl OpenAIPreprocessor {
             tool_call_parser,
             media_loader,
             context_length,
-            #[cfg(feature = "lightseek-mm")]
+            #[cfg(feature = "mm-routing")]
             image_token_counter,
-            #[cfg(feature = "lightseek-mm")]
+            #[cfg(feature = "mm-routing")]
             routing_image_token_id,
-            #[cfg(feature = "lightseek-mm")]
-            image_placeholder_template,
-            #[cfg(feature = "lightseek-mm")]
+            #[cfg(feature = "mm-routing")]
             routing_prepend_bos,
         }))
     }
@@ -647,21 +679,21 @@ impl OpenAIPreprocessor {
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
         let _mm_image_entries = self
-            .gather_multi_modal_data(request, &mut builder, formatted_prompt.as_deref())
+            .gather_multi_modal_data(
+                request,
+                &mut builder,
+                formatted_prompt.as_deref(),
+                &token_ids,
+            )
             .await
             .with_context(|| "Failed to gather multimodal data")?;
 
         // Build the MM-aware view (expanded routing_token_ids + per-block
         // mm_hashes) for the KV router. No-op when no images are present or
         // the model has no resolved image-placeholder.
-        #[cfg(feature = "lightseek-mm")]
-        self.gather_mm_exact_routing_info(
-            &mut builder,
-            &_mm_image_entries,
-            &token_ids,
-            formatted_prompt.as_deref(),
-        )
-        .with_context(|| "Failed to build MM routing info")?;
+        #[cfg(feature = "mm-routing")]
+        self.gather_mm_exact_routing_info(&mut builder, &_mm_image_entries, &token_ids)
+            .with_context(|| "Failed to build MM routing info")?;
 
         // Install tokens on the builder. Done after MM routing built its
         // view so the routing-side borrow stays cheap and builder ownership
@@ -683,12 +715,26 @@ impl OpenAIPreprocessor {
         // If omitted, allow generation up to the remaining context length. Responses requests
         // preserve omission so backend adapters can compute the dynamic cap from their
         // effective prompt length/tokenization.
+        //
+        // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
+        // the MM-expanded length when available, else defer to the backend.
+        let has_images = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .and_then(|m| m.get("image_url"))
+            .is_some_and(|v| !v.is_empty());
+        let effective_prompt_len = Self::effective_prompt_len_for_cap(
+            preprocessed
+                .mm_routing_info
+                .as_ref()
+                .map(|mm| mm.expanded_prompt_len),
+            has_images,
+            preprocessed.token_ids.len(),
+        );
         if preprocessed.stop_conditions.max_tokens.is_none()
-            && let Some(max_tokens) = Self::omitted_max_tokens_default(
-                preprocessed.token_ids.len(),
-                self.context_length,
-                options,
-            )
+            && let Some(prompt_len) = effective_prompt_len
+            && let Some(max_tokens) =
+                Self::omitted_max_tokens_default(prompt_len, self.context_length, options)
         {
             preprocessed.stop_conditions.max_tokens = Some(max_tokens);
         }
@@ -711,38 +757,44 @@ impl OpenAIPreprocessor {
         builder.model(request.model());
 
         let mut stop_conditions = request.extract_stop_conditions()?;
-        // Harmony's `<|call|>` is BOTH the tool-call terminator the parser needs in the
-        // decoded text AND a gpt-oss EOS token. Hiding it like other EOS tokens strips the
-        // terminator before the harmony parser sees it, so tool calls are silently dropped
-        // (vLLM >=0.22 correctly stops on `<|call|>`, which is when this surfaces). Keep it
-        // visible — out of the hidden stop set — when the harmony tool-call parser is active.
-        // Generation still stops on it via the worker's own EOS; we only avoid *hiding* it.
-        let visible_eos: Vec<u32> = if matches!(self.tool_call_parser.as_deref(), Some("harmony")) {
-            dynamo_parsers::harmony_terminator_token_ids()
-        } else {
-            Vec::new()
-        };
+        let eos_token_ids = self.model_info.eos_token_ids();
+        let hidden_eos_token_ids = eos_token_ids.clone();
         if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
-            for eos_token in self.model_info.eos_token_ids() {
-                if !visible_eos.contains(&eos_token) && !stop_tokens.contains(&eos_token) {
-                    stop_tokens.push(eos_token);
+            for eos_token_id in hidden_eos_token_ids {
+                if !stop_tokens.contains(&eos_token_id) {
+                    stop_tokens.push(eos_token_id);
                 }
             }
         } else {
-            stop_conditions.stop_token_ids_hidden = Some(
-                self.model_info
-                    .eos_token_ids()
-                    .into_iter()
-                    .filter(|t| !visible_eos.contains(t))
-                    .collect(),
-            );
+            stop_conditions.stop_token_ids_hidden = Some(hidden_eos_token_ids);
+        }
+        // Some tool-call parsers terminate on a token that is also a model
+        // EOS (e.g. Harmony's `<|call|>` for gpt-oss). Left in the hidden
+        // set, the engine stops AND strips it, so the parser sees a
+        // truncated envelope and drops the call. Move such tokens to the
+        // visible set so the engine still stops on them but the token
+        // survives into output for the parser to consume. See PR #9778.
+        let mut visible_tool_parser_end_token_ids = Vec::new();
+        if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
+            visible_tool_parser_end_token_ids =
+                self.remove_tool_parser_end_tokens_from_hidden_stops(request, stop_tokens)?;
+        }
+        if !visible_tool_parser_end_token_ids.is_empty() {
+            let visible_stops = stop_conditions
+                .stop_token_ids_visible
+                .get_or_insert_with(Vec::new);
+            for token_id in visible_tool_parser_end_token_ids {
+                if !visible_stops.contains(&token_id) {
+                    visible_stops.push(token_id);
+                }
+            }
         }
 
         // apply ignore eos if not already set
         stop_conditions.apply_ignore_eos();
 
         if !stop_conditions.ignore_eos.unwrap_or(false) {
-            builder.eos_token_ids(self.model_info.eos_token_ids());
+            builder.eos_token_ids(eos_token_ids);
         }
 
         builder.stop_conditions(stop_conditions);
@@ -791,8 +843,8 @@ impl OpenAIPreprocessor {
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
             let hints = nvext.agent_hints.as_ref();
+            let (priority_jump, strict_priority, priority) = routing_priorities(hints);
             builder.request_timestamp_ms(nvext.request_timestamp_ms);
-            builder.agent_context(nvext.agent_context.clone());
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
@@ -800,16 +852,15 @@ impl OpenAIPreprocessor {
                 dp_rank: nvext.dp_rank,
                 prefill_dp_rank: nvext.prefill_dp_rank,
                 expected_output_tokens: hints.and_then(|h| h.osl),
-                priority_jump: hints.and_then(|h| {
-                    h.priority
-                        .map(|priority| priority.max(0) as f64)
-                        .or(h.latency_sensitivity)
-                }),
-                priority: hints.and_then(|h| h.priority),
+                priority_jump,
+                strict_priority,
+                priority,
                 lora_name,
                 allowed_worker_ids: None,
-                session_control: nvext.session_control.clone(),
-                routing_constraints: nvext.routing_constraints.clone(),
+                routing_constraints: nvext
+                    .routing_constraints
+                    .clone()
+                    .map(routing_constraints_to_kv),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {
@@ -829,6 +880,81 @@ impl OpenAIPreprocessor {
         builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
         Ok(builder)
+    }
+
+    fn remove_tool_parser_end_tokens_from_hidden_stops<R: OAIChatLikeRequest>(
+        &self,
+        request: &R,
+        hidden_stop_token_ids: &mut Vec<TokenIdType>,
+    ) -> Result<Vec<TokenIdType>> {
+        let has_tools = request
+            .tools()
+            .as_ref()
+            .and_then(|tools| tools.len())
+            .is_some_and(|len| len > 0);
+        let tool_choice_none = request
+            .tool_choice()
+            .as_ref()
+            .and_then(|tool_choice| tool_choice.as_str())
+            == Some("none");
+
+        if !Self::should_keep_tool_parser_end_tokens_visible(has_tools, tool_choice_none) {
+            return Ok(Vec::new());
+        }
+
+        let Some(tool_call_parser) = self.tool_call_parser.as_deref().filter(|p| !p.is_empty())
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(tool_call_config) = get_tool_parser_map().get(tool_call_parser) else {
+            return Ok(Vec::new());
+        };
+
+        let mut visible_stop_token_ids = Vec::new();
+        for end_token in tool_call_config.parser_config.tool_call_end_tokens() {
+            if end_token.is_empty() {
+                continue;
+            }
+            let encoded = self.tokenizer.encode(&end_token).with_context(|| {
+                format!(
+                    "Failed to encode tool-call end token {end_token:?} for parser {tool_call_parser:?}"
+                )
+            })?;
+            let was_hidden_eos =
+                Self::remove_single_token_marker(hidden_stop_token_ids, encoded.token_ids());
+            if !was_hidden_eos {
+                tracing::debug!(
+                    token_ids = ?encoded.token_ids(),
+                    end_token,
+                    parser = tool_call_parser,
+                    "Tool-call end token was not a single hidden EOS token"
+                );
+                continue;
+            }
+            if let [token_id] = encoded.token_ids()
+                && !visible_stop_token_ids.contains(token_id)
+            {
+                visible_stop_token_ids.push(*token_id);
+            }
+        }
+
+        Ok(visible_stop_token_ids)
+    }
+
+    fn should_keep_tool_parser_end_tokens_visible(has_tools: bool, tool_choice_none: bool) -> bool {
+        has_tools && !tool_choice_none
+    }
+
+    fn remove_single_token_marker(
+        hidden_eos_token_ids: &mut Vec<TokenIdType>,
+        marker_token_ids: &[TokenIdType],
+    ) -> bool {
+        let [marker_token_id] = marker_token_ids else {
+            return false;
+        };
+        let before = hidden_eos_token_ids.len();
+        hidden_eos_token_ids.retain(|token_id| token_id != marker_token_id);
+        hidden_eos_token_ids.len() != before
     }
 
     pub fn apply_template<
@@ -899,14 +1025,22 @@ impl OpenAIPreprocessor {
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<&str>,
+        // Worker-bound token ids; used (mm-routing only) to gate `mm_hashes`
+        // forwarding on the same placeholder-count precondition as
+        // `gather_mm_exact_routing_info`, so the two never diverge.
+        token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<Vec<MmImageEntry>> {
+        // `token_ids` is only consumed by the mm-routing `mm_hashes` gate below.
+        #[cfg(not(feature = "mm-routing"))]
+        let _ = token_ids;
+
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
-        // Per-image (mm_hash, width, height) for the lightseek MM-routing path.
+        // Per-image (mm_hash, width, height) for the MM-routing path.
         // Accumulated in message order so we don't walk messages twice.
         // Cleared and returned to the caller; empty for non-image / text-only requests.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let mut mm_image_entries: Vec<MmImageEntry> = Vec::new();
         // Total `image_url` content parts in the request. Bumped at every
         // image part regardless of which fetch path handles it. Used at
@@ -920,12 +1054,12 @@ impl OpenAIPreprocessor {
         // the request. The decoded path (`has_media_loader`) propagates
         // any dim-fetch failure via `?`, so the request errors out before
         // mm_hashes forwarding is even considered.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let mut total_image_count: usize = 0;
         // For the URL-passthrough case (media_loader is None) we collect image
         // URLs here and resolve dims via header-only HTTP after the loop so we
         // can issue all fetches in parallel.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         let mut url_passthrough_images: Vec<(u64, String)> = Vec::new();
 
         let Some(messages) = request.typed_messages() else {
@@ -949,7 +1083,7 @@ impl OpenAIPreprocessor {
                         ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => "audio_url",
                         _ => continue,
                     };
-                    #[cfg(feature = "lightseek-mm")]
+                    #[cfg(feature = "mm-routing")]
                     if type_str == "image_url" {
                         total_image_count += 1;
                     }
@@ -967,7 +1101,7 @@ impl OpenAIPreprocessor {
                         }
                         _ => continue,
                     };
-                    #[cfg(feature = "lightseek-mm")]
+                    #[cfg(feature = "mm-routing")]
                     if type_str == "image_url" {
                         total_image_count += 1;
                         let mm_hash = Self::hash_image_url(url.as_str());
@@ -997,8 +1131,8 @@ impl OpenAIPreprocessor {
                 let rdma_descriptor = result?;
 
                 // Decoded RDMA descriptor carries shape `[H, W, C]`.
-                // Image-only; lightseek doesn't cover audio/video.
-                #[cfg(feature = "lightseek-mm")]
+                // Image-only; MM-routing doesn't cover audio/video.
+                #[cfg(feature = "mm-routing")]
                 if type_str == "image_url" {
                     let shape = &rdma_descriptor.tensor_info.shape;
                     if shape.len() >= 2 {
@@ -1033,7 +1167,7 @@ impl OpenAIPreprocessor {
                                 tokens = n,
                                 mm_hash = mm_hash,
                                 source = hash_source,
-                                "lightseek image-token count"
+                                "image-token count"
                             );
                         }
                         mm_image_entries.push(MmImageEntry {
@@ -1055,7 +1189,7 @@ impl OpenAIPreprocessor {
         // parallel to get (W, H) per image without downloading the full bytes.
         // Enables MM-aware routing for backends that register
         // `media_decoder: null` and decode images on the worker.
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         if !url_passthrough_images.is_empty() {
             let dim_results = futures::future::join_all(
                 url_passthrough_images
@@ -1076,7 +1210,7 @@ impl OpenAIPreprocessor {
                                 tokens = n,
                                 mm_hash = mm_hash,
                                 source = "url_passthrough_header_fetch",
-                                "lightseek image-token count"
+                                "image-token count"
                             );
                         }
                         mm_image_entries.push(MmImageEntry {
@@ -1101,7 +1235,7 @@ impl OpenAIPreprocessor {
                             target: "mm_routing",
                             url = %url_for_log,
                             error = %e,
-                            "lightseek: failed to fetch image dims; MM routing entry skipped"
+                            "mm-routing: failed to fetch image dims; MM routing entry skipped"
                         );
                     }
                 }
@@ -1143,63 +1277,68 @@ impl OpenAIPreprocessor {
                 extra_args_obj.extend(backend_extra_args);
             }
 
-            // Forward routing-side mm_hashes as `multi_modal_uuids` so vLLM
-            // publishes KV events with the same key the router computes.
-            // The kv-router parses events via parse_mm_hash_from_extra_key
-            // (kv-router/src/zmq_wire/extra_keys.rs), which requires exactly
-            // 64 hex chars and reads u64 from the first 16. We pad u64 ->
-            // 16 hex chars + 48 zeros so the byte representation matches
-            // end-to-end without forcing frontend image decoding.
+            // Forward routing-side mm_hashes in `extra_args["mm_hashes"]` so the
+            // backend's KV events publish under the same key the router computes.
+            // Always the canonical 16-char hex (u64); each backend adapts it:
+            // sglang reads `int(hex, 16)` as-is, vLLM pads to its 64-char
+            // BlockStored form. No information is lost — both carry the same u64.
             //
             // Skip forwarding entirely if any image failed dim resolution —
             // a shorter `mm_hashes` list would misalign with the image
-            // positions vLLM derives from `multi_modal_data`, and the
-            // backend would inject the wrong UUIDs onto the wrong images.
-            #[cfg(feature = "lightseek-mm")]
-            if !mm_image_entries.is_empty() && mm_image_entries.len() == total_image_count {
-                // 48 trailing zeros — paired with the {:016x} prefix this gives
-                // the 64-char hex string the kv-router's parse_mm_hash_from_extra_key
-                // expects (reads u64 from the first 16 chars).
-                const HEX_PAD: &str = "000000000000000000000000000000000000000000000000";
+            // positions the backend derives from `multi_modal_data`, and
+            // the wrong UUIDs would get injected onto the wrong images.
+            //
+            // Also gate on the single-token placeholder count matching the
+            // image count — the same precondition `gather_mm_exact_routing_info`
+            // uses to build routing info. Forwarding `mm_hashes` makes the
+            // worker pad_value-key its KV blocks; if the router then falls back
+            // to plain `token_ids` (e.g. numbered-placeholder models like Phi-3,
+            // where the count won't match), the keys diverge and overlap is
+            // lost. Keeping both gated together leaves that fallback as clean
+            // text-prefix routing.
+            #[cfg(feature = "mm-routing")]
+            if let Some(find_token_id) = self.routing_image_token_id
+                && !mm_image_entries.is_empty()
+                && mm_image_entries.len() == total_image_count
+                && token_ids.iter().filter(|&&t| t == find_token_id).count()
+                    == mm_image_entries.len()
+            {
                 let hexes: Vec<serde_json::Value> = mm_image_entries
                     .iter()
-                    .map(|e| serde_json::Value::String(format!("{:016x}{}", e.mm_hash, HEX_PAD)))
+                    .map(|e| serde_json::Value::String(format!("{:016x}", e.mm_hash)))
                     .collect();
                 extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
-            } else if !mm_image_entries.is_empty() {
+            } else if !mm_image_entries.is_empty() && self.routing_image_token_id.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
                     resolved = mm_image_entries.len(),
                     expected = total_image_count,
-                    "lightseek: not all images resolved an MM-routing entry; skipping mm_hashes forwarding"
+                    "mm-routing: exact MM routing info not built (dim resolution or placeholder-count mismatch); skipping mm_hashes forwarding"
                 );
             }
 
             builder.extra_args(Some(extra_args));
         }
 
-        #[cfg(feature = "lightseek-mm")]
+        #[cfg(feature = "mm-routing")]
         return Ok(mm_image_entries);
-        #[cfg(not(feature = "lightseek-mm"))]
+        #[cfg(not(feature = "mm-routing"))]
         Ok(Vec::new())
     }
 
     /// Build `MmRoutingInfo` for exact MM-aware KV routing. The worker-bound
     /// `token_ids` are unchanged — only the routing-side view is expanded.
-    /// `formatted_prompt` is only consumed for Phi-3-style numbered placeholder
-    /// templates; single-special-token families (Qwen-VL, LLaVA) ignore it.
+    /// Supports single-special-token placeholder families (Qwen-VL, LLaVA).
     /// Returns `Ok(())` with no work performed on any precondition miss
     /// (caller falls back to text-prefix routing).
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     pub fn gather_mm_exact_routing_info(
         &self,
         builder: &mut PreprocessedRequestBuilder,
         mm_image_entries: &[MmImageEntry],
         token_ids: &[crate::protocols::TokenIdType],
-        formatted_prompt: Option<&str>,
     ) -> Result<()> {
         use crate::protocols::common::preprocessor::MmRoutingInfo;
-        use dynamo_kv_router::protocols::{RequestExtraInfo, RequestMmObjectInfo};
 
         if mm_image_entries.is_empty() {
             return Ok(());
@@ -1228,89 +1367,60 @@ impl OpenAIPreprocessor {
         }
 
         // Single-special-token placeholders (Qwen-VL `<|image_pad|>`, LLaVA
-        // `<image>`) emit one `find_token_id` per image in the tokenized
-        // prompt and hit the fast path below. Numbered-text placeholders
-        // (Phi-3 `<|image_N|>`) BPE-shatter and need the splice helper to
-        // mirror what the worker hashes on.
+        // `<image>`) emit exactly one `find_token_id` per image in the
+        // tokenized prompt. Any other shape (e.g. numbered-text placeholders
+        // that BPE-shatter) can't be aligned to images here, so we skip MM
+        // routing and let the caller fall back to text-prefix routing.
         let placeholder_count = token_ids.iter().filter(|&&t| t == find_token_id).count();
-        let normalized_token_ids: std::borrow::Cow<'_, [crate::protocols::TokenIdType]> =
-            if placeholder_count == mm_image_entries.len() {
-                std::borrow::Cow::Borrowed(token_ids)
-            } else if let Some(tpl) = self.image_placeholder_template
-                && tpl.contains("{n}")
-                && let Some(prompt) = formatted_prompt
-            {
-                match self.splice_phi3_numbered_placeholders_at_token_level(
-                    prompt,
-                    tpl,
-                    find_token_id,
-                    mm_image_entries.len(),
-                ) {
-                    Some(spliced) => std::borrow::Cow::Owned(spliced),
-                    None => {
-                        tracing::warn!(
-                            target: "mm_routing",
-                            placeholder_count,
-                            image_count = mm_image_entries.len(),
-                            routing_image_token_id = find_token_id,
-                            placeholder_template = tpl,
-                            "splice failed for numbered placeholder; \
-                             skipping MM routing info (text-prefix routing only)"
-                        );
-                        return Ok(());
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    target: "mm_routing",
-                    placeholder_count,
-                    image_count = mm_image_entries.len(),
-                    routing_image_token_id = find_token_id,
-                    "placeholder token count in tokenized prompt does not match image count; \
-                     skipping MM routing info (text-prefix routing only)"
-                );
-                return Ok(());
-            };
+        if placeholder_count != mm_image_entries.len() {
+            tracing::warn!(
+                target: "mm_routing",
+                placeholder_count,
+                image_count = mm_image_entries.len(),
+                routing_image_token_id = find_token_id,
+                "placeholder token count in tokenized prompt does not match image count; \
+                 skipping MM routing info (text-prefix routing only)"
+            );
+            return Ok(());
+        }
+        let normalized_token_ids = token_ids;
 
-        // Compute per-image N via lightseek + run the expansion.
+        // Compute per-image N via the registry + run the expansion.
         let n_tokens: Vec<usize> = mm_image_entries
             .iter()
             .map(|e| counter.count_tokens(e.width, e.height))
             .collect();
         let n_total: usize = n_tokens.iter().sum();
 
-        // Replace each placeholder occurrence with N copies of the same
-        // `find_token_id` (config.json's `image_token_id` when present).
-        // That id is what the backend's HF processor emits in the expanded
-        // sequence for every supported family; filling with lightseek-mm's
-        // per-spec value previously left Qwen2-VL / Qwen2.5-VL stuck at
-        // `effective_cached_blocks=1` because their per-patch id never
-        // appears in stored block hashes.
-        // BOS ownership: when the Phi-3 splice helper produced
-        // `normalized_token_ids` (Cow::Owned), it has already emitted the
-        // leading BOS as part of its complete sequence. Only the non-splice
-        // path (Cow::Borrowed = raw tokenized prompt) needs the caller to
-        // prepend BOS here. Avoids the prior split-brain where the leading
-        // push was here and the mid-segment pushes lived inside the helper.
-        let splice_owns_bos = matches!(normalized_token_ids, std::borrow::Cow::Owned(_));
-        let bos_extra = (!splice_owns_bos && self.routing_prepend_bos.is_some()) as usize;
+        // Canonical pad_value fill at image positions for ALL backends. sglang
+        // consumes pad_value natively; vLLM events are normalized to pad_value
+        // in the kv-router (see `create_stored_blocks`), so the frontend stays
+        // backend-agnostic. pad_value formula pinned by
+        // `pad_value_matches_sglang_protocol` in dynamo_kv_router.
+        //
+        // Prepend the routing-side BOS for `add_bos_token: true` models
+        // (LlamaTokenizer family, e.g. LLaVA-1.5) so per-block hashes match
+        // the backend's HF processor output.
+        let bos_extra = self.routing_prepend_bos.is_some() as usize;
         let mut expanded: Vec<crate::protocols::TokenIdType> =
             Vec::with_capacity(normalized_token_ids.len() + n_total + bos_extra);
-        if !splice_owns_bos && let Some(bos) = self.routing_prepend_bos {
+        if let Some(bos) = self.routing_prepend_bos {
             expanded.push(bos);
         }
-        let mut img_ranges: Vec<(usize, usize)> = Vec::with_capacity(mm_image_entries.len());
         let mut i = 0usize;
         for &t in normalized_token_ids.iter() {
             if t == find_token_id && i < mm_image_entries.len() {
-                let start = expanded.len();
-                expanded.extend(std::iter::repeat_n(find_token_id, n_tokens[i]));
-                img_ranges.push((start, start + n_tokens[i]));
+                let fill_token =
+                    dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_image_entries[i].mm_hash);
+                expanded.extend(std::iter::repeat_n(fill_token, n_tokens[i]));
                 i += 1;
             } else {
                 expanded.push(t);
             }
         }
+
+        // Unpadded expanded length, before the block-padding added below.
+        let expanded_prompt_len = expanded.len();
 
         // Pad to a whole multiple of kv_cache_block_size. The router's
         // compute_block_hash_for_seq only hashes whole blocks, so the partial
@@ -1323,117 +1433,24 @@ impl OpenAIPreprocessor {
             expanded.resize(total_tokens, 0);
         }
 
-        // Build request-level MM info, then derive per-block info.
-        let mm_objects: Vec<RequestMmObjectInfo> = mm_image_entries
-            .iter()
-            .zip(img_ranges.iter())
-            .map(|(entry, &(s, e))| RequestMmObjectInfo {
-                mm_hash: entry.mm_hash,
-                offsets: vec![(s, e)],
-            })
-            .collect();
-        let block_mm_infos =
-            RequestExtraInfo { mm_objects }.to_block_level(block_size, total_tokens);
-
+        // pad_value already encodes mm_hash in the routing tokens the router
+        // hashes, so block_mm_infos is always empty (the canonical scheme for
+        // both backends). The mm identity rides in the token stream, not a
+        // side channel.
         tracing::debug!(
             target: "mm_routing",
             n_images = mm_image_entries.len(),
             block_size,
             total_tokens,
-            n_blocks = block_mm_infos.len(),
-            "lightseek MmRoutingInfo built (exact)"
+            "MmRoutingInfo built (exact, pad_value)"
         );
 
         builder.mm_routing_info(Some(MmRoutingInfo {
             routing_token_ids: expanded,
-            block_mm_infos,
+            block_mm_infos: Vec::new(),
+            expanded_prompt_len,
         }));
         Ok(())
-    }
-
-    /// Build routing-side tokens for Phi-3-vision's `<|image_N|>` numbered
-    /// placeholder template so the router's per-block hashes match the
-    /// worker's BlockStored events byte-for-byte.
-    ///
-    /// **Family contract — Phi-3-only.** The encode-decode roundtrip +
-    /// per-segment BOS pattern here is specific to Phi-3's HF processor
-    /// (and any future `LlamaTokenizer`-family with `<|image_{n}|>`
-    /// placeholders): the processor splits the prompt at `<|image_N|>` and
-    /// tokenizes each segment with `add_special_tokens=true`, prefixing
-    /// every segment (including the first) with a fresh BOS, and decodes-
-    /// then-re-encodes across special-token boundaries, which inserts
-    /// whitespace after each special token and bumps the SentencePiece
-    /// prefix token (e.g. 29871 `▁` -> 259 `▁▁` for `<|user|>\n`). Both
-    /// effects are reproduced here.
-    ///
-    /// Caller is `gather_mm_exact_routing_info`, which gates on
-    /// `placeholder_tpl.contains("{n}")`. The `routing_prepend_bos`
-    /// requirement below acts as the family guard: a future model with a
-    /// `{n}`-style placeholder but no BOS prepend (i.e. not a
-    /// LlamaTokenizer-family) would not benefit from this roundtrip and
-    /// could silently produce wrong block hashes, so we bail and let the
-    /// caller fall back to text-prefix routing.
-    ///
-    /// Returns one `find_token_id` per image; the caller's expansion loop
-    /// multiplies them to the per-image patch count. Leading BOS is
-    /// emitted here as the first element of the returned vector — the
-    /// caller does NOT prepend its own BOS when this helper succeeds.
-    /// Returns `None` (caller falls back to text-prefix routing) when the
-    /// family guard trips or on any tokenize/decode failure.
-    #[cfg(feature = "lightseek-mm")]
-    fn splice_phi3_numbered_placeholders_at_token_level(
-        &self,
-        prompt: &str,
-        placeholder_tpl: &str,
-        find_token_id: crate::protocols::TokenIdType,
-        expected_count: usize,
-    ) -> Option<Vec<crate::protocols::TokenIdType>> {
-        // Family guard: the encode-decode roundtrip + per-segment BOS
-        // semantics are LlamaTokenizer-family-specific. `routing_prepend_bos`
-        // is set iff the model declares `add_bos_token: true` in
-        // tokenizer_config.json, which is the marker for that family.
-        let bos = self.routing_prepend_bos?;
-
-        // Encode-decode roundtrip mirrors vLLM's text-substitute fallback,
-        // which is what the Phi-3 worker actually hashes on.
-        let prompt_owned: String = self
-            .tokenizer
-            .encode(prompt)
-            .ok()
-            .and_then(|enc| self.tokenizer.decode(enc.token_ids(), false).ok())
-            .map(Into::into)?;
-        let prompt: &str = &prompt_owned;
-
-        let mut byte_ranges: Vec<(usize, usize)> = Vec::with_capacity(expected_count);
-        let mut search_from = 0usize;
-        for idx in 1..=expected_count {
-            let pattern = placeholder_tpl.replace("{n}", &idx.to_string());
-            let rel = prompt[search_from..].find(&pattern)?;
-            let start = search_from + rel;
-            let end = start + pattern.len();
-            byte_ranges.push((start, end));
-            search_from = end;
-        }
-
-        // Leading BOS is emitted here so the caller's general-purpose
-        // BOS-prepend path can skip when this helper produced the
-        // normalized tokens (avoids the prior split-brain where leading
-        // BOS was pushed by the caller and mid/suffix BOS pushed here).
-        let mut result: Vec<crate::protocols::TokenIdType> = vec![bos];
-        let mut prev_end = 0usize;
-        for &(ph_start, ph_end) in byte_ranges.iter() {
-            let seg = &prompt[prev_end..ph_start];
-            let seg_enc = self.tokenizer.encode(seg).ok()?;
-            result.extend_from_slice(seg_enc.token_ids());
-            result.push(find_token_id);
-            // Mid-prompt segments get a fresh BOS — Phi-3's HF processor
-            // tokenizes each segment with add_special_tokens=true.
-            result.push(bos);
-            prev_end = ph_end;
-        }
-        let suffix_enc = self.tokenizer.encode(&prompt[prev_end..]).ok()?;
-        result.extend_from_slice(suffix_enc.token_ids());
-        Some(result)
     }
 
     /// xxh3-64 of the raw URL bytes. Used as the routing `mm_hash` in the
@@ -1449,7 +1466,7 @@ impl OpenAIPreprocessor {
     /// Azure SAS) should use `--frontend-decoding`: that path hashes the
     /// decoded RGB bytes instead, so cross-URL cache reuse is restored
     /// without depending on URL conventions.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     fn hash_image_url(url: &str) -> u64 {
         xxhash_rust::xxh3::xxh3_64(url.as_bytes())
     }
@@ -1464,7 +1481,7 @@ impl OpenAIPreprocessor {
     /// (typical of multi-turn / session workloads) hit the cache and skip the
     /// HTTP fetch entirely. Without this cache, sticky-routing workloads pay
     /// 4–5× HTTP Range fetches per request just to compute routing tokens.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     async fn fetch_image_dims(mm_hash: u64, url: &str) -> Result<(u32, u32)> {
         use moka::future::Cache;
         use std::sync::LazyLock;
@@ -1483,7 +1500,7 @@ impl OpenAIPreprocessor {
         static DIM_CACHE: LazyLock<Cache<u64, (u32, u32)>> = LazyLock::new(|| {
             Cache::builder()
                 .max_capacity(100_000)
-                .time_to_live(Duration::from_secs(24 * 60 * 60))
+                .time_to_live(std::time::Duration::from_secs(24 * 60 * 60))
                 .build()
         });
 
@@ -1509,7 +1526,7 @@ impl OpenAIPreprocessor {
             .map_err(|e| anyhow::anyhow!("fetch_image_dims failed: {}", e))
     }
 
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     async fn fetch_image_dims_uncached(url: &str) -> Result<(u32, u32)> {
         use image::ImageReader;
         use std::io::Cursor;
@@ -1522,7 +1539,7 @@ impl OpenAIPreprocessor {
         // Per-Range tighter bound than MediaFetcher's 30 s default — dim
         // fetch is best-effort; on a slow remote we'd rather skip MM
         // routing for this image than starve the request.
-        const DIM_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+        const DIM_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
         if let Some(rest) = url.strip_prefix("data:") {
             let comma = rest
@@ -1866,20 +1883,24 @@ impl OpenAIPreprocessor {
                 Some("kimi_k25")
             );
 
-        // Under guided-decoding (tool_choice=required/named), only force-
-        // reasoning parsers must skip — they treat the bare JSON output as
-        // reasoning_content and starve the jail. Non-force-reasoning parsers
-        // (qwen3, deepseek_v4, glm45, etc.) are safe to run: vLLM's
-        // reasoner-gate allows free generation during `<think>...</think>`
-        // before clamping to the guided grammar, so the model emits
-        // `<reasoning></think><JSON>` and the parser strips the prefix so the
-        // jail sees pure JSON.
-        let skip_reasoning_for_guided_json =
-            matches!(
-                request.inner.tool_choice,
-                Some(ChatCompletionToolChoiceOption::Required)
-                    | Some(ChatCompletionToolChoiceOption::Named(_))
-            ) && Self::is_force_reasoning_parser(self.runtime_config.reasoning_parser.as_deref());
+        // Under guided-decoding (tool_choice=required/named), force-reasoning
+        // parsers must skip because the backend emits bare JSON and the jail
+        // needs to see that JSON as content. Some non-force parsers can also
+        // hit that shape after prompt-injected reasoning, but they need a
+        // stream-content check so `reasoning</think>JSON` still gets parsed.
+        let is_guided_tool_choice = matches!(
+            request.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Required)
+                | Some(ChatCompletionToolChoiceOption::Named(_))
+        );
+        let skip_reasoning_for_guided_json = is_guided_tool_choice
+            && Self::is_force_reasoning_parser(self.runtime_config.reasoning_parser.as_deref());
+        let bypass_reasoning_for_bare_guided_json = is_guided_tool_choice
+            && prompt_injected_reasoning
+            && !uses_tool_call_structural_tag
+            && Self::skips_guided_json_when_prompt_injected(
+                self.runtime_config.reasoning_parser.as_deref(),
+            );
 
         let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
             self.runtime_config.reasoning_parser.as_deref(),
@@ -1904,10 +1925,11 @@ impl OpenAIPreprocessor {
         // To address the limitation if needed in future: move this step before transform_postprocessor_stream and add new field of reasoning_content to the backend output
         // Use backend_output.reasoning_content field to fill out the deltas.
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
-            Box::pin(Self::parse_reasoning_content_from_stream(
+            Box::pin(Self::parse_reasoning_content_from_stream_inner(
                 stream,
                 self.runtime_config.reasoning_parser.clone().unwrap(), // Safety: We already checked that parser is some, so gtg
                 prompt_injected_reasoning,
+                bypass_reasoning_for_bare_guided_json,
             ))
         } else if should_strip_disabled_reasoning_start {
             Box::pin(Self::strip_leading_reasoning_start_from_stream(
@@ -1943,18 +1965,43 @@ impl OpenAIPreprocessor {
                 .collect()
         });
 
+        // When DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is set, supported families
+        // (Qwen3-Coder, DeepSeek-V4) stream through the dynamo-parsers-v2 parser
+        // instead of the jail, which is never built for them on this path.
+        // tool_choice=required/named and structural-tag still use the jail's
+        // Immediate mode, since those rely on guided-decoded JSON rather than the
+        // native markup the v2 parser reads. See tool_parser_v2::apply_stream.
+        use crate::protocols::openai::chat_completions::tool_parser_v2;
+        let parser_name = self.tool_call_parser.as_deref();
+        let use_parsers_v2 = tool_parser_v2::enabled()
+            && parser_name.is_some_and(tool_parser_v2::supports_family)
+            && !uses_tool_call_structural_tag
+            && matches!(
+                request.inner.tool_choice.as_ref(),
+                None | Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto)
+            );
+
         // Apply jail conditionally
-        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
-            Box::pin(Self::apply_tool_calling_jail(
-                self.tool_call_parser.clone(),
-                request.inner.tool_choice.clone(),
-                tool_definitions,
-                uses_tool_call_structural_tag,
-                stream,
-            ))
-        } else {
-            Box::pin(stream)
-        };
+        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> =
+            if should_jail && use_parsers_v2 {
+                Box::pin(tool_parser_v2::apply_stream(
+                    stream,
+                    tool_definitions,
+                    parser_name
+                        .expect("use_parsers_v2 implies a parser name")
+                        .to_string(),
+                ))
+            } else if should_jail {
+                Box::pin(Self::apply_tool_calling_jail(
+                    self.tool_call_parser.clone(),
+                    request.inner.tool_choice.clone(),
+                    tool_definitions,
+                    uses_tool_call_structural_tag,
+                    stream,
+                ))
+            } else {
+                Box::pin(stream)
+            };
 
         Ok(transformed_stream)
     }
@@ -1964,7 +2011,7 @@ impl OpenAIPreprocessor {
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
         trace_tokens_enabled: bool,
-        trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
+        trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
@@ -1983,7 +2030,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: bool,
             finished: bool,
             trace_tokens_enabled: bool,
-            trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
+            trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
         }
 
         let state = State {
@@ -2008,7 +2055,15 @@ impl OpenAIPreprocessor {
                     return None;
                 }
 
-                if let Some(response) = inner.response_stream.next().await {
+                if let Some(mut response) = inner.response_stream.next().await {
+                    // Split topology: overlay a standalone router's forwarded routing_data
+                    // (timing, query-only token_ids) onto this request's tracker so the
+                    // frontend's nvext/timing surfaces populate.
+                    drain_router_routing_data(
+                        &mut response.data,
+                        inner.response_generator.tracker().as_ref(),
+                    );
+
                     if inner.cancelled {
                         tracing::debug!(
                             request_id = inner.context.id(),
@@ -2037,7 +2092,7 @@ impl OpenAIPreprocessor {
 
                         let isl = inner.response_generator.get_isl().map(|isl| isl as usize);
 
-                        crate::agents::trace::record_backend_finish_reason_metadata(
+                        crate::request_trace::record_backend_finish_reason_metadata(
                             inner.trace_finish_reason_metadata.as_ref(),
                             backend_output.index,
                             backend_output.finish_reason.as_ref(),
@@ -2098,7 +2153,7 @@ impl OpenAIPreprocessor {
                         detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
                     if inner.trace_tokens_enabled {
-                        crate::agents::trace::record_llm_metric_tokens(
+                        crate::request_trace::record_llm_metric_tokens(
                             tracker.as_deref(),
                             isl,
                             current_osl,
@@ -2115,13 +2170,7 @@ impl OpenAIPreprocessor {
                         DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
                     }
 
-                    if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
-                        // Only set event if not already set to avoid overriding existing events (like errors)
-                        if response.event.is_none() {
-                            response.event = metrics_annotated.event;
-                            response.comment = metrics_annotated.comment;
-                        }
-                    }
+                    attach_llm_metrics(&mut response, llm_metrics);
 
                     // Mark if we've seen a finish_reason
                     if has_finish_reason {
@@ -2181,7 +2230,7 @@ impl OpenAIPreprocessor {
                             detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
                         if inner.trace_tokens_enabled {
-                            crate::agents::trace::record_llm_metric_tokens(
+                            crate::request_trace::record_llm_metric_tokens(
                                 tracker.as_deref(),
                                 Some(usage.prompt_tokens as usize),
                                 usage.completion_tokens as usize,
@@ -2198,12 +2247,6 @@ impl OpenAIPreprocessor {
                             DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
                         }
 
-                        // Create annotation string
-                        let annotation = llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to serialize metrics: {}", e);
-                            Annotated::<()>::from_data(())
-                        });
-
                         // Send the usage chunk if needed
                         let data = if inner.response_generator.is_usage_enabled() {
                             Some(usage_chunk)
@@ -2211,13 +2254,14 @@ impl OpenAIPreprocessor {
                             None
                         };
 
-                        let annotated_usage = Annotated::<Resp> {
+                        let mut annotated_usage = Annotated::<Resp> {
                             id: None,
                             data,
-                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
-                            comment: annotation.comment,
+                            event: None,
+                            comment: None,
                             error: None,
                         };
+                        attach_llm_metrics(&mut annotated_usage, llm_metrics);
 
                         tracing::trace!(
                             request_id = inner.context.id(),
@@ -2468,6 +2512,13 @@ impl OpenAIPreprocessor {
         )
     }
 
+    fn skips_guided_json_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
+        matches!(
+            reasoning_parser,
+            Some("deepseek_v4" | "deepseek-v4" | "deepseekv4" | "glm45")
+        )
+    }
+
     /// Check if reasoning parsing should be disabled based on per-request parameters.
     /// For kimi_k25: disabled when chat_template_args contains "thinking": false.
     /// For Nemotron force-reasoning aliases: disabled when chat_template_args
@@ -2550,6 +2601,23 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        Self::parse_reasoning_content_from_stream_inner(
+            stream,
+            parser_name,
+            prompt_injected_reasoning,
+            false,
+        )
+    }
+
+    fn parse_reasoning_content_from_stream_inner<S>(
+        stream: S,
+        parser_name: String,
+        prompt_injected_reasoning: bool,
+        bypass_bare_guided_json: bool,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
         // Initialize reasoning parser from parser_name
         let mut reasoning_parser = Box::new(ReasoningParserType::get_reasoning_parser_from_name(
             parser_name.as_ref(),
@@ -2562,27 +2630,58 @@ impl OpenAIPreprocessor {
         let state = ReasoningState {
             stream: Box::pin(stream),
             reasoning_parser: Some(reasoning_parser),
+            bypass_bare_guided_json,
+            guided_json_bypass_decision: None,
         };
 
         stream::unfold(state, |mut state| async move {
             if let Some(response) = state.stream.next().await {
+                let should_bypass_reasoning = if state.bypass_bare_guided_json {
+                    match state.guided_json_bypass_decision {
+                        Some(decision) => decision,
+                        None => {
+                            let decision = response.data.as_ref().and_then(|data| {
+                                data.inner.choices.iter().find_map(|choice| {
+                                    if let Some(ChatCompletionMessageContent::Text(text)) =
+                                        choice.delta.content.as_ref()
+                                    {
+                                        let text = text.trim_start();
+                                        if text.is_empty() {
+                                            return None;
+                                        }
+                                        return Some(matches!(text.as_bytes()[0], b'[' | b'{'));
+                                    }
+                                    None
+                                })
+                            });
+                            if let Some(decision) = decision {
+                                state.guided_json_bypass_decision = Some(decision);
+                            }
+                            decision.unwrap_or(false)
+                        }
+                    }
+                } else {
+                    false
+                };
+
                 // Process the response through reasoning parser if available
-                let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
+                let processed_response = if should_bypass_reasoning {
+                    response
+                } else if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
                         // Process all choices, not just the first one
                         for choice in data.inner.choices.iter_mut() {
                             // Reasoning parsing only applies to text content
-                            if let Some(
-                                dynamo_protocols::types::ChatCompletionMessageContent::Text(text),
-                            ) = choice.delta.content.as_ref()
+                            if let Some(ChatCompletionMessageContent::Text(text)) =
+                                choice.delta.content.as_ref()
                             {
                                 let parser_result =
                                     parser.parse_reasoning_streaming_incremental(text, &[]);
 
                                 // Update this specific choice with parsed content
-                                choice.delta.content = parser_result.get_some_normal_text().map(
-                                    dynamo_protocols::types::ChatCompletionMessageContent::Text,
-                                );
+                                choice.delta.content = parser_result
+                                    .get_some_normal_text()
+                                    .map(ChatCompletionMessageContent::Text);
                                 choice.delta.reasoning_content = parser_result.get_some_reasoning();
                             }
                             // For multimodal content, pass through unchanged
@@ -2803,6 +2902,7 @@ impl
         let (mut common_request, annotations, prompt_injected_reasoning) = self
             .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
+        attach_agent_context_from_context(&mut common_request, &context);
 
         let uses_tool_call_structural_tag = self.apply_tool_choice_guided_decoding(
             &request,
@@ -2811,7 +2911,7 @@ impl
         )?;
 
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
-        let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
+        let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
             &tracker,
             &context,
@@ -2819,7 +2919,7 @@ impl
         );
         let trace_tokens_enabled = trace_state.is_some();
         let trace_finish_reason_metadata =
-            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
+            crate::request_trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -2896,7 +2996,7 @@ impl
             &self.tokenizer,
         );
 
-        let final_stream = crate::agents::trace::wrap_agent_trace_chat_request_end_stream(
+        let final_stream = crate::request_trace::wrap_chat_request_end_stream(
             final_stream,
             trace_state,
             request_id,
@@ -2968,12 +3068,13 @@ impl
         // Returned MM entries are unused on the embeddings path; routing info is
         // not built here.
         let _ = self
-            .gather_multi_modal_data(&request, &mut builder, None)
+            .gather_multi_modal_data(&request, &mut builder, None, &[])
             .await?;
 
         let mut common_request = builder.build()?;
+        attach_agent_context_from_context(&mut common_request, &context);
 
-        let trace_state = crate::agents::trace::build_agent_trace_request_end_state(
+        let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
             &tracker,
             &context,
@@ -2981,7 +3082,7 @@ impl
         );
         let trace_tokens_enabled = trace_state.is_some();
         let trace_finish_reason_metadata =
-            crate::agents::trace::finish_reason_metadata_handle(&trace_state);
+            crate::request_trace::finish_reason_metadata_handle(&trace_state);
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;
@@ -3020,7 +3121,7 @@ impl
             trace_finish_reason_metadata,
         );
 
-        let stream = crate::agents::trace::wrap_agent_trace_completion_request_end_stream(
+        let stream = crate::request_trace::wrap_completion_request_end_stream(
             Box::pin(stream),
             trace_state,
             request_id,
@@ -3148,6 +3249,21 @@ mod strip_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn routing_priorities_keep_strict_tier_independent() {
+        let hints = crate::protocols::common::extensions::AgentHints {
+            priority: Some(-3),
+            strict_priority: Some(7),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            routing_priorities(Some(&hints)),
+            (Some(0.0), Some(7), Some(-3))
+        );
+        assert_eq!(routing_priorities(None), (None, None, None));
+    }
+
     /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_parser_requires_special_tokens() {
@@ -3264,7 +3380,10 @@ mod tests {
             "bad_words_token_ids": [[12, 13]],
             "nvext": {
                 "cache_salt": "step_7",
-                "extra_fields": ["completion_token_ids"]
+                "extra_fields": ["completion_token_ids"],
+                "metadata_upload": {
+                    "url": "s3://bucket/root/rollouts"
+                }
             }
         }))
         .unwrap();
@@ -3275,6 +3394,12 @@ mod tests {
         assert_eq!(
             extra_args["nvext"]["extra_fields"],
             serde_json::json!(["completion_token_ids"])
+        );
+        assert_eq!(
+            extra_args["nvext"]["metadata_upload"],
+            serde_json::json!({
+                "url": "s3://bucket/root/rollouts"
+            })
         );
         assert_eq!(extra_args["sampling_options"]["detokenize"], false);
         assert_eq!(
@@ -3314,6 +3439,35 @@ mod tests {
                 PreprocessRequestOptions::default()
             ),
             None
+        );
+    }
+
+    #[test]
+    fn test_effective_prompt_len_for_cap() {
+        // MM-expanded length present: use it, ignoring the unexpanded token count.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(500), true, 12),
+            Some(500)
+        );
+        // Expanded length 0 (serde-default / absent) with images: defer to backend.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), true, 12),
+            None
+        );
+        // No routing info but images present: defer to backend.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(None, true, 12),
+            None
+        );
+        // Text-only: use the token count.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(None, false, 12),
+            Some(12)
+        );
+        // Expanded length 0 without images: fall back to the token count.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), false, 12),
+            Some(12)
         );
     }
 
@@ -3585,7 +3739,7 @@ mod tests {
     /// the identity. For signed-URL workloads where rotation actually
     /// hides a stable object, `--frontend-decoding` hashes the decoded
     /// bytes instead.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     #[test]
     fn hash_image_url_distinguishes_query_strings() {
         let base = "https://cdn.example.com/img.jpg";
@@ -3601,7 +3755,7 @@ mod tests {
     /// routing for signed-URL workloads — `--frontend-decoding` is the
     /// recommended mode there because it hashes the decoded image bytes
     /// regardless of how the URL was signed.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     #[test]
     fn hash_image_url_distinguishes_rotating_signatures() {
         let base = "https://bucket.s3.amazonaws.com/img.jpg";
@@ -3619,7 +3773,7 @@ mod tests {
 
     /// Identical URLs must hash to the same value (the basic identity
     /// guarantee that makes URL-passthrough routing useful at all).
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     #[test]
     fn hash_image_url_is_deterministic_for_identical_urls() {
         let url = "https://cdn.example.com/img.jpg?width=256";
@@ -3631,7 +3785,7 @@ mod tests {
 
     /// data: URIs hash the entire URI string. Same payload → same hash;
     /// different payload → different hash.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     #[test]
     fn hash_image_url_data_uri_content_addressed() {
         let same = "data:image/png;base64,AAAA";
@@ -3648,7 +3802,7 @@ mod tests {
     }
 
     /// Non-HTTP / non-data schemes (s3://, gs://, file://) hash as-is.
-    #[cfg(feature = "lightseek-mm")]
+    #[cfg(feature = "mm-routing")]
     #[test]
     fn hash_image_url_other_schemes_passthrough() {
         let s3a = OpenAIPreprocessor::hash_image_url("s3://bucket/key?v=1");

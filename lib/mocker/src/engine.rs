@@ -24,7 +24,9 @@ pub fn create_engine(
     fpm_publisher: FpmPublisher,
 ) -> Box<dyn SchedulerHandle> {
     match args.engine_type {
-        EngineType::Vllm => Box::new(Scheduler::new(
+        // TRT-LLM reuses the vLLM scheduler core; the GUARANTEED_NO_EVICT
+        // policy is carried in `args` and read by the core per pass.
+        EngineType::Vllm | EngineType::Trtllm => Box::new(Scheduler::new(
             args,
             dp_rank,
             output_tx,

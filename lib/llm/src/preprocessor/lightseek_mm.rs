@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Pure-Rust per-image token-count and image-placeholder token-id resolution
-//! via the `llm-multimodal` crate. Compiled only when the `lightseek-mm`
+//! via the `llm-multimodal` crate. Compiled only when the `mm-routing`
 //! cargo feature is enabled.
 
 use std::path::Path;
@@ -20,11 +20,11 @@ use crate::protocols::TokenIdType;
 /// No-op `Tokenizer` impl used when a model directory has no `tokenizer.json`
 /// (e.g. Kimi-K2.5 ships `tiktoken.model` instead of an HF fast tokenizer).
 ///
-/// The lightseek `ModelMetadata` always expects a tokenizer reference, but
+/// `ModelMetadata` always expects a tokenizer reference, but
 /// some `ModelProcessorSpec` impls — Kimi-K2.5 in particular — read the
 /// image-placeholder token id straight out of `config.json` and never call
 /// the tokenizer. Passing `NullTokenizer` lets those specs run; specs that
-/// do need vocab access (Phi-3, LLaVA) just get `None` from
+/// do need vocab access (LLaVA) just get `None` from
 /// `token_to_id` and the resolver returns `None` gracefully.
 struct NullTokenizer;
 
@@ -96,20 +96,20 @@ impl LightseekMmCounter {
         let cfg_path = model_dir.join("preprocessor_config.json");
         let json = std::fs::read_to_string(&cfg_path).with_context(|| {
             format!(
-                "lightseek: failed to read preprocessor_config.json at {}",
+                "mm-routing: failed to read preprocessor_config.json at {}",
                 cfg_path.display()
             )
         })?;
         let config = PreProcessorConfig::from_json(&json).with_context(|| {
             format!(
-                "lightseek: failed to parse preprocessor_config.json at {}",
+                "mm-routing: failed to parse preprocessor_config.json at {}",
                 cfg_path.display()
             )
         })?;
 
         let processor = REGISTRY.find(model_id, model_type).ok_or_else(|| {
             anyhow!(
-                "lightseek: no image processor registered for model_id={:?} model_type={:?}",
+                "mm-routing: no image processor registered for model_id={:?} model_type={:?}",
                 model_id,
                 model_type
             )
@@ -132,9 +132,9 @@ impl LightseekMmCounter {
     }
 }
 
-/// Resolve the image-placeholder token id by delegating to lightseek's
-/// per-model `ModelProcessorSpec`. Each registered model (Qwen3-VL,
-/// Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Phi-3-vision, Llama-4,
+/// Resolve the image-placeholder token id by delegating to a per-model
+/// `ModelProcessorSpec` from the registry. Each registered model (Qwen3-VL,
+/// Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Llama-4,
 /// Kimi-K2.5) reads the right field of `config.json` (`image_token_id`,
 /// `image_token_index`, `media_placeholder_token_id`) and falls back to the
 /// tokenizer's vocab when only the placeholder string is known.
@@ -176,7 +176,7 @@ fn resolve_image_token_id_with_config(
                         target: "mm_routing",
                         model_dir = %model_dir.display(),
                         err = %e,
-                        "lightseek: tokenizer.json not loaded; falling back to NullTokenizer"
+                        "mm-routing: tokenizer.json not loaded; falling back to NullTokenizer"
                     );
                     None
                 }
@@ -201,7 +201,7 @@ fn resolve_image_token_id_with_config(
                 target: "mm_routing",
                 model_id = %model_id,
                 err = %e,
-                "lightseek: ModelProcessorSpec could not resolve placeholder_token_id"
+                "mm-routing: ModelProcessorSpec could not resolve placeholder_token_id"
             );
             e
         })
@@ -279,7 +279,7 @@ fn read_json(model_dir: &Path, filename: &str) -> Option<serde_json::Value> {
                 target: "mm_routing",
                 path = %path.display(),
                 err = %e,
-                "lightseek: failed to read {filename}"
+                "mm-routing: failed to read {filename}"
             );
             return None;
         }
@@ -291,7 +291,7 @@ fn read_json(model_dir: &Path, filename: &str) -> Option<serde_json::Value> {
                 target: "mm_routing",
                 path = %path.display(),
                 err = %e,
-                "lightseek: failed to parse {filename}"
+                "mm-routing: failed to parse {filename}"
             );
             None
         }
@@ -310,7 +310,7 @@ fn extract_chat_placeholder_from_config(config: &serde_json::Value) -> Option<To
 
 /// Return the `bos_token` string from a pre-parsed `tokenizer_config.json`
 /// when `add_bos_token: true`. The routing-side sequence must prepend it to
-/// match the backend's HF-processor output (Phi-3-vision and other
+/// match the backend's HF-processor output (LLaVA-1.5 and other
 /// `LlamaTokenizer`-family models). Returns `None` otherwise.
 fn extract_bos_token_from_tokenizer_config(cfg: &serde_json::Value) -> Option<String> {
     if !cfg
@@ -334,10 +334,10 @@ fn extract_bos_token_from_tokenizer_config(cfg: &serde_json::Value) -> Option<St
 
 #[cfg(test)]
 mod tests {
-    //! Contract tests against the upstream lightseek registry. Pin the
-    //! behavior `OpenAIPreprocessor::new_with_parts` relies on so a future
-    //! smg matcher change shows up here instead of as a silent runtime
-    //! fallback to text-prefix-only routing.
+    //! Contract tests against the upstream `llm-multimodal` image-processor
+    //! registry. Pin the behavior `OpenAIPreprocessor::new_with_parts`
+    //! relies on so a future upstream matcher change shows up here instead
+    //! of as a silent runtime fallback to text-prefix-only routing.
     use super::*;
 
     #[test]
@@ -364,9 +364,11 @@ mod tests {
     /// a `(family_label, hf_id, model_type)` triple. A row "passes" when the
     /// upstream registry can match it via either the HF id substring OR the
     /// `model_type` config field. A failure here means either:
-    ///   - the documented family lost coverage in a smg release (need to
-    ///     pin or pick up the fix upstream), or
-    ///   - we should remove that family from our supported-list claim.
+    ///
+    /// - the documented family lost coverage in a smg release (need to
+    ///   pin or pick up the fix upstream), or
+    /// - we should remove that family from our supported-list claim.
+    ///
     /// Update this list whenever we add a new supported family in docs.
     #[test]
     fn image_processor_registry_covers_documented_families() {
@@ -381,11 +383,6 @@ mod tests {
                 "llava_next",
             ),
             ("LLaVA-1.5", "llava-hf/llava-1.5-7b-hf", "llava"),
-            (
-                "Phi-3-vision",
-                "microsoft/Phi-3-vision-128k-instruct",
-                "phi3_v",
-            ),
             ("Llama-4", "meta-llama/Llama-4-Scout-17B-16E", "llama4"),
             ("Kimi-K2.5", "moonshotai/Kimi-K2.5-Instruct", "kimi_k2_5"),
         ];
@@ -400,8 +397,8 @@ mod tests {
         }
         assert!(
             missing.is_empty(),
-            "lightseek registry has no processor for: {:?}. \
-             Either pick up an smg release that registers these, or trim \
+            "image-processor registry has no processor for: {:?}. \
+             Either pick up an upstream release that registers these, or trim \
              the supported-families list in docs.",
             missing
         );
