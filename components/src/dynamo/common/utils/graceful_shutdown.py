@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import signal
+import sys
 from typing import Any, Callable, Coroutine, Iterable, Optional
 
 from dynamo._core import DistributedRuntime
@@ -16,7 +17,36 @@ _DEFAULT_GRACE_PERIOD_SECS = 5.0
 _DEFAULT_DRAIN_TIMEOUT_SECS = 30.0
 _DEFAULT_CLEANUP_TIMEOUT_SECS = 30.0
 _GRACE_PERIOD_ENV = "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS"
+_FAST_FAILOVER_EXIT_ENV = "DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM"
 _shutdown_started = asyncio.Event()
+
+
+def is_shutdown_in_progress() -> bool:
+    """Return whether this process is already handling graceful shutdown."""
+    return _shutdown_started.is_set()
+
+
+def fast_failover_exit_enabled() -> bool:
+    value = os.getenv(_FAST_FAILOVER_EXIT_ENV)
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _fast_exit_after_failover_unregister(
+    shutdown_event: Optional[asyncio.Event],
+) -> None:
+    if shutdown_event is not None:
+        shutdown_event.set()
+    logger.warning(
+        "GMS failover fast-exit enabled; exiting after discovery unregister "
+        "so the kernel releases failover ownership immediately"
+    )
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    finally:
+        os._exit(0)
 
 
 def get_grace_period_seconds() -> float:
@@ -105,6 +135,9 @@ async def graceful_shutdown_with_discovery(
 
     logger.info("Received shutdown signal; unregistering endpoints from discovery")
     await _unregister_endpoints(list(endpoints))
+
+    if fast_failover_exit_enabled():
+        _fast_exit_after_failover_unregister(shutdown_event)
 
     if grace_period_s > 0:
         logger.info("Grace period %.2fs before stopping endpoints", grace_period_s)

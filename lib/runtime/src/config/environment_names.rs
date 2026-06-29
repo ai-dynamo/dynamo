@@ -146,6 +146,8 @@ pub mod nats {
 
     /// NATS request/reply timeout in seconds. Unset = async-nats default (10 s).
     pub const DYN_NATS_REQUEST_TIMEOUT_SECS: &str = "DYN_NATS_REQUEST_TIMEOUT_SECS";
+    /// Request-plane ack timeout in milliseconds for NATS requests.
+    pub const DYN_NATS_REQUEST_TIMEOUT_MS: &str = "DYN_NATS_REQUEST_TIMEOUT_MS";
 
     /// NATS authentication environment variables (checked in priority order)
     pub mod auth {
@@ -663,6 +665,15 @@ pub mod discovery {
 
     /// Kube discovery mode: "pod" (default) or "container" (each container registers independently)
     pub const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+
+    /// Kube discovery daemon debounce window in milliseconds (default: 500).
+    pub const DYN_KUBE_DISCOVERY_DEBOUNCE_MS: &str = "DYN_KUBE_DISCOVERY_DEBOUNCE_MS";
+
+    /// Explicit logical discovery instance id shared by a failover cohort.
+    pub const DYN_DISCOVERY_LOGICAL_INSTANCE_ID: &str = "DYN_DISCOVERY_LOGICAL_INSTANCE_ID";
+
+    /// Stable logical discovery key hashed into an instance id shared by a failover cohort.
+    pub const DYN_DISCOVERY_LOGICAL_INSTANCE_KEY: &str = "DYN_DISCOVERY_LOGICAL_INSTANCE_KEY";
 }
 
 /// CUDA and GPU environment variables
@@ -751,6 +762,7 @@ mod tests {
             // NATS
             nats::NATS_SERVER,
             nats::DYN_NATS_REQUEST_TIMEOUT_SECS,
+            nats::DYN_NATS_REQUEST_TIMEOUT_MS,
             nats::auth::NATS_AUTH_USERNAME,
             nats::auth::NATS_AUTH_PASSWORD,
             nats::auth::NATS_AUTH_TOKEN,

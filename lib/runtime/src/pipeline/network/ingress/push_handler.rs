@@ -4,11 +4,13 @@
 use super::*;
 
 use crate::engine::AsyncEngineContext;
+use crate::error::{DynamoError, ErrorType};
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
 use crate::pipeline::{ManyIn, RequestStream};
+use crate::protocols::maybe_error::MaybeError;
 use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::Deserialize;
@@ -158,7 +160,7 @@ where
         publisher: &StreamSender,
         payload_codec: RequestPlanePayloadCodec,
     ) where
-        U: Data + std::fmt::Debug,
+        U: Data + MaybeError + std::fmt::Debug,
         Adapter: IngressResponseEncoder<U>,
     {
         let context = stream.context();
@@ -166,6 +168,7 @@ where
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
         let mut saw_error_response = false;
+        let mut sent_response_frame = false;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
             let encoded = match self
@@ -217,7 +220,10 @@ where
                         .inc();
                 }
                 break;
-            } else if !is_error {
+            }
+
+            sent_response_frame = true;
+            if !is_error {
                 // Only notify on non-error chunks — error responses don't prove
                 // the engine is healthy and should not reset the canary timer.
                 if let Some(notifier) = self.endpoint_health_check_notifier.get() {
@@ -232,6 +238,55 @@ where
                 break;
             }
         }
+
+        if send_complete_final && !sent_response_frame {
+            let err = DynamoError::builder()
+                .error_type(ErrorType::Disconnected)
+                .message("Stream ended before first response")
+                .build();
+            tracing::warn!(
+                error = %err,
+                "Response stream ended before first frame for stream {}",
+                context.id()
+            );
+
+            match self
+                .payload_adapter
+                .encode_response(payload_codec, Some(U::from_err(err)), false)
+                .await
+            {
+                Ok(encoded) => {
+                    let resp_bytes = encoded.bytes;
+                    if let Some(m) = self.metrics() {
+                        m.response_bytes.inc_by(resp_bytes.len() as u64);
+                    }
+                    if (publisher.send(resp_bytes).await).is_err() {
+                        send_complete_final = false;
+                        tracing::error!(
+                            "Failed to publish empty-stream error for stream {}",
+                            context.id()
+                        );
+                        if let Some(m) = self.metrics() {
+                            m.error_counter
+                                .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
+                                .inc();
+                        }
+                    } else {
+                        saw_error_response = true;
+                    }
+                }
+                Err(err) => {
+                    send_complete_final = false;
+                    tracing::error!(%err, "failed to encode empty-stream error");
+                    if let Some(m) = self.metrics() {
+                        m.error_counter
+                            .with_label_values(&[work_handler::error_types::SERIALIZATION])
+                            .inc();
+                    }
+                }
+            }
+        }
+
         if send_complete_final {
             let encoded = match self
                 .payload_adapter
@@ -543,7 +598,7 @@ where
 impl<Req, U, Adapter> Ingress<Req, ManyOut<U>, Adapter>
 where
     Req: PipelineIO + Sync,
-    U: Data + std::fmt::Debug,
+    U: Data + MaybeError + std::fmt::Debug,
     Adapter: IngressResponseEncoder<U> + Send + Sync + 'static,
 {
     /// Shared body of `PushWorkHandler::handle_payload` for every
@@ -675,7 +730,7 @@ where
 impl<T, U, Adapter> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>, Adapter>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
-    U: Data + std::fmt::Debug,
+    U: Data + MaybeError + std::fmt::Debug,
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn add_metrics(
@@ -707,7 +762,7 @@ where
 impl<T, U, Adapter> PushWorkHandler for Ingress<ManyIn<T>, ManyOut<U>, Adapter>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
-    U: Data + std::fmt::Debug,
+    U: Data + MaybeError + std::fmt::Debug,
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn add_metrics(

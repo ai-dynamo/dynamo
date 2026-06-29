@@ -72,7 +72,19 @@ impl AsyncEngine<ManyIn<u64>, ManyOut<EchoResponse>, Error> for EchoEngine {
 }
 
 #[derive(Debug)]
-struct NonSerdeResponse;
+struct NonSerdeResponse(Option<DynamoError>);
+
+impl MaybeError for NonSerdeResponse {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        Self(Some(DynamoError::from(
+            Box::new(err) as Box<dyn std::error::Error + 'static>
+        )))
+    }
+
+    fn err(&self) -> Option<DynamoError> {
+        self.0.clone()
+    }
+}
 
 struct FailingResponseEngine;
 
@@ -85,7 +97,7 @@ impl AsyncEngine<ManyIn<u64>, ManyOut<NonSerdeResponse>, Error> for FailingRespo
             .take()
             .expect("RequestStream::take called twice on FailingResponseEngine input");
         let stream: DataStream<NonSerdeResponse> =
-            Box::pin(futures::StreamExt::map(inner, |_| NonSerdeResponse));
+            Box::pin(futures::StreamExt::map(inner, |_| NonSerdeResponse(None)));
         Ok(ResponseStream::new(stream, ctx))
     }
 }
@@ -220,7 +232,7 @@ async fn bidirectional_end_to_end_echo_with_explicit_json_codec() {
     assert!(
         error
             .to_string()
-            .contains("Stream ended before generation completed"),
+            .contains("Stream ended before first response"),
         "unexpected client error: {error}"
     );
 

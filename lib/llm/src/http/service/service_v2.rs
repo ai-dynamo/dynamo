@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::env::var;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
@@ -21,6 +22,7 @@ use super::metrics;
 use super::metrics::{register_lora_allocation_metrics, register_worker_timing_metrics};
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
+use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 use crate::kv_router::metrics::{
     RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
@@ -42,10 +44,102 @@ use dynamo_runtime::metrics::{
 use std::net::SocketAddr;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
 
-use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
+const DYN_HTTP_MODEL_FAILOVER_WAIT_MS: &str = "DYN_HTTP_MODEL_FAILOVER_WAIT_MS";
+pub(super) const MODEL_FAILOVER_WAIT_POLL_MS: u64 = 50;
+
+pub(super) fn model_failover_wait() -> Duration {
+    static WAIT: OnceLock<Duration> = OnceLock::new();
+    *WAIT.get_or_init(|| {
+        std::env::var(DYN_HTTP_MODEL_FAILOVER_WAIT_MS)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or_default()
+    })
+}
+
+fn should_wait_for_endpoint_failover(endpoint_type: EndpointType) -> bool {
+    matches!(
+        endpoint_type,
+        EndpointType::Chat | EndpointType::Completion | EndpointType::Responses
+    )
+}
+
+pub(super) async fn wait_for_failover<T, E, F, P>(
+    subject_kind: &str,
+    subject: &str,
+    mut operation: F,
+    is_transient: P,
+) -> Result<T, E>
+where
+    F: FnMut() -> Result<T, E>,
+    P: Fn(&E) -> bool,
+{
+    let wait = model_failover_wait();
+    let deadline = Instant::now() + wait;
+    let mut attempts = 0_u32;
+
+    loop {
+        match operation() {
+            Ok(value) => {
+                if attempts > 0 {
+                    tracing::info!(
+                        subject_kind,
+                        subject,
+                        attempts,
+                        wait_ms = wait.as_millis(),
+                        "Failover subject became available"
+                    );
+                }
+                return Ok(value);
+            }
+            Err(error) if is_transient(&error) => {
+                let now = Instant::now();
+                if wait.is_zero() || now >= deadline {
+                    if attempts > 0 {
+                        tracing::warn!(
+                            subject_kind,
+                            subject,
+                            attempts,
+                            wait_ms = wait.as_millis(),
+                            "Failover subject remained unavailable"
+                        );
+                    }
+                    return Err(error);
+                }
+                attempts += 1;
+                sleep(std::cmp::min(
+                    Duration::from_millis(MODEL_FAILOVER_WAIT_POLL_MS),
+                    deadline - now,
+                ))
+                .await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn endpoint_enabled_or_wait(state: &State, endpoint_type: EndpointType) -> bool {
+    if state.flags.get(&endpoint_type) {
+        return true;
+    }
+    if !should_wait_for_endpoint_failover(endpoint_type) {
+        return false;
+    }
+
+    wait_for_failover(
+        "endpoint",
+        endpoint_type.as_str(),
+        || state.flags.get(&endpoint_type).then_some(()).ok_or(()),
+        |_| true,
+    )
+    .await
+    .is_ok()
+}
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -892,13 +986,16 @@ impl HttpServiceConfigBuilder {
         let cancel_token = config.cancel_token.unwrap_or_default();
         // Use the provided discovery client, or fall back to a no-op memory-backed one
         // (for in-process modes that don't need discovery)
-        let discovery_client = config.discovery.unwrap_or_else(|| {
-            use dynamo_runtime::discovery::KVStoreDiscovery;
-            Arc::new(KVStoreDiscovery::new(
-                dynamo_runtime::storage::kv::Manager::memory(),
-                cancel_token.child_token(),
-            )) as Arc<dyn Discovery>
-        });
+        let discovery_client = match config.discovery {
+            Some(client) => client,
+            None => {
+                use dynamo_runtime::discovery::KVStoreDiscovery;
+                Arc::new(KVStoreDiscovery::new(
+                    dynamo_runtime::storage::kv::Manager::memory(),
+                    cancel_token.child_token(),
+                )?) as Arc<dyn Discovery>
+            }
+        };
         // Both surfaces are on by default; an env-truthy DISABLE var turns them
         // off. The builder flag can also force off (e.g. tests), and wins.
         let nvext_enabled =
@@ -1219,7 +1316,7 @@ impl HttpServiceConfigBuilder {
                     let state: Arc<State> = state_route.clone();
                     async move {
                         // Check if the endpoint is enabled
-                        let enabled = state.flags.get(&endpoint_type);
+                        let enabled = endpoint_enabled_or_wait(&state, endpoint_type).await;
                         if enabled {
                             Ok(next.run(req).await)
                         } else {
@@ -1254,6 +1351,44 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn failover_wait_returns_immediate_success() {
+        let result: Result<u32, ()> = wait_for_failover("model", "test", || Ok(7), |_| true).await;
+        assert_eq!(result, Ok(7));
+    }
+
+    #[tokio::test]
+    async fn failover_wait_does_not_retry_non_transient_errors() {
+        let attempts = std::cell::Cell::new(0_u32);
+        let result: Result<(), &str> = wait_for_failover(
+            "model",
+            "test",
+            || {
+                attempts.set(attempts.get() + 1);
+                Err("permanent")
+            },
+            |_| false,
+        )
+        .await;
+        assert_eq!(result, Err("permanent"));
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn test_endpoint_failover_wait_scope() {
+        assert!(should_wait_for_endpoint_failover(EndpointType::Chat));
+        assert!(should_wait_for_endpoint_failover(EndpointType::Completion));
+        assert!(should_wait_for_endpoint_failover(EndpointType::Responses));
+
+        assert!(!should_wait_for_endpoint_failover(EndpointType::Embedding));
+        assert!(!should_wait_for_endpoint_failover(EndpointType::Images));
+        assert!(!should_wait_for_endpoint_failover(EndpointType::Videos));
+        assert!(!should_wait_for_endpoint_failover(EndpointType::Audios));
+        assert!(!should_wait_for_endpoint_failover(
+            EndpointType::AnthropicMessages
+        ));
     }
 
     #[tokio::test]

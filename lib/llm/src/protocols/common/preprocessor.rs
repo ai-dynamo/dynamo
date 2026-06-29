@@ -116,6 +116,84 @@ pub struct TraceLink {
     pub span_id: String,
 }
 
+/// One contiguous memory region inside a GMS block descriptor.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct GmsMemoryRegion {
+    /// NIXL-registered remote pointer (interpreted by the source
+    /// daemon's NIXL agent).
+    pub remote_ptr: u64,
+    /// Region size in bytes.
+    pub size: u64,
+    /// Source tier: "hbm", "host", or "storage".
+    pub tier: String,
+    /// Source model layer for host-tier multi-range descriptors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<u32>,
+    /// Byte offset inside the source layer allocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+}
+
+/// One block's location inside a source GMS daemon's NIXL-registered
+/// memory. Returned by the daemon's `get_bootstrap_info` RPC; the
+/// receiver engine's connector uses it to issue `nixl_agent.read()`
+/// directly against the source daemon.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct GmsBlockDescriptor {
+    /// Backward-compatible first/only region pointer. New consumers
+    /// should prefer `ranges` when it is non-empty.
+    pub remote_ptr: u64,
+    /// Total descriptor size in bytes. For multi-range host blocks,
+    /// this is the sum of all ranges.
+    pub size: u64,
+    /// Source tier: "hbm", "host", or "storage". Engine connectors
+    /// may choose to fall back to `fetch_remote` if the source tier
+    /// can't be NIXL-read directly (e.g., disk without GDS plugin).
+    pub tier: String,
+    /// Vectored memory regions aligned in source copy order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ranges: Vec<GmsMemoryRegion>,
+    /// Source block generation when the engine/daemon can provide it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    /// True when the source daemon considers the bytes stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<bool>,
+}
+
+/// In-band metadata for GMS-managed KV transfer. Populated by the
+/// router (or routing-time orchestration) when a request's prefix
+/// overlap is served from a remote GMS daemon. Carries enough info
+/// for the receiving engine's connector to issue an engine-direct
+/// `nixl_agent.read()` without the router opening any GMS daemon
+/// sockets. Worker-local daemon sockets remain private to workers.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct GmsPlacementInfo {
+    /// Source daemon's NIXL agent name (peer identifier).
+    pub source_nixl_agent_name: String,
+
+    /// Hex-encoded NIXL agent metadata blob for `add_remote_agent`.
+    /// Sized ~few-KB; first-time use only — engine caches per peer.
+    pub source_nixl_agent_metadata_hex: String,
+
+    /// Source daemon NIXL listen address when the source worker exposes it.
+    /// The hot engine-direct path primarily uses the metadata blob above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_nixl_ip: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_nixl_listen_port: Option<u16>,
+
+    /// Per-hash descriptors aligned with `hashes`. `None` entries
+    /// mean the source daemon doesn't have that hash; the engine
+    /// should skip it and recompute that block locally.
+    pub descriptors: Vec<Option<GmsBlockDescriptor>>,
+
+    /// Hex-encoded content hashes the engine is asking about (length
+    /// matches `descriptors`).
+    pub hashes: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrefillResult {
     /// Disaggregated execution parameters. Engine-owned; the framework
@@ -261,6 +339,16 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_info: Option<BootstrapInfo>,
+
+    /// GMS placement info for disaggregated serving when the source
+    /// daemon holds KV blocks that can be NIXL-read directly. Carried
+    /// in-band like [`BootstrapInfo`]; the receiving engine's connector
+    /// consults it and either issues an engine-direct read (default)
+    /// or asks its local daemon to `fetch_remote` (backup). The router
+    /// itself is GMS-agnostic — it just forwards this field.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gms_placement: Option<GmsPlacementInfo>,
 
     /// Additional arguments for extensibility
     #[builder(default)]

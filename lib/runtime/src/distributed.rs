@@ -176,7 +176,7 @@ impl DistributedRuntime {
                 };
                 use crate::discovery::KVStoreDiscovery;
                 (
-                    Arc::new(KVStoreDiscovery::new(store, runtime.primary_token()))
+                    Arc::new(KVStoreDiscovery::new(store, runtime.primary_token())?)
                         as Arc<dyn Discovery>,
                     None,
                 )

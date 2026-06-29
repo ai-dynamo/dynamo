@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 
@@ -22,6 +24,75 @@ pub use kube::{KubeDiscoveryClient, hash_pod_name};
 pub mod utils;
 use crate::component::{DeviceType, TransportType};
 pub use utils::watch_and_extract_field;
+
+pub(crate) const DISCOVERY_INSTANCE_ID_MASK: u64 = 0x001F_FFFF_FFFF_FFFF;
+
+pub(crate) fn hash_logical_instance_key(key: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish() & DISCOVERY_INSTANCE_ID_MASK
+}
+
+fn parse_logical_instance_id(raw: &str) -> Result<u64> {
+    let value = raw.trim();
+    if value.is_empty() {
+        anyhow::bail!("DYN_DISCOVERY_LOGICAL_INSTANCE_ID must not be empty");
+    }
+    let (digits, radix) = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        (hex, 16)
+    } else {
+        (value, 10)
+    };
+    u64::from_str_radix(digits, radix)
+        .with_context(|| format!("invalid DYN_DISCOVERY_LOGICAL_INSTANCE_ID `{value}`"))
+}
+
+fn expand_env_placeholders(value: &str) -> Result<String> {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("$(") {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start + 2..];
+        let end = tail.find(')').with_context(|| {
+            format!("unterminated env placeholder in DYN_DISCOVERY_LOGICAL_INSTANCE_KEY: `{value}`")
+        })?;
+        let name = &tail[..end];
+        if name.is_empty() || !name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+            anyhow::bail!(
+                "invalid env placeholder `$({name})` in DYN_DISCOVERY_LOGICAL_INSTANCE_KEY"
+            );
+        }
+        let replacement = std::env::var(name).with_context(|| {
+            format!("DYN_DISCOVERY_LOGICAL_INSTANCE_KEY references unset env var `{name}`")
+        })?;
+        out.push_str(&replacement);
+        rest = &tail[end + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+pub(crate) fn resolve_logical_instance_id(default_id: u64) -> Result<u64> {
+    use crate::config::environment_names::discovery::{
+        DYN_DISCOVERY_LOGICAL_INSTANCE_ID, DYN_DISCOVERY_LOGICAL_INSTANCE_KEY,
+    };
+
+    if let Ok(raw_id) = std::env::var(DYN_DISCOVERY_LOGICAL_INSTANCE_ID) {
+        return parse_logical_instance_id(&raw_id);
+    }
+    if let Ok(raw_key) = std::env::var(DYN_DISCOVERY_LOGICAL_INSTANCE_KEY) {
+        let expanded = expand_env_placeholders(&raw_key)?;
+        if expanded.trim().is_empty() {
+            anyhow::bail!("DYN_DISCOVERY_LOGICAL_INSTANCE_KEY must not expand to an empty string");
+        }
+        return Ok(hash_logical_instance_key(&expanded));
+    }
+
+    Ok(default_id)
+}
 
 /// Transport kind for event plane - used for configuration and env var selection.
 ///

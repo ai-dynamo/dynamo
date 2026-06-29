@@ -104,6 +104,17 @@ where
             }
         } else if is_complete_final {
             None
+        } else if first_response {
+            // The worker-side stream closed before emitting any frame. Even if the
+            // request context has already been stopped by failover, treating this as
+            // a clean EOF leaks an empty HTTP 200 to clients and prevents request
+            // migration from replaying the request.
+            let err = DynamoError::builder()
+                .error_type(ErrorType::Disconnected)
+                .message("Stream ended before first response")
+                .build();
+            tracing::debug!("{err}");
+            Some(U::from_err(err))
         } else if engine_ctx_for_stream.is_stopped() {
             tracing::debug!("Request cancelled and then trying to read a response");
             None

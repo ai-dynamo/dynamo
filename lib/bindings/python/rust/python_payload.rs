@@ -83,6 +83,21 @@ impl std::fmt::Debug for PythonResponseItem {
     }
 }
 
+impl MaybeError for PythonResponseItem {
+    fn from_err(err: impl std::error::Error + 'static) -> Self {
+        Self(Err(pyo3::exceptions::PyRuntimeError::new_err(
+            err.to_string(),
+        )))
+    }
+
+    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
+        match &self.0 {
+            Ok(_) => None,
+            Err(err) => Some(dynamo_runtime::error::DynamoError::msg(err.to_string())),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct PythonIngressPayloadAdapter;
 
