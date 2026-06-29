@@ -1569,8 +1569,81 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 
         assert result.prompt_token_ids == [1, 2, 3]
         assert captured["kwargs"]["thinking"] is True
+        assert captured["kwargs"]["enable_thinking"] is True
         assert result.request["chat_template_kwargs"]["thinking"] is True
+        assert result.request["chat_template_kwargs"]["enable_thinking"] is True
         assert "chat_template_kwargs" not in request
+
+    @pytest.mark.parametrize(
+        "request_update",
+        [
+            {"thinking": {"type": "disabled"}},
+            {"reasoning_effort": "none"},
+        ],
+    )
+    def test_reasoning_disabled_openai_inputs_set_qwen3_template_flags(
+        self, request_update
+    ):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+        request.update(request_update)
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="qwen3",
+        )
+
+        assert captured["kwargs"]["thinking"] is False
+        assert captured["kwargs"]["enable_thinking"] is False
+        assert result.request["chat_template_kwargs"]["thinking"] is False
+        assert result.request["chat_template_kwargs"]["enable_thinking"] is False
+        assert result.force_reasoning is False
+
+    def test_reasoning_effort_none_keeps_explicit_template_flags(self):
+        captured = {}
+
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                captured["kwargs"] = kwargs
+                return [1, 2, 3]
+
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_kwargs": {
+                "thinking": True,
+                "enable_thinking": True,
+            },
+            "reasoning_effort": "none",
+        }
+
+        result = preprocess_chat_request(
+            request,
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name="qwen3",
+        )
+
+        assert captured["kwargs"]["thinking"] is True
+        assert captured["kwargs"]["enable_thinking"] is True
+        assert result.request["chat_template_kwargs"]["thinking"] is True
+        assert result.request["chat_template_kwargs"]["enable_thinking"] is True
+        assert result.force_reasoning is True
 
     def test_deepseek_v4_named_tool_choice_filters_encoder_tools(self, monkeypatch):
         captured = {}

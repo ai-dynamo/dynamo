@@ -4,9 +4,10 @@
 //! Public handle for driving an offline replay with planner-in-the-loop.
 //!
 //! Supports both aggregated and disaggregated topologies via [`RuntimeKind`].
-//! The Python planner adapter calls [`PlannerReplayHandle::advance_to`] to
-//! step the simulation, collects metrics, and calls [`PlannerReplayHandle::apply_scaling`]
-//! to resize worker pools.
+//! [`PlannerReplayHandle::run`] drives the simulation to completion; the planner
+//! is invoked once per `PlannerTick` event through the [`PlannerHook`] callback,
+//! which observes per-tick metrics and returns the scale decision plus the next
+//! tick time. The simulation owns the drive loop — there is no external stepping.
 
 use std::path::Path;
 use std::time::Instant;
@@ -15,42 +16,15 @@ use anyhow::Result;
 use dynamo_kv_router::config::KvRouterConfig;
 
 use super::offline::agg::AggRuntime;
-use super::offline::components::{ReplayMode, TrafficStats};
+use super::offline::components::ReplayMode;
 use super::offline::disagg::DisaggRuntime;
+use super::offline::planner_hook::PlannerHook;
 use super::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds,
     TraceSimulationReport,
 };
-use crate::common::protocols::{ForwardPassSnapshot, MockEngineArgs};
+use crate::common::protocols::MockEngineArgs;
 use crate::loadgen::Trace;
-
-/// Snapshot of metrics collected between planner ticks.
-///
-/// For aggregated mode, prefill fields are 0 and all data is in decode fields
-/// (matching how the planner treats agg as a single decode-stage engine).
-///
-/// Traffic metrics are NOT included here — they accumulate across ticks and
-/// must be drained explicitly via [`PlannerReplayHandle::drain_traffic`] on
-/// throughput-scaling ticks only. Draining on every tick would discard data
-/// between the more frequent load-scaling ticks.
-pub struct PlannerTickData {
-    /// Current simulated time in milliseconds.
-    pub now_ms: f64,
-    /// Whether the replay has finished (no more work).
-    pub is_done: bool,
-    /// Prefill FPM snapshots since last tick: (worker_id, snapshot).
-    pub prefill_fpm_snapshots: Vec<(usize, ForwardPassSnapshot)>,
-    /// Decode (or agg) FPM snapshots since last tick: (worker_id, snapshot).
-    pub decode_fpm_snapshots: Vec<(usize, ForwardPassSnapshot)>,
-    /// Active prefill workers (0 for agg mode).
-    pub active_prefill_count: usize,
-    /// Active decode workers (or total active for agg mode).
-    pub active_decode_count: usize,
-    /// Total prefill workers including pending removal (0 for agg mode).
-    pub total_prefill_count: usize,
-    /// Total decode workers including pending removal (or total for agg mode).
-    pub total_decode_count: usize,
-}
 
 #[allow(clippy::large_enum_variant)]
 enum RuntimeKind {
@@ -220,77 +194,19 @@ impl PlannerReplayHandle {
         )
     }
 
-    /// Advance the simulation up to `until_ms`, collect metrics, return tick data.
-    ///
-    /// Traffic metrics are NOT drained here — call [`drain_traffic`] explicitly
-    /// on throughput-scaling ticks so the accumulator covers the full interval.
-    pub fn advance_to(&mut self, until_ms: f64) -> Result<PlannerTickData> {
-        match &mut self.runtime {
-            RuntimeKind::Agg(rt) => {
-                let is_done = rt.advance_to(until_ms)?;
-                let fpm = rt.drain_fpm();
-                Ok(PlannerTickData {
-                    now_ms: rt.now_ms(),
-                    is_done,
-                    prefill_fpm_snapshots: Vec::new(),
-                    decode_fpm_snapshots: fpm,
-                    active_prefill_count: 0,
-                    active_decode_count: rt.active_worker_count(),
-                    total_prefill_count: 0,
-                    total_decode_count: rt.total_worker_count(),
-                })
-            }
-            RuntimeKind::Disagg(rt) => {
-                let is_done = rt.advance_to(until_ms)?;
-                let prefill_fpm = rt.drain_prefill_fpm();
-                let decode_fpm = rt.drain_decode_fpm();
-                Ok(PlannerTickData {
-                    now_ms: rt.now_ms(),
-                    is_done,
-                    prefill_fpm_snapshots: prefill_fpm,
-                    decode_fpm_snapshots: decode_fpm,
-                    active_prefill_count: rt.active_prefill_count(),
-                    active_decode_count: rt.active_decode_count(),
-                    total_prefill_count: rt.total_prefill_count(),
-                    total_decode_count: rt.total_decode_count(),
-                })
-            }
-        }
-    }
-
-    /// Drain accumulated traffic metrics since the last drain.
-    ///
-    /// Call this only on throughput-scaling ticks so the window covers the
-    /// full `throughput_adjustment_interval`, not just the gap between load
-    /// ticks. The returned [`TrafficStats::avg_kv_hit_rate`] is the
-    /// arithmetic mean of per-request ``overlap / isl`` ratios across
-    /// admissions in the window — matching the real router's per-request
-    /// Prometheus histogram, where each request contributes one sample
-    /// regardless of ISL size.
-    pub fn drain_traffic(&mut self) -> TrafficStats {
-        match &mut self.runtime {
-            RuntimeKind::Agg(rt) => rt.drain_traffic(),
-            RuntimeKind::Disagg(rt) => rt.drain_traffic(),
-        }
-    }
-
-    /// Apply a scaling decision with separate prefill and decode targets.
-    /// For agg mode, `target_prefill` is ignored.
-    pub fn apply_scaling(&mut self, target_prefill: usize, target_decode: usize) -> Result<()> {
-        match &mut self.runtime {
-            RuntimeKind::Agg(rt) => rt.apply_scaling(target_decode),
-            RuntimeKind::Disagg(rt) => rt.apply_scaling(target_prefill, target_decode),
-        }
-    }
-
-    /// Finalize the replay and return the report.
-    pub fn finalize(self) -> TraceSimulationReport {
-        let wall_time_ms = self.started_at.elapsed().as_secs_f64() * 1000.0;
-        let report = match self.runtime {
-            RuntimeKind::Agg(rt) => rt.finalize_report(),
-            RuntimeKind::Disagg(rt) => rt.finalize_report(),
+    /// Run the whole replay to completion with the planner driving the tick cadence
+    /// via `hook`. This is the unified entrypoint that replaces the external
+    /// `advance_to`/`apply_scaling` stepping loop: the simulation owns the drive loop
+    /// and calls back into `hook` once per `PlannerTick` event. Returns the final
+    /// report (wall-time stamped, SLA thresholds already set at construction).
+    pub fn run(self, hook: Box<dyn PlannerHook>) -> Result<TraceSimulationReport> {
+        let started_at = self.started_at;
+        let collector = match self.runtime {
+            RuntimeKind::Agg(rt) => rt.with_planner_hook(hook).run()?.0,
+            RuntimeKind::Disagg(rt) => rt.with_planner_hook(hook).run()?.0,
         };
-        report.with_wall_time_ms(wall_time_ms)
+        let wall_time_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+        Ok(collector.finish().with_wall_time_ms(wall_time_ms))
     }
 }
 
@@ -299,6 +215,7 @@ mod tests {
     use super::PlannerReplayHandle;
     use crate::common::protocols::MockEngineArgs;
     use crate::loadgen::{ArrivalSpec, DelaySpec, LengthSpec, SyntheticTraceSpec, Trace};
+    use crate::replay::NoopPlannerHook;
     use crate::replay::{ReplayRouterMode, SlaThresholds};
 
     const NUM_SESSIONS: usize = 8;
@@ -338,23 +255,13 @@ mod tests {
         .unwrap()
     }
 
-    /// One large advance drains every event (arrival timestamps and concurrency
-    /// admissions alike), so the planner loop is mode-agnostic.
-    fn drive_to_completion(handle: &mut PlannerReplayHandle) {
-        let tick = handle.advance_to(1.0e15).unwrap();
-        assert!(
-            tick.is_done,
-            "replay should finish within the advance window"
-        );
-    }
-
     #[test]
     fn from_trace_closed_loop_completes_all_requests() {
         // Burst arrivals + an in-flight cap -> closed-loop: trace timestamps are
         // ignored and at most `max_in_flight` run at once, but every request still
         // completes. This is the planner + concurrency path that was previously
         // unreachable (the handle hard-coded ReplayMode::Trace).
-        let mut handle = PlannerReplayHandle::from_trace(
+        let handle = PlannerReplayHandle::from_trace(
             small_args(),
             None,
             None,
@@ -365,17 +272,14 @@ mod tests {
             SlaThresholds::default(),
         )
         .unwrap();
-        drive_to_completion(&mut handle);
-        assert_eq!(
-            handle.finalize().request_counts.completed_requests,
-            NUM_SESSIONS
-        );
+        let report = handle.run(Box::new(NoopPlannerHook)).unwrap();
+        assert_eq!(report.request_counts.completed_requests, NUM_SESSIONS);
     }
 
     #[test]
     fn from_trace_arrival_completes_all_requests() {
         // No cap -> arrival-timestamp (open-loop) replay; every request completes.
-        let mut handle = PlannerReplayHandle::from_trace(
+        let handle = PlannerReplayHandle::from_trace(
             small_args(),
             None,
             None,
@@ -386,10 +290,7 @@ mod tests {
             SlaThresholds::default(),
         )
         .unwrap();
-        drive_to_completion(&mut handle);
-        assert_eq!(
-            handle.finalize().request_counts.completed_requests,
-            NUM_SESSIONS
-        );
+        let report = handle.run(Box::new(NoopPlannerHook)).unwrap();
+        assert_eq!(report.request_counts.completed_requests, NUM_SESSIONS);
     }
 }

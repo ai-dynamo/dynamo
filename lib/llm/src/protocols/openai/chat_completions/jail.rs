@@ -847,6 +847,7 @@ impl JailedStream {
                     system_fingerprint: None,
                     },
                     nvext: None,
+                    llm_metrics: None,
                 };
 
                 let final_metadata = (last_annotated_id, last_annotated_event, last_annotated_comment);
@@ -1765,6 +1766,7 @@ mod tests {
                     system_fingerprint: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: None,
             event: None,
@@ -1865,6 +1867,7 @@ mod tests {
                     system_fingerprint: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: None,
             event: None,

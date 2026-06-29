@@ -1068,11 +1068,34 @@ pub fn aic_config_from_mock_engine_args(args: &MockEngineArgs) -> Result<Option<
                 .map(|value| to_u32(value, "aic_moe_ep_size"))
                 .transpose()?,
         },
+        // Native analytics path: quant dtypes are parsed by `parse_data_type`
+        // into `aiconfigurator_core::DataType` (accepted: bfloat16, float16,
+        // fp8, fp8_static, fp8_block, nvfp4, int8, int4, w4afp8, w4a16_mxfp4,
+        // w4a8_mxfp4_mxfp8) -- a separate vocabulary from the Python callback
+        // path's per-field AIC quant-mode names. This path also does not model
+        // communication dtype (`QuantizationConfig` has no comm field), so
+        // `aic_comm_dtype` is intentionally not applied here.
         quantization: QuantizationConfig {
-            weight_dtype: None,
-            moe_dtype: None,
-            activation_dtype: None,
-            kv_cache_dtype: None,
+            weight_dtype: args
+                .aic_gemm_dtype
+                .as_deref()
+                .map(parse_data_type)
+                .transpose()?,
+            moe_dtype: args
+                .aic_moe_dtype
+                .as_deref()
+                .map(parse_data_type)
+                .transpose()?,
+            activation_dtype: args
+                .aic_fmha_dtype
+                .as_deref()
+                .map(parse_data_type)
+                .transpose()?,
+            kv_cache_dtype: args
+                .aic_kv_cache_dtype
+                .as_deref()
+                .map(parse_data_type)
+                .transpose()?,
         },
         speculative: None,
         extra,
@@ -1589,6 +1612,32 @@ mod tests {
             config.extra.get(AIC_NEXTN_ACCEPT_RATES_KEY),
             Some(&RAW_AIC_NEXTN_ACCEPT_RATES.to_string())
         );
+    }
+
+    #[test]
+    fn mock_engine_args_json_forwards_aic_quantization() {
+        let args = MockEngineArgs::from_json_str(
+            &serde_json::json!({
+                "aic_backend": "vllm",
+                "aic_model_path": "model",
+                "aic_gemm_dtype": "fp8_block",
+                "aic_moe_dtype": "w4a16_mxfp4",
+                "aic_fmha_dtype": "bfloat16",
+                "aic_kv_cache_dtype": "fp8",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let config = aic_config_from_mock_engine_args(&args).unwrap().unwrap();
+
+        assert_eq!(config.quantization.weight_dtype, Some(DataType::Fp8Block));
+        assert_eq!(config.quantization.moe_dtype, Some(DataType::W4a16Mxfp4));
+        assert_eq!(
+            config.quantization.activation_dtype,
+            Some(DataType::Bfloat16)
+        );
+        assert_eq!(config.quantization.kv_cache_dtype, Some(DataType::Fp8));
     }
 
     #[test]

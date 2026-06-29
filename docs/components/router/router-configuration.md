@@ -60,7 +60,7 @@ Queue limits are configured per discovered worker endpoint with
 configured value multiplied by the current number of discovered endpoints.
 Limits are checked against current usage before adding the incoming request,
 so the request that crosses a limit is accepted and the next queued request is
-rejected with HTTP 503 and the effective total. Worker removal does not evict
+rejected with HTTP 529 and the effective total. Worker removal does not evict
 queued requests; new arrivals reject until usage drains or capacity returns.
 DRR charges the uncached-token snapshot captured at enqueue, while raw, cached,
 and uncached snapshots remain unchanged for limits, WSPT, counters, and later
@@ -94,7 +94,7 @@ no separate first-stage admission queue or global cross-class cap.
 
 This is intentionally not behavior preserving. Class limits are worker-scaled
 and class-local rather than global; rejection returns the structured
-policy-class HTTP 503 response rather than the previous overload 429 path; and
+policy-class HTTP 529 response rather than the previous overload 429 path; and
 it does not exclude the entire router instance. The previous flat
 `default_policy_class` and `uncached_isl_policy_class_tiers` schema is not
 accepted, and ordinary physical classes are no longer direct header
@@ -102,6 +102,40 @@ overrides. The sample is a Baseten-oriented continuing-session starting point,
 not a compatibility profile.
 
 For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` to the approximate throughput ratio of one non-CPU worker relative to one CPU worker. The default is `8`.
+
+## Session Affinity
+
+Session affinity is disabled by default. On the frontend, set
+`--router-session-affinity-ttl-secs` or `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to
+a value from `1` through `31536000` to enable it, then send
+`X-Dynamo-Session-ID` to keep related requests on one worker. Supplying the header
+without the TTL option provides session identity but does not enable router affinity.
+
+The first successfully dispatched request binds the session ID to its selected
+worker and, when available, data-parallel rank. Later requests exact-dispatch to
+that target without transport fallback. Concurrent requests can share a binding.
+Active requests prevent expiry. When a request lease ends after EOF, early drop,
+error, or cancellation, the idle timer restarts. A missing bound worker or a
+non-cancellation selection, setup, dispatch, or target-validation failure invalidates
+the binding.
+
+The configured value is the idle timeout. It is independent of
+`--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
+option to keep affinity disabled.
+
+If the bound worker disappears, Dynamo invalidates the binding so a subsequent
+selection can bind an available worker. Router restart clears all bindings. Bindings
+are not shared between frontend replicas.
+
+Direct mode still requires the phase-appropriate explicit worker ID on every
+affinity request. The stored binding validates that target but does not supply a
+missing ID. In disaggregated serving, prefill and decode use separate phase-local
+bindings. If no prefill router is active, only the decode or aggregated binding is
+created.
+
+Session affinity does not create a backend session or send lifecycle RPCs. There is
+no explicit unbind; idle expiry removes only router-local state. The same session
+ID is available to tracing and other explicitly configured consumers.
 
 ### AIC Prefill Load Model
 

@@ -50,7 +50,7 @@ export ANTHROPIC_API_KEY=
 claude
 ```
 
-Dynamo uses `x-claude-code-session-id` as the Claude Code session ID. For subagents, Dynamo uses `x-claude-code-agent-id` as the child session ID and the session ID as its parent.
+Dynamo uses `x-claude-code-session-id` as the Claude Code session ID. For subagents, Dynamo uses `x-claude-code-agent-id` as the child session ID. Nested subagents use `x-claude-code-parent-agent-id` as the parent; top-level subagents fall back to the root session ID.
 
 ## OpenCode
 
@@ -86,6 +86,59 @@ opencode -m dynamo/zai-org/GLM-4.7-Flash
 ```
 
 Dynamo maps OpenCode's `x-session-id` header to `session_id` and `x-parent-session-id` to `parent_session_id`.
+
+## OpenClaw
+
+OpenClaw can use Dynamo through its OpenAI-compatible Responses endpoint. Install the
+Dynamo provider plugin:
+
+```bash
+git clone https://github.com/ai-dynamo/agent-plugins.git ~/agent-plugins
+openclaw plugins install --link ~/agent-plugins/openclaw-plugin
+openclaw plugins enable dynamo
+```
+
+Add a Dynamo-backed model to `~/.openclaw/openclaw.json`:
+
+```jsonc
+{
+  "models": {
+    "providers": {
+      "dynamo": {
+        "baseUrl": "http://localhost:8000/v1",
+        "apiKey": "dynamo-local",
+        "api": "openai-responses",
+        "models": [
+          {
+            "id": "zai-org/GLM-4.7-Flash",
+            "name": "Dynamo GLM 4.7 Flash",
+            "reasoning": true,
+            "contextWindow": 128000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "dynamo/zai-org/GLM-4.7-Flash"
+      }
+    }
+  }
+}
+```
+
+Run OpenClaw:
+
+```bash
+openclaw chat
+```
+
+The plugin copies OpenClaw's current `sessionId` into `x-dynamo-session-id` on each
+request. Native subagents receive their own `session_id` and the immediate parent is
+recorded as `parent_session_id`.
 
 ## Hermes Agent
 

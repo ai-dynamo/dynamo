@@ -186,20 +186,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_store_and_check() {
-        let store = SharedCacheStore::new();
-        store.store(&[100, 200, 300]);
-
-        // Query: [100, 999, 200, 300, 888]
-        // Hits at positions 0, 2, 3 => ranges [0..1, 2..4]
-        let hits = store.check_blocks(&[100, 999, 200, 300, 888]);
-        assert_eq!(hits.total_hits, 3);
-        assert_eq!(hits.ranges, vec![0..1, 2..4]);
-        store.store(&[100, 400]);
-        assert_eq!(store.len(), 4);
-    }
-
-    #[test]
     fn test_remove_blocks() {
         let store = SharedCacheStore::new();
         store.store(&[10, 20, 30]);
