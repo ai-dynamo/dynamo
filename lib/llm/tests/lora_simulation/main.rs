@@ -788,9 +788,6 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
     let mut metrics = ChurnMetrics::new("HRW");
     let mut prev_snapshot: AllocationSnapshot = HashMap::new();
 
-    // Track which LoRAs are currently registered on the state tracker
-    let mut registered_loras: HashSet<String> = HashSet::new();
-
     for tick in 0..config.total_ticks {
         // Fully clear the previous tick's load signal. `decrement_load` only touches the in-flight
         // counter, not the windowed rate counter the controller actually reads via
@@ -806,30 +803,14 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             load_estimator.remove_lora(&name);
         }
 
-        // Set loads for this tick
+        // The controller unions adapter names from the load estimator with discovery state, so
+        // active adapters do not need synthetic MDC registrations. Registering them on an
+        // arbitrary worker would consume that worker's simulated slots for HRW but not MCF.
+        // Set only this tick's demand to keep the compared allocators capacity-equivalent.
         for schedule in schedules {
             let load = schedule.load_at_tick(tick);
             for _ in 0..load {
                 load_estimator.increment_load(&schedule.lora_name);
-            }
-
-            // Register the LoRA on state tracker when it first becomes active
-            if load > 0 && !registered_loras.contains(&schedule.lora_name) {
-                state_tracker.handle_mdc_addition(
-                    workers[0],
-                    &LoraInfo {
-                        name: schedule.lora_name.clone(),
-                        max_gpu_lora_count: Some(config.slots_per_backend as u32),
-                    },
-                );
-                registered_loras.insert(schedule.lora_name.clone());
-            }
-
-            // Unregister the LoRA from state tracker when its active window ends
-            if registered_loras.contains(&schedule.lora_name) && tick >= schedule.active_window.1 {
-                state_tracker.handle_mdc_removal(workers[0], &schedule.lora_name);
-                load_estimator.remove_lora(&schedule.lora_name);
-                registered_loras.remove(&schedule.lora_name);
             }
         }
 
@@ -892,17 +873,15 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
     for tick in 0..config.total_ticks {
         // Compute loads for this tick
         let mut active_loads: Vec<(String, usize)> = Vec::new();
-        let mut inactive_loras: Vec<String> = Vec::new();
         let mut total_load: usize = 0;
 
+        // Match the controller paths: adapters with zero current load have no load-estimator
+        // entry, so the random baseline excludes them rather than adding unmatched cold pins.
         for schedule in schedules {
             let load = schedule.load_at_tick(tick);
             if load > 0 {
                 active_loads.push((schedule.lora_name.clone(), load));
                 total_load += load;
-            } else if tick >= schedule.active_window.0 && tick < schedule.active_window.1 {
-                // LoRA exists but has no load (ramp-down completed within window)
-                inactive_loras.push(schedule.lora_name.clone());
             }
         }
 
@@ -938,18 +917,6 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
                     }
                 }
 
-                curr_snapshot.insert(lora_name.clone(), replica_set);
-            }
-        }
-
-        // Inactive LoRAs: single random worker
-        for lora_name in &inactive_loras {
-            let replica_set =
-                random_allocator.compute_replica_set(lora_name, &workers, 1, &worker_slot_usage);
-            if !replica_set.is_empty() {
-                if let Some((used, _)) = worker_slot_usage.get_mut(&replica_set[0]) {
-                    *used += 1;
-                }
                 curr_snapshot.insert(lora_name.clone(), replica_set);
             }
         }
@@ -1016,8 +983,6 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
 
     let mut metrics = ChurnMetrics::new("MCF");
     let mut prev_snapshot: AllocationSnapshot = HashMap::new();
-    let mut registered_loras: HashSet<String> = HashSet::new();
-
     for tick in 0..config.total_ticks {
         // Fully clear the previous tick's load signal (see run_hrw_simulation: `decrement_load`
         // leaves the windowed rate counter, which would otherwise accumulate across ticks).
@@ -1030,27 +995,12 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             load_estimator.remove_lora(&name);
         }
 
+        // See run_hrw_simulation: use the load estimator as the active-adapter source instead of
+        // synthetic loaded locations, which would give HRW and MCF different capacity inputs.
         for schedule in schedules {
             let load = schedule.load_at_tick(tick);
             for _ in 0..load {
                 load_estimator.increment_load(&schedule.lora_name);
-            }
-
-            if load > 0 && !registered_loras.contains(&schedule.lora_name) {
-                state_tracker.handle_mdc_addition(
-                    workers[0],
-                    &LoraInfo {
-                        name: schedule.lora_name.clone(),
-                        max_gpu_lora_count: Some(config.slots_per_backend as u32),
-                    },
-                );
-                registered_loras.insert(schedule.lora_name.clone());
-            }
-
-            if registered_loras.contains(&schedule.lora_name) && tick >= schedule.active_window.1 {
-                state_tracker.handle_mdc_removal(workers[0], &schedule.lora_name);
-                load_estimator.remove_lora(&schedule.lora_name);
-                registered_loras.remove(&schedule.lora_name);
             }
         }
 
