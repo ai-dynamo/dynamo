@@ -41,6 +41,7 @@ pub(super) fn split_retained_block_hashes(
     (None, Some(block_hashes))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn query_tiered_matches(
     indexer: &Indexer,
     shared_cache: Option<&dyn SharedKvCache>,
@@ -49,6 +50,7 @@ pub(super) async fn query_tiered_matches(
     block_hashes: Vec<LocalBlockHash>,
     cache_namespace: Option<&str>,
     retain_block_hashes: bool,
+    gms_content_hashes_hex: Option<&[String]>,
 ) -> Result<TieredLookupResult, KvRouterError> {
     if retain_block_hashes {
         let (tiered_matches, shared_cache_hits, indexer_duration, shared_cache_duration) =
@@ -59,6 +61,7 @@ pub(super) async fn query_tiered_matches(
                 block_size,
                 &block_hashes,
                 cache_namespace,
+                gms_content_hashes_hex,
             )
             .await?;
 
@@ -78,6 +81,7 @@ pub(super) async fn query_tiered_matches(
         block_size,
         block_hashes,
         cache_namespace,
+        gms_content_hashes_hex,
     )
     .await?;
 
@@ -97,6 +101,7 @@ async fn query_retained(
     block_size: u32,
     block_hashes: &[LocalBlockHash],
     cache_namespace: Option<&str>,
+    gms_content_hashes_hex: Option<&[String]>,
 ) -> Result<
     (
         TieredMatchDetails,
@@ -106,18 +111,25 @@ async fn query_retained(
     ),
     KvRouterError,
 > {
+    let indexer_fut = async move {
+        if let Some(gms_content_hashes_hex) = gms_content_hashes_hex {
+            indexer
+                .find_matches_by_tier_with_gms_placements(
+                    block_hashes.to_vec(),
+                    Some(gms_content_hashes_hex),
+                )
+                .await
+        } else {
+            indexer.find_matches_by_tier_ref(block_hashes).await
+        }
+    }
+    .instrument(tracing::info_span!("kv_router.find_matches"));
+
     let Some(shared_cache) = shared_cache else {
         let t = Instant::now();
-        let tiered = indexer
-            .find_matches_by_tier_ref(block_hashes)
-            .instrument(tracing::info_span!("kv_router.find_matches"))
-            .await?;
+        let tiered = indexer_fut.await?;
         return Ok((tiered, None, t.elapsed(), None));
     };
-
-    let indexer_fut = indexer
-        .find_matches_by_tier_ref(block_hashes)
-        .instrument(tracing::info_span!("kv_router.find_matches"));
     join_indexer_and_shared_cache(
         indexer_fut,
         shared_cache,
@@ -135,6 +147,7 @@ async fn query_owned(
     block_size: u32,
     block_hashes: Vec<LocalBlockHash>,
     cache_namespace: Option<&str>,
+    gms_content_hashes_hex: Option<&[String]>,
 ) -> Result<
     (
         TieredMatchDetails,
@@ -144,18 +157,25 @@ async fn query_owned(
     ),
     KvRouterError,
 > {
+    let indexer_fut = async move {
+        if let Some(gms_content_hashes_hex) = gms_content_hashes_hex {
+            indexer
+                .find_matches_by_tier_with_gms_placements(
+                    block_hashes,
+                    Some(gms_content_hashes_hex),
+                )
+                .await
+        } else {
+            indexer.find_matches_by_tier(block_hashes).await
+        }
+    }
+    .instrument(tracing::info_span!("kv_router.find_matches"));
+
     let Some(shared_cache) = shared_cache else {
         let t = Instant::now();
-        let tiered = indexer
-            .find_matches_by_tier(block_hashes)
-            .instrument(tracing::info_span!("kv_router.find_matches"))
-            .await?;
+        let tiered = indexer_fut.await?;
         return Ok((tiered, None, t.elapsed(), None));
     };
-
-    let indexer_fut = indexer
-        .find_matches_by_tier(block_hashes)
-        .instrument(tracing::info_span!("kv_router.find_matches"));
     join_indexer_and_shared_cache(
         indexer_fut,
         shared_cache,

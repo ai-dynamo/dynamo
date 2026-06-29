@@ -21,7 +21,7 @@ use crate::indexer::{
     KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
     ThreadPoolIndexer, WireTieredMatchDetails,
 };
-use crate::protocols::{LocalBlockHash, StorageTier};
+use crate::protocols::{GmsPlacementMatch, LocalBlockHash, StorageTier, WorkerWithDpRank};
 
 /// Holds one per-tier [`ThreadPoolIndexer<LowerTierIndexer>`] for every
 /// non-device [`StorageTier`] that has received at least one event.
@@ -119,6 +119,7 @@ impl LowerTierIndexers {
 pub struct TieredMatchDetails {
     pub device: MatchDetails,
     pub lower_tier: HashMap<StorageTier, LowerTierMatchDetails>,
+    pub gms_placements: HashMap<WorkerWithDpRank, GmsPlacementMatch>,
 }
 
 impl From<&TieredMatchDetails> for WireTieredMatchDetails {
@@ -129,6 +130,11 @@ impl From<&TieredMatchDetails> for WireTieredMatchDetails {
                 .lower_tier
                 .iter()
                 .map(|(tier, details)| (*tier, details.into()))
+                .collect(),
+            gms_placements: d
+                .gms_placements
+                .iter()
+                .map(|(worker, placement)| (*worker, placement.clone()))
                 .collect(),
         }
     }
@@ -153,6 +159,7 @@ impl From<WireTieredMatchDetails> for TieredMatchDetails {
                 ..Default::default()
             },
             lower_tier,
+            gms_placements: w.gms_placements.into_iter().collect(),
         }
     }
 }

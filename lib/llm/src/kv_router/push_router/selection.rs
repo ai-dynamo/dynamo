@@ -16,7 +16,10 @@ use crate::{
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
-        common::{preprocessor::RoutingHints, timing::RequestPhase},
+        common::{
+            preprocessor::{GmsPlacementInfo, RoutingHints},
+            timing::RequestPhase,
+        },
     },
 };
 
@@ -27,6 +30,9 @@ pub(super) struct WorkerSelection {
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
+    /// Optional GMS placement metadata that lets the selected worker fetch KV
+    /// from a busier peer selected by the router's reference policy.
+    pub(super) gms_placement: Option<Box<GmsPlacementInfo>>,
     pub(super) scheduler_tracked: bool,
 }
 
@@ -102,15 +108,33 @@ impl KvPushRouter {
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
-            } => Ok(WorkerSelection {
-                instance_id: worker.worker_id,
-                dp_rank: worker.dp_rank,
-                overlap_amount: overlap_blocks,
-                effective_overlap_blocks,
-                cached_tokens,
-                routing_hashes,
-                scheduler_tracked: args.scheduler_tracked,
-            }),
+                gms_transfer,
+                gms_placement,
+            } => {
+                if let Some(transfer) = gms_transfer {
+                    tracing::debug!(
+                        request_id = %args.context_id,
+                        source_worker_id = transfer.source_worker.worker_id,
+                        source_dp_rank = transfer.source_worker.dp_rank,
+                        destination_worker_id = transfer.destination_worker.worker_id,
+                        destination_dp_rank = transfer.destination_worker.dp_rank,
+                        source_overlap_blocks = transfer.source_overlap_blocks,
+                        source_load_blocks = transfer.source_load_blocks,
+                        destination_load_blocks = transfer.destination_load_blocks,
+                        "Routing request with GMS KV transfer placement"
+                    );
+                }
+                Ok(WorkerSelection {
+                    instance_id: worker.worker_id,
+                    dp_rank: worker.dp_rank,
+                    overlap_amount: overlap_blocks,
+                    effective_overlap_blocks,
+                    cached_tokens,
+                    routing_hashes,
+                    gms_placement,
+                    scheduler_tracked: args.scheduler_tracked,
+                })
+            }
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }
     }

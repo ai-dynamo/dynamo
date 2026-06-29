@@ -89,6 +89,7 @@ impl RemoteIndexer {
         &self,
         block_hashes: Vec<LocalBlockHash>,
         device_only: bool,
+        gms_content_hashes_hex: Option<&[String]>,
     ) -> Result<TieredMatchDetails> {
         self.validate_topology_if_ready().await.inspect_err(|_| {
             self.metrics.increment_query_failures();
@@ -97,6 +98,7 @@ impl RemoteIndexer {
         let request = IndexerQueryRequest {
             model_name: self.model_name.clone(),
             block_hashes,
+            gms_content_hashes_hex: gms_content_hashes_hex.map(|hashes| hashes.to_vec()),
             device_only,
         };
         let mut stream: ManyOut<IndexerQueryResponse> = self
@@ -449,10 +451,14 @@ impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>, a
                         .map(|device| TieredMatchDetails {
                             device,
                             lower_tier: HashMap::new(),
+                            gms_placements: Default::default(),
                         })
                 } else {
                     indexer
-                        .find_primary_matches_by_tier(request.block_hashes)
+                        .find_primary_matches_by_tier_with_gms_placements(
+                            request.block_hashes,
+                            request.gms_content_hashes_hex.as_deref(),
+                        )
                         .await
                 };
                 match result {
@@ -533,9 +539,14 @@ mod tests {
     use std::time::Duration;
 
     use dynamo_kv_router::indexer::{
-        KvIndexer, KvIndexerInterface, KvIndexerMetrics, pruning::PruneConfig,
+        GmsPlacementIndex, KvIndexer, KvIndexerInterface, KvIndexerMetrics, pruning::PruneConfig,
     };
-    use dynamo_kv_router::protocols::{StorageTier, WorkerWithDpRank, compute_seq_hash_for_block};
+    use dynamo_kv_router::protocols::{
+        ExternalSequenceBlockHash, GmsPlacementBlock, GmsPlacementDescriptor,
+        GmsPlacementEventData, GmsPlacementMemoryRegion, GmsPlacementStoreData, KvCacheEvent,
+        KvCacheEventData, KvCacheStoreData, RouterEvent, StorageTier, WorkerWithDpRank,
+        compute_seq_hash_for_block,
+    };
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
@@ -548,6 +559,7 @@ mod tests {
         let request = SingleIn::new(IndexerQueryRequest {
             model_name: "model-b".to_string(),
             block_hashes: vec![LocalBlockHash(1)],
+            gms_content_hashes_hex: None,
             device_only: false,
         });
 
@@ -584,6 +596,7 @@ mod tests {
                 Arc::new(KvIndexerMetrics::new_unregistered()),
             ),
             lower_tier: LowerTierIndexers::new(1, 4),
+            gms_placement: Arc::new(GmsPlacementIndex::new()),
             approx: Some(SideIndexer::KvIndexer(side)),
             primary_records_routing_decisions: false,
         };
@@ -607,6 +620,7 @@ mod tests {
             .generate(SingleIn::new(IndexerQueryRequest {
                 model_name: "m".to_string(),
                 block_hashes,
+                gms_content_hashes_hex: None,
                 device_only: false,
             }))
             .await
@@ -636,6 +650,7 @@ mod tests {
                 Arc::new(KvIndexerMetrics::new_unregistered()),
             ),
             lower_tier: LowerTierIndexers::new(1, 4),
+            gms_placement: Arc::new(GmsPlacementIndex::new()),
             approx: None,
             primary_records_routing_decisions: false,
         };
@@ -674,6 +689,7 @@ mod tests {
             .generate(SingleIn::new(IndexerQueryRequest {
                 model_name: "m".to_string(),
                 block_hashes: vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)],
+                gms_content_hashes_hex: None,
                 device_only: false,
             }))
             .await
@@ -722,6 +738,94 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn query_engine_returns_gms_placements_from_event_plane() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let indexer = Indexer::KvIndexer {
+            primary: KvIndexer::new(
+                CancellationToken::new(),
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+            ),
+            lower_tier: LowerTierIndexers::new(1, 4),
+            gms_placement: Arc::new(GmsPlacementIndex::new()),
+            approx: None,
+            primary_records_routing_decisions: false,
+        };
+
+        indexer
+            .apply_event(store_event(7, 0, 1, &[], &[11], StorageTier::Device))
+            .await;
+        indexer
+            .apply_event(RouterEvent::with_gms_placement(
+                worker.worker_id,
+                KvCacheEvent {
+                    event_id: 2,
+                    data: KvCacheEventData::Stored(KvCacheStoreData {
+                        parent_hash: None::<ExternalSequenceBlockHash>,
+                        start_position: None,
+                        blocks: Vec::new(),
+                    }),
+                    dp_rank: worker.dp_rank,
+                },
+                StorageTier::External,
+                GmsPlacementEventData::Stored(GmsPlacementStoreData {
+                    source_nixl_agent_name: "agent-a".to_string(),
+                    source_nixl_agent_metadata_hex: "abcd".to_string(),
+                    source_nixl_ip: Some("10.0.0.1".to_string()),
+                    source_nixl_listen_port: Some(5555),
+                    blocks: vec![GmsPlacementBlock {
+                        content_hash_hex: "aa".to_string(),
+                        descriptor: GmsPlacementDescriptor {
+                            remote_ptr: 1234,
+                            size: 64,
+                            tier: "host".to_string(),
+                            ranges: vec![GmsPlacementMemoryRegion {
+                                remote_ptr: 1234,
+                                size: 64,
+                                tier: "host".to_string(),
+                                layer: Some(0),
+                                offset: Some(0),
+                            }],
+                            generation: Some(9),
+                            sealed: Some(true),
+                        },
+                    }],
+                }),
+            ))
+            .await;
+
+        let Indexer::KvIndexer { primary, .. } = &indexer else {
+            unreachable!()
+        };
+        let _ = primary.flush().await;
+
+        let bindings = Arc::new(RwLock::new(HashMap::from([("m".to_string(), indexer)])));
+        let engine = ServedIndexerQueryEngine { bindings };
+        let mut stream = engine
+            .generate(SingleIn::new(IndexerQueryRequest {
+                model_name: "m".to_string(),
+                block_hashes: vec![LocalBlockHash(11)],
+                gms_content_hashes_hex: Some(vec!["AA".to_string()]),
+                device_only: false,
+            }))
+            .await
+            .unwrap();
+
+        let Some(IndexerQueryResponse::TieredScores(wire)) = stream.next().await else {
+            panic!("expected TieredScores response");
+        };
+        let (_, placement) = wire
+            .gms_placements
+            .iter()
+            .find(|(candidate, _)| *candidate == worker)
+            .expect("GMS placement should be attached to served-indexer response");
+
+        assert_eq!(placement.source_nixl_agent_name, "agent-a");
+        assert_eq!(placement.descriptors.len(), 1);
+        assert_eq!(placement.descriptors[0].as_ref().unwrap().remote_ptr, 1234);
+    }
+
     /// `device_only=true` must skip the lower-tier walk: the response carries
     /// the device overlap but no per-tier entries, even when the underlying
     /// indexer holds host-pinned data.
@@ -735,6 +839,7 @@ mod tests {
                 Arc::new(KvIndexerMetrics::new_unregistered()),
             ),
             lower_tier: LowerTierIndexers::new(1, 4),
+            gms_placement: Arc::new(GmsPlacementIndex::new()),
             approx: None,
             primary_records_routing_decisions: false,
         };
@@ -772,6 +877,7 @@ mod tests {
             .generate(SingleIn::new(IndexerQueryRequest {
                 model_name: "m".to_string(),
                 block_hashes: vec![LocalBlockHash(11), LocalBlockHash(12), LocalBlockHash(13)],
+                gms_content_hashes_hex: None,
                 device_only: true,
             }))
             .await

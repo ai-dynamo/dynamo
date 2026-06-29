@@ -416,6 +416,7 @@ mod tests {
                 (StorageTier::Disk, disk),
                 (StorageTier::External, external),
             ]),
+            gms_placements: HashMap::new(),
         };
         let config = KvRouterConfig {
             host_cache_hit_weight: 0.5,
@@ -452,6 +453,7 @@ mod tests {
                 (StorageTier::HostPinned, host),
                 (StorageTier::External, external),
             ]),
+            gms_placements: HashMap::new(),
         };
         let config = KvRouterConfig {
             overlap_score_credit: 0.5,

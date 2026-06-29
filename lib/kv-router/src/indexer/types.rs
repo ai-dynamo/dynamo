@@ -158,6 +158,10 @@ pub struct IndexerQueryRequest {
     pub model_name: String,
     /// Block hashes to find matches for in the radix tree.
     pub block_hashes: Vec<LocalBlockHash>,
+    /// Stable GMS content hashes for the same request prefix, used only to
+    /// attach already-indexed placement metadata to the query response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gms_content_hashes_hex: Option<Vec<String>>,
     /// When true, the server skips the lower-tier walk and returns only the
     /// device-tier overlap. Older clients that omit this field default to
     /// `false`, preserving the full tiered response.
@@ -233,6 +237,8 @@ impl From<WireLowerTierMatchDetails> for super::lower_tier::LowerTierMatchDetail
 pub struct WireTieredMatchDetails {
     pub device: WireOverlapScores,
     pub lower_tier: Vec<(StorageTier, WireLowerTierMatchDetails)>,
+    #[serde(default)]
+    pub gms_placements: Vec<(WorkerWithDpRank, GmsPlacementMatch)>,
 }
 
 /// Response from a served KV indexer query.

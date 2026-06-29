@@ -699,7 +699,9 @@ impl WorkerQueryClient {
 mod tests {
     use super::*;
     use crate::kv_router::{Indexer, indexer::LowerTierIndexers};
-    use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
+    use dynamo_kv_router::indexer::{
+        GmsPlacementIndex, KvIndexer, KvIndexerInterface, KvIndexerMetrics,
+    };
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
@@ -840,6 +842,7 @@ mod tests {
             Indexer::KvIndexer {
                 primary: kv_indexer,
                 lower_tier: LowerTierIndexers::new(1, 4),
+                gms_placement: Arc::new(GmsPlacementIndex::new()),
                 approx: None,
                 primary_records_routing_decisions: false,
             },

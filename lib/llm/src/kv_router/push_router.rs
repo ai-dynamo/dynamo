@@ -304,6 +304,9 @@ impl KvPushRouter {
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
+        if backend_input.gms_placement.is_none() {
+            backend_input.gms_placement = selection.gms_placement.map(|placement| *placement);
+        }
         let updated_request = context.map(|_| backend_input);
         guard.record_prefill_start();
 

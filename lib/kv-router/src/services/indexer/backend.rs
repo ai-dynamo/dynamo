@@ -168,6 +168,7 @@ impl Indexer {
                 Ok(TieredMatchDetails {
                     device,
                     lower_tier: lt,
+                    gms_placements: Default::default(),
                 })
             }
             Indexer::Concurrent {
@@ -180,6 +181,7 @@ impl Indexer {
                 Ok(TieredMatchDetails {
                     device,
                     lower_tier: lt,
+                    gms_placements: Default::default(),
                 })
             }
         }
