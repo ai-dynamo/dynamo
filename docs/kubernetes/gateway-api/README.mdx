@@ -136,7 +136,7 @@ GAIE requires a Gateway API implementation that can call an Endpoint Picker Plug
 the request to a backend. Dynamo is independent of the Gateway implementation: pick the gateway that
 matches your platform, then point its `HTTPRoute` and generated `InferencePool` at the Dynamo EPP.
 
-The quickstart shows two verified paths: agentgateway and Istio. Other Gateway API
+The walkthroughs show two verified paths: agentgateway and Istio. Other Gateway API
 implementations might work when they support the same GAIE `InferencePool` and `endpointPickerRef`
 EPP path; check the upstream
 [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
@@ -159,7 +159,7 @@ flow.
   </Tab>
 </Tabs>
 
-The quickstart walks through the two verified implementation paths shown in this table:
+The walkthroughs use the two verified implementation paths shown in this table:
 
 | | agentgateway | Istio |
 |---|---|---|
@@ -339,4 +339,4 @@ settings.
 
 For existing GAIE stacks that already run stock vLLM pods, try the experimental
 [vanilla vLLM on-ramp](./vanilla-vllm-onramp.mdx) after you have confirmed that the router-only EPP
-image you are testing includes on-ramp support.
+image you use includes on-ramp support.
