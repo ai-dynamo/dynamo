@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::Display;
+use std::{fmt::Display, sync::LazyLock};
 
 use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
@@ -110,6 +110,9 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "bad_words_token_ids",
 ];
 
+static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
+    LazyLock::new(|| env_is_truthy(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS));
+
 /// Validates that no unsupported fields are present in the request.
 ///
 /// Fields in `PASSTHROUGH_EXTRA_FIELDS` are validated by downstream handlers.
@@ -118,12 +121,22 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
 pub fn validate_no_unsupported_fields(
     unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<(), anyhow::Error> {
+    validate_no_unsupported_fields_with_ignore(
+        unsupported_fields,
+        *IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
+    )
+}
+
+fn validate_no_unsupported_fields_with_ignore(
+    unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+    ignore_unsupported_fields: bool,
+) -> Result<(), anyhow::Error> {
     let unknown: Vec<_> = unsupported_fields
         .keys()
         .filter(|k| !PASSTHROUGH_EXTRA_FIELDS.contains(&k.as_str()))
         .map(|s| format!("`{}`", s))
         .collect();
-    if !unknown.is_empty() && !env_is_truthy(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS) {
+    if !unknown.is_empty() && !ignore_unsupported_fields {
         anyhow::bail!("Unsupported parameter(s): {}", unknown.join(", "));
     }
     if let Some(value) = unsupported_fields.get("cache_salt")
@@ -776,31 +789,24 @@ mod tests {
 
     #[test]
     fn validate_no_unsupported_fields_rejects_unknown_fields_by_default() {
-        temp_env::with_var_unset(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS, || {
-            let err = validate_no_unsupported_fields(&unknown_fields()).unwrap_err();
-            assert!(err.to_string().contains("Unsupported parameter(s)"));
-        });
+        let err = validate_no_unsupported_fields_with_ignore(&unknown_fields(), false).unwrap_err();
+        assert!(err.to_string().contains("Unsupported parameter(s)"));
     }
 
     #[test]
     fn validate_no_unsupported_fields_ignores_unknown_fields_when_configured() {
-        for value in ["1", "true", "TRUE", "on", "yes"] {
-            temp_env::with_var(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS, Some(value), || {
-                validate_no_unsupported_fields(&unknown_fields()).unwrap();
-            });
-        }
+        validate_no_unsupported_fields_with_ignore(&unknown_fields(), true).unwrap();
     }
 
     #[test]
     fn validate_no_unsupported_fields_still_validates_passthrough_fields_when_ignoring_unknowns() {
-        temp_env::with_var(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS, Some("1"), || {
-            let unsupported_fields = HashMap::from([
-                ("experimental_field".to_string(), json!("value")),
-                ("stop_token_ids".to_string(), json!("bad")),
-            ]);
+        let unsupported_fields = HashMap::from([
+            ("experimental_field".to_string(), json!("value")),
+            ("stop_token_ids".to_string(), json!("bad")),
+        ]);
 
-            let err = validate_no_unsupported_fields(&unsupported_fields).unwrap_err();
-            assert!(err.to_string().contains("stop_token_ids"));
-        });
+        let err =
+            validate_no_unsupported_fields_with_ignore(&unsupported_fields, true).unwrap_err();
+        assert!(err.to_string().contains("stop_token_ids"));
     }
 }
