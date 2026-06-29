@@ -19,7 +19,7 @@
 # The default model is a text-only LM (Qwen2.5-1.5B-Instruct) — the standard
 # topology for this feature (custom encoder + stock LM), served with a minimal
 # custom chat template that emits the image placeholder. The default encoder
-# (HitchhikersCustomEncoder) fakes an image as the embeddings of a fixed phrase
+# (HitchhikersVisionEncoder) fakes an image as the embeddings of a fixed phrase
 # so the path can be checked for semantic correctness; replace it with a real
 # CustomEncoder subclass for production.
 #
@@ -29,7 +29,7 @@
 #
 # Defaults:
 #   --model:         Qwen/Qwen2.5-1.5B-Instruct
-#   --encoder-class: examples.custom_encoder.hitchhikers_custom_encoder.HitchhikersCustomEncoder
+#   --encoder-class: examples.custom_encoder.hitchhikers_vision_encoder.HitchhikersVisionEncoder
 #   --gpu:           0
 
 set -e
@@ -41,7 +41,7 @@ source "$SCRIPT_DIR/../../common/launch_utils.sh"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 MODEL="${DYN_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
-ENCODER_CLASS="${DYN_ENCODER_CLASS:-examples.custom_encoder.hitchhikers_custom_encoder.HitchhikersCustomEncoder}"
+ENCODER_CLASS="${DYN_ENCODER_CLASS:-examples.custom_encoder.hitchhikers_vision_encoder.HitchhikersVisionEncoder}"
 # Precedence: explicit DYN_WORKER_GPU/--gpu > harness-set CUDA_VISIBLE_DEVICES
 # (e.g. the pytest profile runner) > device 0 (portable default; on a generic
 # host or single-GPU container, GPU 0 is the natural choice).
@@ -98,7 +98,7 @@ print_launch_banner --no-curl "CustomEncoder — Aggregated Serving" "$MODEL" "$
     "Worker GPU:  $WORKER_GPU" \
     "Encoder:     $ENCODER_CLASS" \
     "Jinja tmpl:  ${CUSTOM_JINJA_TEMPLATE:-(model default)}" \
-    "NOTE: HitchhikersCustomEncoder fakes an image as a fixed-phrase embedding;" \
+    "NOTE: HitchhikersVisionEncoder fakes an image as a fixed-phrase embedding;" \
     "      replace with a real CustomEncoder subclass for production use."
 
 export DYN_REQUEST_PLANE=tcp

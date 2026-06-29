@@ -234,7 +234,7 @@ def make_audio_payload(expected_response: list[str]) -> ChatPayload:
 def make_custom_encoder_payload() -> ChatPayload:
     """Semantic check for the aggregated CustomEncoder path.
 
-    The example HitchhikersCustomEncoder splices the embeddings of "the
+    The example HitchhikersVisionEncoder splices the embeddings of "the
     Ultimate Question of Life, the Universe, and Everything" at the image
     placeholder, so the assembled prompt must answer "42". The served image
     content is irrelevant (the encoder ignores the URL). ``expected_log``

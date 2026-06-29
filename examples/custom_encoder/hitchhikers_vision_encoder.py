@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Example custom encoder that fakes an image as a known text phrase.
+"""Example ``VisionEncoderBackend`` that fakes an image as a known text phrase.
 
 Instead of a real vision encoder, ``forward_batch()`` returns the LM's
 ``embed_tokens`` embeddings of a fixed phrase (default: *"the Ultimate Question
-of Life, the Universe, and Everything"*).  Splicing those embeddings in at the
+of Life, the Universe, and Everything"*). Splicing those embeddings in at the
 image placeholder makes the assembled prompt read as one coherent sentence, so
 the mixed-embeds path can be checked for **semantic** correctness, not just
 shape:
@@ -15,15 +15,18 @@ shape:
         + " is?"
     → the model answers "42".
 
-The image URL is ignored — any URL yields the same phrase embeddings.
+The image URL is ignored — any URL yields the same phrase embeddings. This is an
+**eager** backend: ``buckets`` stays ``None`` (no CUDA graphs), ``cost`` is 1 per
+image, and ``preprocess`` is a pass-through (no fetch / decode), so it isolates
+the splice + contract + LM path from any real vision compute.
 
-Subclasses ``QwenCustomEncoder`` (in ``qwen_custom_encoder``): the default model
-is a Qwen-family LM (Qwen2.5), so the base loads the tokenizer and resolves the
-``<|image_pad|>`` placeholder id; this class only loads the ``embed_tokens``
-weight and implements the synchronous ``forward_batch``.
+Subclasses ``QwenVisionEncoderBackend``: the default model is a Qwen-family LM
+(Qwen2.5), so the base loads the tokenizer and resolves the ``<|image_pad|>``
+placeholder id; this class only loads the ``embed_tokens`` weight and implements
+``preprocess`` + the synchronous ``forward_batch``.
 
 Usage (via agg_custom.sh):
-    DYN_ENCODER_CLASS=examples.custom_encoder.hitchhikers_custom_encoder.HitchhikersCustomEncoder
+    DYN_ENCODER_CLASS=examples.custom_encoder.hitchhikers_vision_encoder.HitchhikersVisionEncoder
     DYN_MODEL=Qwen/Qwen2.5-1.5B-Instruct
     DYN_CUSTOM_PHRASE=" the Ultimate Question of Life, the Universe, and Everything"
     ./agg_custom.sh
@@ -35,13 +38,14 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import torch
 from safetensors import safe_open
 from transformers.utils import cached_file
 
-from examples.custom_encoder.qwen_custom_encoder import QwenCustomEncoder
+from dynamo.vllm.multimodal_utils.vision_encoder_backend import Preprocessed
+from examples.custom_encoder.qwen_vision_encoder import QwenVisionEncoderBackend
 
 logger = logging.getLogger(__name__)
 
@@ -85,31 +89,43 @@ def _load_embed_tokens_weight(model_id: str) -> torch.Tensor:
         return f.get_tensor(embed_key)
 
 
-class HitchhikersCustomEncoder(QwenCustomEncoder):
-    """Encoder that returns the LM embeddings of a fixed phrase for any image URL.
+class HitchhikersVisionEncoder(QwenVisionEncoderBackend):
+    """Backend that returns the LM embeddings of a fixed phrase for any image URL.
 
-    A test/example encoder, not a production vision encoder: it loads the LM's
+    A test/example backend, not a production vision encoder: it loads the LM's
     ``embed_tokens`` weight and returns the embeddings of ``DYN_CUSTOM_PHRASE``
     so the spliced prompt reads as a coherent sentence.
     """
+
+    # Eager: no graph ladder. Count-based budget (cost == 1 per image).
+    buckets = None
+    max_batch_cost = 8
 
     def build(self, model_id: str, device: str) -> None:
         """Load the tokenizer (via the Qwen base) and the LM ``embed_tokens`` weight."""
         super().build(model_id, device)  # loads self.tokenizer
         self._embed_weight = _load_embed_tokens_weight(model_id)
         logger.info(
-            "[HitchhikersCustomEncoder] ready: embed_weight=%s dtype=%s phrase=%r",
+            "[HitchhikersVisionEncoder] ready: embed_weight=%s dtype=%s phrase=%r",
             tuple(self._embed_weight.shape),
             self._embed_weight.dtype,
             _PHRASE,
         )
 
-    def forward_batch(self, image_urls: List[str]) -> List[torch.Tensor]:
-        """Return the ``embed_tokens`` embeddings of the phrase for each URL.
+    def preprocess(self, image_url: str) -> Preprocessed[str]:
+        """Pass-through: the URL is ignored, so there is nothing to fetch/decode.
 
-        Synchronous batched forward — the BatchedCustomEncoder base runs it on
-        the dedicated thread, one batch at a time.
-        """
+        cost=1 (count-based), bucket_key=None (single bucket, eager)."""
+        return Preprocessed(item=image_url, cost=1, bucket_key=None)
+
+    def forward_batch(
+        self, items: List[str], target_bucket: Optional[int] = None
+    ) -> List[torch.Tensor]:
+        """Return the ``embed_tokens`` embeddings of the phrase for each item.
+
+        Synchronous batched forward — the AsyncVisionEncoder runs it on the
+        dedicated actor thread, one batch at a time. Eager (``target_bucket`` is
+        always ``None`` here since ``buckets`` is ``None``)."""
         # Explicit check (not assert): asserts are stripped under `python -O`,
         # which would turn a missing build() into an opaque None-index crash.
         if (
@@ -117,14 +133,14 @@ class HitchhikersCustomEncoder(QwenCustomEncoder):
             or getattr(self, "tokenizer", None) is None
         ):
             raise RuntimeError(
-                "HitchhikersCustomEncoder.forward_batch() called before "
-                "build(); call load(model_id, device) first."
+                "HitchhikersVisionEncoder.forward_batch() called before "
+                "build(); load the encoder first."
             )
         ids = self.tokenizer.encode(_PHRASE, add_special_tokens=False)
         phrase_embeds = self._embed_weight[torch.tensor(ids, dtype=torch.long)]
         logger.debug(
-            "[HitchhikersCustomEncoder] phrase tokens=%d → shape=%s",
+            "[HitchhikersVisionEncoder] phrase tokens=%d → shape=%s",
             len(ids),
             tuple(phrase_embeds.shape),
         )
-        return [phrase_embeds.clone() for _ in image_urls]
+        return [phrase_embeds.clone() for _ in items]

@@ -518,7 +518,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
     # *plugin* (a custom vision encoder) gives it the image->embeds serving
     # path; the multimodality comes from the encoder, not the model. The
     # `agg_custom` topology launches examples/custom_encoder/launch/agg_custom.sh
-    # (hence the `directory` override) with the example HitchhikersCustomEncoder,
+    # (hence the `directory` override) with the example HitchhikersVisionEncoder,
     # which fakes an image as a fixed phrase so the spliced prompt answers "42".
     MultimodalModelProfile(
         name="Qwen/Qwen2.5-1.5B-Instruct",
@@ -534,8 +534,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     # honors an externally-set CUDA_VISIBLE_DEVICES).
                     "DYN_WORKER_GPU": "0",
                     "DYN_ENCODER_CLASS": (
-                        "examples.custom_encoder.hitchhikers_custom_encoder."
-                        "HitchhikersCustomEncoder"
+                        "examples.custom_encoder.hitchhikers_vision_encoder."
+                        "HitchhikersVisionEncoder"
                     ),
                     "DYN_CUSTOM_JINJA_TEMPLATE": os.path.join(
                         WORKSPACE_DIR,

@@ -137,11 +137,11 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_CUSTOM_ENCODER_CLASS",
             default=None,
             help=(
-                "Dotted module.ClassName path to a CustomEncoder subclass. "
-                "When set, the aggregated worker loads this encoder in-process and "
-                "calls encoder.encode(image_urls) for each multimodal request, "
-                "bypassing vLLM's built-in multimodal processing. "
-                "--model is passed verbatim to CustomEncoder.load(). "
+                "Dotted module.ClassName path to a VisionEncoderBackend subclass. "
+                "When set, the aggregated worker wraps it in the in-process "
+                "AsyncVisionEncoder and runs encoder.encode(image_urls) for each "
+                "multimodal request, bypassing vLLM's built-in multimodal "
+                "processing. --model is passed verbatim to the backend's build(). "
                 "Example: 'my_package.encoders.MyEncoder'."
             ),
         )

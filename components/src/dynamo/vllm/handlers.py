@@ -98,7 +98,7 @@ from dynamo.vllm.kv_connector_protocols import (
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
-from .multimodal_utils.batched_custom_encoder import BatchedCustomEncoder
+from .multimodal_utils.async_vision_encoder import AsyncVisionEncoder
 from .multimodal_utils.embed_assembler import build_mixed_embeds
 from .multimodal_utils.hash_utils import compute_mm_uuids_from_images
 from .multimodal_utils.model import (
@@ -111,6 +111,7 @@ from .multimodal_utils.models.qwen import (
     load_qwen_grid_params,
 )
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
+from .multimodal_utils.vision_encoder_backend import VisionEncoderBackend
 
 # Multimodal data dictionary keys
 IMAGE_URL_KEY: Final = "image_url"
@@ -1048,7 +1049,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # always safe, but the encoder is loaded last in __init__ (it starts a
         # thread) — see _load_custom_encoder below — so a failure in the rest of
         # init does not leak the batcher thread.
-        self._custom_encoder: Optional[BatchedCustomEncoder] = None
+        self._custom_encoder: Optional[AsyncVisionEncoder] = None
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
@@ -1121,10 +1122,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "cannot accept without prompt-embeds enabled."
             )
         module_path, _, class_name = custom_encoder_class.rpartition(".")
-        encoder_cls = getattr(importlib.import_module(module_path), class_name)
-        encoder = encoder_cls()
+        backend_cls = getattr(importlib.import_module(module_path), class_name)
+        if not (
+            isinstance(backend_cls, type)
+            and issubclass(backend_cls, VisionEncoderBackend)
+        ):
+            raise TypeError(
+                f"--custom-encoder-class {custom_encoder_class!r} must resolve to a "
+                f"VisionEncoderBackend subclass, got {backend_cls!r}."
+            )
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        encoder.load(config.model, device)  # load() cleans up its thread on failure
+        # The author writes the VisionEncoderBackend (L2); Dynamo wraps it in the
+        # AsyncVisionEncoder glue (L3), which owns the preprocess pool + actor
+        # thread + micro-batcher. load() runs backend.build() on the actor thread
+        # and cleans that thread up on failure.
+        encoder = AsyncVisionEncoder(backend_cls())
+        encoder.load(config.model, device)
         # Assign only after a successful load so a failed load (which already shut
         # its own thread down) leaves _custom_encoder None.
         self._custom_encoder = encoder
@@ -3288,9 +3301,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # failure becomes a structured request error instead of escaping the
         # request coroutine and tearing down the stream.
         try:
-            # encode() is async; BatchedCustomEncoder coalesces concurrent calls
-            # onto its own dedicated thread and runs the batched forward there.
-            # The worker holds no lock — batching/serialization is the encoder's.
+            # encode() is async; AsyncVisionEncoder preprocesses off-thread and the
+            # ThreadedMicroBatcher coalesces concurrent calls onto one dedicated
+            # actor thread. The worker holds no lock — batching is the encoder's.
             img_tensors: list[torch.Tensor] = await self._custom_encoder.encode(
                 image_urls
             )

@@ -3,24 +3,35 @@
 
 """Coalesce concurrent async calls into batched calls of a blocking fn on one thread.
 
-``ThreadedMicroBatcher`` is the generic execution mechanism behind
-``BatchedCustomEncoder`` — it has no model/vision knowledge. It owns:
+``ThreadedMicroBatcher`` is the generic execution mechanism (L1) behind
+``AsyncVisionEncoder`` — it has no model/vision knowledge and stays torch-free.
+It owns:
 
 - a **dedicated worker thread** that runs an optional ``on_start`` (e.g. build +
   CUDA-graph capture) and then every ``fn`` call, so anything thread-affine
   (CUDA graphs, the current device/stream) is captured and replayed on the same
-  thread;
+  thread; an optional ``on_stop`` runs on that same thread at teardown;
 - a **coalescing micro-batcher**: items from concurrent ``submit()`` calls are
   pooled, grouped by ``bucket_key`` (only same-bucket items batch together — the
   shape constraint a CUDA graph needs), and split into batches whose summed
   ``cost`` stays within ``max_batch_cost`` (a compute/token budget, not a raw
-  count). Defaults — ``cost=1``, ``bucket_key=None`` — reduce to plain
-  count-based batching up to ``max_batch_cost`` items.
+  count);
+- a **graph ladder** (optional ``buckets``): when set, the batcher rounds each
+  batch's ``sum(cost)`` **up to the nearest rung** and passes it as
+  ``target_bucket`` so ``fn`` can pad to that rung and replay its captured graph.
+  ``buckets=None`` ⇒ eager: ``target_bucket=None``.
 
-The caller speaks in opaque items: ``cost`` returns an int and ``bucket_key`` a
-hashable; the batcher never interprets them, so all model knowledge stays in the
-caller. Final padding of a batch to a captured CUDA-graph shape is the ``fn``'s
-job (it owns the model), not the batcher's.
+The caller speaks in opaque items plus a per-item ``cost`` (int) and
+``bucket_key`` (hashable), computed once off-thread (see ``Preprocessed``); the
+batcher never interprets them, so all model knowledge stays in the caller. Final
+padding of a batch to a captured CUDA-graph shape is the ``fn``'s job (it owns
+the model), not the batcher's — the batcher only decides *which rung*.
+
+Coalescing window — **eager drain-on-completion, no timer** (the design default):
+whenever the worker is free it pulls everything queued and runs it, then repeats.
+A lone item runs on the next free iteration (liveness for free); batch size
+auto-scales with load (arrivals during ``fn`` pile up and are scooped next loop).
+``max_wait_ms`` is an opt-in, default-off knob for a deliberate accumulate hold.
 
 Concurrency contract (cross-thread correctness):
 
@@ -51,7 +62,7 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Callable, Generic, Hashable, List, Optional, TypeVar
+from typing import Callable, Generic, Hashable, List, Optional, Sequence, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -109,19 +120,25 @@ class _Work(Generic[T]):
 
 
 class ThreadedMicroBatcher(Generic[T, R]):
-    """Run ``fn(list[item]) -> list[result]`` on a dedicated thread, coalescing
-    concurrent ``submit()`` calls into cost-bounded, same-bucket batches.
+    """Run ``fn(list[item], target_bucket) -> list[result]`` on a dedicated thread,
+    coalescing concurrent ``submit()`` calls into cost-bounded, same-bucket batches.
 
     Args:
-        fn: Batched work; one result per item, in order. Runs on the worker thread.
+        fn: Batched work; one result per item, in order. Called as
+            ``fn(items, target_bucket)`` on the worker thread — ``target_bucket``
+            is the ladder rung to pad to (``None`` in eager mode).
         max_batch_cost: Max summed ``cost`` of a single ``fn`` batch (>= 1).
-        max_wait_ms: Window to gather more items after the first arrives.
-        cost: Per-item cost (default 1 → count-based). Must return an int in
-            ``[1, max_batch_cost]``; out-of-range costs are rejected by ``submit``.
-        bucket_key: Items with different keys never share a batch (default: one
-            bucket).
+        buckets: Optional sorted graph ladder. When set, the batcher rounds a
+            batch's ``sum(cost)`` up to the nearest rung and passes it as
+            ``target_bucket``; ``None``/empty ⇒ eager (``target_bucket=None``).
+        max_wait_ms: Opt-in coalescing hold after the first item arrives. Default
+            ``0`` ⇒ eager drain-on-completion (no timer).
         on_start: Optional callable run once on the worker thread before serving
-            (model build / warmup); its failure surfaces from ``start()``.
+            (model build / warmup / graph capture); its failure surfaces from
+            ``start()``.
+        on_stop: Optional callable run once on the worker thread at teardown (after
+            the serving loop ends), iff ``on_start`` succeeded. Its failure is
+            logged, never raised.
         max_outstanding_cost: Optional admission ceiling on accepted-but-incomplete
             cost; ``submit()`` raises ``BatcherOverloaded`` when exceeded.
         name: Worker thread name.
@@ -130,13 +147,13 @@ class ThreadedMicroBatcher(Generic[T, R]):
 
     def __init__(
         self,
-        fn: Callable[[List[T]], List[R]],
+        fn: Callable[[List[T], Optional[int]], List[R]],
         *,
         max_batch_cost: int = 8,
-        max_wait_ms: float = 5.0,
-        cost: Callable[[T], int] = lambda _item: 1,
-        bucket_key: Callable[[T], Hashable] = lambda _item: None,
+        buckets: Optional[Sequence[int]] = None,
+        max_wait_ms: float = 0.0,
         on_start: Optional[Callable[[], None]] = None,
+        on_stop: Optional[Callable[[], None]] = None,
         max_outstanding_cost: Optional[int] = None,
         name: str = "micro-batcher",
         join_timeout_s: float = 10.0,
@@ -145,12 +162,12 @@ class ThreadedMicroBatcher(Generic[T, R]):
             raise ValueError("max_batch_cost must be >= 1")
         if max_outstanding_cost is not None and max_outstanding_cost < 1:
             raise ValueError("max_outstanding_cost must be >= 1")
+        self._buckets = self._validate_buckets(buckets, max_batch_cost)
         self._fn = fn
         self._max_batch_cost = max_batch_cost
         self._max_wait_s = max_wait_ms / 1000.0
-        self._cost = cost
-        self._bucket_key = bucket_key
         self._on_start = on_start
+        self._on_stop = on_stop
         self._max_outstanding_cost = max_outstanding_cost
         self._name = name
         self._join_timeout_s = join_timeout_s
@@ -168,6 +185,36 @@ class ThreadedMicroBatcher(Generic[T, R]):
         self._outstanding = 0
         self._live: set[_Request] = set()
         self._thread: Optional[threading.Thread] = None
+
+    @staticmethod
+    def _validate_buckets(
+        buckets: Optional[Sequence[int]], max_batch_cost: int
+    ) -> Optional[tuple]:
+        """Normalise the ladder to a sorted tuple of positive ints (or None).
+
+        The ladder must cover the dispatch ceiling so every packed batch has a
+        rung to round up to: ``max(buckets) >= max_batch_cost``."""
+        if not buckets:
+            return None
+        rungs = tuple(sorted(int(b) for b in buckets))
+        if any(b < 1 for b in rungs):
+            raise ValueError("buckets must be positive ints")
+        if rungs[-1] < max_batch_cost:
+            raise ValueError(
+                f"max(buckets)={rungs[-1]} < max_batch_cost={max_batch_cost}; the "
+                "ladder must cover the dispatch ceiling (set max_batch_cost to "
+                "max(buckets) for a graphed encoder)"
+            )
+        return rungs
+
+    def _target_bucket(self, batch_cost: int) -> Optional[int]:
+        """Round a batch's summed cost up to the nearest ladder rung (None=eager)."""
+        if self._buckets is None:
+            return None
+        for rung in self._buckets:  # sorted ascending
+            if rung >= batch_cost:
+                return rung
+        return self._buckets[-1]  # unreachable: max(buckets) >= max_batch_cost
 
     # ---- lifecycle ---------------------------------------------------------
 
@@ -205,8 +252,17 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 # a concurrent shutdown() closed us during startup
                 raise RuntimeError("ThreadedMicroBatcher shut down during start()")
 
-    async def submit(self, items: List[T]) -> List[R]:
+    async def submit(
+        self,
+        items: List[T],
+        costs: Optional[List[int]] = None,
+        bucket_keys: Optional[List[Hashable]] = None,
+    ) -> List[R]:
         """Submit a group of items; await one result per item, in order.
+
+        ``costs`` and ``bucket_keys`` are computed off-thread by the caller (see
+        ``Preprocessed``). When omitted they default to ``cost=1`` /
+        ``bucket_key=None`` (plain count-based, single-bucket batching).
 
         Cancellation-safe: cancelling the await tombstones not-yet-run items,
         releases admission, and returns only once the worker has retired the
@@ -216,10 +272,19 @@ class ThreadedMicroBatcher(Generic[T, R]):
             raise RuntimeError("ThreadedMicroBatcher.submit() called before start()")
         if not items:
             return []
-        costs = [self._cost(item) for item in items]
+        if costs is None:
+            costs = [1] * len(items)
+        elif len(costs) != len(items):
+            raise ValueError(f"costs has {len(costs)} entries for {len(items)} items")
+        if bucket_keys is None:
+            bucket_keys = [None] * len(items)
+        elif len(bucket_keys) != len(items):
+            raise ValueError(
+                f"bucket_keys has {len(bucket_keys)} entries for {len(items)} items"
+            )
         for c in costs:
             if not isinstance(c, int) or isinstance(c, bool) or c < 1:
-                raise ValueError(f"cost(item) must be a positive int, got {c!r}")
+                raise ValueError(f"cost must be a positive int, got {c!r}")
             if c > self._max_batch_cost:
                 raise ValueError(
                     f"item cost {c} exceeds max_batch_cost {self._max_batch_cost}; "
@@ -233,8 +298,8 @@ class ThreadedMicroBatcher(Generic[T, R]):
             cost_total=sum(costs),
         )
         works = [
-            _Work(item, self._bucket_key(item), c, request, i)
-            for i, (item, c) in enumerate(zip(items, costs))
+            _Work(item, bucket, c, request, i)
+            for i, (item, c, bucket) in enumerate(zip(items, costs, bucket_keys))
         ]
         # State check + admission + queue-commit under one lock so a concurrent
         # shutdown() cannot strand the request and capacity cannot leak.
@@ -337,21 +402,50 @@ class ThreadedMicroBatcher(Generic[T, R]):
             for req in live:
                 self._abort(req, exc)
         finally:
+            # on_stop runs on the actor thread (so CUDA teardown is same-thread),
+            # only after on_start succeeded (this finally is unreachable otherwise).
+            self._run_on_stop()
             self._terminated.set()
 
+    def _run_on_stop(self) -> None:
+        if self._on_stop is None:
+            return
+        try:
+            self._on_stop()
+        except BaseException:  # noqa: BLE001 — teardown best-effort, never raise
+            logger.exception(
+                "ThreadedMicroBatcher(%s): on_stop raised during teardown",
+                self._name,
+            )
+
     def _collect(self) -> Optional[List[_Work]]:
-        """Block for one item, then drain more within the coalescing window."""
+        """Block for one item, then eager-drain everything else already queued.
+
+        Default (``max_wait_ms=0``): drain only what is immediately available — no
+        timed hold. With ``max_wait_ms>0``, keep draining within that window."""
         first = self._queue.get()
         if first is _SHUTDOWN:
             return None
         works: List[_Work] = [first]
-        deadline = time.monotonic() + self._max_wait_s
+        if self._max_wait_s > 0:
+            deadline = time.monotonic() + self._max_wait_s
+            while True:
+                timeout = deadline - time.monotonic()
+                if timeout <= 0:
+                    break
+                try:
+                    item = self._queue.get(timeout=timeout)
+                except queue.Empty:
+                    break
+                if item is _SHUTDOWN:
+                    self._queue.put(_SHUTDOWN)  # drain this round, stop next loop
+                    break
+                works.append(item)
+            return works
+        # Eager drain: pull everything immediately available, then run.
         while True:
-            timeout = deadline - time.monotonic()
-            if timeout <= 0:
-                break
             try:
-                item = self._queue.get(timeout=timeout)
+                item = self._queue.get_nowait()
             except queue.Empty:
                 break
             if item is _SHUTDOWN:
@@ -411,8 +505,9 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 )
             return
         items = [w.item for w in runnable]
+        target_bucket = self._target_bucket(sum(w.cost for w in runnable))
         try:
-            results = self._fn(items)
+            results = self._fn(items, target_bucket)
         except (
             BaseException
         ) as exc:  # noqa: BLE001 — a bad batch must not hang awaiters
