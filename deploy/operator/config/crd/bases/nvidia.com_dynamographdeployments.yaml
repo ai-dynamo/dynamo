@@ -11858,6 +11858,10 @@ spec:
                     - topologyProfile
                   type: object
               type: object
+              x-kubernetes-validations:
+                - message: spec.restart must be unset on create; set spec.restart.id after creation to request a restart
+                  optionalOldSelf: true
+                  rule: oldSelf.hasValue() || !has(self.restart)
             status:
               description: Status reflects the current observed state of this graph deployment.
               properties:
@@ -12077,10 +12081,6 @@ spec:
                 - state
               type: object
           type: object
-          x-kubernetes-validations:
-            - message: spec.restart must be unset on create; set spec.restart.id after creation to request a restart
-              optionalOldSelf: true
-              rule: oldSelf.hasValue() || !has(self.spec) || !has(self.spec.restart)
       served: true
       storage: true
       subresources:
@@ -21172,6 +21172,10 @@ spec:
                     - clusterTopologyName
                   type: object
               type: object
+              x-kubernetes-validations:
+                - message: spec.restart must be unset on create; set spec.restart.id after creation to request a restart
+                  optionalOldSelf: true
+                  rule: oldSelf.hasValue() || !has(self.restart)
             status:
               description: status reflects the current observed state of this graph deployment.
               properties:
@@ -21375,10 +21379,6 @@ spec:
                 - state
               type: object
           type: object
-          x-kubernetes-validations:
-            - message: spec.restart must be unset on create; set spec.restart.id after creation to request a restart
-              optionalOldSelf: true
-              rule: oldSelf.hasValue() || !has(self.spec) || !has(self.spec.restart)
       served: true
       storage: false
       subresources:
