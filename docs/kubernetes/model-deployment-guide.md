@@ -156,19 +156,13 @@ GPU resources consumed during profiling.
 **Use rapid when:**
 - Getting started or iterating quickly
 - Running in CI/CD pipelines
-- Your GPU SKU is in the
-  [AIC support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
+- Your GPU SKU is in the [AIC support matrix](#aic-support-matrix)
 
 **Limitations:**
-- Rapid has two hardware gates before fallback can run:
-  - DGDR must accept `hardware.gpuSku`, and the hardware fields must be
-    auto-detected or set manually.
-  - AIC must have base system metadata for that GPU SKU, so the generator can
-    use the correct GPU count and VRAM.
-- If those gates pass but AIC does not support the exact model/GPU/backend
-  combination, the profiler falls back to a naive memory-fit config (basic TP
-  calculation). This fallback does not add support for a GPU SKU that is
-  missing from AIC's system metadata.
+- Fallback to a naive memory-fit config only applies after DGDR accepts
+  `hardware.gpuSku` and AIC has base system metadata for that GPU SKU. Unknown
+  or metadata-missing GPU SKUs fail before fallback; unsupported
+  model/GPU/backend combinations can fall back but may be suboptimal.
 - Simulated results may differ from real-hardware performance for unusual
   configurations.
 
@@ -184,8 +178,7 @@ benchmarks with AIPerf. Takes 2–4 hours.
 
 **Use thorough when:**
 - Tuning for production and you need the most optimal configuration
-- Your hardware uses a recognized DGDR GPU SKU but rapid AIC data is not
-  available
+- Your DGDR-recognized hardware does not have rapid AIC data
 - You want measured rather than simulated performance data
 
 **Constraints:**
@@ -199,27 +192,9 @@ benchmarks with AIPerf. Takes 2–4 hours.
 
 The rapid strategy relies on AIC system metadata and performance models. Check
 the [AIC support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
-for the latest model, GPU, backend, and backend-version support.
-
-Rapid checks support in this order:
-
-- **DGDR GPU SKU:** DGDR must accept `hardware.gpuSku`. If discovery cannot map
-  your GPU product name to a recognized SKU, set `hardware.gpuSku`,
-  `hardware.vramMb`, `hardware.numGpusPerNode`, and `hardware.totalGpus`
-  manually. Use lowercase underscore format (e.g., `h100_sxm`, not
-  `H100-SXM5-80GB`). See the
-  [DGDR Reference — SKU Format](dgdr.md#sku-format) for the full list.
-- **AIC base system metadata:** AIC must know the GPU SKU's memory, GPUs per
-  node, and hardware facts. Naive fallback does not add support for a GPU SKU
-  missing from AIC system metadata.
-- **AIC combination support:** If DGDR accepts the GPU SKU and AIC has base
-  system metadata, but AIC lacks rapid performance support for the exact
-  model/GPU/backend combination, rapid can fall back to naive memory-fit
-  generation.
+for the latest support. AIC currently supports:
 
 ### GPU SKUs
-
-AIC currently supports:
 
 | Supported (rapid) | Not Yet Supported (use thorough) |
 |---|---|
@@ -238,6 +213,10 @@ AIC currently supports:
 > Some rapid-mode SKUs use AIC estimate-only data until measured profiles are
 > available. Use `searchStrategy: thorough` when you need hardware-measured
 > profiling for an estimate-only or unsupported SKU.
+
+When specifying GPU SKUs manually, use lowercase underscore format (e.g.,
+`h100_sxm`, not `H100-SXM5-80GB`). See the
+[DGDR Reference — SKU Format](dgdr.md#sku-format) for the full list.
 
 ### Backends
 
