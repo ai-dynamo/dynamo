@@ -70,8 +70,9 @@ by this quickstart path.
   [jq](https://jqlang.org/download/) configured for the cluster.
 - Gateway API and GAIE CRDs installed. The quickstart installs them explicitly from pinned upstream
   release manifests.
-- A Gateway API implementation that supports GAIE. The quickstart shows agentgateway and Istio. See
-  the upstream [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
+- A Gateway API implementation that supports GAIE. The quickstart uses tested agentgateway and Istio
+  paths. See the upstream
+  [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
   for the broader ecosystem.
 - Dynamo platform installed with the operator. See the [Kubernetes Quickstart](../README.md) and
   [Installation Guide](../installation-guide.md).
@@ -85,9 +86,10 @@ GAIE requires a Gateway API implementation that can call an Endpoint Picker Plug
 the request to a backend. Dynamo is independent of the Gateway implementation: pick the gateway that
 matches your platform, then point its `HTTPRoute` and generated `InferencePool` at the Dynamo EPP.
 
-Use a Gateway implementation that supports the GAIE EndpointPicker flow. The quickstart includes
-agentgateway and Istio examples. Envoy Gateway and other Gateway API implementations also work when
-their installed version implements GAIE.
+Use a Gateway implementation that supports the GAIE EndpointPicker flow. The quickstart tests
+agentgateway and Istio. Envoy Gateway and other Gateway API implementations may work when their
+installed version supports GAIE `InferencePool` resources and EndpointPicker calls; validate the
+controller behavior before using that path.
 
 <Tabs>
   <Tab title="agentgateway">
@@ -101,13 +103,13 @@ their installed version implements GAIE.
     Configure EPP TLS policy with a `DestinationRule` when mesh policy requires it.
   </Tab>
   <Tab title="Envoy Gateway">
-    Use Envoy Gateway when its installed version supports GAIE EndpointPicker. Keep the Dynamo
-    resources the same: the route still targets the generated `InferencePool`, and the pool points
-    at the Dynamo EPP service.
+    Use Envoy Gateway when its installed version supports GAIE `InferencePool` resources and
+    EndpointPicker calls. Keep the Dynamo resources the same: the route still targets the generated
+    `InferencePool`, and the pool points at the Dynamo EPP service.
   </Tab>
   <Tab title="Other GAIE">
     Use another Gateway API implementation if it supports GAIE `InferencePool` resources and the
-    EndpointPicker extension. Check the upstream
+    EndpointPicker extension. This quickstart does not test that path. Check the upstream
     [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
     before choosing a controller.
   </Tab>
@@ -180,6 +182,15 @@ result with production-like traffic.
 | `label-filter` parameters | Change worker topology labels or component names. | Keep filter labels and values aligned with worker pod labels. |
 | `schedulingProfiles[].plugins[].weight` | Adjust how much each scorer influences endpoint selection. | Tune scorer weights deliberately; keep required filters and the picker in the profile. |
 | scorer and picker plugins | Change the routing strategy. | Treat this as advanced EPP tuning and validate with traffic. |
+
+For upstream EPP configuration semantics, see the GAIE
+[EPP YAML configuration guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/)
+and its
+[Scheduling Profiles](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/#scheduling-profiles)
+section for plugin weights. For label-based endpoint selection, see the upstream
+[InferencePool configuration guide](https://gateway-api-inference-extension.sigs.k8s.io/api-types/inferencepool/#how-to-configure-an-inferencepool).
+The `label-filter` plugin shown here is Dynamo-specific; the component role label comes from the
+Dynamo [ComponentType](../api-reference.md#componenttype) field.
 
 The operator reconciles the EPP `Deployment`, EPP `Service`, and generated `InferencePool` from the
 DGD. Tune the DGD first; patch generated resources only for short-lived debugging.
