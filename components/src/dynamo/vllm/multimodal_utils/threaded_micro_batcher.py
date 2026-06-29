@@ -128,6 +128,9 @@ class ThreadedMicroBatcher(Generic[T, R]):
             ``fn(items, target_bucket)`` on the worker thread — ``target_bucket``
             is the ladder rung to pad to (``None`` in eager mode).
         max_batch_cost: Max summed ``cost`` of a single ``fn`` batch (>= 1).
+            ``None`` (default) ⇒ **pass-through**: no cap — the whole drained
+            same-``bucket_key`` group runs as one ``fn`` call (``cost`` ignored).
+            With ``buckets`` set, ``None`` derives the ceiling as ``max(buckets)``.
         buckets: Optional sorted graph ladder. When set, the batcher rounds a
             batch's ``sum(cost)`` up to the nearest rung and passes it as
             ``target_bucket``; ``None``/empty ⇒ eager (``target_bucket=None``).
@@ -149,7 +152,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
         self,
         fn: Callable[[List[T], Optional[int]], List[R]],
         *,
-        max_batch_cost: int = 8,
+        max_batch_cost: Optional[int] = None,
         buckets: Optional[Sequence[int]] = None,
         max_wait_ms: float = 0.0,
         on_start: Optional[Callable[[], None]] = None,
@@ -158,11 +161,15 @@ class ThreadedMicroBatcher(Generic[T, R]):
         name: str = "micro-batcher",
         join_timeout_s: float = 10.0,
     ) -> None:
-        if max_batch_cost < 1:
-            raise ValueError("max_batch_cost must be >= 1")
+        if max_batch_cost is not None and max_batch_cost < 1:
+            raise ValueError("max_batch_cost must be >= 1 (or None for pass-through)")
         if max_outstanding_cost is not None and max_outstanding_cost < 1:
             raise ValueError("max_outstanding_cost must be >= 1")
         self._buckets = self._validate_buckets(buckets, max_batch_cost)
+        # Graph mode needs a bounded ceiling, so derive it from the ladder when the
+        # author left it None (pass-through is only meaningful in eager mode).
+        if self._buckets is not None and max_batch_cost is None:
+            max_batch_cost = self._buckets[-1]
         self._fn = fn
         self._max_batch_cost = max_batch_cost
         self._max_wait_s = max_wait_ms / 1000.0
@@ -188,18 +195,19 @@ class ThreadedMicroBatcher(Generic[T, R]):
 
     @staticmethod
     def _validate_buckets(
-        buckets: Optional[Sequence[int]], max_batch_cost: int
+        buckets: Optional[Sequence[int]], max_batch_cost: Optional[int]
     ) -> Optional[tuple]:
         """Normalise the ladder to a sorted tuple of positive ints (or None).
 
-        The ladder must cover the dispatch ceiling so every packed batch has a
-        rung to round up to: ``max(buckets) >= max_batch_cost``."""
+        When ``max_batch_cost`` is set, the ladder must cover it so every packed
+        batch has a rung to round up to: ``max(buckets) >= max_batch_cost``. When
+        it is ``None``, the ceiling is derived as ``max(buckets)`` by the caller."""
         if not buckets:
             return None
         rungs = tuple(sorted(int(b) for b in buckets))
         if any(b < 1 for b in rungs):
             raise ValueError("buckets must be positive ints")
-        if rungs[-1] < max_batch_cost:
+        if max_batch_cost is not None and rungs[-1] < max_batch_cost:
             raise ValueError(
                 f"max(buckets)={rungs[-1]} < max_batch_cost={max_batch_cost}; the "
                 "ladder must cover the dispatch ceiling (set max_batch_cost to "
@@ -285,7 +293,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
         for c in costs:
             if not isinstance(c, int) or isinstance(c, bool) or c < 1:
                 raise ValueError(f"cost must be a positive int, got {c!r}")
-            if c > self._max_batch_cost:
+            if self._max_batch_cost is not None and c > self._max_batch_cost:
                 raise ValueError(
                     f"item cost {c} exceeds max_batch_cost {self._max_batch_cost}; "
                     "it has no batch it can fit"
@@ -469,6 +477,10 @@ class ThreadedMicroBatcher(Generic[T, R]):
         for work in live:
             by_bucket.setdefault(work.bucket, []).append(work)
         for group in by_bucket.values():
+            if self._max_batch_cost is None:
+                # Pass-through: no cost cap — the whole drained bucket is one batch.
+                self._run_batch(group)
+                continue
             batch: List[_Work] = []
             batch_cost = 0
             for work in group:

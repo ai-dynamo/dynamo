@@ -203,6 +203,28 @@ def test_buckets_below_max_batch_cost_rejected():
         ThreadedMicroBatcher(_echo, max_batch_cost=8, buckets=[2, 4])
 
 
+def test_buckets_derive_max_batch_cost_when_none():
+    """Graph mode with no explicit budget derives the ceiling from the ladder."""
+    b = ThreadedMicroBatcher(_echo, buckets=[2, 4, 8])  # max_batch_cost=None
+    assert b._max_batch_cost == 8
+
+
+async def test_max_batch_cost_none_is_passthrough():
+    """Default (max_batch_cost=None): no cap and no per-item ceiling — the whole
+    drained same-bucket group runs as ONE fn call regardless of summed cost."""
+    rec = _Recorder()
+    b = ThreadedMicroBatcher(rec.fn, max_wait_ms=200.0)  # max_batch_cost=None
+    b.start()
+    try:
+        # Big per-item costs that would be split (or rejected) under any finite cap.
+        out = await b.submit([1, 2, 3, 4], costs=[1000, 1000, 1000, 1000])
+        assert len(out) == 4
+        assert rec.batches == [[1, 2, 3, 4]]  # one un-split batch
+        assert rec.target_buckets == [None]  # eager (no ladder)
+    finally:
+        b.shutdown()
+
+
 async def test_error_reaches_every_caller():
     def boom(items, target_bucket=None):
         raise ValueError("boom")

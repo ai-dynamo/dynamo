@@ -75,13 +75,16 @@ class Preprocessed(Generic[ItemT]):
     Attributes:
         item: Opaque payload passed verbatim to ``forward_batch``.
         cost: Token/feature size, ``>= 1``; packs toward ``max_batch_cost``.
+            Defaults to ``1`` and is **ignored** when ``max_batch_cost`` is
+            ``None`` (pass-through), so a pass-through author can omit it.
         bucket_key: Shape-compatibility partition — items with different keys
             never share a ``forward_batch`` call (so a captured graph can replay).
+            Defaults to ``None`` (a single shared bucket).
     """
 
     item: ItemT
-    cost: int
-    bucket_key: Hashable
+    cost: int = 1
+    bucket_key: Hashable = None
 
 
 def placeholder_token_id_from_tokenizer(
@@ -145,9 +148,13 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
     """
 
     #: Dispatch ceiling: the batcher packs items up to this summed ``cost`` per
-    #: ``forward_batch`` call. A chosen budget (a token budget when ``cost`` is a
-    #: token count). When graphed, set it to ``max(buckets)``.
-    max_batch_cost: int = 8
+    #: ``forward_batch`` call (a chosen budget — a token budget when ``cost`` is a
+    #: token count). ``None`` (the default) ⇒ **pass-through**: no cap — every
+    #: same-``bucket_key`` item the batcher drains in one iteration is handed to a
+    #: single ``forward_batch`` (the author owns sizing; ``cost`` is ignored).
+    #: When graphed, leave it ``None`` to derive ``max(buckets)``, or set it
+    #: explicitly (must be ``<= max(buckets)``).
+    max_batch_cost: Optional[int] = None
 
     #: Sorted graph ladder (the captured rungs). ``None``/empty ⇒ eager (no
     #: graphs); the batcher passes ``target_bucket=None``. Non-empty ⇒ the batcher

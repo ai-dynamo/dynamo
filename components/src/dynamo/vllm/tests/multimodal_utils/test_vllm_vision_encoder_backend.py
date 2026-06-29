@@ -101,7 +101,14 @@ def test_abc_cannot_be_instantiated():
 
 def test_default_attrs_and_close_noop():
     e = _MinimalBackend()
-    # Defaults from the ABC: eager (no ladder), small count budget.
+    # Defaults from the ABC: eager (no ladder) + pass-through (no cost cap).
     assert e.buckets is None
-    assert e.max_batch_cost == 8
+    assert e.max_batch_cost is None
     assert e.close() is None
+
+
+def test_preprocessed_defaults_for_passthrough():
+    # A pass-through author can omit cost / bucket_key entirely.
+    p = Preprocessed(item="x")
+    assert p.cost == 1
+    assert p.bucket_key is None
