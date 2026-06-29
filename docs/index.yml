@@ -23,8 +23,8 @@ tabs:
     display-name: Home
     icon: house
     skip-slug: true
-  getting-started:
-    display-name: Getting Started
+  user-guide:
+    display-name: User Guide
     icon: book-open
     skip-slug: true
   recipes:
@@ -49,7 +49,7 @@ navigation:
       - page: Welcome
         path: welcome.mdx
 
-  - tab: getting-started
+  - tab: user-guide
     layout:
       # ==================== Getting Started ====================
       - section: Getting Started
@@ -60,8 +60,8 @@ navigation:
             path: kubernetes/README.md
           # - page: Local Quickstart
           #   path: getting-started/quickstart.mdx
-          # - page: Compatibility
-          #   path: getting-started/compatibility.md
+          - page: Compatibility
+            path: getting-started/compatibility.md
 
       - section: Installation
         contents:
@@ -111,24 +111,26 @@ navigation:
               contents:
                 - page: GKE Setup
                   path: kubernetes/cloud-providers/gke/gke.md
-                  
+
       # ==================== Usage ====================
       - section: Model Deployment # TODO: could be renamed to Deployment or Model Deployment bc this part is more about installation and how to get running with a model as opposed to observability, tuning, or other features.
         contents:
-          - section: Kubernetes
-            collapsed: open-by-default
-            contents:
-              - page: Overview
-                path: getting-started/kubernetes-deployment.md
-              - page: Model Deployment Guide
-                path: kubernetes/model-deployment-guide.md
-              - page: DGDR Reference
-                path: kubernetes/dgdr.md
+          - page: Overview
+            path: getting-started/kubernetes-deployment.md
+          - page: Deploy with DGD
+            path: kubernetes/dgd-guide.md
+          - page: Auto Deploy with DGDR
+            path: kubernetes/dgdr-guide.md
+          # - page: Model Deployment Guide
+          #   path: kubernetes/model-deployment-guide.md
+          # - page: DGDR Reference
+          #   path: kubernetes/dgdr.md
           - page: Set up KV aware routing
             path: components/router/router-guide.md
           - section: Set up Disaggregated Serving
-            path: features/disaggregated-serving/README.md
             contents:
+              - page: Overview
+                path: features/disaggregated-serving/README.md
               - page: Sizing with AIConfigurator
                 path: features/disaggregated-serving/aiconfigurator.md
           - section: Set up KV Cache Offloading
@@ -142,9 +144,10 @@ navigation:
               - page: Custom KV Events
                 path: integrations/kv-events-custom-engines.md
           - section: Set up Observability
-            path: observability/README.md
             collapsed: true
             contents:
+              - page: Overview
+                path: observability/README.md
               - page: Prometheus + Grafana
                 path: observability/prometheus-grafana.md
               - page: Metrics

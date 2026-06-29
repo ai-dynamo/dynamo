@@ -45,7 +45,7 @@ Every Dynamo deployment requires two Helm charts: the **GPU Operator** (Step 1) 
 
 **Shared storage** — Prevents each pod from downloading model weights independently. Without it, large models (>70B) take hours to download per pod, and many replicas will hit HuggingFace rate limits. Not enforced by the operator — this is an operational concern. See [Model Caching](model-caching.md) for the full walkthrough.
 
-<Steps>
+<Steps toc={true} tocDepth={2}>
 
 <Step title="Install the GPU Operator">
 
