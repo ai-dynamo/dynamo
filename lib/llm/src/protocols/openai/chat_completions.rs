@@ -973,6 +973,42 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_messages_accepts_empty_tool_call_arguments() {
+        for arguments in ["", " \n\t ", "{}"] {
+            let request_json = json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "weather?"},
+                    {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": arguments
+                            }
+                        }]
+                    },
+                    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+                ],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                }]
+            });
+
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(request_json).expect("Failed to deserialize request");
+            ValidateRequest::validate(&request)
+                .unwrap_or_else(|err| panic!("empty tool_call arguments should validate: {err}"));
+        }
+    }
+
+    #[test]
     fn test_validate_tools_valid_names() {
         fn make_tool(name: &str) -> ChatCompletionTool {
             ChatCompletionTool {

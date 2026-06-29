@@ -62,13 +62,24 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
 /// Hugging Face config keeps the language model context under
 /// `config.json.text_config.max_position_embeddings`
 fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Result<Option<u32>> {
+    let tokenizer_context_length = || {
+        crate::file_json_field(
+            &local_path.join("tokenizer_config.json"),
+            "model_max_length",
+        )
+        .ok()
+    };
+
     let config_path = local_path.join("config.json");
     let config_json = match std::fs::read_to_string(&config_path) {
-        Ok(config_json) => config_json,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(config_json) => Some(config_json),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => {
             return Err(err).with_context(|| format!("Failed to read {}", config_path.display()));
         }
+    };
+    let Some(config_json) = config_json else {
+        return Ok(tokenizer_context_length().filter(|context_length| *context_length > 0));
     };
     let config: serde_json::Value = serde_json::from_str(&config_json)
         .with_context(|| format!("Failed to parse JSON from file: {}", config_path.display()))?;
@@ -78,23 +89,15 @@ fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Resu
             serde_json::from_value(value.clone())
                 .context("Failed to deserialize max_position_embeddings")?,
         ),
-        None => match config.get("text_config") {
-            Some(text_config) => Some(
-                serde_json::from_value(
-                    text_config
-                        .get("max_position_embeddings")
-                        .cloned()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("Field 'text_config.max_position_embeddings' not found")
-                        })?,
-                )
-                .context("Failed to deserialize text_config.max_position_embeddings")?,
+        None => match config
+            .get("text_config")
+            .and_then(|text_config| text_config.get("max_position_embeddings"))
+        {
+            Some(value) => Some(
+                serde_json::from_value(value.clone())
+                    .context("Failed to deserialize text_config.max_position_embeddings")?,
             ),
-            None => crate::file_json_field(
-                &local_path.join("tokenizer_config.json"),
-                "model_max_length",
-            )
-            .ok(),
+            None => tokenizer_context_length(),
         },
     };
 
@@ -2633,6 +2636,18 @@ mod ownership_tests {
             Some(131072)
         );
 
+        std::fs::write(dir.path().join("config.json"), r#"{"text_config": {}}"#)?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        std::fs::remove_file(dir.path().join("config.json"))?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
         Ok(())
     }
 
@@ -2655,11 +2670,14 @@ mod ownership_tests {
             "{err:?}"
         );
 
-        std::fs::write(dir.path().join("config.json"), r#"{"text_config": {}}"#)?;
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": "not-a-number"}}"#,
+        )?;
         let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
         assert!(
             err.to_string()
-                .contains("Field 'text_config.max_position_embeddings' not found"),
+                .contains("Failed to deserialize text_config.max_position_embeddings"),
             "{err:?}"
         );
 

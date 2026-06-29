@@ -444,7 +444,7 @@ pub fn validate_messages(
         anyhow::bail!("Messages array cannot be empty");
     }
     // Prior assistant tool-call messages in the request must carry arguments
-    // as a JSON object string; reject bad shapes before chat-template rendering.
+    // as a JSON object string; reject bad non-empty shapes before chat-template rendering.
     // This was caught in MiniMax-M3 multi-turn tool-call tests
     for (message_index, message) in messages.iter().enumerate() {
         if let dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(assistant) = message
@@ -464,6 +464,9 @@ pub fn validate_messages(
 }
 
 fn validate_json_object_string(value: &str, field: String) -> Result<(), anyhow::Error> {
+    if value.trim().is_empty() {
+        return Ok(());
+    }
     let parsed: serde_json::Value = serde_json::from_str(value)
         .map_err(|error| anyhow::anyhow!("{field} must be a valid JSON object string: {error}"))?;
     if !parsed.is_object() {
