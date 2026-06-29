@@ -1,11 +1,63 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Native shared-memory KV lease atomics for GMS persistent allocations.
+//! Native hot-path SPSC ring push/pop for GMS RestoreRing.
+//!
+//! Mirrors the on-disk layout defined in `common/restore_ring.py` exactly.
+//! Engine/daemon attach the mmap'd file via the Python wrapper, then
+//! pass the buffer pointer + capacity into these native push/pop calls
+//! to avoid the ~9 µs/op Python overhead (struct.pack_into × 7 +
+//! function-call overhead).
+//!
+//! Layout (little-endian, must match common/restore_ring.py):
+//!
+//!   Header (64B):
+//!     magic        : u32   = 0x4752_5347  ("GMSR" little-endian read)
+//!     version      : u32   = 1
+//!     capacity     : u32   record count (power of 2)
+//!     record_size  : u32   = 512
+//!     head_seq     : u64   producer-only
+//!     tail_seq     : u64   consumer-only
+//!     drops        : u64   producer-only
+//!     padding      : 16B
+//!
+//!   Record (512B):
+//!     seq            : u64    (non-zero ⇒ ready for consumer)
+//!     op_kind        : u8
+//!     flags          : u8
+//!     _pad           : u16
+//!     counter_slot   : u32
+//!     counter_target : u32
+//!     n_blocks       : u32
+//!     _pad2          : u64
+//!     src_engine_id  : char[48]   (NUL-padded)
+//!     block_pairs[54]: each (u32 src_blk, u32 dest_blk)
 
 use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+const HEADER_SIZE: usize = 64;
+const RECORD_SIZE: usize = 512;
+const ENGINE_ID_MAX_LEN: usize = 48;
+const MAX_BLOCK_PAIRS_PER_RECORD: usize = 54;
+
+const OFF_HEAD_SEQ: usize = 16;
+const OFF_TAIL_SEQ: usize = 24;
+const OFF_DROPS: usize = 32;
+
+const R_SEQ: usize = 0;
+const R_OP: usize = 8;
+const R_FLAGS: usize = 9;
+const R_COUNTER_SLOT: usize = 12;
+const R_COUNTER_TARGET: usize = 16;
+const R_N_BLOCKS: usize = 20;
+const R_ENGINE_ID: usize = 32;
+const R_BLOCK_PAIRS: usize = 80;
+const BLOCK_PAIR_STRIDE: usize = 8;
+
+const OP_RESTORE_CHUNK: u8 = 1;
 
 const LEASE_MAGIC: u32 = 0x4c53_4d47; // "GMSL" as little-endian u32.
 const LEASE_VERSION: u32 = 1;
@@ -256,6 +308,201 @@ unsafe fn load_lease_reservation(ptr: *const u8) -> (u32, u64, u64) {
         if before == after {
             return (reserved_blocks, reserved_owner_hash, after);
         }
+    }
+}
+
+/// Push one chunk-restore record into the ring.
+///
+/// Arguments:
+///   - `buf`: mutable bytes-like object backing the mmap. Must be at
+///     least HEADER_SIZE + capacity*RECORD_SIZE bytes.
+///   - `capacity`: ring capacity (power of 2).
+///   - `src_engine_id_bytes`: UTF-8 engine_id, NUL-padded externally
+///     OR length must be ≤ 47.
+///   - `src_blocks` / `dest_blocks`: same-length lists of u32 ids.
+///   - `counter_slot`, `counter_target`, `flags`: scalar fields.
+///
+/// Returns True on success; False if the ring was full (drops counter
+/// auto-incremented).
+#[pyfunction]
+#[pyo3(signature = (
+    buf, capacity, src_engine_id_bytes, src_blocks, dest_blocks,
+    counter_slot, counter_target, flags,
+))]
+fn push_record(
+    py: Python<'_>,
+    buf: PyBuffer<u8>,
+    capacity: u32,
+    src_engine_id_bytes: &[u8],
+    src_blocks: Vec<u32>,
+    dest_blocks: Vec<u32>,
+    counter_slot: u32,
+    counter_target: u32,
+    flags: u8,
+) -> PyResult<bool> {
+    let _ = py;
+    if !buf.readonly() || true {
+        // PyBuffer doesn't expose mut directly; we'll use the raw pointer.
+    }
+    if src_blocks.len() != dest_blocks.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "src_blocks and dest_blocks length mismatch",
+        ));
+    }
+    let n_blocks = src_blocks.len();
+    if n_blocks > MAX_BLOCK_PAIRS_PER_RECORD {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "too many block pairs: {} > {}",
+            n_blocks, MAX_BLOCK_PAIRS_PER_RECORD
+        )));
+    }
+    if src_engine_id_bytes.len() >= ENGINE_ID_MAX_LEN {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "engine_id too long: {} >= {}",
+            src_engine_id_bytes.len(),
+            ENGINE_ID_MAX_LEN
+        )));
+    }
+    let mask = (capacity - 1) as u64;
+
+    let ptr = buf.buf_ptr() as *mut u8;
+    let buf_len = buf.len_bytes();
+    let need = HEADER_SIZE + (capacity as usize) * RECORD_SIZE;
+    if buf_len < need {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "buffer too small: {} < {}",
+            buf_len, need
+        )));
+    }
+
+    // Single-producer: head bump is naturally atomic under GIL.
+    unsafe {
+        let head = read_u64(ptr, OFF_HEAD_SEQ);
+        let tail = read_u64(ptr, OFF_TAIL_SEQ);
+        if head.wrapping_sub(tail) >= capacity as u64 {
+            // Full; bump drops + return False.
+            let drops = read_u64(ptr, OFF_DROPS);
+            write_u64(ptr, OFF_DROPS, drops.wrapping_add(1));
+            return Ok(false);
+        }
+
+        let slot_idx = (head & mask) as usize;
+        let base = HEADER_SIZE + slot_idx * RECORD_SIZE;
+
+        // Zero seq first so consumer never observes half-written.
+        write_u64(ptr, base + R_SEQ, 0);
+
+        // Scalar fields
+        *(ptr.add(base + R_OP)) = OP_RESTORE_CHUNK;
+        *(ptr.add(base + R_FLAGS)) = flags;
+        write_u32(ptr, base + R_COUNTER_SLOT, counter_slot);
+        write_u32(ptr, base + R_COUNTER_TARGET, counter_target);
+        write_u32(ptr, base + R_N_BLOCKS, n_blocks as u32);
+
+        // engine_id (NUL-padded). Zero the field first.
+        std::ptr::write_bytes(ptr.add(base + R_ENGINE_ID), 0, ENGINE_ID_MAX_LEN);
+        std::ptr::copy_nonoverlapping(
+            src_engine_id_bytes.as_ptr(),
+            ptr.add(base + R_ENGINE_ID),
+            src_engine_id_bytes.len(),
+        );
+
+        // Block pairs (zero out unused tail)
+        let pairs_base = base + R_BLOCK_PAIRS;
+        for i in 0..n_blocks {
+            write_u32(ptr, pairs_base + i * BLOCK_PAIR_STRIDE, src_blocks[i]);
+            write_u32(ptr, pairs_base + i * BLOCK_PAIR_STRIDE + 4, dest_blocks[i]);
+        }
+        for i in n_blocks..MAX_BLOCK_PAIRS_PER_RECORD {
+            write_u32(ptr, pairs_base + i * BLOCK_PAIR_STRIDE, 0);
+            write_u32(ptr, pairs_base + i * BLOCK_PAIR_STRIDE + 4, 0);
+        }
+
+        // Release: publish seq AFTER payload (x86-TSO; under GIL).
+        // Use atomic store with Release ordering for memory ordering
+        // guarantee.
+        let seq_ptr = ptr.add(base + R_SEQ) as *const AtomicU64;
+        (*seq_ptr).store(head.wrapping_add(1), Ordering::Release);
+
+        // Publish head LAST.
+        let head_ptr = ptr.add(OFF_HEAD_SEQ) as *const AtomicU64;
+        (*head_ptr).store(head.wrapping_add(1), Ordering::Release);
+    }
+    Ok(true)
+}
+
+/// Pop one ready record from the ring. Returns None if empty.
+///
+/// Returns a tuple: (op, flags, counter_slot, counter_target,
+/// engine_id_bytes, [(src_blk, dest_blk), ...]).
+#[pyfunction]
+#[pyo3(signature = (buf, capacity))]
+fn try_pop_record(
+    py: Python<'_>,
+    buf: PyBuffer<u8>,
+    capacity: u32,
+) -> PyResult<Option<(u8, u8, u32, u32, Py<PyBytes>, Vec<(u32, u32)>)>> {
+    let mask = (capacity - 1) as u64;
+    let ptr = buf.buf_ptr() as *mut u8;
+    let buf_len = buf.len_bytes();
+    let need = HEADER_SIZE + (capacity as usize) * RECORD_SIZE;
+    if buf_len < need {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "buffer too small: {} < {}",
+            buf_len, need
+        )));
+    }
+
+    unsafe {
+        let tail_ptr = ptr.add(OFF_TAIL_SEQ) as *const AtomicU64;
+        let head_ptr = ptr.add(OFF_HEAD_SEQ) as *const AtomicU64;
+        let tail = (*tail_ptr).load(Ordering::Acquire);
+        let head = (*head_ptr).load(Ordering::Acquire);
+        if tail >= head {
+            return Ok(None);
+        }
+        let slot_idx = (tail & mask) as usize;
+        let base = HEADER_SIZE + slot_idx * RECORD_SIZE;
+        let seq_ptr = ptr.add(base + R_SEQ) as *const AtomicU64;
+        let seq = (*seq_ptr).load(Ordering::Acquire);
+        if seq != tail.wrapping_add(1) {
+            return Ok(None); // producer hasn't released yet
+        }
+
+        let op = *(ptr.add(base + R_OP));
+        let flags = *(ptr.add(base + R_FLAGS));
+        let counter_slot = read_u32(ptr, base + R_COUNTER_SLOT);
+        let counter_target = read_u32(ptr, base + R_COUNTER_TARGET);
+        let n_blocks_raw = read_u32(ptr, base + R_N_BLOCKS) as usize;
+        let n_blocks = n_blocks_raw.min(MAX_BLOCK_PAIRS_PER_RECORD);
+
+        // engine_id: find NUL or end of field
+        let eid_slice = std::slice::from_raw_parts(ptr.add(base + R_ENGINE_ID), ENGINE_ID_MAX_LEN);
+        let eid_len = eid_slice
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(ENGINE_ID_MAX_LEN);
+        let eid_bytes = PyBytes::new_bound(py, &eid_slice[..eid_len]);
+
+        let mut pairs = Vec::with_capacity(n_blocks);
+        let pairs_base = base + R_BLOCK_PAIRS;
+        for i in 0..n_blocks {
+            let src = read_u32(ptr, pairs_base + i * BLOCK_PAIR_STRIDE);
+            let dest = read_u32(ptr, pairs_base + i * BLOCK_PAIR_STRIDE + 4);
+            pairs.push((src, dest));
+        }
+
+        // Advance tail AFTER reading payload.
+        (*tail_ptr).store(tail.wrapping_add(1), Ordering::Release);
+
+        Ok(Some((
+            op,
+            flags,
+            counter_slot,
+            counter_target,
+            eid_bytes.unbind(),
+            pairs,
+        )))
     }
 }
 
@@ -744,8 +991,90 @@ fn kv_lease_reclaim_foreign(
 }
 
 // IEEE CRC32 polynomial in reversed representation, matching zlib.
+const CRC32_POLY: u32 = 0xEDB8_8320;
+
+#[inline]
+fn gf2_mat_mul(mat: &[u32; 32], mut vec: u32) -> u32 {
+    let mut out = 0;
+    let mut i = 0;
+    while vec != 0 {
+        if vec & 1 != 0 {
+            out ^= mat[i];
+        }
+        vec >>= 1;
+        i += 1;
+    }
+    out
+}
+
+#[inline]
+fn gf2_mat_square(square: &mut [u32; 32], mat: &[u32; 32]) {
+    for i in 0..32 {
+        square[i] = gf2_mat_mul(mat, mat[i]);
+    }
+}
+
+/// Return crc32(A || B) from crc32(A), crc32(B), and len(B).
+fn crc32_combine_one(crc1: u32, crc2: u32, len2: u64) -> u32 {
+    if len2 == 0 {
+        return crc1;
+    }
+    let mut odd = [0u32; 32];
+    let mut even = [0u32; 32];
+    odd[0] = CRC32_POLY;
+    for (n, value) in odd.iter_mut().enumerate().skip(1) {
+        *value = 1u32 << (n - 1);
+    }
+    gf2_mat_square(&mut even, &odd);
+    gf2_mat_square(&mut odd, &even);
+    let mut crc = crc1;
+    let mut len = len2;
+    loop {
+        gf2_mat_square(&mut even, &odd);
+        if len & 1 != 0 {
+            crc = gf2_mat_mul(&even, crc);
+        }
+        len >>= 1;
+        if len == 0 {
+            break;
+        }
+        gf2_mat_square(&mut odd, &even);
+        if len & 1 != 0 {
+            crc = gf2_mat_mul(&odd, crc);
+        }
+        len >>= 1;
+        if len == 0 {
+            break;
+        }
+    }
+    crc ^ crc2
+}
+
+/// Combine ordered GPU-computed chunk CRCs without copying payload bytes.
+#[pyfunction]
+#[pyo3(signature = (crcs, chunk_bytes, total_bytes))]
+fn crc32_combine_chunks(crcs: Vec<u32>, chunk_bytes: u64, total_bytes: u64) -> u32 {
+    if total_bytes == 0 || crcs.is_empty() {
+        return 0;
+    }
+    let mut combined = 0;
+    let mut remaining = total_bytes;
+    for crc in crcs {
+        let this_len = remaining.min(chunk_bytes);
+        if this_len == 0 {
+            break;
+        }
+        combined = crc32_combine_one(combined, crc, this_len);
+        remaining -= this_len;
+    }
+    combined
+}
+
 #[pymodule]
 fn gms_rust_ring(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(push_record, m)?)?;
+    m.add_function(wrap_pyfunction!(try_pop_record, m)?)?;
+    m.add_function(wrap_pyfunction!(crc32_combine_chunks, m)?)?;
     m.add_function(wrap_pyfunction!(kv_lease_init, m)?)?;
     m.add_function(wrap_pyfunction!(kv_lease_free_count, m)?)?;
     m.add_function(wrap_pyfunction!(kv_lease_free_count_for_owner, m)?)?;
@@ -759,6 +1088,11 @@ fn gms_rust_ring(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(kv_lease_seal, m)?)?;
     m.add_function(wrap_pyfunction!(kv_lease_release, m)?)?;
     m.add_function(wrap_pyfunction!(kv_lease_reclaim_foreign, m)?)?;
+    m.add("RECORD_SIZE", RECORD_SIZE)?;
+    m.add("HEADER_SIZE", HEADER_SIZE)?;
+    m.add("MAX_BLOCK_PAIRS", MAX_BLOCK_PAIRS_PER_RECORD)?;
+    m.add("MAX_BLOCK_PAIRS_PER_RECORD", MAX_BLOCK_PAIRS_PER_RECORD)?;
+    m.add("ENGINE_ID_MAX_LEN", ENGINE_ID_MAX_LEN)?;
     m.add("KV_LEASE_HEADER_SIZE", LEASE_HEADER_SIZE)?;
     m.add("KV_LEASE_RECORD_SIZE", LEASE_RECORD_SIZE)?;
     m.add("KV_LEASE_MAGIC", LEASE_MAGIC)?;
