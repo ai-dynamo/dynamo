@@ -197,7 +197,7 @@ for the latest support.
 
 ### GPU SKUs
 
-| Supported (rapid) | No rapid performance data |
+| Supported (rapid) | Not supported by rapid |
 |---|---|
 | H100 SXM | V100 (SXM/PCIe) |
 | H100 PCIe | T4 |
