@@ -109,7 +109,7 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
 static ALLOW_UNSUPPORTED_FIELDS: OnceLock<bool> = OnceLock::new();
 
 fn allow_unsupported_fields() -> bool {
-    *ALLOW_UNSUPPORTED_FIELDS.get_or_init(|| {
+    *IGNORE_UNSUPPORTED_FIELDS.get_or_init(|| {
         env::var("DYN_ALLOW_UNSUPPORTED_FIELDS")
             .ok()
             .and_then(|value| value.parse::<bool>().ok())
