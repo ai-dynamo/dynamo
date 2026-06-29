@@ -85,6 +85,36 @@ GAIE requires a Gateway API implementation that can call an Endpoint Picker Plug
 the request to a backend. Dynamo is independent of the Gateway implementation: pick the gateway that
 matches your platform, then point its `HTTPRoute` and generated `InferencePool` at the Dynamo EPP.
 
+Use a Gateway implementation that supports the GAIE EndpointPicker flow. The quickstart includes
+agentgateway and Istio examples. Envoy Gateway and other Gateway API implementations also work when
+their installed version implements GAIE.
+
+<Tabs>
+  <Tab title="agentgateway">
+    Use agentgateway for a small Gateway API footprint or when the cluster does not already
+    standardize on a service mesh. Install the agentgateway chart with
+    `inferenceExtension.enabled=true`; the GatewayClass is `agentgateway`.
+  </Tab>
+  <Tab title="Istio">
+    Use Istio when the cluster already standardizes on Istio for ingress, mesh policy, or telemetry.
+    Install Istio with `ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true`; the GatewayClass is `istio`.
+    Configure EPP TLS policy with a `DestinationRule` when mesh policy requires it.
+  </Tab>
+  <Tab title="Envoy Gateway">
+    Use Envoy Gateway when its installed version supports GAIE EndpointPicker. Keep the Dynamo
+    resources the same: the route still targets the generated `InferencePool`, and the pool points
+    at the Dynamo EPP service.
+  </Tab>
+  <Tab title="Other GAIE">
+    Use another Gateway API implementation if it supports GAIE `InferencePool` resources and the
+    EndpointPicker extension. Check the upstream
+    [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
+    before choosing a controller.
+  </Tab>
+</Tabs>
+
+The quickstart walks through the two implementation paths shown in this table:
+
 | | agentgateway | Istio |
 |---|---|---|
 | Good fit | New clusters or clusters without a mesh standard | Clusters that already standardize on Istio |
@@ -136,12 +166,28 @@ the matching `InferencePool`, so users apply the DGD and the route instead of ha
 
 ### EPP Component Configuration
 
-Start from the recipe EPP component and change the plugin profile only when you want different
-routing behavior.
+Start from the recipe EPP component and update the `DynamoGraphDeployment` for your cluster. Change
+deployment-level settings such as replicas and resources to fit gateway traffic volume. Change
+routing plugin settings only when you want different endpoint-selection behavior, then validate the
+result with production-like traffic.
+
+| Setting | When to change it | Rule |
+|---|---|---|
+| `replicas` and `podTemplate.spec.containers[].resources` | Scale or reserve capacity for EPP pods. | Keep EPP capacity aligned with gateway request volume. |
+| `DYN_MODEL_NAME` | Change the served model. | Match the worker model name. |
+| `DYN_KV_CACHE_BLOCK_SIZE` | Change the backend KV block size. | Match the backend `--block-size` value. |
+| `DYN_ENFORCE_DISAGG` | Require strict prefill/decode routing separation. | Set `"true"` only for disaggregated deployments that should fail closed when topology labels are missing. |
+| `label-filter` parameters | Change worker topology labels or component names. | Keep filter labels and values aligned with worker pod labels. |
+| `schedulingProfiles[].plugins[].weight` | Adjust how much each scorer influences endpoint selection. | Tune scorer weights deliberately; keep required filters and the picker in the profile. |
+| scorer and picker plugins | Change the routing strategy. | Treat this as advanced EPP tuning and validate with traffic. |
+
+The operator reconciles the EPP `Deployment`, EPP `Service`, and generated `InferencePool` from the
+DGD. Tune the DGD first; patch generated resources only for short-lived debugging.
 
 ```yaml
 - name: Epp
   type: epp
+  replicas: 1
   eppConfig:
     config:
       plugins:
@@ -167,7 +213,8 @@ routing behavior.
               weight: 1
 ```
 
-Keep the router environment values aligned with the worker runtime:
+The `DYN_*` environment values are runtime contracts between the EPP router logic and the workers.
+Update them when the worker backend changes; do not use them to tune scoring.
 
 ```yaml
 - name: Epp
