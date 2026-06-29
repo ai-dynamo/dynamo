@@ -2106,8 +2106,8 @@ fn test_simulation_load_pattern_visualization() {
 // CSV Export for Visualization
 // ============================================================================
 
-/// Runs simulations at C=20%, 50%, 90% concurrent slot usage and writes
-/// per-tick churn, load, lifecycle, and summary data to CSV files under
+/// Runs load-driven simulations and writes per-tick churn, load, lifecycle,
+/// and summary data to CSV files under
 /// `target/lora_sim_csv/`. Use the companion `plot_lora_churn.py` script
 /// to visualize.
 ///
@@ -2192,7 +2192,7 @@ fn test_export_csv() {
     };
     all_runs.push(("daily", diurnal_config.clone(), diurnal_schedules));
 
-    // ── 4. Flash Crowd: baseline Zipf+Poisson with two viral spikes.
+    // ── 3. Flash Crowd: baseline Zipf+Poisson with two viral spikes.
     // Spike at tick 50 and 130, multiplier=5x, half-life=8 ticks.
     let flash_total_loras: usize = 100;
     let flash_s: f64 = 1.0;
@@ -2228,7 +2228,7 @@ fn test_export_csv() {
     };
     all_runs.push(("spike", flash_config.clone(), flash_schedules));
 
-    // ── 5. MMPP: Markov-modulated Poisson process with 3 states.
+    // ── 4. MMPP: Markov-modulated Poisson process with 3 states.
     //   calm  (rate=15): 90% stay, 10% → busy
     //   busy  (rate=40): 15% → calm, 80% stay, 5% → surge
     //   surge (rate=70): 10% → calm, 20% → busy, 70% stay
@@ -2271,10 +2271,9 @@ fn test_export_csv() {
         let random = run_random_simulation(config, schedules);
         let mcf = run_mcf_simulation(config, schedules);
 
-        let c_pct = (config.concurrent_loras as f64 / total_slots as f64 * 100.0).round();
         println!(
-            "\n── {} (C={:.0}%, {}/{} slots, L={}) ──",
-            name, c_pct, config.concurrent_loras, total_slots, config.total_loras
+            "\n── {} (load-driven, N={} backends, K={} slots/backend, L={}) ──",
+            name, config.num_backends, config.slots_per_backend, config.total_loras
         );
         print_comparison(&hrw, &random, &mcf);
 
@@ -2457,8 +2456,6 @@ fn test_export_csv() {
         writeln!(f, "slots_per_backend,{}", config.slots_per_backend).unwrap();
         writeln!(f, "total_slots,{}", total_slots).unwrap();
         writeln!(f, "total_loras,{}", config.total_loras).unwrap();
-        writeln!(f, "concurrent_loras,{}", config.concurrent_loras).unwrap();
-        writeln!(f, "c_pct,{:.0}", c_pct).unwrap();
         writeln!(f, "total_ticks,{}", config.total_ticks).unwrap();
         writeln!(f, "loras_used,{}", schedules.len()).unwrap();
         writeln!(f, "lifetime_mean,{}", config.lifetime_mean).unwrap();
