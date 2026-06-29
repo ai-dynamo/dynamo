@@ -96,9 +96,9 @@ jobs:
     steps:
       - name: Validate inputs
         env:
-          RELEASE_VERSION: ${{ inputs.release_version || '0.0.0' }}
+          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0' }}
           SOURCE_REF: ${{ inputs.source_ref || 'main' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/0.0.0test' || '') }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0' || '') }}
         run: |
           set -euo pipefail
           if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
@@ -124,7 +124,15 @@ jobs:
           SELECTION: ${{ inputs.selection }}
           CONTAINERS: ${{ inputs.containers || 'all' }}
           WHEELS: ${{ inputs.wheels || 'all' }}
-          CRATES: ${{ inputs.crates || 'all' }}
+          # MAX publishable set = the full dependency closure of the intended public
+          # crates (runtime, memory, tokens, kv-router, protocols, parsers, llm, mocker),
+          # all at 1.3.0. Includes the transitive deps (rl, kv-hashing, data-gen, renderer,
+          # tokenizers, kvbm-*) since --only is strict/dependency-closed. dynamo-mocker's
+          # aiconfigurator-core git dep is stripped at publish by stage_crates.py
+          # (strip_git_deps). Excludes kvbm-consolidator (still 1.2.0 -> would trip the
+          # expect-version gate) and the non-public bench/ext-proc/backend-common crates.
+          # 'dynamo-configs' is not a workspace crate (no such package).
+          CRATES: ${{ inputs.crates || 'dynamo-runtime,dynamo-memory,dynamo-tokens,dynamo-protocols,dynamo-parsers,dynamo-tokenizers,dynamo-renderer,dynamo-kv-hashing,dynamo-kv-router,dynamo-rl,dynamo-data-gen,kvbm-common,kvbm-config,kvbm-kernels,kvbm-logical,kvbm-physical,kvbm-engine,dynamo-mocker,dynamo-llm' }}
           HELM: ${{ inputs.helm || 'all' }}
         run: |
           set -euo pipefail
@@ -238,8 +246,8 @@ jobs:
       - name: Set version and create branch
         id: bump
         env:
-          RELEASE_VERSION: ${{ inputs.release_version || '0.0.0' }}
-          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/0.0.0test' || '') }}
+          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || (github.event_name == 'push' && 'release/1.3.0' || '') }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CONTAINERS: ${{ steps.resolve.outputs.containers }}
@@ -297,7 +305,9 @@ jobs:
           git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
           git checkout -b "${BRANCH}"
           git add -A
-          git commit -s -m "release: set version ${RELEASE_VERSION}"
+          # --allow-empty: cutting release/1.3.0 from a main already at 1.3.0 makes the
+          # version bump a near-no-op, so the branch is still created and post-merge fires.
+          git commit -s --allow-empty -m "release: set version ${RELEASE_VERSION}"
           git push origin "${BRANCH}"
 
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
@@ -310,7 +320,7 @@ jobs:
         # A dry run sets up the branch/bump only — don't consume an rc or push a tag.
         if: ${{ !inputs.dry_run }}
         env:
-          RELEASE_VERSION: ${{ inputs.release_version || '0.0.0' }}
+          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0' }}
           BUMP_SHA: ${{ steps.bump.outputs.bump_sha }}
         run: |
           set -euo pipefail
@@ -464,7 +474,7 @@ jobs:
       commit_sha: ${{ needs.prepare-branch.outputs.bump_sha }}
       on_demand: true
       # TEMPORARY(test): || default lets push/test runs (no inputs) reach release.yml. REVERT to bare inputs.release_version .
-      release_version: ${{ inputs.release_version || '0.0.0' }}
+      release_version: ${{ inputs.release_version || '1.3.0' }}
       # Auto-incrementing internal-staging rc (immutable registries can't be overwritten).
       rc_number: ${{ needs.prepare-branch.outputs.rc_number }}
       # Normalized subsets from resolve-selection (always set, even on push/test).
