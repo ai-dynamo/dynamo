@@ -88,8 +88,13 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          # On main, also move the floating `main-operator` tag so the deploy-operator
+          # fallback in pr.yaml tracks latest main. Gated to main so release/* runs
+          # don't clobber it; empty lines are ignored by the action.
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator
+            ${{ github.ref == 'refs/heads/main' && format('{0}.dkr.ecr.{1}.amazonaws.com/ai-dynamo/dynamo:main-operator', secrets.AWS_ACCOUNT_ID, secrets.AWS_DEFAULT_REGION) || '' }}
+            ${{ github.ref == 'refs/heads/main' && format('{0}/ai-dynamo/dynamo:main-operator', secrets.AZURE_ACR_HOSTNAME) || '' }}
 
 # ============================================================================
 # Snapshot Agent
