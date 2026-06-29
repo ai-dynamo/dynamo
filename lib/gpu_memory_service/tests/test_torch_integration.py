@@ -34,6 +34,7 @@ if not HAS_CUDA:
 
 import torch
 from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+from gpu_memory_service.client.torch import module as torch_module
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
     register_module_tensors,
@@ -69,6 +70,16 @@ class _TinyModule(torch.nn.Module):
         y = y + self.scale
         y = y * self.extra
         return torch.relu(y)
+
+
+class _ReadOnlyTensorPropertyModule(torch.nn.Module):
+    def __init__(self, tensor: torch.Tensor) -> None:
+        super().__init__()
+        self.register_buffer("_expert_map", tensor)
+
+    @property
+    def expert_map(self) -> torch.Tensor:
+        return self._expert_map
 
 
 @pytest.fixture
@@ -160,6 +171,55 @@ def _make_gms_tensor(
 
 def _assert_exact_tensor_equal(expected: torch.Tensor, actual: torch.Tensor) -> None:
     torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+
+
+def test_register_module_tensors_skips_read_only_tensor_property():
+    tensor = torch.arange(4, device="cuda", dtype=torch.int32)
+    module = _ReadOnlyTensorPropertyModule(tensor)
+
+    class _FakeMapping:
+        allocation_id = "alloc"
+        aligned_size = tensor.untyped_storage().nbytes()
+
+    class _Manager:
+        mappings = {tensor.data_ptr(): _FakeMapping()}
+
+        def __init__(self) -> None:
+            self.puts: list[str] = []
+
+        def metadata_put(self, *, key, allocation_id, offset_bytes, value):
+            self.puts.append(key)
+
+    manager = _Manager()
+    register_module_tensors(manager, module)
+
+    assert manager.puts == ["_expert_map"]
+
+
+def test_materialize_module_from_gms_skips_read_only_tensor_property(monkeypatch):
+    tensor = torch.arange(4, device="cuda", dtype=torch.int32)
+    replacement = torch.arange(10, 14, device="cuda", dtype=torch.int32)
+    module = _ReadOnlyTensorPropertyModule(tensor)
+
+    class _Meta:
+        tensor_type = "tensor_attr"
+
+    class _Spec:
+        meta = _Meta()
+
+        def materialize(self, _manager, _device_index):
+            return replacement
+
+    monkeypatch.setattr(
+        torch_module.GMSTensorSpec,
+        "load_all",
+        staticmethod(lambda _manager: {"expert_map": _Spec()}),
+    )
+
+    materialize_module_from_gms(object(), module, device_index=0)
+
+    assert module.expert_map is tensor
+    _assert_exact_tensor_equal(tensor, module.expert_map)
 
 
 def test_gms_tensor_matches_plain_torch_ops(running_gms):

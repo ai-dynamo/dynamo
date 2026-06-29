@@ -192,6 +192,20 @@ impl ModelRuntimeConfig {
         Ok(())
     }
 
+    fn set_gms_placement_enabled(&mut self) -> PyResult<()> {
+        self.inner.set_gms_placement_enabled().map_err(to_pyerr)
+    }
+
+    fn set_gms_daemon_socket(&mut self, daemon_socket: String) -> PyResult<()> {
+        self.inner
+            .set_gms_daemon_socket(daemon_socket)
+            .map_err(to_pyerr)
+    }
+
+    fn set_gms_control_enabled(&mut self) -> PyResult<()> {
+        self.inner.set_gms_control_enabled().map_err(to_pyerr)
+    }
+
     #[getter]
     fn total_kv_blocks(&self) -> Option<u64> {
         self.inner.total_kv_blocks

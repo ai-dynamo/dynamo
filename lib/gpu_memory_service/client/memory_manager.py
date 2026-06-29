@@ -31,6 +31,7 @@ This module uses cuda-python bindings for CUDA driver API calls:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -54,6 +55,10 @@ from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 
 logger = logging.getLogger(__name__)
+
+
+def _is_persistent_kv_tag(tag: Optional[str]) -> bool:
+    return bool(tag and (tag == "kv_pool" or tag.startswith("kv_pool:")))
 
 
 class StaleMemoryLayoutError(Exception):
@@ -80,9 +85,15 @@ class StaleMemoryLayoutError(Exception):
 class _ScratchMapping:
     """Per-VA tracking for one scratch-aliased allocation.
 
-    VA chunks all alias the same physical chunk (scratch_handle). One physical
-    allocation, many virtual mappings. torch.zeros into the range succeeds;
-    cudagraphs capture VAs so they survive the eventual swap to real.
+    In scratch-backed mode, VA chunks all alias the same physical chunk
+    (scratch_handle). One physical allocation, many virtual mappings.
+    torch.zeros into the range succeeds; cudagraphs capture VAs so they
+    survive the eventual swap to real.
+
+    In reserve-only mode, scratch_handle is 0 from creation. This is used for
+    private-bootstrap shadows that need stable tensor VAs but must not create
+    CUDA VMM mappings/access metadata for a full shared KV cache before they
+    are promoted.
 
     Lifecycle: install via create_scratch_mapping; tear down via
     unmap_all_vas (drops physical) and prepare_scratch_for_reallocation
@@ -94,7 +105,8 @@ class _ScratchMapping:
     aligned_size: int  # CUDA-granularity server allocation size
     va_reserved_size: int  # scratch-rounded local VA reservation
     tag: str
-    scratch_handle: int  # 0 after unmap_all_vas drops the physical
+    mapped_size: int = 0  # bytes actually backed by scratch physical (0 if reserve-only)
+    scratch_handle: int = 0  # 0 after unmap_all_vas drops the physical
 
 
 @dataclass(frozen=True)
@@ -171,6 +183,13 @@ class GMSClientMemoryManager:
         self.device = device
         self.tag = tag
         self.scratch_size = scratch_size
+        socket_tag = "kv_cache" if _is_persistent_kv_tag(tag) else tag
+        socket_name = os.path.basename(socket_path)
+        self._uses_canonical_socket_path = bool(
+            socket_tag
+            and socket_name.startswith("gms_")
+            and socket_name.endswith(f"_{socket_tag}.sock")
+        )
 
         self._client: Optional[_GMSClientSession] = None
 
@@ -235,23 +254,32 @@ class GMSClientMemoryManager:
 
         # After abort + CRIU restore the process may be on a different GPU.
         # Re-derive socket path from current UUID so we talk to the right server.
-        if self._aborted and self.tag is not None:
+        # Persistent KV allocators use kv_pool-derived allocation tags such as
+        # ``kv_pool:cuda0`` while connecting to the kv_cache GMS server. Refresh
+        # those managers against kv_cache, not the allocation subtag.
+        if (
+            self._aborted
+            and self.tag is not None
+            and self._uses_canonical_socket_path
+        ):
             from gpu_memory_service.common.utils import (
                 get_socket_path,
                 invalidate_uuid_cache,
             )
 
             invalidate_uuid_cache()
-            new_path = get_socket_path(self.device, self.tag)
+            socket_tag = "kv_cache" if _is_persistent_kv_tag(self.tag) else self.tag
+            new_path = get_socket_path(self.device, socket_tag)
             if new_path != self.socket_path:
                 logger.info(
-                    "Refreshed socket path for tag=%s: %s -> %s",
+                    "Refreshed socket path for tag=%s server_tag=%s: %s -> %s",
                     self.tag,
+                    socket_tag,
                     self.socket_path,
                     new_path,
                 )
                 self.socket_path = new_path
-            self._aborted = False
+        self._aborted = False
 
         self._client = _GMSClientSession(
             self.socket_path,
@@ -322,6 +350,134 @@ class GMSClientMemoryManager:
                 f"GMS free_handle failed for allocation_id={allocation_id}"
             )
         return True
+
+    # ==================== Persistent allocations (KV-pool namespace) ===
+
+    def claim_persistent(
+        self,
+        engine_id: str,
+        tag: str,
+        size: int,
+        *,
+        shared: bool = False,
+    ) -> tuple[str, int, bool]:
+        """Claim or re-attach a persistent allocation.
+
+        Persistent allocations are keyed by ``(engine_id, tag)`` and live
+        in a namespace separate from the RW/RO/COMMITTED weights flow.
+        They survive client disconnect and can be reattached after engine
+        restart, which is the storage primitive backing the VMM-IPC KV
+        pool.
+
+        Returns ``(allocation_id, aligned_size, reattached)``. No lock
+        required."""
+        if self._client is None:
+            raise RuntimeError(
+                "Memory manager must be connected before claim_persistent",
+            )
+        aligned_size = align_to_granularity(size, self.granularity)
+        response = self._client_rpc.claim_persistent(
+            engine_id=engine_id,
+            tag=tag,
+            size=aligned_size,
+            shared=shared,
+        )
+        returned_size = int(response.aligned_size)
+        reattached = bool(response.reattached)
+        if returned_size != aligned_size:
+            # Shared persistent KV attachers may calculate a smaller local
+            # cache geometry after the first claimant has already reserved HBM.
+            # Mapping the existing larger allocation is safe only for explicit
+            # shared claimants; mapping a smaller one for a larger request is
+            # not. Fresh and exclusive allocations must still match exactly.
+            if not shared or not reattached or returned_size < aligned_size:
+                raise RuntimeError(
+                    "GMS persistent allocation alignment mismatch: "
+                    f"requested={aligned_size} returned={response.aligned_size}"
+                )
+            logger.info(
+                "GMS persistent allocation %s/%s reattached with larger "
+                "mapping: requested=%d returned=%d",
+                engine_id,
+                tag,
+                aligned_size,
+                returned_size,
+            )
+        return (
+            response.allocation_id,
+            returned_size,
+            reattached,
+        )
+
+    def release_persistent(self, engine_id: str, tag: str) -> bool:
+        """Explicitly destroy a persistent allocation. Returns True iff
+        the allocation existed and was freed."""
+        if self._client is None:
+            raise RuntimeError(
+                "Memory manager must be connected before release_persistent",
+            )
+        return self._client_rpc.release_persistent(
+            engine_id=engine_id,
+            tag=tag,
+        )
+
+    def export_persistent_handle(self, engine_id: str, tag: str) -> int:
+        """Export the persistent allocation's POSIX FD. The caller owns
+        the returned FD and must close it after ``cuMemImport`` (which
+        ``map_va`` does as part of its work)."""
+        if self._client is None:
+            raise RuntimeError(
+                "Memory manager must be connected before export_persistent",
+            )
+        _, fd = self._client_rpc.export_persistent(
+            engine_id=engine_id,
+            tag=tag,
+        )
+        return fd
+
+    def list_persistent(self, engine_id: Optional[str] = None):
+        """Return persistent allocations, optionally filtered by engine id."""
+        if self._client is None:
+            raise RuntimeError(
+                "Memory manager must be connected before list_persistent",
+            )
+        return self._client_rpc.list_persistent(engine_id=engine_id)
+
+    def create_persistent_mapping(
+        self,
+        engine_id: str,
+        tag: str,
+        size: int,
+        *,
+        shared: bool = False,
+    ) -> int:
+        """End-to-end: claim (or re-attach) + export FD + map into local
+        VA + cuMemSetAccess. Returns the device pointer the caller can
+        wrap in a torch tensor. Mirrors ``create_mapping`` for the
+        persistent namespace.
+
+        Re-attach path skips fresh allocation and remaps the existing
+        physical pages — that's the KV-survival mechanic across engine
+        restart."""
+        allocation_id, aligned_size, _reattached = self.claim_persistent(
+            engine_id=engine_id,
+            tag=tag,
+            size=size,
+            shared=shared,
+        )
+        # Check cache first (re-attach within the same process).
+        cached_va = self._inverse_mapping.get(allocation_id)
+        if cached_va is not None:
+            mapping = self._mappings.get(cached_va)
+            if mapping is not None and mapping.handle != 0:
+                return cached_va
+        fd = self.export_persistent_handle(engine_id, tag)
+        va = self.reserve_va(aligned_size)
+        # map_va consumes the FD and records the mapping under its
+        # canonical allocation_id, so subsequent destroy_mapping calls
+        # work the same as for regular allocations.
+        self.map_va(fd, va, aligned_size, allocation_id, tag, 0)
+        return va
 
     def commit(self) -> bool:
         """Synchronize, unmap writer mappings, then commit.
@@ -518,16 +674,20 @@ class GMSClientMemoryManager:
             unmapped_count += 1
             total_bytes += mapping.aligned_size
 
-        # Scratch is 1 handle aliased N times across [base_va, +va_reserved_size).
-        # cuMemUnmap over the whole range covers all aliases in one call.
+        # Scratch is 1 handle aliased across the mapped VA prefix.
+        # cuMemUnmap over that prefix covers all aliases in one call. The
+        # mapped prefix is the whole va_reserved_size for scratch-backed mode
+        # and 0 for reserve-only mode (skipped via the scratch_handle guard).
         for base_va, scratch in self._scratch_mappings.items():
             if scratch.scratch_handle == 0:
                 continue
-            cumem_unmap(base_va, scratch.va_reserved_size)
+            mapped_size = scratch.mapped_size or scratch.va_reserved_size
+            cumem_unmap(base_va, mapped_size)
             cumem_release(scratch.scratch_handle)
             scratch.scratch_handle = 0
+            scratch.mapped_size = 0
             unmapped_count += 1
-            total_bytes += scratch.va_reserved_size
+            total_bytes += mapped_size
 
         self._va_preserved = True
         self._unmapped = True
@@ -623,6 +783,92 @@ class GMSClientMemoryManager:
             total_bytes / (1 << 30),
         )
 
+    def remap_persistent_vas(
+        self,
+        engine_id: str,
+        *,
+        shared: bool = False,
+        synchronize_per_mapping: bool = True,
+        validate_after_remap: bool = True,
+    ) -> None:
+        """Reclaim and remap persistent allocations at preserved VAs.
+
+        This is the persistent-KV counterpart to ``remap_all_vas``. The
+        mappings were originally created through ``create_persistent_mapping``;
+        after an engine sleep/reconnect, GMS still owns the physical pages and
+        this method imports fresh handles for the same ``(engine_id, tag)``
+        allocation keys.
+
+        ``synchronize_per_mapping=False`` maps the full set first and then
+        synchronizes once. Private-bootstrap failover promotion can also disable
+        final validation because the VMM mapping calls are synchronous and the
+        next engine operation should not zero or otherwise touch reusable KV
+        before serving.
+        """
+        assert self._granted_lock_type is not None
+        if not self._va_preserved:
+            raise RuntimeError(
+                "remap_persistent_vas requires preserved VAs (call unmap_all_vas first)"
+            )
+
+        remapped_count = 0
+        total_bytes = 0
+        remapped_vas: list[int] = []
+        for va, mapping in sorted(self._mappings.items(), key=lambda item: item[1].tag):
+            if mapping.handle != 0:
+                continue
+
+            allocation_id, aligned_size, _reattached = self.claim_persistent(
+                engine_id=engine_id,
+                tag=mapping.tag,
+                size=mapping.size,
+                shared=shared,
+            )
+            if int(aligned_size) != int(mapping.aligned_size):
+                raise StaleMemoryLayoutError(
+                    f"Persistent allocation {engine_id}/{mapping.tag} size changed: "
+                    f"{mapping.aligned_size} vs {aligned_size}"
+                )
+
+            fd = self.export_persistent_handle(engine_id, mapping.tag)
+            handle = cumem_import_from_shareable_handle_close_fd(fd)
+            cumem_map(va, mapping.aligned_size, handle)
+            cumem_set_access(
+                va, mapping.aligned_size, self.device, self._granted_lock_type
+            )
+            if synchronize_per_mapping:
+                cuda_synchronize()
+                cuda_validate_pointer(va)
+            else:
+                remapped_vas.append(va)
+
+            if mapping.allocation_id != allocation_id:
+                self._inverse_mapping.pop(mapping.allocation_id, None)
+            self._mappings[va] = mapping.with_server_identity(
+                allocation_id,
+                mapping.layout_slot,
+            ).with_handle(handle)
+            self._inverse_mapping[allocation_id] = va
+            remapped_count += 1
+            total_bytes += mapping.aligned_size
+
+        if remapped_vas and validate_after_remap:
+            cuda_synchronize()
+            for va in remapped_vas:
+                cuda_validate_pointer(va)
+
+        self._va_preserved = False
+        self._unmapped = False
+        logger.info(
+            "[GPU Memory Service] Persistent remap complete on device %d: "
+            "remapped %d allocations (%.2f GiB), sync_mode=%s validate=%s",
+            self.device,
+            remapped_count,
+            total_bytes / (1 << 30),
+            "per_mapping" if synchronize_per_mapping else "batched",
+            validate_after_remap,
+        )
+
     def reallocate_all_handles(self, tag: str = "default") -> None:
         """Allocate fresh server handles for all preserved VAs (no mapping).
 
@@ -668,17 +914,47 @@ class GMSClientMemoryManager:
 
     # ==================== Scratch-aliased mappings ====================
 
-    def create_scratch_mapping(self, size: int, tag: str = "kv_cache") -> int:
-        """Reserve VA range and back it with ONE aliased physical chunk.
+    def _scratch_mapped_prefix_bytes(self, aligned_size: int) -> int:
+        raw = os.environ.get("GMS_PERSISTENT_DEFER_PHYSICAL_SCRATCH_MAX_BYTES")
+        if raw is None:
+            raw_mib = os.environ.get("GMS_PERSISTENT_DEFER_PHYSICAL_SCRATCH_MAX_MIB")
+            if raw_mib is not None:
+                try:
+                    return max(1, int(raw_mib)) << 20
+                except ValueError:
+                    logger.warning(
+                        "Ignoring invalid GMS_PERSISTENT_DEFER_PHYSICAL_SCRATCH_MAX_MIB=%r",
+                        raw_mib,
+                    )
+            return aligned_size
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid GMS_PERSISTENT_DEFER_PHYSICAL_SCRATCH_MAX_BYTES=%r",
+                raw,
+            )
+            return aligned_size
+
+    def create_scratch_mapping(
+        self,
+        size: int,
+        tag: str = "kv_cache",
+        *,
+        map_scratch: bool = True,
+    ) -> int:
+        """Reserve VA range and optionally back it with one aliased chunk.
 
         Purely client-local — does not require a GMS server connection.
 
-        Used by the shadow engine at init so torch.zeros on the full kv_cache
-        size succeeds without paying the real memory cost. The shadow then
-        sleeps (unmap_all_vas drops scratch physical, preserves VAs) and
-        wakes by moving scratch bookkeeping into _mappings via
-        prepare_scratch_for_reallocation; reallocate_all_handles + remap_all_vas
-        then install fresh server backing at the same VAs.
+        Used by the shadow engine at init. The scratch-backed path lets
+        torch.zeros on the full kv_cache size succeed without paying the real
+        memory cost. The reserve-only path (map_scratch=False) is cheaper and is
+        safe when the caller will not touch the tensor before a later remap to
+        real backing. The shadow then sleeps (unmap_all_vas drops any scratch
+        physical, preserves VAs) and wakes by moving scratch bookkeeping into
+        _mappings via prepare_scratch_for_reallocation; reallocate_all_handles +
+        remap_all_vas then install fresh server backing at the same VAs.
 
         Cudagraphs capture VAs, not physical, so the swap is invisible to
         replay.
@@ -703,35 +979,55 @@ class GMSClientMemoryManager:
         aligned_size = align_to_granularity(size, self.granularity)
         va_reserved_size = align_to_granularity(size, self.scratch_size)
 
-        ok, scratch_handle = cumem_create_tolerate_oom(self.scratch_size, self.device)
-        if not ok:
-            raise RuntimeError(
-                "cuMemCreate failed to allocate the scratch chunk "
-                f"({self.scratch_size // (1 << 20)} MiB) on device {self.device}"
-            )
-
+        # Reserve the scratch-rounded VA range. In scratch-backed mode alias
+        # the whole range to one coarse scratch_size chunk (bounded VMM
+        # metadata). In reserve-only mode (map_scratch=False) leave the range
+        # unbacked: private-bootstrap shadows need stable tensor VAs without
+        # creating CUDA mappings/access for a full shared KV cache.
         va = cumem_address_reserve(va_reserved_size, self.scratch_size)
-        for offset in range(0, va_reserved_size, self.scratch_size):
-            cumem_map(va + offset, self.scratch_size, scratch_handle)
-        cumem_set_access(va, va_reserved_size, self.device, GrantedLockType.RW)
+        scratch_handle = 0
+        mapped_size = 0
+        if map_scratch:
+            ok, scratch_handle = cumem_create_tolerate_oom(
+                self.scratch_size, self.device
+            )
+            if not ok:
+                raise RuntimeError(
+                    "cuMemCreate failed to allocate the scratch chunk "
+                    f"({self.scratch_size // (1 << 20)} MiB) on device {self.device}"
+                )
+
+            for offset in range(0, va_reserved_size, self.scratch_size):
+                cumem_map(va + offset, self.scratch_size, scratch_handle)
+            cumem_set_access(va, va_reserved_size, self.device, GrantedLockType.RW)
+            mapped_size = va_reserved_size
 
         self._scratch_mappings[va] = _ScratchMapping(
             size=size,
             aligned_size=aligned_size,
             va_reserved_size=va_reserved_size,
             tag=tag,
+            mapped_size=mapped_size,
             scratch_handle=scratch_handle,
         )
-        logger.info(
-            "[GMS] Reserved %d MiB VA at 0x%x, aliased 1x %d MiB scratch across %d chunks",
-            va_reserved_size // (1 << 20),
-            va,
-            self.scratch_size // (1 << 20),
-            va_reserved_size // self.scratch_size,
-        )
+        if map_scratch:
+            logger.info(
+                "[GMS] Reserved %d MiB VA at 0x%x, aliased 1x %d MiB scratch across %d chunks",
+                va_reserved_size // (1 << 20),
+                va,
+                self.scratch_size // (1 << 20),
+                va_reserved_size // self.scratch_size,
+            )
+        else:
+            logger.info(
+                "[GMS] Reserved %d MiB VA at 0x%x without scratch backing across %d chunks",
+                va_reserved_size // (1 << 20),
+                va,
+                va_reserved_size // self.scratch_size,
+            )
         return va
 
-    def prepare_scratch_for_reallocation(self) -> None:
+    def prepare_scratch_for_reallocation(self) -> int:
         """Move scratch bookkeeping into _mappings as preserved-VA records.
 
         Pre-condition: scratch was already torn down by unmap_all_vas during
@@ -785,6 +1081,53 @@ class GMSClientMemoryManager:
                         f"granted_lock_type={self.granted_lock_type}"
                     )
                 state.is_scratch = False
+        return moved
+
+    def prepare_reserve_only_scratch_for_persistent_remap(self) -> int:
+        """Promote reserve-only scratch VAs so persistent remap can attach them.
+
+        Private-bootstrap failover shadows reserve the final KV tensor VAs
+        without physical backing. They are already safe to remap after the
+        failover lock is acquired, but they did not go through sleep(), so the
+        usual ``is_unmapped``/``_va_preserved`` state has not been set. This
+        helper validates that no scratch physical handle is still mapped, then
+        marks the VA set as preserved for ``remap_persistent_vas``.
+        """
+        mapped = [
+            base_va
+            for base_va, scratch in self._scratch_mappings.items()
+            if scratch.scratch_handle != 0
+        ]
+        if mapped:
+            raise RuntimeError(
+                "reserve-only scratch promotion requires unmapped scratch VAs; "
+                f"still mapped={len(mapped)} first=0x{mapped[0]:x}"
+            )
+        migrated = self.prepare_scratch_for_reallocation()
+        if migrated:
+            self._va_preserved = True
+            self._unmapped = True
+        return migrated
+
+    def prepare_deferred_scratch_for_persistent_remap(self) -> int:
+        """Prepare deferred KV VAs for persistent remap.
+
+        Private-bootstrap shadows can be initialized with either scratch-backed
+        or reserve-only deferred KV allocations. Scratch-backed mappings must be
+        torn down with ``unmap_all_vas()`` before the shared persistent backing
+        can be attached. Reserve-only mappings have no CUDA physical mapping to
+        tear down, so they must avoid the CUDA synchronize/unmap path entirely:
+        on large shadows the context may already contain a latent fault from
+        probing an unbacked reserve-only tensor, and synchronizing here turns
+        that into a failover crash before promotion can complete.
+        """
+        has_mapped_scratch = any(
+            scratch.scratch_handle != 0 for scratch in self._scratch_mappings.values()
+        )
+        if has_mapped_scratch:
+            self.unmap_all_vas()
+            return self.prepare_scratch_for_reallocation()
+        return self.prepare_reserve_only_scratch_for_persistent_remap()
 
     def destroy_scratch_mapping(self, base_va: int) -> bool:
         """Tear down a scratch entry.
@@ -799,7 +1142,8 @@ class GMSClientMemoryManager:
 
         cuda_synchronize()
         if scratch.scratch_handle:
-            cumem_unmap(base_va, scratch.va_reserved_size)
+            mapped_size = scratch.mapped_size or scratch.va_reserved_size
+            cumem_unmap(base_va, mapped_size)
             cumem_release(scratch.scratch_handle)
         cumem_address_free(base_va, scratch.va_reserved_size)
         return True

@@ -37,8 +37,27 @@ except ImportError:
     cuda_runtime = _MissingCudaRuntime()
 
 
+def _visible_device_tokens() -> list[str]:
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES") or os.environ.get(
+        "NVIDIA_VISIBLE_DEVICES"
+    )
+    if not raw or raw.lower() in {"all", "void", "none"}:
+        return []
+    return [token.strip() for token in raw.split(",") if token.strip()]
+
+
 def list_devices() -> list[int]:
-    """Return list of CUDA device indices visible to this process via NVML."""
+    """Return CUDA-visible device ordinals for this process.
+
+    NVML enumerates physical devices even when CUDA_VISIBLE_DEVICES remaps the
+    CUDA runtime to a restricted ordinal set. GMS child servers accept CUDA
+    ordinals, so CUDA_VISIBLE_DEVICES=2 must spawn device 0, not physical
+    device 2, and certainly not every GPU in a privileged container.
+    """
+    visible_tokens = _visible_device_tokens()
+    if visible_tokens:
+        return list(range(len(visible_tokens)))
+
     import pynvml
 
     pynvml.nvmlInit()
