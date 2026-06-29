@@ -168,14 +168,18 @@ async def async_main():
     Initializes the distributed runtime, configures routing, and starts
     the HTTP server or interactive mode based on command-line arguments.
     """
-    # The system status server port is a worker concern.
+    # The system status server port is usually a worker concern.
     #
     # Serve tests set DYN_SYSTEM_PORT for the worker, but aggregated launch scripts
-    # start `dynamo.frontend` first. If the frontend inherits DYN_SYSTEM_PORT, it can
-    # bind that port before the worker, causing port conflicts and/or scraping the
-    # wrong metrics endpoint.
+    # start `dynamo.frontend` first. If the normal frontend inherits DYN_SYSTEM_PORT,
+    # it can bind that port before the worker, causing port conflicts and/or scraping
+    # the wrong metrics endpoint. Bulwark gateway endpoint mode intentionally keeps
+    # the system server so Kubernetes readiness can gate the stable worker entity.
+    frontend_system_port = os.environ.get("DYN_SYSTEM_PORT")
     os.environ.pop("DYN_SYSTEM_PORT", None)
     config, vllm_flags, sglang_flags = parse_args()
+    if config.bulwark_gateway_endpoint and frontend_system_port:
+        os.environ["DYN_SYSTEM_PORT"] = frontend_system_port
     dump_config(config.dump_config_to, config)
     max_seq_info = (
         f", max_seq_len: {config.migration_max_seq_len}"
@@ -186,8 +190,9 @@ async def async_main():
         f"Request migration {'enabled' if config.migration_limit > 0 else 'disabled'} "
         f"(limit: {config.migration_limit}{max_seq_info})"
     )
-    # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
-    if os.environ.get("DYN_SYSTEM_PORT"):
+    # Warn if DYN_SYSTEM_PORT is set for a normal frontend. Gateway endpoint mode
+    # uses it for Kubernetes readiness.
+    if os.environ.get("DYN_SYSTEM_PORT") and not config.bulwark_gateway_endpoint:
         logger.warning(
             "=" * 80 + "\n"
             "WARNING: DYN_SYSTEM_PORT is set but NOT used by the frontend!\n"
@@ -294,7 +299,15 @@ async def async_main():
     engine = await make_engine(runtime, e)
 
     try:
-        if config.interactive:
+        if config.bulwark_gateway_endpoint:
+            logger.info(
+                "Starting Bulwark frontend gateway at %s; private workers selected by namespace=%s namespace_prefix=%s",
+                config.bulwark_gateway_endpoint,
+                config.namespace,
+                config.namespace_prefix,
+            )
+            await run_input(runtime, config.bulwark_gateway_endpoint, engine)
+        elif config.interactive:
             await run_input(runtime, "text", engine)
         elif config.kserve_grpc_server:
             await run_input(runtime, "grpc", engine)

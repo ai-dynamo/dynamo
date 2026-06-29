@@ -36,12 +36,20 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 _GRACEFUL_SHUTDOWN_PATH = Path(__file__).parent.parent / "graceful_shutdown.py"
 
-# Provide a minimal dynamo._core stub so the module can be loaded
-_dynamo_stub = types.ModuleType("dynamo")
+# Provide a minimal dynamo._core stub while loading graceful_shutdown.py without
+# importing the native extension. The stub is restored immediately after module
+# load so pytest package collection can still import the real runtime bindings.
 _dynamo_core_stub = types.ModuleType("dynamo._core")
 _dynamo_core_stub.DistributedRuntime = object
-sys.modules.setdefault("dynamo", _dynamo_stub)
-sys.modules.setdefault("dynamo._core", _dynamo_core_stub)
+_previous_dynamo = sys.modules.get("dynamo")
+_previous_dynamo_core = sys.modules.get("dynamo._core")
+_added_dynamo_stub = False
+if importlib.util.find_spec("dynamo") is None:
+    _dynamo_stub = types.ModuleType("dynamo")
+    _dynamo_stub.__path__ = []  # mark as package for dynamo._core imports
+    sys.modules["dynamo"] = _dynamo_stub
+    _added_dynamo_stub = True
+sys.modules["dynamo._core"] = _dynamo_core_stub
 
 
 def _load_graceful_shutdown():
@@ -55,8 +63,20 @@ def _load_graceful_shutdown():
 
 
 _gs = _load_graceful_shutdown()
+if _previous_dynamo_core is None:
+    sys.modules.pop("dynamo._core", None)
+else:
+    sys.modules["dynamo._core"] = _previous_dynamo_core
+if _added_dynamo_stub:
+    if _previous_dynamo is None:
+        sys.modules.pop("dynamo", None)
+    else:
+        sys.modules["dynamo"] = _previous_dynamo
+
 graceful_shutdown_with_discovery = _gs.graceful_shutdown_with_discovery
 install_signal_handlers = _gs.install_signal_handlers
+is_shutdown_in_progress = _gs.is_shutdown_in_progress
+fast_failover_exit_enabled = _gs.fast_failover_exit_enabled
 
 
 # ---------------------------------------------------------------------------
@@ -309,3 +329,75 @@ def test_cleanup_callback_timeout_does_not_block_shutdown(monkeypatch):
 
     asyncio.run(_run())
     mock_runtime.shutdown.assert_called_once()
+
+
+def test_shutdown_in_progress_reflects_active_shutdown():
+    """The shutdown-in-progress flag is visible before shutdown_event is set."""
+    assert is_shutdown_in_progress() is False
+
+    async def _run():
+        mock_runtime = MagicMock()
+        mock_endpoint = AsyncMock()
+        mock_endpoint.unregister_endpoint_instance = AsyncMock(return_value=None)
+        await graceful_shutdown_with_discovery(
+            runtime=mock_runtime,
+            endpoints=[mock_endpoint],
+            shutdown_event=None,
+            grace_period_s=0,
+        )
+
+    asyncio.run(_run())
+
+    assert is_shutdown_in_progress() is True
+
+
+def test_fast_failover_exit_env_parsing(monkeypatch):
+    monkeypatch.delenv("DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM", raising=False)
+    assert fast_failover_exit_enabled() is False
+
+    for value in ("1", "true", "yes", "on", "enabled"):
+        monkeypatch.setenv("DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM", value)
+        assert fast_failover_exit_enabled() is True
+
+    for value in ("", "0", "false", "no", "off"):
+        monkeypatch.setenv("DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM", value)
+        assert fast_failover_exit_enabled() is False
+
+
+def test_fast_failover_exit_runs_after_unregister_before_runtime_shutdown(monkeypatch):
+    class FastExit(Exception):
+        pass
+
+    call_order = []
+    shutdown_event = asyncio.Event()
+    mock_runtime = MagicMock()
+    mock_runtime.shutdown = MagicMock(side_effect=lambda: call_order.append("shutdown"))
+
+    async def _run():
+        mock_endpoint = AsyncMock()
+        mock_endpoint.unregister_endpoint_instance = AsyncMock(
+            side_effect=lambda: call_order.append("unregister")
+        )
+
+        def fake_fast_exit(event):
+            assert event is shutdown_event
+            event.set()
+            call_order.append("fast_exit")
+            raise FastExit
+
+        monkeypatch.setenv("DYN_GMS_FAILOVER_FAST_EXIT_ON_SIGTERM", "1")
+        monkeypatch.setattr(_gs, "_fast_exit_after_failover_unregister", fake_fast_exit)
+
+        await graceful_shutdown_with_discovery(
+            runtime=mock_runtime,
+            endpoints=[mock_endpoint],
+            shutdown_event=shutdown_event,
+            grace_period_s=0,
+        )
+
+    with pytest.raises(FastExit):
+        asyncio.run(_run())
+
+    assert call_order == ["unregister", "fast_exit"]
+    assert shutdown_event.is_set()
+    mock_runtime.shutdown.assert_not_called()

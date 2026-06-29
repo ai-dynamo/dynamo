@@ -4,6 +4,7 @@
 use super::*;
 
 use crate::engine::AsyncEngineContext;
+use crate::error::{DynamoError, ErrorType};
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
@@ -161,6 +162,7 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
         let mut saw_error_response = false;
+        let mut sent_response_frame = false;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
             let is_error = resp.err().is_some();
@@ -202,7 +204,10 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
                         .inc();
                 }
                 break;
-            } else if !is_error {
+            }
+
+            sent_response_frame = true;
+            if !is_error {
                 // Only notify on non-error chunks — error responses don't prove
                 // the engine is healthy and should not reset the canary timer.
                 if let Some(notifier) = self.endpoint_health_check_notifier.get() {
@@ -210,6 +215,43 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
                 }
             }
         }
+
+        if send_complete_final && !sent_response_frame {
+            let err = DynamoError::builder()
+                .error_type(ErrorType::Disconnected)
+                .message("Stream ended before first response")
+                .build();
+            tracing::warn!(
+                error = %err,
+                "Response stream ended before first frame for stream {}",
+                context.id()
+            );
+
+            let resp_wrapper = NetworkStreamWrapper {
+                data: Some(U::from_err(err)),
+                complete_final: false,
+            };
+            let resp_bytes = serde_json::to_vec(&resp_wrapper)
+                .expect("fatal error: invalid response object - this should never happen");
+            if let Some(m) = self.metrics() {
+                m.response_bytes.inc_by(resp_bytes.len() as u64);
+            }
+            if (publisher.send(resp_bytes.into()).await).is_err() {
+                send_complete_final = false;
+                tracing::error!(
+                    "Failed to publish empty-stream error for stream {}",
+                    context.id()
+                );
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
+                        .inc();
+                }
+            } else {
+                saw_error_response = true;
+            }
+        }
+
         if send_complete_final {
             let resp_wrapper = NetworkStreamWrapper::<U> {
                 data: None,

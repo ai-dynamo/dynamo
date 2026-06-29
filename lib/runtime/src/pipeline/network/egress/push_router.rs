@@ -398,12 +398,18 @@ fn spawn_instance_removal_watcher(
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
+                                if cancel_token.is_cancelled() {
+                                    break 'reconnect;
+                                }
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
                                     "Instance removal watcher stream error: {e}"
                                 );
                             }
                             None => {
+                                if cancel_token.is_cancelled() {
+                                    break 'reconnect;
+                                }
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
                                     "Instance removal watcher stream ended; reconnecting"

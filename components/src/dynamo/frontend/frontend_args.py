@@ -25,6 +25,7 @@ from dynamo.common.configuration.utils import (
     add_negatable_bool_argument,
     env_or_default,
 )
+from dynamo.common.utils.namespace import get_worker_namespace
 
 from . import __version__
 
@@ -62,6 +63,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
 
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
+    bulwark_gateway_endpoint: Optional[str] = None
 
     migration_limit: int
     migration_max_seq_len: Optional[int]
@@ -94,6 +96,26 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
             self.router_mode = "kv"
         self.apply_load_aware_preset()
 
+        if self.bulwark_gateway_endpoint:
+            if self.namespace and not self.namespace_prefix:
+                self.namespace = get_worker_namespace(self.namespace)
+            if not self.bulwark_gateway_endpoint.startswith("dyn://"):
+                raise ValueError(
+                    "--bulwark-gateway-endpoint must be a dyn://namespace.component.endpoint path"
+                )
+            if not self.namespace and not self.namespace_prefix:
+                raise ValueError(
+                    "--bulwark-gateway-endpoint requires --namespace or --namespace-prefix "
+                    "to select the private primary/shadow worker namespace"
+                )
+            if self.interactive:
+                raise ValueError(
+                    "--bulwark-gateway-endpoint cannot be combined with --interactive"
+                )
+            if self.kserve_grpc_server:
+                raise ValueError(
+                    "--bulwark-gateway-endpoint cannot be combined with --kserve-grpc-server"
+                )
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
@@ -262,6 +284,19 @@ class FrontendArgGroup(ArgGroup):
                 "Dynamo namespace prefix for model discovery scoping. Discovers models from "
                 "namespaces starting with this prefix (e.g., 'ns' matches 'ns', 'ns-abc123', "
                 "'ns-def456'). Takes precedence over --namespace if both are specified."
+            ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--bulwark-gateway-endpoint",
+            env_var="DYN_BULWARK_GATEWAY_ENDPOINT",
+            default=None,
+            help=(
+                "Expose this frontend as a stable request-plane worker endpoint for Bulwark "
+                "compound workers. The value is a public dyn://namespace.component.endpoint "
+                "path; private primary/shadow workers are discovered using --namespace or "
+                "--namespace-prefix."
             ),
         )
 

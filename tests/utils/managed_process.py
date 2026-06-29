@@ -176,6 +176,8 @@ class ManagedProcess:
     straggler_commands: List[str] = field(default_factory=list)
     log_dir: str = os.getcwd()
     display_name: Optional[str] = None
+    terminate_parent_only_first: bool = False
+    graceful_shutdown_timeout: float = 8.0
 
     # Ensure attributes exist even if startup fails early
     proc: Optional[subprocess.Popen] = None
@@ -430,6 +432,25 @@ class ManagedProcess:
         if process.poll() is None:
             raise ManagedProcessStopTimeoutError(attr_name, process.pid, wait_timeout)
 
+    @staticmethod
+    def _live_process_groups_for_pids(pids: set[int]) -> set[int]:
+        """Return process groups for snapshotted PIDs that are still non-zombie."""
+        live_pgids: set[int] = set()
+        for pid in pids:
+            try:
+                process = psutil.Process(pid)
+                if process.status() == psutil.STATUS_ZOMBIE:
+                    continue
+                live_pgids.add(os.getpgid(pid))
+            except (ProcessLookupError, psutil.NoSuchProcess, OSError):
+                pass
+            except psutil.AccessDenied:
+                try:
+                    live_pgids.add(os.getpgid(pid))
+                except (ProcessLookupError, OSError):
+                    pass
+        return live_pgids
+
     def _start_process(self):
         assert self._command_name
         assert self._log_path
@@ -495,7 +516,7 @@ class ManagedProcess:
                 )
             self._tee_proc = None
 
-    def _terminate_process_group(self, timeout: float = 8.0):
+    def _terminate_process_group(self, timeout: Optional[float] = None):
         """Terminate the entire process group/session started for the child.
 
         Kill Sequence:
@@ -529,15 +550,23 @@ class ManagedProcess:
         if self._pgid is None:
             return
 
+        if timeout is None:
+            timeout = self.graceful_shutdown_timeout
+
         # Step 1: Snapshot all process groups before signaling.  Only self.proc runs
         # in self._pgid (start_new_session=True); _tee_proc/_sed_proc are pipe
         # helpers in pytest's group with no children.
         all_pgids: set[int] = {self._pgid}
+        child_pids: set[int] = set()
+        pgid_to_pids: dict[int, set[int]] = {self._pgid: set()}
         if self.proc and self.proc.poll() is None:
             try:
                 for child in psutil.Process(self.proc.pid).children(recursive=True):
+                    child_pids.add(child.pid)
                     try:
-                        all_pgids.add(os.getpgid(child.pid))
+                        child_pgid = os.getpgid(child.pid)
+                        all_pgids.add(child_pgid)
+                        pgid_to_pids.setdefault(child_pgid, set()).add(child.pid)
                     except (ProcessLookupError, OSError):
                         pass
             except (PermissionError, psutil.AccessDenied) as exc:
@@ -548,6 +577,49 @@ class ManagedProcess:
                 )
             except psutil.NoSuchProcess:
                 pass
+
+        if (
+            self.terminate_parent_only_first
+            and self.proc is not None
+            and self.proc.poll() is None
+        ):
+            try:
+                self._logger.info(
+                    "Sending SIGTERM to parent process: %s", self.proc.pid
+                )
+                self.proc.terminate()
+            except ProcessLookupError:
+                return
+            except Exception as e:
+                self._logger.warning(
+                    "Error sending SIGTERM to parent process %s: %s",
+                    self.proc.pid,
+                    e,
+                )
+
+            poll_interval = 0.1
+            elapsed = 0.0
+            while elapsed < timeout:
+                if self.proc.poll() is not None:
+                    live_pgids = self._live_process_groups_for_pids(child_pids)
+                    if not live_pgids:
+                        return
+                    self._logger.info(
+                        "Parent process %s exited; terminating child process groups: %s",
+                        self.proc.pid,
+                        sorted(live_pgids),
+                    )
+                    all_pgids = live_pgids
+                    break
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+
+            if self.proc.poll() is None:
+                self._logger.warning(
+                    "Parent process %s did not exit within %.1fs; terminating process groups",
+                    self.proc.pid,
+                    timeout,
+                )
 
         # Step 2: SIGTERM all snapshotted process groups (graceful shutdown).
         # Delivers the signal to every group so children that called
@@ -577,9 +649,14 @@ class ManagedProcess:
         while elapsed < timeout:
             if self.proc is not None:
                 self.proc.poll()
-            # Check if any signaled group is still alive
+            # Check if any signaled group is still alive. Zombie-only
+            # child groups (common with MPI launch helpers such as orted) do not
+            # hold resources and cannot be killed, so don't burn the timeout.
             still_alive = False
             for pgid in sigtermed_pgids:
+                known_pids = pgid_to_pids.get(pgid, set())
+                if known_pids and not self._live_process_groups_for_pids(known_pids):
+                    continue
                 try:
                     os.killpg(pgid, 0)  # signal 0 = check existence
                     still_alive = True
@@ -595,6 +672,9 @@ class ManagedProcess:
         # survives (e.g. processes that ignored SIGTERM or timed out).
         # _stop_started_processes handles per-process wait/escalation afterward.
         for pgid in all_pgids:
+            known_pids = pgid_to_pids.get(pgid, set())
+            if known_pids and not self._live_process_groups_for_pids(known_pids):
+                continue
             try:
                 os.killpg(pgid, signal.SIGKILL)
             except ProcessLookupError:

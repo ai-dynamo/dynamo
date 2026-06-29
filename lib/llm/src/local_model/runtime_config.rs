@@ -106,6 +106,20 @@ pub struct DisaggregatedEndpoint {
     pub bootstrap_port: Option<u16>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GmsRuntimeConfig {
+    #[serde(default)]
+    pub control_enabled: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nixl_ip: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_socket: Option<String>,
+}
+
+pub const GMS_RUNTIME_CONFIG_KEY: &str = "gms";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Validate)]
 #[validate(schema(function = "validate_model_runtime_config"))]
 /// Runtime-resolved metadata published by a worker after its engine starts.
@@ -422,6 +436,31 @@ impl ModelRuntimeConfig {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn set_gms_placement_enabled(&mut self) -> anyhow::Result<()> {
+        self.set_engine_specific(GMS_RUNTIME_CONFIG_KEY, {
+            let mut config = self.gms_runtime_config().unwrap_or_default();
+            config.control_enabled = true;
+            config
+        })
+    }
+
+    pub fn set_gms_control_enabled(&mut self) -> anyhow::Result<()> {
+        self.set_gms_placement_enabled()
+    }
+
+    pub fn set_gms_daemon_socket(&mut self, daemon_socket: String) -> anyhow::Result<()> {
+        let mut config = self.gms_runtime_config().unwrap_or_default();
+        config.control_enabled = true;
+        config.daemon_socket = Some(daemon_socket);
+        self.set_engine_specific(GMS_RUNTIME_CONFIG_KEY, config)
+    }
+
+    pub fn gms_runtime_config(&self) -> Option<GmsRuntimeConfig> {
+        self.get_engine_specific(GMS_RUNTIME_CONFIG_KEY)
+            .ok()
+            .flatten()
     }
 
     pub fn effective_tokenizer_backend(&self) -> TokenizerBackend {
@@ -754,5 +793,44 @@ mod tests {
         ] {
             assert!(config.validate_config().is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod gms_runtime_config_tests {
+    use super::*;
+
+    #[test]
+    fn gms_runtime_config_is_absent_by_default() {
+        let config = ModelRuntimeConfig::default();
+
+        assert!(config.gms_runtime_config().is_none());
+        assert!(!config.runtime_data.contains_key(GMS_RUNTIME_CONFIG_KEY));
+    }
+
+    #[test]
+    fn set_gms_placement_enabled_is_optional_capability_metadata() {
+        let mut config = ModelRuntimeConfig::default();
+
+        config.set_gms_placement_enabled().unwrap();
+
+        let gms = config.gms_runtime_config().unwrap();
+        assert!(gms.control_enabled);
+        assert_eq!(gms.nixl_ip, None);
+        assert_eq!(gms.daemon_socket, None);
+    }
+
+    #[test]
+    fn set_gms_daemon_socket_is_preserved_when_enabling_placement() {
+        let mut config = ModelRuntimeConfig::default();
+
+        config
+            .set_gms_daemon_socket("/var/run/gms/kv.sock".to_string())
+            .unwrap();
+        config.set_gms_placement_enabled().unwrap();
+
+        let gms = config.gms_runtime_config().unwrap();
+        assert!(gms.control_enabled);
+        assert_eq!(gms.daemon_socket.as_deref(), Some("/var/run/gms/kv.sock"));
     }
 }

@@ -16,7 +16,7 @@ use utils::{KubeDiscoveryMode, PodInfo};
 use crate::CancellationToken;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
-    DiscoveryQuery, DiscoverySpec, DiscoveryStream, MetadataSnapshot,
+    DiscoveryQuery, DiscoverySpec, DiscoveryStream, MetadataSnapshot, resolve_logical_instance_id,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -46,15 +46,17 @@ impl KubeDiscoveryClient {
         cancel_token: CancellationToken,
     ) -> Result<Self> {
         let pod_info = PodInfo::from_env()?;
-        let instance_id = pod_info.target.instance_id();
+        let physical_instance_id = pod_info.target.instance_id();
+        let instance_id = resolve_logical_instance_id(physical_instance_id)?;
         let cr_name = pod_info.target.cr_name();
 
         tracing::info!(
-            "Initializing KubeDiscoveryClient: mode={:?}, target={:?}, cr_name={}, instance_id={:x}, namespace={}, pod_uid={}",
+            "Initializing KubeDiscoveryClient: mode={:?}, target={:?}, cr_name={}, instance_id={:x}, physical_instance_id={:x}, namespace={}, pod_uid={}",
             pod_info.mode,
             pod_info.target,
             cr_name,
             instance_id,
+            physical_instance_id,
             pod_info.pod_namespace,
             pod_info.pod_uid
         );
@@ -364,8 +366,10 @@ impl Discovery for KubeDiscoveryClient {
                 }
             }
 
-            // Track known instances by their unique ID
-            let mut known: HashSet<DiscoveryInstanceId> = initial.into_keys().collect();
+            // Track known instances by ID and value so transport updates for a stable
+            // logical worker id are emitted as an upsert instead of being coalesced away.
+            let mut known: std::collections::HashMap<DiscoveryInstanceId, DiscoveryInstance> =
+                initial;
 
             loop {
                 tracing::trace!(
@@ -414,9 +418,11 @@ impl Discovery for KubeDiscoveryClient {
                             "Watch received snapshot update"
                         );
 
-                        // Compute diff using keys
+                        // Compute diff by ID, then treat value changes as upserts. This is
+                        // important for failover cohorts where a logical worker id stays stable
+                        // while the active pod's transport address changes.
                         let current_keys: HashSet<&DiscoveryInstanceId> = current.keys().collect();
-                        let known_keys: HashSet<&DiscoveryInstanceId> = known.iter().collect();
+                        let known_keys: HashSet<&DiscoveryInstanceId> = known.keys().collect();
 
                         let added: Vec<&DiscoveryInstanceId> =
                             current_keys.difference(&known_keys).copied().collect();
@@ -426,8 +432,14 @@ impl Discovery for KubeDiscoveryClient {
                             .map(|&id| id.clone())
                             .collect();
 
+                        let updated: Vec<&DiscoveryInstanceId> = current_keys
+                            .intersection(&known_keys)
+                            .copied()
+                            .filter(|id| current.get(*id) != known.get(*id))
+                            .collect();
+
                         // Log diff results (even if empty, for debugging)
-                        if added.is_empty() && removed.is_empty() {
+                        if added.is_empty() && removed.is_empty() && updated.is_empty() {
                             tracing::debug!(
                                 stream_id = %stream_id,
                                 seq = snapshot.sequence,
@@ -439,13 +451,16 @@ impl Discovery for KubeDiscoveryClient {
                                 seq = snapshot.sequence,
                                 added = added.len(),
                                 removed = removed.len(),
+                                updated = updated.len(),
                                 total = current.len(),
                                 "Watch detected changes"
                             );
                         }
 
-                        // Emit Added events
-                        for id in added {
+                        // Emit Added events for both new and changed instances. Consumers treat
+                        // Added as an upsert, which preserves KV-router state for the same worker
+                        // id while refreshing the request-plane transport.
+                        for id in added.into_iter().chain(updated.into_iter()) {
                             if let Some(instance) = current.get(id) {
                                 tracing::info!(
                                     stream_id = %stream_id,
@@ -478,8 +493,8 @@ impl Discovery for KubeDiscoveryClient {
                             }
                         }
 
-                        // Update known set
-                        known = current.into_keys().collect();
+                        // Update known map
+                        known = current;
                     }
                     Err(_) => {
                         tracing::info!(

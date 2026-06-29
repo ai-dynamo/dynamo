@@ -338,14 +338,27 @@ impl Manager {
 
             // Send all the existing keys
             for (key, bytes) in bucket.entries().await? {
-                if let Err(err) = tx
+                match tx
                     .send_timeout(
                         WatchEvent::Put(KeyValue::new(key, bytes)),
                         WATCH_SEND_TIMEOUT,
                     )
                     .await
                 {
-                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding existing key to channel");
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::SendTimeoutError::Closed(_)) => {
+                        tracing::debug!(
+                            bucket_name,
+                            "KeyValueStoreManager.watch receiver closed while adding existing key; stopping watch task"
+                        );
+                        return Ok::<(), StoreError>(());
+                    }
+                    Err(tokio::sync::mpsc::error::SendTimeoutError::Timeout(_)) => {
+                        tracing::error!(
+                            bucket_name,
+                            "KeyValueStoreManager.watch timed out adding existing key to channel"
+                        );
+                    }
                 }
             }
 
@@ -358,8 +371,21 @@ impl Manager {
                         None => break,
                     }
                 };
-                if let Err(err) = tx.send_timeout(event, WATCH_SEND_TIMEOUT).await {
-                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding new key to channel");
+                match tx.send_timeout(event, WATCH_SEND_TIMEOUT).await {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::SendTimeoutError::Closed(_)) => {
+                        tracing::debug!(
+                            bucket_name,
+                            "KeyValueStoreManager.watch receiver closed while adding new key; stopping watch task"
+                        );
+                        break;
+                    }
+                    Err(tokio::sync::mpsc::error::SendTimeoutError::Timeout(_)) => {
+                        tracing::error!(
+                            bucket_name,
+                            "KeyValueStoreManager.watch timed out adding new key to channel"
+                        );
+                    }
                 }
             }
 
@@ -588,6 +614,24 @@ mod tests {
         // ingress exits once it has received all values
         let _ = ingress.await?;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_manager_watch_exits_when_receiver_dropped_during_initial_replay()
+    -> anyhow::Result<()> {
+        init();
+
+        let manager = Arc::new(Manager::memory());
+        let bucket = manager.get_or_create_bucket(BUCKET_NAME, None).await?;
+        bucket.insert(&"test1".into(), "value1".into(), 0).await?;
+
+        let cancel = CancellationToken::new();
+        let (watch_task, rx) = manager.watch(BUCKET_NAME, None, cancel);
+        drop(rx);
+
+        let result = tokio::time::timeout(Duration::from_secs(2), watch_task).await??;
+        assert!(result.is_ok());
         Ok(())
     }
 

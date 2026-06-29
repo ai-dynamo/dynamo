@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 
@@ -22,6 +24,91 @@ pub use kube::{KubeDiscoveryClient, hash_pod_name};
 pub mod utils;
 use crate::component::{DeviceType, TransportType};
 pub use utils::watch_and_extract_field;
+
+pub(crate) const DISCOVERY_INSTANCE_ID_MASK: u64 = 0x001F_FFFF_FFFF_FFFFu64;
+
+pub(crate) fn hash_logical_instance_key(key: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish() & DISCOVERY_INSTANCE_ID_MASK
+}
+
+fn parse_logical_instance_id(raw: &str) -> Result<u64> {
+    let value = raw.trim();
+    if value.is_empty() {
+        anyhow::bail!("DYN_DISCOVERY_LOGICAL_INSTANCE_ID must not be empty");
+    }
+
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        return u64::from_str_radix(hex, 16)
+            .with_context(|| format!("invalid hex DYN_DISCOVERY_LOGICAL_INSTANCE_ID `{value}`"));
+    }
+
+    value
+        .parse::<u64>()
+        .with_context(|| format!("invalid DYN_DISCOVERY_LOGICAL_INSTANCE_ID `{value}`"))
+}
+
+fn expand_env_placeholders(value: &str) -> Result<String> {
+    let mut out = String::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+            let start = i + 2;
+            let Some(rel_end) = value[start..].find(')') else {
+                anyhow::bail!(
+                    "unterminated env placeholder in DYN_DISCOVERY_LOGICAL_INSTANCE_KEY: `{value}`"
+                );
+            };
+            let end = start + rel_end;
+            let name = &value[start..end];
+            if name.is_empty() || !name.chars().all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+                anyhow::bail!(
+                    "invalid env placeholder `$({name})` in DYN_DISCOVERY_LOGICAL_INSTANCE_KEY"
+                );
+            }
+            let replacement = std::env::var(name).with_context(|| {
+                format!("DYN_DISCOVERY_LOGICAL_INSTANCE_KEY references unset env var `{name}`")
+            })?;
+            out.push_str(&replacement);
+            i = end + 1;
+        } else {
+            let ch = value[i..]
+                .chars()
+                .next()
+                .expect("valid utf-8 while expanding env placeholders");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+
+    Ok(out)
+}
+
+pub(crate) fn resolve_logical_instance_id(default_id: u64) -> Result<u64> {
+    use crate::config::environment_names::discovery::{
+        DYN_DISCOVERY_LOGICAL_INSTANCE_ID, DYN_DISCOVERY_LOGICAL_INSTANCE_KEY,
+    };
+
+    if let Ok(raw_id) = std::env::var(DYN_DISCOVERY_LOGICAL_INSTANCE_ID) {
+        return parse_logical_instance_id(&raw_id);
+    }
+
+    if let Ok(raw_key) = std::env::var(DYN_DISCOVERY_LOGICAL_INSTANCE_KEY) {
+        let expanded = expand_env_placeholders(&raw_key)?;
+        if expanded.trim().is_empty() {
+            anyhow::bail!("DYN_DISCOVERY_LOGICAL_INSTANCE_KEY must not expand to an empty string");
+        }
+        return Ok(hash_logical_instance_key(&expanded));
+    }
+
+    Ok(default_id)
+}
 
 /// Transport kind for event plane - used for configuration and env var selection.
 ///
@@ -848,4 +935,65 @@ pub trait Discovery: Send + Sync {
     /// For KV store backends, this deletes owned registrations immediately rather than
     /// waiting for TTL expiry. Default is a no-op for backends that don't need cleanup.
     fn shutdown(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn parse_logical_instance_id_accepts_decimal_and_hex() {
+        assert_eq!(parse_logical_instance_id("123").unwrap(), 123);
+        assert_eq!(parse_logical_instance_id("0x7b").unwrap(), 123);
+        assert!(parse_logical_instance_id("").is_err());
+        assert!(parse_logical_instance_id("not-a-number").is_err());
+    }
+
+    fn restore_env(name: &str, value: Option<String>) {
+        // SAFETY: callers hold ENV_LOCK before mutating process environment.
+        unsafe {
+            if let Some(value) = value {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+    }
+
+    #[test]
+    fn expand_env_placeholders_rejects_missing_vars() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let name = "DYN_TEST_MISSING_LOGICAL_INSTANCE_KEY";
+        let old = std::env::var(name).ok();
+        restore_env(name, None);
+        assert!(expand_env_placeholders("$(DYN_TEST_MISSING_LOGICAL_INSTANCE_KEY)").is_err());
+        restore_env(name, old);
+    }
+
+    #[test]
+    fn resolve_logical_instance_id_hashes_expanded_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_id = std::env::var("DYN_DISCOVERY_LOGICAL_INSTANCE_ID").ok();
+        let old_key = std::env::var("DYN_DISCOVERY_LOGICAL_INSTANCE_KEY").ok();
+        let old_pcsg = std::env::var("DYN_TEST_PCSG").ok();
+
+        restore_env("DYN_DISCOVERY_LOGICAL_INSTANCE_ID", None);
+        restore_env("DYN_TEST_PCSG", Some("pcsg-a".to_string()));
+        restore_env(
+            "DYN_DISCOVERY_LOGICAL_INSTANCE_KEY",
+            Some("ns/$(DYN_TEST_PCSG)/role".to_string()),
+        );
+
+        let expected = hash_logical_instance_key("ns/pcsg-a/role");
+        let actual = resolve_logical_instance_id(99).unwrap();
+
+        restore_env("DYN_DISCOVERY_LOGICAL_INSTANCE_ID", old_id);
+        restore_env("DYN_DISCOVERY_LOGICAL_INSTANCE_KEY", old_key);
+        restore_env("DYN_TEST_PCSG", old_pcsg);
+
+        assert_eq!(actual, expected);
+    }
 }

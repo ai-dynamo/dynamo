@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::CancellationToken;
+use crate::config::environment_names::discovery;
 use crate::discovery::{DiscoveryMetadata, MetadataSnapshot};
 use anyhow::Result;
 use futures::StreamExt;
@@ -19,7 +20,25 @@ use tokio::time::{Duration, timeout};
 use super::crd::DynamoWorkerMetadata;
 use super::utils::{KubeDiscoveryMode, PodInfo, extract_endpoint_info, extract_ready_containers};
 
-const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+const DEFAULT_DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
+
+fn discovery_debounce_duration() -> Duration {
+    match std::env::var(discovery::DYN_KUBE_DISCOVERY_DEBOUNCE_MS) {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(ms) => Duration::from_millis(ms),
+            Err(err) => {
+                tracing::warn!(
+                    value = %raw,
+                    %err,
+                    default_ms = DEFAULT_DEBOUNCE_DURATION.as_millis(),
+                    "Invalid DYN_KUBE_DISCOVERY_DEBOUNCE_MS; using default"
+                );
+                DEFAULT_DEBOUNCE_DURATION
+            }
+        },
+        Err(_) => DEFAULT_DEBOUNCE_DURATION,
+    }
+}
 
 #[derive(Clone)]
 struct CachedCrMetadata {
@@ -197,6 +216,11 @@ impl DiscoveryDaemon {
         tokio::spawn(cr_reflector_stream);
 
         // Event-driven loop with debouncing
+        let debounce_duration = discovery_debounce_duration();
+        tracing::info!(
+            debounce_ms = debounce_duration.as_millis(),
+            "Discovery daemon debounce configured"
+        );
         let mut sequence = 0u64;
         let mut prev_snapshot = MetadataSnapshot::empty();
         // Keeps transient invalid CR updates from looking like removals.
@@ -205,7 +229,7 @@ impl DiscoveryDaemon {
         loop {
             tokio::select! {
                 _ = notify.notified() => {
-                    tokio::time::sleep(DEBOUNCE_DURATION).await;
+                    tokio::time::sleep(debounce_duration).await;
                     let _ = timeout(Duration::ZERO, notify.notified()).await;
 
                     tracing::trace!("Debounce window elapsed, processing snapshot");
