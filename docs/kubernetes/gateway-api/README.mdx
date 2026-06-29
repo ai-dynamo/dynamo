@@ -70,10 +70,8 @@ by this quickstart path.
   [jq](https://jqlang.org/download/) configured for the cluster.
 - Gateway API and GAIE CRDs installed. The quickstart installs them explicitly from pinned upstream
   release manifests.
-- A Gateway API implementation that supports GAIE. The quickstart uses tested agentgateway and Istio
-  paths. See the upstream
-  [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
-  for the broader ecosystem.
+- A Gateway API implementation that supports GAIE `InferencePool` resources and `endpointPickerRef`
+  calls.
 - Dynamo platform installed with the operator. See the [Kubernetes Quickstart](../README.md) and
   [Installation Guide](../installation-guide.md).
 - Model credentials and storage needed by the selected model. Hugging Face token secrets are a
@@ -86,10 +84,15 @@ GAIE requires a Gateway API implementation that can call an Endpoint Picker Plug
 the request to a backend. Dynamo is independent of the Gateway implementation: pick the gateway that
 matches your platform, then point its `HTTPRoute` and generated `InferencePool` at the Dynamo EPP.
 
-Use a Gateway implementation that supports the GAIE EndpointPicker flow. The quickstart tests
-agentgateway and Istio. Envoy Gateway and other Gateway API implementations may work when their
-installed version supports GAIE `InferencePool` resources and EndpointPicker calls; validate the
-controller behavior before using that path.
+The quickstart shows two verified paths: agentgateway and Istio. Other Gateway API
+implementations might work when they support the same GAIE `InferencePool` and `endpointPickerRef`
+EPP path; check the upstream
+[GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
+and your controller's documentation before choosing another implementation.
+
+Istio uses Envoy in its data plane. agentgateway is a Rust-based AI gateway. The requirement for
+this guide is not Envoy specifically; it is support for Gateway API plus the GAIE EndpointPicker
+flow.
 
 <Tabs>
   <Tab title="agentgateway">
@@ -102,20 +105,9 @@ controller behavior before using that path.
     Install Istio with `ENABLE_GATEWAY_API_INFERENCE_EXTENSION=true`; the GatewayClass is `istio`.
     Configure EPP TLS policy with a `DestinationRule` when mesh policy requires it.
   </Tab>
-  <Tab title="Envoy Gateway">
-    Use Envoy Gateway when its installed version supports GAIE `InferencePool` resources and
-    EndpointPicker calls. Keep the Dynamo resources the same: the route still targets the generated
-    `InferencePool`, and the pool points at the Dynamo EPP service.
-  </Tab>
-  <Tab title="Other GAIE">
-    Use another Gateway API implementation if it supports GAIE `InferencePool` resources and the
-    EndpointPicker extension. This quickstart does not test that path. Check the upstream
-    [GAIE gateway implementation list](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/implementations/gateways.md)
-    before choosing a controller.
-  </Tab>
 </Tabs>
 
-The quickstart walks through the two implementation paths shown in this table:
+The quickstart walks through the two verified implementation paths shown in this table:
 
 | | agentgateway | Istio |
 |---|---|---|
