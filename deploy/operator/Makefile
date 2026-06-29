@@ -48,6 +48,149 @@ all: build
 help: ## Display this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
+##@ Container Images
+
+# Build/push the framework and dynamo container images from this branch. These
+# render Dockerfiles via container/render.py and build with the repo root as the
+# Docker build context (../.. relative to this directory), since the images pull
+# in components/, lib/, and container/.
+#
+# DISCLAIMER: These build/push targets are a developer convenience only. They are
+# not the supported/official way to produce release images and carry no stability
+# or compatibility guarantees. For production images, use the official build and
+# release pipeline.
+#
+# Examples:
+#   make docker-build-planner REGISTRY=<your-registry>          # build planner
+#   make docker-build-trtllm  REGISTRY=<your-registry>          # build trtllm runtime
+#   make docker-push-planner  REGISTRY=<your-registry>          # push planner
+#   make docker-build-all     REGISTRY=<your-registry> TAG=dev  # build everything
+
+# Container registry prefix (e.g. "<your-registry>", "nvcr.io/nvidia/ai-dynamo").
+# When set, images are tagged as REGISTRY/IMAGE_NAME:TAG.
+REGISTRY ?=
+
+# Image tag applied to all built images.
+TAG ?= latest
+
+# CUDA versions used by render.py. Override for non-default builds.
+# Valid values are constrained by container/render.py (currently 13.0 / 13.1).
+CUDA_VERSION ?= 13.0
+CUDA_VERSION_TRTLLM ?= 13.1
+# CUDA version for the dynamo-framework images (planner, frontend).
+CUDA_VERSION_DYNAMO ?= 13.0
+
+# Platform passed to render.py (not used for multi-arch buildx here).
+PLATFORM ?= linux/amd64
+
+# Make-level build parallelism. Each docker-build-* target is a heavy container
+# build, so running several at once under `make -j` can exhaust RAM/disk. By
+# default we force serial execution even when -j is passed (NOTE: .NOTPARALLEL is
+# Makefile-wide, so this also serializes other targets under -j). Set
+# PARALLEL_BUILDS=1 on a machine with ample resources to allow concurrent builds;
+# each target renders its own Dockerfile, so this is safe for correctness.
+#   make docker-build-all                        -> serial
+#   make -j docker-build-all                     -> serial (default)
+#   make -j docker-build-all PARALLEL_BUILDS=1   -> concurrent
+PARALLEL_BUILDS ?=
+ifndef PARALLEL_BUILDS
+.NOTPARALLEL:
+endif
+
+# Image-name prefix derived from REGISTRY.
+_prefix = $(if $(REGISTRY),$(REGISTRY)/,)
+
+PLANNER_IMG  = $(_prefix)dynamo-planner:$(TAG)
+FRONTEND_IMG = $(_prefix)dynamo-frontend:$(TAG)
+VLLM_IMG     = $(_prefix)vllm-runtime:$(TAG)
+TRTLLM_IMG   = $(_prefix)tensorrtllm-runtime:$(TAG)
+SGLANG_IMG   = $(_prefix)sglang-runtime:$(TAG)
+OPERATOR_IMG = $(_prefix)dynamo-operator:$(TAG)
+
+# render.py (in ../../container) generates a Dockerfile from Jinja2 templates.
+# Without --output-short-filename it emits a unique path per framework/target/arch:
+#   ../../container/<framework>-<target>-cuda<cuda_version>-<arch>-rendered.Dockerfile
+# Unique names (vs the shared rendered.Dockerfile) keep the docker-build-* targets
+# safe under parallel make: each build reads its own rendered Dockerfile and cannot
+# clobber another target's. All such files match *rendered.Dockerfile in .gitignore.
+RENDER = python3 ../../container/render.py --platform $(PLATFORM)
+
+# Architecture component of the rendered filename: render.py strips the
+# "linux/" prefix from --platform (e.g. linux/amd64 -> amd64).
+_arch = $(lastword $(subst /, ,$(PLATFORM)))
+
+# rendered_dockerfile(framework,target,cuda_version) -> path render.py writes to,
+# relative to this directory (the repo container/ dir is ../../container).
+rendered_dockerfile = ../../container/$(1)-$(2)-cuda$(3)-$(_arch)-rendered.Dockerfile
+
+PLANNER_DOCKERFILE  = $(call rendered_dockerfile,dynamo,planner,$(CUDA_VERSION_DYNAMO))
+FRONTEND_DOCKERFILE = $(call rendered_dockerfile,dynamo,frontend,$(CUDA_VERSION_DYNAMO))
+VLLM_DOCKERFILE     = $(call rendered_dockerfile,vllm,runtime,$(CUDA_VERSION))
+TRTLLM_DOCKERFILE   = $(call rendered_dockerfile,trtllm,runtime,$(CUDA_VERSION_TRTLLM))
+SGLANG_DOCKERFILE   = $(call rendered_dockerfile,sglang,runtime,$(CUDA_VERSION))
+
+# Repo root is the Docker build context for the framework/dynamo images.
+BUILD_CONTEXT = ../..
+
+.PHONY: docker-build-planner
+docker-build-planner: ## Build the planner image.
+	$(RENDER) --framework dynamo --target planner --cuda-version $(CUDA_VERSION_DYNAMO)
+	$(CONTAINER_TOOL) build -t $(PLANNER_IMG) -f $(PLANNER_DOCKERFILE) $(BUILD_CONTEXT)
+
+.PHONY: docker-build-frontend
+docker-build-frontend: ## Build the frontend image.
+	$(RENDER) --framework dynamo --target frontend --cuda-version $(CUDA_VERSION_DYNAMO)
+	$(CONTAINER_TOOL) build -t $(FRONTEND_IMG) -f $(FRONTEND_DOCKERFILE) $(BUILD_CONTEXT)
+
+.PHONY: docker-build-vllm
+docker-build-vllm: ## Build the vLLM runtime image.
+	$(RENDER) --framework vllm --target runtime --cuda-version $(CUDA_VERSION)
+	$(CONTAINER_TOOL) build -t $(VLLM_IMG) -f $(VLLM_DOCKERFILE) $(BUILD_CONTEXT)
+
+.PHONY: docker-build-trtllm
+docker-build-trtllm: ## Build the TensorRT-LLM runtime image.
+	$(RENDER) --framework trtllm --target runtime --cuda-version $(CUDA_VERSION_TRTLLM)
+	$(CONTAINER_TOOL) build -t $(TRTLLM_IMG) -f $(TRTLLM_DOCKERFILE) $(BUILD_CONTEXT)
+
+.PHONY: docker-build-sglang
+docker-build-sglang: ## Build the SGLang runtime image.
+	$(RENDER) --framework sglang --target runtime --cuda-version $(CUDA_VERSION)
+	$(CONTAINER_TOOL) build -t $(SGLANG_IMG) -f $(SGLANG_DOCKERFILE) $(BUILD_CONTEXT)
+
+.PHONY: docker-build-operator
+docker-build-operator: ## Build the operator image with dynamo naming (REGISTRY/TAG).
+	$(MAKE) docker-build IMG=$(OPERATOR_IMG)
+
+.PHONY: docker-build-all
+docker-build-all: docker-build-planner docker-build-frontend docker-build-vllm docker-build-trtllm docker-build-sglang docker-build-operator ## Build all images.
+
+.PHONY: docker-push-planner
+docker-push-planner: ## Push the planner image.
+	$(CONTAINER_TOOL) push $(PLANNER_IMG)
+
+.PHONY: docker-push-frontend
+docker-push-frontend: ## Push the frontend image.
+	$(CONTAINER_TOOL) push $(FRONTEND_IMG)
+
+.PHONY: docker-push-vllm
+docker-push-vllm: ## Push the vLLM runtime image.
+	$(CONTAINER_TOOL) push $(VLLM_IMG)
+
+.PHONY: docker-push-trtllm
+docker-push-trtllm: ## Push the TensorRT-LLM runtime image.
+	$(CONTAINER_TOOL) push $(TRTLLM_IMG)
+
+.PHONY: docker-push-sglang
+docker-push-sglang: ## Push the SGLang runtime image.
+	$(CONTAINER_TOOL) push $(SGLANG_IMG)
+
+.PHONY: docker-push-operator
+docker-push-operator: ## Push the operator image with dynamo naming (REGISTRY/TAG).
+	$(MAKE) docker-push IMG=$(OPERATOR_IMG)
+
+.PHONY: docker-push-all
+docker-push-all: docker-push-planner docker-push-frontend docker-push-vllm docker-push-trtllm docker-push-sglang docker-push-operator ## Push all images.
+
 ##@ Development
 
 .PHONY: check
