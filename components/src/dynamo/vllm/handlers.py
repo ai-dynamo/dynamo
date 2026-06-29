@@ -45,6 +45,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.gms_failover import release_attached_gms_failover_lock
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -76,6 +77,10 @@ from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
+from dynamo.gms_router_policy import (
+    maybe_fetch_gms_placement,
+    resolve_vllm_gms_daemon_socket,
+)
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -321,13 +326,23 @@ class VllmEnginePauseController:
     def needs_resume_recovery(self) -> bool:
         return self._generation_paused
 
-    async def pause(self, *args: object) -> bool:
+    async def pause(self, *args: object, clear_cache: bool = True) -> bool:
         if self._is_paused or self._generation_paused:
             return False
 
         level = args[0] if args else None
-        await self._engine_client.pause_generation()
+        await self._engine_client.pause_generation(clear_cache=clear_cache)
         self._generation_paused = True
+        # GMS failover no-clear sleep path: keep KV cache contents and let the
+        # GMS engine-core hook perform the unmap so the pages survive for remap.
+        if not clear_cache and level is not None:
+            engine_core = getattr(self._engine_client, "engine_core", None)
+            call_utility_async = getattr(engine_core, "call_utility_async", None)
+            if call_utility_async is not None:
+                await call_utility_async("gms_sleep_no_clear", level, "abort")
+                self._is_paused = True
+                return True
+
         try:
             if level is None:
                 await self._engine_client.sleep()
@@ -1192,16 +1207,28 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     )
 
                 # Step 2: Abort in-flight requests and wait for them to drain so
-                # generation is fully paused before unmapping memory.
-                if not await self._pause_controller.pause(level):
+                # generation is fully paused before unmapping memory. On a
+                # failover handoff, keep the KV cache (no clear) so the GMS
+                # pages survive for remap by the standby.
+                handoff = bool(body.get("release_failover_lock") or body.get("handoff"))
+                if not await self._pause_controller.pause(
+                    level, clear_cache=not handoff
+                ):
                     return {
                         "status": "ok",
                         "message": "Engine already sleeping",
                     }
 
+                lock_released = False
+                if handoff:
+                    lock_released = await release_attached_gms_failover_lock(
+                        self, backend_name="vllm"
+                    )
+
                 return {
                     "status": "ok",
                     "message": f"Engine slept (level={level})",
+                    "failover_lock_released": lock_released,
                 }
             except Exception as e:
                 logger.error(f"Failed to sleep engine: {e}")
@@ -3166,6 +3193,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
 
         mm_processor_kwargs = self._get_mm_processor_kwargs(request)
+
+        await maybe_fetch_gms_placement(
+            request,
+            resolve_vllm_gms_daemon_socket(self.engine_client.vllm_config),
+            logger=logger,
+            request_id=request_id,
+        )
 
         multi_modal_data: Dict[str, Any] | None = None
         pre_rendered: Dict[str, Any] | None = None

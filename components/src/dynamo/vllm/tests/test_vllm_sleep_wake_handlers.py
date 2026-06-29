@@ -99,6 +99,45 @@ async def test_pause_without_level_uses_vllm_default_sleep():
 
 
 @pytest.mark.asyncio
+async def test_quiesce_can_skip_cache_clear():
+    engine_client = SimpleNamespace(
+        pause_generation=AsyncMock(),
+        sleep=AsyncMock(),
+        wake_up=AsyncMock(),
+        resume_generation=AsyncMock(),
+    )
+    controller = VllmEnginePauseController(engine_client)
+
+    changed = await controller.pause(1, clear_cache=False)
+
+    assert changed is True
+    engine_client.pause_generation.assert_awaited_once_with(clear_cache=False)
+    engine_client.sleep.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_quiesce_uses_no_clear_sleep_utility_when_available():
+    engine_core = SimpleNamespace(call_utility_async=AsyncMock())
+    engine_client = SimpleNamespace(
+        pause_generation=AsyncMock(),
+        sleep=AsyncMock(),
+        wake_up=AsyncMock(),
+        resume_generation=AsyncMock(),
+        engine_core=engine_core,
+    )
+    controller = VllmEnginePauseController(engine_client)
+
+    changed = await controller.pause(1, clear_cache=False)
+
+    assert changed is True
+    engine_client.pause_generation.assert_awaited_once_with(clear_cache=False)
+    engine_core.call_utility_async.assert_awaited_once_with(
+        "gms_sleep_no_clear", 1, "abort"
+    )
+    engine_client.sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_wake_up_passes_explicit_tags_from_request():
     handler = _make_handler()
     await handler._pause_controller.pause(1)
@@ -181,3 +220,19 @@ async def test_wake_up_returns_error_for_register_failure():
     handler.engine_client.wake_up.assert_awaited_once_with()
     handler.engine_client.resume_generation.assert_awaited_once()
     assert handler._pause_controller.is_paused is True
+
+
+@pytest.mark.asyncio
+async def test_sleep_with_handoff_releases_failover_lock():
+    handler = _make_handler()
+    lock = SimpleNamespace(release=AsyncMock())
+    handler._gms_failover_lock = lock
+
+    result = await handler.sleep({"level": 1, "release_failover_lock": True})
+
+    assert result["status"] == "ok"
+    assert result["failover_lock_released"] is True
+    handler.engine_client.pause_generation.assert_awaited_once_with(clear_cache=False)
+    handler.engine_client.sleep.assert_awaited_once_with(1)
+    lock.release.assert_awaited_once()
+    assert handler._gms_failover_lock is None

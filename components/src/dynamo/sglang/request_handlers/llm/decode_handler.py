@@ -15,6 +15,10 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.gms_router_policy import (
+    maybe_fetch_gms_placement,
+    resolve_env_gms_daemon_socket,
+)
 from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -354,6 +358,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         lora_path = self._resolve_lora(request)
         if lora_path:
             logging.debug(f"Request {context.id()} will use LoRA adapter: {lora_path}")
+
+        await maybe_fetch_gms_placement(
+            request,
+            resolve_env_gms_daemon_socket("GMS_SGLANG_DAEMON_SOCKET"),
+            logger=logging.getLogger(__name__),
+            request_id=context.id(),
+        )
 
         if self.serving_mode == DisaggregationMode.DECODE:
             raise_if_unextracted_multimodal(request)
