@@ -632,6 +632,13 @@ def test_minimax_m3_force_reasoning_uses_thinking_mode():
     )
 
 
+class _CapturingReasoningParser:
+    def __init__(self, *, model_type, stream_reasoning, force_reasoning):
+        self.model_type = model_type
+        self.stream_reasoning = stream_reasoning
+        self.force_reasoning = force_reasoning
+
+
 @pytest.mark.parametrize(
     "request_update",
     [
@@ -640,7 +647,15 @@ def test_minimax_m3_force_reasoning_uses_thinking_mode():
         {"reasoning_effort": "none"},
     ],
 )
-def test_minimax_m3_openai_disabled_thinking_sets_thinking_mode(request_update):
+def test_minimax_m3_openai_disabled_thinking_sets_thinking_mode(
+    request_update, monkeypatch
+):
+    monkeypatch.setattr(
+        sglang_prepost_module,
+        "ReasoningParser",
+        _CapturingReasoningParser,
+    )
+
     request = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Hello"}],
@@ -664,9 +679,17 @@ def test_minimax_m3_openai_disabled_thinking_sets_thinking_mode(request_update):
     assert result.request["chat_template_kwargs"]["enable_thinking"] is False
     assert result.request["chat_template_kwargs"]["thinking_mode"] == "disabled"
     assert result.force_reasoning is False
+    assert result.reasoning_parser.model_type == "minimax-m3"
+    assert result.reasoning_parser.force_reasoning is False
 
 
-def test_minimax_m3_reasoning_effort_none_keeps_explicit_thinking_mode():
+def test_minimax_m3_reasoning_effort_none_keeps_explicit_thinking_mode(monkeypatch):
+    monkeypatch.setattr(
+        sglang_prepost_module,
+        "ReasoningParser",
+        _CapturingReasoningParser,
+    )
+
     request = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Hello"}],
@@ -689,6 +712,8 @@ def test_minimax_m3_reasoning_effort_none_keeps_explicit_thinking_mode():
 
     assert result.request["chat_template_kwargs"]["thinking_mode"] == "thinking"
     assert result.force_reasoning is True
+    assert result.reasoning_parser.model_type == "minimax-m3"
+    assert result.reasoning_parser.force_reasoning is True
 
 
 class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup for tool_choice
