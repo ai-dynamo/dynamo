@@ -363,3 +363,56 @@ def test_engine_failure_emits_error_and_failed_response_done():
         done["response"]["status_details"]["error"]["code"] == "omni_generation_error"
     )
     assert types.index("error") < types.index("response.done")
+
+
+def test_concurrent_turns_capped():
+    # With max_concurrent_turns=2, four commits must never put more than two
+    # engine drives in flight at once: the pump blocks opening turn 3 until an
+    # earlier turn finishes (and frees its slot). A barrier that releases once
+    # `cap` drives have started lets the two in-flight turns unblock each other,
+    # so the test still completes -- peak concurrency pinned at the cap.
+    cap = 2
+
+    class _PeakEngine:
+        def __init__(self) -> None:
+            self.inflight = 0
+            self.peak = 0
+            self.started = 0
+            self.gate = asyncio.Event()
+
+        async def generate(
+            self,
+            *,
+            prompt,
+            request_id,
+            sampling_params_list=None,
+            output_modalities=None,
+        ):
+            async for _ in prompt:  # drain this turn's audio
+                pass
+            self.inflight += 1
+            self.peak = max(self.peak, self.inflight)
+            self.started += 1
+            if self.started >= cap:
+                self.gate.set()
+            await asyncio.wait_for(self.gate.wait(), timeout=5)
+            yield _text_output("ok")
+            yield _audio_output(np.zeros(4, dtype=np.float32))
+            self.inflight -= 1
+
+    audio_b64 = base64.b64encode(
+        np.linspace(-8000, 8000, 16, dtype=np.int16).tobytes()
+    ).decode()
+    engine = _PeakEngine()
+    handler = _make_handler(engine, max_concurrent_turns=cap)
+    events = [{"type": "session.update", "session": {"model": MODEL_NAME}}]
+    for _ in range(4):  # four commits => four turns
+        events.append({"type": "input_audio_buffer.append", "audio": audio_b64})
+        events.append({"type": "input_audio_buffer.commit"})
+
+    out = asyncio.run(_drive(handler, events, _FakeContext()))
+
+    assert engine.started == 4  # all four turns ran
+    assert engine.peak == cap  # never more than the cap in flight at once
+    done = [e for e in out if e["type"] == "response.done"]
+    assert len(done) == 4 and all(e["response"]["status"] == "completed" for e in done)

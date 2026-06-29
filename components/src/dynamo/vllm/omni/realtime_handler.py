@@ -257,12 +257,17 @@ class RealtimeOmniHandler:
         streaming_input_factory: StreamingInputFactory,
         default_sampling_params_list: Optional[Sequence[Any]] = None,
         emit_transcript: bool = True,
+        max_concurrent_turns: int = 8,
     ) -> None:
         self.engine_client = engine_client
         self.model_name = model_name
         self._streaming_input_factory = streaming_input_factory
         self._default_sampling_params_list = default_sampling_params_list
         self._emit_transcript = emit_transcript
+        # Upper bound on in-flight turns per connection: the pump blocks before
+        # opening a new turn once this many are running, so a pipelining or
+        # abusive client cannot spawn unbounded concurrent engine generations.
+        self._max_concurrent_turns = max_concurrent_turns
 
     def new_turn(self, output_modalities: list[str] | None) -> Turn:
         return Turn(
@@ -432,16 +437,22 @@ class RealtimeOmniHandler:
         # Latest output modalities requested by the client via session.update;
         # snapshotted into each turn so the engine emits text/audio accordingly.
         session_output_modalities: list[str] | None = None
+        # Cap concurrent in-flight turns: a slot is acquired before a turn opens
+        # and released when its task finishes, so the pump back-pressures rather
+        # than spawning unbounded engine generations on one connection.
+        turn_slots = asyncio.Semaphore(self._max_concurrent_turns)
 
-        def ensure_turn() -> Turn:
+        async def ensure_turn() -> Turn:
             nonlocal active_turn
             if active_turn is None:
+                await turn_slots.acquire()
                 active_turn = self.new_turn(session_output_modalities)
                 turns.append(active_turn)
                 out_stream.put_nowait(active_turn)
                 active_turn.task = asyncio.create_task(
                     self.run_turn(active_turn, context)
                 )
+                active_turn.task.add_done_callback(lambda _: turn_slots.release())
             return active_turn
 
         async def pump() -> None:
@@ -463,12 +474,12 @@ class RealtimeOmniHandler:
                             session_output_modalities = modalities
                         out_stream.put_nowait(session_updated_event(session))
                     elif etype == "input_audio_buffer.append":
-                        turn = ensure_turn()
+                        turn = await ensure_turn()
                         waveform = decode_pcm16(client_event.get("audio", ""))
                         if waveform is not None:
                             turn.audio_queue.put_nowait(waveform)
                     elif etype == "input_audio_buffer.commit":
-                        turn = ensure_turn()
+                        turn = await ensure_turn()
                         # `final` absent defaults to True: a bare commit means
                         # "buffer complete, generate". A non-final commit opens
                         # the turn (engine starts) but keeps the input open.
