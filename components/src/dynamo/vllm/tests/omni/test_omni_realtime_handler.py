@@ -21,7 +21,7 @@ try:
     # Importing the omni package pulls omni_handler -> vllm_omni; the handler
     # logic itself is vllm-free, but the package import is not.
     from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler
-except Exception:
+except (ImportError, ModuleNotFoundError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 pytestmark = [
