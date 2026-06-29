@@ -29,13 +29,13 @@ import (
 // configurations. Modeled after the CAAPH helm_test.go pattern: each It block calls
 // DGDRLifecycleSpec with a different input, and multiple specs can be composed
 // sequentially within a single It to test multi-step workflows.
-var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integration", "k8s"), func() {
+var _ = Describe("DGDR Lifecycle Scenarios", Label("nightly", "integration", "k8s"), func() {
 
 	// -----------------------------------------------------------------------
 	// Backend variations — rapid profiling with each supported backend
 	// -----------------------------------------------------------------------
 
-	Context("Backend variations with rapid profiling", func() {
+	Context("Backend variations with rapid profiling", Label("rapid", "gpu_0"), func() {
 
 		It("should complete full lifecycle with vllm backend", func() {
 			By("Running DGDR lifecycle with vllm + rapid + autoApply")
@@ -65,7 +65,7 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 
 	Context("Search strategy and autoApply variations", func() {
 
-		It("should complete thorough profiling without deploying", func() {
+		It("should complete thorough profiling without deploying", Label("thorough", "gpu_1"), func() {
 			By("Running DGDR lifecycle with thorough + autoApply=false")
 			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
 				return DGDRLifecycleInput{
@@ -79,7 +79,7 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 			})
 		})
 
-		It("should reach Ready but not Deployed with autoApply=false", func() {
+		It("should reach Ready but not Deployed with autoApply=false", Label("rapid", "gpu_0"), func() {
 			By("Running DGDR lifecycle with rapid + autoApply=false")
 			DGDRLifecycleSpec(ctx, func() DGDRLifecycleInput {
 				return DGDRLifecycleInput{
@@ -96,7 +96,7 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 	// Feature combinations
 	// -----------------------------------------------------------------------
 
-	Context("Feature combinations", func() {
+	Context("Feature combinations", Label("rapid", "gpu_0"), func() {
 
 		It("should include Planner service when planner is enabled", func() {
 			By("Running DGDR lifecycle with trtllm + planner enabled")
@@ -127,7 +127,7 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 	// SLA and workload parameter variations
 	// -----------------------------------------------------------------------
 
-	Context("SLA and workload parameter variations", func() {
+	Context("SLA and workload parameter variations", Label("rapid", "gpu_0"), func() {
 
 		It("should profile with custom SLA and workload constraints", func() {
 			By("Running DGDR lifecycle with custom TTFT/ITL and ISL/OSL")
@@ -190,7 +190,7 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 	// Hardware configuration
 	// -----------------------------------------------------------------------
 
-	Context("Hardware configuration", func() {
+	Context("Hardware configuration", Label("rapid", "gpu_0"), func() {
 
 		It("should profile with specified GPU configuration", func() {
 			By("Running DGDR lifecycle with custom A100 hardware spec")
@@ -216,7 +216,7 @@ var _ = Describe("DGDR Lifecycle Scenarios", Label("gpu_0", "nightly", "integrat
 	// a single It block to test sequential scenarios (CAAPH helm_test.go style).
 	// -----------------------------------------------------------------------
 
-	Context("Multi-step workflows", func() {
+	Context("Multi-step workflows", Label("rapid", "gpu_0"), func() {
 
 		It("should run rapid profiling across multiple backends sequentially", func() {
 			By("Running vllm rapid lifecycle")

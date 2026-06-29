@@ -28,9 +28,9 @@ import (
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
-var _ = Describe("DGDR Profiling", Label("gpu_0", "nightly", "integration", "k8s"), func() {
+var _ = Describe("DGDR Profiling", Label("nightly", "integration", "k8s"), func() {
 
-	Context("Rapid search strategy", func() {
+	Context("Rapid search strategy", Label("rapid", "gpu_0"), func() {
 
 		It("should emit an output ConfigMap with final_config.yaml", func() {
 			name := uniqueName("rapid-cm")
