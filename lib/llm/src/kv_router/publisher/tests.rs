@@ -100,6 +100,33 @@ mod test_event_processing {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].block_hash.0, 111);
         assert_eq!(blocks[1].block_hash.0, 222);
+
+        let salted_blocks = create_stored_blocks(
+            kv_block_size,
+            &token_ids,
+            &num_block_tokens,
+            &block_hashes,
+            None,
+            Some("tenant-a"),
+            &Arc::new(AtomicU32::new(0)),
+            None,
+            None,
+            None,
+        );
+        for (block, tokens) in salted_blocks
+            .iter()
+            .zip(token_ids.chunks(kv_block_size as usize))
+        {
+            let expected = compute_block_hash_for_seq(
+                tokens,
+                kv_block_size,
+                BlockHashOptions {
+                    cache_namespace: Some("tenant-a"),
+                    ..Default::default()
+                },
+            )[0];
+            assert_eq!(block.tokens_hash, expected);
+        }
     }
 
     #[test]

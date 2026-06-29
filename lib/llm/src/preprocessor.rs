@@ -304,6 +304,19 @@ impl OpenAIPreprocessor {
         }
     }
 
+    fn request_cache_namespace<R: NvExtProvider>(request: &R) -> Option<String> {
+        request
+            .nvext()
+            .and_then(|nvext| nvext.cache_salt.clone())
+            .or_else(|| {
+                request
+                    .unsupported_fields()
+                    .and_then(|fields| fields.get("cache_salt"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned)
+            })
+    }
+
     fn nvext_passthrough_args<R: NvExtProvider>(
         request: &R,
     ) -> Option<serde_json::Map<String, serde_json::Value>> {
@@ -312,9 +325,6 @@ impl OpenAIPreprocessor {
         if let Some(nvext) = request.nvext() {
             if let Some(ref fields) = nvext.extra_fields {
                 nvext_passthrough.insert("extra_fields".to_string(), serde_json::json!(fields));
-            }
-            if let Some(ref salt) = nvext.cache_salt {
-                nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
             }
             if let Some(ref metadata_upload) = nvext.metadata_upload {
                 nvext_passthrough.insert(
@@ -327,12 +337,7 @@ impl OpenAIPreprocessor {
             }
         }
 
-        if !nvext_passthrough.contains_key("cache_salt")
-            && let Some(salt) = request
-                .unsupported_fields()
-                .and_then(|fields| fields.get("cache_salt"))
-                .and_then(|value| value.as_str())
-        {
+        if let Some(salt) = Self::request_cache_namespace(request) {
             nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
         }
 
@@ -838,6 +843,7 @@ impl OpenAIPreprocessor {
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         let lora_name = self.lora_name.clone();
+        let cache_namespace = Self::request_cache_namespace(request);
 
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
@@ -856,7 +862,7 @@ impl OpenAIPreprocessor {
                 strict_priority,
                 priority,
                 lora_name,
-                cache_namespace: nvext.cache_salt.clone(),
+                cache_namespace: cache_namespace.clone(),
                 allowed_worker_ids: None,
                 routing_constraints: nvext
                     .routing_constraints
@@ -864,11 +870,12 @@ impl OpenAIPreprocessor {
                     .map(routing_constraints_to_kv),
             };
             builder.routing(Some(routing));
-        } else if lora_name.is_some() {
-            // Ensure routing hints exist when we have LoRA,
-            // even when nvext is absent.
+        } else if lora_name.is_some() || cache_namespace.is_some() {
+            // Ensure routing hints exist when we have LoRA or a legacy
+            // top-level cache_salt, even when nvext is absent.
             builder.routing(Some(RoutingHints {
                 lora_name,
+                cache_namespace,
                 ..Default::default()
             }));
         }
@@ -3692,6 +3699,32 @@ mod tests {
         assert_eq!(
             extra_args["sampling_options"]["bad_words_token_ids"],
             serde_json::json!([[12, 13]])
+        );
+    }
+
+    #[test]
+    fn test_request_cache_namespace_supports_legacy_top_level_field() {
+        let legacy: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "cache_salt": "tenant-legacy"
+        }))
+        .unwrap();
+        assert_eq!(
+            OpenAIPreprocessor::request_cache_namespace(&legacy).as_deref(),
+            Some("tenant-legacy")
+        );
+
+        let nvext_wins: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "cache_salt": "tenant-legacy",
+            "nvext": {"cache_salt": "tenant-nvext"}
+        }))
+        .unwrap();
+        assert_eq!(
+            OpenAIPreprocessor::request_cache_namespace(&nvext_wins).as_deref(),
+            Some("tenant-nvext")
         );
     }
 

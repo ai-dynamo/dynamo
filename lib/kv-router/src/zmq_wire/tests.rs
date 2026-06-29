@@ -552,6 +552,44 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
 }
 
 #[test]
+fn test_normalizer_rejects_ambiguous_parent_cache_namespace() {
+    let worker = WorkerWithDpRank::new(7, 0);
+    let mut normalizer = ZmqEventNormalizer::new(2);
+    let stored =
+        |cache_namespace: Option<&str>, block_hashes, parent_block_hash| RawKvEvent::BlockStored {
+            block_hashes,
+            parent_block_hash,
+            token_ids: vec![10, 11],
+            block_size: 2,
+            medium: None,
+            lora_name: None,
+            cache_namespace: cache_namespace.map(str::to_owned),
+            block_mm_infos: None,
+            is_eagle: Some(false),
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
+        };
+
+    let parent_a = stored(Some("tenant-a"), vec![BlockHashValue::Unsigned(1)], None);
+    let parent_b = stored(Some("tenant-b"), vec![BlockHashValue::Unsigned(1)], None);
+    let child = stored(
+        None,
+        vec![BlockHashValue::Unsigned(2)],
+        Some(BlockHashValue::Unsigned(1)),
+    );
+
+    assert!(normalizer.preprocess(parent_a, worker).is_some());
+    assert!(normalizer.preprocess(parent_b, worker).is_some());
+    assert_eq!(
+        normalizer
+            .preprocess_with_reason(child, worker)
+            .expect_err("ambiguous parent must be rejected"),
+        ZmqEventFilterReason::AmbiguousCacheNamespace
+    );
+}
+
+#[test]
 fn test_normalizer_ignores_non_main_attention_kind_with_group_idx_zero() {
     let raw_event: RawKvEvent = from_slice(&sequence_with_cache_spec_kind(
         TestEventKind::BlockStored,

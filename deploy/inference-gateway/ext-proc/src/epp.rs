@@ -509,6 +509,13 @@ fn extract_cache_namespace(
         .nvext
         .as_ref()
         .and_then(|nvext| nvext.cache_salt.clone())
+        .or_else(|| {
+            request
+                .unsupported_fields
+                .get("cache_salt")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
 }
 
 struct DiscoveredModelBootstrap {
@@ -1183,5 +1190,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(extract_cache_namespace(&without_nvext), None);
+
+        let legacy_top_level: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "cache_salt": "tenant-legacy"
+                }"#,
+            )
+            .unwrap();
+        assert_eq!(
+            extract_cache_namespace(&legacy_top_level).as_deref(),
+            Some("tenant-legacy")
+        );
     }
 }

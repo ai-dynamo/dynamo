@@ -36,6 +36,8 @@ pub struct PromptRequest {
     pub isl_tokens: Option<usize>,
     #[serde(default)]
     pub lora_name: Option<String>,
+    #[serde(default, rename = "cache_salt")]
+    pub cache_namespace: Option<String>,
     #[serde(default)]
     pub is_eagle: Option<bool>,
 }
@@ -51,6 +53,7 @@ impl PromptRequest {
                 token_ids,
                 block_size,
                 self.lora_name.as_deref(),
+                self.cache_namespace.as_deref(),
                 block_mm_infos,
                 self.is_eagle.unwrap_or(default_is_eagle),
             ));
@@ -78,6 +81,7 @@ impl PromptRequest {
                 token_ids,
                 block_size,
                 self.lora_name.as_deref(),
+                self.cache_namespace.as_deref(),
                 block_mm_infos,
                 self.is_eagle.unwrap_or(default_is_eagle),
             );
@@ -121,6 +125,7 @@ fn normalize_tokens(
     token_ids: &[u32],
     block_size: u32,
     lora_name: Option<&str>,
+    cache_namespace: Option<&str>,
     block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
     is_eagle: bool,
 ) -> NormalizedPrompt {
@@ -130,7 +135,7 @@ fn normalize_tokens(
         BlockHashOptions {
             block_mm_infos,
             lora_name,
-            cache_namespace: None,
+            cache_namespace,
             is_eagle: Some(is_eagle),
         },
     );

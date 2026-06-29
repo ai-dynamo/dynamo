@@ -420,6 +420,10 @@ pub struct CRoutingResult {
     pub token_ids: *mut u32,
     /// Number of tokens in the request
     pub token_count: usize,
+    /// UTF-8 cache namespace bytes (needed for add_request callback)
+    pub cache_namespace: *mut u8,
+    /// Number of bytes in the cache namespace
+    pub cache_namespace_len: usize,
 }
 
 impl Default for CRoutingResult {
@@ -432,6 +436,8 @@ impl Default for CRoutingResult {
             decode_dp_rank: 0,
             token_ids: ptr::null_mut(),
             token_count: 0,
+            cache_namespace: ptr::null_mut(),
+            cache_namespace_len: 0,
         }
     }
 }
@@ -622,6 +628,13 @@ fn extract_cache_namespace<R: NvExtProvider>(request: &R) -> Option<String> {
     request
         .nvext()
         .and_then(|nvext| nvext.cache_salt.clone())
+        .or_else(|| {
+            request
+                .unsupported_fields
+                .get("cache_salt")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
 }
 
 /// Opaque handle for the router pair
@@ -893,6 +906,42 @@ pub unsafe extern "C" fn add_request(
     worker_id: u64,
     dp_rank: u32,
 ) -> QueryRouterResult {
+    unsafe {
+        add_request_with_cache_namespace(
+            handle,
+            request_id,
+            token_ids,
+            token_count,
+            worker_id,
+            dp_rank,
+            ptr::null(),
+            0,
+        )
+    }
+}
+
+/// Add a cache-namespaced request to the router's bookkeeping after worker selection.
+///
+/// This preserves the original `add_request` ABI for unsalted callers while allowing callers
+/// that routed with a namespace to use the same hashes for scheduler bookkeeping.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_id` must be a valid null-terminated C string
+/// - `token_ids` must point to at least `token_count` valid u32 values
+/// - `cache_namespace` must point to at least `cache_namespace_len` valid UTF-8 bytes when the
+///   length is non-zero
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn add_request_with_cache_namespace(
+    handle: RouterHandlesPtr,
+    request_id: *const c_char,
+    token_ids: *const u32,
+    token_count: usize,
+    worker_id: u64,
+    dp_rank: u32,
+    cache_namespace: *const u8,
+    cache_namespace_len: usize,
+) -> QueryRouterResult {
     if handle.is_null() || request_id.is_null() {
         return QueryRouterResult::ErrInvalidParam;
     }
@@ -901,6 +950,19 @@ pub unsafe extern "C" fn add_request(
     let request_id_str = match unsafe { CStr::from_ptr(request_id) }.to_str() {
         Ok(s) => s.to_owned(),
         Err(_) => return QueryRouterResult::ErrInvalidParam,
+    };
+    let cache_namespace = if cache_namespace_len == 0 {
+        None
+    } else if cache_namespace.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    } else {
+        match std::str::from_utf8(unsafe {
+            std::slice::from_raw_parts(cache_namespace, cache_namespace_len)
+        }) {
+            Ok("") => None,
+            Ok(namespace) => Some(namespace.to_owned()),
+            Err(_) => return QueryRouterResult::ErrInvalidParam,
+        }
     };
 
     let tokens: Vec<u32> = if token_count > 0 && !token_ids.is_null() {
@@ -925,7 +987,7 @@ pub unsafe extern "C" fn add_request(
 
             // Compute overlap_blocks using the public method
             let overlap_blocks = match decode_router
-                .get_overlap_blocks(&tokens, None, worker, None, None)
+                .get_overlap_blocks(&tokens, None, worker, None, cache_namespace.as_deref())
                 .await
             {
                 Ok(overlap) => overlap,
@@ -945,7 +1007,7 @@ pub unsafe extern "C" fn add_request(
                     None,
                     worker,
                     None, // lora_name
-                    None, // cache_namespace
+                    cache_namespace.clone(),
                     Some(&router_config_override),
                 )
                 .await;
@@ -954,6 +1016,7 @@ pub unsafe extern "C" fn add_request(
                 request_id = %request_id_str,
                 worker_id = worker_id,
                 dp_rank = dp_rank,
+                cache_namespace = cache_namespace.as_deref(),
                 overlap_blocks = overlap_blocks,
                 token_count = tokens.len(),
                 "add_request completed"
@@ -1123,6 +1186,18 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
         });
         res.token_ids = ptr::null_mut();
         res.token_count = 0;
+    }
+
+    // Free cache namespace bytes
+    if !res.cache_namespace.is_null() && res.cache_namespace_len > 0 {
+        drop(unsafe {
+            Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+                res.cache_namespace,
+                res.cache_namespace_len,
+            ))
+        });
+        res.cache_namespace = ptr::null_mut();
+        res.cache_namespace_len = 0;
     }
 }
 
@@ -1305,6 +1380,17 @@ fn write_tokens_to_result(tokens: &[u32], out: &mut CRoutingResult) {
     std::mem::forget(tokens_boxed);
 }
 
+/// Write cache namespace bytes into a `CRoutingResult`, transferring ownership to the caller.
+fn write_cache_namespace_to_result(cache_namespace: Option<&str>, out: &mut CRoutingResult) {
+    let Some(cache_namespace) = cache_namespace.filter(|namespace| !namespace.is_empty()) else {
+        return;
+    };
+    let mut namespace_boxed = cache_namespace.as_bytes().to_vec().into_boxed_slice();
+    out.cache_namespace = namespace_boxed.as_mut_ptr();
+    out.cache_namespace_len = namespace_boxed.len();
+    std::mem::forget(namespace_boxed);
+}
+
 /// Route a request to select the best **prefill** worker only.
 ///
 /// This is used in disaggregated mode where the EPP runs separate prefill and decode
@@ -1348,7 +1434,7 @@ pub unsafe extern "C" fn route_prefill_request(
                 &tokens,
                 None,
                 None,
-                cache_namespace,
+                cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
@@ -1378,6 +1464,7 @@ pub unsafe extern "C" fn route_prefill_request(
             out.prefill_worker_id = prefill_worker_id;
             out.prefill_dp_rank = prefill_dp_rank;
             write_tokens_to_result(&tokens, out);
+            write_cache_namespace_to_result(cache_namespace.as_deref(), out);
             QueryRouterResult::Ok
         }
         Err(code) => code,
@@ -1429,7 +1516,7 @@ pub unsafe extern "C" fn route_decode_request(
             .query_decode_worker(
                 &tokens,
                 is_disaggregated,
-                cache_namespace,
+                cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
                 allowed_worker_ids,
@@ -1458,6 +1545,7 @@ pub unsafe extern "C" fn route_decode_request(
             out.decode_worker_id = decode_worker.worker_id;
             out.decode_dp_rank = decode_worker.dp_rank;
             write_tokens_to_result(&tokens, out);
+            write_cache_namespace_to_result(cache_namespace.as_deref(), out);
             QueryRouterResult::Ok
         }
         Err(code) => code,
@@ -1712,5 +1800,38 @@ mod tests {
             )
             .expect("test request must parse as completion");
         assert_eq!(extract_priority_jump(req.nvext.as_ref()), 5.0);
+    }
+
+    #[test]
+    fn cache_namespace_supports_legacy_top_level_field() {
+        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_str(
+                r#"{
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "cache_salt": "tenant-legacy"
+                }"#,
+            )
+            .expect("test request must parse as chat completion");
+        assert_eq!(
+            extract_cache_namespace(&request).as_deref(),
+            Some("tenant-legacy")
+        );
+    }
+
+    #[test]
+    fn routing_result_round_trips_cache_namespace_bytes() {
+        let mut result = CRoutingResult::default();
+        write_cache_namespace_to_result(Some("tenant\0a"), &mut result);
+
+        assert_eq!(result.cache_namespace_len, 8);
+        let namespace = unsafe {
+            std::slice::from_raw_parts(result.cache_namespace, result.cache_namespace_len)
+        };
+        assert_eq!(namespace, b"tenant\0a");
+
+        unsafe { free_routing_result(&mut result) };
+        assert!(result.cache_namespace.is_null());
+        assert_eq!(result.cache_namespace_len, 0);
     }
 }

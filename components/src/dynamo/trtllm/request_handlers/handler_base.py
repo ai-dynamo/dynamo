@@ -18,7 +18,7 @@ import dataclasses
 import logging
 import os
 import re
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
@@ -53,6 +53,7 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
 )
+from dynamo.trtllm.utils.request_utils import request_cache_salt
 
 if TYPE_CHECKING:
     # tensorrt_llm may use a different version that doesn't have MetricsCollector,
@@ -62,23 +63,6 @@ if TYPE_CHECKING:
 configure_dynamo_logging()
 
 logger = logging.getLogger(__name__)
-
-
-def _request_cache_salt(request: Mapping[str, Any]) -> Optional[str]:
-    routing = request.get("routing") or {}
-    if isinstance(routing, dict):
-        cache_salt = routing.get("cache_salt")
-        if cache_salt is not None:
-            return cache_salt
-
-    extra_args = request.get("extra_args") or {}
-    nvext = extra_args.get("nvext") if isinstance(extra_args, dict) else None
-    if isinstance(nvext, dict):
-        cache_salt = nvext.get("cache_salt")
-        if cache_salt is not None:
-            return cache_salt
-
-    return None
 
 
 class TRTLLMEnginePauseController:
@@ -1127,7 +1111,7 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
-        cache_salt = _request_cache_salt(request)
+        cache_salt = request_cache_salt(request)
 
         try:
             # NEW: Updated engine call to include multimodal data

@@ -1605,6 +1605,38 @@ mod lora_tests {
         assert_eq!(scores_b.scores.len(), 1);
         assert!(scores_b.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
         assert!(!scores_b.scores.contains_key(&WorkerWithDpRank::new(0, 0)));
+
+        let request_scores_a = index
+            .find_matches_for_request(&tokens, None, Some("tenant-a"), None)
+            .await
+            .unwrap();
+        assert_eq!(request_scores_a.scores.len(), 1);
+        assert!(
+            request_scores_a
+                .scores
+                .contains_key(&WorkerWithDpRank::new(0, 0))
+        );
+        assert!(
+            !request_scores_a
+                .scores
+                .contains_key(&WorkerWithDpRank::new(1, 0))
+        );
+
+        let request_scores_b = index
+            .find_matches_for_request(&tokens, None, Some("tenant-b"), None)
+            .await
+            .unwrap();
+        assert_eq!(request_scores_b.scores.len(), 1);
+        assert!(
+            request_scores_b
+                .scores
+                .contains_key(&WorkerWithDpRank::new(1, 0))
+        );
+        assert!(
+            !request_scores_b
+                .scores
+                .contains_key(&WorkerWithDpRank::new(0, 0))
+        );
     }
 }
 

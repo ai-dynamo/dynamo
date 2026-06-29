@@ -32,7 +32,9 @@ fn cache_namespace_candidate<'a>(value: &'a str, lora_name: Option<&str>) -> Opt
 
 /// Extract a vLLM cache salt from `extra_keys` when a producer does not emit
 /// top-level `cache_salt`. vLLM aligns `extra_keys` with blocks and includes
-/// request-wide extras in each block, so the first block is enough.
+/// cache salt only in the first block. Only MessagePack string values are
+/// candidates; byte values such as prompt-embedding hashes must never become
+/// cache namespaces.
 pub fn extra_keys_to_cache_namespace(
     extra_keys: Option<&[Option<Vec<ExtraKeyItem>>]>,
     lora_name: Option<&str>,
@@ -44,11 +46,8 @@ pub fn extra_keys_to_cache_namespace(
         | ExtraKeyItem::HashWithUnsignedOffset((hash, _)) => {
             cache_namespace_candidate(hash, lora_name).map(str::to_owned)
         }
-        ExtraKeyItem::Bytes(bytes) => std::str::from_utf8(bytes)
-            .ok()
-            .and_then(|value| cache_namespace_candidate(value, lora_name))
-            .map(str::to_owned),
-        ExtraKeyItem::Signed(_)
+        ExtraKeyItem::Bytes(_)
+        | ExtraKeyItem::Signed(_)
         | ExtraKeyItem::Unsigned(_)
         | ExtraKeyItem::Float(_)
         | ExtraKeyItem::Bool(_) => None,
@@ -109,4 +108,15 @@ pub fn extra_keys_to_block_mm_infos(
     }
 
     Some(infos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_embedding_bytes_are_not_cache_namespace() {
+        let extra_keys = [Some(vec![ExtraKeyItem::Bytes(b"prompt-embed".to_vec())])];
+        assert_eq!(extra_keys_to_cache_namespace(Some(&extra_keys), None), None);
+    }
 }

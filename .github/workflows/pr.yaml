@@ -131,6 +131,8 @@ jobs:
 
   operator:
     needs: changed-files
+    # Keep this trigger set a superset of every deploy-operator* job guarded by
+    # needs.operator.result == 'success'.
     if: |
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.vllm == 'true' ||

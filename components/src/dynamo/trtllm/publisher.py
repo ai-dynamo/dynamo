@@ -875,14 +875,14 @@ class Publisher:
 
             logger.debug(
                 "Publishing stored KV event: engine_event_id=%s "
-                "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s cache_salt=%s "
+                "attention_dp_rank=%s blocks=%s tokens=%s lora_name=%s has_cache_salt=%s "
                 "has_parent=%s",
                 event_id,
                 attention_dp_rank,
                 len(block_hashes),
                 len(token_ids),
                 lora_name,
-                cache_salt,
+                cache_salt is not None,
                 parent_hash is not None,
             )
             # Publish to ZMQ if consolidator is enabled, otherwise publish to NATS

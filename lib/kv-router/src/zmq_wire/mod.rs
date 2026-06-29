@@ -47,7 +47,13 @@ pub struct ZmqEventNormalizer {
     image_token_id: Option<u32>,
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
-    cache_namespaces: FxHashMap<u64, String>,
+    cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CacheNamespaceState {
+    Namespaced(String),
+    Ambiguous,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +65,7 @@ struct KvCacheGroupMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZmqEventFilterReason {
     IgnoredEvent,
+    AmbiguousCacheNamespace,
     NonMainAttentionKind,
     UnknownKind,
     NonMainAttentionGroup,
@@ -69,6 +76,7 @@ impl ZmqEventFilterReason {
     pub fn as_label(self) -> &'static str {
         match self {
             Self::IgnoredEvent => "ignored_event",
+            Self::AmbiguousCacheNamespace => "ambiguous_cache_namespace",
             Self::NonMainAttentionKind => "non_main_attention_kind",
             Self::UnknownKind => "unknown_kind",
             Self::NonMainAttentionGroup => "non_main_attention_group",
@@ -126,7 +134,7 @@ impl ZmqEventNormalizer {
         if let Some(reason) = self.filter_reason(metadata, worker.dp_rank) {
             return Err(reason);
         }
-        self.propagate_cache_namespace(&mut raw);
+        self.propagate_cache_namespace(&mut raw, worker)?;
         Ok(raw)
     }
 
@@ -171,7 +179,11 @@ impl ZmqEventNormalizer {
         );
     }
 
-    fn propagate_cache_namespace(&mut self, raw: &mut RawKvEvent) {
+    fn propagate_cache_namespace(
+        &mut self,
+        raw: &mut RawKvEvent,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), ZmqEventFilterReason> {
         match raw {
             RawKvEvent::BlockStored {
                 block_hashes,
@@ -181,33 +193,65 @@ impl ZmqEventNormalizer {
             } => {
                 if cache_namespace.is_none()
                     && let Some(parent) = parent_block_hash.as_ref()
-                    && let Some(namespace) =
-                        self.cache_namespaces.get(&(*parent).into_u64()).cloned()
                 {
-                    *cache_namespace = Some(namespace);
+                    match self.cache_namespaces.get(&(worker, (*parent).into_u64())) {
+                        Some(CacheNamespaceState::Namespaced(namespace)) => {
+                            *cache_namespace = Some(namespace.clone());
+                        }
+                        Some(CacheNamespaceState::Ambiguous) => {
+                            return Err(ZmqEventFilterReason::AmbiguousCacheNamespace);
+                        }
+                        None => {}
+                    }
                 }
 
-                if let Some(namespace) = cache_namespace.as_ref().filter(|ns| !ns.is_empty()) {
+                if let Some(namespace) = cache_namespace
+                    .as_ref()
+                    .filter(|namespace| !namespace.is_empty())
+                {
+                    let state = CacheNamespaceState::Namespaced(namespace.clone());
                     for block_hash in block_hashes.iter() {
                         self.cache_namespaces
-                            .insert((*block_hash).into_u64(), namespace.clone());
+                            .entry((worker, (*block_hash).into_u64()))
+                            .and_modify(|existing| {
+                                if *existing != state {
+                                    *existing = CacheNamespaceState::Ambiguous;
+                                }
+                            })
+                            .or_insert_with(|| state.clone());
                     }
                 } else {
+                    // Do not retain every unsalted block. If this hash already
+                    // belongs to a namespace, however, fail closed on future
+                    // propagation because the external hash is now ambiguous.
                     for block_hash in block_hashes.iter() {
-                        self.cache_namespaces.remove(&(*block_hash).into_u64());
+                        if let Some(existing) = self
+                            .cache_namespaces
+                            .get_mut(&(worker, (*block_hash).into_u64()))
+                        {
+                            *existing = CacheNamespaceState::Ambiguous;
+                        }
                     }
                 }
             }
             RawKvEvent::BlockRemoved { block_hashes, .. } => {
                 for block_hash in block_hashes.iter() {
-                    self.cache_namespaces.remove(&(*block_hash).into_u64());
+                    let key = (worker, (*block_hash).into_u64());
+                    if !matches!(
+                        self.cache_namespaces.get(&key),
+                        Some(CacheNamespaceState::Ambiguous)
+                    ) {
+                        self.cache_namespaces.remove(&key);
+                    }
                 }
             }
             RawKvEvent::AllBlocksCleared => {
-                self.cache_namespaces.clear();
+                self.cache_namespaces
+                    .retain(|(known_worker, _), _| *known_worker != worker);
             }
             RawKvEvent::Ignored => {}
         }
+        Ok(())
     }
 
     fn filter_reason(

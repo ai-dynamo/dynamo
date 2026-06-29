@@ -18,7 +18,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -68,6 +68,7 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
 )
+from dynamo.trtllm.utils.request_utils import request_cache_salt
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 
 if TYPE_CHECKING:
@@ -105,23 +106,6 @@ _TRTLLM_TO_COMMON_DISAGG = {
     DisaggregationMode.PREFILL: CommonDisaggregationMode.PREFILL,
     DisaggregationMode.DECODE: CommonDisaggregationMode.DECODE,
 }
-
-
-def _request_cache_salt(request: Mapping[str, Any]) -> Optional[str]:
-    routing = request.get("routing") or {}
-    if isinstance(routing, dict):
-        cache_salt = routing.get("cache_salt")
-        if cache_salt is not None:
-            return cache_salt
-
-    extra_args = request.get("extra_args") or {}
-    nvext = extra_args.get("nvext") if isinstance(extra_args, dict) else None
-    if isinstance(nvext, dict):
-        cache_salt = nvext.get("cache_salt")
-        if cache_salt is not None:
-            return cache_salt
-
-    return None
 
 
 def _to_signed_i64(value: int | None) -> int | None:
@@ -862,7 +846,7 @@ class TrtllmLLMEngine(LLMEngine):
         # Prefill returns one non-streaming chunk carrying the handoff -
         # matches the legacy disagg wire format.
         streaming = not is_prefill
-        cache_salt = _request_cache_salt(request)
+        cache_salt = request_cache_salt(request)
         generation_result = self._engine.llm.generate_async(
             inputs=token_ids,
             sampling_params=sampling_params,
