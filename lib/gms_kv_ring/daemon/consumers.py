@@ -2,13 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Engine pool state, ring consumers, and peer-client pooling."""
+
 from __future__ import annotations
+
 import logging
 import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
+
 logger = logging.getLogger(__name__)
+
 
 _TLS = threading.local()
 

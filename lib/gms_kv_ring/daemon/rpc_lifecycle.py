@@ -2,10 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Engine lifecycle and local storage RPC handlers."""
+
 from __future__ import annotations
+
 from typing import TYPE_CHECKING
+
 from gms_kv_ring.daemon.consumers import LayerDesc
-from gms_kv_ring.daemon.rpc_types import Handler, Message, Response
+from gms_kv_ring.daemon.rpc_types import (
+    Handler,
+    Message,
+    Response,
+    optional_int,
+    required_int,
+    required_str,
+)
+
 if TYPE_CHECKING:
     from gms_kv_ring.daemon.server import Daemon
 
@@ -24,21 +35,21 @@ def handle_attach_engine_pool(daemon: "Daemon", msg: Message) -> Response:
         )
         for layer in msg["layers"]
     ]
-    daemon.attach_engine_pool(str(msg["engine_id"]), layers)
+    daemon.attach_engine_pool(required_str(msg, "engine_id"), layers)
     return {"ok": True}
 
 
 def handle_detach_engine_pool(daemon: "Daemon", msg: Message) -> Response:
-    ok = daemon.detach_engine_pool(str(msg["engine_id"]))
+    ok = daemon.detach_engine_pool(required_str(msg, "engine_id"))
     return {"ok": True, "found": ok}
 
 
 def handle_attach_evict_ring(daemon: "Daemon", msg: Message) -> Response:
     daemon.attach_evict_ring(
-        str(msg["engine_id"]),
-        str(msg["ring_path"]),
-        counter_host_addr=int(msg.get("counter_host_addr", 0)),
-        num_counters=int(msg.get("num_counters", 0)),
+        required_str(msg, "engine_id"),
+        required_str(msg, "ring_path"),
+        counter_host_addr=optional_int(msg, "counter_host_addr", 0),
+        num_counters=optional_int(msg, "num_counters", 0),
         counter_path=str(msg.get("counter_path", "")),
     )
     return {"ok": True}
@@ -46,52 +57,52 @@ def handle_attach_evict_ring(daemon: "Daemon", msg: Message) -> Response:
 
 def handle_attach_restore_ring(daemon: "Daemon", msg: Message) -> Response:
     daemon.attach_restore_ring(
-        str(msg["engine_id"]),
-        str(msg["ring_path"]),
-        str(msg["counter_path"]),
+        required_str(msg, "engine_id"),
+        required_str(msg, "ring_path"),
+        required_str(msg, "counter_path"),
         int(msg.get("num_counters", 512)),
-        counter_host_addr=int(msg.get("counter_host_addr", 0)),
+        counter_host_addr=optional_int(msg, "counter_host_addr", 0),
     )
     return {"ok": True}
 
 
 def handle_demote_to_storage(daemon: "Daemon", msg: Message) -> Response:
     ok = daemon.demote_to_storage(
-        str(msg["engine_id"]),
-        int(msg["layer"]),
-        int(msg["offset"]),
+        required_str(msg, "engine_id"),
+        required_int(msg, "layer"),
+        required_int(msg, "offset"),
     )
     return {"ok": True, "demoted": ok}
 
 
 def handle_promote_from_storage(daemon: "Daemon", msg: Message) -> Response:
     ok = daemon.promote_from_storage(
-        str(msg["engine_id"]),
-        int(msg["layer"]),
-        int(msg["offset"]),
+        required_str(msg, "engine_id"),
+        required_int(msg, "layer"),
+        required_int(msg, "offset"),
     )
     return {"ok": True, "promoted": ok}
 
 
 def handle_demote_hbm_to_storage(daemon: "Daemon", msg: Message) -> Response:
     ok = daemon.demote_hbm_to_storage(
-        str(msg["engine_id"]),
-        int(msg["layer"]),
-        int(msg["offset"]),
-        int(msg["size"]),
-        generation=int(msg.get("generation", 0)),
+        required_str(msg, "engine_id"),
+        required_int(msg, "layer"),
+        required_int(msg, "offset"),
+        required_int(msg, "size"),
+        generation=optional_int(msg, "generation", 0),
     )
     return {"ok": True, "demoted": ok}
 
 
 def handle_promote_storage_to_hbm(daemon: "Daemon", msg: Message) -> Response:
     ok = daemon.promote_storage_to_hbm(
-        str(msg["engine_id"]),
-        int(msg["layer"]),
-        int(msg["offset"]),
-        int(msg["size"]),
+        required_str(msg, "engine_id"),
+        required_int(msg, "layer"),
+        required_int(msg, "offset"),
+        required_int(msg, "size"),
         dest_offset=msg.get("dest_offset"),
-        expected_generation=int(msg.get("expected_generation", 0)),
+        expected_generation=optional_int(msg, "expected_generation", 0),
     )
     return {"ok": True, "promoted": ok}
 
@@ -101,7 +112,7 @@ def handle_capabilities(daemon: "Daemon", msg: Message) -> Response:
 
 
 def handle_release_engine_storage(daemon: "Daemon", msg: Message) -> Response:
-    n = daemon.release_engine_storage(str(msg["engine_id"]))
+    n = daemon.release_engine_storage(required_str(msg, "engine_id"))
     return {"ok": True, "released": n}
 
 

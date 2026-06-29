@@ -2,11 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Content-address, staging, and restore RPC handlers."""
+
 from __future__ import annotations
+
 import logging
 from typing import TYPE_CHECKING
-from gms_kv_ring.daemon.rpc_types import Handler, Message, Response
+
+from gms_kv_ring.daemon.rpc_types import (
+    Handler,
+    Message,
+    Response,
+    required_digest,
+    required_int,
+)
+
 logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from gms_kv_ring.daemon.server import Daemon
 
@@ -25,8 +36,8 @@ def handle_staging_reserve(daemon: "Daemon", msg: Message) -> Response:
             "ok": False,
             "error": "staging not enabled",
         }
-    content_hash = bytes.fromhex(str(msg["content_hash"]))
-    size = int(msg["size"])
+    content_hash = required_digest(msg)
+    size = required_int(msg, "size")
     source_daemon = str(msg.get("source_daemon", "unknown"))
     # Step 1: reserve the StagingTier slot. May coalesce
     # if another peer is already delivering this hash.
@@ -203,7 +214,7 @@ def handle_register_content_address(daemon: "Daemon", msg: Message) -> Response:
     # mapping. The router uses this index to drive
     # cross-node transfers (P4c). Multi-range payload
     # because one logical block spans N layers.
-    content_hash = bytes.fromhex(str(msg["content_hash"]))
+    content_hash = required_digest(msg)
     engine_id = str(msg["engine_id"])
     ranges_raw = msg.get("ranges", []) or []
     ranges = [
@@ -295,7 +306,6 @@ def handle_notify_kv_arrived(daemon: "Daemon", msg: Message) -> Response:
                 "[Daemon] notify_kv_arrived: publish_stored failed"
             )
     return {"ok": True, "published": published}
-
 
 
 def handle_restore_staging_ranges(daemon: "Daemon", msg: Message) -> Response:
@@ -471,7 +481,6 @@ def handle_restore_staging_ranges(daemon: "Daemon", msg: Message) -> Response:
     }
 
 
-
 def handle_restore_host_blocks(daemon: "Daemon", msg: Message) -> Response:
     engine_id = str(msg["engine_id"])
     src_engine_id = str(msg["src_engine_id"])
@@ -520,7 +529,6 @@ def handle_restore_host_blocks(daemon: "Daemon", msg: Message) -> Response:
         "requested": len(block_pairs),
         "restored": len(block_pairs) if success else 0,
     }
-
 
 
 def handle_restore_staging_blocks(daemon: "Daemon", msg: Message) -> Response:
@@ -595,7 +603,6 @@ def handle_restore_staging_blocks(daemon: "Daemon", msg: Message) -> Response:
     }
 
 
-
 def handle_register_staging_restore_handles(daemon: "Daemon", msg: Message) -> Response:
     # Worker-side connector is about to push a
     # FLAG_SOURCE_STAGING restore ring record. The ring's
@@ -638,7 +645,6 @@ def handle_register_staging_restore_handles(daemon: "Daemon", msg: Message) -> R
     return {"ok": True, "handles": handles}
 
 
-
 def handle_release_staging_restore_handles(daemon: "Daemon", msg: Message) -> Response:
     handles = msg.get("handles") or []
     released = 0
@@ -651,7 +657,6 @@ def handle_release_staging_restore_handles(daemon: "Daemon", msg: Message) -> Re
             if daemon._staging_restore_handles.pop(hid_i, None) is not None:
                 released += 1
     return {"ok": True, "released": released}
-
 
 
 def handle_staging_scan(daemon: "Daemon", msg: Message) -> Response:
