@@ -75,7 +75,7 @@ spec:
           # No apt-get: cluster runs us as non-root, and we don't actually need
           # curl/jq — Python stdlib handles the readiness probe. Install aiperf
           # into HOME=/tmp/.local via --user so it works under runAsNonRoot.
-          pip install --user -q aiperf==0.6.0 transformers==4.57.3 tokenizers==0.22.2
+          pip install --user -q aiperf==0.10.0 transformers==4.57.3 tokenizers==0.22.2
 
           echo "Waiting for model at http://$ENDPOINT/v1/models..."
           python3 - <<'PY'

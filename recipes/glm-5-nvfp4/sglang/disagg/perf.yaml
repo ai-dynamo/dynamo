@@ -66,7 +66,7 @@ spec:
           # stdlib is enough for the readiness probe.
           # GLM-5's tokenizer_config.json uses tokenizer_class=TokenizersBackend,
           # which is supported by Transformers v5.
-          pip install --user -q aiperf==0.6.0 transformers==5.8.0 tokenizers==0.22.2
+          pip install --user -q aiperf==0.10.0 transformers==5.8.0 tokenizers==0.22.2
 
           echo "Waiting for model at http://$ENDPOINT/v1/models..."
           python3 - <<'PY'
