@@ -1533,7 +1533,7 @@ impl JailedStream {
             // reason. Choices that never emitted tool calls are left alone — there is no
             // signal to invent a finish_reason from for text-only output.
             if let Some(template) = template {
-                for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, &has)| has) {
+                for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, has)| *has) {
                     if terminated.contains(index) {
                         continue;
                     }
