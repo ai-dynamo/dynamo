@@ -42,6 +42,7 @@ type SharedSpecValidator struct {
 	fieldPath           string       // e.g., "spec" for DCD, "spec.services[foo]" for DGD
 	calculatedNamespace string       // The namespace that will be used: {k8s_namespace}-{dgd_name}
 	mgr                 ctrl.Manager // Optional: for API group detection via discovery client
+	grovePathway        bool         // Whether the component is backed by Grove
 }
 
 // NewSharedSpecValidator creates a new validator for DynamoComponentDeploymentSharedSpec.
@@ -49,23 +50,25 @@ type SharedSpecValidator struct {
 // calculatedNamespace is the namespace the operator will use:
 //   - If GlobalDynamoNamespace is true: "dynamo" (global constant)
 //   - Otherwise: {k8s_namespace}-{dgd_name}
-func NewSharedSpecValidator(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string, calculatedNamespace string) *SharedSpecValidator {
+func NewSharedSpecValidator(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string, calculatedNamespace string, grovePathway bool) *SharedSpecValidator {
 	return &SharedSpecValidator{
 		spec:                spec,
 		fieldPath:           fieldPath,
 		calculatedNamespace: calculatedNamespace,
 		mgr:                 nil,
+		grovePathway:        grovePathway,
 	}
 }
 
 // NewSharedSpecValidatorWithManager creates a validator with a manager for API group detection.
 // This allows the validator to check for API group availability (e.g., inference.networking.k8s.io) when validating EPP components.
-func NewSharedSpecValidatorWithManager(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string, calculatedNamespace string, mgr ctrl.Manager) *SharedSpecValidator {
+func NewSharedSpecValidatorWithManager(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string, calculatedNamespace string, mgr ctrl.Manager, grovePathway bool) *SharedSpecValidator {
 	return &SharedSpecValidator{
 		spec:                spec,
 		fieldPath:           fieldPath,
 		calculatedNamespace: calculatedNamespace,
 		mgr:                 mgr,
+		grovePathway:        grovePathway,
 	}
 }
 
@@ -154,7 +157,19 @@ func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings,
 		return nil, err
 	}
 
+	if err := v.validateMinAvailable(); err != nil {
+		return nil, err
+	}
+
 	return warnings, nil
+}
+
+// implied non Grove pathway because Grove does not create DCDs
+func (v *SharedSpecValidator) validateMinAvailable() error {
+	if v.spec.MinAvailable != nil && !v.grovePathway {
+		return fmt.Errorf("spec.minAvailable is currently supported only for Grove-backed DynamoGraphDeployment components")
+	}
+	return nil
 }
 
 // validateIngress validates the ingress configuration.

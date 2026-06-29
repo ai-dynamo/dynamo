@@ -279,6 +279,11 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 		*out = new(int32)
 		**out = **in
 	}
+	if in.MinAvailable != nil {
+		in, out := &in.MinAvailable, &out.MinAvailable
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Multinode != nil {
 		in, out := &in.Multinode, &out.Multinode
 		*out = new(MultinodeSpec)

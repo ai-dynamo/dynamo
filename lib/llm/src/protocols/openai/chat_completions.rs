@@ -14,14 +14,16 @@ use crate::preprocessor::media::MediaDecoder;
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
     common_ext::{CommonExt, CommonExtProvider},
-    nvext::NvExt,
-    nvext::NvExtProvider,
     validate,
+};
+use crate::protocols::common::extensions::{
+    NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
 };
 
 pub mod aggregator;
 mod delta;
 pub mod jail;
+pub mod tool_parser_v2;
 
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
@@ -92,6 +94,7 @@ pub struct NvCreateChatCompletionRequest {
     pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
 
     /// Extra args to pass to the chat template rendering context
@@ -199,6 +202,10 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+    /// Internal frontend metrics payload. This must never be serialized to
+    /// client-facing OpenAI-compatible streams.
+    #[serde(skip)]
+    pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
 }
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
@@ -464,7 +471,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // validate::validate_max_tokens(self.inner.max_tokens)?; // warning depricated field
         validate::validate_max_completion_tokens(self.inner.max_completion_tokens)?;
         validate::validate_n(self.inner.n)?;
-        super::nvext::validate_completion_token_ids_single_choice(
+        validate_completion_token_ids_single_choice(
             self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;

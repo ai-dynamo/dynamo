@@ -8,7 +8,7 @@
 #
 # Same shape as agg_router.sh (2 workers, KV routing, KV events) but with:
 #   - --enable-hierarchical-cache              -> HiCache row populates
-#   - --enable-streaming-session               -> streaming-session held tokens
+#   - --enable-session-radix-cache             -> session-tagged radix KV
 #   - --enable-metrics-for-all-schedulers      -> per-scheduler metrics
 #   - --enable-mfu-metrics                     -> model FLOPs utilization
 #   - --mem-fraction-static 0.92               -> larger KV pool per worker
@@ -104,7 +104,7 @@ Topology:
 
 Features enabled for full Grafana coverage:
   - hierarchical KV cache (host RAM tier)        -> HiCache row
-  - streaming session retention                  -> streaming-session held tokens
+  - session radix cache                          -> session-tagged evictable KV
   - per-scheduler metrics + MFU metrics
   - mem-fraction-static=$MEM_FRACTION, max-running-requests=$MAX_RUNNING
   - page-size=$PAGE_SIZE, chunked-prefill-size=$CHUNKED_PREFILL
@@ -141,7 +141,8 @@ WORKER_COMMON_ARGS=(
   --enable-mfu-metrics
   --enable-hierarchical-cache
   --hicache-ratio "$HICACHE_RATIO"
-  --enable-streaming-session
+  --enable-session-radix-cache
+  --radix-eviction-policy priority
   --mem-fraction-static "$MEM_FRACTION"
   --max-running-requests "$MAX_RUNNING"
   --page-size "$PAGE_SIZE"

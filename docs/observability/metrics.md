@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Metrics
+subtitle: Reference for the Prometheus metrics Dynamo's runtime, frontend, and workers expose on the local system metrics endpoint.
 ---
 
 ## Overview
@@ -401,13 +402,16 @@ Histograms (in milliseconds) tracking the time spent in each phase of the routin
 
 #### Router Queue Metrics (`dynamo_frontend_router_queue_*`)
 
-Gauge tracking the number of requests pending in the router's scheduler queue. Only registered when `--router-queue-threshold` is set. Labeled by `worker_type` to distinguish prefill vs. decode queues in disaggregated mode.
+Gauges track pending work in each router policy class. They are registered by the frontend and are populated when queueing is enabled through either `--router-queue-threshold` or `--router-policy-config`.
 
 | Metric | Type | Description |
 |--------|------|-------------|
 | `dynamo_frontend_router_queue_pending_requests` | Gauge | Requests pending in the router scheduler queue |
+| `dynamo_frontend_router_queue_pending_isl_tokens` | Gauge | Raw input tokens pending in the router scheduler queue |
+| `dynamo_frontend_router_queue_pending_cached_tokens` | Gauge | Cached-token estimate snapshotted when each request is enqueued |
+| `dynamo_frontend_router_queue_backpressure_total` | Counter | Queue rejections by configured limit reason |
 
-**Labels:** `worker_type` (`prefill` or `decode`)
+**Labels:** `model`, `worker_type` (`prefill` or `decode`), and `policy_class`. With policy-family/cache-bucket YAML, `policy_class` is the resolved physical queue, not the family requested by the client. The rejection counter also has `reason`.
 
 #### KV Indexer Metrics
 
@@ -469,5 +473,5 @@ For the full list of metrics, configuration options, and architecture details, s
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
 - [Dynamo Architecture Overview](../design-docs/architecture.md)
 - [Backend Guide](../development/backend-guide.md)
-- [Forward Pass Metrics (SGLang)](../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) — Per-iteration scheduler telemetry via ZMQ/NATS for planner-driven scaling (intended architecture; not available in the 1.2.0 SGLang runtime image)
+- [Forward Pass Metrics (SGLang)](../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) — Per-iteration scheduler telemetry via ZMQ/NATS for planner-driven scaling (intended architecture; not available in the 1.2.1 SGLang runtime image)
 - [Forward Pass Metrics RFC](../proposals/vllm-rfc-forward-pass-metrics.md) - Design rationale for per-iteration metrics

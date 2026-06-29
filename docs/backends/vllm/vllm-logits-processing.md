@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Logits Processing
+subtitle: Custom logits processors plug into vLLM through Dynamo's engine-loaded adapter and per-request SamplingParams.extra_args.
 ---
 
 For general vLLM features and configuration, see the [Reference Guide](vllm-reference-guide.md).

@@ -1,24 +1,35 @@
 # Backend Common (Rust)
 
-Shared runtime glue for Rust LLM backends. Two-type abstraction:
-`Worker` (runtime lifecycle) and `LLMEngine` (trait for engine-specific
-logic). A reference implementation lives at
-`lib/backend-common/examples/mocker/`.
+Shared runtime glue for Rust backends. `Worker` (runtime lifecycle)
+drives one of two engine traits, selected by request modality:
 
-Engines work directly with `PreprocessedRequest` and `LLMEngineOutput`
-— the same types the rest of the Rust pipeline uses. No separate
-Python-shaped request/response wrappers.
+- `LLMEngine` — token pipeline. `generate` takes `PreprocessedRequest`
+  (`token_ids` in) and yields `LLMEngineOutput` (`token_ids` out), the
+  same types the rest of the Rust pipeline uses. Served through
+  `EngineAdapter`. A reference implementation lives at
+  `lib/backend-common/examples/mocker/`.
+- `RawEngine` — raw media pipeline (image/video/audio generation).
+  `generate` takes the forwarded request as `serde_json::Value` and
+  yields response objects as `serde_json::Value` — no tokenizer,
+  detokenizer, or KV cache. Served through `RawEngineAdapter`. The
+  contract is modality-neutral: a new media modality is a new
+  `RawEngine`, not a new framework path.
+
+`Worker` registration honours `WorkerConfig.model_input`: `LLMEngine`
+requires `ModelInput::Tokens`; `RawEngine` requires `Text`/`Tensor`.
+`endpoint_types` parses `images`/`videos`/`audios` (→ `ModelType`) for
+the raw path alongside the LLM `chat`/`completions`/`embedding`/etc.
 
 ## Engine Lifecycle
 
 ```
-construct -> start(worker_id) -> setup_metrics -> generate/abort -> drain -> cleanup
-    |               |                  |                |             |        |
-parse args,    start engine,    wire Prometheus    serve requests pre-cleanup shutdown,
-return engine  return metadata  (optional)         (concurrent)   drain       release
+construct -> start(worker_id) -> setup_metrics -> generate/abort -> is_quiescent -> cleanup
+    |               |                  |                |             |         |
+parse args,    start engine,    wire Prometheus    serve requests drain-poll  shutdown,
+return engine  return metadata  (optional)         (concurrent)   predicate   release
 ```
 
-The trait has six methods. `from_args` is NOT on the trait — each
+The trait has twelve methods. `from_args` is NOT on the trait — each
 backend exposes a backend-specific constructor (typically a sync
 `from_args(argv) -> Result<(Self, WorkerConfig)>` inherent method).
 This keeps the trait fully object-safe without a `where Self: Sized`
@@ -61,13 +72,17 @@ opt-out and lets `run.rs` stay non-generic.
   handle), put the release logic inside the `generate` stream body
   using RAII; use `abort` only for out-of-band notifications (e.g.
   telling a remote scheduler to cancel compute early).
-- `drain(&self) -> Result<(), DynamoError>` — optional, default no-op.
-  Called once during graceful shutdown after the discovery unregister
-  + grace-period sleep, but BEFORE `cleanup`. Use it for backend-side
-  draining that must complete while NATS / etcd are still alive — e.g.
-  prefill workers polling-until-idle so in-flight NIXL KV transfers
-  finish before GPU memory is released (issue #7319). Failures are
-  logged and swallowed; shutdown proceeds regardless.
+- `is_quiescent(&self) -> Result<Option<bool>, DynamoError>` — optional,
+  default `Ok(None)`. Whether in-flight KV transfers are done so GPU memory
+  can be released. Polled **only on prefill workers**, every
+  `DRAIN_POLL_INTERVAL_S` between the grace period and `cleanup`:
+  `Ok(Some(true))` exits the loop; `Ok(Some(false))`/`Ok(None)`/`Err`
+  keep polling until the budget expires. Budget = `DYN_PREFILL_DRAIN_TIMEOUT_S`
+  (default 30s) capped at `graceful_shutdown_timeout - CLEANUP_RESERVE_S`.
+  The default `Ok(None)` never frees KV early — vLLM and TRT-LLM keep it (no
+  reliable idle signal); SGLang overrides it by counting in-flight prefill
+  streams. The mode-gate, poll loop, and SIGTERM/SIGINT ownership live in the
+  `Worker`.
 - `cleanup(&self) -> Result<(), DynamoError>` — called exactly once.
   Runs after `start()` returns Ok on shutdown (even if registration /
   serve fails), **and** after `start()` raises — so implementations
@@ -76,6 +91,38 @@ opt-out and lets `run.rs` stay non-generic.
   successful first returns `Ok(())` without re-entering teardown. The
   conformance kit pins both — `CleanupWithoutStartFailed` and
   `SecondCleanupFailed`.
+- `health_check_payload(&self) -> Result<Option<Value>, DynamoError>` —
+  optional, default `Ok(None)`. Canary payload the runtime sends through
+  `generate` to actively probe an idle endpoint; `None` disables active
+  probing. Operator overrides (`DYN_HEALTH_CHECK_PAYLOAD` / `WorkerConfig`)
+  take precedence.
+- `supported_controls(&self) -> Result<Vec<String>, DynamoError>` —
+  optional, default empty. Semantic engine-control keys this engine
+  advertises (e.g. `start_profile`, `sleep`, `wake_up`). The Worker maps
+  each onto a `/engine/control/{key}` route via `register_engine_controls`.
+- `engine_control(&self, control: String, body: Value) -> Result<Value, DynamoError>` —
+  optional, default returns a `status:"error"` body. Dispatches one
+  advertised control. Returning a `status:"error"` body is HTTP 200 at the
+  `/engine/*` layer (it 5xx's only when this *raises*).
+- `supported_updates(&self) -> Result<Vec<String>, DynamoError>` —
+  optional, default empty. A sibling surface to `supported_controls` for
+  ops that mutate engine-managed assets rather than the serving lifecycle
+  (e.g. vLLM dynamic LoRA `load_lora` / `unload_lora` / `list_loras`). Kept
+  separate so LoRA doesn't inflate the control surface. The Worker maps
+  each onto a `/engine/update/{key}` route via `register_engine_updates`
+  (no quiesce/resume policy — updates never toggle discovery).
+- `engine_update(&self, update: String, body: Value) -> Result<Value, DynamoError>` —
+  optional, default returns a `status:"error"` body. Dispatches one
+  advertised update; same HTTP-200-on-`status:"error"` semantics as
+  `engine_control`.
+- `on_endpoint_ready(&self, endpoint: Endpoint) -> Result<(), DynamoError>` —
+  optional, default no-op. The Worker hands the engine its serving
+  `Endpoint` exactly once, after it exists and **before**
+  `register_engine_controls` / `register_engine_updates` (so `/engine/*`
+  can't fire before the engine has the endpoint). A failure is **fatal to
+  startup**. Engines that publish their own discovery records stash it
+  (e.g. vLLM dynamic LoRA via `register_model` / `unregister_model`).
+  Mirrors the `on_publisher_ready` handoff idiom.
 
 ## Contract for `generate`
 
@@ -159,8 +206,24 @@ aggregates it when present. `usage(prompt, completion)` computes
   exists in another engine. If it does, extract into `Worker` or a
   shared utility.
 
-- **Exactly two types.** `Worker` owns runtime lifecycle. `LLMEngine`
-  owns inference. No intermediate traits or mixins.
+- **One `Worker`, one engine trait per modality.** `Worker` owns
+  runtime lifecycle. `LLMEngine` (token) and `RawEngine` (raw media)
+  own inference; they share the same lifecycle methods and `Worker`
+  drives both via the `EngineKind` forwarders. No intermediate traits
+  or mixins between an engine trait and a concrete backend. A new media
+  modality is a new `RawEngine`, not a new trait or a new `EngineKind`
+  variant.
+
+  **Why the two traits repeat the lifecycle signatures (no shared
+  `LifecycleEngine` supertrait):** Python expresses "shared lifecycle,
+  divergent `generate`" via inheritance (`BaseEngine`); Rust uses two sibling
+  traits + a closed `EngineKind` enum — idiomatic for a fixed variant set. A
+  supertrait would dedupe the six lifecycle signatures but split every engine
+  `impl` (PyO3 bridge, mocker, conformance kit, test mocks) in two, and the
+  lifecycle set is closed/stable so that edit cost is paid ~never. The
+  asymmetry (Python inheritance ↔ Rust enum) is intentional. Mapping: Python
+  `BaseEngine` ≡ the lifecycle methods both traits declare; `isinstance`
+  routing ≡ the `EngineKind` match.
 
 - **Object-safe trait.** `Arc<dyn LLMEngine>` must work. All methods
   take `&self`. Constructors are backend-specific, not on the trait.
@@ -198,15 +261,18 @@ What the **`Worker`** does with the mode at registration time:
 - `Aggregated` → register with the parsed `endpoint_types`.
 
 What an **`LLMEngine`** does with the mode (engine-side dispatch in
-`generate` and `drain`): see `examples/mocker` for a worked reference.
-The mocker stamps a synthetic `disaggregated_params` payload on the
-prefill terminal and rejects decode requests that arrive without
-`PrefillResult`. Real engines run an analogous protocol with their
-own KV transfer transport.
+`generate`): see `examples/mocker` for a worked reference. The mocker
+stamps a synthetic `disaggregated_params` payload on the prefill terminal
+and rejects decode requests that arrive without `PrefillResult`. Real
+engines run an analogous protocol with their own KV transfer transport.
 
-`drain` is the prefill shutdown hook: poll-until-idle so in-flight
-NIXL/KV transfers finish before GPU memory is released. Aggregated and
-decode engines leave the default no-op.
+`is_quiescent` is the prefill shutdown predicate: the `Worker` drains
+**prefill workers by default** (waiting the full budget) and polls
+`is_quiescent` only to exit early — return `Some(true)` once in-flight
+NIXL/KV transfers are done, `Some(false)` while they're pulling. The
+`Worker` owns the mode-gate, the poll loop, and the timeout. Engines that
+can't introspect leave the default `Ok(None)` (wait the budget);
+aggregated/decode engines are never polled (drain is prefill-only).
 
 `PrefillResult` and `BootstrapInfo` are re-exported from
 `dynamo-backend-common` so engines don't need a separate `dynamo-llm`
@@ -461,6 +527,14 @@ The kit asserts:
   post-start-failure path. Failures here surface as
   `CleanupWithoutStartFailed`.
 
+For raw media engines, `testing::run_raw_conformance(factory)` is the
+`RawEngine` analog. Raw responses are opaque JSON (no `finish_reason`,
+no token bookkeeping, no `kv_event_sources`), so it pins the
+modality-neutral contract only: `start()` returns a non-empty model and
+leaves `EngineConfig.llm` `None`; `generate()` yields a non-empty all-`Ok`
+stream; 8 interleaved calls complete; cancellation terminates the stream
+within the deadline; and `cleanup()` is idempotent + safe before start.
+
 Also available: `testing::mock_context()` and
 `testing::cancelling_context(after)` for hand-written tests.
 
@@ -473,8 +547,8 @@ Also available: `testing::mock_context()` and
 | `snapshot_publisher.rs` | `SnapshotPublisher` — single push surface. `publish(dp_rank, ComponentSnapshot)` fans out inline to `ComponentGauges` and per-rank `WorkerMetricsPublisher`. |
 | `publisher.rs` | `setup_publishers` — constructs `KvEventPublisher`s + `SnapshotPublisher` from engine bindings; owned by `Worker` until shutdown. |
 | `worker.rs` | `Worker` — runtime lifecycle: create `DistributedRuntime`, register model (with `disaggregation_mode` adjustments), serve endpoint, orchestrate drain + cleanup. `WorkerConfig` lives here. |
-| `adapter.rs` | `EngineAdapter` — bridges `LLMEngine` to `AsyncEngine`. Cancellation monitor + debug-build validator wrapping. |
-| `run.rs` | `pub fn run(engine, config)` — entry point used by all per-backend `main.rs`. Non-generic. |
+| `adapter.rs` | `EngineAdapter` — bridges `LLMEngine` to `AsyncEngine` (token telemetry, disagg first-token, debug validator). `RawEngineAdapter` — bridges `RawEngine` to `AsyncEngine` (JSON passthrough, cancellation monitor; no token telemetry/disagg). `JsonProbeAdapter` — JSON health-check wrapper for the LLM path (the raw path is already JSON-shaped). |
+| `run.rs` | `pub fn run(engine, config)` (LLM) and `pub fn run_raw(engine, config)` (raw media) — entry points used by per-backend `main.rs`. Non-generic. |
 | `args.rs` | `CommonArgs` — shared CLI flags (`--namespace`, `--component`, `--disaggregation-mode`, etc.) that every engine's `Args` flattens in. |
 | `disagg.rs` | `DisaggregationMode` enum (`Aggregated` / `Prefill` / `Decode`) with `clap::ValueEnum` derive. |
 | `error.rs` | Re-exports `DynamoError`, `ErrorType`, `BackendError` from `dynamo-runtime`. No custom error types. |

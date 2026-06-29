@@ -118,10 +118,11 @@ impl DefaultWorkerSelector {
     ) -> f64 {
         let block_size_f64 = block_size as f64;
         let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
-        let has_tier_overlap_blocks = !request.tier_overlap_blocks.device.is_empty()
-            || !request.tier_overlap_blocks.host_pinned.is_empty()
-            || !request.tier_overlap_blocks.disk.is_empty();
+        let has_tier_overlap_blocks = !request.overlap.tier_overlap_blocks.device.is_empty()
+            || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
+            || !request.overlap.tier_overlap_blocks.disk.is_empty();
         let device_overlap_blocks = request
+            .overlap
             .tier_overlap_blocks
             .device
             .get(&worker)
@@ -143,7 +144,10 @@ impl DefaultWorkerSelector {
                 Some(load) => {
                     let cached_tokens = request.effective_cached_tokens_for(worker);
                     // Preserve the legacy operation order when overlap exceeds the prompt.
-                    let uncached_tokens = request.isl_tokens.saturating_sub(cached_tokens);
+                    let uncached_tokens = super::prefill_load::effective_prefill_tokens(
+                        request.isl_tokens,
+                        cached_tokens,
+                    );
                     let projected_tokens = load.active_prefill_tokens + uncached_tokens;
                     projected_tokens.saturating_add(cached_tokens)
                 }
@@ -154,12 +158,14 @@ impl DefaultWorkerSelector {
         } as f64;
 
         let host_overlap_blocks = request
+            .overlap
             .tier_overlap_blocks
             .host_pinned
             .get(&worker)
             .copied()
             .unwrap_or(0) as f64;
         let disk_overlap_blocks = request
+            .overlap
             .tier_overlap_blocks
             .disk
             .get(&worker)
@@ -399,12 +405,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         };
 
         let best_host_pinned_overlap_blocks = request
+            .overlap
             .tier_overlap_blocks
             .host_pinned
             .get(&best_worker)
             .copied()
             .unwrap_or(0);
         let best_disk_overlap_blocks = request
+            .overlap
             .tier_overlap_blocks
             .disk
             .get(&best_worker)
@@ -413,13 +421,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         if self.worker_type == "decode" {
             tracing::info!(
-                "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, host_pinned blocks: {}, disk blocks: {}",
-                self.worker_type,
-                best_worker.worker_id,
-                best_worker.dp_rank,
-                best_logit,
-                best_host_pinned_overlap_blocks,
-                best_disk_overlap_blocks,
+                router_mode = "kv",
+                worker_id = best_worker.worker_id,
+                worker_type = %self.worker_type,
+                dp_rank = ?best_worker.dp_rank,
+                logit = best_logit,
+                host_pinned_blocks = best_host_pinned_overlap_blocks,
+                disk_blocks = best_disk_overlap_blocks,
+                "Selected worker"
             );
             let effective_overlap_blocks = request.effective_overlap_blocks_for(best_worker);
             let cached_tokens = request.effective_cached_tokens_for(best_worker);
@@ -435,22 +444,21 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         let best_overlap = request.effective_overlap_blocks_for(best_worker);
         let best_cached_tokens = request.effective_cached_tokens_for(best_worker);
 
-        let total_blocks_info = workers
+        let total_kv_blocks = workers
             .get(&best_worker.worker_id)
-            .and_then(|cfg| cfg.total_kv_blocks())
-            .map(|blocks| format!(", total blocks: {}", blocks))
-            .unwrap_or_default();
+            .and_then(|cfg| cfg.total_kv_blocks());
 
         tracing::info!(
-            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}, host_pinned blocks: {}, disk blocks: {}{}",
-            self.worker_type,
-            best_worker.worker_id,
-            best_worker.dp_rank,
-            best_logit,
-            best_overlap,
-            best_host_pinned_overlap_blocks,
-            best_disk_overlap_blocks,
-            total_blocks_info
+            router_mode = "kv",
+            worker_id = best_worker.worker_id,
+            worker_type = %self.worker_type,
+            dp_rank = ?best_worker.dp_rank,
+            logit = best_logit,
+            effective_cached_blocks = best_overlap,
+            host_pinned_blocks = best_host_pinned_overlap_blocks,
+            disk_blocks = best_disk_overlap_blocks,
+            total_kv_blocks = ?total_kv_blocks,
+            "Selected worker"
         );
 
         Ok(WorkerSelectionResult {
@@ -468,6 +476,7 @@ mod tests {
 
     use super::*;
     use crate::protocols::{SharedCacheHits, WorkerConfigLike};
+    use crate::scheduling::{OverlapSignals, ScheduleMode};
 
     #[derive(Clone, Default)]
     struct TaintedWorkerConfig {
@@ -498,18 +507,23 @@ mod tests {
 
     fn base_request(isl_tokens: usize) -> SchedulingRequest {
         SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::default(),
-            effective_cached_tokens: HashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -660,18 +674,23 @@ mod tests {
             (30, SimpleWorkerConfig::default()),
         ]);
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: 16,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::default(),
-            effective_cached_tokens: HashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -718,8 +737,11 @@ mod tests {
         ]);
         let worker0 = WorkerWithDpRank::from_worker_id(0);
         let mut request = base_request(64);
-        request.effective_overlap_blocks.insert(worker0, 4.0);
-        request.effective_cached_tokens.insert(worker0, 64);
+        request
+            .overlap
+            .effective_overlap_blocks
+            .insert(worker0, 4.0);
+        request.overlap.effective_cached_tokens.insert(worker0, 64);
 
         let overloaded_worker_ids = HashSet::from([0]);
         let result = selector
@@ -795,18 +817,23 @@ mod tests {
             },
         )]);
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: 16,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::default(),
-            effective_cached_tokens: HashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -840,18 +867,23 @@ mod tests {
             ),
         ]);
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: 16,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::default(),
-            effective_cached_tokens: HashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -903,18 +935,23 @@ mod tests {
             decode_blocks.insert(WorkerWithDpRank::from_worker_id(noisy_worker_id), 400_000);
 
             let request = SchedulingRequest {
-                maybe_request_id: Some("test".into()),
+                mode: ScheduleMode::QueryOnly {
+                    request_id: Some("test".into()),
+                },
                 token_seq: None,
                 isl_tokens: 16,
-                tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                overlap: OverlapSignals {
+                    tier_overlap_blocks: Default::default(),
+                    effective_overlap_blocks: HashMap::default(),
+                    effective_cached_tokens: HashMap::default(),
+                },
                 worker_loads: worker_loads_with_active_decode(decode_blocks),
                 track_prefill_tokens: true,
                 router_config_override: None,
-                update_states: false,
                 lora_name: None,
                 priority_jump: 0.0,
+                strict_priority: 0,
+                policy_class: None,
                 expected_output_tokens: None,
                 pinned_worker: None,
                 allowed_worker_ids: None,
@@ -964,18 +1001,23 @@ mod tests {
         decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 90);
 
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: 16,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::default(),
-            effective_cached_tokens: HashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
             worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1021,18 +1063,23 @@ mod tests {
         decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 100);
 
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: 16,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::default(),
-            effective_cached_tokens: HashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
             worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1094,18 +1141,23 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: isl,
-            tier_overlap_blocks,
-            effective_overlap_blocks,
-            effective_cached_tokens,
+            overlap: OverlapSignals {
+                tier_overlap_blocks,
+                effective_overlap_blocks,
+                effective_cached_tokens,
+            },
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1158,18 +1210,23 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: isl,
-            tier_overlap_blocks,
-            effective_overlap_blocks: HashMap::new(),
-            effective_cached_tokens,
+            overlap: OverlapSignals {
+                tier_overlap_blocks,
+                effective_overlap_blocks: HashMap::new(),
+                effective_cached_tokens,
+            },
             worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1192,8 +1249,8 @@ mod tests {
     fn test_worker_logit_preserves_prefill_accounting_edges() {
         let worker = WorkerWithDpRank::from_worker_id(0);
         let mut request = base_request(64);
-        request.effective_cached_tokens.insert(worker, 96);
-        request.tier_overlap_blocks.device.insert(worker, 6);
+        request.overlap.effective_cached_tokens.insert(worker, 96);
+        request.overlap.tier_overlap_blocks.device.insert(worker, 6);
         request.worker_loads.insert(
             worker,
             crate::sequences::WorkerLoadProjection {
@@ -1235,8 +1292,15 @@ mod tests {
         ]);
 
         let mut request = base_request(64);
-        request.tier_overlap_blocks.device.insert(warm_worker, 4);
-        request.effective_cached_tokens.insert(warm_worker, 64);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(warm_worker, 4);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(warm_worker, 64);
         request.worker_loads.insert(
             warm_worker,
             crate::sequences::WorkerLoadProjection {
@@ -1305,18 +1369,23 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: isl,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks,
-            effective_cached_tokens: HashMap::new(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks,
+                effective_cached_tokens: HashMap::new(),
+            },
             worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1354,18 +1423,23 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: isl,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks,
-            effective_cached_tokens: HashMap::new(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks,
+                effective_cached_tokens: HashMap::new(),
+            },
             worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,

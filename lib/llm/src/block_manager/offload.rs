@@ -88,8 +88,13 @@ pub fn max_transfer_batch_size() -> usize {
 }
 
 fn read_usize_env(name: &str, default: usize) -> usize {
-    match env::var(name) {
-        Ok(value) => match value.parse::<usize>() {
+    let value = env::var(name).ok();
+    parse_positive_usize(name, value.as_deref(), default)
+}
+
+fn parse_positive_usize(name: &str, value: Option<&str>, default: usize) -> usize {
+    match value {
+        Some(value) => match value.parse::<usize>() {
             Ok(parsed) if parsed > 0 => parsed,
             Ok(_) => {
                 tracing::warn!(
@@ -111,7 +116,7 @@ fn read_usize_env(name: &str, default: usize) -> usize {
                 default
             }
         },
-        Err(_) => default,
+        None => default,
     }
 }
 
@@ -2692,44 +2697,61 @@ mod tests {
     // ============================================================================
     #[test]
     fn test_config_defaults() {
-        temp_env::with_vars(
-            vec![
-                ("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", None::<&str>),
-                ("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", None::<&str>),
-            ],
-            || {
-                assert_eq!(max_concurrent_transfers(), DEFAULT_MAX_CONCURRENT_TRANSFERS);
-                assert_eq!(max_transfer_batch_size(), DEFAULT_MAX_TRANSFER_BATCH_SIZE);
-            },
+        assert_eq!(
+            parse_positive_usize(
+                "DYN_KVBM_MAX_CONCURRENT_TRANSFERS",
+                None,
+                DEFAULT_MAX_CONCURRENT_TRANSFERS
+            ),
+            DEFAULT_MAX_CONCURRENT_TRANSFERS
+        );
+        assert_eq!(
+            parse_positive_usize(
+                "DYN_KVBM_MAX_TRANSFER_BATCH_SIZE",
+                None,
+                DEFAULT_MAX_TRANSFER_BATCH_SIZE
+            ),
+            DEFAULT_MAX_TRANSFER_BATCH_SIZE
         );
     }
 
     #[test]
     fn test_config_custom_values() {
-        temp_env::with_vars(
-            vec![
-                ("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", Some("64")),
-                ("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", Some("128")),
-            ],
-            || {
-                assert_eq!(max_concurrent_transfers(), 64);
-                assert_eq!(max_transfer_batch_size(), 128);
-            },
+        assert_eq!(
+            parse_positive_usize(
+                "DYN_KVBM_MAX_CONCURRENT_TRANSFERS",
+                Some("64"),
+                DEFAULT_MAX_CONCURRENT_TRANSFERS
+            ),
+            64
+        );
+        assert_eq!(
+            parse_positive_usize(
+                "DYN_KVBM_MAX_TRANSFER_BATCH_SIZE",
+                Some("128"),
+                DEFAULT_MAX_TRANSFER_BATCH_SIZE
+            ),
+            128
         );
     }
 
     #[test]
     fn test_config_invalid_values_fallback() {
-        temp_env::with_vars(
-            vec![
-                ("DYN_KVBM_MAX_CONCURRENT_TRANSFERS", Some("not_a_number")),
-                ("DYN_KVBM_MAX_TRANSFER_BATCH_SIZE", Some("0")),
-            ],
-            || {
-                // Should log a tracing::warn and return defaults
-                assert_eq!(max_concurrent_transfers(), DEFAULT_MAX_CONCURRENT_TRANSFERS);
-                assert_eq!(max_transfer_batch_size(), DEFAULT_MAX_TRANSFER_BATCH_SIZE);
-            },
+        assert_eq!(
+            parse_positive_usize(
+                "DYN_KVBM_MAX_CONCURRENT_TRANSFERS",
+                Some("not_a_number"),
+                DEFAULT_MAX_CONCURRENT_TRANSFERS
+            ),
+            DEFAULT_MAX_CONCURRENT_TRANSFERS
+        );
+        assert_eq!(
+            parse_positive_usize(
+                "DYN_KVBM_MAX_TRANSFER_BATCH_SIZE",
+                Some("0"),
+                DEFAULT_MAX_TRANSFER_BATCH_SIZE
+            ),
+            DEFAULT_MAX_TRANSFER_BATCH_SIZE
         );
     }
 }

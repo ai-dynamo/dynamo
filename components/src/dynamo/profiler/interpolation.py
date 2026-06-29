@@ -81,12 +81,17 @@ async def run_interpolation(
 
     config_modifier = CONFIG_MODIFIERS[backend]
     model_name, model_path = config_modifier.get_model_name(disagg_config)
+    convert_kwargs = {}
+    if backend == "vllm":
+        convert_kwargs["model_name_or_path"] = model_path or model_name
 
     best_prefill_gpus = best_prefill_config.num_gpus
     best_decode_gpus = best_decode_config.num_gpus
 
     # --- Prefill interpolation ---
-    prefill_config = config_modifier.convert_config(disagg_config, EngineType.PREFILL)
+    prefill_config = config_modifier.convert_config(
+        disagg_config, EngineType.PREFILL, **convert_kwargs
+    )
     if job_tolerations:
         prefill_config = inject_tolerations_into_dgd(prefill_config, job_tolerations)
 
@@ -143,7 +148,9 @@ async def run_interpolation(
     deployment_clients.remove(client)
 
     # --- Decode interpolation ---
-    decode_config = config_modifier.convert_config(disagg_config, EngineType.DECODE)
+    decode_config = config_modifier.convert_config(
+        disagg_config, EngineType.DECODE, **convert_kwargs
+    )
     if job_tolerations:
         decode_config = inject_tolerations_into_dgd(decode_config, job_tolerations)
 

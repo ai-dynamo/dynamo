@@ -14,6 +14,7 @@ import pytest
 import requests
 
 from tests.utils.constants import QWEN
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import ServicePorts, allocate_port, deallocate_port
@@ -100,6 +101,15 @@ def _prepare_log_dir(request: pytest.FixtureRequest, suffix: str) -> str:
     return str(log_dir)
 
 
+def _vllm_gpu_mem_args(default_utilization: str) -> list[str]:
+    # Honor the GPU scheduler's per-worker KV-cache budget under bin-packing;
+    # fall back to a conservative utilization for serial runs.
+    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
+        "--gpu-memory-utilization",
+        default_utilization,
+    ]
+
+
 class RLVllmWorkerProcess(ManagedProcess):
     def __init__(
         self,
@@ -122,6 +132,7 @@ class RLVllmWorkerProcess(ManagedProcess):
                 "--model",
                 TEST_MODEL,
                 "--enforce-eager",
+                *_vllm_gpu_mem_args("0.4"),
                 "--max-model-len",
                 "2048",
                 "--max-num-seqs",

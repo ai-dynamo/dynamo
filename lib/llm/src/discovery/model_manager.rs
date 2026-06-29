@@ -15,7 +15,7 @@ use dynamo_kv_router::{
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
-use super::{KvWorkerMonitor, Model, RuntimeConfigWatch, WorkerSet, runtime_config_watch};
+use super::{Model, RuntimeConfigWatch, WorkerSet, runtime_config_watch};
 
 use dynamo_runtime::{
     component::{Endpoint, build_transport_type},
@@ -1040,16 +1040,6 @@ impl ModelManager {
         model_entry.load_threshold_config(config)
     }
 
-    /// Gets an existing worker monitor for a specific namespace of a model.
-    pub fn get_worker_monitor_for_namespace(
-        &self,
-        model: &str,
-        namespace: &str,
-    ) -> Option<KvWorkerMonitor> {
-        let model_entry = self.models.get(model)?;
-        model_entry.get_worker_monitor_for_namespace(namespace)
-    }
-
     /// Lists all models with worker monitors configured.
     pub fn list_busy_thresholds(&self) -> Vec<(String, LoadThresholdConfig)> {
         let mut result = Vec::new();
@@ -1737,8 +1727,9 @@ mod tests {
             std::sync::Arc::new(ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
             enforce_disagg,
+            None,
         );
-        pr.mark_activated_for_test();
+        pr.mark_active_for_test();
         ws.prefill_router = Some(pr);
         ws
     }
@@ -1862,12 +1853,13 @@ mod tests {
             "model must be hidden after prefill death"
         );
 
-        // Prefill rejoins -> reactivate via the WorkerSet's PrefillRouter.
+        // Prefill rejoins -> mark the synthetic test router active again. A real
+        // PrefillRouter has an initialized inner router for reactivate() to reuse.
         if let Some(model) = mm.get_model("llama")
             && let Some(ws) = model.get_worker_set("decode-ns")
             && let Some(ref pr) = ws.prefill_router
         {
-            pr.reactivate();
+            pr.mark_active_for_test();
         } else {
             panic!("decode WorkerSet or prefill_router not found");
         }

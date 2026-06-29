@@ -5,10 +5,11 @@ use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed,
     indexer::{
         KvIndexer, KvRouterError, LowerTierIndexers, MatchDetails, ThreadPoolIndexer,
-        query_lower_tiers,
+        TieredMatchProvider, query_lower_tiers,
     },
     protocols::{LocalBlockHash, OverlapScores},
 };
+use dynamo_runtime::pipeline::async_trait;
 
 use super::{Indexer, SideIndexer, TieredMatchDetails, remote::RemoteIndexer};
 
@@ -134,6 +135,16 @@ impl Indexer {
         self.lookup_pipeline()
             .find_primary_matches_by_tier(HashInput::Owned(sequence))
             .await
+    }
+}
+
+#[async_trait]
+impl TieredMatchProvider for Indexer {
+    async fn find_tiered_matches(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        self.find_matches_by_tier_ref(sequence).await
     }
 }
 

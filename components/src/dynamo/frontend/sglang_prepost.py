@@ -22,6 +22,10 @@ from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.utils import get_json_schema_constraint
+from sglang.srt.parser.jinja_template_utils import (
+    detect_jinja_template_content_format,
+    process_content_for_template_format,
+)
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
 from .utils import random_call_id
@@ -362,16 +366,24 @@ def _normalize_openai_thinking_template_kwargs(
     chat_template_kwargs = dict(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
+
+    def setdefault_reasoning(enabled: bool) -> None:
+        # Different SGLang model families consult different template toggles.
+        chat_template_kwargs.setdefault("thinking", enabled)
+        chat_template_kwargs.setdefault("enable_thinking", enabled)
+
     thinking = request.get("thinking")
-    if "thinking" not in chat_template_kwargs:
-        if isinstance(thinking, bool):
-            chat_template_kwargs["thinking"] = thinking
-        elif isinstance(thinking, dict):
-            thinking_type = thinking.get("type")
-            if thinking_type == "enabled":
-                chat_template_kwargs["thinking"] = True
-            elif thinking_type == "disabled":
-                chat_template_kwargs["thinking"] = False
+    if isinstance(thinking, bool):
+        setdefault_reasoning(thinking)
+    elif isinstance(thinking, dict):
+        thinking_type = thinking.get("type")
+        if thinking_type == "enabled":
+            setdefault_reasoning(True)
+        elif thinking_type == "disabled":
+            setdefault_reasoning(False)
+
+    if request.get("reasoning_effort") == "none":
+        setdefault_reasoning(False)
 
     if chat_template_kwargs:
         request["chat_template_kwargs"] = chat_template_kwargs
@@ -385,6 +397,14 @@ def _render_deepseek_v4_prompt_token_ids(
     tokenizer,
     template_tools: list[dict[str, Any]] | None,
 ) -> list[int]:
+    """Render DeepSeek-V4 prompt token ids via SGLang's ``encoding_dsv4``.
+
+    DeepSeek-V4 ships no HF ``chat_template``; SGLang builds the prompt with
+    ``encode_messages`` instead. Flatten each message's content to plain text,
+    re-serialize tool_call ``arguments`` to the JSON string the V4 encoder
+    expects, attach the tool schemas to the system message, then tokenize the
+    rendered prompt.
+    """
     try:
         from sglang.srt.entrypoints.openai.encoding_dsv4 import encode_messages
     except ImportError as exc:
@@ -401,6 +421,22 @@ def _render_deepseek_v4_prompt_token_ids(
             msg["content"] = ""
         else:
             msg["content"] = _flatten_message_content(content)
+
+        # encoding_dsv4.encode_arguments_to_dsml expects tool_call.arguments as
+        # the OpenAI-wire JSON *string* (it json.loads() internally).
+        # _normalize_assistant_tool_call_arguments parses arguments to a dict for
+        # Jinja chat templates, but a dict reaching this V4 encoder trips its
+        # json.loads() fallback into a single name="arguments" parameter wrapping
+        # the whole object — which the model then imitates, emitting a spurious
+        # nested {"arguments": {...}} on its next call. SGLang native keeps this
+        # path string-typed (serving_chat.py only dict-parses for the Jinja
+        # branch); mirror that by re-serializing here.
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            if isinstance(fn, dict) and isinstance(fn.get("arguments"), (dict, list)):
+                fn["arguments"] = json.dumps(fn["arguments"], ensure_ascii=False)
 
     if template_tools:
         if not encoding_messages or encoding_messages[0].get("role") != "system":
@@ -534,6 +570,38 @@ def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
     return list(ids)
 
 
+def _normalize_messages_for_template(
+    messages: list[dict[str, Any]], tokenizer: Any
+) -> list[dict[str, Any]]:
+    """Normalize OpenAI media chunks (``image_url``/``video_url``/``audio_url``)
+    to the simple ``image``/``video``/``audio`` types most VLM chat templates
+    branch on. Without this, templates that gate placeholder emission on
+    ``item.type == 'image'`` never fire for raw OpenAI input, and the
+    rendered prompt has no slot for the media bytes that
+    ``extract_mm_urls()`` forwards in parallel. Mirrors the equivalent
+    step in sglang's own OpenAI server and dynamo's Rust default path.
+    """
+    chat_template = getattr(tokenizer, "chat_template", None) or ""
+    content_format = detect_jinja_template_content_format(chat_template)
+    # The media-data side outputs are discarded: dynamo's separate
+    # ``extract_mm_urls()`` channel is the source of truth for the worker.
+    image_sink: list = []
+    video_sink: list = []
+    audio_sink: list = []
+    modality_sink: list = []
+    return [
+        process_content_for_template_format(
+            msg,
+            content_format,
+            image_data=image_sink,
+            video_data=video_sink,
+            audio_data=audio_sink,
+            modalities=modality_sink,
+        )
+        for msg in messages
+    ]
+
+
 def preprocess_chat_request(
     request: dict[str, Any],
     *,
@@ -548,7 +616,7 @@ def preprocess_chat_request(
     ``template_force_reasoning`` is the static per-server flag derived from
     the chat template (see :func:`detect_force_reasoning_from_template`);
     the effective per-request value combines it with client knobs
-    (``separate_reasoning``, ``chat_template_kwargs.enable_thinking``).
+    (``separate_reasoning``, ``chat_template_kwargs.{thinking,enable_thinking}``).
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
@@ -622,8 +690,10 @@ def preprocess_chat_request(
         if (reasoning_effort := request.get("reasoning_effort")) is not None:
             template_kwargs["reasoning_effort"] = reasoning_effort
 
+        template_messages = _normalize_messages_for_template(messages, tokenizer)
+
         prompt_token_ids = _normalize_prompt_token_ids(
-            tokenizer.apply_chat_template(messages, **template_kwargs)
+            tokenizer.apply_chat_template(template_messages, **template_kwargs)
         )
 
     # Build parsers after rendering, so DeepSeek-V4 can use its custom encoder

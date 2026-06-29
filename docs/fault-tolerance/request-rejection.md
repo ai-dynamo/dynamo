@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Request Rejection
+subtitle: Sheds load with HTTP 529 when all workers exceed admission-control thresholds, preventing cascading failures and OOMs.
 ---
 
 This document describes how Dynamo implements request rejection to prevent system overload and maintain service stability under high load conditions.
@@ -14,7 +15,7 @@ Request rejection (also known as load shedding) is a fault tolerance mechanism t
 - Degraded latency for all requests
 - Out-of-memory conditions on GPU workers
 
-When all workers exceed their configured busy thresholds, new requests receive an HTTP 503 (Service Unavailable) response, signaling clients to retry later.
+When all workers exceed their configured busy thresholds, new requests receive an HTTP 529 response, signaling clients to retry later.
 
 ## Architecture
 
@@ -33,7 +34,7 @@ When all workers exceed their configured busy thresholds, new requests receive a
                                          │ If all workers busy
                                          ▼
                                 ┌─────────────────────┐
-                                │   HTTP 503 Error    │
+                                │   HTTP 529 Error    │
                                 │ "All workers busy"  │
                                 └─────────────────────┘
 ```
@@ -156,26 +157,26 @@ Workers publish these metrics for monitoring:
 3. If configured, router retrieves list of free (non-busy) instances
 4. If no free instances exist (but instances are registered):
    - Request is rejected with `PipelineError::ServiceOverloaded`
-   - HTTP 503 response is returned to client
+   - HTTP 529 response is returned to client
 
 ### Error Response
 
 When requests are rejected, clients receive:
 
 ```http
-HTTP/1.1 503 Service Unavailable
+HTTP/1.1 529
 Content-Type: application/json
 
 {
-  "message": "Service temporarily unavailable: All workers are busy, please retry later",
-  "type": "service_unavailable",
-  "code": 503
+  "message": "Service temporarily overloaded",
+  "type": "Overloaded",
+  "code": 529
 }
 ```
 
 ### Client Retry Strategy
 
-Clients should implement exponential backoff when receiving 503 responses:
+Clients should implement exponential backoff when receiving 529 responses:
 
 ```python
 import time
@@ -184,7 +185,7 @@ import random
 def send_with_retry(request, max_retries=5):
     for attempt in range(max_retries):
         response = send_request(request)
-        if response.status_code != 503:
+        if response.status_code != 529:
             return response
 
         # Exponential backoff with jitter
@@ -204,7 +205,7 @@ Track rejection behavior with these metrics:
   - Labels:
     - `model`: The model name being served
     - `endpoint`: The API endpoint that received the request (e.g., `chat_completions`, `completions`, `embeddings`)
-  - This metric is incremented when the router returns a `ResourceExhausted` error because all workers are busy. The rejected request is surfaced to the client as an HTTP 503 response.
+  - This metric is incremented when the router returns a `ResourceExhausted` error because all workers are busy. The rejected request is surfaced to the client as an HTTP 529 response.
 
 **Example metrics output:**
 ```text
@@ -291,6 +292,41 @@ If using Kubernetes HPA, ensure rejection thresholds trigger before autoscaling:
 # Rejection at 85% provides buffer
 --active-decode-blocks-threshold 0.85
 ```
+
+## Worker-Side Request Admission
+
+In addition to the frontend's metric-driven busy detection above, a worker can
+enforce a hard concurrency cap directly at its request-plane ingress. This is
+disabled by default — when neither knob is set, the worker behaves exactly as
+before (a large pool plus a large overflow queue, no rejection).
+
+### Knobs
+
+| Flag | Env var | Meaning |
+| --- | --- | --- |
+| `--engine-request-limit N` | `DYN_ENGINE_REQUEST_LIMIT` | Max requests handled **concurrently by the engine** (the worker-pool semaphore size). Setting this enables worker-side rejection. |
+| _(env-only)_ | `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` | Max requests **waiting in Dynamo** (not yet in the engine) — the overflow queue size. Not a CLI knob; a small fixed burst defaulting to **16** (hard cap `N + 16`). Only takes effect when the engine limit is set. Advanced override only; must be **≥ 2**. |
+
+When `--engine-request-limit` is set, the worker accepts a request directly into
+the engine while a slot is free; once all `N` engine slots are busy, further
+requests go into the small overflow queue of size `Q`; when the engine **and**
+the queue are both full the worker rejects the request with
+`Server overloaded: worker at capacity`. The frontend maps this rejection to
+`ResourceExhausted` → **HTTP 529**, and temporarily marks the worker overloaded
+so it is skipped on the next routing decision (cleared automatically on the next
+metric recompute). The effective hard cap is **N + Q** in-flight requests per
+worker. The overflow channel is sized to `Q-1` because the single dispatcher
+holds one request in transit between the queue and the engine; this makes the
+cap exact for **Q ≥ 2** (at `Q = 1` the channel floors at 1, so the queued
+peak is 2 — hence the `Q ≥ 2` requirement).
+
+### Metrics
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `dynamo_rejection_request_total` | counter | Cumulative requests rejected because the worker was at capacity (engine in-flight limit and Dynamo queue both full). |
+| `dynamo_engine_request` | gauge | Current requests being handled by the engine. |
+| `dynamo_request_queue` | gauge | Current requests queued in Dynamo, not yet in the engine. |
 
 ## Related Documentation
 

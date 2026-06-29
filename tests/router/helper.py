@@ -38,6 +38,11 @@ def get_kv_indexer_command() -> list[str]:
     return [sys.executable, "-m", "dynamo.indexer"]
 
 
+def get_select_service_command() -> list[str]:
+    """Return the preferred standalone selection service command."""
+    return [sys.executable, "-m", "dynamo.select_service"]
+
+
 def get_kv_indexer_test_env() -> Dict[str, str]:
     """Indexer launch env that enables the listener-control test endpoints
     (gated off by default; used by the ZMQ replay scenario)."""
@@ -171,38 +176,78 @@ def verify_response_timing(timing_info: dict[str, Any], disagg: bool = False) ->
 
 async def wait_for_frontend_ready(
     frontend_url: str,
-    expected_num_workers: int = 2,
+    expected_num_workers: int | None = None,
     timeout: int = 120,
     test_payload: dict[str, Any] | None = None,
+    engine_workers=None,
+    store_backend: str = "etcd",
+    request_plane: str = "nats",
+    request_headers: dict[str, str] | None = None,
 ):
     """Wait for backend worker(s) to be ready via the HTTP frontend (OpenAI API).
 
-    This function performs a two-phase readiness check through the frontend HTTP server:
-        1. Polls GET /v1/models until at least one model is registered (workers connected)
-        2. Sends a test POST to /v1/chat/completions to verify the request pipeline is functional
+    This function performs a three-phase readiness check:
+        1. Polls discovery for every expected worker when engine_workers is provided.
+        2. Polls GET /v1/models until at least one model is registered.
+        3. Sends a test POST to /v1/chat/completions to verify the request pipeline is functional.
 
     Use this when testing through the HTTP frontend server (dynamo.frontend).
     For direct Python API testing with KvRouter, use wait_for_workers_ready() instead.
 
     Args:
         frontend_url: Base URL of the frontend HTTP server (e.g., "http://localhost:8000")
-        expected_num_workers: Number of workers to wait for (currently logs but doesn't enforce)
-        timeout: Maximum time to wait in seconds for both phases combined
-        test_payload: Optional chat completions payload for the phase 2 readiness probe.
+        expected_num_workers: Exact total worker count to enforce through discovery.
+        timeout: Maximum time to wait in seconds for each readiness phase.
+        test_payload: Optional chat completions payload for the final readiness probe.
             Use this when readiness must satisfy the same routing constraints as the test.
+        engine_workers: Worker process object, or a list of process objects, exposing
+            namespace, component_name, and num_workers.
+        store_backend: Discovery backend used by the workers.
+        request_plane: Request transport used by the workers.
+        request_headers: Optional headers for the chat-completions readiness probe.
 
     Raises:
         TimeoutError: If workers don't register or pipeline doesn't become ready within timeout
         aiohttp.ClientError: If HTTP requests fail unexpectedly
     """
 
+    if expected_num_workers is not None:
+        if engine_workers is None:
+            raise ValueError(
+                "engine_workers is required when expected_num_workers is set"
+            )
+
+        worker_groups = (
+            list(engine_workers)
+            if isinstance(engine_workers, (list, tuple))
+            else [engine_workers]
+        )
+        configured_workers = sum(group.num_workers for group in worker_groups)
+        if configured_workers != expected_num_workers:
+            raise ValueError(
+                "expected_num_workers does not match configured workers: "
+                f"expected={expected_num_workers}, configured={configured_workers}"
+            )
+
+        runtime = get_runtime(
+            store_backend=store_backend,
+            request_plane=request_plane,
+        )
+        for group in worker_groups:
+            endpoint = runtime.endpoint(
+                f"{group.namespace}.{group.component_name}.generate"
+            )
+            await poll_for_worker_instances(
+                endpoint,
+                group.num_workers,
+                max_wait_time=timeout,
+            )
+
     models_url = f"{frontend_url}/v1/models"
     chat_url = f"{frontend_url}/v1/chat/completions"
     start_time = asyncio.get_event_loop().time()
 
-    logger.info(
-        f"Waiting for {expected_num_workers} workers to register on HTTP frontend (timeout={timeout}s)..."
-    )
+    logger.info("Waiting for HTTP frontend readiness (timeout=%ss)...", timeout)
 
     # Phase 1: Wait for models to appear in /v1/models
     model_name = None
@@ -230,7 +275,7 @@ async def wait_for_frontend_ready(
                             logger.debug(
                                 f"No models registered yet (elapsed: {elapsed:.1f}s)"
                             )
-        except Exception as e:
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
             logger.debug(f"Error checking models endpoint: {e}")
 
         # Wait before next poll
@@ -259,7 +304,11 @@ async def wait_for_frontend_ready(
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(chat_url, json=test_payload) as response:
+                async with session.post(
+                    chat_url,
+                    json=test_payload,
+                    headers=request_headers,
+                ) as response:
                     if response.status == 200:
                         logger.info("Chat completions pipeline ready!")
                         return
@@ -267,7 +316,7 @@ async def wait_for_frontend_ready(
                         logger.debug(
                             f"Chat completions not ready yet, status {response.status} (elapsed: {elapsed:.1f}s)"
                         )
-        except Exception as e:
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
             logger.debug(f"Error testing chat completions: {e}")
 
         # Wait before next poll
@@ -427,6 +476,58 @@ async def wait_for_indexer_workers_active(
 
     raise RuntimeError(
         f"Timed out waiting for indexer listeners to become active at {workers_url}"
+    )
+
+
+async def wait_for_selection_service_ready(
+    selector_url: str,
+    expected_worker_ids: set[int],
+    timeout_s: float = 30.0,
+) -> None:
+    """Wait until the standalone selection service reports expected workers ready."""
+    if not expected_worker_ids:
+        return
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    ready_url = f"{selector_url}/ready"
+
+    async with aiohttp.ClientSession() as session:
+        while loop.time() < deadline:
+            remaining_s = deadline - loop.time()
+            if remaining_s <= 0:
+                break
+
+            try:
+                request_timeout = aiohttp.ClientTimeout(total=min(2.0, remaining_s))
+                async with session.get(ready_url, timeout=request_timeout) as resp:
+                    if resp.status not in (200, 503):
+                        await asyncio.sleep(0.5)
+                        continue
+                    body = await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                await asyncio.sleep(0.5)
+                continue
+
+            workers_by_id = {
+                worker["worker_id"]: worker for worker in body.get("workers", [])
+            }
+            all_schedulable = all(
+                workers_by_id.get(worker_id, {}).get("lifecycle") == "schedulable"
+                for worker_id in expected_worker_ids
+            )
+            if (
+                resp.status == 200
+                and body.get("ready") is True
+                and body.get("schedulable_workers", 0) >= len(expected_worker_ids)
+                and all_schedulable
+            ):
+                return
+
+            await asyncio.sleep(0.5)
+
+    raise RuntimeError(
+        f"Timed out waiting for selection service workers to become ready at {ready_url}"
     )
 
 

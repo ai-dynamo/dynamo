@@ -9,75 +9,43 @@ This page explains how the Dynamo router evaluates workers, chooses a target, an
 
 ## KV Cache Routing
 
-KV cache routing optimizes large language model inference by intelligently directing requests to workers with the most relevant cached data. By maximizing cache reuse, it reduces redundant computation and improves both throughput and latency.
-
-```mermaid
-graph TD
-    T[Tokens] --> R[KV Aware Router]
-
-    R -.-> W1["Worker 1<br/>Cached: 2 blocks<br/>Prefill: 8 blks<br/>Decode: 10 blks"]
-    R ==>|Selected| W2["Worker 2<br/>Cached: 5 blocks<br/>Prefill: 5 blks<br/>Decode: 5 blks"]
-    R -.-> W3["Worker 3<br/>Cached: 8 blocks<br/>Prefill: 2 blks<br/>Decode: 9 blks"]
-
-    style T fill:#fff3e0,stroke:#333,color:#333
-    style R fill:#2e8b57,stroke:#333,color:#fff
-    style W1 fill:#f3e5f5,stroke:#333,color:#333
-    style W2 fill:#c8e6c9,stroke:#333,color:#333
-    style W3 fill:#f3e5f5,stroke:#333,color:#333
-
-    linkStyle 0,1,2,3 stroke:#8b4513,stroke-width:2px
-```
+KV cache routing optimizes large language model inference by directing requests using both reusable cache state and projected active load. Cache reuse reduces redundant prompt computation, while live prefill and decode accounting prevents cache-rich workers from becoming overloaded.
 
 KV cache reuse introduces complexity to LLM serving load balancing. While it can significantly reduce computation costs, routing strategies that ignore worker-specific KV states can lead to:
 - Missed cache reuse opportunities due to suboptimal worker selection
 - System throughput degradation from uneven request distribution across workers
 
-The router uses a cost function that considers both the prefill cost (influenced by cached blocks) and the decode load to make optimal routing decisions.
-
 ## Cost Calculation
 
-1. **Prefill blocks**: Calculated from active prompt-side token load plus the incoming request's input tokens, divided by the block size. The system updates active prompt load when the first output token signals prefill completion.
-2. **Decode blocks**: Estimated from the request's input tokens and each worker's active sequences. The count updates when requests complete and their blocks are freed.
-3. **Overlap credits**: Device-local, host, disk, and shared-cache hits reduce the prompt-side prefill load before the final prefill scale is applied.
-4. **Cost formula**:
+![Request tokens are hashed and evaluated using KV indexer prefix hits and slot tracker active load before the router selects the lowest-cost worker. Worker KV events update the indexer through the event plane.](../../assets/img/router-kv-routing-overview.jpg)
+
+The cost function combines two worker-specific projections:
+
+- **Prefill cost**: Active prompt work already assigned to the worker plus the incoming request's uncached prompt work. Device, host, disk, and shared-cache hits reduce this cost according to their configured credits.
+- **Decode cost**: Active KV blocks already assigned to the worker plus the blocks projected for the incoming request.
 
 ```text
-excess_active_prefill_blocks =
-    (active_prefill_tokens - minimum_eligible_active_prefill_tokens)
-    / block_size
-normalized_excess = excess_active_prefill_blocks / request_blocks
-effective_overlap_score_credit =
-    overlap_score_credit
-    / (1 + overlap_score_credit_decay * normalized_excess)
-
-adjusted_prefill_blocks = max(
-    prefill_blocks
-    - effective_overlap_score_credit * device_overlap_blocks
-    - host_cache_hit_weight * host_overlap_blocks
-    - disk_cache_hit_weight * disk_overlap_blocks
-    - shared_cache_multiplier * shared_beyond_blocks,
-    0,
-)
+raw_prefill_blocks = active_prefill_blocks + incoming_prompt_blocks
+adjusted_prefill_blocks = max(raw_prefill_blocks - overlap_credit_blocks, 0)
+decode_blocks = active_decode_blocks + incoming_active_blocks
 cost = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 ```
 
-Lower costs indicate better routing choices.
-`overlap_score_credit` is the device-local prefix-overlap credit multiplier, from 0.0 to 1.0.
-Higher values favor cache reuse (improving TTFT), while lower values prioritize even load distribution (improving ITL). `overlap_score_credit_decay` optionally reduces only the device-local credit on workers with excess active prefill load; its default of 0 preserves the fixed credit. `prefill_load_scale` controls the weight of the adjusted prompt-side load relative to decode blocks.
+`overlap_credit_blocks` combines the configured device, host, disk, and shared-cache credits. `overlap_score_credit_decay` can reduce the device-local portion when a cache-rich worker has excess active prefill load. The router selects the lowest-cost eligible worker. For exact tuning behavior, see [Configuration and Tuning](router-configuration.md#tuning-guidelines).
 
 ### Active Load Modeling
 
-The `prefill_blocks` and `decode_blocks` terms include projected load for the new request plus active load already assigned to each worker.
+The prefill and decode projections include load from the incoming request plus active load already assigned to each worker.
 
 #### Prefill Load Modeling
 
-For prefill load, the router first estimates the uncached prompt work for each candidate worker:
+For prefill load, the router estimates each candidate worker's uncached prompt work by subtracting its cached prefix tokens from the request's input tokens.
 
-```text
-effective_isl = input_tokens - cached_tokens
-```
+By default, that effective prefill load remains charged at full value until the first output token marks prefill complete. With `--router-prefill-load-model aic`, the router also asks [AIConfigurator (AIC)](../../features/disaggregated-serving/aiconfigurator.md) for an expected prefill duration using the effective ISL and cached prefix length. The active load tracker uses the oldest active prefill as a time anchor and applies elapsed time to the worker's aggregate modeled prefill backlog. When the oldest request completes, the next active prefill becomes the anchor. If a modeled non-anchor request completes first, the tracker adjusts the anchor to keep the reported load continuous.
 
-By default, that effective prefill load remains charged at full value until the first output token marks prefill complete. With `--router-prefill-load-model aic`, the router also asks AIC for an expected prefill duration using the effective ISL and cached prefix length. The active load tracker then decays the oldest active prefill request on each worker over that predicted duration. This only changes router-side prompt load accounting; it does not change backend execution.
+![Timeline showing how AIC decays active prefill load across an aggregate modeled backlog, compared with static accounting until the first output token.](../../assets/img/router-active-prefill-timeline.jpg)
+
+This model changes router-side prompt load accounting only; it does not change backend batching or execution.
 
 #### Decode Load Modeling
 
@@ -93,10 +61,9 @@ The router selects the worker with the lowest cost. When `router_temperature` is
 
 Before scoring, the router filters candidates by request allow-lists, exact pins, DP-rank bounds, required taints, and busy-threshold overload state. For those hard eligibility rules, see [Router Filtering](router-filtering.md).
 
-Example calculation with `overlap_score_credit = 1.0`:
-- Worker 1: raw prefill 10 blocks, device overlap 2 blocks, decode 10 blocks => cost = 8 + 10 = 18
-- **Worker 2: raw prefill 10 blocks, device overlap 5 blocks, decode 5 blocks => cost = 5 + 5 = 10** (selected - lowest cost)
-- Worker 3: raw prefill 10 blocks, device overlap 8 blocks, decode 9 blocks => cost = 2 + 9 = 11
+When requests wait in policy-class queues, weighted
+[Deficit Round Robin Queue Scheduling](deficit-round-robin.md) selects the
+physical class to dispatch before worker scoring runs.
 
 ## Using the KV Cache Router
 

@@ -13,6 +13,10 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
+from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
+    build_disagg_mm_kwargs,
+    raise_if_unextracted_multimodal,
+)
 
 # Sentinel value matching u32::MAX from the C/Go prefill-routing ABI.
 # This remains as a compatibility fallback for older callers that still encode
@@ -130,6 +134,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         input_param = self._get_input_param(inner_request)
+
+        # Prefill encodes the media so the KV it transfers carries the vision
+        # context; decode extracts the same URLs to match the token layout.
+        mm_kwargs = build_disagg_mm_kwargs(inner_request)
+
         routing = inner_request.get("routing") or {}
         priority = routing.get("priority")
         dp_rank = routing.get("dp_rank")
@@ -145,8 +154,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 f"Prefill request {context.id()} will use LoRA adapter: {lora_path}"
             )
 
+        raise_if_unextracted_multimodal(inner_request)
+
         results = await self.engine.async_generate(
             **input_param,
+            **mm_kwargs,
             sampling_params=sampling_params,
             require_reasoning=require_reasoning,
             stream=True,
@@ -160,7 +172,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             lora_path=lora_path,
             **self._priority_kwargs(priority),
         )
-
         if inner_request.get(HEALTH_CHECK_KEY):
             # Canary: stream engine output so the Rust canary sees scheduler output.
             # No _cancellation_monitor — probe is bounded (max_tokens=1, FAKE_BOOTSTRAP_HOST).

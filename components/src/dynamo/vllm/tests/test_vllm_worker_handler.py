@@ -138,6 +138,36 @@ def _make_engine_response(request_id: str = "req-1", finished: bool = True):
     return resp
 
 
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_resets_vllm_external_cache():
+    handler = _make_handler()
+    handler.engine_client = SimpleNamespace(
+        reset_prefix_cache=AsyncMock(return_value=True)
+    )
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks()]
+
+    assert chunks == [{"status": "success", "message": "KV cache cleared"}]
+    handler.engine_client.reset_prefix_cache.assert_awaited_once_with(
+        reset_connector=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_reports_reset_failure():
+    handler = _make_handler()
+    handler.engine_client = SimpleNamespace(
+        reset_prefix_cache=AsyncMock(return_value=False)
+    )
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks()]
+
+    assert chunks == [{"status": "error", "message": "KV cache reset failed"}]
+    handler.engine_client.reset_prefix_cache.assert_awaited_once_with(
+        reset_connector=True
+    )
+
+
 class TestReasoningParserForwarding:
     def test_request_reasoning_metadata_reads_extra_args(self):
         request = {

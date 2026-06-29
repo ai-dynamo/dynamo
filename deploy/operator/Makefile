@@ -90,6 +90,10 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \
 	done
+	echo "Adding CA-less conversion webhook to multi-version CRD files"
+	for file in config/crd/bases/*.yaml; do \
+		$(YQ) eval 'with(select(.spec.versions | length > 1); .spec.conversion = {"strategy": "Webhook", "webhook": {"clientConfig": {"service": {"namespace": "dynamo-system", "name": "dynamo-operator-webhook-service", "path": "/convert"}}, "conversionReviewVersions": ["v1"]}} | .spec.conversion.webhook.clientConfig head_comment = "CA will be patched in by the Dynamo operator or other means, depending on cert mode auto or manual")' -i --indent 2 $$file || exit 1; \
+	done
 	echo "Adding NVIDIA header to CRD files"
 	for file in config/crd/bases/*.yaml; do \
 		if ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \

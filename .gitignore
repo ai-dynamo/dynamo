@@ -3,6 +3,19 @@
 .vscode/
 .helix
 issues/
+
+# Compliance: NOTICES / ATTRIBUTIONS are generated per-image at build time
+# and ship inside the runtime container under /legal/. Never committed.
+ATTRIBUTIONS-*.md
+ATTRIBUTIONS.md
+NOTICES-*.txt
+NOTICES.txt
+# Local extraction destinations for `docker buildx build --target {legal,sboms}`.
+legal-extract/
+sboms-extract/
+# EPP Go compliance SBOM exported by the CI EPP-build step (make sbom-export);
+# consumed by the frontend build from the build context, never committed.
+.epp-sbom/
 plans/
 *rendered.Dockerfile
 rendered.*.Dockerfile
@@ -128,6 +141,7 @@ core.*
 !/.claude/skills
 /.agents/*
 !/.agents/skills
+/.codex
 /CLAUDE.md
 /CLAUDE.md.bak
 

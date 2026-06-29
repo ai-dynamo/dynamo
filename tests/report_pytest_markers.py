@@ -195,6 +195,7 @@ STUB_MODULES = [
     "sglang.srt.managers.io_struct",
     "sglang.srt.parser",
     "sglang.srt.parser.conversation",
+    "sglang.srt.parser.jinja_template_utils",
     "sglang.srt.parser.reasoning_parser",
     "sglang.srt.sampling",
     "sglang.srt.sampling.custom_logit_processor",
