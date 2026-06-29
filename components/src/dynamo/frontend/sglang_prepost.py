@@ -99,13 +99,12 @@ _THINKING_BY_DEFAULT = {
     "nemotron_3",
     "interns1",
     "kimi_k2",
-    "minimax-m3",
 }
 _THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
 
 _SGLANG_PARSER_NAME_ALIASES = {
-    # Dynamo's Rust parser registry accepts these MiniMax-M3 aliases. Native
-    # SGLang exposes the same parser as "minimax-m3".
+    # Dynamo's Rust parser registry accepts these MiniMax-M3 aliases. SGLang
+    # builds that include MiniMax-M3 expose the parser as "minimax-m3".
     "minimax_m3": "minimax-m3",
     "minimax_m3_nom": "minimax-m3",
     "minimax-m3-nom": "minimax-m3",
@@ -131,6 +130,9 @@ def resolve_request_force_reasoning(
       * opt-out families (``glm45``/``qwen3``/``kimi_k2``/...): on by
         default, ``chat_template_kwargs.enable_thinking=False`` (or
         ``thinking=False`` for ``kimi_k2``) disables it.
+      * MiniMax-M3 defaults to adaptive, but SGLang still enables the
+        reasoning parser unless ``chat_template_kwargs.thinking_mode`` is
+        explicitly ``"disabled"``.
       * opt-in families (``deepseek-v3``/``gemma4``): off by default,
         enabled by ``chat_template_kwargs.{thinking,enable_thinking}=True``.
       * anything else: follow the statically-detected template default.
@@ -143,9 +145,10 @@ def resolve_request_force_reasoning(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
 
+    if reasoning_parser_name == "minimax-m3":
+        return kwargs.get("thinking_mode") != "disabled"
+
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
-        if reasoning_parser_name == "minimax-m3":
-            return kwargs.get("thinking_mode") != "disabled"
         flag_key = (
             "thinking" if reasoning_parser_name == "kimi_k2" else "enable_thinking"
         )
@@ -401,7 +404,7 @@ def _normalize_openai_thinking_template_kwargs(
         chat_template_kwargs.setdefault("thinking", enabled)
         chat_template_kwargs.setdefault("enable_thinking", enabled)
         chat_template_kwargs.setdefault(
-            "thinking_mode", "thinking" if enabled else "disabled"
+            "thinking_mode", "enabled" if enabled else "disabled"
         )
 
     thinking = request.get("thinking")

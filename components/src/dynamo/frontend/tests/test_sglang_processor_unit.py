@@ -693,7 +693,7 @@ def test_minimax_m3_reasoning_effort_none_keeps_explicit_thinking_mode(monkeypat
     request = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Hello"}],
-        "chat_template_kwargs": {"thinking_mode": "thinking"},
+        "chat_template_kwargs": {"thinking_mode": "enabled"},
         "reasoning_effort": "none",
     }
 
@@ -710,7 +710,7 @@ def test_minimax_m3_reasoning_effort_none_keeps_explicit_thinking_mode(monkeypat
         reasoning_parser_name="minimax-m3",
     )
 
-    assert result.request["chat_template_kwargs"]["thinking_mode"] == "thinking"
+    assert result.request["chat_template_kwargs"]["thinking_mode"] == "enabled"
     assert result.force_reasoning is True
     assert result.reasoning_parser.model_type == "minimax-m3"
     assert result.reasoning_parser.force_reasoning is True
@@ -1786,10 +1786,10 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert result.prompt_token_ids == [1, 2, 3]
         assert captured["kwargs"]["thinking"] is True
         assert captured["kwargs"]["enable_thinking"] is True
-        assert captured["kwargs"]["thinking_mode"] == "thinking"
+        assert captured["kwargs"]["thinking_mode"] == "enabled"
         assert result.request["chat_template_kwargs"]["thinking"] is True
         assert result.request["chat_template_kwargs"]["enable_thinking"] is True
-        assert result.request["chat_template_kwargs"]["thinking_mode"] == "thinking"
+        assert result.request["chat_template_kwargs"]["thinking_mode"] == "enabled"
         assert "chat_template_kwargs" not in request
 
     @pytest.mark.parametrize(
