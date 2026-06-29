@@ -13,6 +13,11 @@ import pytest
 
 from tests.router.e2e_harness import (
     ManagedEngineProcessMixin,
+    env_bool,
+    env_float,
+    env_int,
+    env_optional_int,
+    resolve_router_gpu_start_index,
     run_basic_router_test,
     run_disagg_router_decisions_test,
     run_indexers_sync_test,
@@ -30,7 +35,10 @@ from tests.utils.port_utils import (
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
+
+MODEL_NAME = os.environ.get(
+    "DYNAMO_ROUTER_E2E_SGLANG_MODEL", "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+)
 
 pytestmark = [
     pytest.mark.router,
@@ -43,9 +51,22 @@ PAGE_SIZE = 16  # SGLang uses "page_size" instead of "block_size"
 SGLANG_ARGS: Dict[str, Any] = {
     "page_size": PAGE_SIZE,
     "model": MODEL_NAME,
-    "mem_fraction_static": 0.4,  # Limit VRAM allocation per worker (equivalent to vLLM's gpu_memory_utilization)
-    "context_length": 1024,  # Limit context length to reduce KV cache size (equivalent to vLLM's max_model_len)
-    "disable_cuda_graph": True,  # Disable CUDA graphs for faster startup & lower memory (equivalent to vLLM's enforce_eager)
+    "mem_fraction_static": env_float(
+        "DYNAMO_ROUTER_E2E_SGLANG_MEM_FRACTION_STATIC", 0.4
+    ),
+    "context_length": env_int("DYNAMO_ROUTER_E2E_SGLANG_CONTEXT_LENGTH", 1024),
+    "disable_cuda_graph": env_bool(
+        "DYNAMO_ROUTER_E2E_SGLANG_DISABLE_CUDA_GRAPH", False
+    ),
+    "tensor_parallel_size": env_optional_int(
+        "DYNAMO_ROUTER_E2E_SGLANG_TENSOR_PARALLEL_SIZE"
+    ),
+    "expert_parallel_size": env_optional_int(
+        "DYNAMO_ROUTER_E2E_SGLANG_EXPERT_PARALLEL_SIZE"
+    ),
+    "moe_a2a_backend": os.environ.get("DYNAMO_ROUTER_E2E_SGLANG_MOE_A2A_BACKEND"),
+    "deepep_mode": os.environ.get("DYNAMO_ROUTER_E2E_SGLANG_DEEPEP_MODE"),
+    "enable_eplb": env_bool("DYNAMO_ROUTER_E2E_SGLANG_ENABLE_EPLB", False),
 }
 
 
@@ -101,6 +122,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
         self.data_parallel_size = data_parallel_size
         self.worker_processes = []
         self.store_backend = store_backend
+        gpu_start_index = resolve_router_gpu_start_index(gpu_start_index)
 
         # Dynamically allocate unique system and KV event ports to avoid
         # conflicts in parallel test runs.
@@ -121,14 +143,38 @@ class SGLangProcess(ManagedEngineProcessMixin):
         mem_fraction_static = sglang_args.get("mem_fraction_static")
         context_length = sglang_args.get("context_length")
         disable_cuda_graph = sglang_args.get("disable_cuda_graph", False)
+        tensor_parallel_size = sglang_args.get("tensor_parallel_size")
+        expert_parallel_size = sglang_args.get("expert_parallel_size")
+        moe_a2a_backend = sglang_args.get("moe_a2a_backend")
+        deepep_mode = sglang_args.get("deepep_mode")
+        enable_eplb = sglang_args.get("enable_eplb", False)
+        load_format = sglang_args.get("load_format") or os.environ.get(
+            "DYNAMO_ROUTER_E2E_LOAD_FORMAT"
+        )
+        model_loader_extra_config = sglang_args.get(
+            "model_loader_extra_config"
+        ) or os.environ.get("DYNAMO_ROUTER_E2E_MODEL_LOADER_EXTRA_CONFIG")
+        enable_memory_saver = sglang_args.get(
+            "enable_memory_saver", load_format == "gms"
+        )
 
         self.model_name = model
 
         for worker_idx in range(num_workers):
             # Calculate GPU device for this process
             if single_gpu:
-                # Force all processes to GPU 0 (for single-GPU testing)
+                # Force all processes to one GPU (for single-GPU testing)
                 gpu_device = str(gpu_start_index)
+            elif tensor_parallel_size is not None and int(tensor_parallel_size) > 1:
+                worker_start_gpu = gpu_start_index + worker_idx * int(
+                    tensor_parallel_size
+                )
+                gpu_device = ",".join(
+                    str(i)
+                    for i in range(
+                        worker_start_gpu, worker_start_gpu + int(tensor_parallel_size)
+                    )
+                )
             elif data_parallel_size is not None:
                 # Worker sees dp_rank GPUs (each DP rank gets its own GPU)
                 worker_start_gpu = gpu_start_index + worker_idx * data_parallel_size
@@ -139,7 +185,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
                     )
                 )
             else:
-                # No DP; worker sees one GPU
+                # No DP/TP; worker sees one GPU
                 gpu_device = str(gpu_start_index + worker_idx)
 
             command = [
@@ -160,6 +206,17 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 command.append("--disable-cuda-graph")
                 command.append("--disable-piecewise-cuda-graph")
 
+            if load_format is not None:
+                command.extend(["--load-format", str(load_format)])
+
+            if model_loader_extra_config is not None:
+                command.extend(
+                    ["--model-loader-extra-config", str(model_loader_extra_config)]
+                )
+
+            if enable_memory_saver:
+                command.append("--enable-memory-saver")
+
             # Limit VRAM allocation (required for multi-worker on same GPU)
             if mem_fraction_static is not None:
                 command.extend(["--mem-fraction-static", str(mem_fraction_static)])
@@ -173,6 +230,30 @@ class SGLangProcess(ManagedEngineProcessMixin):
             if disaggregation_mode is not None:
                 command.extend(["--disaggregation-mode", disaggregation_mode])
                 command.extend(["--disaggregation-transfer-backend", "nixl"])
+                # SGLang's bootstrap server binds to server_args.host. Dynamo
+                # advertises the machine IP to decode workers, so the bootstrap
+                # server must listen beyond localhost for local multi-process PD.
+                command.extend(
+                    [
+                        "--host",
+                        os.environ.get("DYNAMO_ROUTER_E2E_SGLANG_HOST", "0.0.0.0"),
+                    ]
+                )
+
+            if tensor_parallel_size is not None:
+                command.extend(["--tp-size", str(tensor_parallel_size)])
+
+            if expert_parallel_size is not None:
+                command.extend(["--ep-size", str(expert_parallel_size)])
+
+            if moe_a2a_backend:
+                command.extend(["--moe-a2a-backend", str(moe_a2a_backend)])
+
+            if deepep_mode:
+                command.extend(["--deepep-mode", str(deepep_mode)])
+
+            if enable_eplb:
+                command.append("--enable-eplb")
 
             if data_parallel_size is not None:
                 # Add DP configuration
@@ -226,6 +307,8 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 health_check_urls=[],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
+                terminate_parent_only_first=True,
+                graceful_shutdown_timeout=30.0,
             )
             self.worker_processes.append(process)
             if data_parallel_size is not None:
@@ -341,7 +424,10 @@ def test_router_decisions_sglang_dp(
     )
 
 
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2603")
+@pytest.mark.skipif(
+    os.environ.get("DYNAMO_RUN_SKIPPED_SGLANG_DISAGG") != "1",
+    reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2603",
+)
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.gpu_2
@@ -363,8 +449,12 @@ def test_router_decisions_sglang_disagg(
         request_plane=request_plane,
         model_name=MODEL_NAME,
         block_size=PAGE_SIZE,
-        num_prefill_workers=2,
-        num_decode_workers=1,
+        num_prefill_workers=int(
+            os.environ.get("DYNAMO_ROUTER_E2E_NUM_PREFILL_WORKERS", "1")
+        ),
+        num_decode_workers=int(
+            os.environ.get("DYNAMO_ROUTER_E2E_NUM_DECODE_WORKERS", "1")
+        ),
         prefill_process_kwargs={
             "single_gpu": True,
             "gpu_start_index": 0,
@@ -375,6 +465,7 @@ def test_router_decisions_sglang_disagg(
             "gpu_start_index": 1,
             "disaggregation_mode": "decode",
         },
+        strict_timing=False,
     )
 
 

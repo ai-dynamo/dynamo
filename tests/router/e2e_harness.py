@@ -4,6 +4,7 @@
 import logging
 import os
 import time
+from contextlib import ExitStack, contextmanager
 from typing import Any, Callable, ContextManager
 
 from tests.router.common import (
@@ -18,6 +19,71 @@ from tests.utils.port_utils import allocate_ports, deallocate_ports
 from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
+
+
+def env_int(name: str, default: int) -> int:
+    return int(os.environ.get(name, default))
+
+
+def env_optional_int(name: str) -> int | None:
+    raw = os.environ.get(name)
+    return None if raw is None else int(raw)
+
+
+def env_float(name: str, default: float) -> float:
+    return float(os.environ.get(name, default))
+
+
+def env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    return default if raw is None else raw.lower() not in {"0", "false", "no", "off"}
+
+
+def resolve_router_gpu_start_index(gpu_start_index: int) -> int:
+    override = os.environ.get("DYNAMO_ROUTER_E2E_GPU_START_INDEX")
+    if override is None:
+        return gpu_start_index
+    try:
+        base_index = int(override)
+    except ValueError as exc:
+        raise ValueError(
+            "DYNAMO_ROUTER_E2E_GPU_START_INDEX must be an integer"
+        ) from exc
+    return base_index + gpu_start_index
+
+
+def _resolve_router_e2e_num_requests(default: int = 10) -> int:
+    override = os.environ.get("DYNAMO_ROUTER_E2E_NUM_REQUESTS")
+    if override is None:
+        return default
+    try:
+        value = int(override)
+    except ValueError as exc:
+        raise ValueError("DYNAMO_ROUTER_E2E_NUM_REQUESTS must be an integer") from exc
+    if value <= 0:
+        raise ValueError("DYNAMO_ROUTER_E2E_NUM_REQUESTS must be positive")
+    return value
+
+
+@contextmanager
+def maybe_router_gms_servers():
+    if os.environ.get("DYNAMO_ROUTER_E2E_ENABLE_GMS") != "1":
+        yield
+        return
+
+    from tests.gpu_memory_service.common.gms import GMSServer
+
+    devices = os.environ.get("DYNAMO_ROUTER_E2E_GMS_DEVICES", "0,1")
+    tags = os.environ.get("DYNAMO_ROUTER_E2E_GMS_TAGS", "weights,kv_cache")
+    device_ids = [int(part.strip()) for part in devices.split(",") if part.strip()]
+    tag_names = [part.strip() for part in tags.split(",") if part.strip()]
+
+    with ExitStack() as stack:
+        for device in device_ids:
+            for tag in tag_names:
+                stack.enter_context(GMSServer(device=device, tag=tag))
+        yield
+
 
 TEST_PROMPT = (
     "In a quiet meadow tucked between rolling hills, a plump gray rabbit nibbled on "
@@ -214,7 +280,9 @@ def run_basic_router_test(
         },
         engine_process_kwargs=engine_process_kwargs,
     )
-    with process as engine_workers:
+    with ExitStack() as stack:
+        stack.enter_context(maybe_router_gms_servers())
+        engine_workers = stack.enter_context(process)
         frontend_port = allocate_frontend_ports(request, 1)[0]
         _test_router_basic(
             engine_workers=engine_workers,
@@ -222,7 +290,7 @@ def run_basic_router_test(
             request=request,
             frontend_port=frontend_port,
             test_payload=test_payload or build_test_payload(model_name),
-            num_requests=num_requests,
+            num_requests=_resolve_router_e2e_num_requests(num_requests),
             frontend_timeout=frontend_timeout,
             store_backend="etcd",
             request_plane=request_plane,
@@ -263,7 +331,9 @@ def run_router_decisions_test(
         default_process_kwargs=default_process_kwargs,
         engine_process_kwargs=engine_process_kwargs,
     )
-    with process as engine_workers:
+    with ExitStack() as stack:
+        stack.enter_context(maybe_router_gms_servers())
+        engine_workers = stack.enter_context(process)
         endpoint = get_engine_endpoint(engine_workers, request_plane, component_name)
         scenario_kwargs = dict(test_kwargs or {})
         for argument, attribute in (
@@ -302,6 +372,7 @@ def run_disagg_router_decisions_test(
     | None = None,
     test_payload: dict[str, Any] | None = None,
     test_kwargs: dict[str, Any] | None = None,
+    strict_timing: bool = True,
 ):
     shared_namespace = f"test-namespace-{generate_random_suffix()}"
     frontend_port = allocate_frontend_ports(request, 1)[0]
@@ -316,6 +387,7 @@ def run_disagg_router_decisions_test(
     }
 
     def run_test(prefill_workers, decode_workers):
+        scenario_kwargs = {"strict_timing": strict_timing, **(test_kwargs or {})}
         _test_router_decisions_disagg(
             prefill_workers=prefill_workers,
             decode_workers=decode_workers,
@@ -324,29 +396,35 @@ def run_disagg_router_decisions_test(
             frontend_port=frontend_port,
             test_payload=test_payload or build_test_payload(model_name),
             request_plane=request_plane,
-            **(test_kwargs or {}),
+            **scenario_kwargs,
         )
 
-    if worker_context_factory is not None:
-        with worker_context_factory(shared_namespace) as workers:
+    with ExitStack() as stack:
+        stack.enter_context(maybe_router_gms_servers())
+        if worker_context_factory is not None:
+            workers = stack.enter_context(worker_context_factory(shared_namespace))
             run_test(*workers)
-        return
+            return
 
-    with engine_process_cls(
-        request,
-        num_workers=num_prefill_workers,
-        request_plane=request_plane,
-        **{engine_args_name: engine_args},
-        **prefill_kwargs,
-    ) as prefill_workers:
-        with engine_process_cls(
-            request,
-            num_workers=num_decode_workers,
-            request_plane=request_plane,
-            **{engine_args_name: engine_args},
-            **decode_kwargs,
-        ) as decode_workers:
-            run_test(prefill_workers, decode_workers)
+        prefill_workers = stack.enter_context(
+            engine_process_cls(
+                request,
+                num_workers=num_prefill_workers,
+                request_plane=request_plane,
+                **{engine_args_name: engine_args},
+                **prefill_kwargs,
+            )
+        )
+        decode_workers = stack.enter_context(
+            engine_process_cls(
+                request,
+                num_workers=num_decode_workers,
+                request_plane=request_plane,
+                **{engine_args_name: engine_args},
+                **decode_kwargs,
+            )
+        )
+        run_test(prefill_workers, decode_workers)
 
 
 def run_indexers_sync_test(
@@ -383,7 +461,9 @@ def run_indexers_sync_test(
         },
         engine_process_kwargs=engine_process_kwargs,
     )
-    with process as engine_workers:
+    with ExitStack() as stack:
+        stack.enter_context(maybe_router_gms_servers())
+        engine_workers = stack.enter_context(process)
         _test_router_indexers_sync(
             engine_workers=engine_workers,
             block_size=block_size,
