@@ -13,7 +13,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_ext_proc::{ExtProcServer, Router};
+use dynamo_ext_proc::ExtProcServer;
+use dynamo_ext_proc::Router;
+use dynamo_ext_proc::selection_router::SelectionRouterConfig;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -33,21 +35,39 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 struct Config {
+    mode: EppMode,
     namespace: String,
     component: String,
     enforce_disagg: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum EppMode {
+    Runtime,
+    RouterOnly,
+}
+
 impl Config {
-    fn from_env() -> Self {
+    fn from_env() -> Result<Self> {
         let namespace = env_or("DYN_NAMESPACE_PREFIX", "")
             .or_else(|| env_or("DYN_NAMESPACE", ""))
             .unwrap_or_else(|| "vllm-agg".to_string());
 
-        Self {
+        Ok(Self {
+            mode: parse_mode()?,
             namespace,
             component: env_or("DYN_COMPONENT_NAME", "").unwrap_or_else(|| "backend".to_string()),
             enforce_disagg: parse_env("DYN_ENFORCE_DISAGG", false),
+        })
+    }
+}
+
+fn parse_mode() -> Result<EppMode> {
+    match env_or("DYN_EPP_MODE", "").as_deref().unwrap_or("runtime") {
+        "runtime" | "dynamo" => Ok(EppMode::Runtime),
+        "router-only" | "selection" | "selection-router-only" => Ok(EppMode::RouterOnly),
+        mode => {
+            anyhow::bail!("invalid DYN_EPP_MODE={mode:?}; valid values are runtime and router-only")
         }
     }
 }
@@ -72,7 +92,8 @@ fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> T {
 
 /// Generate a self-signed TLS acceptor for the ext-proc gRPC server.
 fn create_tls_acceptor() -> Result<TlsAcceptor> {
-    use rcgen::{CertificateParams, KeyPair};
+    use rcgen::CertificateParams;
+    use rcgen::KeyPair;
     use rustls::ServerConfig;
     use tokio_rustls::rustls;
 
@@ -119,11 +140,12 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let config = Config::from_env();
+    let config = Config::from_env()?;
 
     tracing::info!(
         port = GRPC_PORT,
         health_port = HEALTH_PORT,
+        mode = ?config.mode,
         namespace = %config.namespace,
         component = %config.component,
         enforce_disagg = config.enforce_disagg,
@@ -144,9 +166,17 @@ async fn main() -> Result<()> {
             .serve(health_addr),
     );
 
-    tracing::info!("Initializing KV-aware router from discovery...");
-    let router =
-        Router::from_discovery(&config.namespace, &config.component, config.enforce_disagg).await?;
+    let router = match config.mode {
+        EppMode::Runtime => {
+            tracing::info!("Initializing KV-aware router from Dynamo runtime discovery...");
+            Router::from_discovery(&config.namespace, &config.component, config.enforce_disagg)
+                .await?
+        }
+        EppMode::RouterOnly => {
+            tracing::info!("Initializing router-only embedded selection router...");
+            Router::from_selection_config(SelectionRouterConfig::from_env()?).await?
+        }
+    };
 
     // Gate SERVING on pod-reflector readiness. `from_discovery` returns once
     // worker discovery and the model card are ready, but the K8s pod reflector's

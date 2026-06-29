@@ -16,8 +16,13 @@ pub mod envoy_helpers;
 pub mod epp;
 pub mod picker;
 pub mod proto;
+pub mod router;
+pub mod selection_router;
 pub mod server;
 
-pub use epp::Router;
-pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo};
+pub use picker::Endpoint;
+pub use picker::EndpointPicker;
+pub use picker::PickResult;
+pub use picker::RequestInfo;
+pub use router::Router;
 pub use server::ExtProcServer;

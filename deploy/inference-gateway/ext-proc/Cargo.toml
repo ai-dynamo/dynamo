@@ -16,7 +16,7 @@ name = "dynamo-ext-proc"
 path = "src/main.rs"
 
 [dependencies]
-dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
+dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols", "standalone-selection"] }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }
@@ -34,6 +34,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
+tokio-util = { workspace = true }
 # `net` for TcpListenerStream (serve_with_incoming), `sync` for ReceiverStream.
 # Declared explicitly rather than relying on workspace feature unification.
 tokio-stream = { workspace = true, features = ["net", "sync"] }
