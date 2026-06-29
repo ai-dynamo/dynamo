@@ -105,6 +105,33 @@ def test_resolve_aic_blocks_preserves_explicit_zero_inputs(monkeypatch):
     assert calls[0]["free_gpu_memory_fraction"] == 0.0
 
 
+def test_resolve_aic_blocks_scales_engine_pool_by_attention_dp(monkeypatch):
+    # estimate_num_gpu_blocks returns a PER-RANK count; offline replay models a single KV
+    # pool per engine, so _resolve_aic_num_gpu_blocks scales it by attention_dp_size to the
+    # engine-wide pool (under DP-attention each rank holds a full KV replica). dp=1/unset is
+    # unchanged. (The live mocker replicates one scheduler per dp rank, so it keeps per-rank
+    # -- this scaling is offline-only.) Regression for DP-attention KV under-provisioning.
+    monkeypatch.setattr(replay_main, "estimate_num_gpu_blocks", lambda **kw: 1000)
+
+    def _resolve(dp):
+        raw = {
+            "aic_backend": "vllm",
+            "aic_model_path": "/models/mock",
+            "aic_tp_size": 1,
+            "block_size": 64,
+            "max_num_batched_tokens": 4096,
+            "gpu_memory_utilization": 0.8,
+        }
+        if dp is not None:
+            raw["aic_attention_dp_size"] = dp
+        replay_main._resolve_aic_num_gpu_blocks(raw)
+        return raw["num_gpu_blocks"]
+
+    assert _resolve(8) == 8000  # dp=8 -> engine pool is 8x the per-rank estimate
+    assert _resolve(1) == 1000  # no DP-attention -> per-rank unchanged
+    assert _resolve(None) == 1000  # unset -> per-rank unchanged
+
+
 def test_programmatic_replay_estimates_unset_aic_blocks(monkeypatch):
     calls = []
 
@@ -161,6 +188,11 @@ def test_programmatic_replay_estimates_unset_aic_blocks(monkeypatch):
             "moe_tp_size": None,
             "moe_ep_size": None,
             "attention_dp_size": None,
+            "gemm_dtype": None,
+            "moe_dtype": None,
+            "fmha_dtype": None,
+            "kv_cache_dtype": None,
+            "comm_dtype": None,
         }
     ]
 
@@ -246,6 +278,11 @@ def test_planner_bridge_materializes_unset_aic_blocks(tmp_path, monkeypatch):
             "moe_tp_size": None,
             "moe_ep_size": None,
             "attention_dp_size": None,
+            "gemm_dtype": None,
+            "moe_dtype": None,
+            "fmha_dtype": None,
+            "kv_cache_dtype": None,
+            "comm_dtype": None,
         }
 
     assert calls == [

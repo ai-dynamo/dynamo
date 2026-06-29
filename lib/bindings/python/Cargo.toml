@@ -49,8 +49,7 @@ mm-routing = ["dynamo-llm/mm-routing"]
 aiconfigurator-core = { git = "https://github.com/ai-dynamo/aiconfigurator.git", rev = "ffbab15797d3a3f14c382e937c0ab0c1c5cbc530", package = "aiconfigurator-core", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "1.4.1" }
-dynamo-protocols = { version = "=2.0.0" }
+dynamo-parsers = { version = "2.1.2" }
 dynamo-backend-common = { path = "../../backend-common" }
 
 anyhow = { version = "1" }

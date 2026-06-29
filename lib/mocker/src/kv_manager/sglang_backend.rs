@@ -54,8 +54,12 @@ pub struct SglangDestinationReservation {
     pub(crate) allocated_tokens: usize,
 }
 
-#[cfg(test)]
 impl SglangDestinationReservation {
+    pub(crate) fn transferable_prompt_tokens(&self) -> usize {
+        self.unpublished_indices.len()
+    }
+
+    #[cfg(test)]
     pub(crate) fn indices(&self) -> Vec<usize> {
         self.prefix_indices
             .iter()
@@ -648,6 +652,49 @@ mod tests {
         assert_eq!(r2.prefix_len, 5);
         assert_eq!(r2.kv_indices.len(), 7); // 5 reused + 2 new pages
         assert_eq!(mgr.cache().token_pool.available(), 93); // 100 - 5 - 2
+    }
+
+    #[test]
+    fn destination_transfer_footprint_uses_missing_physical_pages() {
+        let mut mgr = SglangKvManager::new(64, 4, KvEventPublishers::default(), 0);
+        let prompt = (0..10).collect::<Vec<_>>();
+
+        let cold = mgr
+            .reserve_destination(&prompt)
+            .expect("cold destination reservation should fit");
+        assert_eq!(cold.transferable_prompt_tokens(), 12);
+        mgr.cancel_destination(cold);
+
+        let prefix_tokens = &prompt[..4];
+        let prefix = mgr
+            .allocate_for_request(prefix_tokens)
+            .expect("prefix allocation should fit");
+        mgr.cache_finished_req(
+            prefix_tokens,
+            &prefix.kv_indices,
+            prefix.last_node,
+            prefix.prefix_len,
+        );
+        let partial = mgr
+            .reserve_destination(&prompt)
+            .expect("partially cached destination reservation should fit");
+        assert_eq!(partial.transferable_prompt_tokens(), 8);
+        mgr.cancel_destination(partial);
+
+        let aligned_tokens = (20..28).collect::<Vec<_>>();
+        let aligned = mgr
+            .allocate_for_request(&aligned_tokens)
+            .expect("aligned prompt allocation should fit");
+        mgr.cache_finished_req(
+            &aligned_tokens,
+            &aligned.kv_indices,
+            aligned.last_node,
+            aligned.prefix_len,
+        );
+        let full_hit = mgr
+            .reserve_destination(&aligned_tokens)
+            .expect("fully cached destination reservation should fit");
+        assert_eq!(full_hit.transferable_prompt_tokens(), 0);
     }
 
     #[test]

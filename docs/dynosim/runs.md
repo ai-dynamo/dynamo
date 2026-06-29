@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: DynoSim Runs
 subtitle: Run one trace or synthetic workload through a simulated Dynamo configuration
@@ -138,7 +138,7 @@ Example:
 ```
 
 Rows without `session_id` are independent timestamped requests. Use this shape for wall-clock
-request traces, including agent-converted traces where parallel LLM calls should remain parallel.
+Mooncake-format inputs where parallel LLM calls should remain parallel.
 
 `priority` and `strict_priority` affect only KV-router pending-queue ordering when
 `--router-mode kv_router` is active and requests are actually queued. Negative `priority` values
@@ -162,11 +162,28 @@ Example:
 The second `session-a` row waits for the first turn to complete plus 50 ms. The second `session-b`
 row also waits for the first turn to complete plus the inferred 50 ms timestamp delta.
 
+### Dynamo Request Traces
+
+`--trace-format dynamo` reads one or more original
+`dynamo.request.trace.v1` JSONL or JSONL.GZ shards directly. Replay derives the
+block size from the records and builds the standard or agentic in-memory model
+based on `agent_context`. It does not create an intermediate Mooncake file.
+
+```bash
+python -m dynamo.replay /tmp/dynamo-request-trace.*.jsonl.gz \
+    --trace-format dynamo \
+    --replay-mode offline \
+    --router-mode kv_router \
+    --num-workers 4 \
+    --report-json /tmp/dynamo-request-trace.replay-report.json
+```
+
 ### Agentic Mooncake
 
 `--trace-format agentic_mooncake` simulates request-level workflow dependencies in addition to the
 Mooncake request fields. Each row should contain the normal Mooncake fields plus a stable
-`request_id`. Dependency fields are optional.
+`request_id`. Dependency fields are optional. This is a separate input format for externally
+authored Mooncake-compatible traces, not an intermediate format for Dynamo request traces.
 
 ```json
 {
@@ -188,19 +205,10 @@ Rows with no `wait_for` use `timestamp` as their start time. Rows with dependenc
 listed request to complete, then wait `delay + tool_wait_ms` before dispatch. `branches` records
 child requests spawned by this row, and `prefix_reset` marks the first row in a session.
 
-Use `agent_trace_to_mooncake --agentic` to create this format from Dynamo agent traces:
-
-```bash
-cargo run -p dynamo-bench --bin agent_trace_to_mooncake -- \
-  --agentic \
-  --input-path /tmp/dynamo-agent-trace.jsonl \
-  --output-file /tmp/dynamo-agent-trace.agentic-mooncake.jsonl
-```
-
 Run it with:
 
 ```bash
-python -m dynamo.replay /tmp/dynamo-agent-trace.agentic-mooncake.jsonl \
+python -m dynamo.replay /path/to/agentic-mooncake.jsonl \
     --trace-format agentic_mooncake \
     --trace-block-size 128 \
     --replay-mode offline \
@@ -222,13 +230,18 @@ vLLM benchmark setup uses `block_size=64`. For `engine_type=sglang`, DynoSim sti
 `block_size` internally; `sglang.page_size` is accepted as a compatibility alias and is normalized
 into `block_size` before simulation starts.
 
+Dynamo request traces embed their trace block size. DynoSim derives it when
+`--trace-block-size` is omitted and rejects an explicit mismatch.
+
 ## DynoSim Surfaces
 
 ### `python -m dynamo.replay`
 
 The dedicated DynoSim CLI exposes:
 
-- either a positional `trace_file`, or all of `--input-tokens`, `--output-tokens`, and `--request-count`
+- either positional trace files (`--trace-format dynamo` accepts one or more;
+  other formats require exactly one), or all of `--input-tokens`,
+  `--output-tokens`, and `--request-count`
 - `--replay-mode offline|online`
 - `--router-mode round_robin|kv_router`
 - `--num-workers`
@@ -237,7 +250,7 @@ The dedicated DynoSim CLI exposes:
 - `--replay-concurrency`
 - `--arrival-interval-ms`
 - `--arrival-speedup-ratio`
-- `--trace-format mooncake|mooncake-delta|agentic_mooncake|applied_compute_agentic`
+- `--trace-format mooncake|mooncake-delta|agentic_mooncake|applied_compute_agentic|dynamo`
 - `--trace-block-size`
 - `--turns-per-session`
 - `--shared-prefix-ratio`

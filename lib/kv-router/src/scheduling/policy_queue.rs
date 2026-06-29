@@ -190,6 +190,27 @@ impl<T> PolicyQueue<T> {
         self.classes.iter().flat_map(|class| class.pending.iter())
     }
 
+    /// Remove queued entries that no longer satisfy `keep`, rebuilding queue
+    /// accounting while preserving each retained entry's scheduling key.
+    pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
+        self.pending_count = 0;
+        for class in &mut self.classes {
+            let pending = std::mem::take(&mut class.pending);
+            class.stats = PolicyQueueStats::default();
+            for entry in pending {
+                if !keep(entry.payload()) {
+                    continue;
+                }
+                add_stats(&mut class.stats, entry.snapshot);
+                class.pending.push(entry);
+                self.pending_count += 1;
+            }
+            if class.pending.is_empty() {
+                class.deficit = 0;
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Applies class-local, worker-scaled limits against pre-add counters, then
     /// captures the immutable scheduling key and accounting snapshot.
@@ -442,6 +463,40 @@ policy_classes:
         assert_eq!(rejection.limit, 2);
         assert_eq!(queue.class_stats(0).raw_isl_tokens, 108);
         assert_eq!(queue.class_stats(0).cached_tokens, 104);
+    }
+
+    #[test]
+    fn retain_removes_payload_and_rebuilds_queue_accounting() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_family: default
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: default
+    policy_family: default
+    cache_bucket: all
+    quantum: 10
+"#,
+        ));
+        queue
+            .enqueue(0, 1, QueueSnapshot::new(8, 4), 0.0, 0.0, 0, "keep")
+            .unwrap();
+        queue
+            .enqueue(0, 1, QueueSnapshot::new(16, 6), 1.0, 0.0, 0, "remove")
+            .unwrap();
+
+        queue.retain(|payload| *payload != "remove");
+
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.class_stats(0).requests, 1);
+        assert_eq!(queue.class_stats(0).raw_isl_tokens, 8);
+        assert_eq!(queue.class_stats(0).cached_tokens, 4);
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "keep"
+        );
     }
 
     #[test]

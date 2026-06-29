@@ -15,6 +15,7 @@ pub(super) struct PrefillFpmItem {
     pub(super) prefix_tokens: usize,
 }
 
+#[derive(Default)]
 pub(super) struct AdmitResult {
     pub(super) can_run: Vec<SglangRequest>,
     pub(super) admissions: Vec<AdmissionEvent>,

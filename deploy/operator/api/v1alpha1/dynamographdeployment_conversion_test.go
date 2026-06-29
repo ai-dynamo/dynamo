@@ -111,6 +111,7 @@ func TestDGD_RoundTrip_Empty(t *testing.T) {
 
 func TestDGD_RoundTrip_Minimal(t *testing.T) {
 	replicas := int32(2)
+	minAvailable := int32(1)
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "min", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -119,7 +120,9 @@ func TestDGD_RoundTrip_Minimal(t *testing.T) {
 				{
 					ComponentName: "worker",
 					ComponentType: v1beta1.ComponentTypeWorker,
-					Replicas:      &replicas},
+					Replicas:      &replicas,
+					MinAvailable:  &minAvailable,
+				},
 			},
 		},
 	}
