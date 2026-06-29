@@ -25,7 +25,6 @@ use opentelemetry::logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity}
 use opentelemetry_otlp::{Protocol, WithExportConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::{SdkLogger, SdkLoggerProvider};
-use serde_json::json;
 
 use super::config::AuditPolicy;
 use super::handle::AuditRecord;
@@ -199,16 +198,21 @@ fn marker_payload(rec: &AuditRecord, reason: String) -> Option<(String, bool, Op
         "audit otel: emitting incomplete marker"
     );
 
-    let payload = json!({
-        "schema_version": rec.schema_version,
-        "request_id": &rec.request_id,
-        "requested_streaming": rec.requested_streaming,
-        "model": &rec.model,
-        "audit_complete": false,
-        "audit_drop_reason": reason,
-    });
+    // The marker is an `AuditRecord` with the payload dropped, so it shares the
+    // same schema as a normal record — consumers parse one shape either way.
+    let marker = AuditRecord {
+        schema_version: rec.schema_version,
+        request_id: rec.request_id.clone(),
+        requested_streaming: rec.requested_streaming,
+        model: rec.model.clone(),
+        event_time: rec.event_time,
+        request: None,
+        response: None,
+        audit_complete: false,
+        audit_drop_reason: Some(reason.clone()),
+    };
 
-    match serde_json::to_string(&payload) {
+    match serde_json::to_string(&marker) {
         Ok(s) => Some((s, false, Some(reason))),
         Err(err) => {
             tracing::warn!(target: "dynamo_llm::audit", error = %err, "audit otel: marker serialize failed");
@@ -304,6 +308,8 @@ mod tests {
             event_time: SystemTime::now(),
             request: None,
             response: None,
+            audit_complete: true,
+            audit_drop_reason: None,
         }
     }
 
@@ -361,6 +367,8 @@ mod tests {
             event_time: SystemTime::now(),
             request: Some(Arc::new(request)),
             response: None,
+            audit_complete: true,
+            audit_drop_reason: None,
         }
     }
 
@@ -403,6 +411,8 @@ mod tests {
             event_time: SystemTime::now(),
             request: None,
             response: Some(Arc::new(response)),
+            audit_complete: true,
+            audit_drop_reason: None,
         }
     }
 

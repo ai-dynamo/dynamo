@@ -28,6 +28,15 @@ pub struct AuditRecord {
     pub request: Option<Arc<NvCreateChatCompletionRequest>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response: Option<Arc<NvCreateChatCompletionResponse>>,
+    /// `true` on a complete record. Today only `OtelSink` can set it `false`, on
+    /// the oversize marker where it drops the payload; the other sinks never
+    /// truncate, so it is always `true` for them. A future bus-level size cap
+    /// would make `false` reachable for every sink.
+    pub audit_complete: bool,
+    /// Why the record is incomplete (e.g. `otel_payload_too_large:...`); omitted
+    /// when `audit_complete` is `true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_drop_reason: Option<String>,
 }
 
 pub struct AuditHandle {
@@ -60,6 +69,8 @@ impl AuditHandle {
             event_time: self.event_time,
             request: Some(self.request),
             response,
+            audit_complete: true,
+            audit_drop_reason: None,
         };
         bus::publish(rec);
     }
@@ -191,6 +202,8 @@ mod tests {
             event_time: SystemTime::now(),
             request: Some(Arc::new(create_test_request_with_nvext())),
             response: Some(Arc::new(create_test_response("final answer"))),
+            audit_complete: true,
+            audit_drop_reason: None,
         };
 
         let value = serde_json::to_value(record).unwrap();
@@ -216,6 +229,8 @@ mod tests {
             event_time: SystemTime::now(),
             request: Some(Arc::new(create_test_request("test-model", true))),
             response: None,
+            audit_complete: true,
+            audit_drop_reason: None,
         };
 
         let value = serde_json::to_value(&record).unwrap();

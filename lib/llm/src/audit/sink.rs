@@ -283,6 +283,8 @@ mod tests {
             event_time: std::time::SystemTime::now(),
             request: None,
             response: None,
+            audit_complete: true,
+            audit_drop_reason: None,
         }
     }
 
