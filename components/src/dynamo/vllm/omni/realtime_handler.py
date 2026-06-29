@@ -206,18 +206,13 @@ class Turn:
         against ``self.audio_ref`` so the client never hears duplicates.
         """
         mm = getattr(output, "multimodal_output", None)
-        if not isinstance(mm, dict):
+        if mm is None:
             return []
 
-        key = (
-            "audio"
-            if "audio" in mm
-            else ("model_outputs" if "model_outputs" in mm else None)
-        )
-        if key is None:
+        raw_audio = mm.tensors["audio"] if "audio" in mm.tensors.keys() else None
+        if raw_audio is None:
             return []
 
-        raw_audio = mm.get(key)
         if isinstance(raw_audio, (list, tuple)):
             if not raw_audio:
                 return []
