@@ -67,34 +67,85 @@ func TestGmsWeightServerPodSpec(t *testing.T) {
 
 	result := gmsWeightServerPodSpec(base, 0, 8)
 
-	require.Len(t, result.Containers, 1)
-	c := result.Containers[0]
+	require.Len(t, result.Containers, 2)
+	for _, tag := range []string{"weights", "kv_cache"} {
+		c := findContainer(result.Containers, gmsContainerName(tag))
+		require.NotNil(t, c, "should create a GMS container for %s", tag)
 
-	assert.Equal(t, []string{"bash", "-c"}, c.Command, "should use bash")
-	require.Len(t, c.Args, 1)
-	assert.Contains(t, c.Args[0], gms.ServerModule, "should run gpu_memory_service.cli.server")
-	assert.Nil(t, c.LivenessProbe, "liveness probe should be nil")
-	assert.Nil(t, c.ReadinessProbe, "readiness probe should be nil")
-	assert.NotNil(t, c.StartupProbe, "startup probe should be set")
-	assert.Equal(t, gmsStartupProbeCommand(8), c.StartupProbe.Exec.Command)
+		assert.Equal(t, []string{"bash", "-c"}, c.Command, "should use bash")
+		require.Len(t, c.Args, 1)
+		assert.Contains(t, c.Args[0], gms.ServerModule, "should run gpu_memory_service.cli.server")
+		assert.Contains(t, c.Args[0], "GMS_SERVER_TAGS="+tag, "should restrict the container to one tag")
+		assert.NotNil(t, c.StartupProbe, "startup probe should be set")
+		assert.NotNil(t, c.ReadinessProbe, "readiness probe should be set")
+		assert.NotNil(t, c.LivenessProbe, "liveness probe should be set")
+		assert.Equal(t, gmsProbeCommand(tag, 8), c.StartupProbe.Exec.Command)
+		assert.Equal(t, gmsProbeCommand(tag, 8), c.ReadinessProbe.Exec.Command)
+		assert.Equal(t, gmsProbeCommand(tag, 8), c.LivenessProbe.Exec.Command)
 
-	assert.NotContains(t, c.Resources.Limits, corev1.ResourceName("nvidia.com/gpu"), "GPU should be stripped")
-	assert.Contains(t, c.Resources.Limits, corev1.ResourceMemory, "non-GPU limits should remain")
+		assert.NotContains(t, c.Resources.Limits, corev1.ResourceName("nvidia.com/gpu"), "GPU should be stripped")
+		assert.Contains(t, c.Resources.Limits, corev1.ResourceMemory, "non-GPU limits should remain")
+		assert.Empty(t, c.Ports, "GMS sidecars should not duplicate service port names")
+
+		assert.True(t, hasVolumeMount(*c, gmsSharedMountPath), "should have shared volume mount")
+		assert.True(t, hasEnvVar(*c, gms.EnvSocketDir, gmsSharedMountPath), "should set GMS_SOCKET_DIR")
+		assert.True(t, hasEnvVar(*c, "GMS_SERVER_TAGS", tag), "should expose the tag in env")
+	}
 
 	assert.True(t, hasToleration(result, "nvidia.com/gpu"), "should have GPU toleration")
 	assert.True(t, hasVolume(result, gmsSharedVolumeName), "should have shared volume")
-	assert.True(t, hasVolumeMount(c, gmsSharedMountPath), "should have shared volume mount")
-	assert.True(t, hasEnvVar(c, gms.EnvSocketDir, gmsSharedMountPath), "should set GMS_SOCKET_DIR")
 
 	require.Len(t, result.InitContainers, 1, "should have perm-fix init container")
 	initC := result.InitContainers[0]
+	weights := findContainer(result.Containers, "gms-weights")
+	require.NotNil(t, weights)
 	assert.Equal(t, gmsPermFixInitName, initC.Name)
-	assert.Equal(t, c.Image, initC.Image, "init container should reuse the service image")
+	assert.Equal(t, weights.Image, initC.Image, "init container should reuse the service image")
 	require.NotNil(t, initC.SecurityContext)
 	assert.Equal(t, int64(0), *initC.SecurityContext.RunAsUser)
 
 	// Verify original is not mutated
 	assert.Len(t, base.Containers[0].Command, 3, "original command should be unchanged")
+}
+
+func TestAppendIntraPodGMSServerContainers(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:    "main",
+			Image:   "test-image:latest",
+			Command: []string{"python3", "-m", "dynamo.vllm"},
+			Env: []corev1.EnvVar{
+				{Name: gms.EnvSocketDir, Value: gms.SharedMountPath},
+			},
+			Resources: corev1.ResourceRequirements{
+				Claims: []corev1.ResourceClaim{{Name: dra.ClaimName}},
+				Limits: corev1.ResourceList{
+					"nvidia.com/gpu": k8sresource.MustParse("1"),
+				},
+			},
+			VolumeMounts: []corev1.VolumeMount{{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath}},
+		}},
+	}
+
+	appendIntraPodGMSServerContainers(podSpec, podSpec.Containers[0], 1)
+
+	require.Len(t, podSpec.Containers, 3)
+	for _, tag := range []string{"weights", "kv_cache"} {
+		c := findContainer(podSpec.Containers, gmsContainerName(tag))
+		require.NotNil(t, c, "should create intra-pod GMS container for %s", tag)
+		assert.Equal(t, []string{"bash", "-c"}, c.Command)
+		require.Len(t, c.Args, 1)
+		assert.Contains(t, c.Args[0], "GMS_SERVER_TAGS="+tag)
+		assert.Contains(t, c.Args[0], gms.SharedMountPath)
+		assert.Equal(t, gms.SharedMountPath, envToMap(c.Env)[gms.EnvSocketDir])
+		assert.Equal(t, tag, envToMap(c.Env)["GMS_SERVER_TAGS"])
+		assert.NotNil(t, c.StartupProbe)
+		assert.NotNil(t, c.ReadinessProbe)
+		assert.NotNil(t, c.LivenessProbe)
+		assert.NotContains(t, c.Resources.Limits, corev1.ResourceName("nvidia.com/gpu"))
+		require.Len(t, c.Resources.Claims, 1)
+		assert.Equal(t, dra.ClaimName, c.Resources.Claims[0].Name)
+	}
 }
 
 func TestGmsWeightServerPodSpec_EmptyContainers(t *testing.T) {
@@ -110,16 +161,20 @@ func TestGmsWeightServerPodSpec_SubPathExpr(t *testing.T) {
 
 	t.Run("rank 0", func(t *testing.T) {
 		result := gmsWeightServerPodSpec(base, 0, 4)
-		mount := findVolumeMount(result.Containers[0], gmsSharedMountPath)
-		require.NotNil(t, mount, "GMS container should mount shared volume")
-		assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-0", mount.SubPathExpr)
+		for _, c := range result.Containers {
+			mount := findVolumeMount(c, gmsSharedMountPath)
+			require.NotNil(t, mount, "GMS container should mount shared volume")
+			assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-0", mount.SubPathExpr)
+		}
 	})
 
 	t.Run("rank 3", func(t *testing.T) {
 		result := gmsWeightServerPodSpec(base, 3, 4)
-		mount := findVolumeMount(result.Containers[0], gmsSharedMountPath)
-		require.NotNil(t, mount, "GMS container should mount shared volume")
-		assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-3", mount.SubPathExpr)
+		for _, c := range result.Containers {
+			mount := findVolumeMount(c, gmsSharedMountPath)
+			require.NotNil(t, mount, "GMS container should mount shared volume")
+			assert.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)/rank-3", mount.SubPathExpr)
+		}
 	})
 }
 
@@ -129,6 +184,7 @@ func TestAugmentEngineForGMS(t *testing.T) {
 			Name: "engine",
 			Env: []corev1.EnvVar{
 				{Name: "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Value: "true"},
+				{Name: "DYN_GMS_FAILOVER_SHADOW_MODE", Value: "user"},
 				{Name: "KEEP_ME", Value: "yes"},
 			},
 			Resources: corev1.ResourceRequirements{
@@ -139,18 +195,27 @@ func TestAugmentEngineForGMS(t *testing.T) {
 		}},
 	}
 
-	augmentEngineForGMS(podSpec, 1, true)
+	augmentEngineForGMS(podSpec, 1, true, "svc-wkr-1")
 	c := podSpec.Containers[0]
 
 	assert.True(t, hasEnvVar(c, "ENGINE_ID", ""), "ENGINE_ID should be set (via Downward API)")
 	assert.True(t, hasEnvVar(c, gms.EnvSocketDir, gmsSharedMountPath))
 	assert.True(t, hasEnvVar(c, "FAILOVER_LOCK_PATH", gmsSharedMountPath+"/"+gmsFailoverLockFile))
+	assert.True(t, hasEnvVar(c, "GMS_KV_LEASES", "1"))
+	assert.True(t, hasEnvVar(c, "GMS_KV_LEASE_SHM_DIR", gmsSharedMountPath))
+	assert.True(t, hasEnvVar(c, commonconsts.DynamoDiscoveryLogicalInstanceKeyEnvVar, "$(POD_NAMESPACE)/$(GROVE_PCSG_NAME)/$(GROVE_PCSG_INDEX)/svc-wkr-1"))
+	assert.True(t, hasEnvVar(c, "DYN_GMS_FAILOVER_SHADOW_MODE", "true"))
+	assert.Equal(t, 1, countEnvVar(c.Env, "DYN_GMS_FAILOVER_SHADOW_MODE"))
 	// DYN_VLLM_GMS_SHADOW_MODE is backend-specific and is injected by
 	// VLLMBackend.UpdateContainer, not by augmentEngineForGMS. See
 	// TestVLLMBackend_UpdateContainer_InterPodGMS in backend_vllm_test.go.
-	assert.False(t, hasEnvVar(c, "DYN_VLLM_GMS_SHADOW_MODE", "true"),
+	assert.False(t, hasEnvVar(c, vllmGMSShadowModeEnvVar, "true"),
 		"vLLM-specific env var must not leak into backend-agnostic GMS helpers")
 	assert.True(t, hasEnvVar(c, "DYN_SYSTEM_STARTING_HEALTH_STATUS", "notready"))
+	assert.True(t, hasEnvVar(c, gmsFastShutdownGracePeriodEnvVar, "0"),
+		"inter-pod failover should not hold the active lock during an extra shutdown grace period")
+	assert.True(t, hasEnvVar(c, gmsFastExitOnSigtermEnvVar, "1"),
+		"inter-pod failover should release the kernel-held failover lock as soon as discovery unregisters")
 	assert.True(t, hasEnvVar(c, "KEEP_ME", "yes"), "unrelated env vars should be preserved")
 
 	for _, e := range c.Env {
@@ -176,6 +241,25 @@ func TestAugmentEngineForGMS(t *testing.T) {
 			"FailoverCascadeReconciler is the sole recovery path")
 }
 
+func TestAugmentEngineForGMS_PreservesExplicitShutdownGrace(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name: "engine",
+			Env: []corev1.EnvVar{
+				{Name: gmsFastShutdownGracePeriodEnvVar, Value: "2.5"},
+				{Name: gmsFastExitOnSigtermEnvVar, Value: "0"},
+			},
+		}},
+	}
+
+	augmentEngineForGMS(podSpec, 0, true, "svc")
+
+	assert.True(t, hasEnvVar(podSpec.Containers[0], gmsFastShutdownGracePeriodEnvVar, "2.5"),
+		"explicit user shutdown grace must not be overwritten")
+	assert.True(t, hasEnvVar(podSpec.Containers[0], gmsFastExitOnSigtermEnvVar, "0"),
+		"explicit user fast-exit setting must not be overwritten")
+}
+
 // TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever pins the
 // standalone inter-pod GMS behavior: the engine pod must NOT be forced to
 // RestartPolicy=Never. The cascade-group label is only applied when
@@ -197,7 +281,7 @@ func TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever(t *testing.T) {
 		}},
 	}
 
-	augmentEngineForGMS(podSpec, 0, false)
+	augmentEngineForGMS(podSpec, 0, false, "svc")
 
 	assert.Equal(t, corev1.RestartPolicy(""), podSpec.RestartPolicy,
 		"standalone inter-pod GMS engine must not have RestartPolicy overridden; "+
@@ -207,11 +291,13 @@ func TestAugmentEngineForGMS_StandaloneDoesNotForceRestartNever(t *testing.T) {
 		"standalone engine still needs the shared hostPath for UDS sockets")
 	assert.True(t, hasEnvVar(podSpec.Containers[0], gms.EnvSocketDir, gmsSharedMountPath),
 		"standalone engine still needs the socket-dir env var to reach the GMS server")
+	assert.False(t, hasEnvVar(podSpec.Containers[0], commonconsts.DynamoDiscoveryLogicalInstanceKeyEnvVar, ""),
+		"standalone inter-pod GMS has no shadow cohort and should keep the physical worker identity")
 }
 
 func TestAugmentEngineForGMS_EmptyContainers(t *testing.T) {
 	podSpec := &corev1.PodSpec{}
-	augmentEngineForGMS(podSpec, 0, true)
+	augmentEngineForGMS(podSpec, 0, true, "svc")
 	assert.Empty(t, podSpec.Containers)
 }
 
@@ -309,7 +395,7 @@ func TestGetDeviceClassName(t *testing.T) {
 }
 
 func TestGmsEngineEnvVars(t *testing.T) {
-	envs := gmsEngineEnvVars()
+	envs := gmsEngineEnvVars(gmsLogicalInstanceKey("svc"))
 
 	names := make(map[string]bool)
 	for _, e := range envs {
@@ -319,11 +405,15 @@ func TestGmsEngineEnvVars(t *testing.T) {
 	assert.True(t, names["ENGINE_ID"])
 	assert.True(t, names[gms.EnvSocketDir])
 	assert.True(t, names["FAILOVER_LOCK_PATH"])
+	assert.True(t, names["GMS_KV_LEASES"])
+	assert.True(t, names["GMS_KV_LEASE_SHM_DIR"])
 	assert.True(t, names["DYN_SYSTEM_STARTING_HEALTH_STATUS"])
+	assert.True(t, names[commonconsts.DynamoDiscoveryLogicalInstanceKeyEnvVar])
+	assert.True(t, names["DYN_GMS_FAILOVER_SHADOW_MODE"])
 	// DYN_VLLM_GMS_SHADOW_MODE is backend-specific and is injected by
 	// VLLMBackend.UpdateContainer, not by gmsEngineEnvVars. See
 	// TestVLLMBackend_UpdateContainer_InterPodGMS in backend_vllm_test.go.
-	assert.False(t, names["DYN_VLLM_GMS_SHADOW_MODE"],
+	assert.False(t, names[vllmGMSShadowModeEnvVar],
 		"vLLM-specific env var must not leak into backend-agnostic GMS helpers")
 
 	for _, e := range envs {
@@ -331,6 +421,10 @@ func TestGmsEngineEnvVars(t *testing.T) {
 			assert.NotNil(t, e.ValueFrom, "ENGINE_ID should use Downward API")
 			assert.NotNil(t, e.ValueFrom.FieldRef)
 			assert.Contains(t, e.ValueFrom.FieldRef.FieldPath, "grove.io/podclique-pod-index")
+		}
+		if e.Name == commonconsts.DynamoDiscoveryLogicalInstanceKeyEnvVar {
+			assert.Equal(t, "$(POD_NAMESPACE)/$(GROVE_PCSG_NAME)/$(GROVE_PCSG_INDEX)/svc", e.Value)
+			assert.NotContains(t, e.Value, "podclique-pod-index")
 		}
 	}
 }
@@ -395,6 +489,16 @@ func TestGmsResourceClaimTemplateConfigs_SingleNode(t *testing.T) {
 	require.NotNil(t, req.Exactly)
 	assert.Equal(t, "gpu.nvidia.com/h100", req.Exactly.DeviceClassName)
 	assert.Equal(t, int64(8), req.Exactly.Count)
+}
+
+func TestGmsResourceClaimTemplateConfigs_WithoutQueueLabel(t *testing.T) {
+	resources := corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): k8sresource.MustParse("1")}}
+	roles := []ServiceRole{{Name: "svc", Role: RoleMain, Rank: 0, Replicas: 1}}
+
+	configs, err := gmsResourceClaimTemplateConfigs("svc", nil, resources, roles)
+	require.NoError(t, err)
+	require.Len(t, configs, 1)
+	assert.Nil(t, configs[0].TemplateSpec.ObjectMeta.Labels)
 }
 
 func TestGmsResourceClaimTemplateConfigs_Multinode(t *testing.T) {
@@ -540,6 +644,20 @@ func TestBuildFailoverPod_TwoEnginesPlusSidecar(t *testing.T) {
 	assert.Equal(t, "frontend-sidecar", ps.Containers[2].Name)
 }
 
+func TestBuildFailoverPod_FrontendSidecarFastFailoverDefaults(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	ps.Containers[1].Name = commonconsts.FrontendSidecarContainerName
+	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
+	require.NoError(t, err)
+
+	env := envToMap(ps.Containers[2].Env)
+	assert.Equal(t, gmsFastKubeDiscoveryDebounceMsDefault, env[gmsKubeDiscoveryDebounceMsEnvVar])
+	assert.Equal(t, gmsGatewayNotreadyGraceMsDefault, env[gmsGatewayNotreadyGraceMsEnvVar])
+	assert.Equal(t, gmsMigrationRetryConcurrencyDefault, env[gmsMigrationRetryConcurrencyEnvVar])
+	assert.Equal(t, gmsMigrationFirstChunkTimeoutMsDefault, env[gmsMigrationFirstChunkTimeoutMsEnvVar])
+	assert.Equal(t, gmsMigrationRecentFailoverWindowMsDefault, env[gmsMigrationRecentFailoverWindowMsEnvVar])
+}
+
 func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	ps := corev1.PodSpec{}
 	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
@@ -547,15 +665,54 @@ func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
-func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
+func TestBuildFailoverPod_AllowsSupportedBackends(t *testing.T) {
+	for _, backend := range []BackendFramework{BackendFrameworkVLLM, BackendFrameworkSGLang, BackendFrameworkTRTLLM} {
+		t.Run(string(backend), func(t *testing.T) {
+			ps := intraPodFailoverPodSpec()
+			err := buildFailoverPod(&ps, 1, backend)
+			require.NoError(t, err)
+			require.Len(t, ps.Containers, 3)
+			assert.Equal(t, "engine-0", ps.Containers[0].Name)
+			assert.Equal(t, "engine-1", ps.Containers[1].Name)
+		})
+	}
+}
+
+func TestBuildFailoverPod_SGLangDisablesPiecewiseCudaGraph(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
+	ps.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
+	ps.Containers[0].Args = []string{"--model-path", "Qwen/Qwen3-0.6B"}
+
 	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang)
+	require.NoError(t, err)
+
+	for i := range 2 {
+		assert.Equal(t, 1, countArg(ps.Containers[i].Args, sglangDisablePiecewiseCudaGraphFlag), "engine-%d", i)
+	}
+
+	alreadySet := intraPodFailoverPodSpec()
+	alreadySet.Containers[0].Command = []string{"python3", "-m", "dynamo.sglang"}
+	alreadySet.Containers[0].Args = []string{sglangDisablePiecewiseCudaGraphFlag}
+	err = buildFailoverPod(&alreadySet, 1, BackendFrameworkSGLang)
+	require.NoError(t, err)
+	for i := range 2 {
+		assert.Equal(t, 1, countArg(alreadySet.Containers[i].Args, sglangDisablePiecewiseCudaGraphFlag), "engine-%d", i)
+	}
+}
+
+func TestBuildFailoverPod_RejectsUnsupportedBackend(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	err := buildFailoverPod(&ps, 1, BackendFramework("custom"))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "currently supported only for vLLM")
+	assert.Contains(t, err.Error(), "failover is not supported")
 }
 
 func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
+	ps.Containers[0].Env = append(ps.Containers[0].Env,
+		corev1.EnvVar{Name: "DYN_GMS_FAILOVER_SHADOW_MODE", Value: "user"},
+		corev1.EnvVar{Name: "DYN_SYSTEM_PORT", Value: "old"},
+	)
 	err := buildFailoverPod(&ps, 1, BackendFrameworkVLLM)
 	require.NoError(t, err)
 
@@ -565,8 +722,22 @@ func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
 		assert.Equal(t, strconv.Itoa(i), env["ENGINE_ID"], "engine-%d ENGINE_ID", i)
 		assert.Equal(t, fmt.Sprintf("engine-%d", i), env["CONTAINER_NAME"], "engine-%d CONTAINER_NAME", i)
 		assert.Equal(t, intraPodFailoverLockFile, env["FAILOVER_LOCK_PATH"], "engine-%d FAILOVER_LOCK_PATH", i)
+		assert.Equal(t, "1", env["GMS_KV_LEASES"], "engine-%d GMS_KV_LEASES", i)
+		assert.Equal(t, gms.SharedMountPath, env["GMS_KV_LEASE_SHM_DIR"], "engine-%d GMS_KV_LEASE_SHM_DIR", i)
+		assert.Equal(t, "0", env["DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID"], "engine-%d primary id", i)
+		assert.Equal(t, "true", env["DYN_GMS_FAILOVER_SHADOW_MODE"], "engine-%d generic GMS failover mode", i)
+		assert.Equal(t, 1, countEnvVar(engine.Env, "DYN_GMS_FAILOVER_SHADOW_MODE"), "engine-%d generic GMS failover mode should be unique", i)
+		assert.Equal(t, 1, countEnvVar(engine.Env, "DYN_SYSTEM_PORT"), "engine-%d system port should be unique", i)
+		wantLockBeforeInit := "0"
+		if i == 0 {
+			wantLockBeforeInit = "1"
+		}
+		assert.Equal(t, wantLockBeforeInit, env["DYN_VLLM_GMS_LOCK_BEFORE_INIT"], "engine-%d vLLM lock before init", i)
+		assert.Equal(t, wantLockBeforeInit, env["DYN_SGLANG_GMS_LOCK_BEFORE_INIT"], "engine-%d SGLang lock before init", i)
+		assert.Equal(t, wantLockBeforeInit, env["DYN_TRTLLM_GMS_LOCK_BEFORE_INIT"], "engine-%d TRT-LLM lock before init", i)
 		assert.Equal(t, "notready", env["DYN_SYSTEM_STARTING_HEALTH_STATUS"], "engine-%d starting health", i)
 		assert.Equal(t, "true", env["DYN_SYSTEM_ENABLED"], "engine-%d system enabled", i)
+		assert.Equal(t, gmsFastKubeDiscoveryDebounceMsDefault, env[gmsKubeDiscoveryDebounceMsEnvVar], "engine-%d discovery debounce", i)
 
 		// Removed env vars should not be present
 		_, hasOldHealth := env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"]
@@ -589,6 +760,36 @@ func TestBuildFailoverPod_StaggeredPorts(t *testing.T) {
 		assert.Equal(t, int32(commonconsts.DynamoSystemPort+i), engine.Ports[0].ContainerPort)
 		assert.Equal(t, fmt.Sprintf("system-%d", i), engine.Ports[0].Name)
 	}
+}
+
+func TestBuildFailoverPod_TRTLLMMultinodeStaggersSshPorts(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	basePort := commonconsts.MpiRunSshPort
+	shadowPort := basePort + 1
+	ps.Containers[0].Command = []string{"/bin/sh", "-c"}
+	ps.Containers[0].Args = []string{fmt.Sprintf("printf 'Port %d\n' > $HOME/.ssh/config && mpirun --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no\"", basePort, basePort)}
+	ps.Containers[0].ReadinessProbe = &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(basePort)},
+		},
+	}
+
+	err := buildFailoverPod(&ps, 2, BackendFrameworkTRTLLM)
+	require.NoError(t, err)
+	require.Len(t, ps.Containers, 3)
+
+	primaryCommand := ps.Containers[0].Args[0]
+	shadowCommand := ps.Containers[1].Args[0]
+	assert.Contains(t, primaryCommand, fmt.Sprintf("Port %d", basePort))
+	assert.Contains(t, primaryCommand, fmt.Sprintf("-p %d", basePort))
+	assert.Contains(t, shadowCommand, fmt.Sprintf("Port %d", shadowPort))
+	assert.Contains(t, shadowCommand, fmt.Sprintf("-p %d", shadowPort))
+	assert.NotContains(t, shadowCommand, fmt.Sprintf("Port %d", basePort))
+	assert.NotContains(t, shadowCommand, fmt.Sprintf("-p %d", basePort))
+
+	require.NotNil(t, ps.Containers[1].ReadinessProbe)
+	require.NotNil(t, ps.Containers[1].ReadinessProbe.TCPSocket)
+	assert.Equal(t, intstr.FromInt(shadowPort), ps.Containers[1].ReadinessProbe.TCPSocket.Port)
 }
 
 func TestBuildFailoverPod_ProbesRetargetedToNamedPort(t *testing.T) {
@@ -642,7 +843,18 @@ func TestBuildFailoverPod_MultinodeNNODES(t *testing.T) {
 	for i := range 2 {
 		env := envToMap(ps.Containers[i].Env)
 		assert.Equal(t, "4", env["NNODES"], "engine-%d should have NNODES=4", i)
+		assert.Equal(t, vllmDefaultGlooSocketInterface, env[vllmGlooSocketIfNameEnvVar], "engine-%d should bind Gloo to pod network", i)
 	}
+}
+
+func TestBuildFailoverPod_MultinodePreservesGlooOverride(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	ps.Containers[0].Env = append(ps.Containers[0].Env, corev1.EnvVar{Name: vllmGlooSocketIfNameEnvVar, Value: "ib0"})
+	err := buildFailoverPod(&ps, 4, BackendFrameworkVLLM)
+	require.NoError(t, err)
+
+	env := envToMap(ps.Containers[0].Env)
+	assert.Equal(t, "ib0", env[vllmGlooSocketIfNameEnvVar])
 }
 
 func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
@@ -708,6 +920,15 @@ func hasVolumeMount(c corev1.Container, mountPath string) bool {
 	return false
 }
 
+func findContainer(containers []corev1.Container, name string) *corev1.Container {
+	for i := range containers {
+		if containers[i].Name == name {
+			return &containers[i]
+		}
+	}
+	return nil
+}
+
 func findVolumeMount(c corev1.Container, mountPath string) *corev1.VolumeMount {
 	for i := range c.VolumeMounts {
 		if c.VolumeMounts[i].MountPath == mountPath {
@@ -726,6 +947,26 @@ func hasEnvVar(c corev1.Container, name, value string) bool {
 		}
 	}
 	return false
+}
+
+func countEnvVar(envs []corev1.EnvVar, name string) int {
+	count := 0
+	for _, e := range envs {
+		if e.Name == name {
+			count++
+		}
+	}
+	return count
+}
+
+func countArg(args []string, value string) int {
+	count := 0
+	for _, arg := range args {
+		if arg == value {
+			count++
+		}
+	}
+	return count
 }
 
 func envToMap(envs []corev1.EnvVar) map[string]string {

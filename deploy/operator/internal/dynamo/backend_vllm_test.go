@@ -1052,18 +1052,18 @@ func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
 
 			count := 0
 			for _, e := range container.Env {
-				if e.Name == "DYN_VLLM_GMS_SHADOW_MODE" {
+				if e.Name == vllmGMSShadowModeEnvVar {
 					count++
 					if e.Value != "true" {
-						t.Errorf("DYN_VLLM_GMS_SHADOW_MODE value = %q, want %q", e.Value, "true")
+						t.Errorf("%s value = %q, want %q", vllmGMSShadowModeEnvVar, e.Value, "true")
 					}
 				}
 			}
 			if count != tt.shadowModeCount {
-				t.Errorf("DYN_VLLM_GMS_SHADOW_MODE env var count = %d, want %d", count, tt.shadowModeCount)
+				t.Errorf("%s env var count = %d, want %d", vllmGMSShadowModeEnvVar, count, tt.shadowModeCount)
 			}
 			if got := count > 0; got != tt.wantShadowMode {
-				t.Errorf("DYN_VLLM_GMS_SHADOW_MODE present = %v, want %v", got, tt.wantShadowMode)
+				t.Errorf("%s present = %v, want %v", vllmGMSShadowModeEnvVar, got, tt.wantShadowMode)
 			}
 		})
 	}
@@ -1086,8 +1086,58 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 		t.Errorf("--load-format gms must not be injected when inter-pod GMS is disabled")
 	}
 	for _, e := range container.Env {
-		if e.Name == "DYN_VLLM_GMS_SHADOW_MODE" {
-			t.Errorf("DYN_VLLM_GMS_SHADOW_MODE must not be injected when inter-pod GMS is disabled")
+		if e.Name == vllmGMSShadowModeEnvVar {
+			t.Errorf("%s must not be injected when inter-pod GMS is disabled", vllmGMSShadowModeEnvVar)
+		}
+	}
+}
+
+func TestSGLangBackend_UpdateContainer_InterPodGMS(t *testing.T) {
+	backend := &SGLangBackend{}
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeInterPod,
+		},
+	})
+	container := &corev1.Container{
+		Command: []string{"python3"},
+		Args:    []string{"-m", "dynamo.sglang"},
+	}
+
+	backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{})
+
+	if !containerHasGMSLoadFormat(container) {
+		t.Errorf("expected --load-format gms to be injected for SGLang inter-pod GMS; got args=%q", container.Args)
+	}
+	for _, e := range container.Env {
+		if e.Name == vllmGMSShadowModeEnvVar {
+			t.Errorf("vLLM-specific env var must not be injected for SGLang")
+		}
+	}
+}
+
+func TestTRTLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
+	backend := &TRTLLMBackend{}
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+			Enabled: true,
+			Mode:    v1alpha1.GMSModeInterPod,
+		},
+	})
+	container := &corev1.Container{
+		Command: []string{"python3"},
+		Args:    []string{"-m", "dynamo.trtllm"},
+	}
+
+	backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{})
+
+	if !containerHasGMSLoadFormat(container) {
+		t.Errorf("expected --load-format gms to be injected for TRT-LLM inter-pod GMS; got args=%q", container.Args)
+	}
+	for _, e := range container.Env {
+		if e.Name == vllmGMSShadowModeEnvVar {
+			t.Errorf("vLLM-specific env var must not be injected for TRT-LLM")
 		}
 	}
 }

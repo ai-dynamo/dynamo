@@ -23,6 +23,7 @@ const (
 	dataParallelSizeLocalFlag = "--data-parallel-size-local"
 	distributedExecutorFlag   = "--distributed-executor-backend"
 	enableElasticEPFlag       = "--enable-elastic-ep"
+	vllmGMSShadowModeEnvVar   = "DYN_VLLM_GMS_SHADOW_MODE"
 )
 
 type VLLMBackend struct {
@@ -34,7 +35,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 	// to load weights from the dedicated GMS weight-server pod rather than
 	// from disk.
 	if component.IsInterPodGMSEnabled() {
-		if !containerHasArg(container, "--load-format", "gms") {
+		if !containerHasGMSLoadFormat(container) {
 			injectFlagsIntoContainerCommand(container, "--load-format gms", false, "vllm")
 		}
 		if component.IsInterPodFailoverEnabled() {
@@ -42,7 +43,13 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 			// on top of --load-format gms. Standalone inter-pod GMS should not set
 			// it: those engines are active clients of the dedicated GMS weight
 			// server, not shadow engines waiting for failover activation.
-			container.Env = append(container.Env, corev1.EnvVar{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"})
+			//
+			// This is a vLLM-engine-specific switch (it activates the vLLM-side
+			// GMS client path for shadow weight loading). It is injected here — in
+			// the vLLM backend — rather than in the backend-agnostic GMS helpers so
+			// non-vLLM backends do not inherit a stray, meaningless env var if/when
+			// inter-pod GMS is extended to them.
+			container.Env = append(container.Env, corev1.EnvVar{Name: vllmGMSShadowModeEnvVar, Value: "true"})
 		}
 	}
 
@@ -462,16 +469,6 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		)}
 	}
 	container.Command = []string{"/bin/sh", "-c"}
-}
-
-// hasFlag returns true if flag exists in expandedArgs.
-func hasFlag(expandedArgs []string, flag string) bool {
-	for _, arg := range expandedArgs {
-		if arg == flag {
-			return true
-		}
-	}
-	return false
 }
 
 func injectDataParallelLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, resources *corev1.ResourceRequirements, numberOfNodes int32) {

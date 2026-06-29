@@ -8345,16 +8345,18 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 	for _, clique := range got.Spec.Template.Cliques {
 		targetAnnotation := clique.Annotations[snapshotprotocol.TargetContainersAnnotation]
 		checkpointID := clique.Labels[snapshotprotocol.CheckpointIDLabel]
-		mainContainer := findContainerInClique(t, clique, commonconsts.MainContainerName)
 
 		if strings.Contains(clique.Name, "gms") {
 			sawGMS = true
 			assert.Empty(t, targetAnnotation, "GMS clique %q must not carry snapshot-target-containers annotation", clique.Name)
 			assert.Empty(t, checkpointID, "GMS clique %q must not carry checkpoint-id label (would make it look like a restore target)", clique.Name)
-			assert.NotEqual(t, []string{"sleep", "infinity"}, mainContainer.Command,
-				"GMS clique %q main container command must not be rewritten to sleep infinity (should remain the gms wrapper)", clique.Name)
+			for _, container := range clique.Spec.PodSpec.Containers {
+				assert.NotEqual(t, []string{"sleep", "infinity"}, container.Command,
+					"GMS clique %q container %q command must not be rewritten to sleep infinity (should remain the gms wrapper)", clique.Name, container.Name)
+			}
 		} else {
 			sawEngine = true
+			mainContainer := findContainerInClique(t, clique, commonconsts.MainContainerName)
 			assert.Equal(t, commonconsts.MainContainerName, targetAnnotation,
 				"engine clique %q must carry snapshot-target-containers=main annotation", clique.Name)
 			assert.Empty(t, checkpointID,
@@ -9217,6 +9219,40 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			wantSidecarImage: "my-frontend:latest",
 			wantSidecarEnvVars: map[string]string{
 				"CUSTOM_VAR": "custom_value",
+			},
+			wantSidecarProbes: true,
+			wantSidecarPorts:  true,
+		},
+		{
+			name: "frontendSidecar inherits worker runtime env but keeps frontend identity",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Envs: []corev1.EnvVar{
+					{Name: "PYTHONPATH", Value: "/opt/dynamo/lib:/opt/engine"},
+					{Name: "VIRTUAL_ENV", Value: "/opt/dynamo/venv"},
+					{Name: "PATH", Value: "/opt/dynamo/venv/bin:/usr/bin"},
+					{Name: "DYN_COMPONENT", Value: commonconsts.ComponentTypeWorker},
+				},
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{
+					Image: "my-frontend:latest",
+					Envs: []corev1.EnvVar{
+						{Name: "DYN_BULWARK_GATEWAY_ENDPOINT", Value: "dyn://public.backend.generate"},
+						{Name: "DYN_NAMESPACE", Value: "public-ns"},
+					},
+				},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarEnvVars: map[string]string{
+				"PYTHONPATH":                   "/opt/dynamo/lib:/opt/engine",
+				"VIRTUAL_ENV":                  "/opt/dynamo/venv",
+				"PATH":                         "/opt/dynamo/venv/bin:/usr/bin",
+				"DYN_COMPONENT":                commonconsts.ComponentTypeFrontend,
+				"DYN_NAMESPACE":                "public-ns",
+				"DYN_BULWARK_GATEWAY_ENDPOINT": "dyn://public.backend.generate",
 			},
 			wantSidecarProbes: true,
 			wantSidecarPorts:  true,

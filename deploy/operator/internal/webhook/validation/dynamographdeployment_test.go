@@ -138,12 +138,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Forbidden: requires the Grove pathway, but Grove is disabled in the operator configuration"},
 		},
 		{
-			name: "inter-pod GMS requires vLLM backend",
+			name: "valid inter-pod GMS on SGLang backend",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.BackendFramework = "sglang"
 				enableBetaInterPodGMS(betaWorkerComponent(dgd))
 			}),
-			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Invalid value: \"InterPod\": the inter-pod GMS layout is currently supported only for vLLM (detected backend: sglang)"},
+		},
+		{
+			name: "valid inter-pod GMS on TRT-LLM backend",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.BackendFramework = "trtllm"
+				enableBetaInterPodGMS(betaWorkerComponent(dgd))
+			}),
 		},
 		{
 			name: "KV transfer policy selector is rejected by CEL before webhook validation",
