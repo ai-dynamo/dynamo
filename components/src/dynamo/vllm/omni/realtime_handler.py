@@ -302,7 +302,25 @@ class RealtimeOmniHandler:
             raise
         except Exception as exc:  # noqa: BLE001 - surface engine errors on the wire
             logger.exception("realtime omni turn failed: %s", exc)
+            # The top-level ``error`` event carries the human-readable message but
+            # no ``response_id``, so also close the dangling in-progress response
+            # with a terminal ``response.done(status=failed)`` -- that event
+            # carries the id, so the client can correlate and the response reaches
+            # a terminal state instead of hanging.
             await events.put(self.error_event(exc))
+            await events.put(
+                self.response_done_event(
+                    turn,
+                    status="failed",
+                    status_details={
+                        "type": "failed",
+                        "error": {
+                            "code": "omni_generation_error",
+                            "type": "server_error",
+                        },
+                    },
+                )
+            )
         finally:
             await events.put(None)
 
@@ -322,18 +340,23 @@ class RealtimeOmniHandler:
             },
         }
 
-    def response_done_event(self, turn: Turn) -> dict:
+    def response_done_event(
+        self, turn: Turn, status: str = "completed", status_details: dict | None = None
+    ) -> dict:
+        response: dict[str, Any] = {
+            "id": turn.response_id,
+            "max_output_tokens": "inf",
+            "object": "realtime.response",
+            "output": [],
+            "output_modalities": ["audio"],
+            "status": status,
+        }
+        if status_details is not None:
+            response["status_details"] = status_details
         return {
             "type": "response.done",
             "event_id": event_id(),
-            "response": {
-                "id": turn.response_id,
-                "max_output_tokens": "inf",
-                "object": "realtime.response",
-                "output": [],
-                "output_modalities": ["audio"],
-                "status": "completed",
-            },
+            "response": response,
         }
 
     def error_event(self, exc: Exception) -> dict:

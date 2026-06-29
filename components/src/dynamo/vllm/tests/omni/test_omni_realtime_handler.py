@@ -315,3 +315,51 @@ def test_turns_run_concurrently():
     done = [e["response"]["id"] for e in out if e["type"] == "response.done"]
     assert len(set(created)) == 2  # two distinct turns, both completed
     assert created == done  # forwarded in turn order, non-interleaved
+
+
+def test_engine_failure_emits_error_and_failed_response_done():
+    # When generation throws, the turn surfaces a top-level `error` event (human
+    # readable, but no response_id) AND a terminal response.done(status=failed)
+    # so the in-progress response closes and is correlatable by response id.
+    class _FailingEngine:
+        async def generate(
+            self,
+            *,
+            prompt,
+            request_id,
+            sampling_params_list=None,
+            output_modalities=None,
+        ):
+            async for _ in prompt:  # drain this turn's audio
+                pass
+            yield _text_output("partial")
+            raise RuntimeError("boom")
+
+    audio_b64 = base64.b64encode(
+        np.linspace(-8000, 8000, 16, dtype=np.int16).tobytes()
+    ).decode()
+    handler = _make_handler(_FailingEngine())
+    events = [
+        {"type": "session.update", "session": {"model": MODEL_NAME}},
+        {"type": "input_audio_buffer.append", "audio": audio_b64},
+        {"type": "input_audio_buffer.commit"},
+    ]
+    out = asyncio.run(_drive(handler, events, _FakeContext()))
+    types = [e["type"] for e in out]
+
+    created = next(e for e in out if e["type"] == "response.created")
+    response_id = created["response"]["id"]
+
+    error = next((e for e in out if e["type"] == "error"), None)
+    assert error is not None
+    assert error["error"]["code"] == "omni_generation_error"
+
+    done = next((e for e in out if e["type"] == "response.done"), None)
+    assert done is not None
+    assert done["response"]["id"] == response_id  # correlatable, unlike `error`
+    assert done["response"]["status"] == "failed"
+    assert done["response"]["status_details"]["type"] == "failed"
+    assert (
+        done["response"]["status_details"]["error"]["code"] == "omni_generation_error"
+    )
+    assert types.index("error") < types.index("response.done")
