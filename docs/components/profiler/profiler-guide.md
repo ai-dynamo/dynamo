@@ -55,7 +55,11 @@ flowchart TD
 
 ### Stage-by-stage walkthrough
 
-1. **Validation**: The DGDR spec is validated — required fields checked (`image`, `hardware.gpuSku`, `hardware.numGpusPerNode`), SLA targets verified, and gate checks applied (see [Gate Checks](#gate-checks-and-constraints)).
+1. **Validation**: The DGDR spec is validated — required fields checked (`image`,
+   `hardware.gpuSku`, `hardware.numGpusPerNode`), SLA targets verified, and gate
+   checks applied (see [Gate Checks](#gate-checks-and-constraints)). This happens
+   before rapid fallback logic, so unknown GPU SKUs fail validation instead of
+   falling back.
 
 2. **Search Strategy**: The profiler branches based on `searchStrategy`:
    - **Rapid**: Uses AIC simulation to estimate performance across parallelization configs. No GPUs needed, completes in ~30 seconds.
@@ -78,14 +82,25 @@ flowchart TD
 
 ### Rapid
 
-Uses AIC's performance simulation to estimate optimal configurations without deploying real engines. Completes in ~30 seconds.
+Uses AIC's performance simulation to estimate optimal configurations without
+deploying real engines. Completes in ~30 seconds. Check the
+[AIC support matrix](https://ai-dynamo.github.io/aiconfigurator/support-matrix/)
+for the latest model, GPU, backend, and backend-version support.
 
 ```yaml
 searchStrategy: rapid
 ```
 
 - Supports all backends: vLLM, SGLang, TensorRT-LLM
-- If the model/hardware/backend combination is not supported by AIC, falls back to a naive config (memory-fit TP calculation)
+- DGDR must accept `hardware.gpuSku`, and AIC must have base system metadata
+  for that GPU SKU before fallback can run.
+- If those gates pass but the exact model/GPU/backend combination is not
+  supported by AIC, the profiler falls back to a naive config (memory-fit TP
+  calculation).
+- If hardware discovery produces an unknown GPU product name, set
+  `hardware.gpuSku`, `hardware.vramMb`, `hardware.numGpusPerNode`, and
+  `hardware.totalGpus` manually. Unknown GPU SKUs, and GPU SKUs without AIC
+  base system metadata, fail before naive fallback can produce a valid config.
 - No GPU resources consumed during profiling
 
 ### Thorough
@@ -415,8 +430,12 @@ hardware:
 - **numGpusPerNode**: Determine the upper bound of GPUs per node for dense models and configure Grove for multi-node MoE engines
 - **gpuSku**: GPU SKU identifier, auto-detected by the controller
 
-> [!TIP]
-> If you don't specify hardware constraints, the controller auto-detects based on your model size and available cluster resources.
+> [!IMPORTANT]
+> If you don't specify hardware constraints, the controller auto-detects GPU
+> hardware from cluster resources. If discovery cannot map the GPU to a
+> recognized DGDR SKU, provide all hardware fields manually. Unknown GPU SKUs
+> fail validation before rapid naive fallback can run. A recognized GPU SKU also
+> needs AIC base system metadata before fallback can generate a correct config.
 
 ### Search Strategy (Optional)
 
