@@ -537,7 +537,7 @@ where
 
         self.generate_with_fault_detection(instance_id, request)
             .await
-            .map(|(_, stream)| stream)
+            .map(|(stream, _)| stream)
     }
 
     /// Issue a request to a random endpoint
@@ -555,7 +555,7 @@ where
 
         self.generate_with_fault_detection(instance_id, request)
             .await
-            .map(|(_, stream)| stream)
+            .map(|(stream, _)| stream)
     }
 
     /// Select a worker for a load-aware routing mode (`PowerOfTwoChoices`,
@@ -667,7 +667,7 @@ where
             .generate_with_fault_detection(instance_id, request)
             .await
         {
-            Ok((resolved_id, stream)) => {
+            Ok((stream, resolved_id)) => {
                 permit.retarget(resolved_id);
                 Ok(permit.into_tracked_stream(stream))
             }
@@ -702,7 +702,7 @@ where
 
         self.generate_with_fault_detection(instance_id, request)
             .await
-            .map(|(_, stream)| stream)
+            .map(|(stream, _)| stream)
     }
 
     /// Issue a request using device-aware weighted routing.
@@ -722,7 +722,7 @@ where
             .generate_with_fault_detection(instance_id, request)
             .await
         {
-            Ok((resolved_id, stream)) => {
+            Ok((stream, resolved_id)) => {
                 permit.retarget(resolved_id);
                 Ok(permit.into_tracked_stream(stream))
             }
@@ -740,7 +740,7 @@ where
             .generate_with_fault_detection(instance_id, request)
             .await
         {
-            Ok((resolved_id, stream)) => {
+            Ok((stream, resolved_id)) => {
                 permit.retarget(resolved_id);
                 Ok(permit.into_tracked_stream(stream))
             }
@@ -855,7 +855,7 @@ where
         &self,
         instance_id: u64,
         request: SingleIn<T>,
-    ) -> anyhow::Result<(u64, ManyOut<U>)> {
+    ) -> anyhow::Result<(ManyOut<U>, u64)> {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
         let route_span = if matches!(self.router_mode, RouterMode::KV) {
@@ -887,7 +887,7 @@ where
             .instrument(route_span)
             .await;
         self.wrap_with_fault_detection(stream, instance_id)
-            .map(|stream| (instance_id, stream))
+            .map(|stream| (stream, instance_id))
     }
 
     /// Reject early if the selected worker is overloaded and fault detection
@@ -1104,14 +1104,14 @@ where
 {
     /// Bidirectional sibling of [`Self::generate_with_fault_detection`].
     ///
-    /// Returns the resolved worker id alongside the stream (see that method)
+    /// Returns the stream alongside the resolved worker id (see that method)
     /// so load-aware callers can retarget their occupancy permit when
     /// [`Self::resolve_transport`] falls back to a different worker.
     async fn bidirectional_dispatch(
         &self,
         instance_id: u64,
         input: ManyIn<T>,
-    ) -> anyhow::Result<(u64, ManyOut<U>)> {
+    ) -> anyhow::Result<(ManyOut<U>, u64)> {
         let route_start = Instant::now();
         let request_id = input.context().id().to_string();
         let route_span = tracing::info_span!(
@@ -1136,7 +1136,7 @@ where
             .instrument(route_span)
             .await;
         self.wrap_with_fault_detection(stream, instance_id)
-            .map(|stream| (instance_id, stream))
+            .map(|stream| (stream, instance_id))
     }
 }
 
@@ -1195,7 +1195,7 @@ where
                 let (instance_id, mut permit) =
                     self.select_load_aware_worker(self.router_mode).await?;
                 return match self.bidirectional_dispatch(instance_id, input).await {
-                    Ok((resolved_id, stream)) => {
+                    Ok((stream, resolved_id)) => {
                         permit.retarget(resolved_id);
                         Ok(permit.into_tracked_stream(stream))
                     }
@@ -1213,7 +1213,7 @@ where
 
         self.bidirectional_dispatch(instance_id, input)
             .await
-            .map(|(_, stream)| stream)
+            .map(|(stream, _)| stream)
     }
 }
 
