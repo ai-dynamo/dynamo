@@ -472,6 +472,13 @@ func (w *NodeController) startRestoreForContainer(
 	if annotationContainerID == containerID && (annotationStatus == snapshotprotocol.RestoreStatusCompleted || annotationStatus == snapshotprotocol.RestoreStatusFailed) {
 		return
 	}
+	if w.config.CRIU.TcpEstablished && pod.Status.PodIP == "" {
+		w.log.V(1).Info("Restore pod has no PodIP yet; waiting before TCP-established restore",
+			"pod", podKey,
+			"container", containerName,
+		)
+		return
+	}
 
 	placeholderPID := 0
 	if strings.TrimSpace(w.config.Storage.AccessMode) == types.StorageAccessModePodMount {
@@ -657,6 +664,7 @@ func (w *NodeController) runCheckpoint(ctx context.Context, pod *corev1.Pod, job
 		NodeName:           w.config.NodeName,
 		PodName:            pod.Name,
 		PodNamespace:       pod.Namespace,
+		PodIP:              pod.Status.PodIP,
 		Clientset:          w.clientset,
 	}
 	if err := executor.Checkpoint(leaseCtx, w.runtime, log, req, w.config); err != nil {
@@ -786,6 +794,7 @@ func (w *NodeController) runRestore(ctx context.Context, pod *corev1.Pod, contai
 		NSRestorePath:               w.config.Restore.NSRestorePath,
 		PodName:                     pod.Name,
 		PodNamespace:                pod.Namespace,
+		TargetPodIP:                 pod.Status.PodIP,
 		ContainerName:               containerName,
 		Clientset:                   w.clientset,
 	}

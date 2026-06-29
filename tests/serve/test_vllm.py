@@ -14,6 +14,7 @@ import pytest
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
+    run_prefill_drain_deployment,
     run_serve_deployment,
 )
 from tests.serve.conftest import MULTIMODAL_IMG_URL
@@ -744,6 +745,64 @@ def test_serve_deployment(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+# ---------------------------------------------------------------------------
+# Prefill drain on graceful shutdown, unified entry point. A concurrent burst
+# gives the prefill worker in-flight work; it's then SIGTERMed mid-flight, and
+# the test asserts the Rust Worker drove a graceful shutdown (drain -> cleanup).
+# vLLM has no is_quiescent() override, so the drain waits the full budget.
+# ---------------------------------------------------------------------------
+_PREFILL_DRAIN_CONFIG = VLLMConfig(
+    name="prefill_drain_unified",
+    directory=vllm_dir,
+    script_name="disagg_same_gpu.sh",
+    script_args=["--unified"],
+    marks=[],  # applied on the test function below
+    model="Qwen/Qwen3-0.6B",
+    delayed_start=10,
+    health_check_workers=True,
+    env={
+        "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "0",
+        "DYN_PREFILL_DRAIN_TIMEOUT_S": "3",
+        "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "30",
+        # The unified decode worker disables its health canary by design
+        # (NixlConnector has no local-only bypass), so its system /health is
+        # gated on starting status, which defaults to NotReady. Mark it
+        # ready-on-liveness so the harness's worker health check passes; the
+        # prefill worker still gates on its real canary.
+        "DYN_SYSTEM_STARTING_HEALTH_STATUS": "ready",
+    },
+    # Required by EngineConfig and used to add frontend readiness checks; the
+    # burst issues its own requests.
+    request_payloads=[chat_payload_default()],
+)
+
+
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.profiled_vram_gib(7.3)
+@pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000)
+@pytest.mark.timeout(360)
+@pytest.mark.post_merge
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_prefill_drain_unified(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+):
+    """Fire a concurrent burst, SIGTERM the prefill worker mid-flight, and
+    assert the Rust Worker drove graceful shutdown (drain -> cleanup). vLLM has
+    no is_quiescent() override, so the framework drains prefill for the full
+    budget (safe-by-default)."""
+    config = dataclasses.replace(
+        _PREFILL_DRAIN_CONFIG, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_prefill_drain_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
 # LoRA Test Directory

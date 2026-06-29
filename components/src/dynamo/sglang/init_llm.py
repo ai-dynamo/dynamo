@@ -57,6 +57,9 @@ async def init_decode(
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
     )
+    clear_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.clear_kv_blocks"
+    )
 
     # Use pre-created engine if provided (snapshot mode)
     if snapshot_engine is not None:
@@ -132,13 +135,6 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-    # Only serve session_control when streaming sessions are enabled.
-    if getattr(server_args, "enable_streaming_session", False):
-        session_control_endpoint = runtime.endpoint(
-            f"{dynamo_args.namespace}.{dynamo_args.component}.session_control"
-        )
-        shutdown_endpoints.append(session_control_endpoint)
-
     # Worker type and needs, derived from serving_mode.
     if config.serving_mode == DisaggregationMode.DECODE:
         decode_worker_type = WorkerType.Decode
@@ -167,6 +163,10 @@ async def init_decode(
                 handler.list_loras,
                 metrics_labels=metrics_labels,
             ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks,
+                metrics_labels=metrics_labels,
+            ),
             register_model_with_readiness_gate(
                 engine,
                 generate_endpoint,
@@ -178,10 +178,6 @@ async def init_decode(
                 needs=decode_needs,
             ),
         ]
-        if getattr(server_args, "enable_streaming_session", False):
-            gather_tasks.append(
-                session_control_endpoint.serve_endpoint(handler.session_control)
-            )
         await asyncio.gather(*gather_tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -214,6 +210,9 @@ async def init_prefill(
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
+    )
+    clear_endpoint = runtime.endpoint(
+        f"{dynamo_args.namespace}.{dynamo_args.component}.clear_kv_blocks"
     )
 
     # Use pre-created engine if provided (snapshot mode)
@@ -299,6 +298,10 @@ async def init_prefill(
             ),
             list_loras_endpoint.serve_endpoint(
                 handler.list_loras,
+                metrics_labels=metrics_labels,
+            ),
+            clear_endpoint.serve_endpoint(
+                handler.clear_kv_blocks,
                 metrics_labels=metrics_labels,
             ),
             register_model_with_readiness_gate(

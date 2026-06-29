@@ -111,6 +111,14 @@ pub trait WorkerLoadMonitor: Send + Sync {
     async fn start_monitoring(&self) -> anyhow::Result<()>;
 }
 
+/// Query interface for routing against multimodal embedding cache state.
+pub trait MultimodalCacheIndex: Send + Sync {
+    fn workers_with_cache_key_hits(&self, cache_keys: &[String]) -> Vec<(u64, usize)>;
+    fn remove_worker(&self, worker_id: u64);
+}
+
+pub type MultimodalCacheKeyExtractor<T> = Arc<dyn Fn(&T) -> Vec<String> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct PushRouter<T, U>
 where
@@ -149,6 +157,13 @@ where
     /// Shared request occupancy state for tracked routing modes.
     occupancy_state: Option<Arc<RoutingOccupancyState>>,
 
+    /// Optional cache index for direct multimodal embedding cache lookups.
+    /// Currently consumed by `RouterMode::DeviceAwareWeighted`.
+    multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
+
+    /// Optional typed request extractor for multimodal embedding cache keys.
+    multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+
     /// An internal Rust type. This says that PushRouter is generic over the T and U types,
     /// which are the input and output types of it's `generate` function. It allows the
     /// compiler to specialize us at compile time.
@@ -173,6 +188,14 @@ pub enum RouterMode {
 enum TransportFallback {
     Allow,
     Deny,
+}
+
+struct DeviceAwareCandidates {
+    candidates: Vec<u64>,
+    device_type_map: HashMap<u64, Option<DeviceType>>,
+    embedding_cache_hit: bool,
+    full_embedding_cache_hit: bool,
+    request_cache_keys: usize,
 }
 
 impl RouterMode {
@@ -276,6 +299,11 @@ fn device_aware_candidate_group(
 /// instances. Entry removed on watcher exit so a later router can re-arm.
 static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
     std::sync::OnceLock::new();
+
+/// At most one multimodal cache cleanup watcher per endpoint.
+static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
+    dashmap::DashMap<EndpointId, ()>,
+> = std::sync::OnceLock::new();
 
 /// Watch discovery for instance removals and cancel pending response-stream
 /// registrations on the removed instance, unblocking queued requests with
@@ -395,6 +423,95 @@ fn spawn_instance_removal_watcher(
     });
 }
 
+/// Watch discovery removals for cache-aware routers and drop stale worker cache entries.
+fn spawn_multimodal_cache_cleanup_watcher(
+    endpoint: Endpoint,
+    indexer: Arc<dyn MultimodalCacheIndex>,
+    cancel_token: tokio_util::sync::CancellationToken,
+) {
+    use crate::discovery::{DiscoveryEvent, DiscoveryInstanceId, DiscoveryQuery};
+    use tokio_stream::StreamExt as _;
+
+    let guard = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
+    let endpoint_id = endpoint.id();
+    if guard.insert(endpoint_id.clone(), ()).is_some() {
+        tracing::debug!(
+            ?endpoint_id,
+            "Multimodal cache cleanup watcher already running for this endpoint, skipping"
+        );
+        return;
+    }
+
+    let endpoint_name = endpoint.name().to_string();
+    let namespace = endpoint.component().namespace().name();
+    let component = endpoint.component().name().to_string();
+
+    tokio::spawn(async move {
+        struct GuardRelease(EndpointId);
+        impl Drop for GuardRelease {
+            fn drop(&mut self) {
+                if let Some(map) = ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE.get() {
+                    map.remove(&self.0);
+                }
+            }
+        }
+        let _release = GuardRelease(endpoint_id);
+
+        const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+        'reconnect: loop {
+            let query = DiscoveryQuery::Endpoint {
+                namespace: namespace.clone(),
+                component: component.clone(),
+                endpoint: endpoint_name.clone(),
+            };
+
+            let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    tracing::warn!(
+                        endpoint = %endpoint_name,
+                        "Failed to start multimodal cache cleanup watcher (will retry): {error}"
+                    );
+                    tokio::select! {
+                        _ = tokio::time::sleep(RECONNECT_BACKOFF) => continue 'reconnect,
+                        _ = cancel_token.cancelled() => break 'reconnect,
+                    }
+                }
+            };
+
+            loop {
+                tokio::select! {
+                    event = stream.next() => {
+                        match event {
+                            Some(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(eid)))) => {
+                                indexer.remove_worker(eid.instance_id);
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(error)) => {
+                                tracing::warn!(
+                                    endpoint = %endpoint_name,
+                                    "Multimodal cache cleanup watcher stream error: {error}"
+                                );
+                                continue 'reconnect;
+                            }
+                            None => {
+                                tracing::warn!(
+                                    endpoint = %endpoint_name,
+                                    "Multimodal cache cleanup watcher stream ended; reconnecting"
+                                );
+                                continue 'reconnect;
+                            }
+                        }
+                    }
+                    _ = cancel_token.cancelled() => break 'reconnect,
+                }
+            }
+        }
+
+        tracing::debug!(endpoint = %endpoint_name, "Multimodal cache cleanup watcher exiting");
+    });
+}
+
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     AddressedPushRouter::from_runtime_provider(endpoint).await
 }
@@ -446,6 +563,8 @@ where
             fault_detection_enabled: false,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
+            multimodal_cache_indexer: None,
+            multimodal_cache_key_extractor: None,
             _phantom: PhantomData,
         })
     }
@@ -460,6 +579,17 @@ where
         client: Client,
         router_mode: RouterMode,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+    ) -> anyhow::Result<Self> {
+        Self::from_client_with_state(client, router_mode, worker_monitor, None, None).await
+    }
+
+    /// Create a new PushRouter with optional load monitoring and multimodal cache indexing.
+    pub async fn from_client_with_state(
+        client: Client,
+        router_mode: RouterMode,
+        worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+        multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
+        multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
     ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
 
@@ -486,6 +616,15 @@ where
             client.endpoint.drt().primary_token(),
         );
 
+        // Drop stale cache-index entries when workers leave discovery.
+        if let Some(indexer) = multimodal_cache_indexer.clone() {
+            spawn_multimodal_cache_cleanup_watcher(
+                client.endpoint.clone(),
+                indexer,
+                client.endpoint.drt().primary_token(),
+            );
+        }
+
         let router = PushRouter {
             client,
             addressed,
@@ -494,6 +633,8 @@ where
             fault_detection_enabled: true,
             response_timeout: response_inactivity_timeout(),
             occupancy_state,
+            multimodal_cache_indexer,
+            multimodal_cache_key_extractor,
             _phantom: PhantomData,
         };
 
@@ -501,7 +642,7 @@ where
     }
 
     /// `ResourceExhausted` when workers are routable but all overloaded;
-    /// `anyhow!("no instances found")` when no routable workers exist.
+    /// `Unavailable` when no routable workers exist.
     fn empty_free_pool_error(&self, routing_instances: &RoutingInstances) -> anyhow::Error {
         if !routing_instances.routable_ids().is_empty() {
             let cause = PipelineError::ServiceOverloaded(
@@ -514,10 +655,14 @@ where
                 .build()
                 .into();
         }
-        anyhow::anyhow!(
-            "no instances found for endpoint {}",
-            self.client.endpoint.id()
-        )
+        DynamoError::builder()
+            .error_type(ErrorType::Unavailable)
+            .message(format!(
+                "No workers available for endpoint {}",
+                self.client.endpoint.id()
+            ))
+            .build()
+            .into()
     }
 
     /// Issue a request to the next available instance in a round-robin fashion
@@ -607,10 +752,14 @@ where
         };
 
         if !found {
-            return Err(anyhow::anyhow!(
-                "instance_id={instance_id} not found for endpoint {}",
-                self.client.endpoint.id()
-            ));
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::CannotConnect)
+                .message(format!(
+                    "instance_id={instance_id} not found for endpoint {}",
+                    self.client.endpoint.id()
+                ))
+                .build()
+                .into());
         }
 
         tracing::info!(
@@ -647,7 +796,9 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        let (instance_id, permit) = self.select_exact_target(pinned_worker).await?;
+        let (instance_id, permit) = self
+            .select_exact_target(request.content(), pinned_worker)
+            .await?;
         let metadata = prepare(&mut request, instance_id)?;
         let stream = self.dispatch_exact(request, instance_id).await?;
         let stream = match permit {
@@ -677,43 +828,37 @@ where
         // Apply a unified policy for all endpoints.
         let endpoint_id = self.client.endpoint.id();
 
-        // For encoder endpoints, partition by device type
-        let instances = self.client.instances();
-        let device_type_map: std::collections::HashMap<u64, Option<DeviceType>> = instances
-            .iter()
-            .map(|inst| (inst.instance_id, inst.device_type.clone()))
-            .collect();
+        let selection =
+            self.device_aware_candidates(request.content(), state.as_ref(), &instance_ids);
 
-        // Apply budget-based routing to determine which group to send to
-        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|v| *v >= 1)
-            .unwrap_or(8);
-        let candidates = device_aware_candidate_group(
-            state.as_ref(),
-            &instance_ids,
-            &device_type_map,
-            cuda_to_cpu_ratio,
-        );
-
-        // Empty group: budget-selected device class has no free workers.
-        let instance_id = state
-            .select_exact_min_and_increment(&candidates)
-            .await
-            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
-        let permit = OccupancyPermit::new(state.clone(), instance_id);
+        // Only full cache hits bypass weighted accounting; partial hits still follow the
+        // device-aware ratio because some image encoding remains for this request.
+        let instance_id = if selection.full_embedding_cache_hit {
+            state.select_exact_min(&selection.candidates).await
+        } else {
+            state
+                .select_exact_min_and_increment(&selection.candidates)
+                .await
+        }
+        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+        let permit = if selection.full_embedding_cache_hit {
+            None
+        } else {
+            Some(OccupancyPermit::new(state.clone(), instance_id))
+        };
         let is_cpu = matches!(
-            device_type_map.get(&instance_id),
+            selection.device_type_map.get(&instance_id),
             Some(Some(DeviceType::Cpu))
         );
         tracing::info!(
             router_mode = "device-aware-weighted",
             worker_id = instance_id,
-            candidate_count = candidates.len(),
+            candidate_count = selection.candidates.len(),
             load = state.load(instance_id),
             endpoint = %endpoint_id,
             is_cpu,
+            embedding_cache_hit = selection.embedding_cache_hit,
+            request_cache_keys = selection.request_cache_keys,
             "Selected worker"
         );
 
@@ -721,8 +866,74 @@ where
             .generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
             .await
         {
-            Ok(stream) => Ok(permit.into_tracked_stream(stream)),
+            Ok(stream) => Ok(match permit {
+                Some(permit) => permit.into_tracked_stream(stream),
+                None => stream,
+            }),
             Err(err) => Err(err),
+        }
+    }
+
+    fn device_aware_candidates(
+        &self,
+        request: &T,
+        state: &RoutingOccupancyState,
+        instance_ids: &[u64],
+    ) -> DeviceAwareCandidates {
+        let device_type_map = self
+            .client
+            .instances()
+            .iter()
+            .map(|instance| (instance.instance_id, instance.device_type.clone()))
+            .collect();
+        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value >= 1)
+            .unwrap_or(8);
+
+        let (request_cache_keys, cache_matched_candidates) =
+            if let (Some(indexer), Some(extractor)) = (
+                self.multimodal_cache_indexer.as_ref(),
+                self.multimodal_cache_key_extractor.as_ref(),
+            ) {
+                let request_cache_keys = extractor(request);
+                let matched = if request_cache_keys.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut matched = indexer.workers_with_cache_key_hits(&request_cache_keys);
+                    matched.retain(|(id, _)| instance_ids.contains(id));
+                    matched
+                };
+                (request_cache_keys, matched)
+            } else {
+                (Vec::new(), Vec::new())
+            };
+
+        let embedding_cache_hit = !cache_matched_candidates.is_empty();
+        let request_cache_key_count = request_cache_keys
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let full_cache_candidates = cache_matched_candidates
+            .iter()
+            .filter_map(|(worker_id, hits)| {
+                (*hits >= request_cache_key_count).then_some(*worker_id)
+            })
+            .collect::<Vec<_>>();
+        let full_embedding_cache_hit = !full_cache_candidates.is_empty();
+        let candidates = if full_embedding_cache_hit {
+            full_cache_candidates
+        } else {
+            device_aware_candidate_group(state, instance_ids, &device_type_map, cuda_to_cpu_ratio)
+        };
+
+        DeviceAwareCandidates {
+            candidates,
+            device_type_map,
+            embedding_cache_hit,
+            full_embedding_cache_hit,
+            request_cache_keys: request_cache_keys.len(),
         }
     }
 
@@ -849,6 +1060,7 @@ where
 
     async fn select_exact_target(
         &self,
+        request: &T,
         pinned_worker: Option<u64>,
     ) -> anyhow::Result<(u64, Option<OccupancyPermit>)> {
         if let Some(instance_id) = pinned_worker {
@@ -897,27 +1109,19 @@ where
                         instance_id
                     }
                     RouterMode::DeviceAwareWeighted => {
-                        let device_type_map: HashMap<u64, Option<DeviceType>> = self
-                            .client
-                            .instances()
-                            .iter()
-                            .map(|instance| (instance.instance_id, instance.device_type.clone()))
-                            .collect();
-                        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-                            .ok()
-                            .and_then(|value| value.parse::<usize>().ok())
-                            .filter(|value| *value >= 1)
-                            .unwrap_or(8);
-                        let candidates = device_aware_candidate_group(
-                            state.as_ref(),
-                            &instance_ids,
-                            &device_type_map,
-                            cuda_to_cpu_ratio,
-                        );
-                        state
-                            .select_exact_min_and_increment(&candidates)
-                            .await
-                            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?
+                        let selection =
+                            self.device_aware_candidates(request, state.as_ref(), &instance_ids);
+                        let instance_id = if selection.full_embedding_cache_hit {
+                            state.select_exact_min(&selection.candidates).await
+                        } else {
+                            state
+                                .select_exact_min_and_increment(&selection.candidates)
+                                .await
+                        }
+                        .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+                        let permit = (!selection.full_embedding_cache_hit)
+                            .then(|| OccupancyPermit::new(state, instance_id));
+                        return Ok((instance_id, permit));
                     }
                     _ => unreachable!(),
                 };
@@ -1398,6 +1602,18 @@ mod tests {
         }
     }
 
+    struct StaticMultimodalCacheIndex {
+        worker_id: u64,
+    }
+
+    impl MultimodalCacheIndex for StaticMultimodalCacheIndex {
+        fn workers_with_cache_key_hits(&self, cache_keys: &[String]) -> Vec<(u64, usize)> {
+            vec![(self.worker_id, cache_keys.len())]
+        }
+
+        fn remove_worker(&self, _worker_id: u64) {}
+    }
+
     #[test]
     fn p2c_selects_lower_load_worker() {
         let state = RoutingOccupancyState::default();
@@ -1829,6 +2045,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_workers_is_reported_as_unavailable() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_no_workers_unavailable".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+
+        let error = router.generate(SingleIn::new(42)).await.unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::Unavailable],
+            &[]
+        ));
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
     async fn round_robin_excludes_overloaded_workers_from_candidates() {
         // Long reconcile interval so the synthetic override below survives
         // the test. We still register a real endpoint instance up front so
@@ -1863,7 +2105,7 @@ mod tests {
         // Now override with two synthetic IDs and mark one overloaded.
         // round_robin must never select the overloaded one — that's the
         // whole point of selecting from free_ids instead of routable_ids.
-        // The post-selection overload check in route() would otherwise 503
+        // The post-selection overload check in route() would otherwise return 529
         // one of N requests on each pass, which is the bug this PR closes
         // for non-KV selectors.
         client.override_instance_avail(vec![1, 2]);
@@ -1999,6 +2241,43 @@ mod tests {
         assert!(
             router.peek_next_worker().is_some(),
             "DeviceAwareWeighted peek must return the available worker for disagg bootstrap"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn device_aware_exact_selection_preserves_full_multimodal_cache_hit() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_device_aware_affinity_cache".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let cache_worker = client.wait_for_instances().await.unwrap()[0].id();
+
+        let router = PushRouter::<u64, TestResponse>::from_client_with_state(
+            client,
+            RouterMode::DeviceAwareWeighted,
+            None,
+            Some(Arc::new(StaticMultimodalCacheIndex {
+                worker_id: cache_worker,
+            })),
+            Some(Arc::new(|_| vec!["image-key".to_string()])),
+        )
+        .await
+        .unwrap();
+
+        let (worker_id, permit) = router.select_exact_target(&42, None).await.unwrap();
+        assert_eq!(worker_id, cache_worker);
+        assert!(
+            permit.is_none(),
+            "full cache hits bypass occupancy charging"
         );
 
         rt.shutdown();

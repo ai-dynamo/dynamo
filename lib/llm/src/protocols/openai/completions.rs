@@ -17,7 +17,7 @@ use super::{
     validate,
 };
 use crate::protocols::common::extensions::{
-    NvExt, NvExtProvider, validate_completion_token_ids_single_choice, validate_nvext_semantics,
+    NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
 };
 
 mod aggregator;
@@ -467,7 +467,6 @@ impl ValidateRequest for NvCreateCompletionRequest {
             get_prompt_batch_size(&self.inner.prompt) * self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;
-        validate_nvext_semantics(self.nvext.as_ref())?;
         // none for stream
         // none for stream_options
         validate::validate_logprobs(self.inner.logprobs)?;

@@ -297,14 +297,16 @@ navigation:
             slug: agents
             path: agents/README.md
             contents:
+              - page: Session IDs
+                path: agents/session-ids.md
               - page: Agent Tracing
                 path: agents/agent-tracing.md
+              - page: Agent Simulation
+                path: agents/agent-replay.md
               - page: Agent Hints
                 path: agents/agent-hints.md
-              - page: Priority Scheduling
-                path: agents/priority-scheduling.md
-              - page: Use Pi-Mono with Dynamo
-                path: agents/pi-mono.md
+              - page: Agent Harnesses
+                path: agents/agent-harnesses.md
               - page: ThunderAgent Program Scheduler
                 path: agents/thunderagent-router.md
           - page: LoRA Adapters
@@ -410,6 +412,10 @@ navigation:
                 path: components/router/router-concepts.md
               - page: Configuration and Tuning
                 path: components/router/router-configuration.md
+              - page: Deficit Round Robin Queue Scheduling
+                path: components/router/deficit-round-robin.md
+              - page: Priority Scheduling
+                path: components/router/priority-scheduling.md
               - page: Disaggregated Serving
                 path: components/router/router-disaggregated-serving.md
               - page: Topology-Aware KV Transfer

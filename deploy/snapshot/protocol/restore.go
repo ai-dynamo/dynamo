@@ -6,7 +6,6 @@ package protocol
 import (
 	"context"
 	"fmt"
-	"math"
 	"path/filepath"
 	"strings"
 
@@ -36,7 +35,8 @@ const (
 	// context and sleep instead of cold-starting the workload. Generic
 	// images that do not honor this env must still provide their own inert
 	// restore command.
-	RestoreStandbyModeEnv = "DYN_SNAPSHOT_RESTORE_STANDBY"
+	RestoreStandbyModeEnv          = "DYN_SNAPSHOT_RESTORE_STANDBY"
+	restoreStartupFailureThreshold = 1800 // 30 minutes at 1s cadence.
 )
 
 // NewRestorePod shapes every annotated target container for restore.
@@ -141,7 +141,7 @@ func ensureRestoreStartupProbe(container *corev1.Container) {
 			},
 			TimeoutSeconds:   1,
 			PeriodSeconds:    1,
-			FailureThreshold: math.MaxInt32,
+			FailureThreshold: restoreStartupFailureThreshold,
 			SuccessThreshold: 1,
 		}
 		return
@@ -150,7 +150,7 @@ func ensureRestoreStartupProbe(container *corev1.Container) {
 	startup = startup.DeepCopy()
 	startup.InitialDelaySeconds = 0
 	startup.PeriodSeconds = 1
-	startup.FailureThreshold = math.MaxInt32
+	startup.FailureThreshold = restoreStartupFailureThreshold
 	startup.SuccessThreshold = 1
 	container.StartupProbe = startup
 }

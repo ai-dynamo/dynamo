@@ -22,24 +22,21 @@
 //! Refresh failures are non-fatal: an implementation can return `None` and the queue will
 //! dispatch with the (stale) original scores rather than dropping the request.
 
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::protocols::{LocalBlockHash, WorkerWithDpRank};
+use crate::config::KvRouterConfig;
+use crate::indexer::TieredMatchProvider;
+use crate::protocols::LocalBlockHash;
 
-use super::types::TierOverlapBlocks;
+use super::overlap::{OverlapAnalysis, OverlapSignals};
 
 /// Result of a successful overlap refresh.
 ///
 /// Carries everything required to overwrite the overlap-related fields on a
 /// [`SchedulingRequest`](super::types::SchedulingRequest) at dequeue time.
-#[derive(Debug, Clone, Default)]
-pub struct RefreshedOverlap {
-    pub tier_overlap_blocks: TierOverlapBlocks,
-    pub effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
-    pub effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
-}
+pub type RefreshedOverlap = OverlapSignals;
 
 /// Re-query overlap scores for a request that has been waiting in the scheduler queue.
 ///
@@ -49,6 +46,39 @@ pub struct RefreshedOverlap {
 #[async_trait]
 pub trait OverlapScoresRefresh: Send + Sync {
     async fn refresh(&self, block_hashes: &[LocalBlockHash]) -> Option<RefreshedOverlap>;
+}
+
+pub struct TieredOverlapRefresher<P> {
+    provider: P,
+    config: KvRouterConfig,
+    block_size: u32,
+}
+
+impl<P> TieredOverlapRefresher<P> {
+    pub fn new(provider: P, config: KvRouterConfig, block_size: u32) -> Self {
+        Self {
+            provider,
+            config,
+            block_size,
+        }
+    }
+}
+
+#[async_trait]
+impl<P: TieredMatchProvider> OverlapScoresRefresh for TieredOverlapRefresher<P> {
+    async fn refresh(&self, block_hashes: &[LocalBlockHash]) -> Option<RefreshedOverlap> {
+        if block_hashes.is_empty() {
+            return None;
+        }
+        let tiered = match self.provider.find_tiered_matches(block_hashes).await {
+            Ok(tiered) => tiered,
+            Err(error) => {
+                tracing::warn!(%error, "overlap refresh: tiered match query failed");
+                return None;
+            }
+        };
+        Some(OverlapAnalysis::new(&self.config, self.block_size, &tiered).signals())
+    }
 }
 
 /// Default wait threshold after which a dequeued request gets a fresh overlap-score lookup.
@@ -148,14 +178,47 @@ impl OverlapScoresRefresh for NoopOverlapScoresRefresh {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::{KvRouterError, MatchDetails, TieredMatchDetails};
+    use crate::protocols::{OverlapScores, WorkerWithDpRank};
     use std::{
         collections::HashMap,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
     struct CountingRefresher {
         calls: AtomicUsize,
+    }
+
+    struct FakeProvider {
+        calls: Arc<AtomicUsize>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl TieredMatchProvider for FakeProvider {
+        async fn find_tiered_matches(
+            &self,
+            _sequence: &[LocalBlockHash],
+        ) -> Result<TieredMatchDetails, KvRouterError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.fail {
+                return Err(KvRouterError::IndexerOffline);
+            }
+            let worker = WorkerWithDpRank::new(4, 0);
+            let mut scores = OverlapScores::new();
+            scores.scores.insert(worker, 2);
+            Ok(TieredMatchDetails {
+                device: MatchDetails {
+                    overlap_scores: scores,
+                    ..Default::default()
+                },
+                lower_tier: HashMap::new(),
+            })
+        }
     }
 
     #[async_trait]
@@ -211,5 +274,32 @@ mod tests {
             .is_none()
         );
         assert_eq!(refresher.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn tiered_refresher_converts_matches_and_handles_empty_or_failed_queries() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let refresher = TieredOverlapRefresher::new(
+            FakeProvider {
+                calls: Arc::clone(&calls),
+                fail: false,
+            },
+            KvRouterConfig::default(),
+            16,
+        );
+        let worker = WorkerWithDpRank::new(4, 0);
+
+        assert!(refresher.refresh(&[]).await.is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let refreshed = refresher.refresh(&[LocalBlockHash(1)]).await.unwrap();
+        assert_eq!(refreshed.tier_overlap_blocks.device[&worker], 2);
+        assert_eq!(refreshed.effective_cached_tokens[&worker], 32);
+
+        let failing = TieredOverlapRefresher::new(
+            FakeProvider { calls, fail: true },
+            KvRouterConfig::default(),
+            16,
+        );
+        assert!(failing.refresh(&[LocalBlockHash(1)]).await.is_none());
     }
 }

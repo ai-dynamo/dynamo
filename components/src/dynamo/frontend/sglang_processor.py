@@ -6,6 +6,7 @@
 #
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -44,6 +45,16 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
+    if not isinstance(usage, dict):
+        return None
+    prompt_details = usage.get("prompt_tokens_details")
+    if not isinstance(prompt_details, dict):
+        return None
+    cached_tokens = prompt_details.get("cached_tokens")
+    return cached_tokens if isinstance(cached_tokens, int) else None
 
 
 def _load_tokenizer(source_path: str, trust_remote_code: bool):
@@ -496,6 +507,8 @@ class SglangProcessor:
             pending_token_ids: list[int] = []
             pending_usage: dict[str, Any] | None = None
             first_chunk = True
+            input_tokens = len(tokens)
+            cumulative_output_tokens = 0
 
             async for dynamo_response in dynamo_stream:
                 if dynamo_response.is_error():
@@ -523,6 +536,8 @@ class SglangProcessor:
                     break
 
                 new_ids = engine_response["token_ids"]
+                chunk_tokens = len(new_ids)
+                cumulative_output_tokens += chunk_tokens
                 raw_finish = engine_response.get("finish_reason")
                 finish_reason = _map_finish_reason(raw_finish)
                 stop_reason = engine_response.get("stop_reason")
@@ -552,6 +567,7 @@ class SglangProcessor:
                         post_proc_total_ms += (t_pp1 - t_pp0) * 1000.0
                         token_count += len(pending_token_ids)
 
+                    envelope: dict[str, Any] = {"_dynamo_annotated": True}
                     if choice:
                         dynamo_out: dict[str, Any] = {
                             "id": request_id,
@@ -574,7 +590,20 @@ class SglangProcessor:
                         if response_nvext:
                             dynamo_out["nvext"] = response_nvext
 
-                        yield dynamo_out
+                        envelope["data"] = dynamo_out
+
+                    metrics: dict[str, Any] = {
+                        "input_tokens": input_tokens,
+                        "output_tokens": cumulative_output_tokens,
+                        "chunk_tokens": len(pending_token_ids),
+                    }
+                    cached_tokens = _cached_tokens_from_usage(pending_usage)
+                    if cached_tokens is not None:
+                        metrics["cached_tokens"] = cached_tokens
+                    envelope["event"] = "llm_metrics"
+                    envelope["comment"] = [json.dumps(metrics)]
+
+                    yield envelope
 
                     pending_token_ids = []
                     pending_usage = None

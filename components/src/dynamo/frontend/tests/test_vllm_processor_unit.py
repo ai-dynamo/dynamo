@@ -501,3 +501,22 @@ class TestChatTemplateKwargsForwarding:
             tokenizer,
         )
         assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
+
+
+@pytest.mark.parametrize(
+    ("runtime_config", "expected"),
+    [
+        ({"context_length": 1048576}, 1048576),
+        ({}, None),
+        ({"context_length": None}, None),
+        ({"context_length": 0}, None),
+        ({"context_length": -1}, None),
+        ({"context_length": "1048576"}, None),
+        ({"context_length": True}, None),
+        (None, None),
+    ],
+)
+def test_runtime_config_context_length(vllm_processor_module, runtime_config, expected):
+    mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
+
+    assert vllm_processor_module._runtime_config_context_length(mdc) == expected

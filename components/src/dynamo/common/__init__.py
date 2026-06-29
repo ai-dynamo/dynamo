@@ -9,7 +9,7 @@ Dynamo backends and components.
 
 Main submodules:
     - config_dump: Configuration dumping and system diagnostics utilities
-    - snapshot: Snapshot checkpoint/restore lifecycle helpers
+    - snapshot: Snapshot/restore lifecycle helpers
     - utils: Common utilities including environment and prometheus helpers
 """
 

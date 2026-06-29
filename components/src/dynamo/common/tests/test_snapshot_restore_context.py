@@ -73,7 +73,7 @@ async def test_refresh_snapshot_restore_config_reparses_runtime_fields(
     monkeypatch, tmp_path
 ):
     config = SimpleNamespace(
-        namespace="checkpoint-ns",
+        namespace="snapshot-ns",
         discovery_backend="file",
         request_plane="nats",
         event_plane="zmq",
@@ -116,7 +116,7 @@ async def test_refresh_snapshot_restore_config_supports_async_parser(
     monkeypatch, tmp_path
 ):
     config = SimpleNamespace(
-        namespace="checkpoint-ns",
+        namespace="snapshot-ns",
         discovery_backend="file",
         request_plane="nats",
         event_plane="zmq",
@@ -159,7 +159,7 @@ async def test_refresh_snapshot_restore_config_supports_runtime_selector(
 ):
     config = SimpleNamespace(
         dynamo_args=SimpleNamespace(
-            namespace="checkpoint-ns",
+            namespace="snapshot-ns",
             discovery_backend="file",
             request_plane="nats",
             event_plane="zmq",
@@ -195,7 +195,7 @@ async def test_refresh_snapshot_restore_config_validates_kubernetes_env(
     monkeypatch, tmp_path
 ):
     config = SimpleNamespace(
-        namespace="checkpoint-ns",
+        namespace="snapshot-ns",
         discovery_backend="file",
         request_plane="nats",
         event_plane="zmq",

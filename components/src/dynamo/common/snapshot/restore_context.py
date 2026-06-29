@@ -45,7 +45,7 @@ async def refresh_snapshot_restore_config(
     """Apply restore env, then rebuild backend config through normal parsing.
 
     The restore-context file is created by the restore standby process in the
-    new Pod before CRIU resumes the checkpointed process. Once resumed, apply
+    new Pod before CRIU resumes the snapshotted process. Once resumed, apply
     that env first and then re-run the runtime parser so fields derived from env
     (namespace, discovery backend, request plane, event plane, etc.) follow the
     same CLI/env precedence as a cold start. This avoids brittle ad hoc patches
@@ -154,7 +154,7 @@ def write_snapshot_restore_context(control_dir: str | None = None) -> None:
     """
 
     # Capture only the non-secret env names Dynamo needs after restore. Missing
-    # values are written as null so stale checkpoint-time env can be cleared.
+    # values are written as null so stale snapshot-time env can be cleared.
     context = {
         "env": {
             name: os.environ.get(name) if name in os.environ else None

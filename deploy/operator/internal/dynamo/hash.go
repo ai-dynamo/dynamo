@@ -95,9 +95,10 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoComponentDeploymentSpec {
 	spec := dcd.Spec.DeepCopy()
 
-	// Replica count and autoscaling ownership patch the active DCD. They must
-	// not create a new worker generation.
+	// Replica count, availability envelope, and autoscaling ownership patch the
+	// active DCD. They must not create a new worker generation.
 	spec.Replicas = nil
+	spec.MinAvailable = nil
 	spec.ScalingAdapter = nil
 
 	return *spec

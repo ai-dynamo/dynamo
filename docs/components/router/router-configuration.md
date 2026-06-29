@@ -18,8 +18,9 @@ This page collects the main router flags for frontend-embedded and standalone de
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of normalized router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
-- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 16.0). The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is actually sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. Set to `None` to disable queueing. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../agents/priority-scheduling.md) for how router priority differs from backend engine priority.
+- `--router-queue-threshold`: Queue threshold fraction for prefill token capacity (default: 16.0). The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is actually sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. Set to `None` to disable queueing. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](priority-scheduling.md) for how router priority differs from backend engine priority.
 - `--router-queue-policy`: Scheduling policy for the router queue (default: `fcfs`).
+- `--router-policy-config`: Startup-only policy-family and cache-bucket YAML path. When omitted, `--router-queue-threshold` and `--router-queue-policy` retain the single default queue. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](router-filtering.md).
 
@@ -31,7 +32,110 @@ For all three policies, the complete pending-queue key is
 `(strict_priority, policy_key)`. Higher strict tiers always win; the selected
 policy orders requests within a tier.
 
+### Policy-Class Queues
+
+YAML profiles define a matrix from client-requested policy family and
+router-observed cache bucket to a physical policy-class queue. Clients send the
+requested family through `x-dynamo-meta-policy-class`. The router computes
+uncached ISL as `raw ISL - best cached tokens across eligible workers`, selects
+the highest matching `uncached_isl_buckets` floor, and resolves the
+family/bucket pair to one configured class.
+
+An exact header matching a class with neither `policy_family` nor
+`cache_bucket` selects that explicit class directly and intentionally bypasses
+cache-derived classification. A recognized family selects that family.
+Missing, empty, unknown, or ordinary physical-class names use
+`default_policy_family`, so a client cannot bypass cache bucketing by naming a
+matrix class directly.
+
+Each class owns its FCFS or WSPT heap, busy thresholds, queue limits, quantum,
+deficit, and counters. Absolute and fractional busy thresholds use OR
+semantics. When neither is specified, the fractional threshold defaults to
+`16.0`. A class queues only when every eligible worker is busy for that class,
+but a new arrival cannot bypass an existing backlog in the same class.
+
+Queue limits are configured per discovered worker endpoint with
+`request_queue_limit_per_worker`, `raw_isl_token_queue_limit_per_worker`, and
+`cached_token_queue_limit_per_worker`. The effective class-local limit is the
+configured value multiplied by the current number of discovered endpoints.
+Limits are checked against current usage before adding the incoming request,
+so the request that crosses a limit is accepted and the next queued request is
+rejected with HTTP 529 and the effective total. Worker removal does not evict
+queued requests; new arrivals reject until usage drains or capacity returns.
+DRR charges the uncached-token snapshot captured at enqueue, while raw, cached,
+and uncached snapshots remain unchanged for limits, WSPT, counters, and later
+dispatch. For the ring cursor, deficit charging, weighted bursts, and bounded
+bulk-credit behavior, see
+[Deficit Round Robin Queue Scheduling](deficit-round-robin.md).
+
+Every matrix class must identify both `policy_family` and `cache_bucket`; a
+class with neither field is explicit, while specifying only one is invalid.
+Every configured family must have exactly one physical class for every bucket.
+Bucket floors begin at zero and increase strictly.
+Class, family, and bucket names use metric-safe identifiers.
+
+Profiles resolve in this order: exact model profile, root profile, then the
+synthetic single-class fallback. A model profile completely replaces the root
+profile; fields, buckets, families, and classes are not inherited. With no
+YAML, the router preserves the existing synthetic `default` queue and does not
+compute cache state for classification. See the tested
+[sample policy](../../../examples/router/policy-class-queues.yaml).
+
+```bash
+python -m dynamo.frontend \
+    --router-mode kv \
+    --router-policy-config examples/router/policy-class-queues.yaml
+```
+
+The previous missing-ISL global admission cap is removed. Cache-derived bucket
+selection now resolves directly to an ordinary policy class, and that class
+owns the queue threshold, ordering, DRR weight, counters, and limits. There is
+no separate first-stage admission queue or global cross-class cap.
+
+This is intentionally not behavior preserving. Class limits are worker-scaled
+and class-local rather than global; rejection returns the structured
+policy-class HTTP 529 response rather than the previous overload 429 path; and
+it does not exclude the entire router instance. The previous flat
+`default_policy_class` and `uncached_isl_policy_class_tiers` schema is not
+accepted, and ordinary physical classes are no longer direct header
+overrides. The sample is a Baseten-oriented continuing-session starting point,
+not a compatibility profile.
+
 For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` to the approximate throughput ratio of one non-CPU worker relative to one CPU worker. The default is `8`.
+
+## Session Affinity
+
+Session affinity is disabled by default. On the frontend, set
+`--router-session-affinity-ttl-secs` or `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to
+a value from `1` through `31536000` to enable it, then send
+`X-Dynamo-Session-ID` to keep related requests on one worker. Supplying the header
+without the TTL option provides session identity but does not enable router affinity.
+
+The first successfully dispatched request binds the session ID to its selected
+worker and, when available, data-parallel rank. Later requests exact-dispatch to
+that target without transport fallback. Concurrent requests can share a binding.
+Active requests prevent expiry. When a request lease ends after EOF, early drop,
+error, or cancellation, the idle timer restarts. A missing bound worker or a
+non-cancellation selection, setup, dispatch, or target-validation failure invalidates
+the binding.
+
+The configured value is the idle timeout. It is independent of
+`--router-ttl-secs` and `--router-predicted-ttl-secs`. Omit the session-affinity
+option to keep affinity disabled.
+
+If the bound worker disappears, Dynamo invalidates the binding so a subsequent
+selection can bind an available worker. Router restart clears all bindings. Bindings
+are not shared between frontend replicas.
+
+Direct mode still requires the phase-appropriate explicit worker ID on every
+affinity request. The stored binding validates that target but does not supply a
+missing ID. In disaggregated serving, prefill and decode use separate phase-local
+bindings. If no prefill router is active, only the decode or aggregated binding is
+created.
+
+Session affinity does not create a backend session or send lifecycle RPCs. There is
+no explicit unbind; idle expiry removes only router-local state. The same session
+ID is available to tracing and other explicitly configured consumers.
 
 ### AIC Prefill Load Model
 
@@ -107,15 +211,6 @@ Do not combine this setting with `--no-router-kv-events`, including when the app
 
 To implement KV event publishing for custom inference engines, see [KV Event Publishing for Custom Engines](../../integrations/kv-events-custom-engines.md).
 For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`), see [NVIDIA Request Extensions (`nvext`)](../frontend/nvext.md#agent-hints).
-
-### Session Control and Sticky Routing
-
-When a request carries `nvext.session_control`, the KV router can activate two session-related components:
-
-- **StickySessionRouter**: Maintains an in-memory `session_id -> (worker_id, dp_rank)` affinity map with sliding-window TTL. `action: "bind"` creates router-only affinity without backend engine RPCs. Subsequent requests with the same `session_id` are routed to the pinned worker/rank, bypassing KV overlap scoring.
-- **AgentController**: Sends session lifecycle RPCs (`open_session`, `close_session`) to the worker's `session_control` endpoint when `action` is `"open"` or `"close"`. The event-plane client is lazily initialized on the first lifecycle request.
-
-These activate automatically with `--router-mode kv` -- no additional flags are needed. Requests without `session_control` are unaffected and follow the standard KV-aware routing path. Router-only sticky routing only requires `action: "bind"`; engine-backed session lifecycle currently requires the SGLang backend with `--enable-streaming-session`. See [SGLang for Agentic Workloads -- Session Control](../../backends/sglang/agents.md#session-control-for-subagent-kv-isolation-experimental) for details.
 
 ## Tuning Guidelines
 
