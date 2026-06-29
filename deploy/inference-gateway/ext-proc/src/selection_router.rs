@@ -70,9 +70,7 @@ impl SelectionRouterConfig {
         let k8s_namespace = required_env("POD_NAMESPACE")?;
         let pod_selector = required_env("DYN_EPP_POD_SELECTOR")?;
         let model_name = required_env("DYN_MODEL_NAME")?;
-        let model_source = optional_env("DYN_EPP_MODEL_SOURCE")
-            .or_else(|| optional_env("DYN_MODEL_PATH"))
-            .unwrap_or_else(|| model_name.clone());
+        let model_source = optional_env("DYN_MODEL_PATH").unwrap_or_else(|| model_name.clone());
         let tenant_id =
             optional_env("DYN_EPP_TENANT_ID").unwrap_or_else(|| DEFAULT_TENANT_ID.to_string());
 
