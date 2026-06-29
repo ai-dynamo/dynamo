@@ -340,9 +340,14 @@ impl ResponseStreamConverter {
                         }
                     }
 
-                    // Identity and arguments can arrive in either order. Do not publish an
-                    // output item with empty required fields; once identity is complete,
-                    // publish the item and any argument fragments already received.
+                    // Within a single call, identity (id/name) and arguments can arrive in
+                    // either order — arguments may begin before the identity chunk. Do not
+                    // publish an output item with empty required fields; once identity is
+                    // complete, publish the item and any argument fragments already received.
+                    // Across parallel calls, the in-tree parsers emit one call at a time with
+                    // a monotonically increasing index, so indices are not interleaved today;
+                    // keying state by `tc_index` would handle interleaving too, but that path
+                    // is defensive rather than exercised by any current backend.
                     let should_start = {
                         let state = &self.function_call_items[tc_index];
                         !state.started && state.has_identity()

@@ -15,3 +15,9 @@ backend-specific compatibility claim.
 Each fixture terminates with exactly one `[DONE]` event. The scenarios cover a
 plain text response, a tool call whose initially empty arguments arrive in
 later fragments, parallel tool calls, and a reasoning-plus-tool-call response.
+
+The parallel-tools fixture emits its two calls sequentially — all of call 0's
+deltas precede call 1's, with a monotonically increasing index — which matches
+how the in-tree `dynamo-parsers-v2` parsers emit parallel calls. It exercises
+preserved identity and contiguous indices across sequential calls, not the
+reassembly of interleaved call fragments (no current backend produces those).
