@@ -369,16 +369,24 @@ def _normalize_openai_thinking_template_kwargs(
     chat_template_kwargs = dict(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
+
+    def setdefault_reasoning(enabled: bool) -> None:
+        # Different SGLang model families consult different template toggles.
+        chat_template_kwargs.setdefault("thinking", enabled)
+        chat_template_kwargs.setdefault("enable_thinking", enabled)
+
     thinking = request.get("thinking")
-    if "thinking" not in chat_template_kwargs:
-        if isinstance(thinking, bool):
-            chat_template_kwargs["thinking"] = thinking
-        elif isinstance(thinking, dict):
-            thinking_type = thinking.get("type")
-            if thinking_type == "enabled":
-                chat_template_kwargs["thinking"] = True
-            elif thinking_type == "disabled":
-                chat_template_kwargs["thinking"] = False
+    if isinstance(thinking, bool):
+        setdefault_reasoning(thinking)
+    elif isinstance(thinking, dict):
+        thinking_type = thinking.get("type")
+        if thinking_type == "enabled":
+            setdefault_reasoning(True)
+        elif thinking_type == "disabled":
+            setdefault_reasoning(False)
+
+    if request.get("reasoning_effort") == "none":
+        setdefault_reasoning(False)
 
     if chat_template_kwargs:
         request["chat_template_kwargs"] = chat_template_kwargs
@@ -611,7 +619,7 @@ def preprocess_chat_request(
     ``template_force_reasoning`` is the static per-server flag derived from
     the chat template (see :func:`detect_force_reasoning_from_template`);
     the effective per-request value combines it with client knobs
-    (``separate_reasoning``, ``chat_template_kwargs.enable_thinking``).
+    (``separate_reasoning``, ``chat_template_kwargs.{thinking,enable_thinking}``).
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """

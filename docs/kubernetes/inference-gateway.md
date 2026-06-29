@@ -772,5 +772,5 @@ into the request body (`nvext.token_data`) so the frontend sidecar can skip redu
 
 | Header | Description | Set By |
 |--------|-------------|--------|
-| `x-worker-instance-id` | Primary worker ID (decode worker in disagg mode) | kv-aware-scorer |
-| `x-prefill-instance-id` | Prefill worker ID (disaggregated mode only) | kv-aware-scorer |
+| `x-dynamo-worker-instance-id` | Primary worker ID (decode worker in disagg mode) | kv-aware-scorer |
+| `x-dynamo-prefill-instance-id` | Prefill worker ID (disaggregated mode only) | kv-aware-scorer |

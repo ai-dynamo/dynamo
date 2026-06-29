@@ -11,14 +11,15 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::config::RouterQueuePolicy;
+use super::overlap::OverlapSignals;
 use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{ClassQueueStats, SchedulerQueue};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, SchedulingRequest,
-    SchedulingResponse, TierOverlapBlocks,
+    KvSchedulerError, OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest,
+    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -229,6 +230,62 @@ where
         }
     }
 
+    pub async fn schedule_request(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let track_prefill_tokens = request
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.track_prefill_tokens)
+            .unwrap_or(self.track_prefill_tokens_default);
+        let ScheduleRequest {
+            mode,
+            token_seq,
+            block_hashes,
+            isl_tokens,
+            lora_name,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            router_config_override,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            overlap,
+            shared_cache_hits,
+        } = request;
+        let request = SchedulingRequest {
+            mode,
+            token_seq,
+            isl_tokens,
+            lora_name,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            router_config_override,
+            track_prefill_tokens,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            overlap,
+            shared_cache_hits,
+            worker_loads: FxHashMap::default(),
+            resp_tx: Some(resp_tx),
+        };
+
+        self.queue
+            .enqueue_with_block_hashes(request, block_hashes)
+            .await;
+
+        resp_rx
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
@@ -341,22 +398,19 @@ where
         routing_constraints: RoutingConstraints,
         shared_cache_hits: Option<crate::SharedCacheHits>,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let track_prefill_tokens = router_config_override
-            .and_then(|cfg| cfg.track_prefill_tokens)
-            .unwrap_or(self.track_prefill_tokens_default);
-        let request = SchedulingRequest {
-            maybe_request_id,
+        let mode = ScheduleMode::from_legacy(maybe_request_id, update_states)?;
+        self.schedule_request(ScheduleRequest {
+            mode,
             token_seq,
+            block_hashes,
             isl_tokens,
-            tier_overlap_blocks,
-            effective_overlap_blocks,
-            effective_cached_tokens,
-            worker_loads: FxHashMap::default(),
-            track_prefill_tokens,
+            overlap: OverlapSignals {
+                tier_overlap_blocks,
+                effective_overlap_blocks,
+                effective_cached_tokens,
+            },
             routing_constraints,
             router_config_override: router_config_override.cloned(),
-            update_states,
             lora_name,
             priority_jump,
             strict_priority,
@@ -365,16 +419,8 @@ where
             pinned_worker,
             allowed_worker_ids,
             shared_cache_hits,
-            resp_tx: Some(resp_tx),
-        };
-
-        self.queue
-            .enqueue_with_block_hashes(request, block_hashes)
-            .await;
-
-        resp_rx
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?
+        })
+        .await
     }
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
@@ -730,6 +776,26 @@ mod tests {
         .unwrap();
     }
 
+    fn request(mode: ScheduleMode) -> ScheduleRequest {
+        ScheduleRequest {
+            mode,
+            token_seq: Some(vec![1, 2, 3, 4]),
+            block_hashes: None,
+            isl_tokens: 64,
+            lora_name: None,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
+            router_config_override: None,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
+            overlap: OverlapSignals::default(),
+            shared_cache_hits: None,
+        }
+    }
+
     #[tokio::test]
     async fn test_schedule_books_request_into_active_sequences() {
         let mut workers = HashMap::new();
@@ -742,27 +808,11 @@ mod tests {
         );
         let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
 
-        let response = scheduler
-            .schedule(
-                Some("req-1".to_string()),
-                64,
-                Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks::default(),
-                HashMap::new(),
-                HashMap::new(),
-                None,
-                true,
-                Some("adapter-a".to_string()),
-                0.0,
-                0,
-                None,
-                None,
-                None,
-                crate::protocols::RoutingConstraints::default(),
-                None,
-            )
-            .await
-            .unwrap();
+        let mut request = request(ScheduleMode::Tracked {
+            request_id: "req-1".to_string(),
+        });
+        request.lora_name = Some("adapter-a".to_string());
+        let response = scheduler.schedule_request(request).await.unwrap();
 
         assert_eq!(response.best_worker.worker_id, 0);
         assert_eq!(
@@ -776,6 +826,54 @@ mod tests {
             .expect("scheduled worker should appear in potential loads");
         assert_eq!(worker_load.active_requests, 1);
 
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn query_only_without_id_never_books_state() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+
+        scheduler
+            .schedule_request(request(ScheduleMode::QueryOnly { request_id: None }))
+            .await
+            .unwrap();
+
+        let loads = scheduler.get_potential_loads(None, 0, HashMap::new(), false);
+        assert_eq!(loads[0].active_requests, 0);
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn legacy_tracked_request_without_id_fails_before_enqueue() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) =
+            make_scheduler(workers, Some(0.0), true, None);
+
+        let error = scheduler
+            .schedule(
+                None,
+                64,
+                None,
+                TierOverlapBlocks::default(),
+                HashMap::new(),
+                HashMap::new(),
+                None,
+                true,
+                None,
+                0.0,
+                0,
+                None,
+                None,
+                None,
+                crate::protocols::RoutingConstraints::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, KvSchedulerError::BookingFailed(_)));
+        assert_eq!(scheduler.pending_count(), 0);
         cancel_token.cancel();
     }
 

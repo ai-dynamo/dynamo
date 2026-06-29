@@ -184,6 +184,17 @@ impl LLMEngine for VllmBackend {
             return Err(engine_shutdown("vLLM backend has already been started"));
         }
 
+        // Fail fast on an unsupported role: the Encode disaggregation mode is a
+        // multimodal encoder upstream of P/D/Agg, but this backend is text-only
+        // (multimodal payloads are rejected in `validate_request`). Reject at
+        // startup so the misconfiguration can't register as a healthy worker and
+        // only surface as a per-request error in `apply_disaggregation_mode`.
+        if self.disaggregation_mode.is_encode() {
+            return Err(invalid_arg(
+                "encode disaggregation mode is not supported by the native vLLM backend",
+            ));
+        }
+
         // TODO: currently vLLM's Rust engine-core client only supports local data-parallel engines
         if !self.managed_engine.frontend_local_only() {
             return Err(invalid_arg(

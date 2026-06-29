@@ -258,6 +258,8 @@ pip install /tmp/wheels/*.whl       # ai-dynamo-runtime
 pip install /path/to/dynamo         # ai-dynamo (components/ tree)
 ```
 
+[Maturin](https://github.com/PyO3/maturin) is the Rust-Python bindings build tool. The `patchelf` extra lets maturin patch native extension library paths during the build.
+
 Building the wheel needs a Rust toolchain plus `clang`, `cmake`,
 `protobuf-compiler`, and `libssl-dev`.
 

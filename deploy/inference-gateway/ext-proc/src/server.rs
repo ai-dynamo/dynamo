@@ -576,7 +576,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 ///   * The body holds the chat-completion prompt.
 ///   * We tokenize it.
 ///   * We feed those tokens to the KV-aware router to choose a worker.
-///   * The chosen worker becomes the value of `x-worker-instance-id` /
+///   * The chosen worker becomes the value of `x-dynamo-worker-instance-id` /
 ///     `x-gateway-destination-endpoint` in the `RequestHeaders` response.
 ///
 /// That ordering — header response *after* body — is only legal under

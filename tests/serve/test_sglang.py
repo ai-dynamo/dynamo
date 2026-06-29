@@ -396,7 +396,7 @@ sglang_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["image"],
+                expected_response=["image", "bus", "train", "streetcar"],
                 temperature=0.0,
                 max_tokens=100,
             )
@@ -565,11 +565,14 @@ sglang_configs = {
             "--chat-template",
             "qwen2-vl",
             "--single-gpu",
+            "--multimodal-embedding-cache-capacity-gb",
+            "0.1",
         ],
         timeout=360,
         env={
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
+            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -585,7 +588,21 @@ sglang_configs = {
                 expected_response=["guitar", "tablet", "draw"],
                 temperature=0.0,
                 max_tokens=100,
-            )
+            ),
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["guitar", "tablet", "draw"],
+                expected_log=["Embedding cache hit for VIDEO URL index 0"],
+                temperature=0.0,
+                max_tokens=100,
+            ),
         ],
     ),
     "embedding_agg": SGLangConfig(
