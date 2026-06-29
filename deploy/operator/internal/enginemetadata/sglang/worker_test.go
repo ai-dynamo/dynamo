@@ -155,9 +155,10 @@ func TestBuildWorkerRequestReadsRealStructuredKVEventsMetadata(t *testing.T) {
 	reg.RequireKVEvents = true
 
 	metadata := realStructuredKVEventsFixtureSnapshot(t)
-	if metadata.ServerInfo.KVEvents == nil {
-		t.Fatalf("fixture missing structured kv_events metadata")
+	if len(metadata.ServerInfo.KVEventsConfig) == 0 {
+		t.Fatalf("fixture missing kv_events_config metadata")
 	}
+	metadata.ServerInfo.KVEvents = nil
 	worker, err := BuildWorkerRequest(reg, metadata)
 	if err != nil {
 		t.Fatalf("BuildWorkerRequest() error = %v", err)
@@ -455,7 +456,8 @@ func TestBuildWorkerRequestHandlesOptionalAndRequiredKVEvents(t *testing.T) {
 func TestBuildWorkerRequestTreatsStructuredKVEventsAsAuthoritative(t *testing.T) {
 	reg := testRegistration()
 	reg.RequireKVEvents = true
-	requireBuildWorkerRequestErrorContains(t, reg, testSnapshot(t, map[string]any{
+	worker, err := BuildWorkerRequest(reg, testSnapshot(t, map[string]any{
+		"dp_size": 1,
 		"kv_events": map[string]any{
 			"publisher":          "zmq",
 			"endpoint_host":      "*",
@@ -464,5 +466,11 @@ func TestBuildWorkerRequestTreatsStructuredKVEventsAsAuthoritative(t *testing.T)
 			"dp_size":            2,
 		},
 		"kv_events_config": `{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}`,
-	}), "block_size")
+	}))
+	if err != nil {
+		t.Fatalf("BuildWorkerRequest() error = %v", err)
+	}
+	if worker.KVEventsEndpoints[0] != testKVEventsEndpoint {
+		t.Fatalf("kv events endpoints = %#v", worker.KVEventsEndpoints)
+	}
 }
