@@ -20,6 +20,10 @@ import pytest
 try:
     # Importing the omni package pulls omni_handler -> vllm_omni; the handler
     # logic itself is vllm-free, but the package import is not.
+    # The handler reads audio off a vLLM-Omni MultimodalPayload (``mm.tensors``),
+    # so the fake engine outputs below must use the real type, not a plain dict.
+    from vllm_omni.engine.mm_outputs import MultimodalPayload
+
     from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler
 except (ImportError, ModuleNotFoundError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
@@ -49,7 +53,9 @@ def _audio_output(samples: np.ndarray, sample_rate: int = 16000):
     return SimpleNamespace(
         stage_id=1,
         outputs=[],
-        multimodal_output={"audio": samples, "sr": sample_rate},
+        multimodal_output=MultimodalPayload(
+            tensors={"audio": samples}, metadata={"sr": sample_rate}
+        ),
     )
 
 
@@ -58,7 +64,7 @@ def _text_output(text: str):
         stage_id=0,
         outputs=[SimpleNamespace(text=text, token_ids=[1, 2, 3])],
         prompt_token_ids=[0],
-        multimodal_output={},
+        multimodal_output=MultimodalPayload(),
     )
 
 
