@@ -57,16 +57,14 @@ Set these environment variables on the Rust EPP container.
 | `DYN_NAMESPACE` | unset | Exact Dynamo discovery namespace fallback. If both namespace values are unset, the Rust EPP uses `vllm-agg`. |
 | `DYN_COMPONENT_NAME` | `backend` | Dynamo component that exposes the `generate` endpoint. |
 | `DYN_ENFORCE_DISAGG` | `false` | Fail requests when prefill routing is unavailable instead of falling back to aggregated routing. |
-| `DYN_KUBE_DISCOVERY_MODE` | `pod` | Kubernetes discovery identity mode. The Rust EPP currently rejects `container`. |
 | `DYN_SECURE_SERVING` | `true` | Serve ext_proc gRPC with TLS. Set to `false` only for gateways that expect plaintext h2c. |
 | `RUST_LOG` | `info` | Rust tracing filter. |
-| `DYN_ROUTER_*` | varies | Standard Dynamo router settings, including cache-overlap credit, prefill load scale, temperature, replica sync, and tracking flags. |
 
-For router tuning details, see [GAIE Reference](./reference.mdx#router-tuning).
+Router tuning uses the same `DYN_ROUTER_*` settings as the standard EPP path. For router tuning
+details, see [GAIE Reference](./reference.mdx#router-tuning).
 
 ## Limitations
 
-- Pod-level Kubernetes discovery only. `DYN_KUBE_DISCOVERY_MODE=container` is rejected.
 - Use one Rust EPP replica per pool. Request selection and booking are not yet atomic across
   concurrent Rust EPP replicas.
 - Restart the Rust EPP after a worker-generation rolling update so it binds to the new generation
