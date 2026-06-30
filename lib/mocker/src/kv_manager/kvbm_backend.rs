@@ -153,6 +153,7 @@ enum PreparedUseBlock {
         seq_hash: SequenceHash,
         full_idx: usize,
         mutable: Option<MutableBlock<G1>>,
+        candidate_block_id: Option<usize>,
     },
     FreshPartial {
         uuid: Uuid,
@@ -1585,6 +1586,7 @@ impl KvManager {
                             seq_hash: *seq_hash,
                             full_idx,
                             mutable: None,
+                            candidate_block_id: None,
                         }
                     };
                     prepared.push(entry);
@@ -1693,37 +1695,30 @@ impl KvManager {
         } = transaction;
 
         // Complete every fresh full block first, then register the whole set
-        // under one BlockStore lock. The ordered registration result is joined
-        // back to the original prepared-entry index so the second pass can
-        // preserve router-event segmentation and parent metadata exactly.
-        let mut fresh_registration_order = Vec::new();
+        // under one BlockStore lock. Registration results preserve input order,
+        // so the second pass can consume them alongside the fresh prepared
+        // entries while preserving router-event segmentation and metadata.
         let mut completed_blocks = Vec::new();
-        for (entry_idx, entry) in prepared.iter_mut().enumerate() {
+        for entry in &mut prepared {
             if let PreparedUseBlock::FreshFull {
-                full_idx, mutable, ..
+                full_idx,
+                mutable,
+                candidate_block_id,
+                ..
             } = entry
             {
                 let mutable = mutable
                     .take()
                     .expect("committing Use must own every fresh full slot");
-                let candidate_block_id = mutable.block_id();
+                *candidate_block_id = Some(mutable.block_id());
                 let complete = mutable
                     .stage(signal.plhs[*full_idx], self.block_size)
                     .expect("Use full block stage failed");
-                fresh_registration_order.push((entry_idx, candidate_block_id));
                 completed_blocks.push(complete);
             }
         }
         let registered_blocks = self.block_manager.register_blocks(completed_blocks);
-        assert_eq!(
-            registered_blocks.len(),
-            fresh_registration_order.len(),
-            "batch registration result must align with fresh full blocks"
-        );
-        let mut fresh_registrations = fresh_registration_order
-            .into_iter()
-            .zip(registered_blocks)
-            .peekable();
+        let mut fresh_registrations = registered_blocks.into_iter();
 
         let mut metadata_parent_hash = match signal.parent {
             None => None,
@@ -1735,7 +1730,7 @@ impl KvManager {
         let mut stored_local_hashes = Vec::<BlockHash>::new();
         let mut stored_token_ids = signal.token_ids.map(|_| Vec::<Vec<u32>>::new());
 
-        for (entry_idx, entry) in prepared.into_iter().enumerate() {
+        for entry in prepared {
             match entry {
                 PreparedUseBlock::ExistingActiveFull { seq_hash } => {
                     if !blocks_stored.is_empty() {
@@ -1776,6 +1771,7 @@ impl KvManager {
                     seq_hash,
                     full_idx,
                     mutable,
+                    candidate_block_id,
                 } => {
                     if blocks_stored.is_empty() {
                         first_store_parent = metadata_parent_hash;
@@ -1785,14 +1781,11 @@ impl KvManager {
                         mutable.is_none(),
                         "fresh full slot must be consumed by batch staging"
                     );
-                    let ((registered_entry_idx, candidate_block_id), immutable) =
-                        fresh_registrations
-                            .next()
-                            .expect("fresh full block must have a registration result");
-                    assert_eq!(
-                        registered_entry_idx, entry_idx,
-                        "fresh registration order must match prepared entries"
-                    );
+                    let candidate_block_id = candidate_block_id
+                        .expect("fresh full block must record its staged candidate ID");
+                    let immutable = fresh_registrations
+                        .next()
+                        .expect("fresh full block must have a registration result");
                     assert_eq!(
                         immutable.block_id(),
                         candidate_block_id,
@@ -2448,6 +2441,85 @@ mod tests {
         assert_eq!(stored.parent_hash.map(|hash| hash.0), Some(10));
         assert_eq!(stored.blocks.len(), 1);
         assert_eq!(stored.blocks[0].block_hash.0, 20);
+    }
+
+    #[test]
+    fn mixed_use_keeps_fresh_registration_and_event_order() {
+        let (mut mgr, sink) = make_mgr_capturing(8, 4);
+        let reused_plh = plh(200);
+
+        use_full(&mut mgr, 20, reused_plh);
+        sink.events.lock().unwrap().clear();
+
+        let seq_hashes = [10, 11, 20, 30, 31];
+        let plhs = [plh(100), plh(110), reused_plh, plh(300), plh(310)];
+        let local_hashes = vec![1010, 1011, 1020, 1030, 1031];
+        let token_ids = vec![
+            vec![10, 10, 10, 10],
+            vec![11, 11, 11, 11],
+            vec![20, 20, 20, 20],
+            vec![30, 30, 30, 30],
+            vec![31, 31, 31, 31],
+        ];
+        let blocks = seq_hashes.into_iter().map(UniqueBlock::FullBlock).collect();
+
+        assert_eq!(
+            expect_ready(mgr.process(&MoveBlock::Use(
+                blocks,
+                local_hashes.clone(),
+                plhs.to_vec(),
+                Some(token_ids.clone()),
+                Some(UniqueBlock::FullBlock(5)),
+            ))),
+            seq_hashes.len()
+        );
+
+        for (idx, (seq_hash, plh)) in [(10, plhs[0]), (11, plhs[1]), (30, plhs[3]), (31, plhs[4])]
+            .into_iter()
+            .enumerate()
+        {
+            let signal_idx = [0, 1, 3, 4][idx];
+            let info = mgr
+                .registered_blocks
+                .get(&plh)
+                .expect("fresh block must retain registration metadata");
+            assert_eq!(info.seq_hash, seq_hash);
+            assert_eq!(info.block_id, mgr.active_full[&seq_hash].handle.block_id());
+            assert_eq!(info.local_hash, Some(local_hashes[signal_idx]));
+            assert_eq!(info.token_ids.as_ref(), Some(&token_ids[signal_idx]));
+        }
+        assert_eq!(mgr.registered_blocks[&plhs[0]].parent_hash, Some(5));
+        assert_eq!(mgr.registered_blocks[&plhs[1]].parent_hash, Some(10));
+        assert_eq!(mgr.registered_blocks[&plhs[3]].parent_hash, Some(20));
+        assert_eq!(mgr.registered_blocks[&plhs[4]].parent_hash, Some(30));
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 2, "the reused middle block splits stores");
+        for (event, expected_hashes, expected_local_hashes, expected_parent) in [
+            (&events[0], &[10, 11][..], &[1010, 1011][..], Some(5)),
+            (&events[1], &[30, 31][..], &[1030, 1031][..], Some(20)),
+        ] {
+            let KvCacheEventData::Stored(stored) = &event.data else {
+                panic!("expected Stored event, got {:?}", event.data);
+            };
+            assert_eq!(stored.parent_hash.map(|hash| hash.0), expected_parent);
+            assert_eq!(
+                stored
+                    .blocks
+                    .iter()
+                    .map(|block| block.block_hash.0)
+                    .collect::<Vec<_>>(),
+                expected_hashes
+            );
+            assert_eq!(
+                stored
+                    .blocks
+                    .iter()
+                    .map(|block| block.tokens_hash.0)
+                    .collect::<Vec<_>>(),
+                expected_local_hashes
+            );
+        }
     }
 
     #[test]
