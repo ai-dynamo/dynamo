@@ -33,7 +33,7 @@ use dynamo_parsers::tool_calling::{
 };
 use dynamo_parsers_v2::{Tool as ToolV2, ToolCallDelta, ToolParser, create_tool_parser_for_family};
 
-use super::NvCreateChatCompletionStreamResponse;
+use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_template};
 
 /// Tool-call families with a `dynamo-parsers-v2` parser wired into both the batch and
 /// the streaming path. Must stay a subset of the families
@@ -184,8 +184,12 @@ fn finish_unterminated_choices(
         let state = states
             .get_mut(&index)
             .expect("choice index came from parser state map");
-        let Ok(result) = state.parser.finish() else {
-            continue;
+        let result = match state.parser.finish() {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(error = %error, choice_index = index, "v2 stream finish failed");
+                dynamo_parsers_v2::ToolParseResult::default()
+            }
         };
         let tool_calls = state.emit_chunks(result.calls);
         if tool_calls.is_some() {
@@ -199,38 +203,18 @@ fn finish_unterminated_choices(
         } else {
             None
         };
-        if result.normal_text.is_empty() && tool_calls.is_none() && finish_reason.is_none() {
+        let content = (!result.normal_text.is_empty())
+            .then_some(ChatCompletionMessageContent::Text(result.normal_text));
+        if content.is_none() && tool_calls.is_none() && finish_reason.is_none() {
             continue;
         }
-
-        let mut response = template.clone();
-        // A synthesized terminal chunk must not repeat accounting data copied
-        // from a usage-only template.
-        response.inner.usage = None;
-        response.llm_metrics = None;
-        #[allow(deprecated)]
-        let choice = dynamo_protocols::types::ChatChoiceStream {
+        responses.push(stream_choice_chunk_from_template(
+            template,
             index,
-            delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
-                role: None,
-                content: (!result.normal_text.is_empty())
-                    .then_some(ChatCompletionMessageContent::Text(result.normal_text)),
-                tool_calls,
-                function_call: None,
-                refusal: None,
-                reasoning_content: None,
-            },
+            content,
+            tool_calls,
             finish_reason,
-            logprobs: None,
-        };
-        response.inner.choices = vec![choice];
-        responses.push(Annotated {
-            data: Some(response),
-            id: None,
-            event: None,
-            comment: None,
-            error: None,
-        });
+        ));
     }
     responses
 }
@@ -397,6 +381,22 @@ mod tests {
         ChatChoiceStream, ChatCompletionStreamResponseDelta, CompletionUsage, FinishReason, Role,
     };
     use futures::stream;
+
+    struct FinishErrorParser;
+
+    impl ToolParser for FinishErrorParser {
+        fn create(_tools: &[ToolV2]) -> anyhow::Result<Box<dyn ToolParser>> {
+            Ok(Box::new(Self))
+        }
+
+        fn push(&mut self, _chunk: &str) -> anyhow::Result<dynamo_parsers_v2::ToolParseResult> {
+            Ok(dynamo_parsers_v2::ToolParseResult::default())
+        }
+
+        fn finish(&mut self) -> anyhow::Result<dynamo_parsers_v2::ToolParseResult> {
+            anyhow::bail!("intentional finish failure")
+        }
+    }
 
     const QWEN3_GET_WEATHER: &str = "<tool_call>\n<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n</function>\n</tool_call>";
 
@@ -721,6 +721,44 @@ mod tests {
             final_finish_reason(&out),
             None,
             "text-only stream with no upstream finish_reason must not get a synthetic one"
+        );
+    }
+
+    #[test]
+    fn finish_error_still_terminates_a_choice_that_emitted_tools() {
+        let mut states = HashMap::from([(
+            3,
+            ChoiceState {
+                parser: Box::new(FinishErrorParser),
+                opened: HashSet::new(),
+            },
+        )]);
+        let mut finished = HashSet::new();
+        let mut tool_emitted = HashSet::from([3]);
+        let template = usage_chunk().data.expect("usage response data");
+
+        let responses =
+            finish_unterminated_choices(&mut states, &mut finished, &mut tool_emitted, &template);
+
+        assert_eq!(
+            responses.len(),
+            1,
+            "the choice still needs a terminal chunk"
+        );
+        let response = responses[0].data.as_ref().expect("terminal response data");
+        assert!(
+            response.inner.usage.is_none(),
+            "terminal chunk must not repeat usage"
+        );
+        assert!(
+            response.llm_metrics.is_none(),
+            "terminal chunk must not repeat LLM metrics"
+        );
+        assert_eq!(response.inner.choices.len(), 1);
+        assert_eq!(response.inner.choices[0].index, 3);
+        assert_eq!(
+            response.inner.choices[0].finish_reason,
+            Some(FinishReason::ToolCalls)
         );
     }
 }
