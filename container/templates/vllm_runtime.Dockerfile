@@ -67,6 +67,26 @@ RUN install_nixl_from_wheel \
 ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 {% endif %}
 
+{% if device != "xpu" %}
+# Apply local vLLM source patches on top of the upstream vllm-openai wheel
+# (e.g. offload G2 observability metrics). Patches are pinned against
+# vllm.runtime_image_tag in container/context.yaml; re-validate with
+# `git apply --check -p1` against that vLLM tag whenever it's bumped, and
+# drop/update any patch upstream has since merged.
+# Not applied on xpu, which tracks its own vLLM fork/ref.
+RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm-patches,readonly \
+    set -eux; \
+    command -v patch >/dev/null 2>&1 || { \
+        apt-get update && \
+        apt-get install -y --no-install-recommends patch && \
+        rm -rf /var/lib/apt/lists/*; \
+    }; \
+    for p in /tmp/vllm-patches/*.patch; do \
+        [ -e "$p" ] || continue; \
+        patch -p1 -d "${SITE_PACKAGES}" < "$p"; \
+    done
+{% endif %}
+
 # Install NATS and ETCD
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/

@@ -1,0 +1,335 @@
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/common.py b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/common.py
+index 928fec639..6e374be3b 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/common.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/common.py
+@@ -83,10 +83,18 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
+ 
+     completed_jobs: dict[int, int] = field(default_factory=dict)
+     transfer_stats: TransferStats = field(default_factory=TransferStats)
+-
+-    def mark_completed(self, job_id: int) -> None:
++    # job_id -> this worker's CUDA-event-measured store write duration
++    # (seconds). Store jobs only; used to split scheduler-side pin time into
++    # queue vs. write. Already computed in get_finished() for the transfer
++    # completion event, so this just forwards an existing float, no extra
++    # synchronization or timing work.
++    store_write_seconds: dict[int, float] = field(default_factory=dict)
++
++    def mark_completed(self, job_id: int, write_seconds: float | None = None) -> None:
+         """Record a transfer job completion from this worker."""
+         self.completed_jobs[job_id] = 1
++        if write_seconds is not None:
++            self.store_write_seconds[job_id] = write_seconds
+ 
+     def aggregate(
+         self, other: "KVConnectorWorkerMetadata"
+@@ -97,7 +105,18 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
+         for job_id, v in other.completed_jobs.items():
+             merged[job_id] = merged.get(job_id, 0) + v
+ 
++        # Different TP ranks copy different shards of the same job and may
++        # report slightly different durations; the pin is held until the
++        # slowest one finishes, so take the max rather than last-write-wins.
++        merged_write_seconds = dict(self.store_write_seconds)
++        for job_id, v in other.store_write_seconds.items():
++            if job_id in merged_write_seconds:
++                merged_write_seconds[job_id] = max(merged_write_seconds[job_id], v)
++            else:
++                merged_write_seconds[job_id] = v
++
+         return OffloadingWorkerMetadata(
+             completed_jobs=merged,
+             transfer_stats=self.transfer_stats.aggregate(other.transfer_stats),
++            store_write_seconds=merged_write_seconds,
+         )
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/metrics.py b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/metrics.py
+index a90250d28..239cdcd7d 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/metrics.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/metrics.py
+@@ -28,6 +28,11 @@ class _TransferMetricName:
+     STORE_BYTES = "vllm:kv_offload_store_bytes"
+     STORE_TIME = "vllm:kv_offload_store_time"
+     STORE_SIZE = "vllm:kv_offload_store_size"
++    STORE_PIN_DURATION = "vllm:kv_offload_store_pin_duration_seconds"
++    STORE_PIN_QUEUE_DURATION = "vllm:kv_offload_store_pin_queue_duration_seconds"
++    STORE_PIN_WRITE_DURATION = "vllm:kv_offload_store_pin_write_duration_seconds"
++    INFLIGHT_STORE_JOBS = "vllm:kv_offload_inflight_store_jobs"
++    INFLIGHT_STORE_BLOCKS = "vllm:kv_offload_inflight_store_blocks"
+ 
+ 
+ class _TransferType:
+@@ -51,6 +56,19 @@ TRANSFER_SIZE_BUCKETS = (
+     200e6,
+ )
+ 
++PIN_DURATION_BUCKETS = (
++    0.001,
++    0.005,
++    0.01,
++    0.05,
++    0.1,
++    0.5,
++    1.0,
++    5.0,
++    10.0,
++    30.0,
++)
++
+ 
+ def get_connector_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
+     return {
+@@ -74,6 +92,37 @@ def get_connector_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
+             documentation="Histogram of KV offload store operation size, in bytes.",
+             buckets=TRANSFER_SIZE_BUCKETS,
+         ),
++        _TransferMetricName.STORE_PIN_DURATION: OffloadingHistogramMetadata(
++            documentation=(
++                "Total time store blocks stayed protected from scheduler-side "
++                "prepare_store to complete_store."
++            ),
++            buckets=PIN_DURATION_BUCKETS,
++        ),
++        _TransferMetricName.STORE_PIN_QUEUE_DURATION: OffloadingHistogramMetadata(
++            documentation=(
++                "Portion of store_pin_duration_seconds spent waiting before "
++                "the host write began (pin_duration minus the measured "
++                "write time)."
++            ),
++            buckets=PIN_DURATION_BUCKETS,
++        ),
++        _TransferMetricName.STORE_PIN_WRITE_DURATION: OffloadingHistogramMetadata(
++            documentation=(
++                "Portion of store_pin_duration_seconds spent performing the "
++                "host write itself (CUDA-event-measured GPU-to-CPU copy "
++                "time, max across reporting workers)."
++            ),
++            buckets=PIN_DURATION_BUCKETS,
++        ),
++        _TransferMetricName.INFLIGHT_STORE_JOBS: OffloadingGaugeMetadata(
++            documentation="Number of in-flight (scheduled, not yet completed) "
++            "KV offload store jobs.",
++        ),
++        _TransferMetricName.INFLIGHT_STORE_BLOCKS: OffloadingGaugeMetadata(
++            documentation="Number of GPU KV blocks currently pinned by "
++            "in-flight KV offload store jobs.",
++        ),
+     }
+ 
+ 
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
+index 5884186cc..a53714847 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
+@@ -1,5 +1,6 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++import time
+ from collections.abc import Iterable, Sequence
+ from dataclasses import dataclass, field
+ from itertools import islice
+@@ -66,6 +67,13 @@ class TransferJobStatus:
+     # Store src block IDs that may be freed before the request finishes.
+     # Registered in _block_id_to_pending_jobs at store creation time.
+     sliding_window_block_ids: list[int] | None = None
++    # Wall-clock time the job was created (store jobs only). Used to measure
++    # how long GPU blocks stayed pinned waiting for the offload to complete.
++    created_at: float | None = None
++    # Max (across workers/steps reporting so far) CUDA-event-measured write
++    # duration for this store job. Accumulated incrementally as worker
++    # reports arrive, finalized once pending_count reaches 0.
++    write_seconds: float | None = None
+ 
+ 
+ class GroupOffloadConfig(NamedTuple):
+@@ -995,6 +1003,7 @@ class OffloadingConnectorScheduler:
+                 is_store=True,
+                 non_sliding_window_block_ids=non_sliding_window_block_ids,
+                 sliding_window_block_ids=sliding_window_block_ids or None,
++                created_at=time.perf_counter(),
+             )
+ 
+             store_jobs[job_id] = TransferJob(
+@@ -1114,6 +1123,16 @@ class OffloadingConnectorScheduler:
+                 continue
+             job_status = self._jobs[job_id]
+             job_status.pending_count -= count
++            # Accumulate write duration as worker reports trickle in, even
++            # across calls that don't yet bring pending_count to 0 (TP>1
++            # workers may report over more than one step). Plain dict lookup
++            # + float max, no extra synchronization.
++            if job_status.is_store and (
++                write_seconds := meta.store_write_seconds.get(job_id)
++            ) is not None:
++                job_status.write_seconds = max(
++                    job_status.write_seconds or 0.0, write_seconds
++                )
+             if job_status.pending_count > 0:
+                 continue
+             assert job_status.pending_count == 0
+@@ -1121,6 +1140,24 @@ class OffloadingConnectorScheduler:
+             req_status = self._req_status[job_status.req_id]
+             if job_status.is_store:
+                 self.manager.complete_store(job_status.keys, req_status.req_context)
++                if job_status.created_at is not None:
++                    pin_duration = time.perf_counter() - job_status.created_at
++                    if self._connector_stats is None:
++                        self._connector_stats = OffloadingConnectorStats()
++                    self._connector_stats.observe_histogram(
++                        _TransferMetricName.STORE_PIN_DURATION, pin_duration
++                    )
++                    if job_status.write_seconds is not None:
++                        write_seconds = job_status.write_seconds
++                        queue_seconds = max(0.0, pin_duration - write_seconds)
++                        self._connector_stats.observe_histogram(
++                            _TransferMetricName.STORE_PIN_WRITE_DURATION,
++                            write_seconds,
++                        )
++                        self._connector_stats.observe_histogram(
++                            _TransferMetricName.STORE_PIN_QUEUE_DURATION,
++                            queue_seconds,
++                        )
+             else:
+                 self.manager.complete_load(job_status.keys, req_status.req_context)
+                 if self._blocks_being_loaded:
+@@ -1150,6 +1187,15 @@ class OffloadingConnectorScheduler:
+         stats = self._connector_stats
+         self._connector_stats = None
+ 
++        store_jobs = [job for job in self._jobs.values() if job.is_store]
++        if stats is None:
++            stats = OffloadingConnectorStats()
++        stats.set_gauge(_TransferMetricName.INFLIGHT_STORE_JOBS, len(store_jobs))
++        stats.set_gauge(
++            _TransferMetricName.INFLIGHT_STORE_BLOCKS,
++            sum(len(job.keys) for job in store_jobs),
++        )
++
+         manager_stats = self.manager.get_stats()
+         if manager_stats is not None:
+             if stats is None:
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/worker.py b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/worker.py
+index 7e61c1e7a..565083d32 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/worker.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/worker.py
+@@ -324,7 +324,12 @@ class OffloadingConnectorWorker:
+                     transfer_result.transfer_time,
+                 )
+ 
+-            self._connector_worker_meta.mark_completed(job_id)
++            self._connector_worker_meta.mark_completed(
++                job_id,
++                write_seconds=(
++                    transfer_result.transfer_time if not is_load else None
++                ),
++            )
+             req_id = self._load_jobs.pop(job_id, None)
+             if req_id is not None:
+                 finished_recving.add(req_id)
+diff --git a/vllm/v1/kv_offload/cpu/common.py b/vllm/v1/kv_offload/cpu/common.py
+index 14c96680f..327dadf9a 100644
+--- a/vllm/v1/kv_offload/cpu/common.py
++++ b/vllm/v1/kv_offload/cpu/common.py
+@@ -8,6 +8,10 @@ from vllm.v1.kv_offload.base import BlockIDsLoadStoreSpec
+ class CPUOffloadingMetrics:
+     STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
+     CPU_CACHE_USAGE_PERC = "vllm:kv_offload_cpu_cache_usage_perc"
++    LOOKUP_QUERIES = "vllm:kv_offload_lookup_queries"
++    LOOKUP_HITS = "vllm:kv_offload_lookup_hits"
++    LOOKUP_MISSES = "vllm:kv_offload_lookup_misses"
++    LOOKUP_NOT_READY = "vllm:kv_offload_lookup_not_ready"
+ 
+ 
+ class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
+diff --git a/vllm/v1/kv_offload/cpu/manager.py b/vllm/v1/kv_offload/cpu/manager.py
+index b48abecec..a61282801 100644
+--- a/vllm/v1/kv_offload/cpu/manager.py
++++ b/vllm/v1/kv_offload/cpu/manager.py
+@@ -69,6 +69,11 @@ class CPUOffloadingManager(OffloadingManager):
+         self.max_tracker_size: int = max_tracker_size
+         self.stores_skipped_in_current_batch: int = 0
+ 
++        self.lookup_queries_in_current_batch: int = 0
++        self.lookup_hits_in_current_batch: int = 0
++        self.lookup_misses_in_current_batch: int = 0
++        self.lookup_not_ready_in_current_batch: int = 0
++
+         # Number of block references. It is ordered so can evict the LRU entry in O(1).
+         self.counts: OrderedDict[OffloadKey, int] | None = (
+             OrderedDict() if store_threshold >= 2 else None
+@@ -113,6 +118,7 @@ class CPUOffloadingManager(OffloadingManager):
+ 
+     @override
+     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
++        self.lookup_queries_in_current_batch += 1
+         if self.counts is not None:
+             if key in self.counts:
+                 self.counts.move_to_end(key)
+@@ -123,9 +129,12 @@ class CPUOffloadingManager(OffloadingManager):
+                 self.counts[key] = 1
+         block = self._policy.get(key)
+         if block is None:
++            self.lookup_misses_in_current_batch += 1
+             return False
+         if not block.is_ready:
++            self.lookup_not_ready_in_current_batch += 1
+             return None  # write in-flight; caller should retry
++        self.lookup_hits_in_current_batch += 1
+         return True
+ 
+     @override
+@@ -305,4 +314,25 @@ class CPUOffloadingManager(OffloadingManager):
+                 self.stores_skipped_in_current_batch,
+             )
+             self.stores_skipped_in_current_batch = 0
++
++        stats.increase_counter(
++            CPUOffloadingMetrics.LOOKUP_QUERIES,
++            self.lookup_queries_in_current_batch,
++        )
++        stats.increase_counter(
++            CPUOffloadingMetrics.LOOKUP_HITS,
++            self.lookup_hits_in_current_batch,
++        )
++        stats.increase_counter(
++            CPUOffloadingMetrics.LOOKUP_MISSES,
++            self.lookup_misses_in_current_batch,
++        )
++        stats.increase_counter(
++            CPUOffloadingMetrics.LOOKUP_NOT_READY,
++            self.lookup_not_ready_in_current_batch,
++        )
++        self.lookup_queries_in_current_batch = 0
++        self.lookup_hits_in_current_batch = 0
++        self.lookup_misses_in_current_batch = 0
++        self.lookup_not_ready_in_current_batch = 0
+         return stats
+diff --git a/vllm/v1/kv_offload/cpu/spec.py b/vllm/v1/kv_offload/cpu/spec.py
+index 7d3ba9c75..6405809a0 100644
+--- a/vllm/v1/kv_offload/cpu/spec.py
++++ b/vllm/v1/kv_offload/cpu/spec.py
+@@ -43,7 +43,24 @@ class CPUOffloadingSpec(OffloadingSpec):
+                     "values indicate transfers (stores or promotions) may be "
+                     "dropped due to insufficient capacity."
+                 ),
+-            )
++            ),
++            CPUOffloadingMetrics.LOOKUP_QUERIES: OffloadingCounterMetadata(
++                documentation="Total number of CPU offload lookup() calls.",
++            ),
++            CPUOffloadingMetrics.LOOKUP_HITS: OffloadingCounterMetadata(
++                documentation=(
++                    "Number of CPU offload lookups that found a ready block."
++                ),
++            ),
++            CPUOffloadingMetrics.LOOKUP_MISSES: OffloadingCounterMetadata(
++                documentation="Number of CPU offload lookups that found no block.",
++            ),
++            CPUOffloadingMetrics.LOOKUP_NOT_READY: OffloadingCounterMetadata(
++                documentation=(
++                    "Number of CPU offload lookups that found a block still "
++                    "being written (in-flight)."
++                ),
++            ),
+         }
+         store_threshold = int(extra_config.get("store_threshold", 0))
+         if store_threshold >= 2:
