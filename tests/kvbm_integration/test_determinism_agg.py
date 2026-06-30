@@ -111,6 +111,7 @@ _CONCURRENT_TIMEOUT = _SERVER_START_TIMEOUT + 2 * (
 
 # Test markers to align with repository conventions
 pytestmark = [
+    pytest.mark.kvbm,
     pytest.mark.kvbm_determinism,
     pytest.mark.e2e,
     pytest.mark.slow,

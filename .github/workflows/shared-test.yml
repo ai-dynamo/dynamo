@@ -31,10 +31,10 @@ on:
         required: true
         type: string
       container_workspace:
-        description: 'Workspace path inside the container where pytest should run'
+        description: 'Workspace path inside the container where pytest should run. Empty uses the GitHub checkout workspace.'
         required: false
         type: string
-        default: '/workspace'
+        default: ''
       pytest_extra_args:
         description: 'Additional pytest arguments, such as a test path or plugin flags'
         required: false
@@ -216,7 +216,7 @@ jobs:
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: ./.github/actions/pytest-local
         with:
-          container_workspace: ${{ inputs.container_workspace }}
+          container_workspace: ${{ inputs.container_workspace != '' && inputs.container_workspace || github.workspace }}
           pytest_extra_args: ${{ inputs.pytest_extra_args }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
@@ -232,7 +232,7 @@ jobs:
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
         uses: ./.github/actions/pytest-local
         with:
-          container_workspace: ${{ inputs.container_workspace }}
+          container_workspace: ${{ inputs.container_workspace != '' && inputs.container_workspace || github.workspace }}
           pytest_extra_args: ${{ inputs.pytest_extra_args }}
           pytest_marks: ${{ inputs.gpu_test_markers }}
           test_suite_name: ${{ inputs.test_suite_name }}
@@ -252,7 +252,7 @@ jobs:
         if: ${{ !cancelled() && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
         uses: ./.github/actions/pytest-local
         with:
-          container_workspace: ${{ inputs.container_workspace }}
+          container_workspace: ${{ inputs.container_workspace != '' && inputs.container_workspace || github.workspace }}
           pytest_extra_args: ${{ inputs.pytest_extra_args }}
           # When the parallel stage runs, exclude profiled tests here so they don't run twice.
           pytest_marks: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}

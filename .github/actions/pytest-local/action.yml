@@ -122,6 +122,15 @@ runs:
         DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
         DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
         HF_XET_HIGH_PERFORMANCE: 1
+        PYTEST_MARKS_INPUT: ${{ inputs.pytest_marks }}
+        PYTEST_EXTRA_ARGS_INPUT: ${{ inputs.pytest_extra_args }}
+        DRY_RUN_INPUT: ${{ inputs.dry_run }}
+        PARALLEL_MODE_INPUT: ${{ inputs.parallel_mode }}
+        MAX_VRAM_GIB_INPUT: ${{ inputs.max_vram_gib }}
+        ENABLE_COVERAGE_INPUT: ${{ inputs.enable_coverage }}
+        NVME_DIR_INPUT: ${{ inputs.nvme_dir }}
+        HF_HOME_INPUT: ${{ inputs.hf_home }}
+        CONTAINER_WORKSPACE_INPUT: ${{ inputs.container_workspace }}
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
@@ -134,16 +143,17 @@ runs:
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
 
-        # NVMe guard: GPU runners mount ${{ inputs.nvme_dir }}" (nvme-scratch emptyDir, NVMe-backed via
-        # instanceStorePolicy: RAID0). CPU/ARM runners have no ${{ inputs.nvme_dir }} mount.
-        if [[ -d "${{ inputs.nvme_dir }}" ]]; then
-          WORK_DIR="${{ inputs.nvme_dir }}"
+        # NVMe guard: GPU runners mount the configured NVMe scratch path
+        # (nvme-scratch emptyDir, NVMe-backed via instanceStorePolicy: RAID0).
+        # CPU/ARM runners have no NVMe scratch mount.
+        if [[ -d "${NVME_DIR_INPUT}" ]]; then
+          WORK_DIR="${NVME_DIR_INPUT}"
           echo "✅ NVMe scratch available"
         else
           WORK_DIR="/tmp"
         fi
 
-        REQUESTED_HF_HOME="${{ inputs.hf_home }}"
+        REQUESTED_HF_HOME="${HF_HOME_INPUT}"
         FALLBACK_HF_HOME="${WORK_DIR}/.cache/huggingface"
         # Prefer the requested cache path when it is usable in this job container.
         if
@@ -173,33 +183,69 @@ runs:
         echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> $GITHUB_ENV
 
 
-        CONTAINER_WORKSPACE="${{ inputs.container_workspace }}"
+        CONTAINER_WORKSPACE="${CONTAINER_WORKSPACE_INPUT}"
         if [[ ! -d "${CONTAINER_WORKSPACE}" ]]; then
           echo "❌ container_workspace '${CONTAINER_WORKSPACE}' not found inside container"
           exit 1
         fi
         echo "📦 Running pytest from container workspace: ${CONTAINER_WORKSPACE}"
 
+        parse_pytest_extra_args() {
+          PYTEST_EXTRA_ARGS=()
+          if [[ -z "${PYTEST_EXTRA_ARGS_INPUT}" ]]; then
+            return 0
+          fi
+
+          local extra_args_file
+          extra_args_file="$(mktemp)"
+          if ! python - <<'PY' > "${extra_args_file}"
+        import os
+        import shlex
+        import sys
+
+        try:
+            args = shlex.split(os.environ["PYTEST_EXTRA_ARGS_INPUT"])
+        except ValueError as exc:
+            print(f"Invalid pytest_extra_args: {exc}", file=sys.stderr)
+            sys.exit(2)
+
+        for arg in args:
+            sys.stdout.buffer.write(arg.encode("utf-8", "surrogateescape"))
+            sys.stdout.buffer.write(b"\0")
+        PY
+          then
+            rm -f "${extra_args_file}"
+            exit 2
+          fi
+
+          while IFS= read -r -d '' arg; do
+            PYTEST_EXTRA_ARGS+=("${arg}")
+          done < "${extra_args_file}"
+          rm -f "${extra_args_file}"
+        }
+
+        parse_pytest_extra_args
+
         # Determine docker runtime flags and pytest command based on dry_run mode
-        if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+        if [[ "${DRY_RUN_INPUT}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
           GPU_FLAGS=""
-          PYTEST_CMD="python -m pytest -v --collect-only ${{ inputs.pytest_extra_args }} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD=(python -m pytest -v --collect-only "${PYTEST_EXTRA_ARGS[@]}" -m "${PYTEST_MARKS_INPUT}")
         else
           echo "🚀 Running pytest in normal mode"
           # Determine parallelization based on parallel_mode input
-          case "${{ inputs.parallel_mode }}" in
+          case "${PARALLEL_MODE_INPUT}" in
             "auto")
-              PARALLEL_OPTS="-n auto"
+              PARALLEL_OPTS=(-n auto)
               echo "📊 Parallelization: auto (use all available cores)"
               ;;
             "none"|"0")
-              PARALLEL_OPTS="-n 0"
+              PARALLEL_OPTS=(-n 0)
               echo "📊 Parallelization: disabled (sequential execution) for GPU runs"
               ;;
             *)
-              PARALLEL_OPTS="-n ${{ inputs.parallel_mode }}"
-              echo "📊 Parallelization: ${{ inputs.parallel_mode }} workers"
+              PARALLEL_OPTS=(-n "${PARALLEL_MODE_INPUT}")
+              echo "📊 Parallelization: ${PARALLEL_MODE_INPUT} workers"
               ;;
           esac
 
@@ -208,44 +254,62 @@ runs:
           # parallelism. We pass `--max-vram-gib=N` plus `-n auto`; the conftest
           # consumes both, disables xdist, and runs tests as VRAM-aware
           # subprocesses. --dist=loadscope is omitted because xdist is bypassed.
-          VRAM_OPTS=""
-          if [[ -n "${{ inputs.max_vram_gib }}" ]]; then
-            VRAM_OPTS="--max-vram-gib=${{ inputs.max_vram_gib }}"
-            DIST_OPTS=""
-            echo "🧮 GPU-parallel mode: --max-vram-gib=${{ inputs.max_vram_gib }} (xdist replaced by VRAM-aware orchestrator)"
+          VRAM_OPTS=()
+          if [[ -n "${MAX_VRAM_GIB_INPUT}" ]]; then
+            VRAM_OPTS=(--max-vram-gib="${MAX_VRAM_GIB_INPUT}")
+            DIST_OPTS=()
+            echo "🧮 GPU-parallel mode: --max-vram-gib=${MAX_VRAM_GIB_INPUT} (xdist replaced by VRAM-aware orchestrator)"
           else
             # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-            DIST_OPTS="--dist=loadscope"
+            DIST_OPTS=(--dist=loadscope)
           fi
 
           # Add coverage flags if enabled
-          COVERAGE_FLAGS=""
-          if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
+          COVERAGE_FLAGS=()
+          if [[ "${ENABLE_COVERAGE_INPUT}" == "true" ]]; then
             echo "📊 Coverage collection enabled"
-            COVERAGE_FLAGS="--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report="
+            COVERAGE_FLAGS=(--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report=)
             export COVERAGE_FILE="${TEST_RESULTS_DIR}/.coverage"
             export PYTHONPATH="${CONTAINER_WORKSPACE}/components/src:${CONTAINER_WORKSPACE}/lib/bindings/python/src${PYTHONPATH:+:${PYTHONPATH}}"
           fi
 
-          PYTEST_CMD="python -m pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WORK_DIR}/pytest_temp -o cache_dir=${WORK_DIR}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${COVERAGE_FLAGS} ${{ inputs.pytest_extra_args }} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD=(
+            python -m pytest
+            "${PARALLEL_OPTS[@]}"
+            "${VRAM_OPTS[@]}"
+            "${DIST_OPTS[@]}"
+            --continue-on-collection-errors
+            -v
+            --tb=short
+            --basetemp="${WORK_DIR}/pytest_temp"
+            -o "cache_dir=${WORK_DIR}/.pytest_cache"
+            --junitxml="${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}"
+            --alluredir="${TEST_RESULTS_DIR}/allure-results"
+            --durations=10
+            "${COVERAGE_FLAGS[@]}"
+            "${PYTEST_EXTRA_ARGS[@]}"
+            -m "${PYTEST_MARKS_INPUT}"
+          )
         fi
 
-        echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
+        printf '▶️ Executing (cwd=%s):' "${CONTAINER_WORKSPACE}"
+        printf ' %q' "${PYTEST_CMD[@]}"
+        printf '\n'
 
         umask 0022
         cd "${CONTAINER_WORKSPACE}"
-        bash -c "${PYTEST_CMD}"
+        "${PYTEST_CMD[@]}"
 
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
         # Verify test results were written (only in normal mode)
-        if [[ "${{ inputs.dry_run }}" != "true" ]]; then
-          if [[ -f "${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}" ]]; then
-            echo "✅ Test results file found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
+        if [[ "${DRY_RUN_INPUT}" != "true" ]]; then
+          if [[ -f "${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}" ]]; then
+            echo "✅ Test results file found: ${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}"
           else
-            echo "⚠️  Test results file not found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
+            echo "⚠️  Test results file not found: ${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}"
           fi
         fi
 

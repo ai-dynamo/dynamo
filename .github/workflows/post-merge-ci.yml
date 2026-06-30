@@ -450,36 +450,28 @@ jobs:
     secrets: inherit
 
   kvbm-tests:
-    name: kvbm (${{ matrix.name }})
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [config, vllm-build]
     if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
     uses: ./.github/workflows/shared-test.yml
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: consolidator
-            pytest_markers: post_merge and h100 and kvbm and kvbm_consolidator and gpu_1
-          - name: determinism-cache-reset
-            pytest_markers: post_merge and h100 and kvbm and kvbm_determinism and gpu_1
-          - name: determinism-concurrency
-            pytest_markers: post_merge and h100 and kvbm_concurrency and kvbm_determinism and gpu_1
     with:
       dd_env: post-merge
       test_suite_name: kvbm
-      test_type: ${{ matrix.name }}
+      test_type: KVBM Test
+      # KVBM post-merge coverage currently targets the aws-dev-02 H100 cluster.
       amd_runner: aws-dev-02-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
-      container_workspace: /__w/dynamo/dynamo
       pytest_extra_args: tests/kvbm_integration
       hf_home: /models
       extra_test_env: |
         KVBM_MLA_BACKEND=FLASH_ATTN_MLA
       run_cpu_only_tests: false
       run_gpu_tests: true
-      gpu_test_markers: ${{ matrix.pytest_markers }}
+      gpu_test_markers: post_merge and h100 and kvbm and gpu_1
+      # Observed runtime is about 50 minutes when run sequentially:
+      # consolidator ~9m, cache reset ~13m, concurrency ~27m.
       gpu_test_timeout_minutes: 120
     secrets: inherit
 
