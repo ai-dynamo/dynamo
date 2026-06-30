@@ -1,0 +1,3 @@
+# RIVA NIM Python client used by the cascaded voice pipeline workers.
+# Pure-Python wheel; pinned for reproducible image builds.
+nvidia-riva-client==2.26.0
