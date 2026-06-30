@@ -21,3 +21,30 @@ def request_cache_salt(request: Mapping[str, Any]) -> Optional[str]:
             return cache_salt
 
     return None
+
+
+def stored_event_cache_salt(data: Mapping[str, Any]) -> Optional[str]:
+    """Extract one cache salt from a TRT-LLM stored-event payload.
+
+    TRT-LLM 1.3 serializes ``cache_salt`` on each item in ``data["blocks"]``.
+    Keep the parent-level lookup as a compatibility fallback, but fail closed
+    if an event combines blocks from different cache namespaces.
+    """
+    cache_salts: set[str] = set()
+
+    parent_cache_salt = data.get("cache_salt")
+    if parent_cache_salt is not None:
+        cache_salts.add(parent_cache_salt)
+
+    blocks = data.get("blocks") or []
+    for block in blocks:
+        if not isinstance(block, Mapping):
+            continue
+        block_cache_salt = block.get("cache_salt")
+        if block_cache_salt is not None:
+            cache_salts.add(block_cache_salt)
+
+    if len(cache_salts) > 1:
+        raise ValueError("stored KV event contains conflicting cache_salt values")
+
+    return next(iter(cache_salts), None)

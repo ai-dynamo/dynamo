@@ -386,10 +386,10 @@ def _stored_kv_event(cache_salt="tenant-a"):
         "data": {
             "type": "stored",
             "parent_hash": None,
-            "cache_salt": cache_salt,
             "blocks": [
                 {
                     "block_hash": 123,
+                    "cache_salt": cache_salt,
                     "tokens": [
                         {"token_id": 1},
                         {"token_id": 2},

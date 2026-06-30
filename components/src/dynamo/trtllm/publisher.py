@@ -37,6 +37,7 @@ from prometheus_client import CollectorRegistry
 
 from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import FpmDirectPublisher, KvEventPublisher, WorkerMetricsPublisher
+from dynamo.trtllm.utils.request_utils import stored_event_cache_salt
 
 logger = logging.getLogger(__name__)
 
@@ -871,7 +872,7 @@ class Publisher:
                     block_mm_infos.append(None)
 
             lora_name = data.get("lora_name")
-            cache_salt = data.get("cache_salt")
+            cache_salt = stored_event_cache_salt(data)
 
             logger.debug(
                 "Publishing stored KV event: engine_event_id=%s "
