@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -61,6 +62,8 @@ use crate::{
 use super::ModelManager;
 use crate::namespace::NamespaceFilter;
 
+const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Constructs the WorkerSet storage key as `{namespace}:{model_type}:{worker_type}`.
 ///
 /// Each `(namespace, model_type, worker_type)` combination gets its own
@@ -82,6 +85,44 @@ fn worker_set_key(
     let mt = model_type.as_vec().join("|");
     let wt = effective_worker_type(worker_type, model_type).as_str();
     format!("{}:{}:{}", namespace, mt, wt)
+}
+
+fn model_card_instance_id(instance: &DiscoveryInstance) -> anyhow::Result<ModelCardInstanceId> {
+    match instance {
+        DiscoveryInstance::Model {
+            namespace,
+            component,
+            endpoint,
+            instance_id,
+            model_suffix,
+            ..
+        } => Ok(ModelCardInstanceId {
+            namespace: namespace.clone(),
+            component: component.clone(),
+            endpoint: endpoint.clone(),
+            instance_id: *instance_id,
+            model_suffix: model_suffix.clone(),
+        }),
+        _ => anyhow::bail!("Unexpected discovery instance type (expected ModelCard)"),
+    }
+}
+
+/// A source card is fully represented locally only after both the per-instance
+/// card and the shared WorkerSet have been recorded. `handle_put` can save the
+/// card before later pipeline construction fails, so either check alone would
+/// allow a failed registration to escape reconciliation.
+fn is_registration_complete(
+    manager: &ModelManager,
+    mcid: &ModelCardInstanceId,
+    card: &ModelDeploymentCard,
+) -> bool {
+    let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
+    manager
+        .get_model_card(&mcid.to_path())
+        .is_some_and(|saved| saved.name() == card.name() && saved.mdcsum() == card.mdcsum())
+        && manager
+            .get_model(card.name())
+            .is_some_and(|model| model.has_worker_set(&ws_key))
 }
 
 fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
@@ -282,7 +323,30 @@ impl ModelWatcher {
         mut discovery_stream: DiscoveryStream,
         namespace_filter: NamespaceFilter,
     ) {
-        while let Some(result) = discovery_stream.next().await {
+        let mut reconciliation = tokio::time::interval(RECONCILIATION_INTERVAL);
+        reconciliation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // list_and_watch supplies the initial snapshot. Consume the immediate
+        // first tick so reconciliation begins after one complete interval.
+        reconciliation.tick().await;
+
+        loop {
+            let result = tokio::select! {
+                result = discovery_stream.next() => {
+                    let Some(result) = result else {
+                        break;
+                    };
+                    result
+                }
+                _ = reconciliation.tick() => {
+                    if let Err(err) = self.reconcile(&namespace_filter).await {
+                        tracing::warn!(
+                            error = format!("{err:#}"),
+                            "Frontend model registration reconciliation failed"
+                        );
+                    }
+                    continue;
+                }
+            };
             let event = match result {
                 Ok(event) => event,
                 Err(err) => {
@@ -462,6 +526,169 @@ impl ModelWatcher {
                 }
             }
         }
+    }
+
+    /// Compare the local frontend registry with a fresh discovery snapshot.
+    /// Missing or incomplete source cards are retried through `handle_put`; a
+    /// locally recorded card absent from the snapshot is removed through
+    /// `handle_delete`. The snapshot is sorted so repeated failures are logged
+    /// and retried in a deterministic order.
+    async fn reconcile(self: &Arc<Self>, namespace_filter: &NamespaceFilter) -> anyhow::Result<()> {
+        let mut instances = self.drt.discovery().list(DiscoveryQuery::AllModels).await?;
+        instances.sort_by_key(|instance| {
+            model_card_instance_id(instance)
+                .map(|mcid| mcid.to_path())
+                .unwrap_or_default()
+        });
+
+        let mut desired_keys = HashSet::with_capacity(instances.len());
+        let mut retry_count = 0usize;
+
+        for instance in instances {
+            let mcid = match model_card_instance_id(&instance) {
+                Ok(mcid) => mcid,
+                Err(err) => {
+                    tracing::error!(
+                        error = format!("{err:#}"),
+                        "Unexpected discovery entry during model reconciliation"
+                    );
+                    continue;
+                }
+            };
+            if !namespace_filter.matches(&mcid.namespace) {
+                continue;
+            }
+
+            // Record the source key before deserializing the card. A malformed
+            // source entry must not cause a valid local entry with the same key
+            // to be treated as stale and deleted.
+            desired_keys.insert(mcid.to_path());
+
+            let mut card = match instance.deserialize_model::<ModelDeploymentCard>() {
+                Ok(card) => card,
+                Err(err) => {
+                    tracing::error!(
+                        %err,
+                        instance_id = mcid.instance_id,
+                        "Failed to deserialize model card during reconciliation"
+                    );
+                    continue;
+                }
+            };
+            self.apply_tokenizer_backend_override(&mut card);
+
+            if !is_registration_complete(&self.manager, &mcid, &card)
+                && self.retry_model_registration(mcid, card).await
+            {
+                retry_count += 1;
+            }
+        }
+
+        let mut stale_keys = Vec::new();
+        for key in self.manager.get_model_card_keys() {
+            let mcid = match ModelCardInstanceId::from_path(&key) {
+                Ok(mcid) => mcid,
+                Err(err) => {
+                    tracing::warn!(%err, key, "Ignoring malformed local model-card key");
+                    continue;
+                }
+            };
+            if namespace_filter.matches(&mcid.namespace) && !desired_keys.contains(&key) {
+                stale_keys.push(key);
+            }
+        }
+        stale_keys.sort();
+
+        for key in &stale_keys {
+            let mcid = ModelCardInstanceId::from_path(key)?;
+            self.handle_delete(&mcid, namespace_filter).await?;
+        }
+
+        tracing::debug!(
+            expected_model_cards = desired_keys.len(),
+            retried_model_cards = retry_count,
+            removed_stale_model_cards = stale_keys.len(),
+            "Completed frontend model registration reconciliation"
+        );
+        Ok(())
+    }
+
+    /// Start one reconciliation retry unless the original event-driven
+    /// registration for this instance is still running. Completed failed tasks
+    /// remain in `pending_puts`, so they are replaced here by the retry task.
+    async fn retry_model_registration(
+        self: &Arc<Self>,
+        mcid: ModelCardInstanceId,
+        mut card: ModelDeploymentCard,
+    ) -> bool {
+        let instance_key = mcid.to_path();
+        if self
+            .pending_puts
+            .get(&instance_key)
+            .is_some_and(|handle| !handle.is_finished())
+        {
+            return false;
+        }
+
+        let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
+        if let Some(model) = self.manager.get_model(card.name())
+            && !model.is_checksum_compatible(&ws_key, card.mdcsum())
+        {
+            tracing::error!(
+                model_name = card.name(),
+                namespace = mcid.namespace,
+                new_checksum = card.mdcsum(),
+                "Reconciliation found a model-card checksum that does not match the existing WorkerSet. \
+                 Drain all old workers in this namespace before deploying a new version."
+            );
+            return false;
+        }
+
+        {
+            use crate::kv_router::protocols::WorkerWithDpRank;
+            let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+            if let Some(adapter_name) =
+                seed_lora_state_from_card(self.manager.lora_state_tracker(), worker, &card)
+            {
+                self.pending_lora_adds
+                    .insert(instance_key.clone(), adapter_name);
+            }
+        }
+
+        tracing::warn!(
+            model_name = card.name(),
+            namespace = mcid.namespace,
+            instance_key,
+            "Retrying incomplete frontend model registration from discovery snapshot"
+        );
+
+        let watcher = Arc::clone(self);
+        let handle = tokio::spawn(async move {
+            match watcher.handle_put(&mcid, &mut card).await {
+                Ok(()) => {
+                    tracing::info!(
+                        model_name = card.name(),
+                        namespace = mcid.namespace,
+                        "Reconciled model registration"
+                    );
+                    watcher.notify_on_model.notify_waiters();
+                }
+                Err(err) => {
+                    tracing::error!(
+                        model_name = card.name(),
+                        namespace = mcid.namespace,
+                        error = format!("{err:#}"),
+                        "Model registration reconciliation retry failed"
+                    );
+                }
+            }
+        });
+
+        if let Some((_, old_handle)) = self.pending_puts.remove(&instance_key) {
+            old_handle.abort();
+        }
+        self.pending_puts.insert(instance_key, handle);
+        true
     }
 
     /// Handle a worker removal. Cleans up per-namespace WorkerSets and the Model itself
@@ -1529,6 +1756,46 @@ mod tests {
         assert_eq!(adapter.as_deref(), Some("adapter-x"));
         assert!(st.is_loaded("adapter-x", &worker));
         assert_eq!(st.total_lora_slots(), 2);
+    }
+
+    #[test]
+    fn registration_is_complete_only_after_card_and_worker_set_exist() {
+        let manager = ModelManager::new();
+        let mcid = ModelCardInstanceId {
+            namespace: "deployment-a".to_string(),
+            component: "backend".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 7,
+            model_suffix: None,
+        };
+        let mut card = ModelDeploymentCard::with_name_only("llama");
+        card.model_type = ModelType::Chat;
+        card.worker_type = Some(WorkerType::Aggregated);
+
+        assert!(!is_registration_complete(&manager, &mcid, &card));
+
+        // `do_worker_set_registration` saves the card before all pipeline
+        // construction has completed. A failure after this point must remain a
+        // reconciliation candidate.
+        manager
+            .save_model_card(&mcid.to_path(), card.clone())
+            .unwrap();
+        assert!(!is_registration_complete(&manager, &mcid, &card));
+
+        let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
+        manager.add_worker_set(
+            card.name(),
+            &ws_key,
+            WorkerSet::new(
+                mcid.namespace.clone(),
+                card.mdcsum().to_string(),
+                card.clone(),
+            ),
+        );
+        assert!(is_registration_complete(&manager, &mcid, &card));
+
+        manager.remove_model_card(&mcid.to_path());
+        assert!(!is_registration_complete(&manager, &mcid, &card));
     }
 
     #[test]
