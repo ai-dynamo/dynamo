@@ -226,35 +226,6 @@ impl PodDiscovery {
     }
 }
 
-/// Return `true` iff the pod is `Ready` and not terminating. Mirrors llm-d's
-/// `IsPodReady`: a pod with a deletion timestamp is excluded even if it still
-/// reports `Ready=True`, so draining pods stop receiving traffic promptly.
-fn pod_is_ready(pod: &Pod) -> bool {
-    if pod.metadata.deletion_timestamp.is_some() {
-        return false;
-    }
-    pod.status
-        .as_ref()
-        .and_then(|s| s.conditions.as_ref())
-        .map(|conds| {
-            conds
-                .iter()
-                .any(|c| c.type_ == "Ready" && c.status == "True")
-        })
-        .unwrap_or(false)
-}
-
-/// Return `true` iff the pod carries every `match_labels` key with the equal
-/// value (equality-based selector, matching `InferencePool.spec.selector`).
-fn pod_matches(pod: &Pod, match_labels: &BTreeMap<String, String>) -> bool {
-    let Some(labels) = pod.metadata.labels.as_ref() else {
-        return match_labels.is_empty();
-    };
-    match_labels
-        .iter()
-        .all(|(k, v)| labels.get(k).map(|pv| pv == v).unwrap_or(false))
-}
-
 fn strip_scheme(endpoint: &str) -> &str {
     endpoint
         .strip_prefix("http://")
@@ -285,6 +256,35 @@ fn build_snapshot(
         }
     }
     Snapshot { workers, endpoints }
+}
+
+/// Return `true` iff the pod is `Ready` and not terminating. Mirrors llm-d's
+/// `IsPodReady`: a pod with a deletion timestamp is excluded even if it still
+/// reports `Ready=True`, so draining pods stop receiving traffic promptly.
+fn pod_is_ready(pod: &Pod) -> bool {
+    if pod.metadata.deletion_timestamp.is_some() {
+        return false;
+    }
+    pod.status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .map(|conds| {
+            conds
+                .iter()
+                .any(|c| c.type_ == "Ready" && c.status == "True")
+        })
+        .unwrap_or(false)
+}
+
+/// Return `true` iff the pod carries every `match_labels` key with the equal
+/// value (equality-based selector, matching `InferencePool.spec.selector`).
+fn pod_matches(pod: &Pod, match_labels: &BTreeMap<String, String>) -> bool {
+    let Some(labels) = pod.metadata.labels.as_ref() else {
+        return match_labels.is_empty();
+    };
+    match_labels
+        .iter()
+        .all(|(k, v)| labels.get(k).map(|pv| pv == v).unwrap_or(false))
 }
 
 /// Build a [`RawWorker`] from a pod, or `None` if it is not `Ready`, not
