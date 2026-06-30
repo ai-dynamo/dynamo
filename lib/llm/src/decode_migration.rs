@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Transactional decode-to-decode request migration.
+//! Request-local decode-to-decode migration.
 //!
 //! Destination discovery and reservation are fail-open while the source is still
 //! decoding. Once source quiescence starts, the first-pass protocol is deliberately
@@ -49,7 +49,7 @@ type DirectBackend = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>
 type ControlClient = PushRouter<Value, Annotated<Value>>;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
-const COMMIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const QUIESCE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Copy)]
 enum ControlEndpoint {
@@ -206,10 +206,7 @@ struct ControlResponse {
     prompt_len: Option<usize>,
     committed_len: Option<usize>,
     logical_len: Option<usize>,
-    committed_input_ids: Option<Vec<TokenIdType>>,
-    pending_input_ids: Option<Vec<TokenIdType>>,
     unforwarded_committed_output_ids: Option<Vec<TokenIdType>>,
-    transfer_status: Option<String>,
 }
 
 struct PreparedDestination {
@@ -355,7 +352,6 @@ async fn prepare_destination(
     reserved_input_ids.resize(reserved_committed_len, 0);
     let mut reserved_request = build_destination_request(
         &request,
-        reserved_input_ids,
         BootstrapInfo {
             bootstrap_host: source_host.clone(),
             bootstrap_port: source_port,
@@ -370,6 +366,7 @@ async fn prepare_destination(
         reserved_output_tokens,
         destination_worker,
     );
+    reserved_request.token_ids = reserved_input_ids;
     reserved_request.decode_migration = None;
     let reserved_request = serde_json::to_value(reserved_request)
         .context("failed to serialize reserved destination request")?;
@@ -390,7 +387,7 @@ async fn prepare_destination(
     // Starting them together keeps setup ahead of short or heavily batched
     // source stages. A response loss may mean the source was prepared, so the
     // cleanup path must cancel it from this point onward.
-    cleanup.mark_source_control_started();
+    cleanup.mark_source_prepared();
     let (source_ready, started) = tokio::join!(
         control.call(
             ControlEndpoint::Sync,
@@ -771,7 +768,6 @@ impl
 
                 // Dynamo owns trigger detection. SGLang only receives a generic
                 // request to quiesce at the latest output frontier Dynamo observed.
-                cleanup.mark_source_control_started();
                 let quiesce_deadline = tokio::time::Instant::now() + CONTROL_TIMEOUT;
                 let quiesce_started = tokio::time::Instant::now();
                 let quiesced = loop {
@@ -796,7 +792,7 @@ impl
                                 );
                                 return;
                             }
-                            tokio::time::sleep(COMMIT_POLL_INTERVAL).await;
+                            tokio::time::sleep(QUIESCE_POLL_INTERVAL).await;
                         }
                         Ok(response) if matches!(response.status.as_str(), "finished" | "not_found") => {
                             let _ = control.call(
@@ -814,6 +810,7 @@ impl
                             continue 'request_stream;
                         }
                         Ok(response) if response.success && response.status == "quiesced" => {
+                            cleanup.mark_source_quiesced();
                             break response;
                         }
                         Ok(response) => {
@@ -833,18 +830,25 @@ impl
                         }
                     }
                 };
-                let committed_input_ids = match quiesced.committed_input_ids.clone() {
-                    Some(ids) => ids,
-                    None => {
-                        cleanup.terminate().await;
-                        yield Annotated::from_error("source quiesce omitted committed_input_ids");
-                        return;
-                    }
-                };
-                let pending_input_ids = quiesced.pending_input_ids.clone().unwrap_or_default();
                 let prompt_len = quiesced.prompt_len.unwrap_or(original_request.token_ids.len());
-                let committed_len = quiesced.committed_len.unwrap_or(committed_input_ids.len());
-                let logical_len = quiesced.logical_len.unwrap_or(committed_len + pending_input_ids.len());
+                let Some(committed_len) = quiesced.committed_len else {
+                    cleanup.terminate().await;
+                    yield Annotated::from_error("source quiesce omitted committed_len");
+                    return;
+                };
+                let Some(logical_len) = quiesced.logical_len else {
+                    cleanup.terminate().await;
+                    yield Annotated::from_error("source quiesce omitted logical_len");
+                    return;
+                };
+                let pending_tokens = logical_len.saturating_sub(committed_len);
+                if pending_tokens != 1 {
+                    cleanup.terminate().await;
+                    yield Annotated::from_error(format!(
+                        "source quiesce returned {pending_tokens} pending tokens; expected one"
+                    ));
+                    return;
+                }
                 let unforwarded = quiesced
                     .unforwarded_committed_output_ids
                     .clone()
@@ -865,7 +869,6 @@ impl
 
                 let mut destination_request = build_destination_request(
                     &original_request,
-                    committed_input_ids.clone(),
                     BootstrapInfo {
                         bootstrap_host: source_host,
                         bootstrap_port: source_port,
@@ -885,7 +888,7 @@ impl
                 // now sends the exact token frontier in the same auxiliary transfer
                 // as KV, and transfer completion binds the destination request. This
                 // avoids a second scheduler control round trip on the handoff path.
-                duplicate_tokens = duplicate_tokens.saturating_sub(pending_input_ids.len());
+                duplicate_tokens = duplicate_tokens.saturating_sub(pending_tokens);
 
                 if !unforwarded.is_empty() {
                     yield Annotated::from_data(LLMEngineOutput {
@@ -949,10 +952,9 @@ impl
                     if !destination_ready {
                         // A decode result proves that SGLang has admitted the
                         // transferred KV and started the destination request.
-                        // Source cleanup is intentionally detached from the
-                        // client stream: its pending-commit response retains
-                        // source KV until the scheduler observes NIXL success.
-                        cleanup.start_source_commit();
+                        // NIXL completion owns source cleanup. Once destination
+                        // decode starts, no control-plane work remains.
+                        cleanup.disarm();
                         destination_ready = true;
                         tracing::info!(
                             request_id = %rid,
@@ -1061,14 +1063,12 @@ fn trigger_matches(
 
 fn build_destination_request(
     original: &PreprocessedRequest,
-    committed_input_ids: Vec<TokenIdType>,
     bootstrap_info: BootstrapInfo,
     state: DecodeMigrationRequestState,
     committed_output_tokens: usize,
     worker: WorkerWithDpRank,
 ) -> PreprocessedRequest {
     let mut request = original.clone();
-    request.token_ids = committed_input_ids;
     request.prompt_embeds = None;
     request.multi_modal_data = None;
     request.mm_routing_info = None;
@@ -1143,7 +1143,14 @@ fn normalize_migrated_usage(
     usage.completion_tokens_details = None;
 }
 
-struct MigrationCleanup {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceCleanupPhase {
+    NotPrepared,
+    Prepared,
+    Quiesced,
+}
+
+struct MigrationCleanupPlan {
     control: Arc<dyn MigrationControl>,
     rid: String,
     migration_id: String,
@@ -1151,8 +1158,45 @@ struct MigrationCleanup {
     destination_worker: u64,
     source_dp_rank: u32,
     destination_dp_rank: u32,
-    active: bool,
-    source_may_need_cancel: bool,
+    source_phase: SourceCleanupPhase,
+}
+
+impl MigrationCleanupPlan {
+    async fn run(self) {
+        let _ = self
+            .control
+            .call(
+                ControlEndpoint::Finalize,
+                self.destination_worker,
+                json!({
+                    "rid": self.rid,
+                    "migration_id": self.migration_id,
+                    "side": "destination",
+                    "action": "abort",
+                    "destination_dp_rank": self.destination_dp_rank,
+                }),
+            )
+            .await;
+        if self.source_phase == SourceCleanupPhase::Prepared {
+            let _ = self
+                .control
+                .call(
+                    ControlEndpoint::Finalize,
+                    self.source_worker,
+                    json!({
+                        "rid": self.rid,
+                        "migration_id": self.migration_id,
+                        "action": "cancel",
+                        "source_dp_rank": self.source_dp_rank,
+                    }),
+                )
+                .await;
+        }
+    }
+}
+
+struct MigrationCleanup {
+    plan: Option<MigrationCleanupPlan>,
 }
 
 impl MigrationCleanup {
@@ -1166,202 +1210,46 @@ impl MigrationCleanup {
         destination_dp_rank: u32,
     ) -> Self {
         Self {
-            control,
-            rid,
-            migration_id,
-            source_worker,
-            destination_worker,
-            source_dp_rank,
-            destination_dp_rank,
-            active: true,
-            source_may_need_cancel: false,
+            plan: Some(MigrationCleanupPlan {
+                control,
+                rid,
+                migration_id,
+                source_worker,
+                destination_worker,
+                source_dp_rank,
+                destination_dp_rank,
+                source_phase: SourceCleanupPhase::NotPrepared,
+            }),
         }
     }
 
     fn disarm(&mut self) {
-        self.active = false;
+        self.plan = None;
     }
 
-    fn mark_source_control_started(&mut self) {
-        self.source_may_need_cancel = true;
-    }
-
-    fn start_source_commit(&mut self) {
-        self.active = false;
-        SourceCommitCleanup {
-            control: self.control.clone(),
-            rid: self.rid.clone(),
-            migration_id: self.migration_id.clone(),
-            source_worker: self.source_worker,
-            source_dp_rank: self.source_dp_rank,
+    fn mark_source_prepared(&mut self) {
+        if let Some(plan) = self.plan.as_mut() {
+            plan.source_phase = SourceCleanupPhase::Prepared;
         }
-        .spawn();
+    }
+
+    fn mark_source_quiesced(&mut self) {
+        if let Some(plan) = self.plan.as_mut() {
+            plan.source_phase = SourceCleanupPhase::Quiesced;
+        }
     }
 
     async fn terminate(&mut self) {
-        if !self.active {
-            return;
+        if let Some(plan) = self.plan.take() {
+            plan.run().await;
         }
-        let _ = self
-            .control
-            .call(
-                ControlEndpoint::Finalize,
-                self.destination_worker,
-                json!({
-                    "rid": &self.rid,
-                    "migration_id": &self.migration_id,
-                    "side": "destination",
-                    "action": "abort",
-                    "destination_dp_rank": self.destination_dp_rank,
-                }),
-            )
-            .await;
-        if self.source_may_need_cancel {
-            let _ = self
-                .control
-                .call(
-                    ControlEndpoint::Finalize,
-                    self.source_worker,
-                    json!({
-                        "rid": &self.rid,
-                        "migration_id": &self.migration_id,
-                        "action": "cancel",
-                        "source_dp_rank": self.source_dp_rank,
-                    }),
-                )
-                .await;
-        }
-        self.disarm();
     }
 }
 
 impl Drop for MigrationCleanup {
     fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        let control = self.control.clone();
-        let rid = self.rid.clone();
-        let migration_id = self.migration_id.clone();
-        let source_worker = self.source_worker;
-        let destination_worker = self.destination_worker;
-        let source_dp_rank = self.source_dp_rank;
-        let destination_dp_rank = self.destination_dp_rank;
-        let source_may_need_cancel = self.source_may_need_cancel;
-        tokio::spawn(async move {
-            let _ = control
-                .call(
-                    ControlEndpoint::Finalize,
-                    destination_worker,
-                    json!({
-                        "rid": rid,
-                        "migration_id": migration_id,
-                        "side": "destination",
-                        "action": "abort",
-                        "destination_dp_rank": destination_dp_rank,
-                    }),
-                )
-                .await;
-            if source_may_need_cancel {
-                let _ = control
-                    .call(
-                        ControlEndpoint::Finalize,
-                        source_worker,
-                        json!({
-                            "rid": rid,
-                            "migration_id": migration_id,
-                            "action": "cancel",
-                            "source_dp_rank": source_dp_rank,
-                        }),
-                    )
-                    .await;
-            }
-        });
-    }
-}
-
-struct SourceCommitCleanup {
-    control: Arc<dyn MigrationControl>,
-    rid: String,
-    migration_id: String,
-    source_worker: u64,
-    source_dp_rank: u32,
-}
-
-impl SourceCommitCleanup {
-    fn spawn(self) {
-        tokio::spawn(async move {
-            self.run().await;
-        });
-    }
-
-    async fn run(self) {
-        let deadline = tokio::time::Instant::now() + CONTROL_TIMEOUT;
-        let mut retry_delay = COMMIT_POLL_INTERVAL;
-        loop {
-            let response = self
-                .control
-                .call(
-                    ControlEndpoint::Finalize,
-                    self.source_worker,
-                    json!({
-                        "rid": self.rid,
-                        "migration_id": self.migration_id,
-                        "action": "commit",
-                        "source_dp_rank": self.source_dp_rank,
-                    }),
-                )
-                .await;
-            match response {
-                Ok(response) if response.success => {
-                    tracing::info!(
-                        request_id = %self.rid,
-                        migration_id = %self.migration_id,
-                        "decode migration source cleanup completed"
-                    );
-                    return;
-                }
-                Ok(response)
-                    if matches!(
-                        response.transfer_status.as_deref(),
-                        Some("bootstrapping" | "transferring")
-                    ) && tokio::time::Instant::now() < deadline =>
-                {
-                    tracing::debug!(
-                        request_id = %self.rid,
-                        migration_id = %self.migration_id,
-                        transfer_status = ?response.transfer_status,
-                        "decode migration source cleanup is pending"
-                    );
-                }
-                Ok(response) => {
-                    tracing::error!(
-                        request_id = %self.rid,
-                        migration_id = %self.migration_id,
-                        status = %response.status,
-                        error = ?response.error,
-                        "decode migration source cleanup failed after destination handoff"
-                    );
-                    return;
-                }
-                Err(error) if tokio::time::Instant::now() < deadline => {
-                    tracing::warn!(
-                        request_id = %self.rid,
-                        migration_id = %self.migration_id,
-                        "decode migration source cleanup request failed; retrying: {error:#}"
-                    );
-                }
-                Err(error) => {
-                    tracing::error!(
-                        request_id = %self.rid,
-                        migration_id = %self.migration_id,
-                        "decode migration source cleanup exhausted retries: {error:#}"
-                    );
-                    return;
-                }
-            }
-            tokio::time::sleep(retry_delay).await;
-            retry_delay = retry_delay.saturating_mul(2).min(Duration::from_millis(50));
+        if let Some(plan) = self.plan.take() {
+            tokio::spawn(plan.run());
         }
     }
 }
@@ -1478,8 +1366,6 @@ mod tests {
         DestinationReserveTransportFailure,
         DestinationBootstrapFailure,
         DestinationDispatchFailure,
-        CommitFailure,
-        DelayedCommit,
         EmptyFirstDestinationChunk,
         FinishAtTrigger,
         FinishDuringQuiesce,
@@ -1495,7 +1381,6 @@ mod tests {
     #[derive(Default)]
     struct ScenarioState {
         events: std::sync::Mutex<Vec<String>>,
-        source_commit_calls: std::sync::atomic::AtomicUsize,
         destination_generate_calls: std::sync::atomic::AtomicUsize,
     }
 
@@ -1564,9 +1449,7 @@ mod tests {
                     );
                     self.state.record("source:generate");
                     match self.scenario {
-                        Scenario::SuccessCoalesced
-                        | Scenario::DelayedCommit
-                        | Scenario::EmptyFirstDestinationChunk => vec![
+                        Scenario::SuccessCoalesced | Scenario::EmptyFirstDestinationChunk => vec![
                             output(vec![10, 11, 12], None),
                             output(vec![99], Some(crate::protocols::common::FinishReason::Stop)),
                         ],
@@ -1577,7 +1460,6 @@ mod tests {
                         | Scenario::DestinationReserveTransportFailure
                         | Scenario::DestinationBootstrapFailure
                         | Scenario::DestinationDispatchFailure
-                        | Scenario::CommitFailure
                         | Scenario::CancelAfterArm => vec![
                             output(vec![10], None),
                             output(
@@ -1624,7 +1506,7 @@ mod tests {
                         Scenario::RollbackSyntheticTail => {
                             vec![Annotated::from_error("injected destination failure")]
                         }
-                        Scenario::SuccessCoalesced | Scenario::DelayedCommit => vec![
+                        Scenario::SuccessCoalesced => vec![
                             output(vec![13], None),
                             output(vec![14], Some(crate::protocols::common::FinishReason::Stop)),
                         ],
@@ -1632,9 +1514,7 @@ mod tests {
                             output(vec![], None),
                             output(vec![13], Some(crate::protocols::common::FinishReason::Stop)),
                         ],
-                        Scenario::CommitFailure | Scenario::CancelAfterArm => {
-                            vec![output(vec![13], None)]
-                        }
+                        Scenario::CancelAfterArm => vec![output(vec![13], None)],
                         Scenario::QuiesceTransportFailure
                         | Scenario::CancelDuringReserve
                         | Scenario::CancelDuringQuiesce
@@ -1730,9 +1610,7 @@ mod tests {
                     json!({"success": false, "status": "finished"})
                 } else if matches!(
                     self.scenario,
-                    Scenario::SuccessCoalesced
-                        | Scenario::DelayedCommit
-                        | Scenario::EmptyFirstDestinationChunk
+                    Scenario::SuccessCoalesced | Scenario::EmptyFirstDestinationChunk
                 ) {
                     json!({
                         "success": true,
@@ -1741,8 +1619,6 @@ mod tests {
                         "prompt_len": 3,
                         "committed_len": 5,
                         "logical_len": 6,
-                        "committed_input_ids": [1, 2, 3, 10, 11],
-                        "pending_input_ids": [12],
                         "unforwarded_committed_output_ids": [],
                     })
                 } else {
@@ -1753,8 +1629,6 @@ mod tests {
                         "prompt_len": 3,
                         "committed_len": 5,
                         "logical_len": 6,
-                        "committed_input_ids": [1, 2, 3, 10, 11],
-                        "pending_input_ids": [12],
                         "unforwarded_committed_output_ids": [11],
                     })
                 }
@@ -1789,9 +1663,7 @@ mod tests {
                     "bootstrap_room": 777,
                     "destination_dp_rank": DESTINATION_DP_RANK,
                 })
-            } else if request.get("destination_request").is_some()
-                && request.get("source_state").is_none()
-            {
+            } else if request.get("destination_request").is_some() {
                 assert!(matches!(endpoint, ControlEndpoint::Prepare));
                 assert_eq!(instance_id, 2);
                 assert_control_rank(&request, "destination_dp_rank", DESTINATION_DP_RANK);
@@ -1824,41 +1696,8 @@ mod tests {
                 assert_eq!(instance_id, 1);
                 assert_control_rank(&request, "source_dp_rank", SOURCE_DP_RANK);
                 self.state.record(format!("source:{action}"));
-                if action == "commit" && self.scenario == Scenario::CommitFailure {
-                    self.state
-                        .source_commit_calls
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    json!({
-                        "success": false,
-                        "status": "failed",
-                        "transfer_status": "failed",
-                    })
-                } else if action == "commit" && self.scenario == Scenario::DelayedCommit {
-                    self.state
-                        .source_commit_calls
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    self.state.record("source:commit-start");
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    self.state.record("source:commit-complete");
-                    json!({"success": true, "status": action})
-                } else if action == "commit"
-                    && self
-                        .state
-                        .source_commit_calls
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                        == 0
-                {
-                    json!({
-                        "success": false,
-                        "status": "prepared",
-                        "transfer_status": "transferring",
-                    })
-                } else {
-                    if action == "commit" {
-                        self.state.record("source:commit-complete");
-                    }
-                    json!({"success": true, "status": action})
-                }
+                assert_eq!(action, "cancel");
+                json!({"success": true, "status": action})
             } else {
                 panic!("unexpected control request: {request}")
             };
@@ -2021,47 +1860,8 @@ mod tests {
         let (tokens, errors) = collect_tokens(&harness, 6).await;
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(tokens, vec![10, 11, 12, 13, 14]);
-        wait_for_event(&harness.state, "source:commit-complete").await;
         let events = harness.state.events();
         assert!(events.contains(&"source:quiesce".to_string()));
-        assert_eq!(
-            harness
-                .state
-                .source_commit_calls
-                .load(std::sync::atomic::Ordering::SeqCst),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn integration_splices_destination_before_delayed_source_cleanup() {
-        let harness = integration_harness(Scenario::DelayedCommit);
-        let mut stream = harness
-            .operator
-            .generate(migration_request(6), harness.source.clone())
-            .await
-            .unwrap();
-        assert_eq!(
-            stream.next().await.unwrap().data.unwrap().token_ids,
-            vec![10, 11, 12]
-        );
-
-        let destination_item = tokio::time::timeout(Duration::from_millis(50), stream.next())
-            .await
-            .expect("destination output was blocked on source cleanup")
-            .unwrap();
-        assert_eq!(destination_item.data.unwrap().token_ids, vec![13]);
-        wait_for_event(&harness.state, "source:commit-start").await;
-        assert!(
-            !harness
-                .state
-                .events()
-                .contains(&"source:commit-complete".to_string())
-        );
-
-        drop(stream);
-        wait_for_event(&harness.state, "source:commit-complete").await;
-        let events = harness.state.events();
         assert!(!events.contains(&"source:cancel".to_string()));
     }
 
@@ -2071,7 +1871,6 @@ mod tests {
         let (tokens, errors) = collect_tokens(&harness, 6).await;
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(tokens, vec![10, 11, 12, 13]);
-        wait_for_event(&harness.state, "source:commit-complete").await;
     }
 
     #[tokio::test]
@@ -2082,7 +1881,7 @@ mod tests {
         assert_eq!(tokens, vec![10, 11]);
         let events = harness.state.events();
         assert!(events.contains(&"destination:abort".to_string()));
-        assert!(events.contains(&"source:cancel".to_string()));
+        assert!(!events.contains(&"source:cancel".to_string()));
     }
 
     async fn drop_stream_while_control_is_pending(scenario: Scenario) -> Vec<String> {
@@ -2204,30 +2003,11 @@ mod tests {
         assert_eq!(tokens, vec![10, 11]);
         let events = harness.state.events();
         assert!(events.contains(&"destination:abort".to_string()));
-        assert!(events.contains(&"source:cancel".to_string()));
-        assert_eq!(
-            harness
-                .state
-                .destination_generate_calls
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn integration_source_commit_failure_does_not_revoke_destination() {
-        let harness = integration_harness(Scenario::CommitFailure);
-        let (tokens, errors) = collect_tokens(&harness, 4).await;
-        assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(tokens, vec![10, 11, 13]);
-        wait_for_event(&harness.state, "source:commit").await;
-        let events = harness.state.events();
-        assert!(!events.contains(&"destination:abort".to_string()));
         assert!(!events.contains(&"source:cancel".to_string()));
         assert_eq!(
             harness
                 .state
-                .source_commit_calls
+                .destination_generate_calls
                 .load(std::sync::atomic::Ordering::SeqCst),
             1
         );
@@ -2274,7 +2054,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn integration_stream_drop_cancels_quiesced_source_and_destination() {
+    async fn integration_stream_drop_aborts_destination_after_source_quiesce() {
         let harness = integration_harness(Scenario::CancelAfterArm);
         let mut stream = harness
             .operator
@@ -2293,9 +2073,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let events = harness.state.events();
-                if events.contains(&"destination:abort".to_string())
-                    && events.contains(&"source:cancel".to_string())
-                {
+                if events.contains(&"destination:abort".to_string()) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2303,6 +2081,12 @@ mod tests {
         })
         .await
         .unwrap();
+        assert!(
+            !harness
+                .state
+                .events()
+                .contains(&"source:cancel".to_string())
+        );
     }
 
     #[test]
@@ -2326,7 +2110,6 @@ mod tests {
         });
         let migrated = build_destination_request(
             &request,
-            vec![1, 2, 3, 4, 5, 6],
             BootstrapInfo {
                 bootstrap_host: "127.0.0.1".into(),
                 bootstrap_port: 1234,

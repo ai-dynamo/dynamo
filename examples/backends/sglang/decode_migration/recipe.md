@@ -260,7 +260,7 @@ Run the stdlib-only open-loop client from the SGLang checkout in a benchmark
 pod or operator shell that can reach the frontend Service:
 
 ```bash
-python3 benchmark/decode_migration/static_decode_pareto.py \
+python3 examples/backends/sglang/decode_migration/static_decode_pareto.py \
   --base-url http://dynamo-frontend:8000 \
   --model deepseek-ai/DeepSeek-V2-Lite \
   --mode migration \

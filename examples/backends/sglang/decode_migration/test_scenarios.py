@@ -246,6 +246,9 @@ def main() -> None:
     migration_policy = migration_nvext(migration_sequence_length)
 
     wait_ready(args.base_url, args.model)
+    # Compile first-use kernels before exercising control-plane deadlines.
+    completion(args.base_url, args.model, 1, source_nvext())
+    completion(args.base_url, args.model, 1, destination_nvext())
 
     # A request that finishes before the trigger must remain on the source.
     frontend_before = log_text(args.log_dir, "frontend.log")
@@ -327,7 +330,11 @@ def main() -> None:
         "decode migration destination handoff started",
     )
     wait_for_log(args.log_dir, "fast.log", "Decode migration transfer completed")
-    wait_for_log(args.log_dir, "slow.log", "Bound decode migration destination")
+    wait_for_log(
+        args.log_dir,
+        "slow.log",
+        "Attached generate stream to prepared decode migration",
+    )
 
     near_boundary_baseline = completion(
         args.base_url,

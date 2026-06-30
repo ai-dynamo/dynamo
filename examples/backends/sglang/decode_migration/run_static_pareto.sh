@@ -4,9 +4,7 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-DYNAMO_ROOT=$(cd "$HERE/../../../.." && pwd)
-SGLANG_ROOT=${SGLANG_ROOT:-$(cd "$DYNAMO_ROOT/../sglang" && pwd)}
-CLIENT=${CLIENT:-$SGLANG_ROOT/benchmark/decode_migration/static_decode_pareto.py}
+CLIENT=${CLIENT:-$HERE/static_decode_pareto.py}
 BASE_URL=${BASE_URL:-http://127.0.0.1:18000}
 MODEL=${MODEL:-deepseek-ai/DeepSeek-V2-Lite}
 RESULT_DIR=${RESULT_DIR:-/tmp/decode-migration-pareto}

@@ -379,6 +379,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if reservation is not None:
                     decode = reservation.pop("decode_stream", None)
                     first_item_task = reservation.pop("first_item_task", None)
+                    if decode is not None:
+                        reservation["status"] = "attached"
         if decode is not None:
             logging.info(
                 "Attached generate stream to prepared decode migration "
@@ -598,13 +600,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "error": "migration_id is already bound to another request",
                 }
 
-            source_state = request.get("source_state")
             destination_request = request.get("destination_request")
             if (
                 response is None
                 and isinstance(destination_request, dict)
                 and "decode_stream" not in existing
-                and existing["status"] not in ("ready", "active")
+                and existing["status"] != "attached"
             ):
                 bootstrap_info = destination_request["bootstrap_info"]
                 sampling_params = self._build_sampling_params(destination_request)
@@ -669,75 +670,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         existing["bootstrap_room"],
                     )
 
-            if (
-                response is None
-                and source_state is not None
-                and existing["status"] not in ("ready", "active")
-            ):
-                if not isinstance(destination_request, dict):
-                    response = {
-                        "migration_id": migration_id,
-                        "rid": existing["rid"],
-                        "success": False,
-                        "status": "error",
-                        "error": "destination_request is required when binding",
-                    }
-                elif "decode_stream" not in existing:
-                    response = {
-                        "migration_id": migration_id,
-                        "rid": existing["rid"],
-                        "success": False,
-                        "status": "error",
-                        "error": "destination bootstrap is not active",
-                    }
-                elif existing["status"] not in ("ready", "active"):
-                    from sglang.srt.managers.io_struct import (
-                        BindDecodeMigrationReqInput,
-                    )
-
-                    sampling_params = self._build_sampling_params(destination_request)
-                    bind = BindDecodeMigrationReqInput(
-                        rid=existing["rid"],
-                        migration_id=migration_id,
-                        bootstrap_room=existing["bootstrap_room"],
-                        committed_input_ids=list(
-                            source_state.get("committed_input_ids") or []
-                        ),
-                        pending_input_ids=list(
-                            source_state.get("pending_input_ids") or []
-                        ),
-                        committed_len=int(source_state.get("committed_len") or 0),
-                        logical_len=int(source_state.get("logical_len") or 0),
-                        max_new_tokens=sampling_params.get("max_new_tokens"),
-                        min_new_tokens=sampling_params.get("min_new_tokens"),
-                        routed_dp_rank=destination_dp_rank,
-                    )
-                    result = await self.engine.tokenizer_manager.bind_decode_migration_destination(
-                        bind
-                    )
-                    if not result.success:
-                        response = {
-                            "migration_id": migration_id,
-                            "rid": existing["rid"],
-                            "success": False,
-                            "status": result.status,
-                            "error": result.error,
-                        }
-                    else:
-                        existing["source_state"] = dict(source_state)
-                        existing[
-                            "pending_token_suppressed"
-                        ] = result.pending_token_suppressed
-                        existing["status"] = "ready"
-                        logging.info(
-                            "Bound decode migration destination rid=%s "
-                            "migration_id=%s room=%s committed_len=%s",
-                            existing["rid"],
-                            migration_id,
-                            existing["bootstrap_room"],
-                            source_state.get("committed_len"),
-                        )
-
             if response is None:
                 source = existing["source"]
                 response = {
@@ -750,9 +682,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "bootstrap_room": existing["bootstrap_room"],
                     "destination_dp_rank": existing["destination_dp_rank"],
                     "reserve_tokens": existing["reserve_tokens"],
-                    "pending_token_suppressed": existing.get(
-                        "pending_token_suppressed", False
-                    ),
                 }
 
         yield response
@@ -818,7 +747,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         yield dataclasses.asdict(result)
 
     async def finalize_decode_migration(self, request, context=None):
-        """Finalize destination reservation or retained source ownership."""
+        """Finalize a destination reservation or cancel a prepared source."""
         if request.get("side") == "destination":
             migration_id = request["migration_id"]
             action = request["action"]
@@ -836,8 +765,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             request.get("destination_dp_rank", 0)
                         ),
                     }
-                elif action == "activate":
-                    record["status"] = "active"
                 elif action == "abort":
                     record["status"] = "aborted"
                     self._decode_migration_reservations.pop(migration_id, None)
@@ -877,15 +804,25 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             }
             return
 
-        from sglang.srt.managers.io_struct import FinalizeDecodeMigrationReqInput
+        if request.get("action") != "cancel":
+            yield {
+                "rid": request.get("rid"),
+                "migration_id": request.get("migration_id"),
+                "success": False,
+                "status": "error",
+                "source_dp_rank": int(request.get("source_dp_rank", 0)),
+                "error": "Only prepared source cancellation is supported",
+            }
+            return
 
-        obj = FinalizeDecodeMigrationReqInput(
+        from sglang.srt.managers.io_struct import CancelDecodeMigrationReqInput
+
+        obj = CancelDecodeMigrationReqInput(
             rid=request["rid"],
             migration_id=request["migration_id"],
-            action=request["action"],
             routed_dp_rank=int(request.get("source_dp_rank", 0)),
         )
-        result = await self.engine.tokenizer_manager.finalize_decode_migration(obj)
+        result = await self.engine.tokenizer_manager.cancel_decode_migration(obj)
         yield dataclasses.asdict(result)
 
     async def _process_token_stream(
