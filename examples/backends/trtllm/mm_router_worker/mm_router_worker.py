@@ -164,7 +164,7 @@ async def worker(runtime: DistributedRuntime) -> None:
 
     # Initialize tokenizer and processor for MM processing
     logger.info(f"Loading tokenizer from {args.model}...")
-    tokenizer = tokenizer_factory(args.model)
+    tokenizer = tokenizer_factory(args.model, trust_remote_code=args.trust_remote_code)
 
     processor = None
     try:
