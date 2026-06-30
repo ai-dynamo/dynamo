@@ -108,12 +108,12 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 - **K8s Inference Gateway plugin:** KV-aware routing inside the standard Kubernetes gateway
 - **Storage-tier KV offload:** S3/Azure blob support + global KV events for cluster-wide cache visibility
 
-## Request Entry Patterns
+## Request Routing Topologies
 
-Dynamo can expose traffic through two Kubernetes request-entry patterns. Both expose an
+Dynamo can expose traffic through two Kubernetes request routing topologies. Both expose an
 OpenAI-compatible API and support the same backends, disaggregated serving, and KV-aware routing.
 
-| Pattern | What it is | When to use |
+| Topology | What it is | When to use |
 |------|------------|-------------|
 | **Dynamo-native Frontend routing** | The Dynamo Frontend serves HTTP and the integrated Dynamo Router makes worker-selection decisions. No external gateway is required. | Local development, single-cluster deployments, and environments where Dynamo should own the request entry point end to end. |
 | **Gateway API routing with GAIE** | A Kubernetes [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension) gateway calls the Dynamo Endpoint Picker Plugin (EPP) before forwarding to the selected worker's Frontend sidecar in `--router-mode direct`. | Kubernetes platforms that standardize on Gateway API, or deployments where gateway-level policy, auth, rate limiting, and observability should sit at the cluster edge. |

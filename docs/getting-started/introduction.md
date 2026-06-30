@@ -106,17 +106,17 @@ Kubernetes cluster:
 | Local or container | You are evaluating, developing, or adopting one component at a time. | OpenAI-compatible frontend, router, workers, file or etcd discovery, Python/Rust APIs, and installable packages. |
 | Kubernetes | You are deploying shared GPU capacity, multi-node serving, autoscaling, or platform-integrated inference. | Helm install, Dynamo operator, DGD/DCD/DGDR CRDs, Kubernetes-native discovery, Gateway API Inference Extension, Grove/LWS scheduling, ModelExpress, observability, and lifecycle management. |
 
-## Request Entry Patterns
+## Request Routing Topologies
 
-Dynamo supports two Kubernetes request-entry patterns. Both expose the same
+Dynamo supports two Kubernetes request routing topologies. Both expose the same
 OpenAI-compatible API and the same backends; they differ in where the request
 enters the system and where worker selection is integrated.
 
 - **Dynamo-native Frontend routing** -- The Dynamo Frontend serves HTTP requests directly, and the integrated Dynamo Router makes KV-aware routing decisions before dispatching to workers. No external gateway is required. Request flow: `client -> Frontend -> Router -> workers`.
 
-- **Gateway API routing with GAIE** -- A Kubernetes [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension) gateway calls the Dynamo Endpoint Picker Plugin (EPP) before forwarding to the selected worker's Frontend sidecar in `--router-mode direct`. Use this pattern when your platform standardizes on Gateway API, or when you want gateway-level policy, auth, rate limiting, and observability at the cluster edge. Request flow: `client -> Gateway -> EPP -> Frontend sidecar (direct) -> workers`.
+- **Gateway API routing with GAIE** -- A Kubernetes [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension) gateway calls the Dynamo Endpoint Picker Plugin (EPP) before forwarding to the selected worker's Frontend sidecar in `--router-mode direct`. Use this topology when your platform standardizes on Gateway API, or when you want gateway-level policy, auth, rate limiting, and observability at the cluster edge. Request flow: `client -> Gateway -> EPP -> Frontend sidecar (direct) -> workers`.
 
-Both patterns support disaggregated serving, multimodal, and the same set of backends (vLLM, SGLang, TensorRT-LLM). For setup and configuration of the Gateway API path, see the [Gateway API Inference Extension (GAIE) guide](../kubernetes/gateway-api/README.mdx).
+Both topologies support disaggregated serving, multimodal, and the same set of backends (vLLM, SGLang, TensorRT-LLM). For setup and configuration of the Gateway API path, see the [Gateway API Inference Extension (GAIE) guide](../kubernetes/gateway-api/README.mdx).
 
 ## Performance
 
