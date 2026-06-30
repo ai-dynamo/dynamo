@@ -327,6 +327,21 @@ Two surfaces:
 yet" or "no prefix cache" (gauge skipped); `0.0` is a legitimate
 zero-hit measurement.
 
+Backend shape:
+
+- **vLLM** pushes snapshots from its stat logger for each local DP rank and
+  bridges `vllm:` plus multiprocess-only `lmcache:` metrics from the global
+  registry.
+- **SGLang** pushes scheduler snapshots from the metrics leader node to avoid
+  double-counting DP ranks and bridges `sglang:` metrics from a private
+  multiprocess registry when `--enable-metrics` is set.
+- **TRT-LLM** pushes snapshots from the stats poll thread for each attention-DP
+  rank and bridges the global `trtllm_` registry.
+
+`WorkerConfig.enable_kv_routing=False` skips snapshot publisher construction,
+but the Prometheus bridge still runs. Use it when the worker should expose
+vendor metrics without feeding KV-aware routing signals.
+
 ## KV Event Publishing
 
 On the unified path, `Worker` owns `KvEventPublisher` construction. Engines
