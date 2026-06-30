@@ -264,27 +264,25 @@ jobs:
             IS_TEST=true
           fi
 
+          # Fetch the version-bump script from THIS workflow's commit (GITHUB_SHA);
+          # source_ref may predate --set-version.
+          git show "${GITHUB_SHA}:.github/scripts/apply_dev_version.py" > "${RUNNER_TEMP}/apply_dev_version.py"
+
+          # Base the release branch on the existing remote branch when it exists, so a
+          # re-run only adds the diff (e.g. a newly-added script step lands on the branch
+          # that was cut before it existed); otherwise base it on the checked-out
+          # source_ref. We never delete/clobber — the diff (if any) is committed on top.
           if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
-            # Branch exists: reuse it if it already carries the target version
-            # (idempotent re-run, no push); otherwise fail — we don't delete/clobber.
             git fetch origin "${BRANCH}"
-            EXISTING_VER=$(git show FETCH_HEAD:pyproject.toml | awk '/^version = /{gsub(/"/,"",$3); print $3; exit}')
-            if [ "${EXISTING_VER}" = "${RELEASE_VERSION}" ]; then
-              echo "${BRANCH} already at ${RELEASE_VERSION}; reusing it (no push)."
-              {
-                echo "branch=${BRANCH}"
-                echo "bump_sha=$(git rev-parse FETCH_HEAD)"
-                echo "is_test=${IS_TEST}"
-              } >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "::error::${BRANCH} exists with version '${EXISTING_VER}' (expected '${RELEASE_VERSION}'); delete it and re-run."
-            exit 1
+            git checkout -B "${BRANCH}" FETCH_HEAD
+            EXISTED=1
+          else
+            git checkout -b "${BRANCH}"
+            EXISTED=0
           fi
 
-          # New branch: set the version from THIS workflow's script (GITHUB_SHA, not
-          # source_ref which may predate --set-version), sync the lockfile, push.
-          git show "${GITHUB_SHA}:.github/scripts/apply_dev_version.py" > "${RUNNER_TEMP}/apply_dev_version.py"
+          # Run the release scripts on the working tree: set the absolute version (then
+          # sync the lockfile and substitute image placeholders, below).
           python3 "${RUNNER_TEMP}/apply_dev_version.py" "" . --set-version "${RELEASE_VERSION}" \
             --containers "${CONTAINERS}" --helm "${HELM}"
 
@@ -296,6 +294,18 @@ jobs:
           # Keep Cargo.lock in sync so post-merge `cargo test --locked` passes.
           cargo update --workspace
 
+          # Substitute the example/deploy/doc image placeholders to the GA registry +
+          # release tag (the manual `my-registry`/`my-tag` release step). Anchored to
+          # image refs only — 'my-registry/' and ':my-tag' — so prose, the
+          # `my-registry-secret` k8s name, `my-registry.com` operator test fixtures,
+          # recipe_tool.py's placeholder-detection regex, and the "Replace my-tag"
+          # instructional comments are all left untouched.
+          REGISTRY="nvcr.io/nvidia/ai-dynamo"
+          git ls-files -z \
+            | xargs -0 grep -IlZ -e 'my-registry/' -e ':my-tag' 2>/dev/null \
+            | xargs -0 -r sed -i -e "s#my-registry/#${REGISTRY}/#g" -e "s#:my-tag#:${RELEASE_VERSION}#g" || true
+          echo "Substituted image placeholders -> ${REGISTRY}/<image>:${RELEASE_VERSION}"
+
           APP_USER_ID=$(curl -fsSL --retry 3 \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
@@ -303,17 +313,26 @@ jobs:
             | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
           git config user.name "${APP_SLUG}[bot]"
           git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
-          git checkout -b "${BRANCH}"
+          # Commit + push only when the scripts produced a diff vs the branch's current
+          # state. No diff on an existing branch => reuse (no push); no diff on a brand-
+          # new branch => still record a release commit so the push fires post-merge CI.
           git add -A
-          # --allow-empty: cutting release/1.3.0 from a main already at 1.3.0 makes the
-          # version bump a near-no-op, so the branch is still created and post-merge fires.
-          git commit -s --allow-empty -m "release: set version ${RELEASE_VERSION}"
-          git push origin "${BRANCH}"
+          if git diff --cached --quiet; then
+            if [ "${EXISTED}" = "1" ]; then
+              echo "${BRANCH} already matches the release scripts; nothing to commit (reuse, no push)."
+            else
+              git commit -s --allow-empty -m "release: set version ${RELEASE_VERSION}"
+              git push origin "${BRANCH}"
+            fi
+          else
+            git commit -s -m "release: set version ${RELEASE_VERSION}"
+            git push origin "${BRANCH}"
+          fi
 
           echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "bump_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "is_test=${IS_TEST}" >> "$GITHUB_OUTPUT"
-          echo "Created ${BRANCH} @ $(git rev-parse HEAD) (is_test=${IS_TEST})"
+          echo "Prepared ${BRANCH} @ $(git rev-parse HEAD) (is_test=${IS_TEST}, existed=${EXISTED})"
 
       - name: Compute and tag internal staging rc
         id: rc
