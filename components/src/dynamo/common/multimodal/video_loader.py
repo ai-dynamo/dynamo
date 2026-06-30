@@ -21,10 +21,8 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-import dynamo.nixl_connect as nixl_connect
 from dynamo.common.http import fetch_bytes
 from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
-from dynamo.common.utils.media_nixl import read_decoded_media_via_nixl
 from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
@@ -32,6 +30,31 @@ logger = logging.getLogger(__name__)
 
 URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
+
+
+def _create_nixl_connector() -> Any:
+    try:
+        import dynamo.nixl_connect as nixl_connect
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL is required for frontend video decoding; install "
+            "dynamo.nixl_connect to enable decoded video transfers."
+        ) from exc
+
+    return nixl_connect.Connector()
+
+
+async def read_decoded_media_via_nixl(*args: Any, **kwargs: Any) -> Any:
+    try:
+        from dynamo.common.utils.media_nixl import (
+            read_decoded_media_via_nixl as _read_decoded_media_via_nixl,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "NIXL media utilities are required for frontend video decoding."
+        ) from exc
+
+    return await _read_decoded_media_via_nixl(*args, **kwargs)
 
 
 def _require_vllm_video_media() -> tuple[Any, Any, Any]:
@@ -63,7 +86,7 @@ class VideoLoader:
         self._nixl_connector = None
         self._vllm_media_connector = None
         if self._enable_frontend_decoding:
-            self._nixl_connector = nixl_connect.Connector()
+            self._nixl_connector = _create_nixl_connector()
             run_async(self._nixl_connector.initialize)
 
     def _get_vllm_media_connector(self) -> Any:

@@ -261,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn test_distributed_rwlock() {
         // Setup: Create etcd client
-        let runtime = Runtime::from_settings().unwrap();
+        let runtime = Runtime::from_current().unwrap();
         let etcd_client = Client::builder()
             .etcd_url(vec!["http://localhost:2379".to_string()])
             .build()

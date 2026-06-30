@@ -1,7 +1,7 @@
 # Mocker engine
 
 The canonical user-facing documentation for the mocker lives at
-[`docs/mocker/mocker.md`](../../../../docs/mocker/mocker.md).
+[`docs/dynosim/mocker.md`](../../../../docs/dynosim/mocker.md).
 
 Useful adjacent references:
 

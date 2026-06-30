@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Error, Result};
@@ -11,18 +12,24 @@ use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
 pub use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
-    pipeline::{AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn},
+    pipeline::{
+        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,
+        SingleIn,
+    },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
+use crate::PyAsyncRequestStream;
+use dynamo_runtime::pipeline::ManyIn;
+
 use super::context::{Context, callable_accepts_kwarg};
-use super::errors::py_exception_to_backend_error;
+use super::errors::{extract_http_like_error, py_exception_to_backend_error};
 
 /// Add bindings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -34,6 +41,69 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 //   - this will likely require a change to the function signature python calling arguments
 // - [ ] other `AsyncEngine` implementations will have a similar pattern, i.e. one AsyncEngine
 //       implementation per struct
+
+/// Detect whether the Python `generate` callable accepts a `context`
+/// keyword argument for backwards compatibility with the legacy positional-only call.
+fn detect_has_context(generator: &PyObject) -> bool {
+    Python::with_gil(|py| {
+        let callable = generator.bind(py);
+        callable_accepts_kwarg(py, callable, "context").unwrap_or(false)
+    })
+}
+
+/// Boxed Rust stream of items yielded by a Python async generator. Each
+/// item is either a `PyObject` frame or the `PyErr` the generator raised.
+type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
+
+/// Invoke the Python `generate` callable and convert the async generator it
+/// returns into a Rust [`Stream`] of `PyObject` items.
+///
+/// `to_python_input` converts this engine's `generate` input into the Python
+/// object passed as the generator's positional argument.
+/// `to_python_context` when `Some`, builds the `context=` keyword argument; `None` selects the
+/// legacy positional-only call.
+/// Note: functions instead of Python objects are passed because the construction
+/// of the Python objects needs to run inside the GIL.
+///
+/// The GIL is acquired on a blocking task rather than inline: under contention
+/// it can block for an unbounded time, which would park the tokio reactor.
+async fn invoke_generator<F, G>(
+    generator: Arc<PyObject>,
+    event_loop: Arc<PyObject>,
+    to_python_input: F,
+    to_python_context: Option<G>,
+) -> Result<PyItemStream>
+where
+    F: FnOnce(Python) -> PyResult<Py<PyAny>> + Send + 'static,
+    G: FnOnce(Python) -> PyResult<Py<PyAny>> + Send + 'static,
+{
+    let stream = tokio::task::spawn_blocking(move || {
+        Python::with_gil(|py| {
+            let python_input = to_python_input(py)?;
+
+            let gen_result = match to_python_context {
+                Some(to_python_context) => {
+                    let py_ctx = to_python_context(py)?;
+                    let kwarg = PyDict::new(py);
+                    kwarg.set_item("context", py_ctx)?;
+                    generator.call(py, (python_input,), Some(&kwarg))
+                }
+                // Legacy: no `context` arg.
+                None => generator.call1(py, (python_input,)),
+            }?;
+
+            let locals = TaskLocals::new(event_loop.bind(py).clone());
+            pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
+                locals,
+                gen_result.into_bound(py),
+            )
+        })
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to offload python call to blocking task: {e}"))??;
+
+    Ok(Box::pin(stream))
+}
 
 /// Rust/Python bridge that maps to the [`AsyncEngine`] trait
 ///
@@ -114,10 +184,7 @@ impl PythonServerStreamingEngine {
         generator: Arc<PyObject>,
         event_loop: Arc<PyObject>,
     ) -> Self {
-        let has_context = Python::with_gil(|py| {
-            let callable = generator.bind(py);
-            callable_accepts_kwarg(py, callable, "context").unwrap_or(false)
-        });
+        let has_context = detect_has_context(&generator);
 
         PythonServerStreamingEngine {
             _cancel_token: cancel_token,
@@ -157,137 +224,30 @@ where
 
         // Capture current trace context
         let current_trace_context = get_distributed_tracing_context();
-
-        // Clone the PyObject to move into the thread
-
-        // Create a channel to communicate between the Python thread and the Rust async context
-        let (tx, rx) = mpsc::channel::<Annotated<Resp>>(128);
-
-        let generator = self.generator.clone();
-        let event_loop = self.event_loop.clone();
-        let ctx_python = ctx.clone();
-        let has_context = self.has_context;
         let metadata = context.metadata().clone();
 
-        // Acquiring the GIL is similar to acquiring a standard lock/mutex
-        // Performing this in an tokio async task could block the thread for an undefined amount of time
-        // To avoid this, we spawn a blocking task to acquire the GIL and perform the operations needed
-        // while holding the GIL.
-        //
-        // Under low GIL contention, we wouldn't need to do this.
-        // However, under high GIL contention, this can lead to significant performance degradation.
-        //
-        // Since we cannot predict the GIL contention, we will always use the blocking task and pay the
-        // cost. The Python GIL is the gift that keeps on giving -- performance hits...
-        let stream = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| {
-                let py_request = pythonize(py, &request)?;
-
-                // Create context with trace information
-                let py_ctx = Py::new(
-                    py,
-                    Context::new(ctx_python.clone(), current_trace_context, None, metadata),
-                )?;
-
-                let gen_result = if has_context {
-                    // Pass context as a kwarg
-                    let kwarg = PyDict::new(py);
-                    kwarg.set_item("context", &py_ctx)?;
-                    generator.call(py, (py_request,), Some(&kwarg))
-                } else {
-                    // Legacy: No `context` arg
-                    generator.call1(py, (py_request,))
-                }?;
-
-                let locals = TaskLocals::new(event_loop.bind(py).clone());
-                pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
-                    locals,
-                    gen_result.into_bound(py),
-                )
-            })
-        })
-        .await??;
-
-        let stream = Box::pin(stream);
-
-        // process the stream
-        // any error thrown in the stream will be caught and complete the processing task
-        // errors are captured by a task that is watching the processing task
-        // the error will be emitted as an annotated error
-        let request_id = id.clone();
-
-        tokio::spawn(async move {
-            tracing::debug!(
-                request_id,
-                "starting task to process python async generator stream"
-            );
-
-            let mut stream = stream;
-            let mut count = 0;
-
-            while let Some(item) = stream.next().await {
-                count += 1;
-                tracing::trace!(
-                    request_id,
-                    "processing the {}th item from python async generator",
-                    count
-                );
-
-                let mut done = false;
-
-                let response = match process_item::<Resp>(item).await {
-                    Ok(response) => response,
-                    Err(e) => {
-                        done = true;
-
-                        match e {
-                            ResponseProcessingError::Deserialize(e) => {
-                                // tell the python async generator to stop generating
-                                // right now, this is impossible as we are not passing the context to the python async generator
-                                // todo: add task-local context to the python async generator
-                                ctx.stop_generating();
-                                Annotated::from_error(format!(
-                                    "critical error: invalid response object from python async generator; application-logic-mismatch: {}",
-                                    e
-                                ))
-                            }
-                            ResponseProcessingError::Dynamo(dynamo_err) => {
-                                Annotated::from_err(dynamo_err)
-                            }
-                            ResponseProcessingError::Offload(e) => Annotated::from_error(format!(
-                                "critical error: failed to offload the python async generator to a new thread: {}",
-                                e
-                            )),
-                        }
-                    }
-                };
-
-                if tx.send(response).await.is_err() {
-                    tracing::trace!(
-                        request_id,
-                        "error forwarding annotated response to channel; channel is closed"
-                    );
-                    break;
+        let stream = invoke_generator(
+            self.generator.clone(),
+            self.event_loop.clone(),
+            move |py| Ok(pythonize(py, &request)?.unbind()),
+            self.has_context.then_some({
+                let ctx = ctx.clone();
+                move |py: Python<'_>| {
+                    Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
+                        .map(|c| c.into_any())
                 }
+            }),
+        )
+        .await?;
 
-                if done {
-                    tracing::debug!(
-                        request_id,
-                        "early termination of python async generator stream task"
-                    );
-                    break;
-                }
-            }
+        // Drain the Python response stream on a dedicated task, mapping any
+        // generator error to a typed annotated error frame.
+        let rx = spawn_response_forwarder::<Resp>(stream, ctx, id);
 
-            tracing::debug!(
-                request_id,
-                "finished processing python async generator stream"
-            );
-        });
-
-        let stream = ReceiverStream::new(rx);
-
-        Ok(ResponseStream::new(Box::pin(stream), context.context()))
+        Ok(ResponseStream::new(
+            Box::pin(ReceiverStream::new(rx)),
+            context.context(),
+        ))
     }
 }
 
@@ -308,6 +268,28 @@ where
                     DynamoError::builder()
                         .error_type(ErrorType::Backend(backend_err))
                         .message(message)
+                        .build(),
+                );
+            }
+
+            // openai.rs::extract_backend_error_if_present parses the DynamoError
+            // message as JSON {message, code}; emit that shape so the HTTP status
+            // survives instead of defaulting to 500.
+            if let Some((code, message)) = extract_http_like_error(py, &e) {
+                let backend_err = if (400..500).contains(&code) {
+                    BackendError::InvalidArgument
+                } else {
+                    BackendError::Unknown
+                };
+                let json_msg = serde_json::json!({
+                    "message": message,
+                    "code": code,
+                })
+                .to_string();
+                return ResponseProcessingError::Dynamo(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Backend(backend_err))
+                        .message(json_msg)
                         .build(),
                 );
             }
@@ -354,13 +336,258 @@ where
         })
     })?;
     let response = tokio::task::spawn_blocking(move || {
-        Python::with_gil(|py| depythonize::<Resp>(&item.into_bound(py)))
+        Python::with_gil(|py| {
+            let bound = item.into_bound(py);
+            // Yields tagged with `_dynamo_annotated: True` are wire
+            // Annotated<R> envelopes; everything else is plain data.
+            let is_envelope = bound
+                .downcast::<PyDict>()
+                .ok()
+                .and_then(|d| d.get_item("_dynamo_annotated").ok().flatten())
+                .and_then(|v| v.is_truthy().ok())
+                .unwrap_or(false);
+            if is_envelope {
+                depythonize::<Annotated<Resp>>(&bound)
+            } else {
+                depythonize::<Resp>(&bound).map(Annotated::from_data)
+            }
+        })
     })
     .await
     .map_err(|e| ResponseProcessingError::Offload(e.to_string()))?
     .map_err(|e| ResponseProcessingError::Deserialize(e.to_string()))?;
 
-    let response = Annotated::from_data(response);
-
     Ok(response)
+}
+
+/// Channel depth between the response-forwarding task and the consumer of
+/// the engine's output stream.
+const RESPONSE_CHANNEL_DEPTH: usize = 128;
+
+/// Drain the Python response stream on a spawned task, deserialize each item
+/// into `Resp` via [`process_item`], and forward it as an [`Annotated`] frame
+/// over an mpsc channel. Returns the receiver, to be wrapped in a
+/// [`ResponseStream`].
+///
+/// Errors raised by the Python generator are mapped to typed backend errors
+/// and emitted as annotated error frames, so a failing generator returns as
+/// an error to the client rather than a silently truncated stream.
+/// On a deserialize mismatch the request context is told to stop generating.
+fn spawn_response_forwarder<Resp>(
+    stream: PyItemStream,
+    ctx: Arc<dyn AsyncEngineContext>,
+    request_id: String,
+) -> mpsc::Receiver<Annotated<Resp>>
+where
+    Resp: Data + for<'de> Deserialize<'de>,
+{
+    let (tx, rx) = mpsc::channel::<Annotated<Resp>>(RESPONSE_CHANNEL_DEPTH);
+
+    // any error thrown in the stream will be caught and complete the
+    // processing task; the error is emitted as an annotated error frame
+    tokio::spawn(async move {
+        tracing::debug!(
+            request_id,
+            "starting task to process python async generator stream"
+        );
+
+        let mut stream = stream;
+        let mut count = 0;
+
+        while let Some(item) = stream.next().await {
+            count += 1;
+            tracing::trace!(
+                request_id,
+                "processing the {}th item from python async generator",
+                count
+            );
+
+            let mut done = false;
+
+            let response = match process_item::<Resp>(item).await {
+                Ok(response) => response,
+                Err(e) => {
+                    done = true;
+
+                    match e {
+                        ResponseProcessingError::Deserialize(e) => {
+                            // tell the python async generator to stop generating
+                            ctx.stop_generating();
+                            Annotated::from_error(format!(
+                                "critical error: invalid response object from python async generator; application-logic-mismatch: {}",
+                                e
+                            ))
+                        }
+                        ResponseProcessingError::Dynamo(dynamo_err) => {
+                            Annotated::from_err(dynamo_err)
+                        }
+                        ResponseProcessingError::Offload(e) => Annotated::from_error(format!(
+                            "critical error: failed to offload the python async generator to a new thread: {}",
+                            e
+                        )),
+                    }
+                }
+            };
+
+            if tx.send(response).await.is_err() {
+                // Consumer dropped the response stream — tell the generator to
+                // stop rather than relying solely on upstream push_handler.
+                ctx.stop_generating();
+                tracing::trace!(
+                    request_id,
+                    "error forwarding annotated response to channel; channel is closed"
+                );
+                break;
+            }
+
+            if done {
+                tracing::debug!(
+                    request_id,
+                    "early termination of python async generator stream task"
+                );
+                break;
+            }
+        }
+
+        tracing::debug!(
+            request_id,
+            "finished processing python async generator stream"
+        );
+    });
+
+    rx
+}
+
+/// Channel depth between the inbound forwarder and the Python iterator.
+/// Mirrors the depth used by the wire-side bidirectional ingress forwarder
+/// in `lib/runtime/src/pipeline/network/ingress/push_handler.rs`.
+const BIDIRECTIONAL_INPUT_CHANNEL_DEPTH: usize = 8;
+
+/// Rust-side adapter that bridges a Python `async def generate(request_stream, context)`
+/// callable into an [`AsyncEngine`] of the ManyIn / ManyOut
+/// shape (Req=serde_json::Value, Resp=Annotated<serde_json::Value>).
+///
+/// The adapter:
+///
+/// 1. Transforms the inbound `RequestStream<serde_json::Value>` into a
+///    `PyAsyncRequestStream` and `context`. Similar to unary engine,
+///    cancellation observation is the Python engine's responsibility via the
+///    `context` argument. Input stream can end early if no more inputs are expected.
+/// 2. Invokes the Python generator with `(request_stream, context)`, then
+///    wraps the returned async generator into a Rust `Stream<Item = PyResult<PyObject>>`.
+/// 3. Depythonizes each item and wraps it as `Annotated<serde_json::Value>`,
+///    and forwards it on the response stream.
+///
+/// Wire types are fixed to `serde_json::Value` on the request side and
+/// `Annotated<serde_json::Value>` on the response side. The Python user
+/// works with dicts on both sides and any schema enforcement is handled in
+/// Python.
+pub struct PythonBidirectionalEngine {
+    generator: Arc<PyObject>,
+    event_loop: Arc<PyObject>,
+    has_context: bool,
+}
+
+impl PythonBidirectionalEngine {
+    /// Build the adapter from a Python callable and an event loop. The
+    /// callable should be an `async def generate(request_stream)` or
+    /// `async def generate(request_stream, context)` returning an async
+    /// generator of JSON-shaped response frames.
+    pub fn new(generator: PyObject, event_loop: PyObject) -> PyResult<Self> {
+        let has_context = detect_has_context(&generator);
+        Ok(Self {
+            generator: Arc::new(generator),
+            event_loop: Arc::new(event_loop),
+            has_context,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncEngine<ManyIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>>, Error>
+    for PythonBidirectionalEngine
+{
+    async fn generate(
+        &self,
+        input: ManyIn<serde_json::Value>,
+    ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
+        let (request_stream, ctx_unit) = input.into_parts();
+        let ctx = ctx_unit.context();
+        let request_id = ctx_unit.id().to_string();
+        let metadata = ctx_unit.metadata().clone();
+        let mut inbound = request_stream
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("RequestStream::take returned None"))?;
+
+        // Capture trace context once, while we still hold the
+        // dispatching task; needed when constructing the Python `Context`.
+        let current_trace_context = get_distributed_tracing_context();
+
+        // Forwarder: pull `serde_json::Value` frames off the inbound stream,
+        // pythonize each, and hand the resulting `PyObject` to the Python
+        // iterator. The `frame_tx.closed()` arm cancels the forwarder as soon
+        // as the Python iterator drops the receiver, so it shuts down promptly
+        // instead of blocking on the next inbound frame.
+        let (frame_tx, frame_rx) = mpsc::channel::<PyObject>(BIDIRECTIONAL_INPUT_CHANNEL_DEPTH);
+        let forwarder_request_id = request_id.clone();
+        tokio::spawn(async move {
+            loop {
+                let value = tokio::select! {
+                    _ = frame_tx.closed() => break,
+                    value = inbound.next() => value,
+                };
+                let Some(value) = value else {
+                    break;
+                };
+                let pyobj = match Python::with_gil(|py| {
+                    pythonize(py, &value).map(|bound| bound.unbind())
+                }) {
+                    Ok(pyobj) => pyobj,
+                    Err(e) => {
+                        tracing::error!(
+                            request_id = %forwarder_request_id,
+                            error = %e,
+                            "failed to pythonize bidirectional request frame; \
+                             closing input forwarder"
+                        );
+                        break;
+                    }
+                };
+                if frame_tx.send(pyobj).await.is_err() {
+                    tracing::debug!(
+                        request_id = %forwarder_request_id,
+                        "python engine dropped request stream; input forwarder exiting"
+                    );
+                    break;
+                }
+            }
+        });
+
+        let py_request_stream = PyAsyncRequestStream::new(frame_rx);
+
+        // The positional argument is the `PyAsyncRequestStream` handle, wrapped
+        // inside the GIL.
+        let stream = invoke_generator(
+            self.generator.clone(),
+            self.event_loop.clone(),
+            move |py| Ok(Py::new(py, py_request_stream)?.into_any()),
+            self.has_context.then_some({
+                let ctx = ctx.clone();
+                move |py: Python<'_>| {
+                    Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
+                        .map(|c| c.into_any())
+                }
+            }),
+        )
+        .await?;
+
+        // Drain the Python response stream on a dedicated task. Sharing
+        // `spawn_response_forwarder` gives the bidirectional engine the same
+        // typed error mapping as the unary engine: a generator that raises now
+        // yields a structured annotated error frame instead of a silently
+        // truncated stream.
+        let rx = spawn_response_forwarder::<serde_json::Value>(stream, ctx.clone(), request_id);
+
+        Ok(ResponseStream::new(Box::pin(ReceiverStream::new(rx)), ctx))
+    }
 }

@@ -128,9 +128,9 @@ docker build -f container/rendered.Dockerfile .
 # Update the image references in the YAML files
 ```
 
-### Pre-Deployment Profiling (SLA Planner Only)
+### Planner Perf Model Bootstrap (SLA Planner Only)
 
-If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/components/profiler/profiler-guide.md) to run pre-deployment profiling.
+The SLA Planner deployment (`disagg_planner.yaml`) can start from native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See the [pre-deployment profiling guide](../../../../docs/components/profiler/profiler-guide.md) for the optional bootstrap workflow.
 
 ## Usage
 

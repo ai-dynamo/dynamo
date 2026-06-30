@@ -7,17 +7,16 @@ This module defines the DiffusionConfig dataclass used for configuring
 video and image diffusion workers.
 
 Fields map to TensorRT-LLM's VisualGenArgs sub-configs:
-- PipelineConfig: offloading, fuse_qkv, NVTX markers
 - TorchCompileConfig: torch_compile, fullgraph
 - CudaGraphConfig: CUDA graph capture
 - AttentionConfig: attention backend (VANILLA, TRTLLM)
-- ParallelConfig: dit_*_size parallelism dimensions
+- ParallelConfig: CFG/Ulysses/ring parallelism dimensions
 - TeaCacheConfig: caching optimization
 - QuantConfig: quantization algorithm and dynamic flags
 """
 
 import dataclasses
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from dynamo.common.utils.namespace import get_worker_namespace
@@ -75,8 +74,6 @@ class DiffusionConfig:
     disable_torch_compile: bool = False
     # Enable torch.compile fullgraph mode (stricter but potentially faster)
     enable_fullgraph: bool = False
-    # QKV fusion for transformer attention layers
-    fuse_qkv: bool = True
     # CUDA graph capture for transformer forward passes
     # (mutually exclusive with torch.compile — torch.compile takes priority)
     enable_cuda_graph: bool = False
@@ -103,36 +100,22 @@ class DiffusionConfig:
     teacache_thresh: float = 0.2
 
     # ── Parallelism config (maps to ParallelConfig) ──
-    dit_dp_size: int = 1
-    dit_tp_size: int = 1
     dit_ulysses_size: int = 1
     dit_ring_size: int = 1
     dit_cfg_size: int = 1
-    dit_fsdp_size: int = 1
-
-    # ── Offloading config (maps to PipelineConfig) ──
-    enable_async_cpu_offload: bool = False
-
-    # ── Component loading options ──
-    # Components to skip loading (e.g., ["text_encoder", "vae"]).
-    # Valid values: "transformer", "vae", "text_encoder", "tokenizer",
-    #               "scheduler", "image_encoder", "image_processor"
-    skip_components: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_config(cls, config: Any, skip_components: list[str]) -> "DiffusionConfig":
+    def from_config(cls, config: Any) -> "DiffusionConfig":
         """Build a DiffusionConfig from a worker Config, mapping matching field names automatically.
 
         Special cases:
           - model_path  ← config.model  (field name differs)
-          - skip_components ← pre-parsed list (Config holds a raw comma-separated string)
           - max_height, max_width, default_fps, default_seconds use DiffusionConfig defaults
             (they are not exposed as CLI args in Config)
         """
         field_names = {f.name for f in dataclasses.fields(cls)}
         kwargs = {k: getattr(config, k) for k in field_names if hasattr(config, k)}
         kwargs["model_path"] = config.model
-        kwargs["skip_components"] = skip_components
         return cls(**kwargs)
 
     def __str__(self) -> str:
@@ -154,6 +137,7 @@ class DiffusionConfig:
             f"quant_algo={self.quant_algo}, "
             f"enable_cuda_graph={self.enable_cuda_graph}, "
             f"skip_warmup={self.skip_warmup}, "
-            f"dit_dp_size={self.dit_dp_size}, "
-            f"dit_tp_size={self.dit_tp_size})"
+            f"dit_cfg_size={self.dit_cfg_size}, "
+            f"dit_ulysses_size={self.dit_ulysses_size}, "
+            f"dit_ring_size={self.dit_ring_size})"
         )

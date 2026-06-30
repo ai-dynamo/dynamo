@@ -18,6 +18,8 @@ _AIC_PERF_FIELDS: tuple[str, ...] = (
     "aic_moe_tp_size",
     "aic_moe_ep_size",
     "aic_attention_dp_size",
+    "aic_nextn",
+    "aic_nextn_accept_rates",
 )
 
 
@@ -30,6 +32,9 @@ class AicPerfConfigBase(ConfigBase):
     aic_moe_tp_size: Optional[int]
     aic_moe_ep_size: Optional[int]
     aic_attention_dp_size: Optional[int]
+    aic_nextn: Optional[int]
+    aic_nextn_accept_rates: Optional[str]
+    aic_mtp_seed: int = 42
 
     def aic_perf_kwargs(self) -> dict:
         return {field: getattr(self, field) for field in _AIC_PERF_FIELDS}
@@ -112,5 +117,35 @@ class AicPerfArgGroup(ArgGroup):
             env_var="DYN_AIC_ATTENTION_DP_SIZE",
             default=None,
             help="[EXPERIMENTAL] Attention data-parallel size to model in AIC.",
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--aic-nextn",
+            env_var="DYN_AIC_NEXTN",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] MTP/Eagle speculative-decoding draft-token count "
+                "for AIC latency modeling (max 5). Omit to disable spec dec."
+            ),
+            arg_type=int,
+        )
+        add_argument(
+            g,
+            flag_name="--aic-nextn-accept-rates",
+            env_var="DYN_AIC_NEXTN_ACCEPT_RATES",
+            default=None,
+            help=(
+                "[EXPERIMENTAL] Comma-separated conditional accept rates for MTP "
+                "draft tokens. Entry i is P(draft i accepted | all earlier drafts "
+                "were accepted). Values are padded or truncated to --aic-nextn."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--aic-mtp-seed",
+            env_var="DYN_AIC_MTP_SEED",
+            default=42,
+            help="[EXPERIMENTAL] Base RNG seed for mocker MTP burst sampling.",
             arg_type=int,
         )

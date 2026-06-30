@@ -142,12 +142,19 @@ func GetDCDKubeAnnotations(dcd *v1beta1.DynamoComponentDeployment) map[string]st
 	maps.Copy(annotations, GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec))
 	AddBaseModelAnnotation(annotations, dcd.Spec.ModelRef)
 	delete(annotations, commonconsts.KubeAnnotationDynamoOperatorOriginVersion)
-	delete(annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
+		delete(annotations, annotationKey)
+	}
 
-	// Propagate topology label key from DCD metadata to pods so the topology
-	// label controller can discover which node label to copy.
-	if v := dcd.Annotations[commonconsts.KubeAnnotationTopologyLabelKey]; v != "" {
-		annotations[commonconsts.KubeAnnotationTopologyLabelKey] = v
+	// Propagate topology metadata from DCD metadata to pods so the topology
+	// label controller can discover which node labels to copy.
+	for _, annotationKey := range commonconsts.KubeTopologySourceAnnotationKeys() {
+		if v := dcd.Annotations[annotationKey]; v != "" {
+			annotations[annotationKey] = v
+		}
+	}
+	if v := dcd.Annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName]; v != "" {
+		annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName] = v
 	}
 
 	return annotations
@@ -168,7 +175,10 @@ func GetCheckpoint(component *v1beta1.DynamoComponentDeploymentSharedSpec) *v1be
 	if component == nil || component.Experimental == nil {
 		return nil
 	}
-	return component.Experimental.Checkpoint
+	if checkpoint := component.Experimental.Checkpoint; checkpoint != nil && checkpoint.Enabled {
+		return checkpoint
+	}
+	return nil
 }
 
 // ToAlphaCheckpointConfig converts a v1beta1 checkpoint config into the
@@ -190,17 +200,6 @@ func ToAlphaCheckpointIdentity(src *v1beta1.DynamoCheckpointIdentity) *v1alpha1.
 	}
 	dst := &v1alpha1.DynamoCheckpointIdentity{}
 	v1alpha1.ConvertToDynamoCheckpointIdentity(src, dst)
-	return dst
-}
-
-// ToAlphaGPUMemoryService converts a v1beta1 GPU memory service config into
-// the controller's v1alpha1 compatibility shape.
-func ToAlphaGPUMemoryService(src *v1beta1.GPUMemoryServiceSpec) *v1alpha1.GPUMemoryServiceSpec {
-	if src == nil {
-		return nil
-	}
-	dst := &v1alpha1.GPUMemoryServiceSpec{}
-	v1alpha1.ConvertToGPUMemoryServiceSpec(src, dst)
 	return dst
 }
 

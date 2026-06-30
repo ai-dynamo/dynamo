@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Amazon Elastic Container Service (ECS)
+subtitle: Runs Dynamo on Amazon ECS with EC2 GPU clusters for vLLM workers and Fargate tasks for etcd and NATS.
 ---
 
-# Dynamo Deployment of vLLM Example on AWS ECS
 ## 1. EC2 Cluster Setup (for vLLM workloads)
 1. Go to AWS ECS console, **Clusters** tab and click on **Create cluster** with name `dynamo-GPU`
 2. Input the cluster name and choose **AWS EC2 instances** as the infrastructure. This option will create a cluster with EC2 instances to deploy containers.
@@ -119,7 +119,7 @@ You can create a service or directly run the task from the task definition
 
 ## 6. Testing
 Find the public IP of the dynamo frontend task from the task page. Run following commands to query the endpoint.
-```sh
+```bash
 export DYNAMO_IP_ADDRESS=TASK_PUBLIC_IP_ADDRESS
 curl http://$DYNAMO_IP_ADDRESS:8000/v1/models
 curl http://$DYNAMO_IP_ADDRESS:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{

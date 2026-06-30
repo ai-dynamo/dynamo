@@ -17,7 +17,7 @@ use tokio::sync::oneshot;
 
 use super::{
     KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
-    WorkerLookupStats, WorkerTask,
+    WorkerLookupStats, WorkerTask, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
@@ -149,7 +149,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let worker_assignments = Arc::new(DashMap::with_hasher(FxBuildHasher));
         let worker_assignment_count = Arc::new(AtomicUsize::new(0));
         let synthetic_event_id = Arc::new(AtomicU64::new(0));
-        for _ in 0..num_workers {
+        for worker_idx in 0..num_workers {
             let (event_sender, event_receiver) = flume::unbounded::<WorkerTask>();
             worker_event_senders.push(event_sender);
 
@@ -157,7 +157,28 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             let metrics = metrics.clone();
 
             let handle = std::thread::spawn(move || {
-                backend.worker(event_receiver, metrics).unwrap();
+                // This is observability, not recovery: if the worker panics, log
+                // through tracing and then preserve the panic for join().
+                let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Err(error) = backend.worker(event_receiver, metrics) {
+                        tracing::error!(
+                            worker_thread_index = worker_idx,
+                            ?error,
+                            "Thread pool worker exited with an error; worker thread is now dead"
+                        );
+                    }
+                }));
+
+                if let Err(panic_payload) = panic_result {
+                    let panic_msg = panic_payload_message(&*panic_payload);
+                    tracing::error!(
+                        target: "dynamo_kv_router::thread_pool_worker_panic",
+                        worker_thread_index = worker_idx,
+                        panic_message = %panic_msg,
+                        "Thread pool worker panicked; worker thread is now dead"
+                    );
+                    std::panic::resume_unwind(panic_payload);
+                }
             });
             thread_handles.push(handle);
         }
@@ -441,6 +462,15 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         local_hashes: &[LocalBlockHash],
         sequence_hashes: &[SequenceHash],
     ) -> Result<(), KvRouterError> {
+        if local_hashes.len() != sequence_hashes.len() {
+            tracing::warn!(
+                local_len = local_hashes.len(),
+                sequence_len = sequence_hashes.len(),
+                "Mismatched routing-decision hash lengths"
+            );
+            return Err(KvRouterError::IndexerDroppedRequest);
+        }
+
         let Some(prune_manager) = &self.prune_manager else {
             // Approximate routing decisions are only recorded when explicitly enabled.
             return Ok(());
@@ -481,6 +511,16 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<(), KvRouterError> {
         self.record_routing_decision_hashes(worker, &local_hashes, &sequence_hashes)
+            .await
+    }
+
+    pub async fn process_routing_decision_hash_slices(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: &[LocalBlockHash],
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<(), KvRouterError> {
+        self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
             .await
     }
 }

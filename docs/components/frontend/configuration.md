@@ -45,8 +45,9 @@ The Rust HTTP server also reads these environment variables (not exposed as CLI 
 | `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `DYN_ROUTER_TRACK_PREFILL_TOKENS` | `true` | Track prompt-side prefill load in worker load accounting |
 | `--router-prefill-load-model` | `DYN_ROUTER_PREFILL_LOAD_MODEL` | `none` | Prompt-side load model: `none` for static load, `aic` for oldest-prefill decay using an AIC prediction |
 | `--router-event-threads` | `DYN_ROUTER_EVENT_THREADS` | `4` | KV indexer worker threads. >1 enables the concurrent radix tree, including with `--no-router-kv-events` |
-| `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | `16.0` | Queue threshold fraction of prefill capacity. Enables priority scheduling |
+| `--router-queue-threshold` | `DYN_ROUTER_QUEUE_THRESHOLD` | `16.0` | Queue threshold fraction of prefill capacity. Priority hints only affect requests waiting in this queue |
 | `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` | Queue scheduling policy: `fcfs` (tail TTFT), `wspt` (avg TTFT), or `lcfs` (comparison-only reverse ordering) |
+| `--router-policy-config` | `DYN_ROUTER_POLICY_CONFIG` | — | Startup-only [policy-family and cache-bucket YAML](../router/router-configuration.md#policy-class-queues). Falls back to the single queue configured above when omitted |
 | `--decode-fallback` / `--no-decode-fallback` | `DYN_DECODE_FALLBACK` | `false` | Fall back to aggregated mode when prefill workers unavailable |
 
 ## AIC Prefill Load Model
@@ -94,7 +95,7 @@ For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_
 |-------------|---------|---------|-------------|
 | `--discovery-backend` | `DYN_DISCOVERY_BACKEND` | `etcd` | Service discovery: `kubernetes`, `etcd`, `file`, `mem` |
 | `--request-plane` | `DYN_REQUEST_PLANE` | `tcp` | Request distribution: `tcp` (fastest), `nats` |
-| `--event-plane` | `DYN_EVENT_PLANE` | `nats` | Event publishing: `nats`, `zmq` |
+| `--event-plane` | `DYN_EVENT_PLANE` | auto | Event publishing: `nats`, `zmq`; defaults to `zmq` for `file`/`mem` discovery and `nats` for `etcd`/`kubernetes` |
 
 ## KServe gRPC
 
@@ -123,7 +124,7 @@ See the [Frontend Guide](frontend-guide.md) for KServe message formats and integ
 | CLI Argument | Env Var | Default | Description |
 |-------------|---------|---------|-------------|
 | `--enable-anthropic-api` | `DYN_ENABLE_ANTHROPIC_API` | `false` | Enable `/v1/messages` (Anthropic Messages API) |
-| `--dyn-chat-processor` | `DYN_CHAT_PROCESSOR` | `dynamo` | Chat processor: `dynamo` or `vllm` |
+| `--dyn-chat-processor` | `DYN_CHAT_PROCESSOR` | `dynamo` | Chat processor: `dynamo` (default), `vllm`, or `sglang`. See [Parser Configuration](../../tool-calling/parser-configuration.md) for how this combines with the parser flags. |
 | `--dyn-debug-perf` | `DYN_DEBUG_PERF` | `false` | Log per-function timing for preprocessing (vllm processor only) |
 | `--dyn-preprocess-workers` | `DYN_PREPROCESS_WORKERS` | `0` | Worker processes for CPU-bound preprocessing. 0 = main event loop (vllm processor only) |
 | `-i` / `--interactive` | `DYN_INTERACTIVE` | `false` | Interactive text chat mode |
@@ -161,8 +162,19 @@ The frontend exposes the following HTTP endpoints:
 | `GET` | `/metrics` | Prometheus metrics |
 | `GET` | `/openapi.json` | OpenAPI specification |
 | `GET` | `/docs` | Swagger UI |
-| `POST` | `/busy_threshold` | Set busy thresholds |
-| `GET` | `/busy_threshold` | Get current busy thresholds |
+| `POST` | `/busy_threshold` | Set busy thresholds (gated by `DYN_ENABLE_FRONTEND_ADMIN_API`, see below) |
+| `GET` | `/busy_threshold` | Get current busy thresholds (gated by `DYN_ENABLE_FRONTEND_ADMIN_API`, see below) |
+
+### Frontend feature switches
+
+Environment variables controlling frontend extensions. Extensions are enabled by default. When deploying, consider whether each is needed for your use case; if not, disable it to prevent accidental abuse.
+
+Set an env value of `0` / `false` / `no` / `off` (case-insensitive) to disable.
+
+| Env Var | Default | Behavior when `false` |
+|---------|---------|------------------------|
+| `DYN_ENABLE_FRONTEND_NVEXT` | `true` | Frontend drops `request.nvext` at handler entry on `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/messages`; ignores Dynamo routing headers (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`, `x-dynamo-prefill-dp-rank`, `x-dynamo-request-priority`, `x-dynamo-request-strict-priority`) and their compatibility aliases; silently ignores the response-side `nvext.extra_fields` opt-in. Note: disabling this breaks EPP / GAIE serving, Prime-RL-style training that uses `nvext.cache_salt`, multi-tenant agent platforms that forward `nvext.agent_hints`, and clients that opt into response disclosure via `nvext.extra_fields`. |
+| `DYN_ENABLE_FRONTEND_ADMIN_API` | `true` | `GET /busy_threshold` and `POST /busy_threshold` are not registered (404 instead of 503). Inference, metrics, models, health, and liveness routes are unaffected. |
 
 ### Endpoint Path Customization
 

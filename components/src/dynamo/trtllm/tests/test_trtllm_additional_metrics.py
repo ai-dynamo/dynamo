@@ -12,7 +12,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from prometheus_client import CollectorRegistry, generate_latest
+from prometheus_client import CollectorRegistry
+from prometheus_client import Counter as RealCounter
+from prometheus_client import Gauge as RealGauge
+from prometheus_client import Histogram as RealHistogram
+from prometheus_client import generate_latest
 
 from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
@@ -38,14 +42,13 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         """Create a fresh registry and collector for each test."""
         self.registry = CollectorRegistry()
 
-        # Patch prometheus_client.Counter and Histogram to use our test registry
+        # Patch prometheus_client metrics to use our test registry
         with patch("dynamo.trtllm.metrics.Counter") as MockCounter, patch(
             "dynamo.trtllm.metrics.Histogram"
-        ) as MockHistogram:
-            from prometheus_client import Counter, Histogram
+        ) as MockHistogram, patch("dynamo.trtllm.metrics.Gauge") as MockGauge:
 
             def make_counter(name, documentation, labelnames=None, **_kw):
-                return Counter(
+                return RealCounter(
                     name,
                     documentation,
                     labelnames=labelnames or [],
@@ -58,12 +61,21 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
                 kwargs = {"registry": self.registry}
                 if buckets is not None:
                     kwargs["buckets"] = buckets
-                return Histogram(
+                return RealHistogram(
                     name, documentation, labelnames=labelnames or [], **kwargs
+                )
+
+            def make_gauge(name, documentation, labelnames=None, **_kw):
+                return RealGauge(
+                    name,
+                    documentation,
+                    labelnames=labelnames or [],
+                    registry=self.registry,
                 )
 
             MockCounter.side_effect = make_counter
             MockHistogram.side_effect = make_histogram
+            MockGauge.side_effect = make_gauge
 
             self.collector = AdditionalMetricsCollector(
                 labels={
@@ -223,6 +235,37 @@ class TestAdditionalMetricsCollector(unittest.TestCase):
         # None means unobserved; Prometheus counters without .inc() do not
         # appear as a sample row.
         self.assertIn(count, (None, 0.0))
+
+    def test_kv_event_buffer_telemetry(self):
+        """KV event drains report capacity, distribution, and ID loss."""
+        self.collector.set_kv_event_buffer_capacity(100_000)
+        self.collector.record_kv_event_drain_batch(64)
+        self.collector.record_kv_event_drain_batch(512)
+        self.collector.record_kv_event_drain_batch(128)
+        self.collector.record_kv_event_id_gap(7)
+        self.collector.record_kv_event_id_gap(0)
+
+        labels = {
+            "model_name": "test-model",
+            "disaggregation_mode": "prefill_and_decode",
+            "engine_type": "trtllm",
+        }
+        self.assertEqual(
+            self.registry.get_sample_value("trtllm_kv_event_buffer_capacity", labels),
+            100_000,
+        )
+        self.assertEqual(
+            self.registry.get_sample_value(
+                "trtllm_kv_event_drain_batch_size_count", labels
+            ),
+            3,
+        )
+        self.assertEqual(
+            self.registry.get_sample_value(
+                "trtllm_kv_event_id_gap_events_total", labels
+            ),
+            7,
+        )
 
     def test_no_duplicate_metrics(self):
         """Test that removed duplicate metrics are not present."""

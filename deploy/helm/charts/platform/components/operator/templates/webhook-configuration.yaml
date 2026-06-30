@@ -78,7 +78,7 @@ webhooks:
     service:
       name: {{ include "dynamo-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
-      path: /validate-nvidia-com-v1alpha1-dynamographdeployment
+      path: /validate/nvidia.com/v1beta1/dynamographdeployments
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: vdynamographdeployment.kb.io
   {{- if .Values.webhook.namespaceSelector }}
@@ -93,7 +93,7 @@ webhooks:
   - apiGroups:
     - nvidia.com
     apiVersions:
-    - v1alpha1
+    - v1beta1
     operations:
     - CREATE
     - UPDATE
@@ -234,7 +234,7 @@ webhooks:
     service:
       name: {{ include "dynamo-operator.fullname" . }}-webhook-service
       namespace: {{ .Release.Namespace }}
-      path: /mutate-nvidia-com-v1alpha1-dynamographdeployment
+      path: /mutate/nvidia.com/v1beta1/dynamographdeployments
   failurePolicy: {{ .Values.webhook.failurePolicy }}
   name: mdynamographdeployment.kb.io
   {{- if .Values.webhook.namespaceSelector }}
@@ -249,9 +249,10 @@ webhooks:
   - apiGroups:
     - nvidia.com
     apiVersions:
-    - v1alpha1
+    - v1beta1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - dynamographdeployments
   sideEffects: None
@@ -286,6 +287,7 @@ webhooks:
     - v1beta1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - dynamocomponentdeployments
   sideEffects: None
@@ -319,7 +321,43 @@ webhooks:
     - v1beta1
     operations:
     - CREATE
+    - UPDATE
     resources:
     - dynamographdeploymentrequests
+  sideEffects: None
+  timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    {{- if and (not .Values.webhook.certManager.enabled) .Values.webhook.certificateSecret.external }}
+    {{- if .Values.webhook.caBundle }}
+    caBundle: {{ .Values.webhook.caBundle }}
+    {{- end }}
+    {{- end }}
+    service:
+      name: {{ include "dynamo-operator.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /mutate-core-v1-pod-checkpoint-restore
+  failurePolicy: {{ .Values.webhook.podCheckpointRestoreFailurePolicy | default "Ignore" }}
+  name: mpodcheckpointrestore.kb.io
+  {{- if .Values.webhook.namespaceSelector }}
+  namespaceSelector:
+    {{- toYaml .Values.webhook.namespaceSelector | nindent 4 }}
+  {{- else if .Values.namespaceRestriction.enabled }}
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+  {{- end }}
+  rules:
+  - apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    # Pod checkpoint restore injects pod spec fields before creation. It is
+    # intentionally CREATE-only because pod UPDATE cannot apply that mutation.
+    operations:
+    - CREATE
+    resources:
+    - pods
   sideEffects: None
   timeoutSeconds: {{ .Values.webhook.timeoutSeconds }}

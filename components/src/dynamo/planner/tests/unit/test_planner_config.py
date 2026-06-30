@@ -6,6 +6,7 @@
 import pytest
 from pydantic import ValidationError
 
+from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.config.planner_config import PlannerConfig
 
 pytestmark = [
@@ -109,6 +110,19 @@ def test_max_num_fpm_samples_field():
     assert config.max_num_fpm_samples == 100
 
 
+def test_speculative_nextn_default_and_positive_value():
+    config = PlannerConfig(namespace="test-ns")
+    assert config.speculative_nextn == 0
+
+    config = PlannerConfig(namespace="test-ns", speculative_nextn=3)
+    assert config.speculative_nextn == 3
+
+
+def test_speculative_nextn_rejects_negative_value():
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", speculative_nextn=-1)
+
+
 def test_agg_mode_supports_throughput_scaling():
     """Agg mode supports throughput-based scaling."""
     config = PlannerConfig(
@@ -121,3 +135,35 @@ def test_agg_mode_supports_throughput_scaling():
     assert config.mode == "agg"
     assert config.enable_throughput_scaling is True
     assert config.scaling_enabled() is True
+
+
+def test_aic_perf_model_requires_prefill_pick_for_prefill_mode():
+    with pytest.raises(ValidationError, match="prefill_pick"):
+        PlannerConfig(
+            namespace="test-ns",
+            mode="prefill",
+            optimization_target="sla",
+            aic_perf_model={
+                "hf_id": "model",
+                "system": "h200_sxm",
+                "backend": "vllm",
+            },
+        )
+
+
+def test_aic_perf_model_accepts_mode_required_picks():
+    pick = PickedParallelConfig(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1)
+    config = PlannerConfig(
+        namespace="test-ns",
+        mode="decode",
+        optimization_target="sla",
+        aic_perf_model={
+            "hf_id": "model",
+            "system": "h200_sxm",
+            "backend": "vllm",
+            "decode_pick": pick.model_dump(),
+        },
+    )
+
+    assert config.aic_perf_model is not None
+    assert config.aic_perf_model.decode_pick == pick

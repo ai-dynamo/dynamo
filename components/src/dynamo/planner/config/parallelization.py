@@ -63,11 +63,34 @@ class PickedParallelConfig(BaseModel):
         return self.tp
 
     def label(self) -> str:
+        """Build a label that is injective across all five parallel dimensions.
+
+        Encodes ``(tp, pp, dp, moe_tp, moe_ep)`` so distinct topologies never
+        collide. Default-1 dimensions are omitted for readability.
+
+        Examples (MoE picks)::
+
+            (tp=2, dp=1, moe_tp=2, moe_ep=1) -> "tp2-moetp2"
+            (tp=2, dp=1, moe_tp=1, moe_ep=2) -> "tp2-moeep2"
+            (tp=1, dp=2, moe_tp=1, moe_ep=2) -> "tp1-dp2-moeep2"
+            (tp=4, dp=1, moe_tp=4, moe_ep=1) -> "tp4-moetp4"
+
+        The prior 3-bucket form (``dep{moe_ep}`` / ``tep{moe_tp}`` / ``tp{tp}``)
+        collapsed ``(tp=2, moe_ep=2)`` and ``(tp=1, dp=2, moe_ep=2)`` to the
+        same ``"dep2"`` string, which corrupted ``thorough.py`` work_dir
+        naming and ``aiconfigurator.sdk.picking`` ``groupby("parallel")``
+        dedup.
+        """
+        parts = [f"tp{self.tp}"]
+        if self.pp > 1:
+            parts.append(f"pp{self.pp}")
+        if self.dp > 1:
+            parts.append(f"dp{self.dp}")
+        if self.moe_tp > 1:
+            parts.append(f"moetp{self.moe_tp}")
         if self.moe_ep > 1:
-            return f"dep{self.moe_ep}"
-        elif self.moe_tp > 1:
-            return f"tep{self.moe_tp}"
-        return f"tp{self.tp}"
+            parts.append(f"moeep{self.moe_ep}")
+        return "-".join(parts)
 
 
 def picked_to_aic_model_config_kwargs(p: PickedParallelConfig) -> dict[str, int]:

@@ -6,6 +6,7 @@ use dynamo_kv_router::protocols::KvCacheEventData;
 pub use dynamo_kv_router::test_utils::NoopSequencePublisher;
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_mocker::loadgen::{SessionPartitionSpec, Trace};
+use dynamo_mocker::replay::ReplayKvEventVisibility;
 pub use dynamo_mocker::replay::ReplayWorkerArtifacts as WorkerReplayArtifacts;
 use indicatif::ProgressBar;
 
@@ -80,6 +81,7 @@ fn replay_worker_trace(
     trace: Trace,
     sched_args: MockEngineArgs,
     trace_simulation_duration_ms: Option<u64>,
+    kv_event_visibility_override: Option<ReplayKvEventVisibility>,
     progress: ProgressBar,
 ) -> anyhow::Result<WorkerReplayArtifacts> {
     let total_turns = trace
@@ -87,18 +89,23 @@ fn replay_worker_trace(
         .iter()
         .map(|session| session.turns.len())
         .sum::<usize>();
-    let artifacts = dynamo_mocker::replay::generate_trace_worker_artifacts_offline(
-        sched_args,
-        maybe_rescale_ready_span(trace, trace_simulation_duration_ms)?,
-    )?;
+    let trace = maybe_rescale_ready_span(trace, trace_simulation_duration_ms)?;
+    let artifacts = if let Some(visibility) = kv_event_visibility_override {
+        dynamo_mocker::replay::generate_trace_worker_artifacts_offline_with_kv_event_visibility(
+            sched_args, trace, visibility,
+        )?
+    } else {
+        dynamo_mocker::replay::generate_trace_worker_artifacts_offline(sched_args, trace)?
+    };
     progress.inc(total_turns as u64);
     Ok(artifacts)
 }
 
-pub async fn generate_replay_artifacts_with_args(
+pub async fn generate_replay_artifacts_with_args_and_visibility(
     traces: &[Trace],
     sched_args: MockEngineArgs,
     trace_simulation_duration_ms: Option<u64>,
+    kv_event_visibility_override: Option<ReplayKvEventVisibility>,
 ) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
     println!("Generating events...");
     let progress = make_progress_bar(Some(
@@ -119,7 +126,13 @@ pub async fn generate_replay_artifacts_with_args(
         let sched_args = sched_args.clone();
         let progress = progress.clone();
         tasks.push(tokio::task::spawn_blocking(move || {
-            replay_worker_trace(trace, sched_args, trace_simulation_duration_ms, progress)
+            replay_worker_trace(
+                trace,
+                sched_args,
+                trace_simulation_duration_ms,
+                kv_event_visibility_override,
+                progress,
+            )
         }));
     }
 
@@ -167,6 +180,20 @@ pub async fn generate_replay_artifacts_with_args(
     println!("Remove events: {}", num_removed_events);
 
     Ok(artifacts)
+}
+
+pub async fn generate_replay_artifacts_with_args(
+    traces: &[Trace],
+    sched_args: MockEngineArgs,
+    trace_simulation_duration_ms: Option<u64>,
+) -> anyhow::Result<Vec<WorkerReplayArtifacts>> {
+    generate_replay_artifacts_with_args_and_visibility(
+        traces,
+        sched_args,
+        trace_simulation_duration_ms,
+        None,
+    )
+    .await
 }
 
 pub async fn generate_replay_artifacts(

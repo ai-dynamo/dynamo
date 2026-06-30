@@ -28,17 +28,33 @@ use crate::lora::predictor::{EmaPredictor, LoadPredictor};
 
 // ─── BucketedRateCounter ────────────────────────────────────────────────────
 
+/// Sentinel epoch value indicating a bucket is mid-rotation. Acts as a
+/// transient lock: fast-path adders spin until the rotator publishes the new
+/// epoch, and readers skip the bucket until then.
+const BUCKET_ROTATING: u64 = u64::MAX;
+
+/// Upper bound on the per-LoRA sliding-window bucket count. Caps the bucket
+/// vector allocation (~16 bytes/bucket) so a pathological rate-window or
+/// bucket-rate config cannot OOM. 1M buckets ≈ 16 MiB.
+const MAX_BUCKETS: u64 = 1_000_000;
+
 /// Lock-free, epoch-based sliding-window rate counter.
 ///
 /// Divides time into fixed-duration buckets. Each bucket has an atomic counter
 /// and an epoch (the absolute bucket index it was last used for). Stale buckets
-/// are detected by epoch mismatch and lazily reset via CAS.
+/// are detected by epoch mismatch and lazily reset via a CAS-into-sentinel
+/// protocol that prevents concurrent fast-path additions from being lost.
 pub struct BucketedRateCounter {
     buckets: Vec<AtomicU64>,
     epochs: Vec<AtomicU64>,
     epoch_start: Instant,
     bucket_duration: Duration,
     num_buckets: usize,
+    /// Absolute bucket index of the most recent recorded arrival, or `u64::MAX` if none recorded
+    /// since creation/clear. Read by [`Self::has_recent_arrival`] for a rotation-safe "any arrival
+    /// in the window" check — unlike [`Self::count`], it never transiently reads 0 while a bucket
+    /// is mid-rotation, so it cannot drop a just-recorded short-lived arrival.
+    last_arrival_bucket: AtomicU64,
 }
 
 // All fields (Vec<AtomicU64>, Instant, Duration, usize) are Sync, so Sync is
@@ -68,6 +84,7 @@ impl BucketedRateCounter {
             epoch_start: now,
             bucket_duration,
             num_buckets,
+            last_arrival_bucket: AtomicU64::new(u64::MAX),
         }
     }
 
@@ -76,41 +93,72 @@ impl BucketedRateCounter {
         self.record_count(1, now);
     }
 
-    /// Record `n` arrivals at time `now`. Lock-free.
+    /// Record `n` arrivals at time `now`. Lock-free (spins only during the
+    /// narrow rotation window when crossing a bucket boundary).
+    ///
+    /// Rotation protocol: when a stale epoch is observed, the writer CASes the
+    /// epoch to the `BUCKET_ROTATING` sentinel, resets the bucket to its own
+    /// contribution, and publishes the new epoch. Concurrent threads either
+    /// take the fast path against the new epoch (preserving their adds) or
+    /// observe the sentinel and spin until publish completes — so no fast-path
+    /// add can be silently overwritten by the rotation.
     pub fn record_count(&self, n: u64, now: Instant) {
         if n == 0 {
             return;
         }
         let elapsed = now.duration_since(self.epoch_start);
-        let global_bucket = elapsed.as_nanos() / self.bucket_duration.as_nanos();
-        let global_bucket = global_bucket as u64;
+        let global_bucket = (elapsed.as_nanos() / self.bucket_duration.as_nanos()) as u64;
         let index = (global_bucket as usize) % self.num_buckets;
 
-        let current_epoch = self.epochs[index].load(Ordering::Acquire);
-        if current_epoch == global_bucket {
-            self.buckets[index].fetch_add(n, Ordering::Relaxed);
-        } else if current_epoch < global_bucket {
-            match self.epochs[index].compare_exchange(
-                current_epoch,
-                global_bucket,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    // Discard the stale previous epoch's value and add our
-                    // contribution. Using swap(0) + fetch_add instead of
-                    // store(n) avoids a lost-update race: a concurrent fast-path
-                    // fetch_add between these two ops would still be preserved.
-                    self.buckets[index].swap(0, Ordering::AcqRel);
-                    self.buckets[index].fetch_add(n, Ordering::Relaxed);
-                }
-                Err(actual) => {
-                    if actual == global_bucket {
-                        self.buckets[index].fetch_add(n, Ordering::Relaxed);
-                    }
-                    // else: another thread advanced to a newer epoch; drop this record
-                }
+        // Advance the latest-arrival bucket monotonically for the rotation-safe recent-arrival
+        // check. Use a max-update (treating the u64::MAX "empty" sentinel as lower than any real
+        // bucket) so a rare stale/out-of-order recorder with an older `now` can never REGRESS the
+        // marker below a newer concurrent record — which would otherwise make has_recent_arrival
+        // read stale and drop a genuinely recent signal.
+        let _ =
+            self.last_arrival_bucket
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(if cur == u64::MAX {
+                        global_bucket
+                    } else {
+                        cur.max(global_bucket)
+                    })
+                });
+
+        loop {
+            let current_epoch = self.epochs[index].load(Ordering::Acquire);
+            if current_epoch == global_bucket {
+                // Fast path: bucket already belongs to our epoch.
+                self.buckets[index].fetch_add(n, Ordering::Relaxed);
+                return;
             }
+            if current_epoch == BUCKET_ROTATING {
+                // Another thread is rotating this bucket; wait for publish.
+                std::hint::spin_loop();
+                continue;
+            }
+            if current_epoch > global_bucket {
+                // A newer epoch already owns this slot; drop the stale record.
+                return;
+            }
+            // current_epoch < global_bucket: try to claim the rotation.
+            if self.epochs[index]
+                .compare_exchange(
+                    current_epoch,
+                    BUCKET_ROTATING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                // We own the bucket. Reset to our contribution, then publish
+                // the new epoch. Concurrent readers/writers see ROTATING in
+                // between and either spin or skip, never a stale value.
+                self.buckets[index].store(n, Ordering::Release);
+                self.epochs[index].store(global_bucket, Ordering::Release);
+                return;
+            }
+            // Lost the CAS; another rotator won. Loop to observe new state.
         }
     }
 
@@ -123,6 +171,11 @@ impl BucketedRateCounter {
         let min_valid_epoch = global_bucket.saturating_sub(self.num_buckets as u64 - 1);
         for i in 0..self.num_buckets {
             let epoch = self.epochs[i].load(Ordering::Acquire);
+            // Skip buckets that are mid-rotation; their value will be visible
+            // on the next read once the rotator publishes the new epoch.
+            if epoch == BUCKET_ROTATING {
+                continue;
+            }
             if epoch >= min_valid_epoch && epoch <= global_bucket {
                 total += self.buckets[i].load(Ordering::Relaxed);
             }
@@ -130,11 +183,31 @@ impl BucketedRateCounter {
         total
     }
 
+    /// Whether any arrival was recorded within the sliding window ending at `now`.
+    ///
+    /// Rotation-safe single-atomic read (no per-bucket scan): checks the most-recent-arrival
+    /// bucket against the window, so unlike [`Self::count`] it cannot transiently miss an arrival
+    /// while a bucket is mid-rotation. Used by `retain_known` to avoid pruning a short-lived
+    /// new-adapter's load signal during the bucket-rotation window.
+    pub fn has_recent_arrival(&self, now: Instant) -> bool {
+        let last = self.last_arrival_bucket.load(Ordering::Relaxed);
+        if last == u64::MAX {
+            return false; // nothing recorded since creation/clear
+        }
+        let elapsed = now.duration_since(self.epoch_start);
+        let global_bucket = (elapsed.as_nanos() / self.bucket_duration.as_nanos()) as u64;
+        // saturating_sub handles a last bucket slightly ahead of `global_bucket` (treated as just
+        // now → recent); a last bucket older than the window yields a difference >= num_buckets.
+        global_bucket.saturating_sub(last) < self.num_buckets as u64
+    }
+
     pub fn clear(&self) {
         for i in 0..self.num_buckets {
             self.buckets[i].store(0, Ordering::Release);
             self.epochs[i].store(0, Ordering::Release);
         }
+        // No arrivals remain in the window after a clear.
+        self.last_arrival_bucket.store(u64::MAX, Ordering::Release);
     }
 }
 
@@ -184,22 +257,36 @@ impl LoadEstimatorConfig {
     pub fn from_controller_timestep(timestep_secs: u64, multiplier: u64) -> Self {
         let min_window = crate::lora::config::MIN_RATE_WINDOW_SECS;
         Self {
-            rate_window: Duration::from_secs((timestep_secs * multiplier).max(min_window)),
+            // saturating_mul: both operands are operator-supplied and could
+            // otherwise overflow u64.
+            rate_window: Duration::from_secs(
+                timestep_secs.saturating_mul(multiplier).max(min_window),
+            ),
             ..Default::default()
         }
     }
 
     fn num_buckets(&self) -> usize {
         let secs = self.rate_window.as_secs().max(1);
-        (secs * self.buckets_per_second).max(1) as usize
+        // saturating_mul guards against overflow; the clamp then bounds the
+        // bucket-vector allocation so a pathological (operator-supplied) window
+        // or bucket rate cannot OOM/panic when a counter is created. At 16 bytes
+        // per bucket (count + epoch atomics) the cap is ~16 MiB per LoRA.
+        secs.saturating_mul(self.buckets_per_second)
+            .clamp(1, MAX_BUCKETS) as usize
     }
 
     fn bucket_duration(&self) -> Duration {
-        if self.buckets_per_second == 0 {
-            Duration::from_secs(1)
-        } else {
-            Duration::from_nanos(1_000_000_000 / self.buckets_per_second)
-        }
+        // Spread exactly `num_buckets` buckets across the configured rate
+        // window. Deriving the duration from the (possibly clamped) bucket
+        // count keeps `num_buckets * bucket_duration == rate_window`, so
+        // clamping the count lengthens each bucket rather than silently
+        // shrinking the retained window. For unclamped configs this equals the
+        // requested 1s / buckets_per_second.
+        let buckets = self.num_buckets() as u128; // num_buckets() >= 1
+        let window_nanos = self.rate_window.as_nanos().max(1);
+        let per = (window_nanos / buckets).clamp(1, u64::MAX as u128) as u64;
+        Duration::from_nanos(per)
     }
 }
 
@@ -225,6 +312,84 @@ impl LoadEstimator {
             predictors: Mutex::new(HashMap::new()),
             config: parking_lot::RwLock::new(config),
         }
+    }
+
+    /// Replace the full estimator config at runtime (rate window, bucket granularity,
+    /// predictor type/alpha).
+    ///
+    /// Rebuilds EXISTING per-LoRA counters under the new bucket geometry when `rate_window` or
+    /// `buckets_per_second` changes, and clears predictors when the geometry or the predictor
+    /// type/alpha changes. The load-feed path can create counters BEFORE the controller applies
+    /// its config (e.g. a KV active-sequence event arriving before `start_lora_controller` runs),
+    /// so without this rebuild those early counters would keep the default bucketing forever.
+    /// `active_count` (in-flight requests) is preserved; the windowed arrival history is restarted
+    /// because it was measured against the old window. (Mirrors `set_rate_window`, but covers the
+    /// full config.)
+    pub fn set_config(&self, config: LoadEstimatorConfig) {
+        let mut cfg = self.config.write();
+        let old = cfg.clone();
+        let geometry_changed = old.rate_window != config.rate_window
+            || old.buckets_per_second != config.buckets_per_second;
+        let predictor_changed = old.predictor_type != config.predictor_type
+            || (old.ema_alpha - config.ema_alpha).abs() > f64::EPSILON;
+        *cfg = config;
+        let num_buckets = cfg.num_buckets();
+        let bucket_duration = cfg.bucket_duration();
+        drop(cfg);
+
+        if geometry_changed {
+            let now = Instant::now();
+            for mut entry in self.data.iter_mut() {
+                let old_active = entry.value().active_count.load(Ordering::Relaxed);
+                *entry.value_mut() = LoraLoadData {
+                    active_count: AtomicUsize::new(old_active),
+                    rate_counter: BucketedRateCounter::new(num_buckets, bucket_duration, now),
+                };
+            }
+        }
+        // Predictors built under the old window/params are meaningless once the geometry or the
+        // predictor type/alpha changes; clear them so smoothing restarts from scratch.
+        if geometry_changed || predictor_changed {
+            self.predictors
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+        }
+
+        tracing::info!(
+            num_buckets,
+            geometry_changed,
+            predictor_changed,
+            "LoadEstimator config updated"
+        );
+    }
+
+    /// Prune tracking data (and predictors) for any LoRA not in `known`. Bounds memory
+    /// against unloaded adapters and unknown/typo request names that never get allocated.
+    pub fn retain_known(&self, known: &std::collections::HashSet<&str>) {
+        // Keep an entry if it is known, OR still has in-flight requests, OR has nonzero arrivals
+        // within the current rate window. The in-flight check protects a LoRA whose arrival raced
+        // this controller tick before its MDC reached the state tracker (dropping it would make
+        // the matching LoadGuard / Free-event decrement a silent no-op). The recent-arrival check
+        // additionally protects a SHORT request for a newly seen adapter that already completed
+        // (active_count back to 0) before discovery reported the adapter: its arrival history must
+        // survive at least one rate window so the controller still sees the load signal and can
+        // allocate for it, instead of pruning the demand the instant the request finishes. The
+        // recent-arrival check uses the rotation-safe `has_recent_arrival` (a single-atomic
+        // last-arrival-bucket read), NOT `count`, so a bucket mid-rotation cannot transiently read
+        // zero and drop the very signal this protects. Once the window slides past with no further
+        // arrivals and the name is still unknown, it is pruned, so memory stays bounded against
+        // unknown/typo request names.
+        let now = Instant::now();
+        self.data.retain(|name, data| {
+            known.contains(name.as_str())
+                || data.active_count.load(Ordering::Relaxed) > 0
+                || data.rate_counter.has_recent_arrival(now)
+        });
+        self.predictors
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|name, _| known.contains(name.as_str()) || self.data.contains_key(name));
     }
 
     /// Update the rate window at runtime.
@@ -303,16 +468,37 @@ impl LoadEstimator {
         self: Arc<Self>,
         component: Component,
     ) -> tokio::task::JoinHandle<()> {
+        let cancel_token = component.drt().child_token();
         tokio::spawn(async move {
-            if let Err(e) = self.subscribe_to_events(component).await {
-                tracing::error!("Error in LORA load event subscription: {}", e);
+            // Durable feed: reconnect on transient errors / stream end with capped backoff,
+            // stopping only on cancellation. A failed subscribe must not silently disable KV
+            // load tracking for the lifetime of the process.
+            let mut backoff = Duration::from_secs(1);
+            while !cancel_token.is_cancelled() {
+                match self.subscribe_to_events(&component, &cancel_token).await {
+                    Ok(()) => break, // cancelled cleanly
+                    Err(e) => {
+                        tracing::warn!(
+                            "LORA load event subscription error: {e}; reconnecting in {backoff:?}"
+                        );
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => break,
+                            _ = tokio::time::sleep(backoff) => {}
+                        }
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
+                }
             }
+            tracing::debug!("LORA load event subscription task exiting");
         })
     }
 
-    async fn subscribe_to_events(&self, component: Component) -> anyhow::Result<()> {
-        let cancel_token = component.drt().child_token();
-        let mut subscriber = EventSubscriber::for_component(&component, ACTIVE_SEQUENCES_SUBJECT)
+    async fn subscribe_to_events(
+        &self,
+        component: &Component,
+        cancel_token: &tokio_util::sync::CancellationToken,
+    ) -> anyhow::Result<()> {
+        let mut subscriber = EventSubscriber::for_component(component, ACTIVE_SEQUENCES_SUBJECT)
             .await?
             .typed::<ActiveSequenceEvent>();
 
@@ -320,10 +506,7 @@ impl LoadEstimator {
 
         loop {
             tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    tracing::debug!("LORA load event subscription cancelled");
-                    break;
-                }
+                _ = cancel_token.cancelled() => return Ok(()),
                 result = subscriber.next() => {
                     match result {
                         Some(Ok((_envelope, event))) => {
@@ -332,16 +515,11 @@ impl LoadEstimator {
                         Some(Err(e)) => {
                             tracing::warn!("Error receiving LORA load event: {}", e);
                         }
-                        None => {
-                            tracing::warn!("LORA load event stream ended");
-                            break;
-                        }
+                        None => anyhow::bail!("LORA load event stream ended"),
                     }
                 }
             }
         }
-
-        Ok(())
     }
 
     fn handle_event(&self, event: ActiveSequenceEvent) {
@@ -408,6 +586,26 @@ impl LoadEstimator {
         }
     }
 
+    /// Remove all tracking data for a LoRA. After this call the LoRA will no
+    /// longer appear in [`get_current_load`] results. Useful when a LoRA is
+    /// permanently unloaded and its stale rate-counter / predictor entries
+    /// should be purged.
+    pub fn remove_lora(&self, lora_name: &str) {
+        self.data.remove(lora_name);
+        if let Ok(mut predictors) = self.predictors.lock() {
+            predictors.remove(lora_name);
+        }
+    }
+
+    /// Update active counts from a polled snapshot.
+    ///
+    /// **Polling-mode caveat**: arrivals are approximated as the per-poll
+    /// delta `max(0, current - prev)`, since worker snapshots do not expose
+    /// request-start events. This is a *lower bound* on real arrivals:
+    /// in-interval churn (e.g., 10 requests finishing while 10 new ones start
+    /// — net delta 0) is invisible, and sub-interval oscillation is lost.
+    /// Event-based mode (`handle_event` / `increment_load`) gives accurate
+    /// arrival rates; prefer it when arrival precision matters.
     fn update_from_counts(&self, lora_counts: HashMap<String, usize>) {
         let now = Instant::now();
         let cfg = self.config.read();
@@ -549,6 +747,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn set_config_rebuilds_existing_counter_geometry() {
+        // The load-feed path can create a counter before the controller applies its config, so
+        // set_config must rebuild EXISTING counters under the new bucket geometry (preserving the
+        // in-flight active_count), not only counters created afterward.
+        let est = LoadEstimator::with_config(LoadEstimatorConfig {
+            rate_window: Duration::from_secs(10),
+            buckets_per_second: 1,
+            ..Default::default()
+        });
+        // Counter for "lora-a" created under the OLD geometry (10s @ 1/s = 10 buckets), with one
+        // in-flight request.
+        est.increment_load("lora-a");
+        assert_eq!(est.data.get("lora-a").unwrap().rate_counter.num_buckets, 10);
+
+        // Apply a finer bucket geometry at runtime.
+        est.set_config(LoadEstimatorConfig {
+            rate_window: Duration::from_secs(10),
+            buckets_per_second: 4,
+            ..Default::default()
+        });
+
+        let entry = est.data.get("lora-a").unwrap();
+        assert_eq!(
+            entry.rate_counter.num_buckets, 40,
+            "existing counter must adopt the new geometry (10s @ 4/s = 40 buckets)"
+        );
+        assert_eq!(
+            entry.active_count.load(Ordering::Relaxed),
+            1,
+            "in-flight active_count must survive the rebuild"
+        );
+    }
+
+    #[test]
     fn test_bucketed_rate_counter_basic() {
         let now = Instant::now();
         let counter = BucketedRateCounter::new(10, Duration::from_secs(1), now);
@@ -620,6 +852,113 @@ mod tests {
     }
 
     #[test]
+    fn test_decrement_load_saturates_at_zero() {
+        let estimator = LoadEstimator::new();
+
+        // Decrementing a never-seen LoRA is a no-op (data entry doesn't exist).
+        estimator.decrement_load("never-seen");
+        assert!(!estimator.get_inflight_counts().contains_key("never-seen"));
+
+        // Over-decrement an existing entry: pre-fix, this wrapped to usize::MAX.
+        estimator.increment_load("lora-test");
+        estimator.decrement_load("lora-test");
+        estimator.decrement_load("lora-test"); // would wrap without saturating_sub
+        estimator.decrement_load("lora-test");
+
+        let inflight = estimator.get_inflight_counts();
+        // active_count == 0 is filtered out of get_inflight_counts.
+        assert!(
+            !inflight.contains_key("lora-test"),
+            "expected saturated zero (filtered out); got {:?}",
+            inflight.get("lora-test")
+        );
+    }
+
+    #[test]
+    fn test_update_from_counts_records_arrival_deltas() {
+        let estimator = LoadEstimator::new();
+
+        // First poll: 3 active → record 3 arrivals.
+        let mut counts = HashMap::new();
+        counts.insert("lora-a".to_string(), 3);
+        estimator.update_from_counts(counts);
+        assert_eq!(estimator.get_raw_arrival_counts().get("lora-a"), Some(&3));
+
+        // Second poll: still 3 active (sustained) → delta is 0, no new arrivals.
+        let mut counts = HashMap::new();
+        counts.insert("lora-a".to_string(), 3);
+        estimator.update_from_counts(counts);
+        assert_eq!(
+            estimator.get_raw_arrival_counts().get("lora-a"),
+            Some(&3),
+            "sustained traffic must not double-count arrivals"
+        );
+
+        // Third poll: 5 active (grew by 2) → record 2 new arrivals.
+        let mut counts = HashMap::new();
+        counts.insert("lora-a".to_string(), 5);
+        estimator.update_from_counts(counts);
+        assert_eq!(estimator.get_raw_arrival_counts().get("lora-a"), Some(&5));
+
+        // Fourth poll: 2 active (shrank by 3) → no arrivals recorded; window stays.
+        let mut counts = HashMap::new();
+        counts.insert("lora-a".to_string(), 2);
+        estimator.update_from_counts(counts);
+        assert_eq!(
+            estimator.get_raw_arrival_counts().get("lora-a"),
+            Some(&5),
+            "decreases must not record arrivals"
+        );
+
+        // In-flight reflects the latest snapshot, not the rolling window.
+        assert_eq!(estimator.get_inflight_counts().get("lora-a"), Some(&2));
+    }
+
+    #[test]
+    fn test_bucket_rotation_concurrent_no_lost_updates() {
+        use std::sync::Arc;
+        use std::thread;
+
+        // Geometry: 100us per bucket, large window so nothing expires during the
+        // test. Threads contend simultaneously across many bucket boundaries.
+        let start = Instant::now();
+        let bucket_duration = Duration::from_micros(100);
+        let num_buckets = 10_000usize;
+        let counter = Arc::new(BucketedRateCounter::new(
+            num_buckets,
+            bucket_duration,
+            start,
+        ));
+
+        let threads_n: usize = 8;
+        let per_thread: usize = 1_000;
+        let step_micros: u64 = 50; // two records per bucket, so every other i crosses a boundary
+
+        let mut handles = Vec::with_capacity(threads_n);
+        for _ in 0..threads_n {
+            let counter = Arc::clone(&counter);
+            handles.push(thread::spawn(move || {
+                for i in 0..per_thread {
+                    let offset = Duration::from_micros(i as u64 * step_micros);
+                    counter.record(start + offset);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_time = start + Duration::from_micros(per_thread as u64 * step_micros);
+        let total = counter.count(final_time);
+        let expected = (threads_n * per_thread) as u64;
+        assert_eq!(
+            total, expected,
+            "expected {expected} arrivals across concurrent bucket rotations, got {total} \
+             — rotation protocol lost updates"
+        );
+    }
+
+    #[test]
     fn test_load_with_ema_predictor() {
         let config = LoadEstimatorConfig {
             predictor_type: PredictorType::Ema,
@@ -637,6 +976,91 @@ mod tests {
             load.get("lora-test"),
             Some(&3),
             "EMA with alpha=1.0 should match raw count"
+        );
+    }
+
+    #[test]
+    fn has_recent_arrival_marker_never_regresses_from_stale_writer() {
+        // L-1: the last-arrival marker must advance monotonically. A stale/out-of-order recorder
+        // with an older `now` must NOT regress the marker below a newer concurrent record, or
+        // has_recent_arrival would read stale and wrongly drop a genuinely recent signal.
+        let base = Instant::now();
+        let bd = Duration::from_secs(1);
+        let counter = BucketedRateCounter::new(3, bd, base); // window = 3 buckets
+
+        // Newer record at bucket 10, then a STALE record at bucket 2 (out of order).
+        counter.record_count(1, base + Duration::from_secs(10));
+        counter.record_count(1, base + Duration::from_secs(2));
+
+        // Queried at bucket 10: only the newer (bucket 10) arrival is inside the 3-bucket window.
+        // If the stale write had regressed the marker to bucket 2, this would read false.
+        assert!(
+            counter.has_recent_arrival(base + Duration::from_secs(10)),
+            "marker must reflect the newest arrival (bucket 10), not the stale older write"
+        );
+        // Far past the window: no recent arrival.
+        assert!(
+            !counter.has_recent_arrival(base + Duration::from_secs(20)),
+            "once the window slides past the newest arrival, has_recent_arrival is false"
+        );
+    }
+
+    #[test]
+    fn retain_known_keeps_recent_arrival_after_short_request() {
+        // A short request for a newly seen adapter can arrive and complete (active_count back to 0)
+        // before the adapter appears in discovery. retain_known must keep its recent-arrival
+        // history so the controller still sees the load signal for at least one rate window,
+        // instead of pruning the demand the instant the request finishes.
+        let est = LoadEstimator::new();
+        est.increment_load("new-adapter"); // request arrives
+        est.decrement_load("new-adapter"); // request completes immediately
+        assert!(
+            !est.get_inflight_counts().contains_key("new-adapter"),
+            "no in-flight requests remain after the short request completes"
+        );
+
+        // Discovery has not reported it yet, so it is not "known".
+        let known: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        est.retain_known(&known);
+
+        assert!(
+            est.data.contains_key("new-adapter"),
+            "a recent arrival must survive retain_known for at least one rate window"
+        );
+        assert!(
+            est.get_raw_arrival_counts()
+                .get("new-adapter")
+                .copied()
+                .unwrap_or(0)
+                > 0,
+            "the load signal (recent arrival) must be preserved"
+        );
+    }
+
+    #[test]
+    fn retain_known_prunes_unknown_with_no_recent_arrivals() {
+        // Once the rate window has slid past the arrival (no recent arrivals) and the name is still
+        // unknown, retain_known must prune it so memory stays bounded against typo/unknown names.
+        let est = LoadEstimator::new();
+        est.increment_load("typo-adapter");
+        est.decrement_load("typo-adapter");
+        // Simulate the rate window fully sliding past the arrival without sleeping.
+        est.clear_rate_counter("typo-adapter");
+        assert_eq!(
+            est.get_raw_arrival_counts()
+                .get("typo-adapter")
+                .copied()
+                .unwrap_or(0),
+            0,
+            "precondition: no recent arrivals remain"
+        );
+
+        let known: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        est.retain_known(&known);
+
+        assert!(
+            !est.data.contains_key("typo-adapter"),
+            "an unknown name with no in-flight requests and no recent arrivals must be pruned"
         );
     }
 }
