@@ -289,8 +289,9 @@ class ThreadedMicroBatcher(Generic[T, R]):
             raise
 
     def shutdown(self) -> None:
-        """Stop the worker, failing not-yet-run items. Idempotent; retries the
-        join if a slow ``fn`` is still in flight."""
+        """Stop the worker, failing not-yet-run items. Idempotent and best-effort:
+        a slow in-flight ``fn`` keeps running and the worker exits on its own once
+        it returns and reads the stop signal."""
         if self._thread is None:
             return
         to_fail: List[_Work] = []
@@ -301,19 +302,18 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 self._queue.put(_SHUTDOWN)
         self._consume_all(to_fail, RuntimeError("ThreadedMicroBatcher shut down"))
         self._thread.join(timeout=self._join_timeout_s)
-        if self._thread.is_alive():
-            logger.warning(
-                "ThreadedMicroBatcher(%s): worker still running after %gs; will "
-                "reap on a later call",
-                self._name,
-                self._join_timeout_s,
-            )
-            return
         with self._lock:
-            if self._state is _State.CLOSING:
+            if self._state is _State.CLOSING and not self._thread.is_alive():
                 self._state = _State.CLOSED
             leftover = self._drain_queue_locked()  # belt-and-suspenders
         self._consume_all(leftover, RuntimeError("ThreadedMicroBatcher shut down"))
+        if self._thread.is_alive():
+            logger.warning(
+                "ThreadedMicroBatcher(%s): worker still finishing an in-flight fn "
+                "after %gs; it will exit on its own.",
+                self._name,
+                self._join_timeout_s,
+            )
 
     # ---- worker thread -----------------------------------------------------
 
@@ -520,7 +520,10 @@ class ThreadedMicroBatcher(Generic[T, R]):
             except queue.Empty:
                 return drained
             if item is _SHUTDOWN:
-                continue
+                # Preserve the stop signal so a still-running worker reads it and
+                # exits — draining must never strand the worker.
+                self._queue.put(_SHUTDOWN)
+                return drained
             drained.append(item)
 
     def _consume_all(self, works: List[_Work], exc: BaseException) -> None:
