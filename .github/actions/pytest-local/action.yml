@@ -190,47 +190,16 @@ runs:
         fi
         echo "📦 Running pytest from container workspace: ${CONTAINER_WORKSPACE}"
 
-        parse_pytest_extra_args() {
-          PYTEST_EXTRA_ARGS=()
-          if [[ -z "${PYTEST_EXTRA_ARGS_INPUT}" ]]; then
-            return 0
-          fi
-
-          local extra_args_file
-          extra_args_file="$(mktemp)"
-          if ! python - <<'PY' > "${extra_args_file}"
-        import os
-        import shlex
-        import sys
-
-        try:
-            args = shlex.split(os.environ["PYTEST_EXTRA_ARGS_INPUT"])
-        except ValueError as exc:
-            print(f"Invalid pytest_extra_args: {exc}", file=sys.stderr)
-            sys.exit(2)
-
-        for arg in args:
-            sys.stdout.buffer.write(arg.encode("utf-8", "surrogateescape"))
-            sys.stdout.buffer.write(b"\0")
-        PY
-          then
-            rm -f "${extra_args_file}"
-            exit 2
-          fi
-
-          while IFS= read -r -d '' arg; do
-            PYTEST_EXTRA_ARGS+=("${arg}")
-          done < "${extra_args_file}"
-          rm -f "${extra_args_file}"
-        }
-
-        parse_pytest_extra_args
+        if [[ -n "${PYTEST_EXTRA_ARGS_INPUT}" ]]; then
+          export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }${PYTEST_EXTRA_ARGS_INPUT}"
+          printf '📌 PYTEST_ADDOPTS=%q\n' "${PYTEST_ADDOPTS}"
+        fi
 
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${DRY_RUN_INPUT}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
           GPU_FLAGS=""
-          PYTEST_CMD=(python -m pytest -v --collect-only "${PYTEST_EXTRA_ARGS[@]}" -m "${PYTEST_MARKS_INPUT}")
+          PYTEST_CMD=(python -m pytest -v --collect-only -m "${PYTEST_MARKS_INPUT}")
         else
           echo "🚀 Running pytest in normal mode"
           # Determine parallelization based on parallel_mode input
@@ -287,7 +256,6 @@ runs:
             --alluredir="${TEST_RESULTS_DIR}/allure-results"
             --durations=10
             "${COVERAGE_FLAGS[@]}"
-            "${PYTEST_EXTRA_ARGS[@]}"
             -m "${PYTEST_MARKS_INPUT}"
           )
         fi

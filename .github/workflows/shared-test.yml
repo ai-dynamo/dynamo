@@ -40,8 +40,8 @@ on:
         required: false
         type: string
         default: ''
-      extra_test_env:
-        description: 'Additional KEY=VALUE environment lines exported before test steps'
+      kvbm_mla_backend:
+        description: 'KVBM MLA attention backend exported for KVBM tests'
         required: false
         type: string
         default: ''
@@ -179,13 +179,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
-      - name: Export extra test environment
-        if: ${{ inputs.extra_test_env != '' }}
+      - name: Export KVBM MLA backend
+        if: ${{ inputs.kvbm_mla_backend != '' }}
         shell: bash
         env:
-          EXTRA_TEST_ENV: ${{ inputs.extra_test_env }}
+          KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
         run: |
-          printf '%s\n' "$EXTRA_TEST_ENV" >> "$GITHUB_ENV"
+          echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
       # Experimental: trialing Datadog Test Visibility. Remove if not kept.
       - name: Configure Datadog Test Visibility
         continue-on-error: true

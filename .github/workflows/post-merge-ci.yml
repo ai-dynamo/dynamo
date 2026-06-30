@@ -449,7 +449,7 @@ jobs:
       run_gpu_tests: false
     secrets: inherit
 
-  kvbm-tests:
+  vllm-kvbm-tests:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [config, vllm-build]
     if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
@@ -464,9 +464,9 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       pytest_extra_args: tests/kvbm_integration
+      container_workspace: /__w/dynamo/dynamo
       hf_home: /models
-      extra_test_env: |
-        KVBM_MLA_BACKEND=FLASH_ATTN_MLA
+      kvbm_mla_backend: FLASH_ATTN_MLA
       run_cpu_only_tests: false
       run_gpu_tests: true
       gpu_test_markers: post_merge and h100 and kvbm and gpu_1
