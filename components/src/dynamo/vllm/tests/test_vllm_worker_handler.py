@@ -1433,11 +1433,15 @@ class TestEmbeddingWorkerHandlerCancellation:
         handler = self._make_embedding_handler()
         context = self._make_context()
         captured: dict = {}
+        # vLLM's pooler has already reduced to the requested ``dimensions``, so
+        # the stub returns a 128-dim vector (not 3) -- otherwise the handler's
+        # oversized-dimensions guard would (correctly) reject it.
+        vec = [i * 0.01 for i in range(128)]
 
         async def fake_encode(prompt, pooling_params, request_id):
             captured["pooling_params"] = pooling_params
             output = MagicMock()
-            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.outputs.data = torch.tensor(vec)
             output.prompt_token_ids = [1, 2, 3]
             yield output
 
@@ -1450,9 +1454,9 @@ class TestEmbeddingWorkerHandlerCancellation:
         assert pp.task == "embed"
         assert pp.dimensions == 128
         # No post-hoc truncation: the handler returns exactly the vector vLLM
-        # produced (the 3-float stub here), trusting the pooler to have
+        # produced (the 128-float stub here), trusting the pooler to have
         # already applied the dimensionality reduction.
-        expected_b64 = mod._encode_floats_to_base64([0.1, 0.2, 0.3])
+        expected_b64 = mod._encode_floats_to_base64(vec)
         assert responses[0]["data"][0]["embedding"] == expected_b64
 
     @pytest.mark.asyncio
