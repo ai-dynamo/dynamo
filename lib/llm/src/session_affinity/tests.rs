@@ -163,7 +163,7 @@ async fn resolve_local(
         .acquire(session_id)
         .await
         .unwrap()
-        .resolve(target_payload(selected))
+        .resolve(|| target_payload(selected))
         .await
         .unwrap()
 }
@@ -290,14 +290,14 @@ async fn session_affinity_initialization_is_atomic() {
     assert!(!waiter.is_finished());
 
     let first = first
-        .resolve(target_payload(target(7, Some(0))))
+        .resolve(|| target_payload(target(7, Some(0))))
         .await
         .unwrap();
     let second = waiter
         .await
         .unwrap()
         .unwrap()
-        .resolve(target_payload(target(8, Some(0))))
+        .resolve(|| target_payload(target(8, Some(0))))
         .await
         .unwrap();
     assert_eq!(second.target(), target(7, Some(0)));
@@ -316,7 +316,7 @@ async fn distributed_existing_winner_skips_proposal_and_cache_hits_skip_discover
         .acquire(&session_id)
         .await
         .unwrap()
-        .resolve(target_payload(target(7, Some(0))))
+        .resolve(|| target_payload(target(7, Some(0))))
         .await
         .unwrap();
     assert_eq!(created.target(), target(7, Some(0)));
@@ -325,15 +325,16 @@ async fn distributed_existing_winner_skips_proposal_and_cache_hits_skip_discover
 
     let proposal_polled = Arc::new(AtomicBool::new(false));
     let polled = proposal_polled.clone();
-    let proposed: ClaimPayloadFuture<'_> = Box::pin(async move {
-        polled.store(true, Ordering::Relaxed);
-        Ok(serde_json::to_value(target(8, Some(0)))?)
-    });
     let winner = second
         .acquire(&session_id)
         .await
         .unwrap()
-        .resolve(proposed)
+        .resolve(|| {
+            Box::pin(async move {
+                polled.store(true, Ordering::Relaxed);
+                Ok(serde_json::to_value(target(8, Some(0)))?)
+            })
+        })
         .await
         .unwrap();
     assert_eq!(winner.target(), target(7, Some(0)));
@@ -342,21 +343,20 @@ async fn distributed_existing_winner_skips_proposal_and_cache_hits_skip_discover
     drop(winner);
     assert_eq!(discovery.create_calls.load(Ordering::Relaxed), 2);
 
-    let cached_proposal_polled = Arc::new(AtomicBool::new(false));
-    let polled = cached_proposal_polled.clone();
-    let proposed: ClaimPayloadFuture<'_> = Box::pin(async move {
-        polled.store(true, Ordering::Relaxed);
-        Ok(serde_json::to_value(target(9, Some(0)))?)
-    });
+    let cached_proposal_constructed = Arc::new(AtomicBool::new(false));
+    let constructed = cached_proposal_constructed.clone();
     let cached = second
         .acquire(&session_id)
         .await
         .unwrap()
-        .resolve(proposed)
+        .resolve(|| {
+            constructed.store(true, Ordering::Relaxed);
+            target_payload(target(9, Some(0)))
+        })
         .await
         .unwrap();
     assert_eq!(cached.target(), target(7, Some(0)));
-    assert!(!cached_proposal_polled.load(Ordering::Relaxed));
+    assert!(!cached_proposal_constructed.load(Ordering::Relaxed));
     assert_eq!(discovery.create_calls.load(Ordering::Relaxed), 2);
 }
 
@@ -376,7 +376,7 @@ async fn distributed_delete_evicts_one_entry_and_duplicate_is_harmless() {
                 .acquire(session)
                 .await
                 .unwrap()
-                .resolve(target_payload(target(worker_id, Some(0))))
+                .resolve(|| target_payload(target(worker_id, Some(0))))
                 .await
                 .unwrap(),
         );
@@ -403,7 +403,7 @@ async fn distributed_subscriber_lag_clears_all_entries() {
             .acquire(&session_id)
             .await
             .unwrap()
-            .resolve(target_payload(target(8, Some(0))))
+            .resolve(|| target_payload(target(8, Some(0))))
             .await
             .unwrap(),
     );
@@ -425,7 +425,7 @@ async fn distributed_reset_and_disconnect_clear_entries() {
             .acquire(&session_id)
             .await
             .unwrap()
-            .resolve(target_payload(target(8, Some(0))))
+            .resolve(|| target_payload(target(8, Some(0))))
             .await
             .unwrap(),
     );
@@ -437,7 +437,7 @@ async fn distributed_reset_and_disconnect_clear_entries() {
             .acquire(&session_id)
             .await
             .unwrap()
-            .resolve(target_payload(target(99, Some(0))))
+            .resolve(|| target_payload(target(99, Some(0))))
             .await
             .unwrap(),
     );
@@ -454,7 +454,7 @@ async fn terminal_close_evicts_synchronously() {
         .acquire(&session_id)
         .await
         .unwrap()
-        .resolve(target_payload(target(7, Some(0))))
+        .resolve(|| target_payload(target(7, Some(0))))
         .await
         .unwrap();
     let key = coordinator.claim_key_for_test(&session_id);
@@ -493,6 +493,34 @@ async fn session_affinity_initializer_cancellation_wakes_waiter() {
         coordinator.acquire(&session_id()).await.unwrap(),
         AffinityAcquire::Initialize(_)
     ));
+}
+
+#[tokio::test]
+async fn distributed_reset_wakes_initializing_waiter_and_preserves_entry_count() {
+    let discovery = ClaimTestDiscovery::new(16);
+    let coordinator = distributed_coordinator(discovery.clone());
+    let first = coordinator.acquire(&session_id()).await.unwrap();
+    let AffinityAcquire::Initialize(first) = first else {
+        panic!("first request must initialize");
+    };
+
+    let waiter_coordinator = coordinator.clone();
+    let waiter = tokio::spawn(async move { waiter_coordinator.acquire(&session_id()).await });
+    coordinator.wait_for_initializing_waiter().await;
+    discovery.emit(ClaimEvent::Reset);
+
+    let next = tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .expect("reset did not wake initializing waiter")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(&next, AffinityAcquire::Initialize(_)));
+    assert_eq!(coordinator.entry_count(), 1);
+
+    drop(first);
+    assert_eq!(coordinator.entry_count(), 1);
+    drop(next);
+    assert_eq!(coordinator.entry_count(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -535,7 +563,7 @@ async fn session_affinity_existing_binding_overrides_explicit_proposals() {
             .acquire(&session_id())
             .await
             .unwrap()
-            .resolve(target_payload(proposal))
+            .resolve(|| target_payload(proposal))
             .await
             .unwrap();
         assert_eq!(resolved.target(), target(7, None));

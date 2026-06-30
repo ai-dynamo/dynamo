@@ -156,15 +156,18 @@ impl KvPushRouter {
         let operation = affinity
             .acquire_with_context(&session_id, request_context.as_ref())
             .await?;
-        let proposed_payload: ClaimPayloadFuture<'_> = Box::pin(async {
-            let selection = self.select_request(request, phase, true, None).await?;
-            let target = AffinityTarget {
-                worker_id: selection.instance_id,
-                dp_rank: Some(selection.dp_rank),
-            };
-            Ok(serde_json::to_value(target)?)
-        });
-        let resolved = operation.resolve(proposed_payload).await?;
+        let resolved = operation
+            .resolve(|| -> ClaimPayloadFuture<'_> {
+                Box::pin(async {
+                    let selection = self.select_request(request, phase, true, None).await?;
+                    let target = AffinityTarget {
+                        worker_id: selection.instance_id,
+                        dp_rank: Some(selection.dp_rank),
+                    };
+                    Ok(serde_json::to_value(target)?)
+                })
+            })
+            .await?;
         let worker = affinity_worker(resolved.target());
         let selection = self.select_request(request, phase, false, worker).await?;
         Ok((selection, Some(resolved)))
@@ -663,9 +666,7 @@ mod tests {
             .acquire(&session_id)
             .await
             .unwrap()
-            .resolve(Box::pin(async move {
-                Ok(serde_json::to_value(original_target)?)
-            }))
+            .resolve(|| Box::pin(async move { Ok(serde_json::to_value(original_target)?) }))
             .await
             .unwrap();
         drop(resolved);
@@ -703,12 +704,14 @@ mod tests {
             .acquire(&session_id)
             .await
             .unwrap()
-            .resolve(Box::pin(async move {
-                Ok(serde_json::to_value(AffinityTarget {
-                    worker_id: 8,
-                    dp_rank: Some(0),
-                })?)
-            }))
+            .resolve(|| {
+                Box::pin(async move {
+                    Ok(serde_json::to_value(AffinityTarget {
+                        worker_id: 8,
+                        dp_rank: Some(0),
+                    })?)
+                })
+            })
             .await
             .unwrap();
         assert_eq!(resolved.target(), original_target);
@@ -732,9 +735,7 @@ mod tests {
             .acquire(&session_id)
             .await
             .unwrap()
-            .resolve(Box::pin(
-                async move { Ok(serde_json::to_value(bound_target)?) },
-            ))
+            .resolve(|| Box::pin(async move { Ok(serde_json::to_value(bound_target)?) }))
             .await
             .unwrap();
         drop(resolved);

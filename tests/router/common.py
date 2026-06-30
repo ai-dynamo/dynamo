@@ -679,9 +679,6 @@ def _test_distributed_session_affinity(
                 first_evictions = first_router.read_logs().count(
                     "evicted session affinity cache entry"
                 )
-                second_evictions = second_router.read_logs().count(
-                    "evicted session affinity cache entry"
-                )
                 assert await send(
                     client,
                     urls[1],
@@ -691,6 +688,24 @@ def _test_distributed_session_affinity(
                         "x-dynamo-session-final": "true",
                     },
                 ) == (worker_a, 0)
+
+                for _ in range(50):
+                    if (
+                        first_router.read_logs().count(
+                            "evicted session affinity cache entry"
+                        )
+                        > first_evictions
+                    ):
+                        break
+                    await asyncio.sleep(0.1)
+                else:
+                    raise AssertionError(
+                        "first frontend did not observe session A claim deletion"
+                    )
+
+                second_evictions = second_router.read_logs().count(
+                    "evicted session affinity cache entry"
+                )
                 assert await send(
                     client,
                     urls[0],
@@ -702,23 +717,16 @@ def _test_distributed_session_affinity(
                 ) == (worker_b, 0)
 
                 for _ in range(50):
-                    first_observed = (
-                        first_router.read_logs().count(
-                            "evicted session affinity cache entry"
-                        )
-                        > first_evictions
-                    )
-                    second_observed = (
+                    if (
                         second_router.read_logs().count(
                             "evicted session affinity cache entry"
                         )
                         > second_evictions
-                    )
-                    if first_observed and second_observed:
+                    ):
                         return
                     await asyncio.sleep(0.1)
                 raise AssertionError(
-                    "frontends did not observe terminal claim deletion invalidation"
+                    "second frontend did not observe session B claim deletion"
                 )
 
         asyncio.run(run_test())

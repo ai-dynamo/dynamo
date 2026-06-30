@@ -39,6 +39,9 @@ pub struct KVStoreDiscovery {
 /// instance. `Put` events never populate caches. `Delete(key)` evicts one entry, while
 /// watcher loss, restart, or subscriber lag produces `Reset` so coordinators clear all
 /// entries rather than retain potentially stale bindings.
+///
+/// TODO: `Bucket::watch` cannot yet surface etcd reconnect/compaction or FileStore
+/// overflow errors, so those hidden backend failures cannot be converted into `Reset`.
 struct ClaimState {
     events: broadcast::Sender<ClaimEvent>,
     watcher_started: OnceCell<()>,
@@ -905,6 +908,50 @@ mod tests {
         create_on_call: Option<usize>,
     }
 
+    struct InsertBarrierBucket {
+        inner: Box<dyn kv::Bucket>,
+        barrier: tokio::sync::Barrier,
+    }
+
+    #[async_trait]
+    impl kv::Bucket for InsertBarrierBucket {
+        async fn insert(
+            &self,
+            key: &kv::Key,
+            value: bytes::Bytes,
+            revision: u64,
+        ) -> std::result::Result<kv::StoreOutcome, kv::StoreError> {
+            self.barrier.wait().await;
+            self.inner.insert(key, value, revision).await
+        }
+
+        async fn get(
+            &self,
+            key: &kv::Key,
+        ) -> std::result::Result<Option<bytes::Bytes>, kv::StoreError> {
+            self.inner.get(key).await
+        }
+
+        async fn delete(&self, key: &kv::Key) -> std::result::Result<(), kv::StoreError> {
+            self.inner.delete(key).await
+        }
+
+        async fn watch(
+            &self,
+        ) -> std::result::Result<
+            Pin<Box<dyn futures::Stream<Item = kv::WatchEvent> + Send + '_>>,
+            kv::StoreError,
+        > {
+            self.inner.watch().await
+        }
+
+        async fn entries(
+            &self,
+        ) -> std::result::Result<HashMap<kv::Key, bytes::Bytes>, kv::StoreError> {
+            self.inner.entries().await
+        }
+    }
+
     #[async_trait]
     impl kv::Bucket for DisappearingBucket {
         async fn insert(
@@ -978,23 +1025,29 @@ mod tests {
 
     #[tokio::test]
     async fn competing_claims_return_one_created_winner() {
-        let client = Arc::new(KVStoreDiscovery::new(
-            kv::Manager::memory(),
-            CancellationToken::new(),
-        ));
-        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let store = kv::Manager::memory();
+        let bucket = Arc::new(InsertBarrierBucket {
+            inner: store
+                .get_or_create_bucket(CLAIMS_BUCKET, None)
+                .await
+                .unwrap(),
+            barrier: tokio::sync::Barrier::new(8),
+        });
+        let key = Arc::new(kv::Key::new("scope/race".to_string()));
         let mut tasks = Vec::new();
         for worker_id in 0..8 {
-            let client = client.clone();
-            let barrier = barrier.clone();
+            let bucket = bucket.clone();
+            let key = key.clone();
             tasks.push(tokio::spawn(async move {
                 let mut proposal: ClaimPayloadFuture<'_> =
                     Box::pin(async move { Ok(payload(worker_id)) });
-                barrier.wait().await;
-                client
-                    .create_or_get_claim("scope/race", &mut proposal)
-                    .await
-                    .unwrap()
+                KVStoreDiscovery::create_or_get_in_bucket(
+                    bucket.as_ref(),
+                    key.as_ref(),
+                    &mut proposal,
+                )
+                .await
+                .unwrap()
             }));
         }
 
@@ -1022,7 +1075,6 @@ mod tests {
             ClaimOutcome::Created(payload) | ClaimOutcome::Existing(payload) => payload == winner,
             ClaimOutcome::Unsupported => false,
         }));
-        assert_eq!(client.claims.watcher_probe.starts(), 1);
     }
 
     #[tokio::test]

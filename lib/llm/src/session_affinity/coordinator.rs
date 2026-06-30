@@ -259,13 +259,15 @@ impl AffinityCoordinator {
     }
 
     fn clear_entries(inner: &AffinityCoordinatorInner) {
-        for entry in inner.entries.iter() {
-            if let AffinityEntry::Initializing { notify, .. } = entry.value() {
+        let mut removed = 0;
+        inner.entries.retain(|_, entry| {
+            if let AffinityEntry::Initializing { notify, .. } = entry {
                 notify.notify_waiters();
             }
-        }
-        inner.entries.clear();
-        inner.entry_count.store(0, Ordering::Relaxed);
+            removed += 1;
+            false
+        });
+        Self::decrement_entry_count(inner, removed);
         tracing::debug!("cleared session affinity cache after claim watcher reset");
     }
 
@@ -552,12 +554,12 @@ pub(crate) enum AffinityAcquire {
 }
 
 impl AffinityAcquire {
-    pub(crate) async fn resolve(
-        self,
-        proposed_payload: ClaimPayloadFuture<'_>,
-    ) -> Result<ResolvedAffinity, Error> {
+    pub(crate) async fn resolve<'a, F>(self, proposed_payload: F) -> Result<ResolvedAffinity, Error>
+    where
+        F: FnOnce() -> ClaimPayloadFuture<'a> + Send,
+    {
         match self {
-            Self::Initialize(initialization) => initialization.resolve(proposed_payload).await,
+            Self::Initialize(initialization) => initialization.resolve(proposed_payload()).await,
             Self::Bound { target, lease } => Ok(ResolvedAffinity {
                 target,
                 lease,
@@ -750,6 +752,8 @@ impl CloseAction {
             return;
         };
         let claim_key = self.claim_key;
+        // TODO: Drive backend close to completion before returning stream EOF. This detached
+        // task keeps early stream drops best-effort and can be cancelled during runtime shutdown.
         tokio::spawn(async move {
             if let Err(error) = claims.close(&claim_key).await {
                 tracing::error!(%claim_key, %error, "failed to close session affinity claim");

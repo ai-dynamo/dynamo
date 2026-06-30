@@ -195,8 +195,9 @@ pub struct Directory {
 
 impl Directory {
     fn new(root: PathBuf, p: PathBuf, ttl: Duration) -> Self {
-        // Canonicalize root to handle symlinks (e.g., /var -> /private/var on macOS)
+        // Keep watched paths and event paths in the same form across symlinked roots.
         let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+        let canonical_path = p.canonicalize().unwrap_or_else(|_| p.clone());
         if ttl < MIN_KEEP_ALIVE {
             let h_ttl = humantime::format_duration(ttl);
             tracing::warn!(path = %p.display(), ttl = %h_ttl, "ttl is too short, increasing to {}", humantime::format_duration(MIN_KEEP_ALIVE));
@@ -204,7 +205,7 @@ impl Directory {
         let ttl = cmp::max(ttl, MIN_KEEP_ALIVE);
         Directory {
             root: canonical_root,
-            p,
+            p: canonical_path,
             ttl,
             owned_files: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -441,7 +442,6 @@ impl Bucket for Directory {
                         continue;
                     }
                 };
-
                 for item_path in event.paths {
                     // Skip if the event is for the directory itself
                     if item_path == dir {
@@ -449,9 +449,7 @@ impl Bucket for Directory {
                         continue;
                     }
 
-                    // Canonicalize paths to handle symlinks (e.g., /var -> /private/var on macOS)
-                    // The unwrap_or_else path is for Remove case.
-                    let canonical_item_path = item_path.canonicalize().unwrap_or_else(|_| item_path.clone());
+                    let canonical_item_path = canonicalize_event_path(&item_path);
 
                     let key = match canonical_item_path.strip_prefix(&root) {
                         Ok(stripped) => Key::from_url_safe(&stripped.display().to_string()),
@@ -490,7 +488,7 @@ impl Bucket for Directory {
                             let item = KeyValue::new(key, data);
                             yield WatchEvent::Put(item);
                         }
-                        EventKind::Remove(event::RemoveKind::File) => {
+                        EventKind::Remove(_) => {
                             yield WatchEvent::Delete(key);
                         }
                         _ => {
@@ -589,6 +587,19 @@ fn write_temp_file_at(temp_path: &Path, value: &[u8]) -> Result<bool, StoreError
     Ok(true)
 }
 
+fn canonicalize_event_path(path: &Path) -> PathBuf {
+    if let Ok(canonical_path) = path.canonicalize() {
+        return canonical_path;
+    }
+    let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) else {
+        return path.to_path_buf();
+    };
+    let Ok(canonical_parent) = parent.canonicalize() else {
+        return path.to_path_buf();
+    };
+    canonical_parent.join(file_name)
+}
+
 // For anyhow preserve the context
 fn a_to_fs_err(err: anyhow::Error) -> StoreError {
     StoreError::FilesystemError(format!("{err:#}"))
@@ -602,10 +613,77 @@ fn to_fs_err<E: std::error::Error>(err: E) -> StoreError {
 mod tests {
     use std::collections::HashSet;
     use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::time::Duration;
 
+    use futures::StreamExt;
     use tokio_util::sync::CancellationToken;
 
     use crate::storage::kv::{Bucket as _, FileStore, Key, Store as _, StoreOutcome};
+
+    #[test]
+    fn deleted_event_path_canonicalizes_existing_parent() {
+        let t = tempfile::tempdir().unwrap();
+        let canonical_root = t.path().join("canonical");
+        let bucket = canonical_root.join("v1/claims");
+        fs::create_dir_all(&bucket).unwrap();
+        let linked_root = t.path().join("linked");
+        symlink(&canonical_root, &linked_root).unwrap();
+
+        assert_eq!(
+            super::canonicalize_event_path(&linked_root.join("v1/claims/deleted")),
+            canonical_root
+                .canonicalize()
+                .unwrap()
+                .join("v1/claims/deleted")
+        );
+    }
+
+    #[tokio::test]
+    async fn external_delete_is_observed_under_noncanonical_root() {
+        let t = tempfile::tempdir().unwrap();
+        let watcher_cancel = CancellationToken::new();
+        let creator_cancel = CancellationToken::new();
+        let watcher_store = FileStore::new(watcher_cancel.clone(), t.path());
+        let creator_store = FileStore::new(creator_cancel.clone(), t.path());
+        let watcher_bucket = watcher_store
+            .get_or_create_bucket("v1/claims", None)
+            .await
+            .unwrap();
+        let creator_bucket = creator_store
+            .get_or_create_bucket("v1/claims", None)
+            .await
+            .unwrap();
+        let mut events = watcher_bucket.watch().await.unwrap();
+        let key = Key::new("scope/session".to_string());
+
+        creator_bucket
+            .insert(&key, "value".into(), 0)
+            .await
+            .unwrap();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), events.next())
+                .await
+                .expect("FileStore watcher did not observe claim creation")
+                .expect("FileStore watcher ended after claim creation");
+            if matches!(event, super::WatchEvent::Put(ref item) if item.key_str() == "v1/claims/scope/session")
+            {
+                break;
+            }
+        }
+
+        creator_bucket.delete(&key).await.unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), events.next())
+            .await
+            .expect("FileStore watcher did not observe claim deletion")
+            .expect("FileStore watcher ended after claim deletion");
+        assert!(
+            matches!(event, super::WatchEvent::Delete(ref deleted) if deleted == &Key::new("v1/claims/scope/session".to_string()))
+        );
+
+        watcher_cancel.cancel();
+        creator_cancel.cancel();
+    }
 
     #[tokio::test]
     async fn test_entries_full_path() {
