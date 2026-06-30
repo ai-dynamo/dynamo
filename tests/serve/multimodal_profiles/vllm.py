@@ -625,9 +625,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 timeout_s=300,
                 directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
                 env={
-                    # The single-GPU test container remaps its host GPU to
-                    # device 0, so pin the worker there (agg_custom.sh also
-                    # honors an externally-set CUDA_VISIBLE_DEVICES).
+                    # The single-GPU test container exposes its GPU at device 0,
+                    # so pin the worker there.
                     "DYN_WORKER_GPU": "0",
                     "DYN_ENCODER_CLASS": (
                         "examples.custom_encoder.hitchhikers_vision_encoder."

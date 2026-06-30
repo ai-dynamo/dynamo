@@ -1144,8 +1144,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # The author writes the VisionEncoderBackend; Dynamo wraps it in the
         # AsyncVisionEncoder glue, which owns the preprocess pool + actor
         # thread + micro-batcher. load() runs backend.build() on the actor thread
-        # (the backend picks its own device — the worker pins it via
-        # CUDA_VISIBLE_DEVICES) and cleans that thread up on failure.
+        # (the backend picks its own device) and cleans that thread up on failure.
         encoder = AsyncVisionEncoder(backend_cls())
         encoder.load(config.model)
         # Assign only after a successful load so a failed load (which already shut
