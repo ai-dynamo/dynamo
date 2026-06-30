@@ -1622,6 +1622,59 @@ def test_qwen3_coder_non_streaming_batches_reasoning_before_tool_parse(
 
 
 @pytest.mark.vllm
+def test_qwen3_streaming_buffers_function_marker_after_reasoning_end(
+    tokenizer, qwen3_coder_request_for_sampling, sampling_params
+):
+    outputs = [
+        CompletionOutput(
+            index=0,
+            text=(
+                "<think>Need the weather.</think>\n"
+                "<function=get_weather>\n"
+                "<parameter=location>\n"
+                "NYC\n"
+                "</parameter>\n"
+            ),
+            token_ids=[151667, 151668],
+            cumulative_logprob=None,
+            logprobs=None,
+        ),
+        CompletionOutput(
+            index=0,
+            text="</function>",
+            token_ids=[1002],
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason="stop",
+        ),
+    ]
+
+    proc = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=qwen3_coder_request_for_sampling,
+        sampling_params=sampling_params,
+        prompt_token_ids=PROMPT_TOKEN_IDS,
+        tool_parser=Qwen3EngineToolParser(
+            tokenizer, qwen3_coder_request_for_sampling.tools
+        ),
+        reasoning_parser_class=Qwen3ParserReasoningAdapter,
+        chat_template_kwargs={"reasoning_effort": None},
+        stream_response=True,
+    )
+
+    results = _collect_results(proc, outputs)
+    assert _collect_reasoning(results) == "Need the weather."
+    all_content = "".join(r.get("delta", {}).get("content", "") for r in results)
+    assert "<function=get_weather>" not in all_content
+    assert "</function>" not in all_content
+
+    tool_calls = _collect_tool_calls(results)
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["function"]["name"] == "get_weather"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"location": "NYC"}
+
+
+@pytest.mark.vllm
 def test_stream_interval_1(processor):
     """stream_interval=1: one token per chunk. Baseline that works."""
     results = _collect_results(processor, OUTPUTS_INTERVAL_1)

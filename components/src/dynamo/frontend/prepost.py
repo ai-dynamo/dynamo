@@ -323,6 +323,44 @@ class StreamingPostProcessor:
             and self.request_for_sampling.tool_choice != "none"
         )
 
+    def _tool_parser_terminal_markers(self, names: tuple[str, ...]) -> tuple[str, ...]:
+        parser_engine = getattr(self.tool_parser, "_parser_engine", None)
+        parser_engine_config = getattr(parser_engine, "parser_engine_config", None)
+        terminals = getattr(parser_engine_config, "terminals", None)
+        if not isinstance(terminals, dict):
+            return ()
+
+        markers: list[str] = []
+        for name in names:
+            marker = terminals.get(name)
+            if isinstance(marker, str) and marker:
+                markers.append(marker)
+        return tuple(markers)
+
+    def _tool_start_markers(self) -> tuple[str, ...]:
+        markers = [
+            getattr(self.tool_parser, "tool_call_start_token", None),
+            # MistralToolParser names its [TOOL_CALLS] marker bot_token.
+            getattr(self.tool_parser, "bot_token", None),
+            *self._tool_parser_terminal_markers(("TOOL_START", "FUNC_PREFIX")),
+        ]
+        return tuple(
+            dict.fromkeys(
+                marker for marker in markers if isinstance(marker, str) and marker
+            )
+        )
+
+    def _tool_end_markers(self) -> tuple[str, ...]:
+        markers = [
+            getattr(self.tool_parser, "tool_call_end_token", None),
+            *self._tool_parser_terminal_markers(("TOOL_END", "FUNC_END")),
+        ]
+        return tuple(
+            dict.fromkeys(
+                marker for marker in markers if isinstance(marker, str) and marker
+            )
+        )
+
     @staticmethod
     def _compose_delta_message(
         reasoning: str | None, content: str | None
@@ -510,9 +548,11 @@ class StreamingPostProcessor:
         # ------------------------------------------------------------------
         if self._tool_text_buffer is not None:
             self._tool_text_buffer += delta_text
-            tool_call_end = getattr(self.tool_parser, "tool_call_end_token", None)
             buffer_complete = (
-                tool_call_end and tool_call_end in self._tool_text_buffer
+                any(
+                    marker in self._tool_text_buffer
+                    for marker in self._tool_end_markers()
+                )
             ) or output.finish_reason
             if buffer_complete:
                 buffered_text = self._tool_text_buffer
@@ -551,13 +591,10 @@ class StreamingPostProcessor:
                 current_text = ""
                 current_token_ids = []
 
-                tool_call_start = getattr(
-                    self.tool_parser, "tool_call_start_token", None
-                )
-                if not tool_call_start:
-                    # MistralToolParser names its [TOOL_CALLS] marker bot_token.
-                    tool_call_start = getattr(self.tool_parser, "bot_token", None)
-                if post_content and tool_call_start and tool_call_start in post_content:
+                tool_start_markers = self._tool_start_markers()
+                if post_content and any(
+                    marker in post_content for marker in tool_start_markers
+                ):
                     # Tool call markup present — buffer for non-streaming
                     # extraction (streaming parser can't handle the combined
                     # reasoning-end + tool-start in a single chunk).
