@@ -23,6 +23,7 @@ pub mod proto;
 pub mod selection_backend;
 pub mod selector_fleet;
 pub mod server;
+pub mod topology_adapter;
 
 pub use epp::Router;
 pub use epp_config::EppConfig;
@@ -35,3 +36,4 @@ pub use selection_backend::{
 };
 pub use selector_fleet::SelectorFleet;
 pub use server::ExtProcServer;
+pub use topology_adapter::{RegistrationDefaults, TopologyAdapter};
