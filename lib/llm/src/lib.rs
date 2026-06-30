@@ -13,6 +13,7 @@ pub mod endpoint_type;
 pub mod engines;
 pub mod entrypoint;
 pub mod fpm_publisher;
+pub mod frontend_config;
 pub mod grpc;
 pub mod http;
 pub mod hub;

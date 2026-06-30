@@ -432,12 +432,12 @@ impl OpenAIPreprocessor {
         // here; remove once fastokens upstream exposes the mutator.
         #[cfg(feature = "mm-routing")]
         let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
-            let fastokens_active = std::env::var("DYN_TOKENIZER").as_deref() == Ok("fastokens");
+            let fastokens_active = runtime_config.effective_tokenizer_backend().is_fastokens();
             if fastokens_active && model_dir_for_routing.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
-                    "DYN_TOKENIZER=fastokens is set; MM-aware KV routing disabled. \
-                     Unset DYN_TOKENIZER (or set it to 'default') to re-enable."
+                    "fastokens tokenizer backend is active; MM-aware KV routing disabled. \
+                     Use the default tokenizer backend to re-enable."
                 );
                 None
             } else {
@@ -662,13 +662,13 @@ impl OpenAIPreprocessor {
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
 
-        // Check if the chat template injected a reasoning start token at the end
-        // of the prompt (e.g., Qwen3.5 appends `<think>\n` when enable_thinking
-        // is not explicitly false). If so, the model's completion starts
-        // mid-reasoning and the parser should begin in reasoning mode.
-        let prompt_injected_reasoning = formatted_prompt
-            .as_ref()
-            .is_some_and(|p| p.trim_end().ends_with("<think>"));
+        // Generic reasoning parsers start from `<think>`; MiniMax M3 starts
+        // from `<mm:think>`. If the chat template injected that opener at the
+        // end of the prompt, the model completion starts mid-reasoning.
+        let prompt_injected_reasoning = Self::prompt_injected_reasoning_start(
+            self.runtime_config.reasoning_parser.as_deref(),
+            formatted_prompt.as_deref(),
+        );
 
         let tokenize_start = Instant::now();
         let (token_ids, annotations) = {
@@ -2461,12 +2461,26 @@ impl OpenAIPreprocessor {
         // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
         // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
         // - kimi_k25: `</think>` (special token id 163607).
+        // - minimax_m3: `]<]minimax[>[` tool-call namespace tokens and
+        //   `<mm:think>` reasoning markers.
         matches!(
             tool_call_parser,
-            Some("gemma4") | Some("gemma-4") | Some("harmony") | Some("kimi_k2")
+            Some("gemma4")
+                | Some("gemma-4")
+                | Some("harmony")
+                | Some("kimi_k2")
+                | Some("minimax_m3")
+                | Some("minimax-m3")
+                | Some("minimax_m3_nom")
+                | Some("minimax-m3-nom")
         ) || matches!(
             reasoning_parser,
-            Some("gemma4") | Some("gemma-4") | Some("gpt_oss") | Some("kimi_k25")
+            Some("gemma4")
+                | Some("gemma-4")
+                | Some("gpt_oss")
+                | Some("kimi_k25")
+                | Some("minimax_m3")
+                | Some("minimax-m3")
         )
     }
 
@@ -2515,8 +2529,29 @@ impl OpenAIPreprocessor {
     fn skips_guided_json_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
         matches!(
             reasoning_parser,
-            Some("deepseek_v4" | "deepseek-v4" | "deepseekv4" | "glm45")
+            Some(
+                "deepseek_v4"
+                    | "deepseek-v4"
+                    | "deepseekv4"
+                    | "glm45"
+                    | "minimax_m3"
+                    | "minimax-m3"
+            )
         )
+    }
+
+    fn prompt_injected_reasoning_start(
+        reasoning_parser: Option<&str>,
+        formatted_prompt: Option<&str>,
+    ) -> bool {
+        let Some(prompt) = formatted_prompt.map(str::trim_end) else {
+            return false;
+        };
+
+        match reasoning_parser {
+            Some("minimax_m3") | Some("minimax-m3") => prompt.ends_with("<mm:think>"),
+            _ => prompt.ends_with("<think>"),
+        }
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
@@ -2531,6 +2566,9 @@ impl OpenAIPreprocessor {
     ///   defined and enable_thinking` (truthy), so when callers explicitly set the
     ///   flag false the model emits no `<|channel>` markers and the parser would
     ///   only ever fall through.
+    /// For MiniMax M3: disabled when chat_template_args contains
+    ///   "thinking_mode": "disabled", matching SGLang's MiniMax M3 request
+    ///   convention.
     fn is_reasoning_disabled_by_request(
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -2576,6 +2614,14 @@ impl OpenAIPreprocessor {
                 if let Some(enabled) = dynamo_renderer::thinking_bool_from_args(chat_template_args)
                 {
                     return !enabled;
+                }
+                false
+            }
+            Some("minimax_m3") | Some("minimax-m3") => {
+                if let Some(args) = chat_template_args
+                    && let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str())
+                {
+                    return mode == "disabled";
                 }
                 false
             }
@@ -3339,6 +3385,18 @@ mod tests {
                 "kimi_k2 tool-call only → required \
                  (`<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>` are special)",
             ),
+            (
+                Some("minimax_m3"),
+                Some("minimax_m3"),
+                true,
+                "minimax_m3 paired → required",
+            ),
+            (
+                Some("minimax-m3-nom"),
+                Some("minimax-m3"),
+                true,
+                "MiniMax M3 SGLang aliases → required",
+            ),
             (None, None, false, "no parsers → not required"),
         ];
         for (tool, reasoning, expected, desc) in cases {
@@ -3368,6 +3426,57 @@ mod tests {
         // forced-true but parser doesn't need special tokens → fine
         assert!(!f(Some(true), Some("hermes"), None));
         assert!(!f(Some(true), None, None));
+    }
+
+    #[test]
+    fn test_prompt_injected_reasoning_start_by_parser() {
+        let cases = [
+            (
+                Some("minimax_m3"),
+                Some("...<mm:think>\n"),
+                true,
+                "MiniMax M3 starts from <mm:think>",
+            ),
+            (
+                Some("minimax-m3"),
+                Some("...</mm:think>\n"),
+                false,
+                "MiniMax M3 prefilled end marker means not in reasoning",
+            ),
+            (
+                Some("minimax_m3"),
+                Some("...<think>\n"),
+                false,
+                "MiniMax M3 must not use generic <think>",
+            ),
+            (
+                Some("qwen3"),
+                Some("...<think>\n"),
+                true,
+                "Qwen-style templated <think> behavior remains",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some("...<think>\n"),
+                true,
+                "existing <think> parser behavior remains",
+            ),
+            (
+                None,
+                Some("...<think>\n"),
+                true,
+                "legacy no-parser detection",
+            ),
+            (Some("minimax_m3"), None, false, "no prompt"),
+        ];
+
+        for (parser, prompt, expected, desc) in cases {
+            assert_eq!(
+                OpenAIPreprocessor::prompt_injected_reasoning_start(parser, prompt),
+                expected,
+                "FAILED: {desc}",
+            );
+        }
     }
 
     #[test]
@@ -3518,6 +3627,14 @@ mod tests {
             m.insert(
                 "thinking_mode".to_string(),
                 serde_json::Value::String("thinking".to_string()),
+            );
+            m
+        };
+        let thinking_mode_disabled = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String("disabled".to_string()),
             );
             m
         };
@@ -3720,6 +3837,30 @@ mod tests {
                 Some(&enable_thinking_false),
                 true,
                 "gemma-4 (hyphen alias) + enable_thinking=false → disabled",
+            ),
+            (
+                Some("minimax_m3"),
+                Some(&thinking_mode_disabled),
+                true,
+                "minimax_m3 + thinking_mode=disabled → disabled",
+            ),
+            (
+                Some("minimax-m3"),
+                Some(&thinking_mode_disabled),
+                true,
+                "minimax-m3 + thinking_mode=disabled → disabled",
+            ),
+            (
+                Some("minimax_m3"),
+                Some(&thinking_mode_thinking),
+                false,
+                "minimax_m3 + thinking_mode=thinking → enabled",
+            ),
+            (
+                Some("minimax_m3"),
+                None,
+                false,
+                "minimax_m3 + no args → enabled",
             ),
         ];
 

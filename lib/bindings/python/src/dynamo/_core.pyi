@@ -34,77 +34,6 @@ def get_reasoning_parser_names() -> list[str]:
     """Get list of available reasoning parser names."""
     ...
 
-async def parse_tool_calls_batch(
-    parser_name: str,
-    message: str,
-    tools_json: Optional[str] = None,
-) -> str:
-    """Parse tool calls from a model output string using the specified parser.
-
-    Args:
-        parser_name: Parser name (e.g. "kimi_k25"). Empty string falls back to default.
-        message:     Model output text to parse.
-        tools_json:  Optional JSON-serialized list of tool definitions in the form
-                     `[{"name": "...", "parameters": {...}}, ...]` (or OpenAI shape
-                     with `{"function": {...}}` wrapper). Used by parsers that need
-                     schema-aware coercion (e.g. XML family).
-
-    Returns:
-        JSON-serialized string `{"calls": [...], "normal_text": str | None}`.
-        Each entry in `calls` is `{"id", "type", "function": {"name", "arguments"}}`
-        with `arguments` itself a JSON-serialized string.
-
-    Raises:
-        ValueError on parser failure or malformed `tools_json`.
-    """
-    ...
-
-async def parse_tool_calls_stream(
-    parser_name: str,
-    chunks_json: str,
-    tools_json: Optional[str] = None,
-) -> str:
-    """Parse streamed tool-call chunks using the specified parser.
-
-    Args:
-        parser_name: Parser name (e.g. "kimi_k2"). Empty string falls back to default.
-        chunks_json: JSON-serialized list of chunks with `delta_text` and optional `finish_reason`.
-        tools_json: Optional JSON-serialized list of tool definitions.
-
-    Returns:
-        JSON-serialized string `{"calls": [{"name", "arguments"}], "normal_text": str}`.
-
-    Raises:
-        ValueError on parser failure or malformed JSON.
-    """
-    ...
-
-def parse_reasoning_batch(
-    parser_name: str,
-    message: str,
-    token_ids: Optional[List[int]] = None,
-    in_reasoning: bool = False,
-) -> str:
-    """Parse reasoning from a complete model output string using the specified parser.
-
-    Returns:
-        JSON-serialized string `{"reasoning_text": str, "normal_text": str}`.
-    """
-    ...
-
-def parse_reasoning_stream(
-    parser_name: str,
-    chunks: List[str],
-    token_chunks: Optional[List[List[int]]] = None,
-    in_reasoning: bool = False,
-) -> str:
-    """Parse reasoning from streaming chunks using one stateful parser instance.
-
-    Returns:
-        JSON-serialized string with accumulated `reasoning_text` and `normal_text`.
-    """
-    ...
-
 def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...
@@ -527,6 +456,13 @@ class Context:
         """
         ...
 
+    def detached(self, id: str) -> "Context":
+        """
+        Create a context with a fresh cancellation controller and request ID
+        while preserving trace parentage and a metadata snapshot.
+        """
+        ...
+
     def async_killed_or_stopped(self) -> asyncio.Future[bool]:
         """
         Asynchronously wait until the context is killed or stopped.
@@ -588,8 +524,8 @@ class Context:
         Build W3C trace headers for propagating to downstream inference engines.
 
         Returns:
-            ``{"traceparent": "00-<trace_id>-<span_id>-01"}`` when this request
-            carries trace context, ``None`` otherwise. Also emits ``tracestate``,
+            ``{"traceparent": "00-<trace_id>-<span_id>-<flags>"}`` when this
+            request carries trace context, ``None`` otherwise. Also emits ``tracestate``,
             ``x-request-id``, ``request-id`` when upstream propagated them.
             Forward unchanged to the inference engine's ``trace_headers`` kwarg.
         """
@@ -844,6 +780,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    tokenizer_backend: str | None
     exclude_tools_when_tool_choice_none: bool
     data_parallel_start_rank: int
     data_parallel_size: int
@@ -2011,6 +1948,7 @@ class MockEngineArgs:
         kv_transfer_bandwidth: Optional[float] = None,
         kv_transfer_timing_mode: str = "full_prompt",
         reasoning: Optional[ReasoningConfig] = None,
+        response_replay_trace_path: Optional[str | os.PathLike[str]] = None,
         zmq_kv_events_port: Optional[int] = None,
         zmq_replay_port: Optional[int] = None,
         preemption_mode: str = "lifo",
@@ -2074,6 +2012,9 @@ class MockEngineArgs:
 
     @property
     def engine_type(self) -> str: ...
+
+    @property
+    def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
 
     @property
     def num_g2_blocks(self) -> Optional[int]: ...
@@ -2299,6 +2240,7 @@ async def register_model(
     needs: Optional[List[List[WorkerType]]] = None,
     self_host_metadata: Optional[bool] = None,
     ignore_weights: bool = False,
+    max_gpu_lora_count: Optional[int] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
@@ -3063,8 +3005,16 @@ class EntrypointArgs:
         is_prefill: bool = False,
         is_decode: bool = False,
         migration_limit: int = 0,
+        migration_max_seq_len: Optional[int] = None,
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
+        *,
+        metrics_prefix: Optional[str] = None,
+        enable_anthropic_api: Optional[bool] = None,
+        strip_anthropic_preamble: Optional[bool] = None,
+        enable_streaming_tool_dispatch: Optional[bool] = None,
+        enable_streaming_reasoning_dispatch: Optional[bool] = None,
+        tokenizer_backend: Optional[str] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3090,8 +3040,15 @@ class EntrypointArgs:
             is_prefill: Whether this is a prefill worker
             is_decode: Whether this is a decode worker (disaggregated); pairs with a prefill peer for readiness
             migration_limit: Maximum number of request migrations (0=disabled)
+            migration_max_seq_len: Optional max sequence length for migration
             chat_engine_factory: Optional Python chat completions engine factory callback
             aic_perf_config: Optional AIC perf-model configuration for default KV routing
+            metrics_prefix: Optional Prometheus metrics prefix override
+            enable_anthropic_api: Optional Anthropic Messages API override
+            strip_anthropic_preamble: Optional Anthropic preamble stripping override
+            enable_streaming_tool_dispatch: Optional streaming tool dispatch override
+            enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
+            tokenizer_backend: Optional tokenizer backend override ("default" or "fastokens")
         """
         ...
 
@@ -3232,6 +3189,7 @@ class backend:
         Aggregated: "backend.DisaggregationMode"
         Prefill: "backend.DisaggregationMode"
         Decode: "backend.DisaggregationMode"
+        Encode: "backend.DisaggregationMode"
 
     class LlmRegistration:
         def __init__(
@@ -3313,6 +3271,7 @@ class backend:
             structural_tag_mode: str = ...,
             structural_tag_scope: str = ...,
             structural_tag_schema: str = ...,
+            route_to_encoder: bool = ...,
         ) -> None: ...
 
     class Worker:

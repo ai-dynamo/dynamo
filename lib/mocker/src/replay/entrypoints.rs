@@ -1434,6 +1434,7 @@ mod tests {
         let request = DirectRequest {
             tokens: vec![1; 8],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(0.0),

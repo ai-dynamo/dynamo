@@ -91,19 +91,36 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
 
     /// Register a batch of completed blocks.
     pub fn register_blocks(&self, blocks: Vec<CompleteBlock<T>>) -> Vec<ImmutableBlock<T>> {
-        blocks
+        if blocks.is_empty() {
+            return Vec::new();
+        }
+
+        let handles = self
+            .block_registry
+            .register_sequence_hashes(blocks.iter().map(CompleteBlock::sequence_hash));
+        let batch_size = blocks.len();
+        let registered = self.store.register_completed_blocks(
+            blocks.into_iter().zip(handles).collect(),
+            self.duplication_policy,
+        );
+        // The offline settlement bridge observes this counter as a
+        // publication watermark, so publish only after every store transition
+        // and presence marker in the batch is complete.
+        self.metrics
+            .inc_registrations_by(u64::try_from(batch_size).unwrap_or(u64::MAX));
+        registered
             .into_iter()
-            .map(|block| self.register_block(block))
+            .map(ImmutableBlock::from_inner)
             .collect()
     }
 
     /// Register a single completed block and return an immutable handle.
     pub fn register_block(&self, block: CompleteBlock<T>) -> ImmutableBlock<T> {
-        self.metrics.inc_registrations();
         let handle = self
             .block_registry
             .register_sequence_hash(block.sequence_hash());
         let inner = handle.register_block(block, self.duplication_policy, &self.store);
+        self.metrics.inc_registrations();
         ImmutableBlock::from_inner(inner)
     }
 

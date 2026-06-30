@@ -478,7 +478,25 @@ func main() {
 	}
 
 	setupLog.Info("Detecting Istio availability...")
-	runtimeConfig.IstioAvailable = commonController.DetectIstioAvailability(mainCtx, mgr)
+	switch {
+	case operatorCfg.ServiceMesh.Enabled == nil:
+		setupLog.Info("Auto-detecting Istio availability")
+		runtimeConfig.IstioEnabled = commonController.DetectIstioDestinationRuleAvailability(mainCtx, mgr)
+	case *operatorCfg.ServiceMesh.Enabled:
+		setupLog.Info("Istio service mesh is explicitly enabled; verifying availability")
+		istioDetected := commonController.DetectIstioDestinationRuleAvailability(mainCtx, mgr)
+		if !istioDetected {
+			setupLog.Error(nil,
+				"Service mesh is explicitly enabled but the networking.istio.io"+
+					" DestinationRule API group was not detected in the cluster",
+			)
+			os.Exit(1)
+		}
+		runtimeConfig.IstioEnabled = true
+	default:
+		setupLog.Info("Istio service mesh is explicitly disabled via config override")
+		runtimeConfig.IstioEnabled = false
+	}
 
 	setupLog.Info("Detected orchestrators availability",
 		"grove", runtimeConfig.GroveEnabled,
@@ -486,7 +504,7 @@ func main() {
 		"volcano", volcanoDetected,
 		"kai-scheduler", runtimeConfig.KaiSchedulerEnabled,
 		"dra", runtimeConfig.DRAEnabled,
-		"istio", runtimeConfig.IstioAvailable,
+		"istio", runtimeConfig.IstioEnabled,
 	)
 
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
@@ -554,10 +572,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
-		setupLog.Error(err, "initial docker secrets index refresh failed")
-		os.Exit(1)
+		setupLog.Error(err, "initial docker secrets index refresh completed with errors; continuing startup")
+	} else {
+		setupLog.Info("initial docker secrets index refreshed")
 	}
-	setupLog.Info("initial docker secrets index refreshed")
 	// launch a goroutine to refresh the docker secret indexer in any case every minute
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
@@ -567,11 +585,9 @@ func main() {
 			case <-mainCtx.Done():
 				return
 			case <-ticker.C:
-				setupLog.Info("refreshing docker secrets index...")
 				if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
-					setupLog.Error(err, "unable to refresh docker secrets index")
+					setupLog.Error(err, "failed to refresh docker secrets index")
 				}
-				setupLog.Info("docker secrets index refreshed")
 			}
 		}
 	}()
@@ -674,6 +690,7 @@ func registerControllers(
 		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
 		Config:                operatorCfg,
 		RuntimeConfig:         runtimeConfig,
+		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: dockerSecretRetriever,
 		ScaleClient:           scaleClient,
 		SSHKeyManager:         sshKeyManager,

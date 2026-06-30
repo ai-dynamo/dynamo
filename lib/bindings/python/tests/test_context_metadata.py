@@ -41,3 +41,30 @@ def test_context_metadata_setter_replaces_mapping():
 
     assert "tenant" not in ctx.metadata
     assert dict(ctx.metadata.items()) == {"region": "us-east"}
+
+
+def test_context_detached_uses_new_id_and_metadata_snapshot():
+    ctx = Context(id="prefill", metadata={"tenant": "alpha", "region": "us-west"})
+    ctx.stop_generating()
+
+    detached = ctx.detached("decode")
+
+    assert detached.id() == "decode"
+    assert not detached.is_stopped()
+    assert not detached.is_killed()
+    assert detached.trace_headers() == ctx.trace_headers()
+    assert dict(detached.metadata.items()) == {
+        "region": "us-west",
+        "tenant": "alpha",
+    }
+
+    ctx.metadata["tenant"] = "beta"
+    detached.metadata["detached"] = "true"
+
+    assert dict(ctx.metadata.items()) == {"region": "us-west", "tenant": "beta"}
+    assert dict(detached.metadata.items()) == {
+        "detached": "true",
+        "region": "us-west",
+        "tenant": "alpha",
+    }
+    detached.notify_first_token()
