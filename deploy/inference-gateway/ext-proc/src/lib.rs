@@ -14,12 +14,14 @@
 
 pub mod envoy_helpers;
 pub mod epp;
+pub mod offline_preprocessor;
 pub mod picker;
 pub mod proto;
 pub mod selector_config;
 pub mod server;
 
 pub use epp::Router;
+pub use offline_preprocessor::build_offline_preprocessor;
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo};
 pub use selector_config::SelectorConfig;
 pub use server::ExtProcServer;
