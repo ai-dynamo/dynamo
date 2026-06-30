@@ -37,7 +37,7 @@ jobs:
             exit 0
           fi
 
-          if echo "$APPROVED_EXTERNAL_CONTRIBUTORS" | jq -e --arg author "$PR_AUTHOR" 'contains([$author])' > /dev/null; then
+          if echo "$APPROVED_EXTERNAL_CONTRIBUTORS" | jq -e --arg author "$PR_AUTHOR" 'any(.[]; . == $author)' > /dev/null; then
             echo "Author $PR_AUTHOR is a trusted contributor."
             echo "is_trusted=true" >> "$GITHUB_OUTPUT"
           else
