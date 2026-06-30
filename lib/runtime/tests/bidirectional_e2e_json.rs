@@ -1,12 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end bidirectional round trip over the full Rust stack: a real
-//! `Ingress<ManyIn<u64>, ManyOut<EchoResponse>>` worker, a `PushRouter`
-//! client, and a three-frame `ManyIn` producing three response frames.
-//!
-//! Lives in its own `tests/` binary so the process-global TCP server's
-//! accept loop runs for the whole test process.
+//! Process-isolated coverage for the explicit JSON request-plane fallback.
+//! The codec is globally cached, so this must remain in its own integration
+//! test binary rather than sharing a process with the default-codec test.
 
 use std::sync::Arc;
 
@@ -14,6 +11,10 @@ use anyhow::Error;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use dynamo_runtime::pipeline::network::{
+    RequestPlanePayloadCodec,
+    egress::push_router::{PushRouter, RouterMode},
+};
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
     distributed::DistributedConfig,
@@ -23,11 +24,6 @@ use dynamo_runtime::{
         ManyIn, ManyOut, RequestStream, ResponseStream, context::Context, network::Ingress,
     },
     protocols::maybe_error::MaybeError,
-};
-
-use dynamo_runtime::pipeline::network::{
-    RequestPlanePayloadCodec,
-    egress::push_router::{PushRouter, RouterMode},
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -62,8 +58,8 @@ impl AsyncEngine<ManyIn<u64>, ManyOut<EchoResponse>, Error> for EchoEngine {
         let inner = request_stream
             .take()
             .expect("RequestStream::take called twice on EchoEngine input");
-        let mapped = futures::StreamExt::map(inner, |v| EchoResponse {
-            value: Some(v),
+        let mapped = futures::StreamExt::map(inner, |value| EchoResponse {
+            value: Some(value),
             error: None,
         });
         let stream: DataStream<EchoResponse> = Box::pin(mapped);
@@ -72,22 +68,22 @@ impl AsyncEngine<ManyIn<u64>, ManyOut<EchoResponse>, Error> for EchoEngine {
 }
 
 #[tokio::test]
-async fn bidirectional_end_to_end_echo() {
-    // This integration test is a standalone process, so clear any inherited
-    // override before the request-plane codec cache is initialized.
+async fn bidirectional_end_to_end_echo_with_explicit_json_codec() {
+    // This test binary owns the process and sets the value before the first
+    // request initializes the request-plane codec cache.
     unsafe {
-        std::env::remove_var("DYN_REQUEST_PLANE_CODEC");
+        std::env::set_var("DYN_REQUEST_PLANE_CODEC", "json");
     }
     assert_eq!(
         RequestPlanePayloadCodec::configured(),
-        RequestPlanePayloadCodec::Msgpack
+        RequestPlanePayloadCodec::Json
     );
 
     let rt = Runtime::from_current().unwrap();
     let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
         .await
         .unwrap();
-    let ns = drt.namespace("test_bidi_e2e".to_string()).unwrap();
+    let ns = drt.namespace("test_bidi_e2e_json".to_string()).unwrap();
     let component = ns.component("echo_component".to_string()).unwrap();
     let endpoint = component.endpoint("echo_endpoint".to_string());
 
@@ -107,19 +103,18 @@ async fn bidirectional_end_to_end_echo() {
     let router = PushRouter::<u64, EchoResponse>::from_client(client, RouterMode::RoundRobin)
         .await
         .unwrap();
-
     let input: ManyIn<u64> = Context::new(RequestStream::new(Box::pin(tokio_stream::iter(vec![
-        1u64, 2, 3,
+        10u64, 20, 30,
     ]))));
     let response_stream = router.generate(input).await.unwrap();
     let responses: Vec<EchoResponse> = futures::StreamExt::collect(response_stream).await;
 
-    let values: Vec<u64> = responses.iter().filter_map(|r| r.value).collect();
     assert_eq!(
-        values,
-        vec![1u64, 2, 3],
-        "echo engine should reflect each input frame back; got {responses:?}"
+        responses
+            .iter()
+            .filter_map(|response| response.value)
+            .collect::<Vec<_>>(),
+        vec![10u64, 20, 30]
     );
-
     rt.shutdown();
 }

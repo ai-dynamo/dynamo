@@ -141,7 +141,12 @@ impl Drop for RequestMetricsGuard {
     }
 }
 
-impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
+impl<Req, Resp, Adapter> Ingress<Req, Resp, Adapter>
+where
+    Req: PipelineIO + Sync,
+    Resp: PipelineIO,
+    Adapter: Send + Sync + 'static,
+{
     /// Pump every chunk from the engine's response stream out to the
     /// upstream-side `StreamSender`, plus the terminal complete-final
     /// frame. Captures the per-frame metrics, the publish-failure error
@@ -154,7 +159,8 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         publisher: &StreamSender,
         payload_codec: RequestPlanePayloadCodec,
     ) where
-        U: Data + Serialize + MaybeError + std::fmt::Debug,
+        U: Data + std::fmt::Debug,
+        Adapter: IngressResponseEncoder<U>,
     {
         let context = stream.context();
 
@@ -163,21 +169,25 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         let mut saw_error_response = false;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
-            let is_error = resp.err().is_some();
-            if is_error {
-                saw_error_response = true;
-            }
-            let resp_wrapper = NetworkStreamWrapper {
-                data: Some(resp),
-                complete_final: false,
+            let encoded = match self
+                .payload_adapter
+                .encode_response(payload_codec, Some(resp), false)
+                .await
+            {
+                Ok(encoded) => encoded,
+                Err(err) => {
+                    tracing::error!(%err, "failed to encode request-plane response");
+                    saw_error_response = true;
+                    break;
+                }
             };
-            let resp_bytes = payload_codec
-                .encode(&resp_wrapper)
-                .expect("fatal error: invalid request-plane response object");
+            let is_error = encoded.is_error;
+            saw_error_response |= is_error;
+            let resp_bytes = encoded.bytes;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
-            if (publisher.send(resp_bytes.into()).await).is_err() {
+            if (publisher.send(resp_bytes).await).is_err() {
                 send_complete_final = false;
                 if context.is_stopped() {
                     // Say there are 2 threads accessing `context`, the sequence can be either:
@@ -209,19 +219,36 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
                     notifier.notify_one();
                 }
             }
+            if encoded.stop_stream {
+                // Dropping the engine stream after the terminal frame is sent
+                // propagates cancellation to a producer that is still running.
+                // Stopping the context here can close the response transport
+                // before the queued error and clean terminal frames are read.
+                break;
+            }
         }
         if send_complete_final {
-            let resp_wrapper = NetworkStreamWrapper::<U> {
-                data: None,
-                complete_final: true,
+            let encoded = match self
+                .payload_adapter
+                .encode_response(payload_codec, None, true)
+                .await
+            {
+                Ok(encoded) => encoded,
+                Err(err) => {
+                    tracing::error!(%err, "failed to encode request-plane final response");
+                    if let Some(m) = self.metrics() {
+                        m.error_counter
+                            .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
+                            .inc();
+                    }
+                    return;
+                }
             };
-            let resp_bytes = payload_codec
-                .encode(&resp_wrapper)
-                .expect("fatal error: invalid request-plane response final object");
+            let resp_bytes = encoded.bytes;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
-            if (publisher.send(resp_bytes.into()).await).is_err() {
+            if (publisher.send(resp_bytes).await).is_err() {
                 tracing::error!(
                     "Failed to publish complete final for stream {}",
                     context.id()
@@ -320,10 +347,11 @@ trait IngressDispatch: Send + Sync {
 }
 
 #[async_trait]
-impl<T, U> IngressDispatch for Ingress<SingleIn<T>, ManyOut<U>>
+impl<T, U, Adapter> IngressDispatch for Ingress<SingleIn<T>, ManyOut<U>, Adapter>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
     U: Data + Serialize + MaybeError + std::fmt::Debug,
+    Adapter: IngressRequestDecoder<T> + Send + Sync + 'static,
 {
     type Request = SingleIn<T>;
 
@@ -346,18 +374,17 @@ where
             ))
         })?;
         let payload_codec = control_msg.payload_codec;
-        let request_t: T = payload_codec.decode(&data).map_err(|err| {
-            if let Some(m) = self.metrics() {
-                m.error_counter
-                    .with_label_values(&[work_handler::error_types::DESERIALIZATION])
-                    .inc();
-            }
-            PipelineError::DeserializationError(format!(
-                "Failed deserializing {} request payload: {}",
-                payload_codec.name(),
-                err
-            ))
-        })?;
+        let request_t: T = self
+            .payload_adapter
+            .decode_request(payload_codec, data)
+            .await
+            .inspect_err(|_| {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::DESERIALIZATION])
+                        .inc();
+                }
+            })?;
 
         tracing::trace!(
             request_id = %control_msg.id,
@@ -379,10 +406,11 @@ where
 }
 
 #[async_trait]
-impl<T, U> IngressDispatch for Ingress<ManyIn<T>, ManyOut<U>>
+impl<T, U, Adapter> IngressDispatch for Ingress<ManyIn<T>, ManyOut<U>, Adapter>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
     U: Data + Serialize + MaybeError + std::fmt::Debug,
+    Adapter: IngressRequestDecoder<T> + Send + Sync + 'static,
 {
     type Request = ManyIn<T>;
 
@@ -461,6 +489,7 @@ where
         // header-only.
         let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<T>(8);
         let forwarder_ctx = context_arc.clone();
+        let payload_adapter = self.payload_adapter.clone();
         tokio::spawn(async move {
             let mut rx = request_stream_recv.rx;
             while let Some(bytes) = rx.recv().await {
@@ -471,7 +500,7 @@ where
                 if forwarder_ctx.is_killed() || forwarder_ctx.is_stopped() {
                     break;
                 }
-                match payload_codec.decode::<T>(&bytes) {
+                match payload_adapter.decode_request(payload_codec, bytes).await {
                     Ok(item) => {
                         if frame_tx.send(item).await.is_err() {
                             tracing::debug!(
@@ -506,9 +535,11 @@ where
     }
 }
 
-impl<Req: PipelineIO + Sync, U> Ingress<Req, ManyOut<U>>
+impl<Req, U, Adapter> Ingress<Req, ManyOut<U>, Adapter>
 where
-    U: Data + Serialize + MaybeError + std::fmt::Debug,
+    Req: PipelineIO + Sync,
+    U: Data + std::fmt::Debug,
+    Adapter: IngressResponseEncoder<U> + Send + Sync + 'static,
 {
     /// Shared body of `PushWorkHandler::handle_payload` for every
     /// `Ingress<Req, ManyOut<U>>` shape that has an [`IngressDispatch`]
@@ -636,10 +667,11 @@ where
 }
 
 #[async_trait]
-impl<T, U> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>>
+impl<T, U, Adapter> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>, Adapter>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
     U: Data + Serialize + MaybeError + std::fmt::Debug,
+    Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn add_metrics(
         &self,
@@ -667,10 +699,11 @@ where
 }
 
 #[async_trait]
-impl<T, U> PushWorkHandler for Ingress<ManyIn<T>, ManyOut<U>>
+impl<T, U, Adapter> PushWorkHandler for Ingress<ManyIn<T>, ManyOut<U>, Adapter>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
     U: Data + Serialize + MaybeError + std::fmt::Debug,
+    Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn add_metrics(
         &self,
