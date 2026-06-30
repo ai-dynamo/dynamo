@@ -380,18 +380,16 @@ impl ActiveSequence {
         let active_blocks = active_tokens
             .div_ceil(self.block_size)
             .min(self.unique_blocks.len());
-        self.unique_blocks[..active_blocks]
+        if active_blocks == 0 {
+            return Vec::new();
+        }
+
+        let blocks = self.unique_blocks[..active_blocks]
             .iter()
             .rev()
-            .map(|block| match block {
-                UniqueBlock::PartialBlock(uuid) => {
-                    MoveBlock::Deref(vec![UniqueBlock::PartialBlock(*uuid)])
-                }
-                UniqueBlock::FullBlock(hash) => {
-                    MoveBlock::Deref(vec![UniqueBlock::FullBlock(*hash)])
-                }
-            })
-            .collect()
+            .cloned()
+            .collect();
+        vec![MoveBlock::Deref(blocks)]
     }
 
     /// Free the currently active allocation footprint.
@@ -485,23 +483,12 @@ mod tests {
         }
     }
 
-    fn assert_deref_partial(signal: &MoveBlock) {
+    fn assert_deref_blocks(signal: &MoveBlock, expected: &[UniqueBlock]) {
         match signal {
             MoveBlock::Deref(blocks) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
+                assert_eq!(blocks, expected);
             }
-            _ => panic!("Expected MoveBlock::Deref for partial block"),
-        }
-    }
-
-    fn assert_deref_full(signal: &MoveBlock) {
-        match signal {
-            MoveBlock::Deref(blocks) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::FullBlock(_)));
-            }
-            _ => panic!("Expected MoveBlock::Deref for full block"),
+            _ => panic!("Expected MoveBlock::Deref"),
         }
     }
 
@@ -614,9 +601,40 @@ mod tests {
 
         let free_signals = seq.reset_with_signal();
 
-        assert!(!free_signals.is_empty());
+        assert_eq!(free_signals.len(), 1);
+        let expected = seq
+            .unique_blocks()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_deref_blocks(&free_signals[0], &expected);
         assert_eq!(seq.num_allocated_tokens(), 0);
         assert_eq!(seq.generated_tokens(), 2);
+    }
+
+    #[test]
+    fn test_free_signal_is_empty_without_an_active_allocation() {
+        let seq = ActiveSequence::new((0..10).collect(), 4, Some(4), true, false);
+
+        assert!(seq.free_signal().is_empty());
+    }
+
+    #[test]
+    fn test_free_signal_batches_allocated_blocks_in_reverse_order() {
+        let mut seq = ActiveSequence::new((0..10).collect(), 4, Some(4), true, false);
+        seq.commit_allocation(seq.len());
+
+        let expected = seq
+            .unique_blocks()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        let signals = seq.free_signal();
+
+        assert_eq!(signals.len(), 1);
+        assert_deref_blocks(&signals[0], &expected);
     }
 
     #[test]
@@ -647,15 +665,17 @@ mod tests {
         let signals_third = seq.generate();
         assert_eq!(signals_third.len(), 0);
 
-        // Generate last token - we reach max_output_tokens, should trigger Deref signals
+        // Generate last token - we reach max_output_tokens, so all blocks should
+        // be dereferenced in one reverse-ordered batch.
+        let expected = seq
+            .unique_blocks()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
         let signals_last = seq.generate();
-        assert_eq!(signals_last.len(), 2);
-
-        // First signal should be Deref for the partial block
-        assert_deref_partial(&signals_last[0]);
-
-        // Second signal should be Deref for the full block
-        assert_deref_full(&signals_last[1]);
+        assert_eq!(signals_last.len(), 1);
+        assert_deref_blocks(&signals_last[0], &expected);
     }
 
     #[test]

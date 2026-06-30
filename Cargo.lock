@@ -3434,15 +3434,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
-name = "fsevent-sys"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ee7a02da4d231650c7cea31349b889be2f45ddb3ef3032d2ec8185f6313fd2"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5776,7 +5767,6 @@ checksum = "6205bd8bb1e454ad2e27422015fb5e4f2bcc7e08fa8f27058670d208324a4d2d"
 dependencies = [
  "bitflags 2.11.1",
  "filetime",
- "fsevent-sys",
  "inotify",
  "kqueue",
  "libc",
@@ -10442,7 +10432,7 @@ checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 [[package]]
 name = "vllm-engine-core-client"
 version = "0.1.0"
-source = "git+https://github.com/vllm-project/vllm.git?tag=v0.22.0#0b3ba88f165976e77ca5e6a7a3f5bba4562b80af"
+source = "git+https://github.com/vllm-project/vllm.git?tag=v0.24.0#ee0da84ab9e04ac7610e28580af62c365e898389"
 dependencies = [
  "arc-swap",
  "bytemuck",
@@ -10476,11 +10466,12 @@ dependencies = [
 [[package]]
 name = "vllm-llm"
 version = "0.1.0"
-source = "git+https://github.com/vllm-project/vllm.git?tag=v0.22.0#0b3ba88f165976e77ca5e6a7a3f5bba4562b80af"
+source = "git+https://github.com/vllm-project/vllm.git?tag=v0.24.0#ee0da84ab9e04ac7610e28580af62c365e898389"
 dependencies = [
  "easy-ext",
  "enum-as-inner",
  "futures",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -10495,7 +10486,7 @@ dependencies = [
 [[package]]
 name = "vllm-managed-engine"
 version = "0.1.0"
-source = "git+https://github.com/vllm-project/vllm.git?tag=v0.22.0#0b3ba88f165976e77ca5e6a7a3f5bba4562b80af"
+source = "git+https://github.com/vllm-project/vllm.git?tag=v0.24.0#ee0da84ab9e04ac7610e28580af62c365e898389"
 dependencies = [
  "anyhow",
  "clap",
@@ -10507,8 +10498,9 @@ dependencies = [
 [[package]]
 name = "vllm-metrics"
 version = "0.1.0"
-source = "git+https://github.com/vllm-project/vllm.git?tag=v0.22.0#0b3ba88f165976e77ca5e6a7a3f5bba4562b80af"
+source = "git+https://github.com/vllm-project/vllm.git?tag=v0.24.0#ee0da84ab9e04ac7610e28580af62c365e898389"
 dependencies = [
+ "itertools 0.14.0",
  "prometheus-client",
 ]
 
