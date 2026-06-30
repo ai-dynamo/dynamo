@@ -36,6 +36,14 @@ _MULTIMODAL_COLOR_PROMPT = (
 )
 IMAGE_COLOR_PROMPT = _MULTIMODAL_COLOR_PROMPT
 
+# Topic-aligned filler sentence used by callers that need to pad the prompt
+# past a coarse routing-block threshold without confusing the model's
+# color-identification objective. ~30 tokens per copy.
+_COLOR_PROMPT_FILLER = (
+    " Analyze the image in detail; identify dominant tones, secondary hues, "
+    "and surface textures across the foreground and background regions."
+)
+
 
 def make_image_payload(
     expected_response: list[str], *, max_attempts: int = 1
@@ -66,29 +74,35 @@ def make_image_payload(
 def make_image_payload_cached_tokens(
     expected_response: list[str],
     *,
-    repeat_count: int = 2,
+    repeat_count: int = 3,
     min_cached_tokens: int = 1,
+    require_rust_processor_init: bool = False,
+    require_vllm_mm_processor_init: bool = False,
+    min_routing_total_blocks: int = 0,
+    min_avg_kv_hit_rate: float = 0.0,
+    prompt_filler_repeats: int = 0,
 ) -> CachedTokensChatPayload:
-    """Image payload that also asserts MM-aware KV cache reuse on repeats.
+    """Image payload that asserts MM-aware KV cache reuse on repeats.
 
-    Same body shape as :func:`make_image_payload`, but wrapped in a
-    :class:`CachedTokensChatPayload` so the 2nd+ request validates that
-    ``usage.prompt_tokens_details.cached_tokens >= min_cached_tokens``.
-    Two identical MM requests through an MM-routing-aware frontend must
-    land on the same warm worker and reuse the prefix cache; if routing
-    silently regresses to text-only the second request will report 0
-    cached tokens and this payload fails.
-
-    Used to harden the ``agg_router`` pre_merge smoke against silent
-    regressions in the Rust+lightseek routing path.
+    ``require_rust_processor_init`` / ``require_vllm_mm_processor_init`` assert
+    the MM-routing init log fired. ``min_routing_total_blocks`` asserts the
+    [ROUTING] block count is well above text-prefix fallback (~1-3 blocks).
+    ``min_avg_kv_hit_rate`` asserts the post-R1 mean of router_kv_hit_rate
+    >= threshold (fails closed when router-side hashes diverge from the worker).
+    ``prompt_filler_repeats`` prepends N copies of a topic-aligned filler so
+    the routing-token sequence spans multiple blocks on specs that use a
+    coarse routing-block size (e.g. qwen3_5 family at block_size=544).
     """
+    prompt = _MULTIMODAL_COLOR_PROMPT
+    if prompt_filler_repeats > 0:
+        prompt = (_COLOR_PROMPT_FILLER * prompt_filler_repeats).strip() + " " + prompt
     return CachedTokensChatPayload(
         body={
             "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": _MULTIMODAL_COLOR_PROMPT},
+                        {"type": "text", "text": prompt},
                         {
                             "type": "image_url",
                             "image_url": {"url": MULTIMODAL_IMG_URL},
@@ -96,13 +110,17 @@ def make_image_payload_cached_tokens(
                     ],
                 }
             ],
-            "max_tokens": 100,
+            "max_tokens": 50,
             "temperature": 0.0,
             "stream": False,
         },
         repeat_count=repeat_count,
         expected_response=expected_response,
         min_cached_tokens=min_cached_tokens,
+        require_rust_processor_init=require_rust_processor_init,
+        require_vllm_mm_processor_init=require_vllm_mm_processor_init,
+        min_routing_total_blocks=min_routing_total_blocks,
+        min_avg_kv_hit_rate=min_avg_kv_hit_rate,
     )
 
 
@@ -270,6 +288,7 @@ class TopologyConfig:
     marks: list[Any] = field(default_factory=list)  # default for cases
     profiled_vram_gib: Optional[float] = None
     requested_vllm_kv_cache_bytes: Optional[int] = None
+    requested_sglang_kv_tokens: Optional[int] = None
     delayed_start: int = 0
     directory: Optional[str] = None  # override profile-level directory
     gpu_marker: Optional[str] = None  # override profile-level gpu_marker
@@ -355,6 +374,12 @@ def make_multimodal_configs(
                 marks.append(
                     pytest.mark.requested_vllm_kv_cache_bytes(
                         topo_cfg.requested_vllm_kv_cache_bytes
+                    )
+                )
+            if topo_cfg.requested_sglang_kv_tokens is not None:
+                marks.append(
+                    pytest.mark.requested_sglang_kv_tokens(
+                        topo_cfg.requested_sglang_kv_tokens
                     )
                 )
             if profile.gated:

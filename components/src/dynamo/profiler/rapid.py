@@ -59,6 +59,7 @@ def _generate_dgd_from_pick(
     best_config_df: pd.DataFrame,
     chosen_exp: str,
     task_configs: dict[str, TaskConfig],
+    picking_mode: str = "default",
 ) -> dict | None:
     """Generate a DGD config dict from the rank-1 picked result via AIC's generator."""
     if best_config_df is None or best_config_df.empty:
@@ -79,7 +80,15 @@ def _generate_dgd_from_pick(
 
     original_total_gpus = tc.total_gpus
     try:
-        if "total_gpus_needed" in row.index:
+        if picking_mode == "autoscale":
+            # pick_autoscale returns rows with (p)workers=1 / (d)workers=1 by
+            # construction; the planner handles runtime scaling. AIC's
+            # module_bridge rescales workers by total_gpus // gpus_per_replica
+            # whenever total_gpus is truthy, which would override the picker's
+            # intent. Zeroing total_gpus here disables that rescale so the
+            # picker's workers=1 flows through unchanged.
+            tc.total_gpus = 0
+        elif "total_gpus_needed" in row.index:
             clamped_total_gpus, was_clamped = clamp_total_gpus_to_budget(
                 row["total_gpus_needed"],
                 original_total_gpus,
@@ -220,7 +229,9 @@ def _run_autoscale_sim(
         best_latencies["request_latency"] = float(row.get("request_latency", 0.0))
 
     task_configs = {"disagg": task}
-    dgd_config = _generate_dgd_from_pick(dgdr, pareto_df, "disagg", task_configs)
+    dgd_config = _generate_dgd_from_pick(
+        dgdr, pareto_df, "disagg", task_configs, "autoscale"
+    )
     return {
         "best_config_df": pareto_df,
         "best_latencies": best_latencies,
@@ -298,7 +309,9 @@ def _run_default_sim(
         chosen, {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
     )
 
-    dgd_config = _generate_dgd_from_pick(dgdr, best_config_df, chosen, task_configs)
+    dgd_config = _generate_dgd_from_pick(
+        dgdr, best_config_df, chosen, task_configs, picking_mode
+    )
 
     # When backend="auto" AIC expands to per-backend task configs; the winning
     # row carries the concrete backend name so downstream consumers (e.g.

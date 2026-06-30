@@ -9,7 +9,7 @@
 import tritonclient.grpc.model_config_pb2 as mc
 import uvloop
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_model
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
@@ -41,24 +41,14 @@ async def echo_tensor_worker(runtime: DistributedRuntime):
         "outputs": [],
         "triton_model_config": triton_model_config.SerializeToString(),
     }
-    runtime_config = ModelRuntimeConfig()
-    runtime_config.set_tensor_model_config(model_config)
-
-    # Internally the bytes string will be converted to List of int
-    retrieved_model_config = runtime_config.get_tensor_model_config()
-    assert retrieved_model_config is not None
-    retrieved_model_config["triton_model_config"] = bytes(
-        retrieved_model_config["triton_model_config"]
-    )
-    assert model_config == retrieved_model_config
-
     # Use register_model for tensor-based backends (skips HuggingFace downloads)
     await register_model(
         ModelInput.Tensor,
         ModelType.TensorBased,
         endpoint,
         "echo",  # model_path (used as display name for tensor-based models)
-        runtime_config=runtime_config,
+        worker_type=WorkerType.Aggregated,
+        tensor_model_config=model_config,
     )
 
     await endpoint.serve_endpoint(generate)

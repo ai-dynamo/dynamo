@@ -115,9 +115,12 @@ def test_transform_response_base64_applies_dimensions_truncation_first(monkeypat
     assert decoded == pytest.approx(full[:3])
 
 
-def test_transform_response_defaults_to_float(monkeypatch):
-    """Default behavior (no ``encoding_format`` argument) returns float lists
-    -- preserves the wire shape for clients that have not opted into base64."""
+def test_transform_response_always_emits_base64(monkeypatch):
+    """The worker always emits base64 over the internal worker->frontend wire
+    format regardless of the client's ``encoding_format``. The Rust HTTP
+    frontend decodes back to float at the HTTP boundary if the client asked
+    for float; the worker itself does not branch.
+    """
     monkeypatch.setattr(
         "dynamo.sglang.request_handlers.handler_base.BaseWorkerHandler.__init__",
         lambda self, *a, **kw: None,
@@ -126,6 +129,16 @@ def test_transform_response_defaults_to_float(monkeypatch):
     monkeypatch.setattr(eh, "observe_embedding_input_tokens", lambda *a, **kw: None)
 
     handler = eh.EmbeddingWorkerHandler.__new__(eh.EmbeddingWorkerHandler)
-    ret = [{"embedding": [0.1, 0.2, 0.3], "meta_info": {"prompt_tokens": 1}}]
-    out = handler._transform_response(ret, "m")
-    assert out["data"][0]["embedding"] == [0.1, 0.2, 0.3]
+    floats = [0.1, 0.2, 0.3]
+    ret = [{"embedding": floats, "meta_info": {"prompt_tokens": 1}}]
+    expected = eh._encode_floats_to_base64(floats)
+
+    # Default (no ``encoding_format`` arg) emits base64.
+    out_default = handler._transform_response(ret, "m")
+    assert out_default["data"][0]["embedding"] == expected
+
+    # Explicit ``encoding_format="float"`` also emits base64 -- the
+    # encoding_format kwarg is validated upstream in ``generate`` but no
+    # longer branches the worker's wire output.
+    out_float_kw = handler._transform_response(ret, "m", encoding_format="float")
+    assert out_float_kw["data"][0]["embedding"] == expected

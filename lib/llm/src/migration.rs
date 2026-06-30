@@ -13,7 +13,10 @@ use crate::{
     model_card::ModelDeploymentCard,
     protocols::{
         TokenIdType,
-        common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+        common::{
+            extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+            llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+        },
     },
 };
 
@@ -146,6 +149,10 @@ where
         let (preprocessed_request, context) = request.transfer(());
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
+        let session_affinity = context
+            .get_optional::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .map_err(Error::msg)?
+            .map(|session_id| session_id.as_ref().clone());
         let retry_manager = RetryManager::build(
             engine_ctx,
             context.metadata().clone(),
@@ -155,6 +162,7 @@ where
             self.max_seq_len,
             self.model_name.clone(),
             self.metrics.clone(),
+            session_affinity,
         )
         .await?;
         let response_stream = stream::unfold(retry_manager, move |mut retry_manager| async move {
@@ -175,6 +183,7 @@ where
     context: Arc<dyn AsyncEngineContext>,
     metadata: BTreeMap<String, String>,
     request: PreprocessedRequest,
+    session_affinity: Option<SessionAffinityId>,
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     next_stream: Option<ManyOut<Annotated<Resp>>>,
     retries_left: u32,
@@ -200,6 +209,7 @@ where
         max_seq_len: Option<u32>,
         model_name: Arc<String>,
         metrics: Arc<Metrics>,
+        session_affinity: Option<SessionAffinityId>,
     ) -> Result<Self> {
         // Disable migration for structured-output (guided-decoding) requests.
         // Inference backends initialize the guided-decoding FSM (finite state machine) fresh
@@ -233,6 +243,7 @@ where
             context,
             metadata,
             request: preprocessed_request,
+            session_affinity,
             next_generate: next,
             next_stream: None,
             retries_left: retries_left + 1, // +1 to account for the initial attempt
@@ -286,11 +297,14 @@ where
             if let Some(link) = self.last_worker_link.as_ref() {
                 self.request.migration_link = Some(link.clone());
             }
-            let request = Context::with_id_and_metadata(
+            let mut request = Context::with_id_and_metadata(
                 self.request.clone(),
                 self.context.id().to_string(),
                 self.metadata.clone(),
             );
+            if let Some(session_affinity) = self.session_affinity.as_ref() {
+                request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
+            }
             self.context.link_child(request.context());
             if self.context.is_stopped() || self.context.is_killed() {
                 tracing::debug!("Abort creating new stream after context is stopped or killed");
@@ -421,9 +435,11 @@ mod tests {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         })
     }
 
@@ -433,12 +449,19 @@ mod tests {
         Success,
         /// Fails on first call with NoResponders error, then succeeds on subsequent calls
         FailThenSuccess,
+        FailThenSuccessWithAffinity,
         /// Succeeds initially, fails mid-stream with specific error, then succeeds on retry
-        MidStreamFail { fail_after: usize },
+        MidStreamFail {
+            fail_after: usize,
+        },
         /// Succeeds initially, fails mid-stream with specific error, then always fails on retry attempts
-        MidStreamFailAlways { fail_after: usize },
+        MidStreamFailAlways {
+            fail_after: usize,
+        },
         /// Succeeds initially, fails mid-stream, then always fails with stream error on retry attempts
-        MidStreamFailAlwaysStreamError { fail_after: usize },
+        MidStreamFailAlwaysStreamError {
+            fail_after: usize,
+        },
         /// Always fails with NoResponders error (same as FailThenSuccess first call)
         AlwaysFail,
     }
@@ -479,6 +502,12 @@ mod tests {
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<BackendOutput>>> {
             let call_num = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if matches!(self.behavior, MockBehavior::FailThenSuccessWithAffinity) {
+                let actual = request
+                    .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+                    .expect("session affinity context missing after migration wrapper");
+                assert_eq!(actual.as_str(), "session-123");
+            }
             let (preprocessed_request, context) = request.transfer(());
 
             // Assert that the context_id matches the expected one
@@ -514,7 +543,7 @@ mod tests {
                     self.send_responses(responses_already_generated, self.num_responses)
                         .await
                 }
-                MockBehavior::FailThenSuccess => {
+                MockBehavior::FailThenSuccess | MockBehavior::FailThenSuccessWithAffinity => {
                     if call_num == 0 {
                         // First call - return "No responders available" error to trigger retry
                         return Err(anyhow::anyhow!(
@@ -737,6 +766,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -756,6 +786,30 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
+    #[tokio::test]
+    async fn test_migration_preserves_session_affinity_across_retry() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::FailThenSuccessWithAffinity,
+            1,
+            100,
+            context_id.clone(),
+        ));
+        let calls = mock_engine.call_count.clone();
+        let mut request =
+            Context::with_id_and_metadata(create_mock_request(1), context_id, BTreeMap::new());
+        request.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new("session-123"),
+        );
+
+        let migration = Migration::new(1, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+        let mut stream = migration.generate(request, mock_engine).await.unwrap();
+        while stream.next().await.is_some() {}
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     /// Test case 2: New request migration
@@ -789,6 +843,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -842,6 +897,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -896,6 +952,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await;
 
@@ -937,6 +994,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         ) // 3 retries
         .await
         .expect("Failed to build RetryManager");
@@ -997,6 +1055,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         ) // 3 retries
         .await
         .expect("Failed to build RetryManager");
@@ -1062,6 +1121,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await;
 
@@ -1142,6 +1202,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1220,6 +1281,7 @@ mod tests {
             Some(5), // prompt(3) + 3 generated = 6 > 5 → disables migration
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1292,6 +1354,7 @@ mod tests {
             Some(5), // prompt(3) + 2 generated = 5 == max_seq_len → still migratable
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1358,6 +1421,7 @@ mod tests {
             Some(2), // prompt(3) > max_seq_len(2) → migration disabled at build time
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1438,6 +1502,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics,
+            None,
         )
         .await
         .expect("Failed to build RetryManager");
@@ -1567,6 +1632,7 @@ mod tests {
             None,
             Arc::new(TEST_MODEL.to_string()),
             metrics.clone(),
+            None,
         )
         .await
         .expect("Failed to build RetryManager");

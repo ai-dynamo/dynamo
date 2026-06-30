@@ -47,6 +47,7 @@ pytestmark = [
     # gpu_1 not gpu_0: vLLM DeviceConfig(device='auto') fails on CPU-only arm64
     # runners with "Failed to infer device type" even for mock tests.
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
     pytest.mark.integration,
@@ -215,7 +216,7 @@ def start_services(
             yield frontend_port, capture_path
 
 
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(180)  # 0-GiB unit test, floor 180s (3x observed 43s)
 def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
     start_services: tuple[int, Path],
 ) -> None:
@@ -280,7 +281,7 @@ def test_vllm_chat_processor_tokenizes_and_streams_tool_calls(
     assert set(finish_reasons) <= {"stop", "tool_calls"}
 
 
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(180)  # 0-GiB unit test, floor 180s (3x observed 43s)
 def test_vllm_chat_processor_forwards_max_thinking_tokens(
     start_services: tuple[int, Path],
 ) -> None:

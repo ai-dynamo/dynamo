@@ -8,7 +8,7 @@ pub mod stream;
 
 /// Parse a comma-separated list of sink names from an env-var value.
 /// Empty/whitespace items are dropped; if the result is empty the list defaults
-/// to `["stderr"]`. Used by audit and agent trace sink configuration.
+/// to `["stderr"]`. Used by audit and request trace sink configuration.
 pub fn parse_sink_names(value: &str) -> Vec<String> {
     let sinks: Vec<String> = value
         .split(',')

@@ -15,10 +15,10 @@ on:
         required: true
         type: string
       cuda_version:
-        description: 'CUDA version for the runtime image (e.g. 12.9)'
+        description: 'CUDA version for the runtime image (e.g. 13.0). cuda13 is the default.'
         required: false
         type: string
-        default: '12.9'
+        default: '13.0'
       fresh_builder:
         description: 'Always create a fresh K8s BuildKit builder (for nightly)'
         required: false
@@ -98,7 +98,7 @@ jobs:
     needs: image
     runs-on: prod-tester-amd-gpu-v2
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ inputs.cuda_version != '' && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || startsWith(inputs.cuda_version, '13.') && '13' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -155,7 +155,7 @@ jobs:
     needs: image
     runs-on: prod-tester-amd-v2
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ inputs.cuda_version != '' && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || startsWith(inputs.cuda_version, '13.') && '13' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and

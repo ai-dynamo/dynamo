@@ -32,6 +32,7 @@ import (
 func TestConvertToServiceCheckpointConfigSetsNilIdentity(t *testing.T) {
 	var got ServiceCheckpointConfig
 	ConvertToServiceCheckpointConfig(&v1beta1.ComponentCheckpointConfig{
+		Enabled:       true,
 		Mode:          v1beta1.CheckpointMode("auto"),
 		CheckpointRef: ptr.To("checkpoint"),
 	}, &got)

@@ -1,14 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use dashmap::{DashMap, mapref::entry::Entry};
-use dynamo_kv_router::{PrefillLoadEstimator, config::KvRouterConfig, protocols::WorkerId};
+use dynamo_kv_router::{
+    PrefillLoadEstimator,
+    config::KvRouterConfig,
+    protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId},
+};
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
-use super::{KvWorkerMonitor, Model, RuntimeConfigWatch, WorkerSet, runtime_config_watch};
+use super::{Model, RuntimeConfigWatch, WorkerSet, runtime_config_watch};
 
 use dynamo_runtime::{
     component::{Endpoint, build_transport_type},
@@ -22,7 +29,8 @@ use crate::{
         KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
         shared_cache::HicacheSharedKvCache,
     },
-    local_model::runtime_config::DisaggregatedEndpoint,
+    local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig, topology_taint},
+    lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -95,6 +103,20 @@ pub struct ModelManager {
 
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
+
+    // LoRA allocation state. The state objects are always created so discovery can
+    // populate them, but `lora_filter()` only hands out the filter when LoRA serving is
+    // enabled (DYN_LORA_ENABLED) — so non-LoRA deployments keep the unmodified routing
+    // path. The controller is additionally gated on the allocation config.
+    lora_routing_table: LoraRoutingTable,
+    lora_state_tracker: LoraStateTracker,
+    lora_load_estimator: Arc<LoadEstimator>,
+    lora_filter: Arc<LoraFilter>,
+    lora_enabled: bool,
+    /// Per-decode-component LoRA load-feed subscription handles, so we start exactly one feed
+    /// per component and can restart it if the previous one exited (avoids double counting on
+    /// rebuilds while keeping the feed durable).
+    lora_load_feeds: DashMap<String, tokio::task::JoinHandle<()>>,
 }
 
 impl Default for ModelManager {
@@ -105,11 +127,24 @@ impl Default for ModelManager {
 
 impl ModelManager {
     pub fn new() -> Self {
+        let lora_routing_table = LoraRoutingTable::new();
+        let lora_state_tracker = LoraStateTracker::new();
+        let lora_filter = Arc::new(LoraFilter::new(
+            lora_routing_table.clone(),
+            lora_state_tracker.clone(),
+        ));
+
         Self {
             models: DashMap::new(),
             cards: DashMap::new(),
             prefill_router_activators: DashMap::new(),
             runtime_configs: DashMap::new(),
+            lora_routing_table,
+            lora_state_tracker,
+            lora_load_estimator: Arc::new(LoadEstimator::new()),
+            lora_filter,
+            lora_enabled: crate::lora::lora_serving_enabled(),
+            lora_load_feeds: DashMap::new(),
         }
     }
 
@@ -171,6 +206,10 @@ impl ModelManager {
     }
 
     /// Remove and return model card for this instance's key. We do this when the instance stops.
+    pub fn get_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
+        self.cards.get(key).map(|r| r.value().clone())
+    }
+
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
         self.cards.remove(key).map(|(_, v)| v)
     }
@@ -237,6 +276,23 @@ impl ModelManager {
         self.models
             .iter()
             .filter(|entry| entry.value().is_displayable())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Display names filtered to models that can actually serve a request right
+    /// now — displayable AND with a complete worker set in at least one
+    /// namespace ([`Model::has_ready_workers`]). This is the gate the HTTP
+    /// listing/default-model paths should apply so a registered-but-incomplete
+    /// deployment (e.g. decode-only with no prefill peer) is neither advertised
+    /// nor chosen as an implicit default.
+    pub fn serving_ready_display_names(&self) -> HashSet<String> {
+        self.models
+            .iter()
+            .filter(|entry| {
+                let model = entry.value();
+                model.is_displayable() && model.has_ready_workers()
+            })
             .map(|entry| entry.key().clone())
             .collect()
     }
@@ -429,9 +485,21 @@ impl ModelManager {
 
     // -- Convenience methods for in-process models (http.rs, grpc.rs) --
     // These create a WorkerSet with a default namespace for local models.
+    // Synthetic in-process worker sets are always `Aggregated` (they own
+    // their engine inline and don't depend on a peer worker), so we stamp
+    // that role onto the card here. The `Prefill` helper, in contrast,
+    // tags itself with `WorkerType::Prefill` so the serving-readiness
+    // gate sees it correctly.
     // TODO: These methods use ModelDeploymentCard::default() for the WorkerSet, which means
     // parsing_options() returns defaults (no tool_call_parser/reasoning_parser). Pass the real
     // MDC from callers so ParsingOptions reflect the model's actual configuration.
+
+    fn aggregated_local_card() -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.needs = Vec::new();
+        card
+    }
 
     pub fn add_chat_completions_model(
         &self,
@@ -447,7 +515,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.chat_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -468,7 +536,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.completions_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -489,7 +557,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.embeddings_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -510,7 +578,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.tensor_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -531,7 +599,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.images_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -552,7 +620,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.videos_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -573,7 +641,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.audios_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -594,7 +662,7 @@ impl ModelManager {
         let mut ws = WorkerSet::new(
             namespace.clone(),
             card_checksum.to_string(),
-            ModelDeploymentCard::default(),
+            Self::aggregated_local_card(),
         );
         ws.realtime_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
@@ -611,11 +679,10 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_prefill_{}", model);
-        let ws = WorkerSet::new(
-            namespace.clone(),
-            card_checksum.to_string(),
-            ModelDeploymentCard::default(),
-        );
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Prefill);
+        card.needs = vec![vec![crate::worker_type::WorkerType::Decode]];
+        let ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         Ok(())
     }
@@ -681,6 +748,18 @@ impl ModelManager {
     }
 
     // -- KV Router creation --
+
+    /// Whether to start the LoRA load-estimator feed for a KV router being built for `worker_type`.
+    ///
+    /// The feed must run for the worker mode that carries the routable request load. In dynamo's
+    /// KV path that is `WORKER_TYPE_DECODE`, which the binding assigns to BOTH aggregated and
+    /// disaggregated-decode endpoints (any non-prefill endpoint that tracks active blocks; see
+    /// `create_kv_router_from_endpoint`). Only disaggregated PREFILL is excluded, so its transient
+    /// load does not double-count the decode component's active sequences. Returns false when LoRA
+    /// serving is disabled.
+    fn should_start_lora_load_feed(lora_enabled: bool, worker_type: &str) -> bool {
+        lora_enabled && worker_type == crate::protocols::common::timing::WORKER_TYPE_DECODE
+    }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn kv_chooser_for(
@@ -751,8 +830,65 @@ impl ModelManager {
             model_name,
             is_eagle,
             shared_cache,
+            self.lora_filter(),
         )
         .await?;
+
+        // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
+        // subscription per "decode" component. WORKER_TYPE_DECODE is the routing path for BOTH
+        // aggregated and disaggregated-decode deployments: the binding maps any non-prefill,
+        // active-block-tracking endpoint to WORKER_TYPE_DECODE (see create_kv_router_from_endpoint
+        // in bindings/python/rust/llm/kv.rs), so aggregated KV feeds load here too. Only
+        // disaggregated PREFILL is excluded — its load is transient and would double-count the
+        // decode component's active sequences. Without this feed the estimator is never fed in KV
+        // mode and every LoRA stays "inactive" forever. (Edge case specific to the Python KV path:
+        // create_kv_router_from_endpoint infers WORKER_TYPE_PREFILL for a non-prefill endpoint when
+        // router_track_active_blocks=false, so that aggregated worker would skip this feed and KV
+        // routing is not load-aware — dynamic LoRA allocation then degrades to cold-start pins while
+        // the filter still routes by loaded worker. Constructors that pass WORKER_TYPE_DECODE
+        // directly, e.g. the watcher / C bindings, are unaffected.)
+        if Self::should_start_lora_load_feed(self.lora_enabled, worker_type) {
+            let feed_key = format!("{}/{}", endpoint.id().namespace, endpoint.id().component);
+            // Start a feed if none runs for this component yet, or restart it if the previous
+            // one exited (so a dead subscription does not permanently disable load tracking).
+            //
+            // Use the DashMap entry API so the check-and-insert is atomic per key: two
+            // concurrent `kv_chooser_for` calls for the same component otherwise both observe
+            // "no feed" and each spawn a subscription, double-counting active sequences.
+            // Holding the entry lock across the spawn serializes them — the loser sees the
+            // winner's live handle and skips.
+            let started = match self.lora_load_feeds.entry(feed_key) {
+                Entry::Occupied(mut entry) => {
+                    if entry.get().is_finished() {
+                        // Previous feed exited; replace it (aborting the dead handle is a no-op).
+                        let handle = self
+                            .lora_load_estimator
+                            .clone()
+                            .start_event_subscription(endpoint.component().clone());
+                        entry.insert(handle);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    let handle = self
+                        .lora_load_estimator
+                        .clone()
+                        .start_event_subscription(endpoint.component().clone());
+                    entry.insert(handle);
+                    true
+                }
+            };
+            if started {
+                tracing::info!(
+                    namespace = %endpoint.id().namespace,
+                    component = %endpoint.id().component,
+                    "Started decode-side LoRA load feed (KV active-sequence subscription)"
+                );
+            }
+        }
+
         Ok(Arc::new(chooser))
     }
 
@@ -764,6 +900,75 @@ impl ModelManager {
     /// and registration guards.
     pub(crate) fn model_namespace_key(model_name: &str, namespace: &str) -> String {
         format!("{}:{}", model_name, namespace)
+    }
+
+    // ── LoRA allocation accessors ───────────────────────────────────────
+
+    pub fn lora_routing_table(&self) -> &LoraRoutingTable {
+        &self.lora_routing_table
+    }
+
+    pub fn lora_state_tracker(&self) -> &LoraStateTracker {
+        &self.lora_state_tracker
+    }
+
+    pub fn lora_load_estimator(&self) -> &Arc<LoadEstimator> {
+        &self.lora_load_estimator
+    }
+
+    pub fn lora_filter(&self) -> Option<Arc<LoraFilter>> {
+        // Only expose the filter when LoRA serving is enabled, so non-LoRA deployments
+        // keep the unmodified routing path (no wrapper, no avail-vs-free regression).
+        self.lora_enabled.then(|| self.lora_filter.clone())
+    }
+
+    /// Start the LoRA allocation controller background loop.
+    pub fn start_lora_controller(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let config = crate::lora::LoraAllocationConfig::from_env();
+
+        // F10: respect the allocation-enabled config (DYN_LORA_ALLOCATION_ENABLED). When
+        // disabled, skip the controller entirely — routing still works via the filter's
+        // loaded-worker fallback, just without dynamic replica recomputation.
+        if !config.enabled {
+            tracing::info!(
+                "LoRA allocation controller disabled (DYN_LORA_ALLOCATION_ENABLED=false); \
+                 routing uses the loaded-worker fallback without dynamic allocation"
+            );
+            return tokio::spawn(async {});
+        }
+
+        let rate_window_secs = config.effective_rate_window_secs();
+        // F11: apply the full estimator config (rate window + bucket granularity +
+        // predictor type/alpha), not just the rate window.
+        self.lora_load_estimator
+            .set_config(crate::lora::LoadEstimatorConfig {
+                rate_window: std::time::Duration::from_secs(rate_window_secs),
+                buckets_per_second: config.buckets_per_second,
+                predictor_type: config.predictor_type,
+                ema_alpha: config.ema_alpha,
+                ..Default::default()
+            });
+
+        tracing::info!(
+            enabled = config.enabled,
+            algorithm = ?config.algorithm,
+            timestep_secs = config.timestep_secs,
+            rate_window_secs = rate_window_secs,
+            rate_window_multiplier = config.rate_window_multiplier,
+            buckets_per_second = config.buckets_per_second,
+            predictor_type = ?config.predictor_type,
+            "Starting LoRA allocation controller"
+        );
+        crate::lora::LoraController::start(
+            config,
+            self.lora_routing_table.clone(),
+            self.lora_state_tracker.clone(),
+            self.lora_load_estimator.clone(),
+            cancel_token,
+        )
     }
 
     /// Register a prefill router for a decode WorkerSet. Returns a receiver that will be
@@ -1005,16 +1210,6 @@ impl ModelManager {
         model_entry.load_threshold_config(config)
     }
 
-    /// Gets an existing worker monitor for a specific namespace of a model.
-    pub fn get_worker_monitor_for_namespace(
-        &self,
-        model: &str,
-        namespace: &str,
-    ) -> Option<KvWorkerMonitor> {
-        let model_entry = self.models.get(model)?;
-        model_entry.get_worker_monitor_for_namespace(namespace)
-    }
-
     /// Lists all models with worker monitors configured.
     pub fn list_busy_thresholds(&self) -> Vec<(String, LoadThresholdConfig)> {
         let mut result = Vec::new();
@@ -1080,11 +1275,101 @@ impl ModelManager {
         let configs = rx.borrow();
         Some(configs.get(&worker_id)?.data_parallel_size)
     }
+
+    /// Whether any worker on this endpoint advertises a required KV-transfer topology policy.
+    pub fn has_kv_transfer_required_routing_policy(&self, endpoint_id: &EndpointId) -> bool {
+        let Some(rx) = self.runtime_configs.get(endpoint_id) else {
+            return false;
+        };
+        let configs = rx.borrow();
+        has_required_kv_transfer_policy(&configs)
+    }
+
+    /// Build topology routing constraints from a selected prefill worker's metadata.
+    pub fn get_kv_transfer_routing_constraints(
+        &self,
+        endpoint_id: &EndpointId,
+        worker_id: WorkerId,
+    ) -> anyhow::Result<Option<RoutingConstraints>> {
+        let Some(rx) = self.runtime_configs.get(endpoint_id) else {
+            tracing::debug!(%endpoint_id, worker_id, "no runtime configs for topology routing");
+            return Ok(None);
+        };
+        let configs = rx.borrow();
+        let Some(config) = configs.get(&worker_id) else {
+            tracing::debug!(
+                %endpoint_id,
+                worker_id,
+                num_workers = configs.len(),
+                worker_ids = ?configs.keys().collect::<Vec<_>>(),
+                "selected prefill worker missing from runtime configs for topology routing"
+            );
+            if has_required_kv_transfer_policy(&configs) {
+                anyhow::bail!(
+                    "selected prefill worker {worker_id} missing from runtime configs for endpoint {endpoint_id}; \
+                     cannot derive KV transfer topology constraints for required policy"
+                );
+            }
+            return Ok(None);
+        };
+        let Some(domain) = config.kv_transfer_domain.as_deref() else {
+            tracing::debug!(
+                %endpoint_id,
+                worker_id,
+                topology_domains = ?config.topology_domains,
+                "selected prefill worker has no kv_transfer_domain"
+            );
+            return Ok(None);
+        };
+        let Some(value) = config.topology_domains.get(domain) else {
+            anyhow::bail!(
+                "selected prefill worker {worker_id} configured kv_transfer_domain={domain:?}, \
+                 but topology_domains does not contain that domain"
+            );
+        };
+
+        let taint = topology_taint(domain, value);
+        let mut constraints = RoutingConstraints::default();
+        match config.kv_transfer_enforcement {
+            Some(KvTransferEnforcement::Required) => {
+                constraints.required_taints.insert(taint);
+            }
+            Some(KvTransferEnforcement::Preferred) => {
+                let Some(weight) = config.kv_transfer_preferred_weight else {
+                    anyhow::bail!(
+                        "selected prefill worker {worker_id} configured preferred KV transfer \
+                         enforcement for domain {domain:?}, but kv_transfer_preferred_weight is missing"
+                    );
+                };
+                constraints.preferred_taints.insert(taint, weight);
+            }
+            None => {
+                anyhow::bail!(
+                    "selected prefill worker {worker_id} configured kv_transfer_domain={domain:?}, \
+                     but kv_transfer_enforcement is missing"
+                );
+            }
+        };
+
+        Ok(Some(constraints))
+    }
+}
+
+fn has_required_kv_transfer_policy(configs: &HashMap<WorkerId, ModelRuntimeConfig>) -> bool {
+    configs.values().any(|config| {
+        matches!(
+            config.kv_transfer_enforcement,
+            Some(KvTransferEnforcement::Required)
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use crate::local_model::runtime_config::ModelRuntimeConfig;
     use crate::model_card::ModelDeploymentCard;
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
@@ -1093,6 +1378,160 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    fn insert_runtime_configs(
+        mm: &ModelManager,
+        endpoint_id: &EndpointId,
+        configs: HashMap<WorkerId, ModelRuntimeConfig>,
+    ) {
+        let (_tx, rx) = tokio::sync::watch::channel(configs);
+        mm.runtime_configs.insert(endpoint_id.clone(), rx);
+    }
+
+    fn topology_runtime_config(
+        enforcement: KvTransferEnforcement,
+        preferred_weight: Option<f32>,
+    ) -> ModelRuntimeConfig {
+        let mut config = ModelRuntimeConfig {
+            kv_transfer_domain: Some("zone".to_string()),
+            kv_transfer_enforcement: Some(enforcement),
+            kv_transfer_preferred_weight: preferred_weight,
+            ..Default::default()
+        };
+        config
+            .topology_domains
+            .insert("zone".to_string(), "us-east-1a".to_string());
+        config
+    }
+
+    #[test]
+    fn lora_load_feed_starts_for_aggregated_and_decode_not_prefill() {
+        use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+        // Aggregated and disaggregated-decode deployments both route via WORKER_TYPE_DECODE
+        // (create_kv_router_from_endpoint maps any non-prefill, active-block-tracking endpoint to
+        // it), so the LoRA load feed must start for that worker type — otherwise the controller
+        // would treat every adapter as inactive and never run dynamic allocation.
+        assert!(
+            ModelManager::should_start_lora_load_feed(true, WORKER_TYPE_DECODE),
+            "decode/aggregated KV must start the LoRA load feed"
+        );
+        // Disaggregated prefill load is fed via the decode component, so prefill must NOT start its
+        // own feed (avoids double-counting active sequences).
+        assert!(
+            !ModelManager::should_start_lora_load_feed(true, WORKER_TYPE_PREFILL),
+            "prefill KV must not start its own LoRA load feed"
+        );
+        // LoRA serving disabled: never start the feed.
+        assert!(
+            !ModelManager::should_start_lora_load_feed(false, WORKER_TYPE_DECODE),
+            "no feed when LoRA serving is disabled"
+        );
+    }
+
+    #[test]
+    fn kv_transfer_constraints_build_required_and_preferred_constraints() {
+        let mm = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+
+        for (worker_id, config) in [
+            (
+                7,
+                topology_runtime_config(KvTransferEnforcement::Required, None),
+            ),
+            (
+                8,
+                topology_runtime_config(KvTransferEnforcement::Preferred, Some(0.85)),
+            ),
+        ] {
+            insert_runtime_configs(&mm, &endpoint_id, HashMap::from([(worker_id, config)]));
+
+            let constraints = mm
+                .get_kv_transfer_routing_constraints(&endpoint_id, worker_id)
+                .unwrap()
+                .unwrap();
+
+            match worker_id {
+                7 => {
+                    assert!(
+                        constraints
+                            .required_taints
+                            .contains("dynamo.topology/zone=us-east-1a")
+                    );
+                    assert!(constraints.preferred_taints.is_empty());
+                }
+                8 => {
+                    assert!(constraints.required_taints.is_empty());
+                    assert_eq!(
+                        constraints.preferred_taints["dynamo.topology/zone=us-east-1a"],
+                        0.85
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn kv_transfer_required_policy_presence_ignores_preferred_policy() {
+        let mm = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(
+                7,
+                topology_runtime_config(KvTransferEnforcement::Preferred, Some(0.85)),
+            )]),
+        );
+        assert!(!mm.has_kv_transfer_required_routing_policy(&endpoint_id));
+
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(
+                7,
+                topology_runtime_config(KvTransferEnforcement::Required, None),
+            )]),
+        );
+        assert!(mm.has_kv_transfer_required_routing_policy(&endpoint_id));
+    }
+
+    #[test]
+    fn kv_transfer_constraints_missing_selected_worker_fails_closed_for_required_policy() {
+        let mm = ModelManager::new();
+        let endpoint_id = EndpointId::from("test.prefill.generate");
+        let missing_worker_id = 99;
+
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(
+                7,
+                topology_runtime_config(KvTransferEnforcement::Preferred, Some(0.85)),
+            )]),
+        );
+        assert!(
+            mm.get_kv_transfer_routing_constraints(&endpoint_id, missing_worker_id)
+                .unwrap()
+                .is_none()
+        );
+
+        insert_runtime_configs(
+            &mm,
+            &endpoint_id,
+            HashMap::from([(
+                7,
+                topology_runtime_config(KvTransferEnforcement::Required, None),
+            )]),
+        );
+        let err = mm
+            .get_kv_transfer_routing_constraints(&endpoint_id, missing_worker_id)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("selected prefill worker 99 missing from runtime configs"));
+        assert!(err.contains("required policy"));
     }
 
     // -- CRUD delegation tests --
@@ -1482,8 +1921,9 @@ mod tests {
             std::sync::Arc::new(ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
             enforce_disagg,
+            None,
         );
-        pr.mark_activated_for_test();
+        pr.mark_active_for_test();
         ws.prefill_router = Some(pr);
         ws
     }
@@ -1607,12 +2047,13 @@ mod tests {
             "model must be hidden after prefill death"
         );
 
-        // Prefill rejoins -> reactivate via the WorkerSet's PrefillRouter.
+        // Prefill rejoins -> mark the synthetic test router active again. A real
+        // PrefillRouter has an initialized inner router for reactivate() to reuse.
         if let Some(model) = mm.get_model("llama")
             && let Some(ws) = model.get_worker_set("decode-ns")
             && let Some(ref pr) = ws.prefill_router
         {
-            pr.reactivate();
+            pr.mark_active_for_test();
         } else {
             panic!("decode WorkerSet or prefill_router not found");
         }
@@ -1705,5 +2146,88 @@ mod tests {
         assert!(mm.has_any_ready_model());
         assert!(mm.is_model_ready_to_serve("ready-llama"));
         assert!(!mm.is_model_ready_to_serve("pending-llama"));
+    }
+
+    /// A decode-only WorkerSet that needs a prefill peer (absent here), with a
+    /// live worker and a chat engine attached: displayable, but its namespace
+    /// is not serving-ready.
+    fn incomplete_decode_chat_ws(namespace: &str, mdcsum: &str) -> WorkerSet {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Decode);
+        card.needs = vec![vec![crate::worker_type::WorkerType::Prefill]];
+        // Watch receiver keeps its last value after the sender drops, so
+        // worker_count stays 1 without holding the sender.
+        let (_tx, rx) = tokio::sync::watch::channel(vec![1u64]);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        ws.chat_engine = Some(make_chat_engine());
+        ws
+    }
+
+    /// Verifies the readiness gate the review (PR #10503) flagged for the
+    /// listing, default-model, and error-shape paths. A registered-but-incomplete
+    /// deployment (decode-only, no prefill peer) is displayable but must be:
+    ///   - excluded from `serving_ready_display_names` (OpenAI/Anthropic listing
+    ///     and the audio default-model fallback),
+    ///   - reported not-ready by `is_model_ready_to_serve` (KServe), and
+    ///   - surfaced as `ModelUnavailable` (503) by the engine getter, not
+    ///     `ModelNotFound` (404).
+    #[test]
+    fn serving_ready_excludes_incomplete_namespace() {
+        let mm = ModelManager::new();
+
+        // Complete, serving-ready model (aggregated, live).
+        mm.add_chat_completions_model("ready", "mdc-r", make_chat_engine())
+            .unwrap();
+
+        // Incomplete model: decode-only, needs a prefill peer that never joins.
+        mm.add_worker_set(
+            "broken",
+            "decode-ns",
+            incomplete_decode_chat_ws("decode-ns", "mdc-b"),
+        );
+
+        // The incomplete model is still *displayable* (it has a live engine)...
+        let displayable = mm.model_display_names();
+        assert!(displayable.contains("ready"));
+        assert!(
+            displayable.contains("broken"),
+            "incomplete model is displayable (has a live engine)"
+        );
+
+        // ...but only the complete model is *serving-ready* — the gate the
+        // listing endpoints and the audio default-model fallback now apply.
+        let serving = mm.serving_ready_display_names();
+        assert!(serving.contains("ready"));
+        assert!(
+            !serving.contains("broken"),
+            "incomplete model must be excluded from serving_ready_display_names"
+        );
+
+        // Point 3: the audio-speech implicit default-model fallback resolves to
+        // `serving_ready_display_names().into_iter().next()`. With an incomplete
+        // model present, that set excludes it, so the default can only ever
+        // resolve to the complete/ready model — never the incomplete one.
+        let audio_default = mm.serving_ready_display_names().into_iter().next();
+        assert_eq!(
+            audio_default.as_deref(),
+            Some("ready"),
+            "audio default-model fallback must pick the ready model, not the incomplete one"
+        );
+
+        // KServe readiness agrees.
+        assert!(mm.is_model_ready_to_serve("ready"));
+        assert!(!mm.is_model_ready_to_serve("broken"));
+
+        // The engine getter yields ModelUnavailable (mapped to 503 by both the
+        // OpenAI and the Anthropic handlers), not ModelNotFound (404), because
+        // the engine exists but the namespace is incomplete.
+        assert!(
+            matches!(
+                mm.get_chat_completions_engine("broken"),
+                Err(ModelManagerError::ModelUnavailable(_))
+            ),
+            "incomplete-but-engine-present model must be ModelUnavailable (503), not 404"
+        );
     }
 }

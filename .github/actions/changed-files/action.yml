@@ -16,6 +16,9 @@ outputs:
   snapshot:
     description: 'Whether snapshot-agent files changed'
     value: ${{ steps.filter.outputs.snapshot_any_modified }}
+  power_agent:
+    description: 'Whether power-agent files changed'
+    value: ${{ steps.filter.outputs.power_agent_any_modified }}
   deploy:
     description: 'Whether deploy files changed'
     value: ${{ steps.filter.outputs.deploy_any_modified }}
@@ -40,6 +43,9 @@ outputs:
   benchmarks:
     description: 'Whether benchmarks files changed'
     value: ${{ steps.filter.outputs.benchmarks_any_modified }}
+  efa:
+    description: 'Whether AWS EFA Dockerfile changed'
+    value: ${{ steps.filter.outputs.efa_any_modified }}
   rust:
     description: 'Whether rust files changed'
     value: ${{ steps.filter.outputs.rust_any_modified }}
@@ -118,6 +124,7 @@ runs:
         echo "core: ${{ steps.filter.outputs.core_any_modified }}"
         echo "operator: ${{ steps.filter.outputs.operator_any_modified }}"
         echo "snapshot: ${{ steps.filter.outputs.snapshot_any_modified }}"
+        echo "power_agent: ${{ steps.filter.outputs.power_agent_any_modified }}"
         echo "deploy: ${{ steps.filter.outputs.deploy_any_modified }}"
         echo "planner: ${{ steps.filter.outputs.planner_any_modified }}"
         echo "vllm: ${{ steps.filter.outputs.vllm_any_modified }}"
@@ -126,6 +133,7 @@ runs:
         echo "sample: ${{ steps.filter.outputs.sample_any_modified }}"
         echo "frontend: ${{ steps.filter.outputs.frontend_any_modified }}"
         echo "benchmarks: ${{ steps.filter.outputs.benchmarks_any_modified }}"
+        echo "efa: ${{ steps.filter.outputs.efa_any_modified }}"
         echo "rust: ${{ steps.filter.outputs.rust_any_modified }}"
         echo ""
         echo "=== Files Matching Each Filter ==="
@@ -134,6 +142,7 @@ runs:
         echo "core: ${{ steps.filter.outputs.core_all_modified_files }}"
         echo "operator: ${{ steps.filter.outputs.operator_all_modified_files }}"
         echo "snapshot: ${{ steps.filter.outputs.snapshot_all_modified_files }}"
+        echo "power_agent: ${{ steps.filter.outputs.power_agent_all_modified_files }}"
         echo "deploy: ${{ steps.filter.outputs.deploy_all_modified_files }}"
         echo "planner: ${{ steps.filter.outputs.planner_all_modified_files }}"
         echo "vllm: ${{ steps.filter.outputs.vllm_all_modified_files }}"
@@ -142,13 +151,14 @@ runs:
         echo "sample: ${{ steps.filter.outputs.sample_all_modified_files }}"
         echo "frontend: ${{ steps.filter.outputs.frontend_all_modified_files }}"
         echo "benchmarks: ${{ steps.filter.outputs.benchmarks_all_modified_files }}"
+        echo "efa: ${{ steps.filter.outputs.efa_all_modified_files }}"
         echo "rust: ${{ steps.filter.outputs.rust_all_modified_files }}"
 
     - name: Check for uncovered files
       shell: bash
       run: |
         # Combine all filter-specific files into one list
-        COVERED_FILES=$(echo "${{ steps.filter.outputs.docs_all_modified_files }} ${{ steps.filter.outputs.examples_all_modified_files }} ${{ steps.filter.outputs.ignore_all_modified_files }} ${{ steps.filter.outputs.ci_all_modified_files }} ${{ steps.filter.outputs.core_all_modified_files }} ${{ steps.filter.outputs.operator_all_modified_files }} ${{ steps.filter.outputs.snapshot_all_modified_files }} ${{ steps.filter.outputs.deploy_all_modified_files }} ${{ steps.filter.outputs.planner_all_modified_files }} ${{ steps.filter.outputs.vllm_all_modified_files }} ${{ steps.filter.outputs.sglang_all_modified_files }} ${{ steps.filter.outputs.trtllm_all_modified_files }} ${{ steps.filter.outputs.sample_all_modified_files }} ${{ steps.filter.outputs.frontend_all_modified_files }} ${{ steps.filter.outputs.benchmarks_all_modified_files }} ${{ steps.filter.outputs.rust_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
+        COVERED_FILES=$(echo "${{ steps.filter.outputs.docs_all_modified_files }} ${{ steps.filter.outputs.examples_all_modified_files }} ${{ steps.filter.outputs.ignore_all_modified_files }} ${{ steps.filter.outputs.ci_all_modified_files }} ${{ steps.filter.outputs.core_all_modified_files }} ${{ steps.filter.outputs.operator_all_modified_files }} ${{ steps.filter.outputs.snapshot_all_modified_files }} ${{ steps.filter.outputs.power_agent_all_modified_files }} ${{ steps.filter.outputs.deploy_all_modified_files }} ${{ steps.filter.outputs.planner_all_modified_files }} ${{ steps.filter.outputs.vllm_all_modified_files }} ${{ steps.filter.outputs.sglang_all_modified_files }} ${{ steps.filter.outputs.trtllm_all_modified_files }} ${{ steps.filter.outputs.sample_all_modified_files }} ${{ steps.filter.outputs.frontend_all_modified_files }} ${{ steps.filter.outputs.benchmarks_all_modified_files }} ${{ steps.filter.outputs.efa_all_modified_files }} ${{ steps.filter.outputs.rust_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
 
         # Get all modified files
         ALL_FILES=$(echo "${{ steps.filter.outputs.all_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)

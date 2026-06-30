@@ -8,26 +8,19 @@ from __future__ import annotations
 import os
 from collections import defaultdict
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence
 
 from gpu_memory_service.snapshot.model import AllocationEntry
 
-DEFAULT_TRANSFER_BACKEND = "nixl"
-NIXL_TRANSFER_BACKEND = "nixl"
-NIXL_GDS_TRANSFER_BACKEND = "nixl-gds"
-SHARDED_SSD_TRANSFER_BACKEND = "sharded-ssd"
 
-TRANSFER_BACKEND_CHOICES = (
-    NIXL_TRANSFER_BACKEND,
-    NIXL_GDS_TRANSFER_BACKEND,
-    SHARDED_SSD_TRANSFER_BACKEND,
-)
+class TransferBackendKind(str, Enum):
+    NIXL = "nixl"
+    NIXL_GDS = "nixl-gds"
+    SHARDED_SSD = "sharded-ssd"
 
-CHECKPOINT_DIR_TRANSFER_BACKENDS = (
-    NIXL_TRANSFER_BACKEND,
-    NIXL_GDS_TRANSFER_BACKEND,
-    SHARDED_SSD_TRANSFER_BACKEND,
-)
+    def __str__(self) -> str:
+        return self.value
 
 
 @dataclass(frozen=True)
@@ -77,8 +70,6 @@ class TransferSession(Protocol):
 class TransferBackend(Protocol):
     """Backend capable of restoring bytes into GMS targets."""
 
-    name: str
-
     def start_restore(self, sources: Sequence[FileTransferSource]) -> TransferSession:
         """Start or stage restore work for the given sources."""
 
@@ -107,26 +98,26 @@ def create_transfer_backend(
     config: GMSSnapshotConfig,
 ) -> TransferBackend:
     """Create the configured restore transfer backend."""
-    if name == NIXL_TRANSFER_BACKEND:
+    if name == TransferBackendKind.NIXL.value:
         from gpu_memory_service.snapshot.backends.nixl import NixlTransferBackend
 
         return NixlTransferBackend(config=config)
 
-    if name == NIXL_GDS_TRANSFER_BACKEND:
+    if name == TransferBackendKind.NIXL_GDS.value:
         from gpu_memory_service.snapshot.backends.nixl_gds import NixlGDSTransferBackend
 
         return NixlGDSTransferBackend(config=config)
 
-    if name == SHARDED_SSD_TRANSFER_BACKEND:
+    if name == TransferBackendKind.SHARDED_SSD.value:
         from gpu_memory_service.snapshot.backends.sharded_ssd import (
             ShardedSSDTransferBackend,
         )
 
         return ShardedSSDTransferBackend(config=config)
 
+    choices = ", ".join(backend.value for backend in TransferBackendKind)
     raise ValueError(
-        f"Unsupported GMS transfer backend {name!r}; "
-        f"expected one of {', '.join(TRANSFER_BACKEND_CHOICES)}"
+        f"Unsupported GMS transfer backend {name!r}; expected one of {choices}"
     )
 
 

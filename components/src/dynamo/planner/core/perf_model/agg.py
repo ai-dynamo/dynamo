@@ -133,6 +133,7 @@ class AggRegressionModel(_BaseRegressionModel):
         max_kv_tokens: Optional[int] = None,
         max_num_seqs: Optional[int] = None,
         kv_hit_rate: Optional[float] = None,
+        accept_length: float = 1.0,
     ) -> tuple[float, float, float]:
         """Find the maximum agg engine request rate under both SLA targets.
 
@@ -140,8 +141,13 @@ class AggRegressionModel(_BaseRegressionModel):
         where both ITL and TTFT remain within their targets.  Warns if
         even batch_size=1 violates either SLA.
 
-        Request rate is derived via Little's law:
-        ``engine_rps = best_batch_size / (osl * wall_time_per_iter)``.
+        Decode egress rate is derived via Little's law, with speculative
+        accept length reducing the number of decode forwards needed per raw
+        output length:
+        ``decode_rps = best_batch_size * accept_length / (osl * wall_time)``.
+        The final engine RPS is capped by prefill admission capacity so
+        aggregated engines do not claim decode-side speedup that prefill cannot
+        sustain.
 
         ``kv_hit_rate`` discounts only the prefill portion of each
         iteration; decode KV residency uses the full ISL because cache
@@ -178,6 +184,7 @@ class AggRegressionModel(_BaseRegressionModel):
             or max_num_batched_tokens <= 0
         ):
             return (0.0, 0.0, 0.0)
+        accept_length = max(1.0, float(accept_length))
 
         prefill_scale = 1.0 - _clamp_kv_hit_rate(kv_hit_rate)
         effective_isl = isl * prefill_scale
@@ -193,8 +200,11 @@ class AggRegressionModel(_BaseRegressionModel):
         # Concurrency cap
         seq_cap = max_num_seqs if max_num_seqs and max_num_seqs > 0 else kv_cap
 
-        # Prefill/decode balance cap via binary search within [1, min(kv_cap, seq_cap)]
-        # For each candidate x, check: effective_isl / (max_num_batched_tokens - x) <= osl
+        # Prefill/decode balance cap via binary search within [1, min(kv_cap, seq_cap)].
+        # For each candidate x, check that the per-forward prefill work needed
+        # to admit requests at the speculative decode egress rate fits in the
+        # remaining token budget:
+        #   x * accept_length * effective_isl / osl <= max_num_batched_tokens - x
         # Uses ``effective_isl`` (post-cache) because cache reuse shrinks the
         # prefill tokens each new request consumes from the per-iteration
         # budget, raising the admissible batch size.
@@ -204,7 +214,8 @@ class AggRegressionModel(_BaseRegressionModel):
             prefill_budget = max_num_batched_tokens - x
             if prefill_budget <= 0:
                 return False
-            return effective_isl / prefill_budget <= osl
+            required_prefill = x * accept_length * effective_isl / max(1.0, osl)
+            return required_prefill <= prefill_budget
 
         lo, hi = 1, max(1, hard_cap)
         while lo < hi:
@@ -225,10 +236,11 @@ class AggRegressionModel(_BaseRegressionModel):
             # engine actually computes ``effective_isl`` tokens per request
             # because the cached prefix is skipped.
             prefill_per_iter = min(
-                bs * effective_isl / max(1.0, osl), max_num_batched_tokens
+                bs * accept_length * effective_isl / max(1.0, osl),
+                max_num_batched_tokens,
             )
             wt = self._predict_2d(prefill_per_iter, decode_kv)
-            itl_ms = wt * 1000.0
+            itl_ms = wt * 1000.0 / accept_length
 
             # ``estimate_next_ttft`` applies the same discount internally to
             # both the queued portion and the avg_isl portion. To keep the
@@ -236,7 +248,10 @@ class AggRegressionModel(_BaseRegressionModel):
             # queued contribution and forward ``kv_hit_rate`` so the
             # function's own ``(1 - clamp(kv_hit_rate))`` factor scales
             # both sides consistently.
-            raw_prefill_per_iter = min(bs * isl / max(1.0, osl), max_num_batched_tokens)
+            raw_prefill_per_iter = min(
+                bs * accept_length * isl / max(1.0, osl),
+                max_num_batched_tokens,
+            )
             est_ttft = self.estimate_next_ttft(
                 queued_prefill_tokens=int(raw_prefill_per_iter),
                 max_num_batched_tokens=max_num_batched_tokens,
@@ -252,12 +267,26 @@ class AggRegressionModel(_BaseRegressionModel):
                         f"TTFT={ttft_ms:.1f}ms (target {ttft_sla:.1f}ms), "
                         f"ITL={itl_ms:.1f}ms (target {itl_sla:.1f}ms)"
                     )
-                    best_rps = 1.0 / (osl * wt)
+                    decode_rps = accept_length / (osl * wt)
+                    prefill_budget = max(0.0, float(max_num_batched_tokens - 1))
+                    prefill_rps = (
+                        math.inf
+                        if effective_isl <= 0.0
+                        else prefill_budget / (effective_isl * wt)
+                    )
+                    best_rps = min(decode_rps, prefill_rps)
                     best_ttft_ms = ttft_ms
                     best_itl_ms = itl_ms
                 break
 
-            best_rps = bs / (osl * wt)
+            decode_rps = bs * accept_length / (osl * wt)
+            prefill_budget = max(0.0, float(max_num_batched_tokens - bs))
+            prefill_rps = (
+                math.inf
+                if effective_isl <= 0.0
+                else prefill_budget / (effective_isl * wt)
+            )
+            best_rps = min(decode_rps, prefill_rps)
             best_ttft_ms = ttft_ms
             best_itl_ms = itl_ms
 

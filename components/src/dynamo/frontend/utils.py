@@ -3,11 +3,36 @@
 
 """Shared utilities for frontend chat processors (vLLM, SGLang)."""
 
+import json
 import logging
+import os
 import uuid
 from typing import Any
 
 _MASK_64_BITS = (1 << 64) - 1
+
+
+def resolve_chat_template(source_path: str) -> str | None:
+    """Return a chat template stored beside the model, or None.
+
+    Covers models (e.g. Qwen3-Omni) whose template lives in chat_template.json
+    or chat_template.jinja rather than tokenizer_config.json, which the HF
+    tokenizer does not merge.
+    """
+    jinja_path = os.path.join(source_path, "chat_template.jinja")
+    if os.path.exists(jinja_path):
+        with open(jinja_path, encoding="utf-8") as f:
+            return f.read()
+
+    json_path = os.path.join(source_path, "chat_template.json")
+    if os.path.exists(json_path):
+        with open(json_path, encoding="utf-8") as f:
+            try:
+                return json.load(f).get("chat_template")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Malformed JSON in {json_path}: {e}") from e
+
+    return None
 
 
 def random_uuid() -> str:
