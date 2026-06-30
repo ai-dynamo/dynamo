@@ -4,7 +4,7 @@
 """Unit tests for the serial dynamo.vllm.multimodal_utils.async_vision_encoder.
 
 Pin the serial-glue contract: build / forward / close run on one actor thread;
-encode returns one tensor per raw; the A5 preprocess barrier fails a request
+encode returns one tensor per raw; the preprocess barrier fails a request
 atomically (no GPU work) if any image's preprocess fails; concurrent encodes are
 **not** coalesced (one forward_batch call each — the batched version's job, added
 later); load fails fast on a build error or a missing/invalid image_token_id.
@@ -78,7 +78,7 @@ async def test_encode_returns_one_tensor_per_raw():
         enc.shutdown()
 
 
-async def test_a5_barrier_fails_atomically_with_no_gpu_work():
+async def test_preprocess_barrier_fails_atomically_with_no_gpu_work():
     be = _FakeBackend(fail_on={"bad"})
     enc = AsyncVisionEncoder(be)
     enc.load("m")
@@ -190,7 +190,7 @@ def test_shutdown_before_load_is_safe():
 
 async def test_passthrough_skips_preprocess_when_no_pool():
     """With no pool (preprocess_concurrency=0) preprocess is skipped and raws go
-    straight to forward_batch — no A5 barrier, no pool thread."""
+    straight to forward_batch — no barrier, no pool thread."""
 
     class _PassthroughBackend(_FakeBackend):
         preprocess_concurrency = 0

@@ -47,8 +47,8 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
 
     The worker calls ``load`` once at startup and ``await``s ``encode`` per
     request; ``shutdown`` on teardown. All model knowledge lives in ``backend``;
-    this class owns the optional preprocess pool, the A5 barrier, and the single
-    actor thread that runs ``build`` / ``forward_batch`` / ``close``.
+    this class owns the optional preprocess pool, the request-atomicity barrier,
+    and the single actor thread that runs ``build`` / ``forward_batch`` / ``close``.
     """
 
     def __init__(
@@ -123,8 +123,8 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
     # ---- request path ------------------------------------------------------
 
     async def encode(self, raws: List[RawT]) -> List[torch.Tensor]:
-        """Optionally preprocess (off-loop, A5 barrier) then run a single serial
-        forward.
+        """Optionally preprocess (off-loop, with a request-atomicity barrier) then
+        run a single serial forward.
 
         With no preprocess pool (``preprocess_concurrency == 0``) raws go straight
         to ``forward_batch`` (the backend folds any prep in there). Returns one
@@ -138,13 +138,13 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
             return []
         loop = asyncio.get_running_loop()
         if self._pool is None:
-            # No preprocess phase: raw IS the item. No A5 barrier needed — the
+            # No preprocess phase: raw IS the item. No barrier needed — the
             # single forward is already all-or-nothing for the request.
             items: List[ItemT] = list(raws)  # type: ignore[arg-type]  # ItemT==RawT
         else:
-            # A5 barrier: preprocess all images concurrently, wait for EVERY one to
-            # settle, run the forward only if all succeeded. return_exceptions=True
-            # makes the gather a true barrier (no short-circuit).
+            # Request-atomicity barrier: preprocess all images concurrently, wait
+            # for EVERY one to settle, run the forward only if all succeeded.
+            # return_exceptions=True makes the gather a true barrier (no short-circuit).
             tasks = [
                 loop.run_in_executor(self._pool, self._backend.preprocess, raw)
                 for raw in raws
