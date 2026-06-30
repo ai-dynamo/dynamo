@@ -1585,14 +1585,19 @@ mod scattered_match_tests {
 
         let after = manager.metrics().snapshot();
         assert_eq!(
-            after.scan_hashes_requested - before.scan_hashes_requested,
+            after.match_hashes_requested - before.match_hashes_requested,
             input.len() as u64
         );
         assert_eq!(
-            after.scan_blocks_returned - before.scan_blocks_returned,
+            after.match_blocks_returned - before.match_blocks_returned,
             4,
-            "scan return metric counts hit occurrences, including duplicates"
+            "match return metric counts hit occurrences, including duplicates"
         );
+        assert_eq!(
+            after.scan_hashes_requested - before.scan_hashes_requested,
+            0
+        );
+        assert_eq!(after.scan_blocks_returned - before.scan_blocks_returned, 0);
     }
 
     #[test]
@@ -1601,6 +1606,14 @@ mod scattered_match_tests {
         let before = manager.metrics().snapshot();
         assert!(manager.match_blocks_scattered(&[]).is_empty());
         let after = manager.metrics().snapshot();
+        assert_eq!(
+            after.match_hashes_requested - before.match_hashes_requested,
+            0
+        );
+        assert_eq!(
+            after.match_blocks_returned - before.match_blocks_returned,
+            0
+        );
         assert_eq!(
             after.scan_hashes_requested - before.scan_hashes_requested,
             0
@@ -2539,6 +2552,51 @@ mod capacity_lifecycle_tests {
 
 mod scan_matches_tests {
     use super::*;
+
+    #[test]
+    fn scan_metrics_count_input_occurrences_and_distinct_results() {
+        let manager = create_test_manager(2);
+        let token_block = create_iota_token_block(12_000, 4);
+        let hash = token_block.kvbm_sequence_hash();
+        let mutable = manager
+            .allocate_blocks(1)
+            .expect("allocate")
+            .into_iter()
+            .next()
+            .unwrap();
+        let complete = mutable.complete(&token_block).expect("complete");
+        let _active = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        let missing_hash = create_iota_token_block(99_000, 4).kvbm_sequence_hash();
+        let before = manager.metrics().snapshot();
+
+        let found = manager.scan_matches(&[hash, hash, missing_hash], true);
+
+        assert_eq!(found.len(), 1);
+        assert!(found.contains_key(&hash));
+        let after = manager.metrics().snapshot();
+        assert_eq!(
+            after.scan_hashes_requested - before.scan_hashes_requested,
+            3,
+            "scan request metrics count duplicate input occurrences"
+        );
+        assert_eq!(
+            after.scan_blocks_returned - before.scan_blocks_returned,
+            1,
+            "scan return metrics count distinct result-map entries"
+        );
+        assert_eq!(
+            after.match_hashes_requested - before.match_hashes_requested,
+            0
+        );
+        assert_eq!(
+            after.match_blocks_returned - before.match_blocks_returned,
+            0
+        );
+    }
 
     #[test]
     fn test_scan_matches_with_pool_size_gauges() {

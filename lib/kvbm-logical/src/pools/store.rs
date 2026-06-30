@@ -667,7 +667,8 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         // slot was created. The locked helper guarantees that fresh/Allow
         // outcomes use the candidate slot, while Reject returns the distinct
         // existing primary (enforced by its same-block collision assertion).
-        if result.block_id() == block.block_id() {
+        let presence_added = result.block_id() == block.block_id();
+        if presence_added {
             handle.mark_present::<T>();
         }
 
@@ -708,7 +709,8 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         for ((block, handle), outcome) in blocks.iter().zip(&handles).zip(&outcomes) {
             // Fresh and Allow outcomes retain the candidate block ID; Reject
             // returns the different existing primary ID and re-arms `block`.
-            if outcome.block_id() == block.block_id() {
+            let presence_added = outcome.block_id() == block.block_id();
+            if presence_added {
                 handle.mark_present::<T>();
             }
         }
@@ -716,6 +718,13 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         outcomes
     }
 
+    /// Register a completed candidate while the store mutex is held.
+    ///
+    /// The returned block ID equals the candidate block ID exactly when this
+    /// call creates a presence-bearing slot (fresh primary or allowed
+    /// duplicate). A rejected duplicate re-arms the candidate guard and
+    /// returns the existing primary, whose distinct ID is enforced by the
+    /// same-block collision assertion below.
     fn register_completed_block_locked(
         self: &Arc<Self>,
         inner: &mut BlockStoreInner<T>,

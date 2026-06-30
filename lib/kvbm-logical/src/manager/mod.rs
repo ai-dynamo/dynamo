@@ -176,17 +176,18 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
     /// tracking is applied after releasing that lock, exactly once per hit
     /// (including repeated hashes and inactive resurrections).
     ///
-    /// This operation contributes to the existing scan metrics because it has
-    /// scan, rather than prefix, semantics.
+    /// This operation contributes to the existing match metrics. Requested
+    /// and returned values are counted as occurrences, so repeated input
+    /// hashes and their repeated hits are counted repeatedly.
     pub fn match_blocks_scattered(
         &self,
         seq_hash: &[SequenceHash],
     ) -> Vec<Option<ImmutableBlock<T>>> {
         self.metrics
-            .inc_scan_hashes_requested(seq_hash.len() as u64);
+            .inc_match_hashes_requested(seq_hash.len() as u64);
 
         if seq_hash.is_empty() {
-            self.metrics.inc_scan_blocks_returned(0);
+            self.metrics.inc_match_blocks_returned(0);
             return Vec::new();
         }
 
@@ -208,7 +209,7 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
             .map(|inner| inner.map(ImmutableBlock::from_inner))
             .collect();
 
-        self.metrics.inc_scan_blocks_returned(hit_count as u64);
+        self.metrics.inc_match_blocks_returned(hit_count as u64);
         tracing::debug!(
             num_hashes = seq_hash.len(),
             total_matched = hit_count,
@@ -218,7 +219,8 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
     }
 
     /// Scatter-gather scan: finds all blocks matching any hash, without
-    /// stopping on misses.
+    /// stopping on misses. Requested hashes are counted as input occurrences,
+    /// while returned blocks are counted as distinct hashes in the result map.
     pub fn scan_matches(
         &self,
         seq_hashes: &[SequenceHash],

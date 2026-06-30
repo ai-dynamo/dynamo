@@ -148,12 +148,17 @@ enum PreparedUseBlock {
         seq_hash: SequenceHash,
         handle: ImmutableBlock<G1>,
     },
+    /// Not present in `active_full`; resolved by the single aligned scattered
+    /// lookup after the initial classification pass.
+    PendingNonLocalFull {
+        seq_hash: SequenceHash,
+        full_idx: usize,
+    },
     ExistingPartial,
     FreshFull {
         seq_hash: SequenceHash,
         full_idx: usize,
         mutable: Option<MutableBlock<G1>>,
-        candidate_block_id: Option<usize>,
     },
     FreshPartial {
         uuid: Uuid,
@@ -171,6 +176,7 @@ struct UseSignalRef<'a> {
 struct UseTransaction<'a> {
     signal: UseSignalRef<'a>,
     prepared: Vec<PreparedUseBlock>,
+    fresh_full_blocks: usize,
     evicted_plhs: Vec<PositionalLineageHash>,
 }
 
@@ -1541,55 +1547,39 @@ impl KvManager {
             expected_full_blocks,
         );
 
-        // Preserve the existing per-block scattered reuse semantics while
-        // collapsing all non-local lookups into one store-lock acquisition.
-        // `match_blocks` cannot be used here because it stops at the first
-        // miss, whereas the existing singleton loop can still reuse a later
-        // registered block.
-        let mut nonlocal_plhs = Vec::with_capacity(expected_full_blocks);
-        let mut full_idx = 0usize;
-        for block in blocks {
-            if let UniqueBlock::FullBlock(seq_hash) = block {
-                if !self.active_full.contains_key(seq_hash) {
-                    nonlocal_plhs.push(plhs[full_idx]);
-                }
-                full_idx += 1;
-            }
-        }
-        let mut nonlocal_matches = self
-            .block_manager
-            .match_blocks_scattered(&nonlocal_plhs)
-            .into_iter();
-
+        // Classify locally active blocks once, and preserve the existing
+        // per-block scattered reuse semantics while collapsing all non-local
+        // lookups into one store-lock acquisition. `match_blocks` cannot be
+        // used here because it stops at the first miss, whereas the existing
+        // singleton loop can still reuse a later registered block.
+        //
+        // Start empty rather than reserving for every full block: an all-active
+        // request never needs storage for non-local lookup inputs.
         let mut prepared = Vec::with_capacity(blocks.len());
-        let mut evicted_plhs = Vec::new();
+        let mut nonlocal_plhs = Vec::new();
         let mut fresh_blocks = 0usize;
-        full_idx = 0;
+        let mut fresh_full_blocks = 0usize;
+        let mut full_idx = 0usize;
         for block in blocks {
             match block {
                 UniqueBlock::FullBlock(seq_hash) => {
-                    let entry = if self.active_full.contains_key(seq_hash) {
-                        PreparedUseBlock::ExistingActiveFull {
+                    if self.active_full.contains_key(seq_hash) {
+                        prepared.push(PreparedUseBlock::ExistingActiveFull {
                             seq_hash: *seq_hash,
-                        }
-                    } else if let Some(handle) = nonlocal_matches
-                        .next()
-                        .expect("scattered match result must align with non-local full blocks")
-                    {
-                        PreparedUseBlock::ExistingMatchedFull {
-                            seq_hash: *seq_hash,
-                            handle,
-                        }
+                        });
                     } else {
-                        fresh_blocks += 1;
-                        PreparedUseBlock::FreshFull {
+                        prepared.push(PreparedUseBlock::PendingNonLocalFull {
                             seq_hash: *seq_hash,
                             full_idx,
-                            mutable: None,
-                            candidate_block_id: None,
+                        });
+                        // Allocate once, but only when the request actually
+                        // contains a non-local full block. Every remaining
+                        // full block is the largest possible suffix here.
+                        if nonlocal_plhs.is_empty() {
+                            nonlocal_plhs.reserve_exact(expected_full_blocks - full_idx);
                         }
-                    };
-                    prepared.push(entry);
+                        nonlocal_plhs.push(plhs[full_idx]);
+                    }
                     full_idx += 1;
                 }
                 UniqueBlock::PartialBlock(uuid) => {
@@ -1605,10 +1595,40 @@ impl KvManager {
                 }
             }
         }
-        assert!(
-            nonlocal_matches.next().is_none(),
-            "scattered match returned more entries than non-local full blocks"
-        );
+
+        if !nonlocal_plhs.is_empty() {
+            let mut nonlocal_matches = self
+                .block_manager
+                .match_blocks_scattered(&nonlocal_plhs)
+                .into_iter();
+            for entry in &mut prepared {
+                let PreparedUseBlock::PendingNonLocalFull { seq_hash, full_idx } = entry else {
+                    continue;
+                };
+                let seq_hash = *seq_hash;
+                let full_idx = *full_idx;
+                *entry = if let Some(handle) = nonlocal_matches
+                    .next()
+                    .expect("scattered match result must align with non-local full blocks")
+                {
+                    PreparedUseBlock::ExistingMatchedFull { seq_hash, handle }
+                } else {
+                    fresh_blocks += 1;
+                    fresh_full_blocks += 1;
+                    PreparedUseBlock::FreshFull {
+                        seq_hash,
+                        full_idx,
+                        mutable: None,
+                    }
+                };
+            }
+            assert!(
+                nonlocal_matches.next().is_none(),
+                "scattered match returned more entries than non-local full blocks"
+            );
+        }
+
+        let mut evicted_plhs = Vec::new();
 
         if let Some(reservation) = reservation.as_mut() {
             if reservation.len() < fresh_blocks {
@@ -1627,6 +1647,9 @@ impl KvManager {
                     PreparedUseBlock::ExistingActiveFull { .. }
                     | PreparedUseBlock::ExistingMatchedFull { .. }
                     | PreparedUseBlock::ExistingPartial => {}
+                    PreparedUseBlock::PendingNonLocalFull { .. } => {
+                        unreachable!("non-local full block must be resolved before reservation")
+                    }
                 }
             }
         } else {
@@ -1667,6 +1690,9 @@ impl KvManager {
                     PreparedUseBlock::ExistingActiveFull { .. }
                     | PreparedUseBlock::ExistingMatchedFull { .. }
                     | PreparedUseBlock::ExistingPartial => {}
+                    PreparedUseBlock::PendingNonLocalFull { .. } => {
+                        unreachable!("non-local full block must be resolved before reservation")
+                    }
                 }
             }
             assert!(
@@ -1683,6 +1709,7 @@ impl KvManager {
                 parent,
             },
             prepared,
+            fresh_full_blocks,
             evicted_plhs,
         })
     }
@@ -1691,6 +1718,7 @@ impl KvManager {
         let UseTransaction {
             signal,
             mut prepared,
+            fresh_full_blocks,
             evicted_plhs,
         } = transaction;
 
@@ -1698,19 +1726,17 @@ impl KvManager {
         // under one BlockStore lock. Registration results preserve input order,
         // so the second pass can consume them alongside the fresh prepared
         // entries while preserving router-event segmentation and metadata.
-        let mut completed_blocks = Vec::new();
+        let mut completed_blocks = Vec::with_capacity(fresh_full_blocks);
+        let mut candidate_block_ids = Vec::with_capacity(fresh_full_blocks);
         for entry in &mut prepared {
             if let PreparedUseBlock::FreshFull {
-                full_idx,
-                mutable,
-                candidate_block_id,
-                ..
+                full_idx, mutable, ..
             } = entry
             {
                 let mutable = mutable
                     .take()
                     .expect("committing Use must own every fresh full slot");
-                *candidate_block_id = Some(mutable.block_id());
+                candidate_block_ids.push(mutable.block_id());
                 let complete = mutable
                     .stage(signal.plhs[*full_idx], self.block_size)
                     .expect("Use full block stage failed");
@@ -1718,7 +1744,17 @@ impl KvManager {
             }
         }
         let registered_blocks = self.block_manager.register_blocks(completed_blocks);
-        let mut fresh_registrations = registered_blocks.into_iter();
+        assert_eq!(
+            candidate_block_ids.len(),
+            fresh_full_blocks,
+            "prepared fresh full count must match staged candidate IDs"
+        );
+        assert_eq!(
+            candidate_block_ids.len(),
+            registered_blocks.len(),
+            "fresh candidate IDs must align with batch registration results"
+        );
+        let mut fresh_registrations = candidate_block_ids.into_iter().zip(registered_blocks);
 
         let mut metadata_parent_hash = match signal.parent {
             None => None,
@@ -1766,12 +1802,14 @@ impl KvManager {
                     metadata_parent_hash = Some(seq_hash);
                     first_store_parent = metadata_parent_hash;
                 }
+                PreparedUseBlock::PendingNonLocalFull { .. } => {
+                    unreachable!("non-local full block must be resolved before commit")
+                }
                 PreparedUseBlock::ExistingPartial => {}
                 PreparedUseBlock::FreshFull {
                     seq_hash,
                     full_idx,
                     mutable,
-                    candidate_block_id,
                 } => {
                     if blocks_stored.is_empty() {
                         first_store_parent = metadata_parent_hash;
@@ -1781,16 +1819,33 @@ impl KvManager {
                         mutable.is_none(),
                         "fresh full slot must be consumed by batch staging"
                     );
-                    let candidate_block_id = candidate_block_id
-                        .expect("fresh full block must record its staged candidate ID");
-                    let immutable = fresh_registrations
+                    let (candidate_block_id, immutable) = fresh_registrations
                         .next()
                         .expect("fresh full block must have a registration result");
-                    assert_eq!(
-                        immutable.block_id(),
-                        candidate_block_id,
-                        "prepared fresh Use block unexpectedly resolved to an existing registration"
-                    );
+                    if immutable.block_id() != candidate_block_id {
+                        // Reject deduplication can resolve two fresh entries in
+                        // this same batch to one canonical block. Finish the
+                        // preceding Stored group, retain the returned handle as
+                        // another logical owner, and advance the lineage cursor
+                        // without replacing canonical shadow metadata or
+                        // publishing a duplicate Stored event.
+                        if !blocks_stored.is_empty() {
+                            let hashes = std::mem::take(&mut blocks_stored);
+                            let local_hashes = std::mem::take(&mut stored_local_hashes);
+                            let token_ids = stored_token_ids.as_mut().map(std::mem::take);
+                            self.publish_kv_event(
+                                hashes,
+                                &local_hashes,
+                                first_store_parent,
+                                true,
+                                token_ids,
+                            );
+                        }
+                        self.insert_or_retain_active_full(seq_hash, immutable);
+                        metadata_parent_hash = Some(seq_hash);
+                        first_store_parent = metadata_parent_hash;
+                        continue;
+                    }
                     self.insert_or_retain_active_full(seq_hash, immutable);
 
                     let local_hash = signal.local_hashes.get(full_idx).copied();
@@ -2132,7 +2187,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::common::protocols::KvCacheEventSink;
+    use crate::common::protocols::{KvCacheEventSink, RawKvEvent, RawKvEventSink};
 
     /// Capturing event sink for router-publication assertions.
     #[derive(Default)]
@@ -2141,6 +2196,18 @@ mod tests {
     }
     impl KvCacheEventSink for CapturingSink {
         fn publish(&self, event: KvCacheEvent) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingRawSink {
+        events: Mutex<Vec<RawKvEvent>>,
+    }
+
+    impl RawKvEventSink for CapturingRawSink {
+        fn publish(&self, event: RawKvEvent) -> anyhow::Result<()> {
             self.events.lock().unwrap().push(event);
             Ok(())
         }
@@ -2167,6 +2234,21 @@ mod tests {
         (
             KvManager::new_with_event_sink(capacity, block_size, publishers, 0),
             sink,
+        )
+    }
+
+    fn make_mgr_capturing_with_raw(
+        capacity: usize,
+        block_size: usize,
+    ) -> (KvManager, Arc<CapturingSink>, Arc<CapturingRawSink>) {
+        let sink = Arc::new(CapturingSink::default());
+        let raw_sink = Arc::new(CapturingRawSink::default());
+        let publishers =
+            KvEventPublishers::new(Some(sink.clone() as _), Some(raw_sink.clone() as _));
+        (
+            KvManager::new_with_event_sink(capacity, block_size, publishers, 0),
+            sink,
+            raw_sink,
         )
     }
 
@@ -2335,6 +2417,50 @@ mod tests {
         assert_eq!(mgr.num_active_blocks(), 0);
         assert_eq!(mgr.num_active_block_refs(), 0);
         assert_eq!(mgr.block_manager.metrics().snapshot().inflight_immutable, 0);
+    }
+
+    #[test]
+    fn all_active_multi_block_use_only_retains_logical_owners() {
+        let (mut mgr, sink) = make_mgr_capturing(4, 4);
+        let blocks = vec![UniqueBlock::FullBlock(10), UniqueBlock::FullBlock(20)];
+        let plhs = vec![plh(100), plh(200)];
+
+        assert_eq!(
+            expect_ready(mgr.process(&MoveBlock::Use(
+                blocks.clone(),
+                vec![101, 201],
+                plhs.clone(),
+                None,
+                None,
+            ))),
+            2
+        );
+        let available_before = mgr.block_manager.available_blocks();
+        let first_block_id = mgr.active_full[&10].handle.block_id();
+        let second_block_id = mgr.active_full[&20].handle.block_id();
+        sink.events.lock().unwrap().clear();
+
+        assert_eq!(
+            expect_ready(mgr.process(&MoveBlock::Use(blocks, vec![101, 201], plhs, None, None,))),
+            2
+        );
+
+        assert_eq!(mgr.block_manager.available_blocks(), available_before);
+        assert_eq!(mgr.num_active_blocks(), 2);
+        assert_eq!(mgr.num_active_block_refs(), 4);
+        assert_eq!(mgr.active_full[&10].handle.block_id(), first_block_id);
+        assert_eq!(mgr.active_full[&20].handle.block_id(), second_block_id);
+        assert!(
+            sink.events.lock().unwrap().is_empty(),
+            "retaining active blocks must not publish another Stored event"
+        );
+
+        for _ in 0..2 {
+            deref_full(&mut mgr, 10);
+            deref_full(&mut mgr, 20);
+        }
+        assert_eq!(mgr.num_active_blocks(), 0);
+        assert_eq!(mgr.num_active_block_refs(), 0);
     }
 
     #[test]
@@ -2520,6 +2646,95 @@ mod tests {
                 expected_local_hashes
             );
         }
+    }
+
+    #[test]
+    fn duplicate_fresh_registration_reuses_canonical_without_duplicate_event() {
+        const CAPACITY: usize = 6;
+        let (mut mgr, sink, raw_sink) = make_mgr_capturing_with_raw(CAPACITY, 4);
+        let a_plh = plh(100);
+        let b_plh = plh(200);
+        let local_hashes = vec![101, 102, 201];
+        let token_ids = vec![vec![1; 4], vec![2; 4], vec![3; 4]];
+        let dedup_before = mgr.block_manager.metrics().snapshot().registration_dedup;
+
+        assert_eq!(
+            expect_ready(mgr.process(&MoveBlock::Use(
+                vec![
+                    UniqueBlock::FullBlock(10),
+                    UniqueBlock::FullBlock(10),
+                    UniqueBlock::FullBlock(20),
+                ],
+                local_hashes.clone(),
+                vec![a_plh, a_plh, b_plh],
+                Some(token_ids.clone()),
+                Some(UniqueBlock::FullBlock(5)),
+            ))),
+            3
+        );
+
+        assert_eq!(mgr.num_active_blocks(), 2);
+        assert_eq!(mgr.num_active_block_refs(), 3);
+        assert_eq!(mgr.block_manager.available_blocks(), CAPACITY - 2);
+        assert_eq!(
+            mgr.block_manager.metrics().snapshot().registration_dedup,
+            dedup_before + 1
+        );
+        assert_eq!(mgr.registered_blocks.len(), 2);
+
+        let a_info = &mgr.registered_blocks[&a_plh];
+        assert_eq!(a_info.seq_hash, 10);
+        assert_eq!(a_info.block_id, mgr.active_full[&10].handle.block_id());
+        assert_eq!(a_info.parent_hash, Some(5));
+        assert_eq!(a_info.local_hash, Some(local_hashes[0]));
+        assert_eq!(a_info.token_ids.as_ref(), Some(&token_ids[0]));
+
+        let b_info = &mgr.registered_blocks[&b_plh];
+        assert_eq!(b_info.seq_hash, 20);
+        assert_eq!(b_info.block_id, mgr.active_full[&20].handle.block_id());
+        assert_eq!(b_info.parent_hash, Some(10));
+        assert_eq!(b_info.local_hash, Some(local_hashes[2]));
+        assert_eq!(b_info.token_ids.as_ref(), Some(&token_ids[2]));
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 2, "the duplicate must split Stored groups");
+        for (event, expected_hash, expected_local_hash, expected_parent) in [
+            (&events[0], 10, local_hashes[0], Some(5)),
+            (&events[1], 20, local_hashes[2], Some(10)),
+        ] {
+            let KvCacheEventData::Stored(stored) = &event.data else {
+                panic!("expected Stored event, got {:?}", event.data);
+            };
+            assert_eq!(stored.parent_hash.map(|hash| hash.0), expected_parent);
+            assert_eq!(stored.blocks.len(), 1);
+            assert_eq!(stored.blocks[0].block_hash.0, expected_hash);
+            assert_eq!(stored.blocks[0].tokens_hash.0, expected_local_hash);
+        }
+        drop(events);
+
+        let raw_events = raw_sink.events.lock().unwrap();
+        assert_eq!(
+            raw_events.len(),
+            2,
+            "the duplicate must split raw Stored groups"
+        );
+        assert_eq!(
+            raw_events[0].block_token_ids.as_deref(),
+            Some(std::slice::from_ref(&token_ids[0]))
+        );
+        assert_eq!(
+            raw_events[1].block_token_ids.as_deref(),
+            Some(std::slice::from_ref(&token_ids[2]))
+        );
+        drop(raw_events);
+
+        deref_full(&mut mgr, 10);
+        deref_full(&mut mgr, 10);
+        deref_full(&mut mgr, 20);
+        assert_eq!(mgr.num_active_blocks(), 0);
+        assert_eq!(mgr.num_active_block_refs(), 0);
+        assert!(mgr.active_full.is_empty());
+        assert_eq!(mgr.block_manager.available_blocks(), CAPACITY);
     }
 
     #[test]
