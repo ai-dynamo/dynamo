@@ -198,9 +198,9 @@ The default model `Qwen/Qwen3-0.6B` requires ~2GB of GPU memory. Larger models n
 
 Start with a small model and scale up based on your hardware.
 
-**Python 3.11 with TensorRT-LLM**
+**TensorRT-LLM**
 
-TensorRT-LLM does not support Python 3.11. Use Python 3.10 or 3.12, or the
+TensorRT-LLM is not supported via a local PyPI install. Use the
 `tensorrtllm-runtime` container (Option A).
 
 **Container runs but GPU not detected**
