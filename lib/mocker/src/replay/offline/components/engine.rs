@@ -15,8 +15,6 @@ use crate::common::protocols::{DirectRequest, ForwardPassSnapshot, MockEngineArg
 use crate::replay::TraceCollector;
 use crate::scheduler::RouterEventVisibility;
 use crate::scheduler::{SchedulerCommand, SchedulerCommandEffects};
-#[cfg(feature = "kvbm-offload")]
-use dynamo_kv_router::protocols::RouterEvent;
 
 fn fpm_has_scheduled_work(snapshot: &ForwardPassSnapshot) -> bool {
     snapshot.num_prefill_requests > 0 || snapshot.num_decode_requests > 0
@@ -282,6 +280,15 @@ impl EngineComponent {
             };
 
             if executed.end_ms == now_ms {
+                // NOTE: Keep both lifecycle extremes in view when changing this gate.
+                // Tight-spin/livelock occurs when an effect-free, queued-only,
+                // zero-duration pass is repeatedly treated as progress at the same
+                // virtual timestamp. Dead-end/lost-wakeup occurs when replay declares
+                // quiescence while workers still own unfinished requests but have no
+                // concrete future event, deadline, or dependency notification. Stop
+                // same-time iteration when no observable state changed, but only after
+                // the owning subsystem can account for every unfinished request's
+                // future wakeup; an empty event queue alone is not quiescence.
                 let made_progress = !effects.admissions.is_empty()
                     || !effects.pass_start_kv_events.is_empty()
                     || payload.completed_requests > 0
