@@ -1571,8 +1571,7 @@ impl JailedStream {
                 let is_empty_choices = response
                     .data
                     .as_ref()
-                    .map(|d| d.inner.choices.is_empty())
-                    .unwrap_or(true);
+                    .is_some_and(|d| d.inner.choices.is_empty());
                 if is_empty_choices && !synthesized {
                     if let Some(template) = &template {
                         for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, has)| **has) {
@@ -1581,8 +1580,8 @@ impl JailedStream {
                             }
                             yield Self::synthesize_tool_calls_chunk(template, *index);
                         }
+                        synthesized = true;
                     }
-                    synthesized = true;
                 }
 
                 yield response;
@@ -1914,6 +1913,16 @@ mod tests {
             id: None,
             event: None,
             comment: None,
+            error: None,
+        }
+    }
+
+    fn heartbeat() -> Annotated<NvCreateChatCompletionStreamResponse> {
+        Annotated {
+            data: None,
+            id: None,
+            event: None,
+            comment: Some(vec!["heartbeat".to_string()]),
             error: None,
         }
     }
@@ -2303,6 +2312,7 @@ mod tests {
         let jail = JailedStream::builder().tool_call_parser("hermes").build();
 
         let chunks = vec![
+            heartbeat(),
             text_chunk(
                 "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"SF\"}}\n</tool_call>",
             ),
@@ -2313,6 +2323,13 @@ mod tests {
         let output_stream = jail.apply_with_finish_reason(input_stream);
 
         let responses: Vec<_> = output_stream.collect().await;
+        assert_eq!(
+            responses
+                .first()
+                .and_then(|response| response.comment.clone()),
+            Some(vec!["heartbeat".to_string()]),
+            "leading non-data annotations must pass through unchanged"
+        );
         let tool_calls = collect_tool_calls(&responses);
         assert!(
             !tool_calls.is_empty(),
