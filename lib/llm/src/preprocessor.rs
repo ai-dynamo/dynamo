@@ -176,8 +176,6 @@ struct ReasoningState {
     guided_json_bypass_decision: Option<bool>,
 }
 
-/// Per-image routing payload accumulated and consumed by
-/// `gather_multi_modal_data`.
 #[derive(Debug, Clone, Copy)]
 pub struct MmImageEntry {
     pub mm_hash: u64,
@@ -190,10 +188,6 @@ pub struct MmImageEntry {
 #[cfg(feature = "mm-routing")]
 const MAX_MM_ROUTING_TOKENS: usize = 1_048_576;
 
-/// Expand one chat placeholder per image into the routing-only token stream.
-///
-/// Callers validate the placeholder/image cardinality and a non-zero block
-/// size before entering this allocation-heavy request path.
 #[cfg(feature = "mm-routing")]
 fn build_mm_routing_info(
     token_ids: &[TokenIdType],
@@ -387,9 +381,6 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
-    /// Per-image token-count engine. `None` when the feature is disabled, the
-    /// model isn't covered by a Dynamo estimator, or
-    /// `preprocessor_config.json` is unreadable.
     #[cfg(feature = "mm-routing")]
     image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
     /// Image-placeholder token id emitted once per image by the chat template.
@@ -554,8 +545,6 @@ impl OpenAIPreprocessor {
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
-        // model_type comes from config.json (e.g. "qwen3_vl") and resolves
-        // custom-named fine-tunes whose directory omits the family substring.
         #[cfg(feature = "mm-routing")]
         let model_dir_for_routing: Option<std::path::PathBuf> = mdc_model_dir(&mdc);
         // TODO(mm-routing): fastokens lacks a special-token mutator, so it
@@ -594,8 +583,6 @@ impl OpenAIPreprocessor {
         let (image_token_counter, routing_image_token_id, bos_token_string) =
             match image_token_inputs {
                 Some((model_id, model_type, model_dir)) => {
-                    // Resolve counter + image-token id independently so the
-                    // summary log can name which piece is missing.
                     let (counter, counter_err): (
                         Option<lightseek_mm::LightseekMmCounter>,
                         Option<String>,
@@ -607,17 +594,11 @@ impl OpenAIPreprocessor {
                         Ok(c) => (Some(c), None),
                         Err(e) => (None, Some(e.to_string())),
                     };
-                    // One-shot config/tokenizer_config read for all
-                    // routing-side token info. Parsing lives next to the
-                    // family-specific resolution in the MM-routing module.
                     let routing_tokens = lightseek_mm::resolve_routing_tokens_with_tokenizer(
                         &model_id,
                         &model_dir,
                         tokenizer.as_ref(),
                     );
-                    // `chat_placeholder_token_id` already applies the family
-                    // config/vocabulary fallbacks, so it is the single ID used
-                    // for both the engagement gate and routing fill below.
                     let img_tok = routing_tokens.chat_placeholder_token_id;
                     let bos_tok_string = routing_tokens.bos_token_string;
 
@@ -668,23 +649,12 @@ impl OpenAIPreprocessor {
                 }
             };
 
-        // Force the dim-fetch HTTP client to build at startup for any
-        // MM-routable preprocessor, so TLS / env-var / reqwest-init
-        // failures fail the deployment instead of crashing the first
-        // MM request 20 minutes in. Text-only preprocessors skip the
-        // force (both MM-routing hooks resolved to `None`) — no point
-        // building a client they'll never use.
         #[cfg(feature = "mm-routing")]
         if image_token_counter.is_some() || routing_image_token_id.is_some() {
             std::sync::LazyLock::force(&DIM_FETCH_MEDIA_FETCHER);
             std::sync::LazyLock::force(&DIM_FETCH_HTTP_CLIENT);
         }
 
-        // Resolve the routing-side BOS prepend for models with
-        // `add_bos_token: true` (see `routing_prepend_bos` doc). Only kept
-        // when the configured `bos_token` has an exact vocabulary id. The
-        // BOS string was harvested above by `resolve_routing_tokens` from
-        // the same `tokenizer_config.json` pass.
         #[cfg(feature = "mm-routing")]
         let routing_prepend_bos = bos_token_string.and_then(|bos_text| {
             let id = tokenizer.token_to_id(&bos_text);
@@ -805,8 +775,6 @@ impl OpenAIPreprocessor {
         .await
         .with_context(|| "Failed to gather multimodal data")?;
 
-        // Install tokens on the builder after multimodal routing has borrowed
-        // the worker-bound view.
         builder.token_ids(token_ids);
 
         STAGE_DURATION_SECONDS
@@ -1134,40 +1102,19 @@ impl OpenAIPreprocessor {
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<&str>,
-        // Worker-bound token ids; used (mm-routing only) to construct routing
-        // tokens and `mm_hashes` as one atomic payload.
         token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<Vec<MmImageEntry>> {
-        // `token_ids` is only consumed by the mm-routing `mm_hashes` gate below.
         #[cfg(not(feature = "mm-routing"))]
         let _ = token_ids;
 
         let mut media_map: MultimodalDataMap = HashMap::new();
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
-        // Per-image (mm_hash, width, height) for the MM-routing path.
-        // Accumulated in message order so we don't walk messages twice. Empty
-        // for non-image and text-only requests; returned for direct callers
-        // after this method installs any viable routing payload.
         #[cfg(feature = "mm-routing")]
         let mut mm_image_entries: Vec<MmImageEntry> = Vec::new();
-        // Total `image_url` content parts in the request. Bumped at every
-        // image part regardless of which fetch path handles it. Used at
-        // `mm_hashes` forwarding time: if `mm_image_entries.len()` is
-        // smaller, we omit `mm_hashes` for the whole request rather than
-        // ship a partial / misaligned UUID list to vLLM.
-        //
-        // The mismatch is only reachable on the URL-passthrough path
-        // (no media_loader): each `fetch_image_dims_uncached` failure logs
-        // a warn and skips its `mm_image_entries.push`, but doesn't abort
-        // the request. The decoded path (`has_media_loader`) propagates
-        // any dim-fetch failure via `?`, so the request errors out before
-        // mm_hashes forwarding is even considered.
+        // Omit all MM hashes if any image lacks dimensions; positions must align.
         #[cfg(feature = "mm-routing")]
         let mut total_image_count: usize = 0;
-        // For the URL-passthrough case (media_loader is None) we collect image
-        // URLs here and resolve dims via header-only HTTP after the loop so we
-        // can issue all fetches in parallel.
         #[cfg(feature = "mm-routing")]
         let mut url_passthrough_images: Vec<(u64, String)> = Vec::new();
 
@@ -1471,7 +1418,6 @@ impl OpenAIPreprocessor {
         }
         let normalized_token_ids = token_ids;
 
-        // Compute per-image N with the selected estimator, then expand.
         let n_tokens: Vec<usize> = mm_image_entries
             .iter()
             .map(|e| counter.count_tokens(e.width, e.height))
@@ -1509,10 +1455,6 @@ impl OpenAIPreprocessor {
             }
         };
 
-        // pad_value already encodes mm_hash in the routing tokens the router
-        // hashes, so block_mm_infos is always empty (the canonical scheme for
-        // both backends). The mm identity rides in the token stream, not a
-        // side channel.
         tracing::debug!(
             target: "mm_routing",
             n_images = mm_image_entries.len(),

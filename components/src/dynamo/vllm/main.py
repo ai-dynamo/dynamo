@@ -343,17 +343,9 @@ def setup_metrics_collection(
 
 
 def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional[int]:
-    """Routing-side image-placeholder token id for the served model.
+    """Use the Rust frontend's routing placeholder resolver.
 
-    Resolved via the SAME Rust logic the frontend uses
-    (`dynamo._core.resolve_routing_image_token_id` -> the Dynamo-owned Rust
-    resolver), returning `chat_placeholder_token_id`, which the frontend finds
-    in the unexpanded prompt. Returns None for Llama 4 because vLLM expands it
-    into a structured sequence that the Rust routing path cannot represent.
-
-    Returns None when the bindings lack the `mm-routing` feature or the model
-    has no supported Dynamo estimator — in both cases the frontend also skips
-    MM routing, so a worker-side no-op is consistent (events pass through).
+    Returns None for unsupported models and Llama 4's structured sequence.
     """
     try:
         from dynamo._core import resolve_routing_image_token_id
@@ -432,11 +424,6 @@ def setup_kv_event_publisher(
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
     kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
-    # The image-placeholder token id the frontend substitutes pad_value over.
-    # Passed to the KV publisher so the router-side normalizer rewrites those
-    # runs in vLLM BlockStored events to the same canonical pad_value scheme.
-    # None (no mm-routing, unsupported model, or text-only) leaves events
-    # unchanged, consistent with the frontend also skipping MM routing.
     image_token_id = _resolve_image_token_id(config, vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):

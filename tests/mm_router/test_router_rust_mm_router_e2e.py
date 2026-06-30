@@ -17,11 +17,7 @@ These tests assert that:
   3. Different images on the same prompt produce strictly less overlap
      than identical-image repeats.
 
-The fallback path (model unsupported by Dynamo's estimators, unresolved image
-token, or rejected expansion) is covered by the Rust preprocessor unit tests.
-Reproducing it e2e would require a model whose loading is heavy and whose worker
-support is fragile (for example, Phi-4-multimodal-instruct with
-`trust_remote_code`), so that path stays at the unit-test boundary.
+Fallback behavior is covered by the Rust preprocessor unit tests.
 """
 
 from __future__ import annotations

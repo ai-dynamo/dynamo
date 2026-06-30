@@ -4,22 +4,7 @@
 #
 # MM-aware KV routing for vLLM workers.
 #
-# Architecture:
-#   HTTP client
-#     -> Rust frontend
-#          - resolves the image-placeholder token id from model config or the
-#            Dynamo tokenizer (Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3.5,
-#            Qwen3.6, LLaVA-1.5, LLaVA-NeXT, Kimi-K2.5, Kimi-K2.6)
-#            Llama-4 falls back to text-prefix routing because its vLLM prompt
-#            uses a structured image-token sequence
-#          - Dynamo-owned per-image token-count math (header-only fetch for W,H)
-#          - expands placeholder -> N copies in routing_token_ids
-#          - hashes URL (xxh3) -> u64 -> 16-char hex -> extra_args["mm_hashes"]
-#          - encodes mm_hash in pad-value tokens and feeds the KV router
-#     -> N x vLLM worker
-#          - publishes KV events via zmq (one port per worker)
-#          - worker right-pads mm_uuid to 64 chars -> events match
-#            the router's routing-side block hashes -> matching cache keys
+# See docs/features/multimodal/multimodal-kv-routing.md for architecture and support.
 #
 # Build prerequisite (run once inside the dynamo dev container):
 #   cd /workspace/lib/bindings/python && maturin develop --release --features mm-routing

@@ -18,7 +18,6 @@ use dynamo_tokenizers::{HuggingFaceTokenizer, traits::Tokenizer};
 use self::estimator::{ImageTokenEstimator, ModelFamily};
 use crate::protocols::TokenIdType;
 
-/// Maps `(width, height) -> num_image_tokens` for one model.
 pub struct LightseekMmCounter {
     estimator: ImageTokenEstimator,
     model_id: String,
@@ -108,7 +107,6 @@ pub fn resolve_routing_tokens(model_id: &str, model_dir: &Path) -> RoutingTokens
     resolve_routing_tokens_inner(model_id, model_dir, tokenizer.as_ref().map(as_tokenizer))
 }
 
-/// Resolve routing tokens using the tokenizer already loaded by the frontend.
 pub(crate) fn resolve_routing_tokens_with_tokenizer(
     model_id: &str,
     model_dir: &Path,

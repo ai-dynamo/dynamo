@@ -29,7 +29,6 @@ fn main() -> anyhow::Result<()> {
         .next()
         .unwrap_or_else(|| "Qwen/Qwen2.5-VL-3B-Instruct".to_string());
 
-    // model_type from config.json takes priority over model-ID fallback.
     let cfg_path = model_dir.join("config.json");
     let cfg_json: serde_json::Value = serde_json::from_reader(
         std::fs::File::open(&cfg_path)

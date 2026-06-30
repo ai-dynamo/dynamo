@@ -299,7 +299,7 @@ def http_image_server_with_alias() -> Generator[dict[str, str], None, None]:
     primary_bytes = _make_png_bytes((180, 30, 90))
     image_map: dict[str, bytes] = {
         "/image_A.png": primary_bytes,
-        "/image_A_alias.png": primary_bytes,  # identical bytes, different URL
+        "/image_A_alias.png": primary_bytes,
     }
     server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
     thread = threading.Thread(target=server.serve_forever, daemon=True)

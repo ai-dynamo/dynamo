@@ -429,8 +429,6 @@ impl Llama4Estimator {
         total_tiles * (self.tile_size / Self::PATCH_SIZE).pow(2)
     }
 
-    /// Allocation-free equivalent of the pinned processor's supported-canvas
-    /// search. Only the tile product is needed by routing.
     fn best_fit_tile_count(&self, original_h: u32, original_w: u32) -> usize {
         let mut has_upscaling = false;
         let mut selected_scale = f64::NEG_INFINITY;
