@@ -500,6 +500,18 @@ class DynamoVllmConfig(ConfigBase):
         """
         if not self.custom_encoder_class:
             return
+        if (
+            self.multimodal_worker
+            or self.multimodal_encode_worker
+            or self.multimodal_decode_worker
+        ):
+            raise ValueError(
+                "--custom-encoder-class is incompatible with the legacy multimodal "
+                "role flags (--multimodal-worker / --multimodal-encode-worker / "
+                "--multimodal-decode-worker): the custom encoder is its own "
+                "aggregated multimodal path and bypasses vLLM's built-in "
+                "multimodal processing."
+            )
         if not self.enable_multimodal:
             raise ValueError(
                 "--custom-encoder-class requires --enable-multimodal "

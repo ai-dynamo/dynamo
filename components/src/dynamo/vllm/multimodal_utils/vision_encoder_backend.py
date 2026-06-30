@@ -7,7 +7,8 @@
 It is a pure policy + compute backend: no threads, no futures, no event loop.
 Dynamo owns all the *driving* — the dedicated actor thread, cross-request
 coalescing, the embeds splice, and the lifecycle — via ``ThreadedMicroBatcher``
-(L1, generic) and ``AsyncVisionEncoder`` (L3, glue). This module is L2.
+(the generic cross-request batcher) and ``AsyncVisionEncoder`` (the async
+request-API glue). This module defines only the contract those drivers call.
 
 The encoder runs in the **same process** as the aggregated vLLM worker (no
 separate encode worker, no NIXL transfer): it turns image inputs into the
@@ -18,9 +19,9 @@ mixed ``EmbedsPrompt`` at the placeholder positions (see
 Division of labour (author vs. Dynamo):
 
 - ``build(model_id)`` — **actor thread, once.** Load weights / tokenizer; warm up
-  to peak; if ``buckets`` is set (graph milestone), capture one CUDA graph per
-  rung here so it is bound to the thread that later replays it in
-  ``forward_batch``. Pick the device yourself (the worker pins it via
+  to peak; if ``buckets`` is set (once CUDA-graph batching is supported), capture
+  one CUDA graph per rung here so it is bound to the thread that later replays it
+  in ``forward_batch``. Pick the device yourself (the worker pins it via
   ``CUDA_VISIBLE_DEVICES``, so ``"cuda"`` / the current device is correct).
 - ``preprocess(raw) -> Preprocessed{item, cost}`` — **off the actor thread,
   concurrent.** Deterministic, thread-safe, CUDA-free (fetch / resize / patchify
@@ -32,8 +33,8 @@ Division of labour (author vs. Dynamo):
   the budget). Fence (stream event + sync) and **copy outputs to CPU** before
   returning, so results are safe to consume from another thread and splice
   directly. Returns one ``(n_visual_tokens, lm_hidden_dim)`` **CPU** tensor per
-  item, in input order. ``target_bucket`` is reserved for the graph milestone (the
-  ladder rung to pad to); it is ``None`` until then.
+  item, in input order. ``target_bucket`` is reserved for CUDA-graph batching,
+  once supported (the ladder rung to pad to); it is ``None`` until then.
 - ``close()`` — actor thread, on teardown. Release any thread-affine resources.
 
 Attributes read **once at setup** (never per-request):
@@ -44,8 +45,8 @@ Attributes read **once at setup** (never per-request):
 - ``max_batch_cost`` — the scalar dispatch ceiling the batcher packs up to; a
   *chosen* budget (a token budget when ``cost`` is a token count). ``None`` (the
   default) ⇒ **pass-through**: no cap (the author owns sizing).
-- ``buckets`` — sorted graph ladder, forward-compatible (unused until the graph
-  milestone). ``None``/empty ⇒ eager.
+- ``buckets`` — sorted graph ladder, forward-compatible (unused until CUDA-graph
+  batching is supported). ``None``/empty ⇒ eager.
 
 Batching is **one-dimensional**: Dynamo packs by scalar ``cost`` up to
 ``max_batch_cost`` and never inspects item shape — the author owns any
@@ -83,7 +84,7 @@ class Preprocessed(Generic[ItemT]):
 
 
 class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
-    """Author-written, in-process vision encoder contract (L2).
+    """Author-written, in-process vision encoder contract.
 
     A pure policy + compute backend — no threads, no futures. Dynamo drives it
     on a dedicated actor thread (``ThreadedMicroBatcher``) and exposes the async
@@ -105,7 +106,7 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
     max_batch_cost: Optional[int] = None
 
     #: Sorted graph ladder (the captured rungs), **forward-compatible** — unused
-    #: until the graph milestone. ``None``/empty ⇒ eager.
+    #: until CUDA-graph batching is supported. ``None``/empty ⇒ eager.
     buckets: Optional[Sequence[int]] = None
 
     # ---- subclass contract -------------------------------------------------
@@ -139,8 +140,8 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
         Fence (stream event + sync) and **copy outputs to CPU** before returning,
         so results are safe to consume from another thread and splice directly.
         Return one ``(n_visual_tokens, lm_hidden_dim)`` **CPU** tensor per item, in
-        input order. ``target_bucket`` is reserved for the graph milestone (the
-        ladder rung to pad to) and is ``None`` until then.
+        input order. ``target_bucket`` is reserved for CUDA-graph batching, once
+        supported (the ladder rung to pad to), and is ``None`` until then.
         """
         ...
 
