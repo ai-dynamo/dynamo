@@ -21,8 +21,7 @@ Division of labour (author vs. Dynamo):
 - ``build(model_id)`` — **actor thread, once.** Load weights / tokenizer; warm up
   to peak; if ``buckets`` is set (once CUDA-graph batching is supported), capture
   one CUDA graph per rung here so it is bound to the thread that later replays it
-  in ``forward_batch``. Pick the device yourself (the worker pins it via
-  ``CUDA_VISIBLE_DEVICES``, so ``"cuda"`` / the current device is correct).
+  in ``forward_batch``. Pick the device yourself (``"cuda"`` / the current device).
 - ``preprocess(raw) -> Preprocessed{item, cost}`` — **off the actor thread,
   concurrent.** Deterministic, thread-safe, CUDA-free (fetch / resize / patchify
   on CPU/pinned memory). ``cost`` is a **scalar** — how much the item adds toward
@@ -134,8 +133,8 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
         """Load weights / tokenizer, warm up, capture graphs (actor thread, once).
 
         Any CUDA graph captured here is bound to the thread that later replays it.
-        Pick the device yourself — the worker pins it via ``CUDA_VISIBLE_DEVICES``,
-        so ``"cuda"`` / the current device is correct. All CUDA init happens here.
+        Pick the device yourself (``"cuda"`` / the current device). All CUDA init
+        happens here.
         """
         ...
 
