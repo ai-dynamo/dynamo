@@ -5,12 +5,12 @@ use std::collections::{BinaryHeap, HashMap, VecDeque, hash_map::Entry};
 
 use super::PolicyQueueEntry;
 
-pub(super) struct SessionRoundRobinQueue<T> {
+pub(super) struct SessionQueue<T> {
     sessions: HashMap<Option<String>, BinaryHeap<PolicyQueueEntry<T>>>,
     order: VecDeque<Option<String>>,
 }
 
-impl<T> SessionRoundRobinQueue<T> {
+impl<T> SessionQueue<T> {
     pub(super) fn new() -> Self {
         Self {
             sessions: HashMap::new(),

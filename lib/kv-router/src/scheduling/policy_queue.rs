@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
 
-mod session_round_robin;
-use session_round_robin::SessionRoundRobinQueue;
+mod session;
+use session::SessionQueue;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueSnapshot {
@@ -134,15 +134,13 @@ impl<T> PartialOrd for PolicyQueueEntry<T> {
 
 enum PendingQueue<T> {
     Request(BinaryHeap<PolicyQueueEntry<T>>),
-    SessionRoundRobin(SessionRoundRobinQueue<T>),
+    Session(SessionQueue<T>),
 }
 
 impl<T> PendingQueue<T> {
     fn new(policy: RouterQueuePolicy) -> Self {
         match policy {
-            RouterQueuePolicy::AgentRoundRobin => {
-                Self::SessionRoundRobin(SessionRoundRobinQueue::new())
-            }
+            RouterQueuePolicy::AgentRoundRobin => Self::Session(SessionQueue::new()),
             _ => Self::Request(BinaryHeap::new()),
         }
     }
@@ -150,49 +148,49 @@ impl<T> PendingQueue<T> {
     fn is_empty(&self) -> bool {
         match self {
             Self::Request(pending) => pending.is_empty(),
-            Self::SessionRoundRobin(pending) => pending.is_empty(),
+            Self::Session(pending) => pending.is_empty(),
         }
     }
 
     fn peek(&self) -> Option<&PolicyQueueEntry<T>> {
         match self {
             Self::Request(pending) => pending.peek(),
-            Self::SessionRoundRobin(pending) => pending.peek(),
+            Self::Session(pending) => pending.peek(),
         }
     }
 
     fn push(&mut self, session_id: Option<String>, entry: PolicyQueueEntry<T>) {
         match self {
             Self::Request(pending) => pending.push(entry),
-            Self::SessionRoundRobin(pending) => pending.push(session_id, entry),
+            Self::Session(pending) => pending.push(session_id, entry),
         }
     }
 
     fn pop(&mut self) -> Option<PolicyQueueEntry<T>> {
         match self {
             Self::Request(pending) => pending.pop(),
-            Self::SessionRoundRobin(pending) => pending.pop(),
+            Self::Session(pending) => pending.pop(),
         }
     }
 
     fn retain(&mut self, mut keep: impl FnMut(&PolicyQueueEntry<T>) -> bool) {
         match self {
             Self::Request(pending) => pending.retain(keep),
-            Self::SessionRoundRobin(pending) => pending.retain(&mut keep),
+            Self::Session(pending) => pending.retain(&mut keep),
         }
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = &PolicyQueueEntry<T>> + '_> {
         match self {
             Self::Request(pending) => Box::new(pending.iter()),
-            Self::SessionRoundRobin(pending) => Box::new(pending.iter()),
+            Self::Session(pending) => Box::new(pending.iter()),
         }
     }
 
     fn into_entries(self) -> Vec<PolicyQueueEntry<T>> {
         match self {
             Self::Request(pending) => pending.into_iter().collect(),
-            Self::SessionRoundRobin(pending) => pending.into_entries().collect(),
+            Self::Session(pending) => pending.into_entries().collect(),
         }
     }
 }
