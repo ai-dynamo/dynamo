@@ -22,7 +22,6 @@ use dynamo_llm::lora::load_estimator::LoadEstimator;
 use dynamo_llm::lora::routing::AllocationAlgorithmType;
 use dynamo_llm::lora::routing::table::LoraRoutingTable;
 use dynamo_llm::lora::state_tracker::LoraStateTracker;
-use dynamo_llm::model_card::LoraInfo;
 
 use rand::SeedableRng;
 use rand::prelude::*;
@@ -255,7 +254,11 @@ fn sample_poisson(rng: &mut StdRng, lambda: f64) -> usize {
     }
     if lambda > 30.0 {
         // Normal approximation: Poisson(λ) ≈ N(λ, λ)
-        let normal = lambda + lambda.sqrt() * rng.random_range(-3.0f64..3.0f64);
+        let uniform_1 = rng.random::<f64>().max(f64::MIN_POSITIVE);
+        let uniform_2 = rng.random::<f64>();
+        let standard_normal =
+            (-2.0 * uniform_1.ln()).sqrt() * (std::f64::consts::TAU * uniform_2).cos();
+        let normal = lambda + lambda.sqrt() * standard_normal;
         return normal.round().max(0.0) as usize;
     }
     // Knuth's algorithm
@@ -707,10 +710,7 @@ impl RandomAllocator {
             .collect();
 
         if available.is_empty() {
-            // Fall back to any workers if all are full
-            let mut shuffled = workers.to_vec();
-            shuffled.shuffle(&mut self.rng);
-            return shuffled.into_iter().take(replica_factor).collect();
+            return Vec::new();
         }
 
         let mut shuffled = available;
@@ -1172,6 +1172,38 @@ fn print_per_tick_churn(
 // ============================================================================
 
 #[test]
+fn test_sample_poisson_high_lambda_has_poisson_variance() {
+    let mut rng = StdRng::seed_from_u64(1234);
+    let samples: Vec<f64> = (0..10_000)
+        .map(|_| sample_poisson(&mut rng, 100.0) as f64)
+        .collect();
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    let variance = samples
+        .iter()
+        .map(|sample| (sample - mean).powi(2))
+        .sum::<f64>()
+        / samples.len() as f64;
+
+    assert!((mean - 100.0).abs() < 2.0, "mean was {mean}");
+    assert!((50.0..150.0).contains(&variance), "variance was {variance}");
+}
+
+#[test]
+fn test_random_allocator_does_not_overbook_full_workers() {
+    let workers = [WorkerWithDpRank::new(0, 0), WorkerWithDpRank::new(1, 0)];
+    let worker_slot_usage = workers
+        .iter()
+        .copied()
+        .map(|worker| (worker, (2, 2)))
+        .collect();
+
+    let replicas =
+        RandomAllocator::new(1234).compute_replica_set("lora-0", &workers, 1, &worker_slot_usage);
+
+    assert!(replicas.is_empty());
+}
+
+#[test]
 fn test_simulation_small_cluster() {
     // Small cluster: 4 backends, 2 slots each, 6 LoRAs, 3 concurrent
     let config = SimConfig {
@@ -1308,7 +1340,18 @@ fn test_simulation_steady_state_zero_churn() {
         ..Default::default()
     };
 
-    let schedules = generate_load_schedules(&config);
+    let active_ticks = config.ramp_ticks + config.steady_ticks + config.ramp_down_ticks;
+    let schedules: Vec<LoraLoadSchedule> = (0..config.total_loras)
+        .map(|index| LoraLoadSchedule {
+            lora_name: format!("lora-{index:03}"),
+            active_window: (0, active_ticks),
+            peak_load: config.max_load_per_lora,
+            ramp_up: config.ramp_ticks,
+            steady: config.steady_ticks,
+            ramp_down: config.ramp_down_ticks,
+            per_tick_loads: None,
+        })
+        .collect();
     print_simulation_header(&config);
 
     let hrw_metrics = run_hrw_simulation(&config, &schedules);
@@ -1413,13 +1456,7 @@ fn test_simulation_worker_addition() {
 
         for i in 0..num_workers {
             let w = WorkerWithDpRank::new(i as u64, 0);
-            state_tracker.handle_mdc_addition(
-                w,
-                &LoraInfo {
-                    name: format!("lora-{}", i % num_loras),
-                    max_gpu_lora_count: Some(slots_per_worker as u32),
-                },
-            );
+            state_tracker.set_worker_capacity(w, slots_per_worker as u32);
         }
         for i in 0..num_loras {
             let name = format!("lora-{}", i);
@@ -1437,12 +1474,9 @@ fn test_simulation_worker_addition() {
         }
 
         // Add a new worker
-        state_tracker.handle_mdc_addition(
+        state_tracker.set_worker_capacity(
             WorkerWithDpRank::new(num_workers as u64, 0),
-            &LoraInfo {
-                name: "lora-0".to_string(),
-                max_gpu_lora_count: Some(slots_per_worker as u32),
-            },
+            slots_per_worker as u32,
         );
         controller.recompute_now();
 
@@ -1542,13 +1576,7 @@ fn test_simulation_worker_addition() {
 
         for i in 0..num_workers {
             let w = WorkerWithDpRank::new(i as u64, 0);
-            state_tracker.handle_mdc_addition(
-                w,
-                &LoraInfo {
-                    name: format!("lora-{}", i % num_loras),
-                    max_gpu_lora_count: Some(slots_per_worker as u32),
-                },
-            );
+            state_tracker.set_worker_capacity(w, slots_per_worker as u32);
         }
         for i in 0..num_loras {
             let name = format!("lora-{}", i);
@@ -1566,12 +1594,9 @@ fn test_simulation_worker_addition() {
         }
 
         // Add a new worker
-        state_tracker.handle_mdc_addition(
+        state_tracker.set_worker_capacity(
             WorkerWithDpRank::new(num_workers as u64, 0),
-            &LoraInfo {
-                name: "lora-0".to_string(),
-                max_gpu_lora_count: Some(slots_per_worker as u32),
-            },
+            slots_per_worker as u32,
         );
         controller.recompute_now();
 
@@ -1662,13 +1687,7 @@ fn test_simulation_worker_removal() {
 
         for i in 0..num_workers {
             let w = WorkerWithDpRank::new(i as u64, 0);
-            state_tracker.handle_mdc_addition(
-                w,
-                &LoraInfo {
-                    name: format!("lora-{}", i % num_loras),
-                    max_gpu_lora_count: Some(slots_per_worker as u32),
-                },
-            );
+            state_tracker.set_worker_capacity(w, slots_per_worker as u32);
         }
         for i in 0..num_loras {
             let name = format!("lora-{}", i);
@@ -1797,13 +1816,7 @@ fn test_simulation_worker_removal() {
 
         for i in 0..num_workers {
             let w = WorkerWithDpRank::new(i as u64, 0);
-            state_tracker.handle_mdc_addition(
-                w,
-                &LoraInfo {
-                    name: format!("lora-{}", i % num_loras),
-                    max_gpu_lora_count: Some(slots_per_worker as u32),
-                },
-            );
+            state_tracker.set_worker_capacity(w, slots_per_worker as u32);
         }
         for i in 0..num_loras {
             let name = format!("lora-{}", i);

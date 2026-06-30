@@ -20,7 +20,7 @@ Usage:
     python lib/llm/tests/lora_simulation/plot_lora_churn.py --save
 
     # Plot a single scenario:
-    python lib/llm/tests/lora_simulation/plot_lora_churn.py --scenario c20_low --save
+    python lib/llm/tests/lora_simulation/plot_lora_churn.py --scenario hot_lora_poisson --save
 """
 
 import argparse
@@ -34,6 +34,8 @@ from pathlib import Path
 # import-time crash.
 try:
     import matplotlib
+
+    matplotlib.use("Agg")
     import matplotlib.colors as mcolors
     import matplotlib.pyplot as plt
     import matplotlib.ticker as ticker
@@ -988,18 +990,27 @@ def plot_efficiency_frontier(csv_dir: Path, save: bool, out_dir: Path):
 
     for name in SCENARIOS:
         summary_file = csv_dir / f"{name}_summary.csv"
-        load_file = csv_dir / f"{name}_load.csv"
+        replicas_file = csv_dir / f"{name}_replicas.csv"
         meta_file = csv_dir / f"{name}_meta.csv"
-        if not summary_file.exists() or not load_file.exists():
+        if not summary_file.exists() or not replicas_file.exists():
             continue
 
         meta = read_meta(meta_file) if meta_file.exists() else {}
         total_slots = int(meta.get("total_slots", 32))
 
-        # Compute average active LoRAs as proxy for slot utilization
-        load_data = read_csv(load_file)
-        avg_active = np.mean([int(r["active_loras"]) for r in load_data])
-        util_pct = 100.0 * avg_active / total_slots
+        replica_data = read_csv(replicas_file)
+
+        def average_replica_utilization(algo_prefix: str) -> float:
+            occupied_slots = []
+            for row in replica_data:
+                occupied_slots.append(
+                    sum(
+                        int(count) * int(column.rsplit("_r", 1)[1])
+                        for column, count in row.items()
+                        if column.startswith(f"{algo_prefix}_r")
+                    )
+                )
+            return 100.0 * np.mean(occupied_slots) / total_slots
 
         summary = {}
         for row in read_csv(summary_file):
@@ -1009,7 +1020,9 @@ def plot_efficiency_frontier(csv_dir: Path, save: bool, out_dir: Path):
 
         for algo in ["HRW", "Random", "MCF"]:
             churn = int(total_churn.get(algo.lower(), 0))
-            points[algo].append((util_pct, churn, label))
+            points[algo].append(
+                (average_replica_utilization(algo.lower()), churn, label)
+            )
 
     if not any(points.values()):
         return
@@ -1069,16 +1082,11 @@ def plot_efficiency_frontier(csv_dir: Path, save: bool, out_dir: Path):
         plt.show()
 
 
-def plot_placement_stability(csv_dir: Path, save: bool, out_dir: Path):
-    """Heatmap of per-LoRA load stability for each algorithm.
+def plot_load_and_churn_analysis(csv_dir: Path, save: bool, out_dir: Path):
+    """Plot per-LoRA load stability alongside allocator churn.
 
-    For each scenario that has per-LoRA load data, computes:
-      stability(lora, algo) = fraction of ticks where the LoRA's load
-      was unchanged from the previous tick (i.e. no rebalancing trigger).
-
-    Plots a 3-column heatmap (HRW / Random / MCF) with LoRAs on the y-axis,
-    ticks on the x-axis, and color = load value. Stable allocations show
-    smooth color bands; unstable ones flicker.
+    This visualizes common input load stability, not allocator placement
+    stability, which is not included in the exported CSVs.
     """
 
     # Pick the most interesting scenarios for this viz
@@ -1152,7 +1160,7 @@ def plot_placement_stability(csv_dir: Path, save: bool, out_dir: Path):
     )
     title = build_title(chosen, meta)
     fig.suptitle(
-        f"Placement Stability Analysis — {title}",
+        f"Load Stability and Churn Analysis — {title}",
         fontsize=12,
         fontweight="bold",
         y=0.98,
@@ -1298,7 +1306,7 @@ def main():
         "--scenario",
         type=str,
         default=None,
-        help="Plot a single scenario (c20_low, c50_medium, c90_high, c_sine_wave, ...)",
+        help="Plot a single scenario (hot_lora_poisson, daily, spike, mmpp)",
     )
     args = parser.parse_args()
 
@@ -1319,9 +1327,6 @@ def main():
         print("ERROR: matplotlib is required. Install with:")
         print("  pip install matplotlib")
         sys.exit(1)
-    if args.save:
-        matplotlib.use("Agg")  # Non-interactive backend for saving
-
     if args.save:
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1346,8 +1351,8 @@ def main():
         print("Plotting efficiency frontier...")
         plot_efficiency_frontier(csv_dir, args.save, out_dir)
 
-        print("Plotting placement stability...")
-        plot_placement_stability(csv_dir, args.save, out_dir)
+        print("Plotting load stability and churn analysis...")
+        plot_load_and_churn_analysis(csv_dir, args.save, out_dir)
 
     if args.save:
         print(f"\nAll plots saved to: {out_dir}")
