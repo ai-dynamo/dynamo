@@ -4,13 +4,13 @@
 """Unit tests for dynamo.vllm.multimodal_utils.threaded_micro_batcher.
 
 Pin the execution contract: on_start + every fn call (+ on_stop) run on one
-dedicated thread (so CUDA-graph capture/replay share a thread), concurrent submits
-coalesce into cost-bounded batches up to max_batch_cost (or pass-through when
-None), eager-drain pulls all queued work when free, errors reach every awaiting
-caller, and the shutdown lifecycle behaves.
+dedicated thread (so CUDA-graph capture/replay share a thread), concurrent
+submits coalesce into cost-bounded same-bucket batches, the graph ladder rounds a
+batch's cost up to a rung (target_bucket), eager-drain pulls all queued work when
+free, errors reach every awaiting caller, and the shutdown lifecycle behaves.
 
-``fn`` is ``fn(items)``; ``cost`` is a precomputed scalar that rides on
-``submit(items, costs)`` (one-dimensional packing — no bucket_key, no ladder).
+``fn`` is ``fn(items, target_bucket)``; ``cost`` is a precomputed scalar that rides
+on ``submit(items, costs)`` (one-dimensional packing — no bucket_key).
 """
 
 import asyncio
@@ -32,16 +32,17 @@ pytestmark = [
 ]
 
 
-def _echo(items):
+def _echo(items, target_bucket=None):
     return list(items)
 
 
 class _Recorder:
-    """fn that records the threads it ran on and the batches it received."""
+    """fn that records the threads it ran on and the batches / target_buckets it saw."""
 
     def __init__(self):
         self.threads: list[int] = []
         self.batches: list[list] = []
+        self.target_buckets: list = []
         self.start_thread: int | None = None
         self.stop_thread: int | None = None
 
@@ -51,9 +52,10 @@ class _Recorder:
     def on_stop(self):
         self.stop_thread = threading.get_ident()
 
-    def fn(self, items):
+    def fn(self, items, target_bucket=None):
         self.threads.append(threading.get_ident())
         self.batches.append(list(items))
+        self.target_buckets.append(target_bucket)
         return [("r", x) for x in items]
 
 
@@ -117,7 +119,7 @@ async def test_eager_drain_pulls_all_queued_when_free():
     release = threading.Event()
     batches: list[list] = []
 
-    def fn(items):
+    def fn(items, target_bucket=None):
         batches.append(list(items))
         if "block" in items:
             entered.set()
@@ -155,9 +157,48 @@ async def test_cost_budget_caps_each_batch():
         b.shutdown()
 
 
+async def test_target_bucket_rounds_packed_cost_up_to_nearest_rung():
+    """Graph mode: the batcher rounds a batch's sum(cost) up to the nearest rung
+    and passes it as target_bucket."""
+    rec = _Recorder()
+    b = ThreadedMicroBatcher(
+        rec.fn, max_batch_cost=8, buckets=[2, 4, 8], max_wait_ms=200.0
+    )
+    b.start()
+    try:
+        # One coalesced batch of cost 3 → rounds up to rung 4.
+        await b.submit(["x", "y", "z"], costs=[1, 1, 1])
+        assert rec.batches == [["x", "y", "z"]]
+        assert rec.target_buckets == [4]
+    finally:
+        b.shutdown()
+
+
+async def test_eager_mode_passes_none_target_bucket():
+    rec = _Recorder()
+    b = ThreadedMicroBatcher(rec.fn)  # buckets=None ⇒ eager
+    b.start()
+    try:
+        await b.submit(["a"])
+        assert rec.target_buckets == [None]
+    finally:
+        b.shutdown()
+
+
+def test_buckets_below_max_batch_cost_rejected():
+    with pytest.raises(ValueError, match="ladder must cover"):
+        ThreadedMicroBatcher(_echo, max_batch_cost=8, buckets=[2, 4])
+
+
+def test_buckets_derive_max_batch_cost_when_none():
+    """Graph mode with no explicit budget derives the ceiling from the ladder."""
+    b = ThreadedMicroBatcher(_echo, buckets=[2, 4, 8])  # max_batch_cost=None
+    assert b._max_batch_cost == 8
+
+
 async def test_max_batch_cost_none_is_passthrough():
     """Default (max_batch_cost=None): no cap and no per-item ceiling — the whole
-    drained set runs as ONE fn call regardless of summed cost."""
+    drained same-bucket group runs as ONE fn call regardless of summed cost."""
     rec = _Recorder()
     b = ThreadedMicroBatcher(rec.fn, max_wait_ms=200.0)  # max_batch_cost=None
     b.start()
@@ -166,12 +207,13 @@ async def test_max_batch_cost_none_is_passthrough():
         out = await b.submit([1, 2, 3, 4], costs=[1000, 1000, 1000, 1000])
         assert len(out) == 4
         assert rec.batches == [[1, 2, 3, 4]]  # one un-split batch
+        assert rec.target_buckets == [None]  # eager (no ladder)
     finally:
         b.shutdown()
 
 
 async def test_error_reaches_every_caller():
-    def boom(items):
+    def boom(items, target_bucket=None):
         raise ValueError("boom")
 
     b = ThreadedMicroBatcher(boom, max_wait_ms=50.0)
@@ -186,7 +228,7 @@ async def test_error_reaches_every_caller():
 
 
 async def test_wrong_result_count_raises():
-    b = ThreadedMicroBatcher(lambda items: [], max_wait_ms=10.0)
+    b = ThreadedMicroBatcher(lambda items, target_bucket=None: [], max_wait_ms=10.0)
     b.start()
     try:
         with pytest.raises(RuntimeError, match="one result per item"):
@@ -233,7 +275,7 @@ async def test_shutdown_fails_queued_items():
     entered = threading.Event()
     release = threading.Event()
 
-    def blocking(items):
+    def blocking(items, target_bucket=None):
         entered.set()
         release.wait(timeout=5.0)
         return [("r", x) for x in items]
@@ -275,7 +317,7 @@ async def test_cancelled_submit_is_retired_and_releases_admission():
     entered = threading.Event()
     release = threading.Event()
 
-    def blocking(items):
+    def blocking(items, target_bucket=None):
         entered.set()
         release.wait(timeout=5.0)
         return [("r", x) for x in items]
@@ -309,7 +351,7 @@ async def test_max_outstanding_cost_rejects_when_full():
     entered = threading.Event()
     release = threading.Event()
 
-    def blocking(items):
+    def blocking(items, target_bucket=None):
         entered.set()
         release.wait(timeout=5.0)
         return [("r", x) for x in items]
@@ -379,7 +421,7 @@ async def test_partial_batch_failure_fails_request_once_and_releases():
     later sibling item is tombstoned — it never reaches fn."""
     seen: list = []
 
-    def fn(items):
+    def fn(items, target_bucket=None):
         seen.extend(items)
         if "bad" in items:
             raise ValueError("boom")
@@ -407,7 +449,7 @@ async def test_no_fn_after_shutdown_for_collected_items():
     release = threading.Event()
     seen: list = []
 
-    def fn(items):
+    def fn(items, target_bucket=None):
         seen.extend(items)
         if "a" in items:
             entered.set()
