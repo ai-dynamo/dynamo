@@ -1078,6 +1078,10 @@ impl EndpointPicker for Router {
             fallbacks: vec![],
             headers,
             token_ids: Some(tokens),
+            // The Dynamo Router keeps its own request-id-keyed bookkeeping (it also
+            // runs embedded in the frontend), so it books nothing here; the server
+            // falls back to the request id for its lifecycle callbacks.
+            reservation_id: None,
         })
     }
 
