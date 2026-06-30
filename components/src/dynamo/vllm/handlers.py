@@ -2530,20 +2530,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # intentionally skipped for this path.
         if mixed_embeds is not None:
             prompt_embeds, prompt_token_ids, prompt_is_token_ids = mixed_embeds
-            if not self.config.engine_args.enable_prompt_embeds:
-                msg = (
-                    "CustomEncoder requires `--enable-prompt-embeds`; the "
-                    "assembled EmbedsPrompt cannot be submitted without it."
-                )
-                logger.error("Request %s: %s", request_id, msg)
-                return (
-                    None,
-                    None,
-                    {
-                        "finish_reason": f"error: {msg}",
-                        "token_ids": [],
-                    },
-                )
             seq_len = prompt_embeds.shape[0]
             return (
                 EmbedsPrompt(
