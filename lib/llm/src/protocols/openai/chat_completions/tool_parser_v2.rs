@@ -163,6 +163,78 @@ impl ChoiceState {
     }
 }
 
+/// Finish every choice that has not received an upstream finish reason. This is
+/// called before a usage-only chunk when one exists, with EOF as a fallback.
+fn finish_unterminated_choices(
+    states: &mut HashMap<u32, ChoiceState>,
+    finished: &mut HashSet<u32>,
+    tool_emitted: &mut HashSet<u32>,
+    template: &NvCreateChatCompletionStreamResponse,
+) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+    let mut indices: Vec<_> = states
+        .keys()
+        .copied()
+        .filter(|index| !finished.contains(index))
+        .collect();
+    indices.sort_unstable();
+
+    let mut responses = Vec::new();
+    for index in indices {
+        finished.insert(index);
+        let state = states
+            .get_mut(&index)
+            .expect("choice index came from parser state map");
+        let Ok(result) = state.parser.finish() else {
+            continue;
+        };
+        let tool_calls = state.emit_chunks(result.calls);
+        if tool_calls.is_some() {
+            tool_emitted.insert(index);
+        }
+        // A choice that produced tool calls during the stream must terminate
+        // with `ToolCalls` even when the backend never sent a finish_reason.
+        // Text-only output without an upstream finish reason stays `None`.
+        let finish_reason = if tool_emitted.contains(&index) {
+            Some(FinishReason::ToolCalls)
+        } else {
+            None
+        };
+        if result.normal_text.is_empty() && tool_calls.is_none() && finish_reason.is_none() {
+            continue;
+        }
+
+        let mut response = template.clone();
+        // A synthesized terminal chunk must not repeat accounting data copied
+        // from a usage-only template.
+        response.inner.usage = None;
+        response.llm_metrics = None;
+        #[allow(deprecated)]
+        let choice = dynamo_protocols::types::ChatChoiceStream {
+            index,
+            delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+                role: None,
+                content: (!result.normal_text.is_empty())
+                    .then_some(ChatCompletionMessageContent::Text(result.normal_text)),
+                tool_calls,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason,
+            logprobs: None,
+        };
+        response.inner.choices = vec![choice];
+        responses.push(Annotated {
+            data: Some(response),
+            id: None,
+            event: None,
+            comment: None,
+            error: None,
+        });
+    }
+    responses
+}
+
 /// Streaming path: replace the jail with the `family` v2 parser. Each upstream text
 /// delta is pushed into the parser; the parser's `normal_text` becomes the emitted
 /// content and its tool-call deltas become OpenAI tool-call chunks. The jail is never
@@ -213,6 +285,7 @@ where
                 t.inner.choices.clear();
                 template = Some(t);
             }
+            let is_empty_choices = chat_response.inner.choices.is_empty();
 
             for choice in chat_response.inner.choices.iter_mut() {
                 let state = states.entry(choice.index).or_insert_with(|| {
@@ -282,6 +355,21 @@ where
                 }
             }
 
+            // OpenAI stream ordering requires a terminal finish_reason before the
+            // usage-only chunk. Finish every unterminated choice before yielding an
+            // empty-choices response; EOF below remains the fallback when no such
+            // response arrives.
+            if is_empty_choices && let Some(template) = &template {
+                for terminal in finish_unterminated_choices(
+                    &mut states,
+                    &mut finished,
+                    &mut tool_emitted,
+                    template,
+                ) {
+                    yield terminal;
+                }
+            }
+
             yield response;
         }
 
@@ -289,65 +377,14 @@ where
         // each unfinished parser; emit a trailing chunk when the flush yields output
         // or when the choice already emitted tool calls and still needs a terminal
         // `ToolCalls` reason.
-        if let Some(template) = template {
-            for (index, state) in states.iter_mut() {
-                if finished.contains(index) {
-                    continue;
-                }
-                let Ok(result) = state.parser.finish() else {
-                    continue;
-                };
-                let tool_calls = state.emit_chunks(result.calls);
-                if tool_calls.is_some() {
-                    tool_emitted.insert(*index);
-                }
-                // A choice that produced tool calls during the stream must terminate
-                // with `ToolCalls` even when the backend never sent a finish_reason
-                // chunk (e.g. speculative decoding folded EOS into content, or the
-                // engine dropped the terminal signal). Strict OpenAI clients wait for
-                // a non-null finish_reason before considering a tool call complete;
-                // emitting `None` here left them hanging until their client-side
-                // timeout. Text-only output without an upstream finish
-                // reason stays `None` — we have no signal to invent one from.
-                let finish_reason = if tool_emitted.contains(index) {
-                    Some(FinishReason::ToolCalls)
-                } else {
-                    None
-                };
-                if result.normal_text.is_empty()
-                    && tool_calls.is_none()
-                    && finish_reason.is_none()
-                {
-                    continue;
-                }
-                let mut response = template.clone();
-                // A synthesized terminal chunk must not repeat accounting data
-                // copied from a usage-only template.
-                response.inner.usage = None;
-                response.llm_metrics = None;
-                #[allow(deprecated)]
-                let choice = dynamo_protocols::types::ChatChoiceStream {
-                    index: *index,
-                    delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
-                        role: None,
-                        content: (!result.normal_text.is_empty())
-                            .then_some(ChatCompletionMessageContent::Text(result.normal_text)),
-                        tool_calls,
-                        function_call: None,
-                        refusal: None,
-                        reasoning_content: None,
-                    },
-                    finish_reason,
-                    logprobs: None,
-                };
-                response.inner.choices = vec![choice];
-                yield Annotated {
-                    data: Some(response),
-                    id: None,
-                    event: None,
-                    comment: None,
-                    error: None,
-                };
+        if let Some(template) = &template {
+            for terminal in finish_unterminated_choices(
+                &mut states,
+                &mut finished,
+                &mut tool_emitted,
+                template,
+            ) {
+                yield terminal;
             }
         }
     }
@@ -622,9 +659,39 @@ mod tests {
             Some(FinishReason::ToolCalls),
             "backstop must synthesize ToolCalls when the stream ended without a finish_reason"
         );
-        let terminal = out
-            .last()
-            .and_then(|response| response.data.as_ref())
+        let finish_positions: Vec<_> = out
+            .iter()
+            .enumerate()
+            .filter_map(|(position, response)| {
+                response.data.as_ref().and_then(|data| {
+                    data.inner
+                        .choices
+                        .iter()
+                        .any(|choice| choice.finish_reason == Some(FinishReason::ToolCalls))
+                        .then_some(position)
+                })
+            })
+            .collect();
+        assert_eq!(
+            finish_positions.len(),
+            1,
+            "expected exactly one synthesized finish chunk"
+        );
+        let usage_position =
+            out.iter()
+                .position(|response| {
+                    response.data.as_ref().is_some_and(|data| {
+                        data.inner.choices.is_empty() && data.inner.usage.is_some()
+                    })
+                })
+                .expect("usage-only response");
+        assert!(
+            finish_positions[0] < usage_position,
+            "synthesized finish chunk must precede usage"
+        );
+        let terminal = out[finish_positions[0]]
+            .data
+            .as_ref()
             .expect("synthesized terminal response");
         assert!(
             terminal.inner.usage.is_none(),
