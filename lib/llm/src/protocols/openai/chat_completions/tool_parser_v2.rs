@@ -321,6 +321,10 @@ where
                     continue;
                 }
                 let mut response = template.clone();
+                // A synthesized terminal chunk must not repeat accounting data
+                // copied from a usage-only template.
+                response.inner.usage = None;
+                response.llm_metrics = None;
                 #[allow(deprecated)]
                 let choice = dynamo_protocols::types::ChatChoiceStream {
                     index: *index,
@@ -353,7 +357,7 @@ where
 mod tests {
     use super::*;
     use dynamo_protocols::types::{
-        ChatChoiceStream, ChatCompletionStreamResponseDelta, FinishReason, Role,
+        ChatChoiceStream, ChatCompletionStreamResponseDelta, CompletionUsage, FinishReason, Role,
     };
     use futures::stream;
 
@@ -398,6 +402,35 @@ mod tests {
             comment: None,
             error: None,
         }
+    }
+
+    fn usage_chunk() -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chunk("", false);
+        let data = chunk.data.as_mut().expect("usage chunk response data");
+        data.inner.choices.clear();
+        data.inner.usage = Some(CompletionUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        });
+        data.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 5,
+            chunk_tokens: 0,
+            cached_tokens: None,
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: None,
+            detokenize_total_latency: None,
+            detokenize_count: None,
+        });
+        chunk
     }
 
     /// Reassemble the streamed tool-call deltas into (name, arguments) per index and
@@ -572,8 +605,8 @@ mod tests {
             .chunks(8)
             .map(|b| chunk(std::str::from_utf8(b).unwrap(), false))
             .collect();
-        // Trailing empty chunk with finish=false — no finish_reason at all.
-        chunks.push(chunk("", false));
+        // A usage-only chunk arrives without any terminating choice.
+        chunks.push(usage_chunk());
 
         let out: Vec<_> = apply_stream(stream::iter(chunks), None, "qwen3_coder".to_string())
             .collect::<Vec<_>>()
@@ -588,6 +621,18 @@ mod tests {
             final_finish_reason(&out),
             Some(FinishReason::ToolCalls),
             "backstop must synthesize ToolCalls when the stream ended without a finish_reason"
+        );
+        let terminal = out
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .expect("synthesized terminal response");
+        assert!(
+            terminal.inner.usage.is_none(),
+            "synthesized terminal chunk must not repeat usage"
+        );
+        assert!(
+            terminal.llm_metrics.is_none(),
+            "synthesized terminal chunk must not repeat LLM metrics"
         );
     }
 
