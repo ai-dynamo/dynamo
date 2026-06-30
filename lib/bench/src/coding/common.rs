@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_TOKENIZER: &str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B";
 pub const DEFAULT_BLOCK_SIZE: usize = 64;
-pub const DEFAULT_OUTPUT_NAME: &str = "claude_mooncake_trace.jsonl";
+pub const DEFAULT_OUTPUT_NAME: &str = "claude_request_trace.jsonl";
 pub const SIDE_CAR_TOKEN: &str = ".sidecar";
 
 pub fn parse_utc_timestamp_ms(value: &str) -> Result<i64> {

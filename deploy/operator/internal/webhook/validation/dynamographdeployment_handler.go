@@ -62,6 +62,10 @@ func NewDynamoGraphDeploymentHandler(mgr manager.Manager, operatorPrincipal stri
 func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentWebhookName)
 
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
+		return nil, err
+	}
+
 	deployment, err := castToDynamoGraphDeployment(obj)
 	if err != nil {
 		return nil, err
@@ -70,13 +74,17 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
 	// Create validator with manager for API group detection and perform validation
-	validator := NewDynamoGraphDeploymentValidatorWithManager(deployment, h.mgr, h.groveEnabled)
+	validator := NewDynamoGraphDeploymentValidator(deployment, h.mgr, h.groveEnabled)
 	return validator.Validate(ctx)
 }
 
 // ValidateUpdate validates a DynamoGraphDeployment update request.
 func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentWebhookName)
+
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
+		return nil, err
+	}
 
 	newDeployment, err := castToDynamoGraphDeployment(newObj)
 	if err != nil {
@@ -97,7 +105,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 	}
 
 	// Create validator with manager for API group detection and perform validation.
-	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr, h.groveEnabled)
+	validator := NewDynamoGraphDeploymentValidator(newDeployment, h.mgr, h.groveEnabled)
 	warnings, err := validator.Validate(ctx)
 	if err != nil {
 		return warnings, err
@@ -132,6 +140,10 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 // ValidateDelete validates a DynamoGraphDeployment delete request.
 func (h *DynamoGraphDeploymentHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentWebhookName)
+
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
+		return nil, err
+	}
 
 	deployment, err := castToDynamoGraphDeployment(obj)
 	if err != nil {

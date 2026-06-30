@@ -51,7 +51,7 @@ also using the router queue, configure the frontend-side
 after a request reaches the worker.
 
 For the cross-layer behavior, see
-[Priority Scheduling](../../agents/priority-scheduling.md). For the upstream
+[Priority Scheduling](../../components/router/priority-scheduling.md). For the upstream
 flag definition, see the
 [vLLM serve args documentation](https://docs.vllm.ai/en/stable/configuration/serve_args.html).
 

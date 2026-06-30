@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use super::types::*;
-use crate::indexer::compressed_radix::{NodeState, RemoveOutcome};
+use crate::indexer::compressed_radix::NodeState;
 use crate::protocols::*;
 
 type NodeChildren = DashMap<LocalBlockHash, SharedNode, FxBuildHasher>;
@@ -656,19 +656,36 @@ impl Node {
         SplitLookupData { suffix }
     }
 
-    pub(super) fn remove_worker_for_hash(
+    pub(super) fn remove_worker_for_hashes(
         &self,
         worker: WorkerWithDpRank,
-        block_hash: ExternalSequenceBlockHash,
-    ) -> Option<RemoveOutcome> {
+        block_hashes: &[ExternalSequenceBlockHash],
+    ) -> Option<RemoveBatchOutcome> {
         let _gate = self.shape_gate.write();
         let mut state = self.state.write();
-        let pos = state.edge_index.get(&block_hash).copied()?;
+        let mut min_match = None;
+        let mut unmatched_hashes = Vec::new();
+
+        for &hash in block_hashes {
+            match state.edge_index.get(&hash).copied() {
+                Some(pos) => {
+                    if min_match.is_none_or(|(min_pos, _)| pos < min_pos) {
+                        min_match = Some((pos, hash));
+                    }
+                }
+                None => unmatched_hashes.push(hash),
+            }
+        }
+
+        let (pos, block_hash) = min_match?;
         let outcome = state.remove_worker_at_pos(worker, pos, block_hash);
         let should_clear_children = state.full_edge_workers.is_empty();
         drop(state);
         self.clear_children_if_unreachable(should_clear_children);
-        Some(outcome)
+        Some(RemoveBatchOutcome {
+            stale_hashes: outcome.stale_hashes,
+            unmatched_hashes,
+        })
     }
 
     #[cfg_attr(feature = "profile", inline(never))]

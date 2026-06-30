@@ -103,11 +103,30 @@ pub struct TcpStreamServer {
 struct RequestedSendConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamSender, String>>,
+    /// Capacity of the per-stream mpsc buffer between the socket task and the
+    /// engine producer; carried from the registration [`StreamOptions`].
+    send_buffer_count: usize,
 }
 
 struct RequestedRecvConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamReceiver, String>>,
+    /// Capacity of the per-stream mpsc buffer between the socket task and the
+    /// engine consumer; carried from the registration [`StreamOptions`].
+    send_buffer_count: usize,
+}
+
+/// Build the per-stream data-plane mpsc channel that bridges the socket task
+/// and the engine producer/consumer. The capacity is driven by the
+/// registration options ([`StreamOptions::send_buffer_count`]) rather than a
+/// hard-coded constant; both `process_request_stream` and
+/// `process_response_stream` size their channel through this helper. See #10293.
+fn data_plane_channel<T>(send_buffer_count: usize) -> (mpsc::Sender<T>, mpsc::Receiver<T>) {
+    // `tokio::sync::mpsc::channel` panics on a capacity of 0. Now that the value
+    // is caller-configurable via `StreamOptions::send_buffer_count`, clamp to at
+    // least 1 so a misconfigured `0` degrades to a minimal buffer instead of
+    // panicking the connection handler task.
+    mpsc::channel(send_buffer_count.max(1))
 }
 
 // /// When registering a new TcpStream on the server, the registration method will return a [`Connections`] object.
@@ -396,6 +415,7 @@ impl ResponseService for TcpStreamServer {
             let connection_info = RequestedSendConnection {
                 context: options.context.clone(),
                 connection: pending_sender_tx,
+                send_buffer_count: options.send_buffer_count,
             };
 
             let mut state = self.state.lock().await;
@@ -443,6 +463,7 @@ impl ResponseService for TcpStreamServer {
             let connection_info = RequestedRecvConnection {
                 context: options.context.clone(),
                 connection: pending_recver_tx,
+                send_buffer_count: options.send_buffer_count,
             };
 
             let mut state = self.state.lock().await;
@@ -652,11 +673,13 @@ async fn tcp_listener(
         let RequestedSendConnection {
             context,
             connection,
+            send_buffer_count,
         } = request_stream;
 
-        // Buffer size matches `process_response_stream`; both should be driven
-        // by the registration options rather than hard-coded. See #10293.
-        let (request_tx, request_rx) = mpsc::channel(64);
+        // Buffer size is driven by the registration options
+        // ([`StreamOptions::send_buffer_count`]) rather than hard-coded; the
+        // same applies to `process_response_stream`. See #10293.
+        let (request_tx, request_rx) = data_plane_channel(send_buffer_count);
 
         if connection
             .send(Ok(crate::pipeline::network::StreamSender {
@@ -769,6 +792,7 @@ async fn tcp_listener(
         let RequestedRecvConnection {
             context,
             connection,
+            send_buffer_count,
         } = response_stream;
 
         // the [`Prologue`]
@@ -807,9 +831,10 @@ async fn tcp_listener(
             return Err(error!("Received error prologue: {}", error));
         }
 
-        // Buffer size should be driven by the registration options rather than
-        // hard-coded; the same applies to `process_request_stream`. See #10293.
-        let (response_tx, response_rx) = mpsc::channel(64);
+        // Buffer size is driven by the registration options
+        // ([`StreamOptions::send_buffer_count`]) rather than hard-coded; the
+        // same applies to `process_request_stream`. See #10293.
+        let (response_tx, response_rx) = data_plane_channel(send_buffer_count);
 
         if connection
             .send(Ok(crate::pipeline::network::StreamReceiver {
@@ -1010,6 +1035,7 @@ mod tests {
     use super::*;
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
+    use crate::pipeline::network::DEFAULT_SEND_BUFFER_COUNT;
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
     use tokio::net::TcpStream;
 
@@ -1071,6 +1097,57 @@ mod tests {
         println!(
             "Server created successfully with address: {}",
             tcp_info.address
+        );
+    }
+
+    /// The data-plane channel helper sizes the mpsc buffer from
+    /// `send_buffer_count` — this is the value `process_request_stream` /
+    /// `process_response_stream` feed it. `max_capacity()` reflects the
+    /// channel's configured buffer, so a custom value and the default both
+    /// reach the channel. Guards against regressing back to a hard-coded 64.
+    #[test]
+    fn data_plane_channel_capacity_matches_send_buffer_count() {
+        let (tx, _rx) = data_plane_channel::<()>(7);
+        assert_eq!(tx.max_capacity(), 7);
+
+        let (tx, _rx) = data_plane_channel::<()>(DEFAULT_SEND_BUFFER_COUNT);
+        assert_eq!(tx.max_capacity(), 64);
+
+        // A misconfigured 0 must clamp to 1, not panic (mpsc::channel(0) panics).
+        let (tx, _rx) = data_plane_channel::<()>(0);
+        assert_eq!(tx.max_capacity(), 1);
+    }
+
+    /// `register` must thread `StreamOptions::send_buffer_count` through to the
+    /// stored `RequestedSendConnection` / `RequestedRecvConnection` (the
+    /// registration structs `process_*_stream` later destructure to size the
+    /// channel). Verified here against the real registration path.
+    #[tokio::test]
+    async fn register_threads_send_buffer_count_into_connection_structs() {
+        let server = TcpStreamServer::new(ServerOptions::default())
+            .await
+            .expect("server");
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .send_buffer_count(7)
+            .build()
+            .unwrap();
+
+        let _pending = server.register(options).await;
+
+        let state = server.state.lock().await;
+        assert_eq!(state.tx_subjects.len(), 1, "one request stream registered");
+        assert_eq!(state.rx_subjects.len(), 1, "one response stream registered");
+        assert!(
+            state.tx_subjects.values().all(|c| c.send_buffer_count == 7),
+            "send_buffer_count must reach RequestedSendConnection"
+        );
+        assert!(
+            state.rx_subjects.values().all(|c| c.send_buffer_count == 7),
+            "send_buffer_count must reach RequestedRecvConnection"
         );
     }
 

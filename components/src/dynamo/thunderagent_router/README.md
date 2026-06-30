@@ -2,8 +2,8 @@
 
 > **Experimental — not a released component.** Run it from a source checkout
 > (see [Install](#install)), not from a `pip install ai-dynamo`. The CLI
-> flags, the `nvext.agent_context` schema, and the lifecycle hooks are all
-> unstable and will change.
+> flags, session headers, and the lifecycle hooks are all unstable and will
+> change.
 
 A standalone Dynamo router that schedules at the granularity of an agent run —
 the whole `LLM turn → tool call → next turn` loop — instead of individual
@@ -65,49 +65,32 @@ forwarded.
 
 ### Sending requests
 
-The router expects `nvext.agent_context.trajectory_id` (and optionally
-`session_id`, `session_type_id`) on each chat-completions request so it
-can group turns under the same program. The
-[ishandhanani/ThunderAgent](https://github.com/ishandhanani/ThunderAgent)
-fork of `mini-swe-agent` injects these directly via OpenAI client
-`extra_body`; any other harness can do the same.
+The router expects header-derived `session_id` on each chat-completions
+request so it can group turns under the same program. Custom harnesses can send
+`x-dynamo-session-id` and, for subagents, `x-dynamo-parent-session-id`.
 
-```json
-{
-  "model": "MiniMaxAI/MiniMax-M2",
-  "messages": [...],
-  "stream": true,
-  "nvext": {
-    "agent_context": {
-      "trajectory_id": "astropy__astropy-14365",
-      "session_id":    "mswea-...",
-      "session_type_id": "swebench-lite"
-    }
-  }
-}
-```
-
-Requests without `agent_context` are passed through as one-off (no
-program admission, no pause/resume). This is the safe fallback for
-non-agentic traffic sharing the same workers.
+Requests without session identity are passed through as one-off (no program
+admission, no pause/resume). This is the safe fallback for non-agentic traffic
+sharing the same workers.
 
 ## Tracing
 
-Enable agent tracing on the frontend with the master switch
-`DYN_AGENT_TRACE=1`. That turns on sane defaults: the `jsonl_gz` sink at
-`/tmp/dynamo-agent-trace`, the tool-events ZMQ socket bound at
-`tcp://127.0.0.1:20390`, and replay hashes. Override any of them with
-`DYN_AGENT_TRACE_SINKS` (e.g. `jsonl`, `stderr`),
-`DYN_AGENT_TRACE_OUTPUT_PATH`, and `DYN_AGENT_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT`.
+Enable request tracing on the frontend with the master switch
+`DYN_REQUEST_TRACE=1`. That turns on sane defaults: the `jsonl_gz` sink at
+`/tmp/dynamo-request-trace` and replay hashes. Bind the optional tool-events ZMQ
+socket with `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` when the harness
+publishes explicit tool spans. Override sink behavior with
+`DYN_REQUEST_TRACE_SINKS` (e.g. `jsonl`, `stderr`) and
+`DYN_REQUEST_TRACE_OUTPUT_PATH`.
 See [Agent Tracing](/docs/agents/agent-tracing.md) for the record schema.
 
-Every LLM call then lands a `request_end` record carrying `trajectory_id`,
-`session_id`, `input_tokens`, `output_tokens`, `cached_tokens`,
+Every LLM call then lands a `request_end` record carrying `session_id`,
+`input_tokens`, `output_tokens`, `cached_tokens`,
 `request_received_ms`, `total_time_ms`, and the block-level
 `input_sequence_hashes` — enough for offline replay against this router.
 Dynamo owns the ZMQ bind side, so point your harness's tool-event publisher
 at that endpoint (producers connect) and `tool_start` / `tool_end` /
-`tool_error` events arrive with the same `trajectory_id` and matching
+`tool_error` events arrive with the same `session_id` and matching
 `tool_call_id` pairs, giving you the full LLM-turn ↔ tool-gap timeline per
 agent.
 
@@ -138,7 +121,7 @@ workers (`--router-mode kv`).
 
 The mini-SWE-agent variant we reference is bundled in the ThunderAgent fork on
 the `feat/mini-swe-direct-dynamo` branch: it patches mini-SWE-agent so that with
-`MSWEA_BACKEND=dynamo` it injects `nvext.agent_context` natively (no proxy in the
+`MSWEA_BACKEND=dynamo` it injects Dynamo session headers natively (no proxy in the
 loop), mapping each SWE-bench instance to one ThunderAgent program. Clone it,
 point it at the frontend on `:8100`, and drive SWE-bench-Lite at 128 concurrent
 workers:
@@ -154,8 +137,7 @@ sed -i 's#http://localhost:8000/v1#http://localhost:8100/v1#' \
   src/minisweagent/config/extra/swebench.yaml
 
 export OPENAI_API_KEY="DUMMY"          # any non-empty value; the frontend ignores it
-export MSWEA_BACKEND="dynamo"          # inject nvext.agent_context natively
-export MSWEA_SESSION_TYPE_ID="swebench-lite"
+export MSWEA_BACKEND="dynamo"          # inject Dynamo session headers natively
 
 mini-extra swebench \
   --config src/minisweagent/config/extra/swebench.yaml \
@@ -199,6 +181,5 @@ ThunderAgent paper:
 - Conceptual docs: [docs/agents/thunderagent-router.md](/docs/agents/thunderagent-router.md)
 - ThunderAgent paper: <https://arxiv.org/abs/2602.13692>
 - Upstream ThunderAgent reference: <https://github.com/HaoKang-Timmy/ThunderAgent>
-- Repro fork (mini-swe-agent + agent_context injector): <https://github.com/ishandhanani/ThunderAgent>
+- Repro fork (mini-swe-agent + session injector): <https://github.com/ishandhanani/ThunderAgent>
 - Dynamo KV router: [Router Guide](/docs/components/router/router-guide.md)
-- `nvext.agent_context` schema: [nvext reference](/docs/components/frontend/nvext.md#agent-context)

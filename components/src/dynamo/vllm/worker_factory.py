@@ -892,11 +892,13 @@ class WorkerFactory:
         Args:
             runtime: The DistributedRuntime instance to register routes on.
         """
-        runtime.register_engine_route("start_profile", handler.start_profile)
-        runtime.register_engine_route("stop_profile", handler.stop_profile)
-        runtime.register_engine_route("sleep", handler.sleep)
-        runtime.register_engine_route("wake_up", handler.wake_up)
-        runtime.register_engine_route("scale_elastic_ep", handler.scale_elastic_ep)
+        runtime.register_engine_route("control/start_profile", handler.start_profile)
+        runtime.register_engine_route("control/stop_profile", handler.stop_profile)
+        runtime.register_engine_route("control/sleep", handler.sleep)
+        runtime.register_engine_route("control/wake_up", handler.wake_up)
+        runtime.register_engine_route(
+            "control/scale_elastic_ep", handler.scale_elastic_ep
+        )
 
         rl_routes: dict = {
             "liveness_probe": handler.liveness_probe,
@@ -931,8 +933,9 @@ class WorkerFactory:
         )
 
         logger.info(
-            "Registered engine routes: sleep, wake_up, scale_elastic_ep, "
-            "start_profile, stop_profile, and RL admin routes: %s%s",
+            "Registered engine routes: control/sleep, control/wake_up, "
+            "control/scale_elastic_ep, control/start_profile, control/stop_profile, "
+            "and RL admin routes: %s%s",
             ", ".join(sorted(rl_routes)),
             " (LoRA routes: load_lora, unload_lora)" if lora_enabled else "",
         )

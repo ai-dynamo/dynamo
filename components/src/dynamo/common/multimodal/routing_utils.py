@@ -72,4 +72,5 @@ def build_mm_routing_info_from_features(
     return {
         "routing_token_ids": routing_token_ids,
         "block_mm_infos": [],
+        "expanded_prompt_len": n_tokens,
     }

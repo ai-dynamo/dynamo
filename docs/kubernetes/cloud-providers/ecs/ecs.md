@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Amazon Elastic Container Service (ECS)
+subtitle: Runs Dynamo on Amazon ECS with EC2 GPU clusters for vLLM workers and Fargate tasks for etcd and NATS.
 ---
 
 ## 1. EC2 Cluster Setup (for vLLM workloads)

@@ -31,7 +31,7 @@ use dynamo_renderer::OAIPromptFormatter;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
 use futures::stream::{self, StreamExt};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::metrics::frontend_perf::{
@@ -39,7 +39,7 @@ use dynamo_runtime::metrics::frontend_perf::{
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
 use std::borrow::Cow;
-use std::{collections::HashMap, pin::Pin, sync::Arc};
+use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 #[cfg(feature = "mm-routing")]
@@ -57,13 +57,16 @@ use dynamo_parsers::{
 };
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
 use dynamo_runtime::pipeline::{
-    AsyncEngineContext, Error, ManyOut, Operator, SingleIn, async_trait,
+    AsyncEngineContext, Context as PipelineContext, Error, ManyOut, Operator, SingleIn, async_trait,
 };
 use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 
 use crate::protocols::{
     TokenIdType,
-    common::{OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
+    common::{
+        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+        extensions::{AgentHints, NvExtProvider, routing_constraints_to_kv},
+    },
     openai::{
         DeltaGeneratorExt,
         chat_completions::{
@@ -71,7 +74,6 @@ use crate::protocols::{
         },
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
-        nvext::NvExtProvider,
     },
 };
 use crate::tokenizers::traits::Tokenizer;
@@ -80,9 +82,21 @@ use crate::preprocessor::prompt::{MediaRequestExt, prompt_formatter_from_mdc};
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
+pub use crate::protocols::common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation};
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
+
+fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, Option<i32>) {
+    let priority_jump = hints.and_then(|h| {
+        h.priority
+            .map(|priority| priority.max(0) as f64)
+            .or(h.latency_sensitivity)
+    });
+    let strict_priority = hints.and_then(|h| h.strict_priority);
+    let priority = hints.and_then(|h| h.priority);
+    (priority_jump, strict_priority, priority)
+}
 
 /// Encode a slice of `f32` values as a base64 string per the OpenAI
 /// `encoding_format=base64` spec: the raw little-endian byte
@@ -99,68 +113,6 @@ fn encode_floats_to_base64(floats: &[f32]) -> String {
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
-pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LLMMetricAnnotation {
-    pub input_tokens: usize,
-    pub output_tokens: usize,
-    pub chunk_tokens: usize,
-    pub cached_tokens: Option<usize>,
-    /// Prefill worker ID (for TTFT attribution in disaggregated mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_worker_id: Option<u64>,
-    /// Prefill worker DP rank
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_dp_rank: Option<u32>,
-    /// Prefill worker type ("prefill" or "decode") for Prometheus metric labeling.
-    /// Stored at routing time to avoid expensive MDC lookup when updating TTFT metrics.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_worker_type: Option<String>,
-    /// Decode worker ID (for ITL attribution in disaggregated mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decode_worker_id: Option<u64>,
-    /// Decode worker DP rank
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decode_dp_rank: Option<u32>,
-    /// Decode worker type ("prefill" or "decode") for Prometheus metric labeling.
-    /// Stored at routing time to avoid expensive MDC lookup when updating ITL metrics.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decode_worker_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokenize_latency: Option<Duration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detokenize_total_latency: Option<Duration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detokenize_count: Option<u64>,
-}
-
-impl LLMMetricAnnotation {
-    /// Convert this metrics struct to an Annotated event
-    pub fn to_annotation<T>(&self) -> Result<Annotated<T>, serde_json::Error> {
-        Annotated::from_annotation(ANNOTATION_LLM_METRICS, self)
-    }
-
-    /// Extract LLM metrics from an Annotated event, if present
-    pub fn from_annotation<T>(
-        annotation: &Annotated<T>,
-    ) -> Result<Option<LLMMetricAnnotation>, Box<dyn std::error::Error>> {
-        if annotation.event.is_none() {
-            return Ok(None);
-        }
-        if annotation.event.as_ref().unwrap() != ANNOTATION_LLM_METRICS {
-            return Ok(None);
-        }
-        let comments = annotation
-            .comment
-            .as_ref()
-            .ok_or("missing comments block")?;
-        if comments.len() != 1 {
-            return Err("malformed comments block - expected exactly 1 comment".into());
-        }
-        let metrics: LLMMetricAnnotation = serde_json::from_str(&comments[0])?;
-        Ok(Some(metrics))
-    }
-}
 
 /// Drain a standalone router's forwarded `routing_data` onto this request's tracker so the
 /// frontend's timing/worker/token surfaces populate, then drop the field to keep it off the
@@ -186,6 +138,34 @@ fn drain_router_routing_data(
     if let Some(token_ids) = routing_data.token_ids {
         tracker.set_external_query_token_ids(token_ids);
     }
+}
+
+fn attach_metrics_annotation<Resp>(response: &mut Annotated<Resp>, metrics: &LLMMetricAnnotation) {
+    if let Ok(metrics_annotated) = metrics.to_annotation::<()>() {
+        response.event = metrics_annotated.event;
+        response.comment = metrics_annotated.comment;
+    } else {
+        tracing::warn!("Failed to serialize LLM metrics annotation");
+    }
+}
+
+fn attach_llm_metrics<Resp>(response: &mut Annotated<Resp>, metrics: LLMMetricAnnotation)
+where
+    Resp: 'static,
+{
+    if response.event.is_some() {
+        return;
+    }
+
+    if let Some(data) = response.data.as_mut()
+        && let Some(chat_response) =
+            (data as &mut dyn Any).downcast_mut::<NvCreateChatCompletionStreamResponse>()
+    {
+        chat_response.llm_metrics = Some(metrics);
+        return;
+    }
+
+    attach_metrics_annotation(response, &metrics);
 }
 
 // Reasoning State for reasoning parsing transformation step
@@ -241,6 +221,17 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
+
+fn attach_agent_context_from_context(
+    request: &mut PreprocessedRequest,
+    context: &PipelineContext<()>,
+) {
+    if let Ok(agent_context) = context.get::<crate::protocols::common::extensions::AgentContext>(
+        crate::protocols::common::extensions::AGENT_CONTEXT_CONTEXT_KEY,
+    ) {
+        request.agent_context = Some(agent_context.as_ref().clone());
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct PreprocessRequestOptions {
@@ -298,6 +289,22 @@ impl OpenAIPreprocessor {
         Some(context_length.saturating_sub(prompt_len as u32))
     }
 
+    /// Prompt length for sizing the omitted-`max_tokens` cap. Prefers the
+    /// MM-expanded length; a 0 (serde-default / absent) counts as missing. With
+    /// images but no expanded length, defers to the backend (`None`); text-only
+    /// uses `token_ids_len`.
+    fn effective_prompt_len_for_cap(
+        expanded_prompt_len: Option<usize>,
+        has_images: bool,
+        token_ids_len: usize,
+    ) -> Option<usize> {
+        match expanded_prompt_len {
+            Some(n) if n > 0 => Some(n),
+            _ if has_images => None,
+            _ => Some(token_ids_len),
+        }
+    }
+
     fn nvext_passthrough_args<R: NvExtProvider>(
         request: &R,
     ) -> Option<serde_json::Map<String, serde_json::Value>> {
@@ -309,6 +316,12 @@ impl OpenAIPreprocessor {
             }
             if let Some(ref salt) = nvext.cache_salt {
                 nvext_passthrough.insert("cache_salt".to_string(), serde_json::json!(salt));
+            }
+            if let Some(ref metadata_upload) = nvext.metadata_upload {
+                nvext_passthrough.insert(
+                    "metadata_upload".to_string(),
+                    serde_json::json!(metadata_upload),
+                );
             }
             if nvext.token_data.is_some() {
                 nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
@@ -419,12 +432,12 @@ impl OpenAIPreprocessor {
         // here; remove once fastokens upstream exposes the mutator.
         #[cfg(feature = "mm-routing")]
         let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
-            let fastokens_active = std::env::var("DYN_TOKENIZER").as_deref() == Ok("fastokens");
+            let fastokens_active = runtime_config.effective_tokenizer_backend().is_fastokens();
             if fastokens_active && model_dir_for_routing.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
-                    "DYN_TOKENIZER=fastokens is set; MM-aware KV routing disabled. \
-                     Unset DYN_TOKENIZER (or set it to 'default') to re-enable."
+                    "fastokens tokenizer backend is active; MM-aware KV routing disabled. \
+                     Use the default tokenizer backend to re-enable."
                 );
                 None
             } else {
@@ -649,13 +662,13 @@ impl OpenAIPreprocessor {
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
 
-        // Check if the chat template injected a reasoning start token at the end
-        // of the prompt (e.g., Qwen3.5 appends `<think>\n` when enable_thinking
-        // is not explicitly false). If so, the model's completion starts
-        // mid-reasoning and the parser should begin in reasoning mode.
-        let prompt_injected_reasoning = formatted_prompt
-            .as_ref()
-            .is_some_and(|p| p.trim_end().ends_with("<think>"));
+        // Generic reasoning parsers start from `<think>`; MiniMax M3 starts
+        // from `<mm:think>`. If the chat template injected that opener at the
+        // end of the prompt, the model completion starts mid-reasoning.
+        let prompt_injected_reasoning = Self::prompt_injected_reasoning_start(
+            self.runtime_config.reasoning_parser.as_deref(),
+            formatted_prompt.as_deref(),
+        );
 
         let tokenize_start = Instant::now();
         let (token_ids, annotations) = {
@@ -702,12 +715,26 @@ impl OpenAIPreprocessor {
         // If omitted, allow generation up to the remaining context length. Responses requests
         // preserve omission so backend adapters can compute the dynamic cap from their
         // effective prompt length/tokenization.
+        //
+        // Multimodal `token_ids` carry unexpanded image placeholders, so prefer
+        // the MM-expanded length when available, else defer to the backend.
+        let has_images = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .and_then(|m| m.get("image_url"))
+            .is_some_and(|v| !v.is_empty());
+        let effective_prompt_len = Self::effective_prompt_len_for_cap(
+            preprocessed
+                .mm_routing_info
+                .as_ref()
+                .map(|mm| mm.expanded_prompt_len),
+            has_images,
+            preprocessed.token_ids.len(),
+        );
         if preprocessed.stop_conditions.max_tokens.is_none()
-            && let Some(max_tokens) = Self::omitted_max_tokens_default(
-                preprocessed.token_ids.len(),
-                self.context_length,
-                options,
-            )
+            && let Some(prompt_len) = effective_prompt_len
+            && let Some(max_tokens) =
+                Self::omitted_max_tokens_default(prompt_len, self.context_length, options)
         {
             preprocessed.stop_conditions.max_tokens = Some(max_tokens);
         }
@@ -816,8 +843,8 @@ impl OpenAIPreprocessor {
         if let Some(nvext) = request.nvext() {
             // Build routing hints from nvext fields
             let hints = nvext.agent_hints.as_ref();
+            let (priority_jump, strict_priority, priority) = routing_priorities(hints);
             builder.request_timestamp_ms(nvext.request_timestamp_ms);
-            builder.agent_context(nvext.agent_context.clone());
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
@@ -825,16 +852,15 @@ impl OpenAIPreprocessor {
                 dp_rank: nvext.dp_rank,
                 prefill_dp_rank: nvext.prefill_dp_rank,
                 expected_output_tokens: hints.and_then(|h| h.osl),
-                priority_jump: hints.and_then(|h| {
-                    h.priority
-                        .map(|priority| priority.max(0) as f64)
-                        .or(h.latency_sensitivity)
-                }),
-                priority: hints.and_then(|h| h.priority),
+                priority_jump,
+                strict_priority,
+                priority,
                 lora_name,
                 allowed_worker_ids: None,
-                session_control: nvext.session_control.clone(),
-                routing_constraints: nvext.routing_constraints.clone(),
+                routing_constraints: nvext
+                    .routing_constraints
+                    .clone()
+                    .map(routing_constraints_to_kv),
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() {
@@ -1393,6 +1419,9 @@ impl OpenAIPreprocessor {
             }
         }
 
+        // Unpadded expanded length, before the block-padding added below.
+        let expanded_prompt_len = expanded.len();
+
         // Pad to a whole multiple of kv_cache_block_size. The router's
         // compute_block_hash_for_seq only hashes whole blocks, so the partial
         // tail block doesn't influence routing either way; aligning the length
@@ -1419,6 +1448,7 @@ impl OpenAIPreprocessor {
         builder.mm_routing_info(Some(MmRoutingInfo {
             routing_token_ids: expanded,
             block_mm_infos: Vec::new(),
+            expanded_prompt_len,
         }));
         Ok(())
     }
@@ -1470,7 +1500,7 @@ impl OpenAIPreprocessor {
         static DIM_CACHE: LazyLock<Cache<u64, (u32, u32)>> = LazyLock::new(|| {
             Cache::builder()
                 .max_capacity(100_000)
-                .time_to_live(Duration::from_secs(24 * 60 * 60))
+                .time_to_live(std::time::Duration::from_secs(24 * 60 * 60))
                 .build()
         });
 
@@ -1509,7 +1539,7 @@ impl OpenAIPreprocessor {
         // Per-Range tighter bound than MediaFetcher's 30 s default — dim
         // fetch is best-effort; on a slow remote we'd rather skip MM
         // routing for this image than starve the request.
-        const DIM_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+        const DIM_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
         if let Some(rest) = url.strip_prefix("data:") {
             let comma = rest
@@ -1935,18 +1965,43 @@ impl OpenAIPreprocessor {
                 .collect()
         });
 
+        // When DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is set, supported families
+        // (Qwen3-Coder, DeepSeek-V4) stream through the dynamo-parsers-v2 parser
+        // instead of the jail, which is never built for them on this path.
+        // tool_choice=required/named and structural-tag still use the jail's
+        // Immediate mode, since those rely on guided-decoded JSON rather than the
+        // native markup the v2 parser reads. See tool_parser_v2::apply_stream.
+        use crate::protocols::openai::chat_completions::tool_parser_v2;
+        let parser_name = self.tool_call_parser.as_deref();
+        let use_parsers_v2 = tool_parser_v2::enabled()
+            && parser_name.is_some_and(tool_parser_v2::supports_family)
+            && !uses_tool_call_structural_tag
+            && matches!(
+                request.inner.tool_choice.as_ref(),
+                None | Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto)
+            );
+
         // Apply jail conditionally
-        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
-            Box::pin(Self::apply_tool_calling_jail(
-                self.tool_call_parser.clone(),
-                request.inner.tool_choice.clone(),
-                tool_definitions,
-                uses_tool_call_structural_tag,
-                stream,
-            ))
-        } else {
-            Box::pin(stream)
-        };
+        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> =
+            if should_jail && use_parsers_v2 {
+                Box::pin(tool_parser_v2::apply_stream(
+                    stream,
+                    tool_definitions,
+                    parser_name
+                        .expect("use_parsers_v2 implies a parser name")
+                        .to_string(),
+                ))
+            } else if should_jail {
+                Box::pin(Self::apply_tool_calling_jail(
+                    self.tool_call_parser.clone(),
+                    request.inner.tool_choice.clone(),
+                    tool_definitions,
+                    uses_tool_call_structural_tag,
+                    stream,
+                ))
+            } else {
+                Box::pin(stream)
+            };
 
         Ok(transformed_stream)
     }
@@ -1956,7 +2011,7 @@ impl OpenAIPreprocessor {
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
         trace_tokens_enabled: bool,
-        trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
+        trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
@@ -1975,7 +2030,7 @@ impl OpenAIPreprocessor {
             usage_chunk_sent: bool,
             finished: bool,
             trace_tokens_enabled: bool,
-            trace_finish_reason_metadata: Option<crate::agents::trace::SharedFinishReasonMetadata>,
+            trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
         }
 
         let state = State {
@@ -2037,7 +2092,7 @@ impl OpenAIPreprocessor {
 
                         let isl = inner.response_generator.get_isl().map(|isl| isl as usize);
 
-                        crate::agents::trace::record_backend_finish_reason_metadata(
+                        crate::request_trace::record_backend_finish_reason_metadata(
                             inner.trace_finish_reason_metadata.as_ref(),
                             backend_output.index,
                             backend_output.finish_reason.as_ref(),
@@ -2098,7 +2153,7 @@ impl OpenAIPreprocessor {
                         detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
                     if inner.trace_tokens_enabled {
-                        crate::agents::trace::record_llm_metric_tokens(
+                        crate::request_trace::record_llm_metric_tokens(
                             tracker.as_deref(),
                             isl,
                             current_osl,
@@ -2115,13 +2170,7 @@ impl OpenAIPreprocessor {
                         DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
                     }
 
-                    if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
-                        // Only set event if not already set to avoid overriding existing events (like errors)
-                        if response.event.is_none() {
-                            response.event = metrics_annotated.event;
-                            response.comment = metrics_annotated.comment;
-                        }
-                    }
+                    attach_llm_metrics(&mut response, llm_metrics);
 
                     // Mark if we've seen a finish_reason
                     if has_finish_reason {
@@ -2181,7 +2230,7 @@ impl OpenAIPreprocessor {
                             detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                         };
                         if inner.trace_tokens_enabled {
-                            crate::agents::trace::record_llm_metric_tokens(
+                            crate::request_trace::record_llm_metric_tokens(
                                 tracker.as_deref(),
                                 Some(usage.prompt_tokens as usize),
                                 usage.completion_tokens as usize,
@@ -2198,12 +2247,6 @@ impl OpenAIPreprocessor {
                             DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
                         }
 
-                        // Create annotation string
-                        let annotation = llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to serialize metrics: {}", e);
-                            Annotated::<()>::from_data(())
-                        });
-
                         // Send the usage chunk if needed
                         let data = if inner.response_generator.is_usage_enabled() {
                             Some(usage_chunk)
@@ -2211,13 +2254,14 @@ impl OpenAIPreprocessor {
                             None
                         };
 
-                        let annotated_usage = Annotated::<Resp> {
+                        let mut annotated_usage = Annotated::<Resp> {
                             id: None,
                             data,
-                            event: Some(ANNOTATION_LLM_METRICS.to_string()),
-                            comment: annotation.comment,
+                            event: None,
+                            comment: None,
                             error: None,
                         };
+                        attach_llm_metrics(&mut annotated_usage, llm_metrics);
 
                         tracing::trace!(
                             request_id = inner.context.id(),
@@ -2417,12 +2461,26 @@ impl OpenAIPreprocessor {
         // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
         // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
         // - kimi_k25: `</think>` (special token id 163607).
+        // - minimax_m3: `]<]minimax[>[` tool-call namespace tokens and
+        //   `<mm:think>` reasoning markers.
         matches!(
             tool_call_parser,
-            Some("gemma4") | Some("gemma-4") | Some("harmony") | Some("kimi_k2")
+            Some("gemma4")
+                | Some("gemma-4")
+                | Some("harmony")
+                | Some("kimi_k2")
+                | Some("minimax_m3")
+                | Some("minimax-m3")
+                | Some("minimax_m3_nom")
+                | Some("minimax-m3-nom")
         ) || matches!(
             reasoning_parser,
-            Some("gemma4") | Some("gemma-4") | Some("gpt_oss") | Some("kimi_k25")
+            Some("gemma4")
+                | Some("gemma-4")
+                | Some("gpt_oss")
+                | Some("kimi_k25")
+                | Some("minimax_m3")
+                | Some("minimax-m3")
         )
     }
 
@@ -2471,8 +2529,29 @@ impl OpenAIPreprocessor {
     fn skips_guided_json_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
         matches!(
             reasoning_parser,
-            Some("deepseek_v4" | "deepseek-v4" | "deepseekv4" | "glm45")
+            Some(
+                "deepseek_v4"
+                    | "deepseek-v4"
+                    | "deepseekv4"
+                    | "glm45"
+                    | "minimax_m3"
+                    | "minimax-m3"
+            )
         )
+    }
+
+    fn prompt_injected_reasoning_start(
+        reasoning_parser: Option<&str>,
+        formatted_prompt: Option<&str>,
+    ) -> bool {
+        let Some(prompt) = formatted_prompt.map(str::trim_end) else {
+            return false;
+        };
+
+        match reasoning_parser {
+            Some("minimax_m3") | Some("minimax-m3") => prompt.ends_with("<mm:think>"),
+            _ => prompt.ends_with("<think>"),
+        }
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
@@ -2487,6 +2566,9 @@ impl OpenAIPreprocessor {
     ///   defined and enable_thinking` (truthy), so when callers explicitly set the
     ///   flag false the model emits no `<|channel>` markers and the parser would
     ///   only ever fall through.
+    /// For MiniMax M3: disabled when chat_template_args contains
+    ///   "thinking_mode": "disabled", matching SGLang's MiniMax M3 request
+    ///   convention.
     fn is_reasoning_disabled_by_request(
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -2532,6 +2614,14 @@ impl OpenAIPreprocessor {
                 if let Some(enabled) = dynamo_renderer::thinking_bool_from_args(chat_template_args)
                 {
                     return !enabled;
+                }
+                false
+            }
+            Some("minimax_m3") | Some("minimax-m3") => {
+                if let Some(args) = chat_template_args
+                    && let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str())
+                {
+                    return mode == "disabled";
                 }
                 false
             }
@@ -2858,6 +2948,7 @@ impl
         let (mut common_request, annotations, prompt_injected_reasoning) = self
             .preprocess_request_with_options(&request, tracker.as_deref(), preprocess_options)
             .await?;
+        attach_agent_context_from_context(&mut common_request, &context);
 
         let uses_tool_call_structural_tag = self.apply_tool_choice_guided_decoding(
             &request,
@@ -3027,6 +3118,7 @@ impl
             .await?;
 
         let mut common_request = builder.build()?;
+        attach_agent_context_from_context(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
@@ -3203,6 +3295,21 @@ mod strip_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn routing_priorities_keep_strict_tier_independent() {
+        let hints = crate::protocols::common::extensions::AgentHints {
+            priority: Some(-3),
+            strict_priority: Some(7),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            routing_priorities(Some(&hints)),
+            (Some(0.0), Some(7), Some(-3))
+        );
+        assert_eq!(routing_priorities(None), (None, None, None));
+    }
+
     /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.
     #[test]
     fn test_parser_requires_special_tokens() {
@@ -3278,6 +3385,18 @@ mod tests {
                 "kimi_k2 tool-call only → required \
                  (`<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>` are special)",
             ),
+            (
+                Some("minimax_m3"),
+                Some("minimax_m3"),
+                true,
+                "minimax_m3 paired → required",
+            ),
+            (
+                Some("minimax-m3-nom"),
+                Some("minimax-m3"),
+                true,
+                "MiniMax M3 SGLang aliases → required",
+            ),
             (None, None, false, "no parsers → not required"),
         ];
         for (tool, reasoning, expected, desc) in cases {
@@ -3310,6 +3429,57 @@ mod tests {
     }
 
     #[test]
+    fn test_prompt_injected_reasoning_start_by_parser() {
+        let cases = [
+            (
+                Some("minimax_m3"),
+                Some("...<mm:think>\n"),
+                true,
+                "MiniMax M3 starts from <mm:think>",
+            ),
+            (
+                Some("minimax-m3"),
+                Some("...</mm:think>\n"),
+                false,
+                "MiniMax M3 prefilled end marker means not in reasoning",
+            ),
+            (
+                Some("minimax_m3"),
+                Some("...<think>\n"),
+                false,
+                "MiniMax M3 must not use generic <think>",
+            ),
+            (
+                Some("qwen3"),
+                Some("...<think>\n"),
+                true,
+                "Qwen-style templated <think> behavior remains",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some("...<think>\n"),
+                true,
+                "existing <think> parser behavior remains",
+            ),
+            (
+                None,
+                Some("...<think>\n"),
+                true,
+                "legacy no-parser detection",
+            ),
+            (Some("minimax_m3"), None, false, "no prompt"),
+        ];
+
+        for (parser, prompt, expected, desc) in cases {
+            assert_eq!(
+                OpenAIPreprocessor::prompt_injected_reasoning_start(parser, prompt),
+                expected,
+                "FAILED: {desc}",
+            );
+        }
+    }
+
+    #[test]
     fn test_backend_extra_args_preserves_nvext_and_sampling_extensions() {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
@@ -3319,7 +3489,10 @@ mod tests {
             "bad_words_token_ids": [[12, 13]],
             "nvext": {
                 "cache_salt": "step_7",
-                "extra_fields": ["completion_token_ids"]
+                "extra_fields": ["completion_token_ids"],
+                "metadata_upload": {
+                    "url": "s3://bucket/root/rollouts"
+                }
             }
         }))
         .unwrap();
@@ -3330,6 +3503,12 @@ mod tests {
         assert_eq!(
             extra_args["nvext"]["extra_fields"],
             serde_json::json!(["completion_token_ids"])
+        );
+        assert_eq!(
+            extra_args["nvext"]["metadata_upload"],
+            serde_json::json!({
+                "url": "s3://bucket/root/rollouts"
+            })
         );
         assert_eq!(extra_args["sampling_options"]["detokenize"], false);
         assert_eq!(
@@ -3369,6 +3548,35 @@ mod tests {
                 PreprocessRequestOptions::default()
             ),
             None
+        );
+    }
+
+    #[test]
+    fn test_effective_prompt_len_for_cap() {
+        // MM-expanded length present: use it, ignoring the unexpanded token count.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(500), true, 12),
+            Some(500)
+        );
+        // Expanded length 0 (serde-default / absent) with images: defer to backend.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), true, 12),
+            None
+        );
+        // No routing info but images present: defer to backend.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(None, true, 12),
+            None
+        );
+        // Text-only: use the token count.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(None, false, 12),
+            Some(12)
+        );
+        // Expanded length 0 without images: fall back to the token count.
+        assert_eq!(
+            OpenAIPreprocessor::effective_prompt_len_for_cap(Some(0), false, 12),
+            Some(12)
         );
     }
 
@@ -3419,6 +3627,14 @@ mod tests {
             m.insert(
                 "thinking_mode".to_string(),
                 serde_json::Value::String("thinking".to_string()),
+            );
+            m
+        };
+        let thinking_mode_disabled = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String("disabled".to_string()),
             );
             m
         };
@@ -3621,6 +3837,30 @@ mod tests {
                 Some(&enable_thinking_false),
                 true,
                 "gemma-4 (hyphen alias) + enable_thinking=false → disabled",
+            ),
+            (
+                Some("minimax_m3"),
+                Some(&thinking_mode_disabled),
+                true,
+                "minimax_m3 + thinking_mode=disabled → disabled",
+            ),
+            (
+                Some("minimax-m3"),
+                Some(&thinking_mode_disabled),
+                true,
+                "minimax-m3 + thinking_mode=disabled → disabled",
+            ),
+            (
+                Some("minimax_m3"),
+                Some(&thinking_mode_thinking),
+                false,
+                "minimax_m3 + thinking_mode=thinking → enabled",
+            ),
+            (
+                Some("minimax_m3"),
+                None,
+                false,
+                "minimax_m3 + no args → enabled",
             ),
         ];
 

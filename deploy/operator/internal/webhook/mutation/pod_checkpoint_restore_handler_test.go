@@ -90,14 +90,35 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 		assert.Equal(t, "2", patchesByPath["/metadata/annotations/nvidia.com~1snapshot-artifact-version"])
 		assert.NotContains(t, patchesByPath, "/metadata/annotations/nvidia.com~1snapshot-target-containers")
 		assert.Contains(t, patchesByPath, "/spec/volumes")
-		assert.Equal(t, "sleep", patchesByPath["/spec/containers/0/command/0"])
-		assert.Equal(t, "infinity", patchesByPath["/spec/containers/0/command/1"])
+		for _, patch := range resp.Patches {
+			assert.NotContains(t, patch.Path, "/command")
+			assert.NotContains(t, patch.Path, "/args")
+		}
+		envPatch, ok := patchesByPath["/spec/containers/0/env"].([]any)
+		require.True(t, ok, "expected env patch, got %#v", patchesByPath)
+		assert.Contains(t, envPatch, map[string]any{
+			"name":  "DYN_SNAPSHOT_RESTORE_STANDBY",
+			"value": "1",
+		})
 	})
 
 	t.Run("not ready checkpoint leaves pod unchanged", func(t *testing.T) {
 		pod := checkpointCandidatePod("pending-checkpoint")
 		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
 			Operation: admissionv1.Create,
+			Namespace: "default",
+			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
+		}}
+
+		resp := mutator.Handle(context.Background(), req)
+		require.True(t, resp.Allowed)
+		assert.Empty(t, resp.Patches)
+	})
+
+	t.Run("update leaves pod unchanged", func(t *testing.T) {
+		pod := checkpointCandidatePod("worker-checkpoint")
+		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Update,
 			Namespace: "default",
 			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
 		}}

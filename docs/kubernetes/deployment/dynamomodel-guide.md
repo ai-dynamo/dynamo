@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Managing Models with DynamoModel
+subtitle: Deploys LoRA adapters and tracks model endpoints with the DynamoModel custom resource alongside DGDs.
 ---
 
 ## Overview

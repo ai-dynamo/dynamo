@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: gpt-oss-120b
+title: GPT-OSS-120B
+page: recipes/gpt-oss-120b.mdx
+provider: openai
+model:
+  name: GPT-OSS-120B
+  hf_id: openai/gpt-oss-120b
+  precision: W4A8_MXFP4_MXFP8 (disagg, via OVERRIDE_QUANT_ALGO)
+status: validated
+targets:
+- id: trtllm-agg
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 4
+  runtime:
+    framework: trtllm
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
+  topology: aggregated
+  techniques:
+  - wideep
+  - tp4
+  - arm64
+  workload:
+    type: static-synthetic
+    traffic: ISL 128 / OSL 1000, 3600 total concurrency (900/GPU), 10x request count
+  deploy:
+    asset: recipes/gpt-oss-120b/trtllm/agg/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/gpt-oss-120b/trtllm/agg/perf.yaml
+  expected_performance:
+    available: false
+- id: trtllm-disagg
+  recommended: false
+  hardware:
+    gpu: GB200/B200
+    count: 5
+  runtime:
+    framework: trtllm
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.0
+  topology: disaggregated
+  techniques:
+  - disagg-pd
+  - tp1-prefill
+  - tp4-decode
+  - ucx-kv-transfer
+  - w4a8-mxfp4-mxfp8
+  workload:
+    type: static-synthetic
+    traffic: ISL 8192 / OSL 1024, 1536 total concurrency (perf.yaml computes 256/GPU x 6)
+  deploy:
+    asset: recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/gpt-oss-120b/trtllm/disagg/perf.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null
+gaps:
+- no expected performance numbers in source for either target — section omitted
+- disagg perf.yaml computes concurrency from DEPLOYMENT_GPU_COUNT=6 while deploy topology is 5 GPUs — noted on page
+- no related feature benchmark exists
+- maintainer unknown

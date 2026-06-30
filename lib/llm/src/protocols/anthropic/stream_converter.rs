@@ -790,6 +790,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
@@ -832,6 +833,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
@@ -1021,6 +1023,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 

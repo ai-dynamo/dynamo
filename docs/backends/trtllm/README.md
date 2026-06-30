@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: TensorRT-LLM
+subtitle: TensorRT-LLM engines run in Dynamo's distributed runtime with disaggregated serving, KV-aware routing, and multinode support.
 ---
 
 ## Use the Latest Release

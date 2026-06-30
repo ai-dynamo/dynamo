@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::protocols::common::extensions::NvExt;
 use dynamo_llm::protocols::{
     common::StopConditionsProvider,
     openai::{
         chat_completions::NvCreateChatCompletionRequest,
         common_ext::{CommonExt, CommonExtProvider},
         completions::NvCreateCompletionRequest,
-        nvext::NvExt,
     },
 };
 

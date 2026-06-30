@@ -83,7 +83,7 @@ func TestNewCheckpointJob(t *testing.T) {
 	if main.ReadinessProbe == nil || main.ReadinessProbe.Exec == nil {
 		t.Fatalf("expected ready-file readiness probe, got %#v", main.ReadinessProbe)
 	}
-	expectedProbe := []string{"cat", SnapshotControlMountPath + "/" + ReadyForCheckpointFile}
+	expectedProbe := []string{"cat", SnapshotControlMountPath + "/" + ReadyForSnapshotFile}
 	if strings.Join(main.ReadinessProbe.Exec.Command, " ") != strings.Join(expectedProbe, " ") {
 		t.Fatalf("expected readiness probe %#v, got %#v", expectedProbe, main.ReadinessProbe.Exec.Command)
 	}

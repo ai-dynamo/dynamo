@@ -29,6 +29,15 @@ var (
 	// GroupVersion is group version used to register these objects
 	GroupVersion = schema.GroupVersion{Group: "nvidia.com", Version: "v1beta1"}
 
+	// DynamoComponentDeploymentGVK is the v1beta1 DynamoComponentDeployment kind.
+	DynamoComponentDeploymentGVK = GroupVersion.WithKind("DynamoComponentDeployment")
+
+	// DynamoGraphDeploymentGVK is the v1beta1 DynamoGraphDeployment kind.
+	DynamoGraphDeploymentGVK = GroupVersion.WithKind("DynamoGraphDeployment")
+
+	// DynamoGraphDeploymentRequestGVK is the v1beta1 DynamoGraphDeploymentRequest kind.
+	DynamoGraphDeploymentRequestGVK = GroupVersion.WithKind("DynamoGraphDeploymentRequest")
+
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme
 	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
 

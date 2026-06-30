@@ -161,15 +161,23 @@ impl ModelType {
     /// Returns all endpoint types supported by this model type.
     /// This properly handles combinations like Chat | Completions.
     pub fn as_endpoint_types(&self) -> Vec<crate::endpoint_type::EndpointType> {
+        self.as_endpoint_types_with_anthropic(dynamo_runtime::config::env_is_truthy(
+            dynamo_runtime::config::environment_names::llm::DYN_ENABLE_ANTHROPIC_API,
+        ))
+    }
+
+    /// Returns all endpoint types supported by this model type using an explicit
+    /// Anthropic API gate.
+    pub fn as_endpoint_types_with_anthropic(
+        &self,
+        enable_anthropic_api: bool,
+    ) -> Vec<crate::endpoint_type::EndpointType> {
         let mut endpoint_types = Vec::new();
         if self.contains(Self::Chat) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Chat);
             // Translation layers over chat completions
             endpoint_types.push(crate::endpoint_type::EndpointType::Responses);
-            // AnthropicMessages is gated by DYN_ENABLE_ANTHROPIC_API env var
-            if dynamo_runtime::config::env_is_truthy(
-                dynamo_runtime::config::environment_names::llm::DYN_ENABLE_ANTHROPIC_API,
-            ) {
+            if enable_anthropic_api {
                 endpoint_types.push(crate::endpoint_type::EndpointType::AnthropicMessages);
             }
         }

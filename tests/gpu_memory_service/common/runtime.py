@@ -201,7 +201,7 @@ class GMSEngineProcess(EngineProcess, ABC):
         action: str,
     ) -> dict:
         response = requests.post(
-            f"http://localhost:{self.system_port}/engine/{route}",
+            f"http://localhost:{self.system_port}/engine/control/{route}",
             json=payload,
             timeout=timeout,
         )

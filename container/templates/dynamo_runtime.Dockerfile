@@ -168,3 +168,11 @@ ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+
+
+# Compliance stages are intentionally NOT included here: dynamo-runtime is an
+# UNPUBLISHED wheel-builder image (release.yml ships vllm/sglang/trtllm-runtime,
+# frontend, operator, planner, snapshot-agent — not this), so it carries no
+# shipped-NOTICES obligation. The Rust-crate attribution that matters lives in
+# the published wheels themselves (maturin SBOM + bundled THIRD-PARTY-RUST-
+# LICENSES, see wheel_builder) and in the published framework images' /legal.
