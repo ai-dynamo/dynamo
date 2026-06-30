@@ -19,8 +19,8 @@ use dynamo_protocols::types::{
     ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
-    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType, FunctionName,
-    FunctionObject, FunctionType, ImageUrl, ReasoningContent,
+    ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType, CompletionUsage,
+    FunctionName, FunctionObject, FunctionType, ImageUrl, ReasoningContent,
 };
 use uuid::Uuid;
 
@@ -458,6 +458,34 @@ fn convert_anthropic_tool_choice(tc: &AnthropicToolChoice) -> ChatCompletionTool
         }
     }
 }
+
+/// Convert Dynamo's OpenAI-compatible usage into Anthropic's non-overlapping
+/// input-token accounting.
+///
+/// Dynamo backends report `prompt_tokens` as the complete prompt and
+/// `cached_tokens` as a subset of it. Anthropic reports the cached subset
+/// separately, so `input_tokens` must exclude it.
+pub(super) fn completion_usage_to_anthropic(usage: &CompletionUsage) -> AnthropicUsage {
+    let cache_read_input_tokens = usage
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|details| details.cached_tokens)
+        // A backend must not be able to produce an Anthropic usage breakdown
+        // whose cached subset exceeds the complete prompt.
+        .map(|tokens| tokens.min(usage.prompt_tokens))
+        .filter(|&tokens| tokens > 0);
+
+    AnthropicUsage {
+        input_tokens: usage
+            .prompt_tokens
+            .saturating_sub(cache_read_input_tokens.unwrap_or(0)),
+        output_tokens: usage.completion_tokens,
+        // OpenAI-compatible backends do not distinguish cache writes.
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens,
+    }
+}
+
 /// Convert a completed chat completion response into an Anthropic Messages response.
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
@@ -536,31 +564,12 @@ pub fn chat_completion_to_anthropic_response(
         });
     }
 
-    // Map usage
+    // Map usage through the same protocol conversion used by the streaming path.
     let usage = chat_resp
         .inner
         .usage
-        .map(|u| {
-            let cache_read_input_tokens = u
-                .prompt_tokens_details
-                .and_then(|d| d.cached_tokens)
-                .filter(|&n| n > 0);
-            // OpenAI's `prompt_tokens` is the TOTAL prompt size and already
-            // includes the cached (and cache-creation) tokens. Anthropic's
-            // `input_tokens` semantics are the opposite: it counts only the
-            // *uncached* input, with cache_read/cache_creation reported
-            // separately and non-overlapping. Subtract so the same token isn't
-            // double-counted across input_tokens + cache_read_input_tokens.
-            let input_tokens = u
-                .prompt_tokens
-                .saturating_sub(cache_read_input_tokens.unwrap_or(0));
-            AnthropicUsage {
-                input_tokens,
-                output_tokens: u.completion_tokens,
-                cache_creation_input_tokens: None, // Not available from OpenAI format
-                cache_read_input_tokens,
-            }
-        })
+        .as_ref()
+        .map(completion_usage_to_anthropic)
         .unwrap_or_default();
 
     AnthropicMessageResponse {
@@ -1023,6 +1032,25 @@ mod tests {
         assert_eq!(response.usage.input_tokens, 1);
         assert_eq!(response.usage.cache_read_input_tokens, Some(11));
         assert_eq!(response.usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn test_anthropic_usage_clamps_cached_tokens_to_prompt_tokens() {
+        let usage = CompletionUsage {
+            prompt_tokens: 12,
+            completion_tokens: 5,
+            total_tokens: 17,
+            prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
+                audio_tokens: None,
+                cached_tokens: Some(20),
+            }),
+            completion_tokens_details: None,
+        };
+
+        let usage = completion_usage_to_anthropic(&usage);
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, Some(12));
+        assert_eq!(usage.output_tokens, 5);
     }
 
     #[allow(deprecated)]

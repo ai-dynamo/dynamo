@@ -10,12 +10,15 @@
 use std::collections::HashSet;
 
 use axum::response::sse::Event;
-use dynamo_protocols::types::{ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk};
+use dynamo_protocols::types::{
+    ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk, CompletionUsage,
+};
 use uuid::Uuid;
 
 use super::types::{
     AnthropicDelta, AnthropicErrorBody, AnthropicMessageDeltaBody, AnthropicMessageResponse,
     AnthropicResponseContentBlock, AnthropicStopReason, AnthropicStreamEvent, AnthropicUsage,
+    completion_usage_to_anthropic,
 };
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::AnthropicContext;
@@ -34,10 +37,9 @@ pub struct AnthropicStreamConverter {
     text_block_started: bool,
     text_block_closed: bool,
     text_block_index: u32,
-    // Token usage (from engine)
-    input_token_count: u32,
-    output_token_count: u32,
-    cached_token_count: Option<u32>,
+    // Starts with a frontend estimate and is replaced atomically when the
+    // engine reports authoritative usage.
+    usage: AnthropicUsage,
     // Tool call tracking
     tool_call_states: Vec<ToolCallState>,
     tool_blocks_flushed: bool,
@@ -63,7 +65,7 @@ impl ToolCallState {
 }
 
 impl AnthropicStreamConverter {
-    pub fn new(model: String) -> Self {
+    pub fn new(model: String, estimated_input_tokens: u32) -> Self {
         Self {
             model,
             message_id: format!("msg_{}", Uuid::new_v4().simple()),
@@ -74,14 +76,10 @@ impl AnthropicStreamConverter {
             text_block_started: false,
             text_block_closed: false,
             text_block_index: 0,
-            // 0 until the engine reports the real prompt_tokens on the final
-            // chunk. The frontend can't produce an authoritative count here:
-            // the cache-hit split is unknown pre-generation and the frontend
-            // tokenizer may diverge from the worker's. message_delta carries
-            // the real value (see append_chunk_events).
-            input_token_count: 0,
-            output_token_count: 0,
-            cached_token_count: None,
+            usage: AnthropicUsage {
+                input_tokens: estimated_input_tokens,
+                ..Default::default()
+            },
             tool_call_states: Vec::new(),
             tool_blocks_flushed: false,
             next_block_index: 0,
@@ -92,8 +90,12 @@ impl AnthropicStreamConverter {
     /// Create a converter seeded with the original Anthropic request context.
     /// This allows the response stream to carry forward metadata that was lost
     /// during the Anthropic-to-OpenAI request conversion.
-    pub fn with_context(model: String, context: AnthropicContext) -> Self {
-        let mut converter = Self::new(model);
+    pub fn with_context(
+        model: String,
+        estimated_input_tokens: u32,
+        context: AnthropicContext,
+    ) -> Self {
+        let mut converter = Self::new(model, estimated_input_tokens);
         converter.api_context = Some(context);
         converter
     }
@@ -194,6 +196,10 @@ impl AnthropicStreamConverter {
         }
     }
 
+    fn record_usage(&mut self, usage: &CompletionUsage) {
+        self.usage = completion_usage_to_anthropic(usage);
+    }
+
     /// Emit the initial `message_start` event.
     pub fn emit_start_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::with_capacity(1);
@@ -213,12 +219,7 @@ impl AnthropicStreamConverter {
             model: self.model.clone(),
             stop_reason: None,
             stop_sequence: None,
-            usage: AnthropicUsage {
-                input_tokens: self.input_token_count,
-                output_tokens: 0,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-            },
+            usage: self.usage.clone(),
         };
 
         let event = AnthropicStreamEvent::MessageStart { message };
@@ -241,25 +242,11 @@ impl AnthropicStreamConverter {
         chunk: &NvCreateChatCompletionStreamResponse,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
-        // Capture token usage from the engine when available (typically on the
-        // final chunk). Per the Anthropic streaming spec, `message_delta.usage`
-        // is cumulative, so we report the engine's real `prompt_tokens` here.
-        // OpenAI's `prompt_tokens` is the TOTAL prompt and already includes the
-        // cached tokens, whereas Anthropic's `input_tokens` counts only the
-        // *uncached* input (cache_read is reported separately and must not
-        // overlap) — so subtract the cached count. The engine is the only
-        // authoritative source for this number: the frontend tokenizer can
-        // diverge from the worker's (multimodal expansion, sglang chat-processor
-        // mode, special-token handling), so we never synthesize it upstream.
+        // Replace the initial estimate when the engine reports authoritative
+        // usage (typically on the final chunk). This also applies Anthropic's
+        // non-overlapping cached-token accounting.
         if let Some(usage) = &chunk.inner.usage {
-            self.output_token_count = usage.completion_tokens;
-            self.cached_token_count = usage
-                .prompt_tokens_details
-                .as_ref()
-                .and_then(|d| d.cached_tokens);
-            self.input_token_count = usage
-                .prompt_tokens
-                .saturating_sub(self.cached_token_count.unwrap_or(0));
+            self.record_usage(usage);
         }
 
         let mut should_flush_tool_blocks = false;
@@ -466,12 +453,7 @@ impl AnthropicStreamConverter {
                 stop_reason: self.stop_reason.clone(),
                 stop_sequence: None,
             },
-            usage: AnthropicUsage {
-                input_tokens: self.input_token_count,
-                output_tokens: self.output_token_count,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: self.cached_token_count,
-            },
+            usage: self.usage.clone(),
         };
         events.push(make_sse_event("message_delta", &message_delta));
 
@@ -532,14 +514,7 @@ impl AnthropicStreamConverter {
         let mut events = Vec::new();
 
         if let Some(usage) = &chunk.inner.usage {
-            self.output_token_count = usage.completion_tokens;
-            self.cached_token_count = usage
-                .prompt_tokens_details
-                .as_ref()
-                .and_then(|d| d.cached_tokens);
-            self.input_token_count = usage
-                .prompt_tokens
-                .saturating_sub(self.cached_token_count.unwrap_or(0));
+            self.record_usage(usage);
         }
 
         let mut should_flush_tool_blocks = false;
@@ -634,7 +609,7 @@ impl AnthropicStreamConverter {
                     events.push(make_tagged_event("content_block_start", &ev));
                 }
 
-                self.output_token_count += 1;
+                self.usage.output_tokens += 1;
                 let ev = AnthropicStreamEvent::ContentBlockDelta {
                     index: self.text_block_index,
                     delta: AnthropicDelta::TextDelta {
@@ -724,12 +699,7 @@ impl AnthropicStreamConverter {
                 stop_reason: self.stop_reason.clone(),
                 stop_sequence: None,
             },
-            usage: AnthropicUsage {
-                input_tokens: self.input_token_count,
-                output_tokens: self.output_token_count,
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: self.cached_token_count,
-            },
+            usage: self.usage.clone(),
         };
         events.push(make_tagged_event("message_delta", &ev));
 
@@ -911,24 +881,29 @@ mod tests {
                 }),
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 
-    /// Streaming usage: `message_start` reports input_tokens=0 (engine count not
-    /// known yet), and the final `message_delta` reports the engine's real
-    /// `prompt_tokens` minus the cached tokens (Anthropic `input_tokens` counts
-    /// only the uncached input; cache_read is separate and must not overlap).
+    /// Streaming usage starts with the frontend estimate, then reconciles to
+    /// the engine's total prompt tokens minus its cached-token count.
     #[test]
-    fn test_streaming_input_tokens_zero_at_start_real_at_delta() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into());
+    fn test_streaming_input_tokens_reconciled_from_engine_usage() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 19);
 
-        // message_start: nothing from the engine yet -> 0.
-        assert_eq!(conv.input_token_count, 0);
+        // `message_start` is emitted before backend usage is available.
+        assert_eq!(conv.usage.input_tokens, 19);
 
-        conv.process_chunk_tagged(&text_chunk("Hi!"));
-        // Final chunk carries usage: prompt=12, cached=11 -> input=1.
-        let end = conv.process_chunk_tagged(&usage_chunk(12, Some(11), 5));
-        assert!(end.is_empty(), "usage-only chunk emits no content events");
+        // Exercise the production chunk path rather than its tagged test mirror.
+        let mut events = Vec::new();
+        conv.append_chunk_events(&usage_chunk(12, Some(11), 5), &mut events);
+        assert!(
+            events.is_empty(),
+            "usage-only chunk emits no content events"
+        );
+        assert_eq!(conv.usage.input_tokens, 1);
+        assert_eq!(conv.usage.cache_read_input_tokens, Some(11));
+        assert_eq!(conv.usage.output_tokens, 5);
 
         let delta = conv.emit_end_events_tagged();
         let message_delta = delta
@@ -953,7 +928,7 @@ mod tests {
     /// events and fail to execute tool calls ("Error editing file").
     #[test]
     fn test_text_block_stops_before_tool_block_starts() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into());
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
 
         // Stream some text
         let text_events = conv.process_chunk_tagged(&text_chunk("I'll edit the file."));
@@ -1175,7 +1150,7 @@ mod tests {
     /// Text-only response: stop emitted in end events (no early close).
     #[test]
     fn test_text_only_response_stop_in_end_events() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into());
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
 
         conv.process_chunk_tagged(&text_chunk("Hello world"));
 
@@ -1225,7 +1200,7 @@ mod tests {
     /// block is properly closed before the next one starts.
     #[test]
     fn test_thinking_text_then_tool_call() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into());
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
 
         // 1. Reasoning tokens → thinking block starts
         let ev = conv.process_chunk_tagged(&reasoning_chunk("Let me think..."));
@@ -1293,7 +1268,7 @@ mod tests {
     /// Thinking-only response (no text/tool follows): thinking block closed in end events.
     #[test]
     fn test_thinking_only_closed_in_end_events() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into());
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
         conv.process_chunk_tagged(&reasoning_chunk("Deep thought..."));
 
         let ev = conv.emit_end_events_tagged();
@@ -1405,7 +1380,7 @@ mod tests {
             service_tier: Some("priority".to_string()),
             ..Default::default()
         };
-        let mut conv = AnthropicStreamConverter::with_context("test-model".into(), ctx);
+        let mut conv = AnthropicStreamConverter::with_context("test-model".into(), 0, ctx);
         assert!(conv.api_context.is_some());
         assert_eq!(
             conv.api_context.as_ref().unwrap().service_tier.as_deref(),

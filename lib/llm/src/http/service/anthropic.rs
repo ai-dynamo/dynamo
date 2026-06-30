@@ -266,6 +266,16 @@ async fn anthropic_messages(
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
+    // Anthropic exposes input usage in `message_start`, before the backend's
+    // authoritative count is available. Seed the stream with the same
+    // best-effort estimate as `/count_tokens`; the converter replaces it when
+    // the backend reports final usage.
+    let estimated_input_tokens = if streaming {
+        estimate_input_tokens(&orig_request)
+    } else {
+        0
+    };
+
     // Check if the Anthropic request explicitly disabled thinking.
     let thinking_explicitly_disabled = orig_request
         .thinking
@@ -408,8 +418,10 @@ async fn anthropic_messages(
         stream_handle.arm();
 
         let mut converter = match anthropic_ctx {
-            Some(ctx) => AnthropicStreamConverter::with_context(model_for_resp, ctx),
-            None => AnthropicStreamConverter::new(model_for_resp),
+            Some(ctx) => {
+                AnthropicStreamConverter::with_context(model_for_resp, estimated_input_tokens, ctx)
+            }
+            None => AnthropicStreamConverter::new(model_for_resp, estimated_input_tokens),
         };
 
         let mut http_queue_guard = Some(http_queue_guard);
@@ -759,6 +771,20 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
             content.text = trimmed[newline_pos + 1..].to_string();
         }
     }
+}
+
+/// Estimate input usage for a streaming `message_start` event.
+///
+/// The backend's rendered prompt and cache-hit split are not available when
+/// the event is emitted. Final `message_delta` usage replaces this estimate.
+fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
+    AnthropicCountTokensRequest {
+        model: req.model.clone(),
+        messages: req.messages.clone(),
+        system: req.system.clone(),
+        tools: req.tools.clone(),
+    }
+    .estimate_tokens()
 }
 
 fn gate_anthropic_nvext(request: &mut AnthropicCreateMessageRequest, nvext_enabled: bool) {
