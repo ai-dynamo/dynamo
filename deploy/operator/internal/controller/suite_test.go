@@ -52,6 +52,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlwebhook "sigs.k8s.io/controller-runtime/pkg/webhook"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -90,7 +91,7 @@ var _ = BeforeSuite(func() {
 		// Note that you must have the required binaries setup under the bin directory to perform
 		// the tests directly. When we run make test it will be setup and used automatically.
 		BinaryAssetsDirectory: filepath.Join("..", "..", "bin", "k8s",
-			fmt.Sprintf("1.29.0-%s-%s", runtime.GOOS, runtime.GOARCH)),
+			fmt.Sprintf("1.30.0-%s-%s", runtime.GOOS, runtime.GOARCH)),
 	}
 
 	var err error
@@ -136,7 +137,21 @@ var _ = BeforeSuite(func() {
 
 	k8sManager, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
+		WebhookServer: ctrlwebhook.NewServer(ctrlwebhook.Options{
+			Host:    testEnv.WebhookInstallOptions.LocalServingHost,
+			Port:    testEnv.WebhookInstallOptions.LocalServingPort,
+			CertDir: testEnv.WebhookInstallOptions.LocalServingCertDir,
+		}),
 	})
+	Expect(err).NotTo(HaveOccurred())
+
+	err = ctrl.NewWebhookManagedBy(k8sManager, &v1beta1.DynamoGraphDeploymentRequest{}).Complete()
+	Expect(err).NotTo(HaveOccurred())
+	err = ctrl.NewWebhookManagedBy(k8sManager, &v1beta1.DynamoGraphDeployment{}).Complete()
+	Expect(err).NotTo(HaveOccurred())
+	err = ctrl.NewWebhookManagedBy(k8sManager, &v1beta1.DynamoComponentDeployment{}).Complete()
+	Expect(err).NotTo(HaveOccurred())
+	err = ctrl.NewWebhookManagedBy(k8sManager, &v1beta1.DynamoGraphDeploymentScalingAdapter{}).Complete()
 	Expect(err).NotTo(HaveOccurred())
 
 	go func() {

@@ -32,7 +32,7 @@ async-nats = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 tmq = { workspace = true }
-lru = { version = "0.12" }
+lru = { version = "0.16" }
 axum = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }

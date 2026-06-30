@@ -24,7 +24,6 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
-from dynamo.sglang._compat import get_scheduler_info
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
@@ -35,6 +34,38 @@ from dynamo.sglang.capacity import (
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+
+
+def _register_model_source_path(engine: sgl.Engine, server_args: ServerArgs) -> str:
+    """Pick the path passed to `register_model` for MDC construction.
+
+    When `--model-path` is a remote URI (`s3://...`, `gs://...`), SGLang's
+    `ModelConfig.maybe_pull_model_tokenizer_from_remote` (sglang/srt/configs/
+    model_config.py) pulls metadata files (`*config.json`) to a local temp dir
+    and rewrites the engine's ModelConfig:
+
+      - `.model_weights = <original URI>`  (preserved for the weight loader)
+      - `.model_path    = <local temp dir>` (now contains the metadata)
+
+    `server_args.model_path` itself is NOT mutated. Dynamo's `register_model`
+    would otherwise pass the raw URI through `hub.rs` -> ModelExpress, which
+    has no S3 provider and 404s. Returning the post-pull local dir lets
+    `register_model` take its `fs::exists` shortcut and skip the broken MX
+    path.
+
+    Temporary LLM-only workaround mirroring the vLLM fix in
+    `components/src/dynamo/vllm/main.py`. Diffusion paths (Images/Videos) skip
+    the Rust-side HF download entirely (lib/bindings/python/rust/lib.rs:314)
+    and don't need this rewrite.
+    """
+    try:
+        mc = engine.tokenizer_manager.model_config
+    except AttributeError:
+        return server_args.model_path
+    weights = getattr(mc, "model_weights", None)
+    if weights:
+        return mc.model_path
+    return server_args.model_path
 
 
 def _build_media_decoder_and_fetcher():
@@ -64,6 +95,7 @@ async def _register_model_with_runtime_config(
     *,
     worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
+    serves_lora_load: bool = False,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -101,12 +133,29 @@ async def _register_model_with_runtime_config(
     if getattr(dynamo_args, "frontend_decoding", False):
         media_decoder, media_fetcher = _build_media_decoder_and_fetcher()
 
+    # Advertise the worker's LoRA slot budget on the BASE registration so the frontend allocator
+    # can place adapters onto idle-but-LoRA-capable workers before any adapter is loaded here.
+    # Only workers that actually SERVE the LoRA load endpoints (init_decode / init_prefill, which
+    # pass serves_lora_load=True) may advertise capacity. Other worker modes (embedding, diffusion,
+    # multimodal-encode) register through this same wrapper but do not serve load_lora, so they
+    # must never advertise capacity they cannot fulfill -- hence an explicit allowlist flag rather
+    # than an output_type denylist.
+    lora_enabled = bool(
+        getattr(server_args, "enable_lora", None)
+        or getattr(server_args, "lora_paths", None)
+    )
+    max_gpu_lora_count = (
+        getattr(server_args, "max_loras_per_batch", None)
+        if (serves_lora_load and lora_enabled)
+        else None
+    )
+
     try:
         await register_model(
             input_type,
             output_type,
             endpoint,
-            server_args.model_path,
+            _register_model_source_path(engine, server_args),
             server_args.served_model_name,
             kv_cache_block_size=server_args.page_size,
             runtime_config=runtime_config,
@@ -116,6 +165,7 @@ async def _register_model_with_runtime_config(
             worker_type=worker_type,
             needs=needs,
             ignore_weights=use_modelexpress_remote_instance(server_args),
+            max_gpu_lora_count=max_gpu_lora_count,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
@@ -376,7 +426,7 @@ async def _get_runtime_config(
             )
 
     try:
-        scheduler_info = get_scheduler_info(engine)
+        scheduler_info = engine._scheduler_init_result.scheduler_infos[0]
         capacity = runtime_capacity(server_args, scheduler_info)
         max_total_tokens = scheduler_info.get("max_total_num_tokens")
 
@@ -423,6 +473,7 @@ async def register_model_with_readiness_gate(
     *,
     worker_type: WorkerType,
     needs: Optional[List[List[WorkerType]]] = None,
+    serves_lora_load: bool = False,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
@@ -449,6 +500,7 @@ async def register_model_with_readiness_gate(
         output_type,
         worker_type=worker_type,
         needs=needs,
+        serves_lora_load=serves_lora_load,
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")

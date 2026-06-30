@@ -179,27 +179,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
 #[cfg(test)]
 mod tests {
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode, header};
+    use tower::ServiceExt;
+
     use super::*;
-
-    #[test]
-    fn test_store_and_check() {
-        let store = SharedCacheStore::new();
-        store.store(&[100, 200, 300]);
-
-        // Query: [100, 999, 200, 300, 888]
-        // Hits at positions 0, 2, 3 => ranges [0..1, 2..4]
-        let hits = store.check_blocks(&[100, 999, 200, 300, 888]);
-        assert_eq!(hits.total_hits, 3);
-        assert_eq!(hits.ranges, vec![0..1, 2..4]);
-    }
-
-    #[test]
-    fn test_check_empty_cache() {
-        let store = SharedCacheStore::new();
-        let hits = store.check_blocks(&[1, 2, 3]);
-        assert_eq!(hits.total_hits, 0);
-        assert!(hits.ranges.is_empty());
-    }
 
     #[test]
     fn test_remove_blocks() {
@@ -213,33 +197,29 @@ mod tests {
         assert_eq!(hits.ranges, vec![0..1, 2..3]);
     }
 
-    #[test]
-    fn test_all_hits() {
-        let store = SharedCacheStore::new();
-        store.store(&[1, 2, 3]);
+    #[tokio::test]
+    async fn check_blocks_returns_wire_format() {
+        let store = Arc::new(SharedCacheStore::new());
+        store.store(&[10, 30]);
+        let app = create_router(Arc::new(AppState { store }));
 
-        let hits = store.check_blocks(&[1, 2, 3]);
-        assert_eq!(hits.total_hits, 3);
-        assert_eq!(hits.ranges, vec![0..3]);
-    }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/check_blocks")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"block_hashes":[10,20,30]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-    #[test]
-    fn test_store_len() {
-        let store = SharedCacheStore::new();
-        assert_eq!(store.len(), 0);
-        store.store(&[1, 2, 3]);
-        assert_eq!(store.len(), 3);
-        store.store(&[1, 4]); // 1 is a duplicate
-        assert_eq!(store.len(), 4);
-    }
-
-    #[test]
-    fn test_response_wire_format() {
-        let hits = SharedCacheHits::from_ranges(vec![0..2, 5..8]);
-        let ranges: Vec<[u32; 2]> = hits.ranges.iter().map(|r| [r.start, r.end]).collect();
-        let resp = SharedCacheQueryResponse { ranges };
-        let json = serde_json::to_string(&resp).unwrap();
-        let parsed: SharedCacheQueryResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.ranges, vec![[0, 2], [5, 8]]);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"ranges": [[0, 1], [2, 3]]})
+        );
     }
 }

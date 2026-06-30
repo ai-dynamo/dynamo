@@ -9,4 +9,5 @@
 
 --no-binary imageio-ffmpeg
 
+blake3>=1.0.0,<2.0.0  # Dynamo SGLang multimodal request handlers import blake3 at startup
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file

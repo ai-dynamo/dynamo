@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: qwen3-vl-30b
+title: Qwen3-VL-30B
+provider: qwen
+model:
+  name: Qwen3-VL-30B-A3B-Instruct
+  hf_id: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+  precision: FP8
+status: validated
+targets:
+- id: agg-embedding-cache
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 1
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+  topology: aggregated
+  techniques:
+  - embedding-cache
+  - prefix-caching
+  - multimodal
+  workload:
+    type: multimodal-synthetic
+    traffic: 1,000 requests, 1 image each, 200-image pool (80% reuse), 400 text tokens, max_tokens 150, concurrency 64
+  deploy:
+    asset: recipes/qwen3-vl-30b/vllm/agg-embedding-cache/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/qwen3-vl-30b/vllm/agg-embedding-cache/perf.yaml
+  expected_performance:
+    available: true
+    summary: 'Cache ON vs OFF: +16.4% output TPS (3,575.6 vs 3,072.3 tok/s), -27.7% TTFT avg, -8.8% ITL avg, -13.4% request
+      latency'
+related_benchmarks:
+- qwen3-vl-embedding-cache
+maintainer: null
+gaps:
+- maintainer unknown
+- exact measured cache hit rate not in source (LRU eviction makes it uncontrollable)
+deferred_reason: 'R1 scope decision (2026-06-11): benchmark-derived recipe held back from R1 per the no-promotion-from-ablation
+  rule; deployable target exists and the embedding-cache feature benchmark page remains. Re-add in R2 via the promotion
+  process.'

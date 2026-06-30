@@ -160,6 +160,14 @@ curl http://localhost:8090/metrics
 | `dynamo_kvindexer_models` | Gauge | — | Number of active model+tenant indexers |
 | `dynamo_kvindexer_workers` | Gauge | — | Number of registered worker instances |
 | `dynamo_kvindexer_listeners` | Gauge | `status` | Number of ZMQ listeners by status (`pending`, `active`, `paused`, `failed`) |
+| `dynamo_kvrouter_kv_cache_events_applied` | Counter | `event_type`, `status` | Primary device-tier KV events applied, partitioned by event type and result |
+| `dynamo_kvrouter_kv_cache_event_warnings` | Counter | `warning_kind` | Suspicious-but-valid primary device-tier events, including duplicate STORE content |
+
+The core event counters aggregate process-wide across model and tenant indexers and
+across all indexer threads. A `duplicate_store` warning is not necessarily an error:
+peer recovery replay can reapply content already restored from a snapshot. Lower-tier
+events and listener transport or replay failures are not represented by these core
+event counters; use the standalone service metrics and logs for those paths.
 
 ### `POST /register` — Register an endpoint
 

@@ -345,6 +345,8 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         model="Qwen/Qwen3-0.6B",
         disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
         component="backend",
+        dyn_tool_call_parser=None,
+        dyn_reasoning_parser=None,
     )
     worker_config = object()
 
@@ -407,6 +409,69 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
     assert captured["enable_rl"] is True
 
 
+@pytest.mark.asyncio
+async def test_unified_start_returns_normalized_served_model_name(monkeypatch):
+    """Return the Dynamo-normalized served model name from EngineConfig."""
+    from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
+    from dynamo.vllm import llm_engine
+
+    served_model_name = "Qwen/Qwen3-0.6B"
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(num_gpu_blocks=8),
+        model_config=SimpleNamespace(
+            max_model_len=4096, get_diff_sampling_param=lambda: {}
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=2,
+            max_num_batched_tokens=8192,
+        ),
+    )
+    engine_args = SimpleNamespace(
+        model=served_model_name,
+        served_model_name=[served_model_name],
+        create_model_config=lambda: SimpleNamespace(get_diff_sampling_param=lambda: {}),
+        create_engine_config=lambda usage_context: vllm_config,
+    )
+    engine_client = SimpleNamespace(vllm_config=vllm_config, shutdown=lambda: None)
+
+    monkeypatch.setattr(
+        llm_engine.AsyncLLM,
+        "from_vllm_config",
+        lambda **kwargs: engine_client,
+    )
+    monkeypatch.setattr(llm_engine, "get_dp_range_for_worker", lambda config: (0, 1))
+    monkeypatch.setattr(llm_engine, "per_rank_kv_blocks", lambda blocks, size: blocks)
+    monkeypatch.setattr(
+        llm_engine,
+        "configure_kv_event_block_size",
+        lambda client, config: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        llm_engine, "get_configured_kv_event_block_size", lambda config: 16
+    )
+    monkeypatch.setattr(
+        llm_engine.VllmLLMEngine,
+        "logits_processor_spec",
+        lambda self: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        llm_engine, "VllmEnginePauseController", lambda client: object()
+    )
+
+    engine = llm_engine.VllmLLMEngine(
+        engine_args,
+        CommonDisaggregationMode.AGGREGATED,
+        served_model_name=served_model_name,
+        component="backend",
+    )
+
+    config = await engine.start(worker_id=0)
+    await engine.cleanup()
+
+    assert engine_args.served_model_name == [served_model_name]
+    assert config.served_model_name == served_model_name
+
+
 def test_should_prefetch_model_for_default_load_format():
     from dynamo.vllm.main import should_prefetch_model
 
@@ -456,6 +521,69 @@ def test_should_register_model_fetch_weights_for_default_load_format():
     )
 
     assert should_register_model_ignore_weights(config) is False
+
+
+def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
+    from dynamo.vllm import main as vllm_main
+
+    class FakeModelConfig:
+        def get_diff_sampling_param(self):
+            return {"temperature": 0.7}
+
+    vllm_config = SimpleNamespace(
+        additional_config={},
+        cache_config=SimpleNamespace(block_size=None),
+        model_config=FakeModelConfig(),
+    )
+
+    class FakeEngineArgs:
+        enable_log_requests = False
+        enable_lora = False
+        disable_log_stats = True
+        load_format = "modelexpress"
+
+        def create_model_config(self):
+            raise AssertionError("setup_vllm_engine must not create ModelConfig twice")
+
+        def create_engine_config(self, usage_context):
+            return vllm_config
+
+    engine_client = SimpleNamespace(vllm_config=vllm_config)
+
+    class FakeAsyncLLM:
+        @staticmethod
+        def from_vllm_config(**_kwargs):
+            return engine_client
+
+    class FakeMetrics:
+        def __init__(self, **_kwargs):
+            pass
+
+        def set_model_load_time(self, _load_time):
+            pass
+
+    monkeypatch.setattr(vllm_main, "setup_multiprocess_prometheus", lambda: None)
+    monkeypatch.setattr(vllm_main, "LLMBackendMetrics", FakeMetrics)
+    monkeypatch.setattr(vllm_main, "_uses_dynamo_connector", lambda _args: False)
+    monkeypatch.setattr(vllm_main, "AsyncLLM", FakeAsyncLLM)
+    monkeypatch.setattr(
+        vllm_main,
+        "get_engine_cache_info",
+        lambda _engine: {"block_size": 16},
+    )
+
+    config = SimpleNamespace(
+        component="backend",
+        engine_args=FakeEngineArgs(),
+        gms_shadow_mode=False,
+        multimodal_embedding_cache_capacity_gb=0,
+        route_to_encoder=False,
+        served_model_name="Qwen/Qwen3-0.6B",
+    )
+
+    _, _, default_sampling_params, _, _ = vllm_main.setup_vllm_engine(config)
+
+    assert default_sampling_params == {"temperature": 0.7}
 
 
 # --disaggregation-mode tests
@@ -908,6 +1036,40 @@ def test_build_sampling_params_maps_max_thinking_tokens():
     assert sp.thinking_token_budget == 1024
 
 
+def test_build_sampling_params_caps_omitted_max_tokens_to_generation_default():
+    from dynamo.vllm.handlers import build_sampling_params
+
+    model_max_len = 100
+    defaults = {"max_tokens": 32}
+
+    def make(stop_conditions):
+        return {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {},
+            "stop_conditions": stop_conditions,
+            "output_options": {},
+        }
+
+    remaining = model_max_len - 3
+
+    # omitted max_tokens → capped to configured default
+    sp = build_sampling_params(make({}), defaults, model_max_len)
+    assert sp.max_tokens == 32
+
+    # explicit max_tokens == remaining context → treated as explicit, not capped
+    sp = build_sampling_params(make({"max_tokens": remaining}), defaults, model_max_len)
+    assert sp.max_tokens == remaining
+
+    sp = build_sampling_params(make({"max_tokens": 10}), defaults, model_max_len)
+    assert sp.max_tokens == 10
+
+    sp = build_sampling_params(make({"max_tokens": 64}), defaults, model_max_len)
+    assert sp.max_tokens == 64
+
+    sp = build_sampling_params(make({}), {}, model_max_len)
+    assert sp.max_tokens == remaining
+
+
 def _make_dynamo_config(**overrides):
     """Build a minimal fake DynamoConfig for update_engine_config_with_dynamo tests."""
     defaults = {
@@ -1053,3 +1215,16 @@ class TestEmbeddingWorkerFlag:
             ValueError, match="--embedding-worker cannot be combined with multimodal"
         ):
             parse_args()
+
+
+def test_build_sampling_params_openai_maps_max_thinking_tokens():
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    request = {
+        "model": "test-model",
+        "prompt": "Solve: 1+1.",
+        "max_tokens": 32,
+        "nvext": {"max_thinking_tokens": 1024},
+    }
+    sp = build_sampling_params_openai(request, default_sampling_params={})
+    assert sp.thinking_token_budget == 1024

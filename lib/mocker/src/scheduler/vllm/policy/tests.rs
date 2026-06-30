@@ -13,6 +13,7 @@ use crate::common::protocols::{
 };
 use crate::common::sequence::ActiveSequence;
 use crate::kv_manager::KvManager;
+use crate::kv_manager::kvbm_backend::G1Acquire;
 use crate::scheduler::vllm::{RequestStatus, VllmCore};
 
 use super::{AdmissionDecision, decide_waiting_admission};
@@ -47,7 +48,7 @@ mod vllm {
         let mut manager = kv_manager(4);
         let mut holder = ActiveSequence::new((100..112).collect(), 1, Some(4), false, false);
         let signal = holder.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 3);
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(3)));
         let sequence = ActiveSequence::new((0..8).collect(), 32, Some(4), false, false);
 
         let decision = decide_waiting_admission(
@@ -86,7 +87,7 @@ mod vllm {
         let mut manager = kv_manager(3);
         let mut holder = ActiveSequence::new((0..8).collect(), 1, Some(4), true, false);
         let signal = holder.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 2);
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(2)));
         let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, false);
 
         let decision = decide_waiting_admission(
@@ -107,13 +108,13 @@ mod vllm {
         let mut manager = kv_manager(3);
         let mut seeder = ActiveSequence::new((0..8).collect(), 1, Some(4), true, false);
         let signal = seeder.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 2);
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(2)));
         for signal in seeder.free_signal() {
             manager.process(&signal);
         }
         let mut holder = ActiveSequence::new((100..104).collect(), 1, Some(4), true, false);
         let signal = holder.take_creation_signal().unwrap();
-        assert_eq!(manager.process(&signal), 1);
+        assert!(matches!(manager.process(&signal), G1Acquire::Ready(1)));
         let sequence = ActiveSequence::new((0..12).collect(), 1, Some(4), true, false);
 
         let decision = decide_waiting_admission(
@@ -155,9 +156,11 @@ mod trtllm {
         core.receive(DirectRequest {
             tokens: tokens.collect(),
             max_output_tokens: max_output,
+            output_token_ids: None,
             uuid: Some(uuid),
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
     }
 

@@ -139,8 +139,8 @@ scale() {
   echo "SCALE dp=$from_dp → dp=$to_dp at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "  worker pod: $(worker_pod)"
   echo "=========================================="
-  echo "--- request: POST /engine/scale_elastic_ep {\"new_data_parallel_size\": $to_dp} ---"
-  RESP=$(curl -s -X POST http://localhost:8001/engine/scale_elastic_ep \
+  echo "--- request: POST /engine/control/scale_elastic_ep {\"new_data_parallel_size\": $to_dp} ---"
+  RESP=$(curl -s -X POST http://localhost:8001/engine/control/scale_elastic_ep \
     -H "Content-Type: application/json" \
     -d "{\"new_data_parallel_size\": $to_dp}" \
     --max-time "$timeout")

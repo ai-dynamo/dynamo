@@ -46,7 +46,9 @@ def make_args(**overrides):
         "startup_time": None,
         "durable_kv_events": False,
         "kv_transfer_bandwidth": 64.0,
+        "kv_transfer_timing_mode": "full_prompt",
         "reasoning": None,
+        "response_replay_trace_path": None,
         "sglang_schedule_policy": None,
         "sglang_page_size": None,
         "sglang_max_prefill_tokens": None,
@@ -88,6 +90,7 @@ def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
     assert runtime_config.total_kv_blocks == 16384
     assert runtime_config.max_num_seqs == 256
     assert runtime_config.max_num_batched_tokens == 8192
+    assert runtime_config.runtime_data["output_replay_consumer"] == "true"
 
 
 def test_build_mocker_engine_args_rejects_mismatched_sglang_sizes():
@@ -273,6 +276,8 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         durable_kv_events=False,
         kv_bytes_per_token=131072,
         kv_transfer_bandwidth=123.0,
+        kv_transfer_timing_mode="destination_missing",
+        response_replay_trace_path=None,
         num_g2_blocks=8192,
         num_g3_blocks=16384,
         offload_batch_size=32,
@@ -322,6 +327,7 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
     assert engine_args.aic_moe_ep_size is None
     assert engine_args.aic_attention_dp_size is None
     assert engine_args.bootstrap_port is None
+    assert engine_args.kv_transfer_timing_mode == "destination_missing"
     assert engine_args.num_g2_blocks == 8192
     assert engine_args.num_g3_blocks == 16384
     assert engine_args.offload_batch_size == 32
@@ -447,6 +453,50 @@ def test_replay_engine_args_compute_kv_bytes_for_g4_before_validation(monkeypatc
     assert engine_args.num_g2_blocks == 8192
     assert engine_args.enable_g4_storage is True
     assert calls == [("/models/mock", "auto")]
+
+
+def test_get_kv_cache_dtype_bytes_supports_int8():
+    # AIC KVCacheQuantMode allows int8; the byte map must size it at 1 byte
+    # instead of silently falling back to 2, or offload KV-byte estimates and
+    # transfer latency are overstated.
+    from types import SimpleNamespace
+
+    from dynamo.mocker.utils.kv_cache import get_kv_cache_dtype_bytes
+
+    cfg = SimpleNamespace(dtype="bfloat16")
+    assert get_kv_cache_dtype_bytes(cfg, "int8") == 1
+    assert get_kv_cache_dtype_bytes(cfg, "fp8") == 1
+    assert get_kv_cache_dtype_bytes(cfg, "auto") == 2  # model default dtype
+
+
+def test_replay_engine_args_forwards_aic_kv_cache_dtype(monkeypatch):
+    # Offload KV-byte estimation must use the configured (normalized) KV dtype,
+    # not always "auto".
+    import dynamo.replay.main as replay_main
+
+    calls = []
+
+    def fake_compute_kv_bytes_per_token(model_path, kv_cache_dtype="auto"):
+        calls.append((model_path, kv_cache_dtype))
+        return 131072
+
+    monkeypatch.setattr(
+        replay_main, "compute_kv_bytes_per_token", fake_compute_kv_bytes_per_token
+    )
+
+    replay_main._load_engine_args(
+        json.dumps(
+            {
+                "num_gpu_blocks": 4096,
+                "num_g2_blocks": 8192,
+                "num_g3_blocks": 16384,
+                "aic_model_path": "/models/mock",
+                "aic_kv_cache_dtype": "fp8",
+            }
+        )
+    )
+
+    assert calls == [("/models/mock", "fp8")]
 
 
 def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):

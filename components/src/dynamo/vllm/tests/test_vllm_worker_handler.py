@@ -138,6 +138,36 @@ def _make_engine_response(request_id: str = "req-1", finished: bool = True):
     return resp
 
 
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_resets_vllm_external_cache():
+    handler = _make_handler()
+    handler.engine_client = SimpleNamespace(
+        reset_prefix_cache=AsyncMock(return_value=True)
+    )
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks()]
+
+    assert chunks == [{"status": "success", "message": "KV cache cleared"}]
+    handler.engine_client.reset_prefix_cache.assert_awaited_once_with(
+        reset_connector=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_clear_kv_blocks_reports_reset_failure():
+    handler = _make_handler()
+    handler.engine_client = SimpleNamespace(
+        reset_prefix_cache=AsyncMock(return_value=False)
+    )
+
+    chunks = [chunk async for chunk in handler.clear_kv_blocks()]
+
+    assert chunks == [{"status": "error", "message": "KV cache reset failed"}]
+    handler.engine_client.reset_prefix_cache.assert_awaited_once_with(
+        reset_connector=True
+    )
+
+
 class TestReasoningParserForwarding:
     def test_request_reasoning_metadata_reads_extra_args(self):
         request = {
@@ -1427,6 +1457,73 @@ class TestRLAdminRouteHardening:
                 resp = await fn(body)
                 assert resp["status"] == "error", (fn.__name__, body, resp)
                 assert "JSON object" in resp["message"]
+
+    @pytest.mark.asyncio
+    async def test_distributed_update_can_match_async_rl_semantics(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        resp = await handler.update_weights_from_distributed(
+            {
+                "allow_unpaused": True,
+                "reset_prefix_cache": False,
+                "engine_rpc": "update_weights",
+                "weight_version": 7,
+                "update_info": {"names": ["weight"]},
+            }
+        )
+
+        assert resp == {"status": "ok", "version": 7}
+        handler.engine_client.collective_rpc.assert_awaited_once_with(
+            "update_weights",
+            kwargs={"update_info": {"names": ["weight"]}},
+        )
+        handler.engine_client.reset_prefix_cache.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_distributed_update_rejects_unpaused_cache_reset(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        resp = await handler.update_weights_from_distributed(
+            {"allow_unpaused": True, "engine_rpc": "update_weights"}
+        )
+
+        assert resp["status"] == "error"
+        assert "cannot reset the prefix cache" in resp["message"]
+        handler.engine_client.collective_rpc.assert_not_awaited()
+        handler.engine_client.reset_prefix_cache.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_distributed_update_preserves_safe_defaults(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        handler._paused = False
+        resp = await handler.update_weights_from_distributed({})
+        assert resp["status"] == "error"
+        handler.engine_client.collective_rpc.assert_not_awaited()
+
+        handler._paused = True
+        resp = await handler.update_weights_from_distributed(
+            {"engine_rpc": "finish_weight_update"}
+        )
+        assert resp["status"] == "ok"
+        handler.engine_client.collective_rpc.assert_awaited_once_with(
+            "finish_weight_update", kwargs={}
+        )
+        handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
 
     @pytest.mark.asyncio
     async def test_abort_request_surfaces_deferred_abort_failure(self):
