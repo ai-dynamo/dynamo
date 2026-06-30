@@ -1572,16 +1572,17 @@ impl JailedStream {
                     .data
                     .as_ref()
                     .is_some_and(|d| d.inner.choices.is_empty());
-                if is_empty_choices && !synthesized {
-                    if let Some(template) = &template {
-                        for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, has)| **has) {
-                            if terminated.contains(index) {
-                                continue;
-                            }
-                            yield Self::synthesize_tool_calls_chunk(template, *index);
+                if is_empty_choices
+                    && !synthesized
+                    && let Some(template) = &template
+                {
+                    for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, has)| **has) {
+                        if terminated.contains(index) {
+                            continue;
                         }
-                        synthesized = true;
+                        yield Self::synthesize_tool_calls_chunk(template, *index);
                     }
+                    synthesized = true;
                 }
 
                 yield response;
