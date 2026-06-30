@@ -825,6 +825,32 @@ where
         Ok((metadata, stream))
     }
 
+    /// Book a previously arbitrated worker and dispatch without reselection or fallback.
+    pub async fn book_and_dispatch_exact<M, F>(
+        &self,
+        mut request: SingleIn<T>,
+        instance_id: u64,
+        advance_round_robin: bool,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        if advance_round_robin && self.router_mode == RouterMode::RoundRobin {
+            self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
+        }
+        let (instance_id, permit) = self
+            .select_exact_target(request.content(), Some(instance_id))
+            .await?;
+        let metadata = prepare(&mut request, instance_id)?;
+        let stream = self.dispatch_exact(request, instance_id).await?;
+        let stream = match permit {
+            Some(permit) => permit.into_tracked_stream(stream),
+            None => stream,
+        };
+        Ok((metadata, stream))
+    }
+
     /// Issue a request using device-aware weighted routing.
     ///
     /// Instances are partitioned by device type (CPU vs non-CPU), then the router
@@ -1072,6 +1098,23 @@ where
                     self.router_mode
                 )
             }
+        }
+    }
+
+    /// Peek the worker this routing mode would choose for a request without booking it.
+    pub fn peek_worker_for_request(&self, request: &T) -> Option<u64> {
+        let instance_ids = self.client.routing_instances().free_ids().to_vec();
+        if instance_ids.is_empty() {
+            return None;
+        }
+
+        match self.router_mode {
+            RouterMode::DeviceAwareWeighted => {
+                let state = self.occupancy_state.as_deref()?;
+                let selection = self.device_aware_candidates(request, state, &instance_ids);
+                state.peek_min(&selection.candidates)
+            }
+            _ => self.peek_next_worker(),
         }
     }
 
