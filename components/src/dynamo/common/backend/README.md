@@ -320,6 +320,47 @@ Two surfaces:
 yet" or "no prefix cache" (gauge skipped); `0.0` is a legitimate
 zero-hit measurement.
 
+## KV Event Publishing
+
+On the unified path, `Worker` owns `KvEventPublisher` construction. Engines
+declare sources with `kv_event_sources()`; they do not instantiate
+`KvEventPublisher` directly.
+
+Use `ZmqSource` when the engine already emits Dynamo-compatible KV events on a
+ZMQ socket:
+
+```python
+from dynamo.common.backend.publisher import ZmqSource
+
+async def kv_event_sources(self):
+    return [
+        ZmqSource(endpoint="tcp://127.0.0.1:5557", dp_rank=0),
+    ]
+```
+
+Use `PushSource` when the engine needs a live publisher and drives
+`publish_stored()` / `publish_removed()` from its own thread:
+
+```python
+from dynamo.common.backend.publisher import PushSource
+
+def _on_kv_publisher_ready(self, publisher):
+    self._kv_publisher = publisher
+    self._start_kv_event_thread()
+
+async def kv_event_sources(self):
+    return [PushSource(on_ready=self._on_kv_publisher_ready, dp_rank=0)]
+```
+
+Return one source per DP rank owned by this worker, and keep that rank ownership
+stable for the engine lifetime. `EngineConfig.llm.kv_cache_block_size` must be
+set or `Worker` skips KV event publishers; snapshot publishers still work
+without a block size.
+
+For `PushSource`, cleanup is the engine's responsibility. Stop event threads in
+`cleanup()`, prevent new publishes once cleanup begins, and let any in-flight
+publish loop observe the shutdown signal before resources are released.
+
 ## Telemetry
 
 > **Requires `DYN_LOGGING_JSONL=1` + `OTEL_EXPORT_ENABLED=1`** for engine

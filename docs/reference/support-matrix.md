@@ -230,14 +230,14 @@ For version-specific artifact details, installation commands, and release histor
   - [Dynamo Graph](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-graph) *(Deprecated in v0.9.0)*
 
 - **Rust Crates**:
-  - [dynamo-runtime](https://crates.io/crates/dynamo-runtime/)
-  - [dynamo-llm](https://crates.io/crates/dynamo-llm/)
-  - [dynamo-protocols](https://crates.io/crates/dynamo-protocols/)
-  - [dynamo-parsers](https://crates.io/crates/dynamo-parsers/)
-  - [dynamo-config](https://crates.io/crates/dynamo-config/) *(New in v0.8.0)*
-  - [dynamo-memory](https://crates.io/crates/dynamo-memory/) *(New in v0.8.0)*
-  - [dynamo-tokens](https://crates.io/crates/dynamo-tokens/) *(New in v0.9.0)*
-  - [dynamo-mocker](https://crates.io/crates/dynamo-mocker/) *(New in v1.0.0)*
-  - [dynamo-kv-router](https://crates.io/crates/dynamo-kv-router/) *(New in v1.0.0)*
+  - [dynamo-runtime](https://docs.rs/dynamo-runtime/)
+  - [dynamo-llm](https://docs.rs/dynamo-llm/)
+  - [dynamo-protocols](https://docs.rs/dynamo-protocols/)
+  - [dynamo-parsers](https://docs.rs/dynamo-parsers/)
+  - [dynamo-config](https://docs.rs/dynamo-config/) *(New in v0.8.0)*
+  - [dynamo-memory](https://docs.rs/dynamo-memory/) *(New in v0.8.0)*
+  - [dynamo-tokens](https://docs.rs/dynamo-tokens/) *(New in v0.9.0)*
+  - [dynamo-mocker](https://docs.rs/dynamo-mocker/) *(New in v1.0.0)*
+  - [dynamo-kv-router](https://docs.rs/dynamo-kv-router/) *(New in v1.0.0)*
 
 Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the [Quickstart](https://docs.nvidia.com/dynamo/getting-started/quickstart) in the docs.
