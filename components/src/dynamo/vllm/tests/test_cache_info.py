@@ -18,7 +18,7 @@ from dynamo.vllm.cache_info import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.pre_merge,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
 ]
 
 
