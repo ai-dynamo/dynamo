@@ -152,9 +152,16 @@ class NativePlannerBase:
         from dynamo.planner.plugins.orchestrator.engine_adapter import (
             OrchestratorEngineAdapter,
         )
+        from dynamo.planner.plugins.builtins.observe import EnvironmentObservePlugin
 
         self._engine = OrchestratorEngineAdapter(
-            self.config, self._build_worker_capabilities()
+            self.config,
+            self._build_worker_capabilities(),
+            observe_plugin=EnvironmentObservePlugin(
+                self.environment,
+                require_prefill=self.require_prefill,
+                require_decode=self.require_decode,
+            ),
         )
         return self._engine
 
@@ -233,9 +240,7 @@ class NativePlannerBase:
             update_engine_capabilities(self._build_worker_capabilities())
 
     async def _collect_traffic(self) -> Optional[TrafficObservation]:
-        observation = await self.environment.collect_traffic()
-        self._emit_observed_traffic_metrics()
-        return observation
+        return await self.environment.collect_traffic()
 
     async def _collect_kv_hit_rate_observation(
         self, duration_s: float
@@ -243,10 +248,7 @@ class NativePlannerBase:
         return await self.environment.collect_kv_hit_rate_observation(duration_s)
 
     def _collect_fpm(self) -> FpmObservations:
-        fpm_stats = self.environment.collect_fpm()
-        if self.prometheus_port != 0:
-            self._emit_per_engine_fpm(fpm_stats.prefill, fpm_stats.decode)
-        return fpm_stats
+        return self.environment.collect_fpm()
 
     def _emit_observed_traffic_metrics(self) -> None:
         if self.prometheus_port == 0:
@@ -338,6 +340,23 @@ class NativePlannerBase:
             worker_counts=worker_counts,
             fpm_observations=fpm_obs,
         )
+
+    async def _observe_tick(
+        self, engine: EngineProtocol, tick: ScheduledTick
+    ) -> TickInput:
+        observe = getattr(engine, "observe", None)
+        if callable(observe):
+            return await observe(tick, time.time())
+        return await self._gather_tick_input(tick)
+
+    def _publish_observation_metrics(self, tick_input: TickInput) -> None:
+        if tick_input.traffic is not None:
+            self._emit_observed_traffic_metrics()
+        if tick_input.fpm_observations is not None and self.prometheus_port != 0:
+            self._emit_per_engine_fpm(
+                tick_input.fpm_observations.prefill,
+                tick_input.fpm_observations.decode,
+            )
 
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         pass
@@ -491,7 +510,8 @@ class NativePlannerBase:
                     continue
 
                 await self._refresh_and_update_capabilities()
-                tick_input = await self._gather_tick_input(next_tick)
+                tick_input = await self._observe_tick(engine, next_tick)
+                self._publish_observation_metrics(tick_input)
                 self._publish_inventory_and_gpu_hours(tick_input)
                 if tick_input.worker_counts is not None:
                     self._last_worker_counts = tick_input.worker_counts
