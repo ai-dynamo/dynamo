@@ -168,6 +168,56 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
         matched
     }
 
+    /// Scattered batch match: resolves every input hash against the active or
+    /// inactive pool without stopping at a miss.
+    ///
+    /// The returned vector is aligned with `seq_hash`: each hit is `Some`,
+    /// each miss is `None`, and input order and duplicates are preserved. The
+    /// complete batch is resolved under one store-mutex acquisition. Frequency
+    /// tracking is applied after releasing that lock, exactly once per hit
+    /// (including repeated hashes and inactive resurrections).
+    ///
+    /// This operation contributes to the existing scan metrics because it has
+    /// scan, rather than prefix, semantics.
+    pub fn match_blocks_scattered(
+        &self,
+        seq_hash: &[SequenceHash],
+    ) -> Vec<Option<ImmutableBlock<T>>> {
+        self.metrics
+            .inc_scan_hashes_requested(seq_hash.len() as u64);
+
+        if seq_hash.is_empty() {
+            self.metrics.inc_scan_blocks_returned(0);
+            return Vec::new();
+        }
+
+        // ONE store-lock acquisition for all active+inactive probes, including
+        // misses and repeated hashes.
+        let inners = self.store.match_scattered_locked_batch(seq_hash);
+
+        // Keep TinyLFU work outside the store critical section. A duplicate
+        // input is a duplicate access, so each returned occurrence is touched.
+        if self.block_registry.has_frequency_tracking() {
+            for inner in inners.iter().flatten() {
+                self.block_registry.touch(inner.sequence_hash());
+            }
+        }
+
+        let hit_count = inners.iter().filter(|inner| inner.is_some()).count();
+        let matched = inners
+            .into_iter()
+            .map(|inner| inner.map(ImmutableBlock::from_inner))
+            .collect();
+
+        self.metrics.inc_scan_blocks_returned(hit_count as u64);
+        tracing::debug!(
+            num_hashes = seq_hash.len(),
+            total_matched = hit_count,
+            "match_blocks_scattered result"
+        );
+        matched
+    }
+
     /// Scatter-gather scan: finds all blocks matching any hash, without
     /// stopping on misses.
     pub fn scan_matches(

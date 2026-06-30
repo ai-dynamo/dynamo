@@ -1377,6 +1377,136 @@ mod single_lock_match_tests {
 }
 
 // ============================================================================
+// ALIGNED SCATTERED MATCH TESTS
+// ============================================================================
+
+mod scattered_match_tests {
+    use super::*;
+
+    fn create_backend_manager(
+        block_count: usize,
+        backend_builder: fn(
+            BlockManagerConfigBuilder<TestBlockData>,
+        ) -> BlockManagerConfigBuilder<TestBlockData>,
+    ) -> BlockManager<TestBlockData> {
+        let registry = BlockRegistry::builder()
+            .frequency_tracker(FrequencyTrackingCapacity::default().create_tracker())
+            .build();
+        backend_builder(
+            BlockManager::<TestBlockData>::builder()
+                .block_count(block_count)
+                .block_size(4)
+                .registry(registry),
+        )
+        .build()
+        .expect("build manager")
+    }
+
+    fn register_one(
+        manager: &BlockManager<TestBlockData>,
+        base: u32,
+    ) -> (SequenceHash, ImmutableBlock<TestBlockData>) {
+        let token_block = create_token_block(&[base, base + 1, base + 2, base + 3]);
+        let seq_hash = token_block.kvbm_sequence_hash();
+        let mutable = manager
+            .allocate_blocks(1)
+            .expect("allocate")
+            .into_iter()
+            .next()
+            .unwrap();
+        let complete = mutable.complete(&token_block).expect("complete");
+        let immutable = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        (seq_hash, immutable)
+    }
+
+    /// Active and inactive hits remain aligned around a miss; duplicate
+    /// inactive hashes are returned at both positions and later hits are not
+    /// truncated. Run against every supported inactive backend.
+    #[rstest]
+    #[case("lru", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_lru_backend())]
+    #[case("multi_lru", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_multi_lru_backend())]
+    #[case("lineage", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_lineage_backend())]
+    fn scattered_preserves_alignment_misses_duplicates_and_later_hits(
+        #[case] _backend_name: &str,
+        #[case] backend_builder: fn(
+            BlockManagerConfigBuilder<TestBlockData>,
+        ) -> BlockManagerConfigBuilder<TestBlockData>,
+    ) {
+        let manager = create_backend_manager(4, backend_builder);
+        let (active_hash, _active) = register_one(&manager, 20_000);
+        let (inactive_hash, inactive) = register_one(&manager, 20_010);
+        let (later_hash, _later) = register_one(&manager, 20_020);
+        drop(inactive);
+
+        let miss = create_token_block(&[90_000, 90_001, 90_002, 90_003]).kvbm_sequence_hash();
+        let input = [active_hash, miss, inactive_hash, inactive_hash, later_hash];
+        let before = manager.metrics().snapshot();
+
+        let matched = manager.match_blocks_scattered(&input);
+
+        assert_eq!(matched.len(), input.len());
+        assert_eq!(matched[0].as_ref().unwrap().sequence_hash(), active_hash);
+        assert!(matched[1].is_none(), "miss must retain its aligned slot");
+        assert_eq!(matched[2].as_ref().unwrap().sequence_hash(), inactive_hash);
+        assert_eq!(matched[3].as_ref().unwrap().sequence_hash(), inactive_hash);
+        assert_eq!(
+            matched[2].as_ref().unwrap().block_id(),
+            matched[3].as_ref().unwrap().block_id(),
+            "duplicate hashes must resolve to the same physical primary"
+        );
+        assert_eq!(matched[4].as_ref().unwrap().sequence_hash(), later_hash);
+
+        let after = manager.metrics().snapshot();
+        assert_eq!(
+            after.scan_hashes_requested - before.scan_hashes_requested,
+            input.len() as u64
+        );
+        assert_eq!(
+            after.scan_blocks_returned - before.scan_blocks_returned,
+            4,
+            "scan return metric counts hit occurrences, including duplicates"
+        );
+    }
+
+    #[test]
+    fn scattered_empty_input_returns_empty() {
+        let manager = create_test_manager(1);
+        let before = manager.metrics().snapshot();
+        assert!(manager.match_blocks_scattered(&[]).is_empty());
+        let after = manager.metrics().snapshot();
+        assert_eq!(
+            after.scan_hashes_requested - before.scan_hashes_requested,
+            0
+        );
+        assert_eq!(after.scan_blocks_returned - before.scan_blocks_returned, 0);
+    }
+
+    #[test]
+    fn scattered_touches_once_per_hit_occurrence() {
+        let (manager, metered) = crate::testing::create_test_manager_metered::<TestBlockData>(3);
+        let (active_hash, _active) = register_one(&manager, 30_000);
+        let (inactive_hash, inactive) = register_one(&manager, 30_010);
+        drop(inactive);
+        let miss = create_token_block(&[91_000, 91_001, 91_002, 91_003]).kvbm_sequence_hash();
+
+        metered.reset();
+        let matched =
+            manager.match_blocks_scattered(&[active_hash, miss, inactive_hash, inactive_hash]);
+
+        assert_eq!(matched.iter().filter(|block| block.is_some()).count(), 3);
+        assert_eq!(
+            metered.touches(),
+            3,
+            "each aligned hit occurrence must touch exactly once; misses never touch"
+        );
+    }
+}
+
+// ============================================================================
 // IMMUTABLE BLOCK AND WEAK BLOCK TESTS
 // ============================================================================
 

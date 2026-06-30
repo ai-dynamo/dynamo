@@ -612,6 +612,31 @@ impl<T: BlockMetadata + Sync> BlockStore<T> {
         out
     }
 
+    /// Batched active-or-inactive scattered lookup under **one** store-mutex
+    /// acquisition. Unlike [`match_prefix_locked_batch`](Self::match_prefix_locked_batch),
+    /// this preserves one output position per input hash and continues after
+    /// misses.
+    ///
+    /// Each position uses [`acquire_for_hash_locked`](Self::acquire_for_hash_locked),
+    /// so active lookup, eager `Primary -> Inactive` recovery, and inactive
+    /// resurrection remain atomic with respect to every other position in the
+    /// batch. Repeated hashes are resolved independently: an inactive hit in
+    /// the first occurrence is resurrected, and subsequent occurrences clone
+    /// that now-active primary.
+    ///
+    /// Frequency tracking is deliberately disabled while the store lock is
+    /// held. The caller applies one touch per hit after this method returns.
+    pub(crate) fn match_scattered_locked_batch(
+        self: &Arc<Self>,
+        hashes: &[SequenceHash],
+    ) -> Vec<Option<Arc<ImmutableBlockInner<T>>>> {
+        let mut inner = self.inner.lock();
+        hashes
+            .iter()
+            .map(|&hash| self.acquire_for_hash_locked(&mut inner, hash, /*touch*/ false))
+            .collect()
+    }
+
     /// Atomic registration of a [`CompleteBlock`]: lookup-then-transition
     /// under one store-mutex acquisition. Closes the register-vs-register
     /// race for the same sequence hash.
