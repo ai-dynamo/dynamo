@@ -517,7 +517,7 @@ runs:
             fi
 
             if ! grep -Eiq \
-              'no endpoints available|connection refused|connection reset by peer|TLS handshake timeout|context deadline exceeded|service .* not found|temporarily unavailable|unable to handle the request|timed out|timeout|i/o timeout|unexpected EOF|^EOF$' \
+              'no endpoints available|connection refused|connection reset by peer|TLS handshake timeout|service .* not found|unexpected EOF|^EOF$' \
               <<<"${output}"; then
               printf '%s\n' "${output}" >&2
               return 1

@@ -131,6 +131,13 @@ jobs:
 
   operator:
     needs: changed-files
+    if: |
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.vllm == 'true' ||
+      needs.changed-files.outputs.sglang == 'true' ||
+      needs.changed-files.outputs.trtllm == 'true' ||
+      needs.changed-files.outputs.deploy == 'true' ||
+      needs.changed-files.outputs.snapshot == 'true'
     name: Operator
     runs-on: prod-default-v2
     outputs:
