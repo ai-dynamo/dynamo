@@ -515,6 +515,10 @@ impl Node {
         blocks: &[KvCacheStoredBlockData],
         shape_version: u64,
     ) -> Option<bool> {
+        if self.internal.load(Ordering::Acquire) {
+            return Some(false);
+        }
+
         self.apply_edge_shape_update(shape_version, |state, _children| {
             if self.internal.load(Ordering::Acquire) || blocks.is_empty() || state.edge.is_empty() {
                 return (false, false);
