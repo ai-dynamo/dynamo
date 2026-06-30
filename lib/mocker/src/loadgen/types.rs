@@ -54,11 +54,11 @@ pub enum DynamoRequestTrace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceFileFormat {
     Mooncake,
-    /// Mooncake-shaped rows where follow-up turns contain input deltas.
-    /// Offline replay accumulates those deltas per session in token space before
-    /// computing engine block hashes. Use this only for delta traces: it expands
-    /// compact session deltas into cumulative prompts and can use much more
-    /// memory than `Mooncake`.
+    /// Mooncake-shaped rows where follow-up turns contain new input deltas.
+    /// Offline replay accumulates each generated output and the next input delta
+    /// per session before computing engine block hashes. Use this only for delta
+    /// traces: it expands compact session turns into cumulative prompts and can
+    /// use much more memory than `Mooncake`.
     MooncakeDelta,
     /// Mooncake request/cache rows plus explicit request-level workflow
     /// dependencies. Each row dispatches after `wait_for` completions plus its

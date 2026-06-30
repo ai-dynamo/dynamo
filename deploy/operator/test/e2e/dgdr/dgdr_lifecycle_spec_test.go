@@ -43,10 +43,15 @@ type DGDRLifecycleInput struct {
 	Hardware       *v1beta1.HardwareSpec
 	Features       *v1beta1.FeaturesSpec
 
+	// Overrides contains optional DGD and profiling job overrides.
+	Overrides *v1beta1.OverridesSpec
+
 	// Verification options
 	ExpectDGDReady  bool                          // verify DGD reaches state=successful (skipped in mocker mode)
 	VerifyServices  map[string]ServiceExpectation // per-service expectations on the DGD (optional)
 	VerifyConfigMap bool                          // check dgdr-output-<name> ConfigMap exists and contains a DGD
+	// send v1/models and v1/chat/completions requests (skipped in mocker mode)
+	VerifyInference bool
 }
 
 // DGDRLifecycleSpec implements a test that exercises the full DGDR lifecycle:
@@ -94,6 +99,9 @@ func DGDRLifecycleSpec(ctx context.Context, inputGetter func() DGDRLifecycleInpu
 	}
 	if input.Features != nil {
 		opts = append(opts, withFeatures(*input.Features))
+	}
+	if input.Overrides != nil {
+		opts = append(opts, withOverrides(*input.Overrides))
 	}
 
 	// Step 1: Create DGDR
@@ -165,10 +173,24 @@ func DGDRLifecycleSpec(ctx context.Context, inputGetter func() DGDRLifecycleInpu
 	dgd := waitForDGDSuccessful(dgdrResult.Status.DGDName, dgdTimeout)
 	Expect(dgd).NotTo(BeNil())
 
-	// Step 6: Verify individual DGD services
+	// Step 6: Verify actual pod readiness (independent of DGD status)
+	By("Verifying DGD pods are Running and Ready")
+	verifyDGDPodsReady(dgdrResult.Status.DGDName)
+
+	// Step 7: Verify individual DGD services
 	if len(input.VerifyServices) > 0 {
 		By("Verifying DGD service replica status")
 		verifyDGDServices(dgdrResult.Status.DGDName, input.VerifyServices)
+	}
+
+	// Step 8: Inference smoke test
+	if input.VerifyInference {
+		model := input.Model
+		if model == "" {
+			model = flagModel
+		}
+		By("Running inference smoke test against frontend")
+		verifyInference(dgdrResult.Status.DGDName, model)
 	}
 }
 

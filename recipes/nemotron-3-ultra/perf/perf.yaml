@@ -183,7 +183,7 @@ spec:
         - name: AIPERF_HTTP_CONNECTION_LIMIT
           value: "200"
         - name: AIPERF_VERSION
-          value: "0.8.0"
+          value: "0.10.0"
         - name: AIPERF_HTTP_SO_RCVTIMEO
           value: "120"
         - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT

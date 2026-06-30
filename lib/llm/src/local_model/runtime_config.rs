@@ -212,6 +212,14 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[validate(range(min = 0.0, max = 1.0))]
     pub kv_transfer_preferred_weight: Option<f32>,
+
+    /// Per-worker LoRA adapter slot capacity (e.g. vLLM `--max-loras`, SGLang
+    /// `--max-loras-per-batch`), advertised on the BASE worker registration so the LoRA
+    /// allocation controller can see idle-but-LoRA-capable workers before any adapter is
+    /// loaded on them. `None` for non-LoRA workers. Adapter (`card.lora`) registrations carry
+    /// the same value via `LoraInfo::max_gpu_lora_count`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_gpu_lora_count: Option<u32>,
 }
 
 const fn default_data_parallel_start_rank() -> u32 {
@@ -260,6 +268,7 @@ impl Default for ModelRuntimeConfig {
             kv_transfer_domain: None,
             kv_transfer_enforcement: None,
             kv_transfer_preferred_weight: None,
+            max_gpu_lora_count: None,
         }
     }
 }
@@ -529,6 +538,27 @@ mod tests {
             cfg.populate_stable_routing_id_from_env();
             assert!(cfg.stable_routing_id.is_none());
         });
+    }
+
+    #[test]
+    fn max_gpu_lora_count_roundtrips_and_is_omitted_when_none() {
+        // Worker LoRA capacity must survive the MDC -> discovery -> watcher wire so the frontend
+        // can seed set_worker_capacity for idle LoRA-capable workers.
+        let cfg = ModelRuntimeConfig {
+            max_gpu_lora_count: Some(8),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"max_gpu_lora_count\":8"));
+        let parsed: ModelRuntimeConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.max_gpu_lora_count, Some(8));
+
+        // Omitted from the wire (and defaults to None on read) for non-LoRA workers, so older
+        // payloads without the field stay backward-compatible.
+        let none_json = serde_json::to_string(&ModelRuntimeConfig::default()).unwrap();
+        assert!(!none_json.contains("max_gpu_lora_count"));
+        let from_legacy: ModelRuntimeConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(from_legacy.max_gpu_lora_count, None);
     }
 
     #[test]

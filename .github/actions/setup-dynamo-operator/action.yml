@@ -342,9 +342,18 @@ runs:
         if [ -n "${REGISTRY}" ]; then
           OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
           echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
+          # OPERATOR_TAG is a mutable, floating tag (e.g. main-operator) that is
+          # re-pushed on every main build. The chart default
+          # imagePullPolicy=IfNotPresent means a CI node that cached an older copy
+          # never re-pulls it, so a PR that doesn't rebuild the operator can run a
+          # stale crd-apply/manager binary (e.g. missing a newly-added flag) and
+          # land in CrashLoopBackOff. Force Always so the floating tag is refreshed
+          # on every pod start; the chart applies this value to both the manager
+          # and the crd-apply init container.
           IMAGE_ARGS+=(
             --set dynamo-operator.controllerManager.manager.image.repository="${OPERATOR_REPO}"
             --set dynamo-operator.controllerManager.manager.image.tag="${OPERATOR_TAG}"
+            --set dynamo-operator.controllerManager.manager.image.pullPolicy=Always
           )
         else
           echo "Using default operator image from Helm chart (nvcr.io/nvidia/ai-dynamo/kubernetes-operator)"
