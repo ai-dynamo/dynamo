@@ -127,6 +127,9 @@ impl RouterSchedulingPolicy {
             RouterQueuePolicy::Fcfs => Self::Fcfs(FcfsPolicy),
             RouterQueuePolicy::Lcfs => Self::Lcfs(LcfsPolicy),
             RouterQueuePolicy::Wspt => Self::Wspt(WsptPolicy),
+            // Session arbitration lives in PolicyQueue; requests within one
+            // session retain FCFS ordering.
+            RouterQueuePolicy::AgentRoundRobin => Self::Fcfs(FcfsPolicy),
         }
     }
 }
@@ -219,6 +222,7 @@ mod tests {
             priority_jump,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,

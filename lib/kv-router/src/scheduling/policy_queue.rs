@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap, VecDeque, hash_map::Entry as HashMapEntry};
 
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
@@ -129,9 +129,152 @@ impl<T> PartialOrd for PolicyQueueEntry<T> {
     }
 }
 
+struct SessionRoundRobinQueue<T> {
+    sessions: HashMap<Option<String>, BinaryHeap<PolicyQueueEntry<T>>>,
+    order: VecDeque<Option<String>>,
+}
+
+impl<T> SessionRoundRobinQueue<T> {
+    fn new() -> Self {
+        Self {
+            sessions: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, session_id: Option<String>, entry: PolicyQueueEntry<T>) {
+        match self.sessions.entry(session_id.clone()) {
+            HashMapEntry::Occupied(mut session) => session.get_mut().push(entry),
+            HashMapEntry::Vacant(session) => {
+                self.order.push_back(session_id);
+                let mut pending = BinaryHeap::new();
+                pending.push(entry);
+                session.insert(pending);
+            }
+        }
+    }
+
+    fn head_index(&self) -> Option<usize> {
+        let mut best = None;
+        for (index, session_id) in self.order.iter().enumerate() {
+            let strict_priority = self
+                .sessions
+                .get(session_id)
+                .and_then(|pending| pending.peek())
+                .expect("active session queue must not be empty")
+                .priority
+                .strict_priority;
+            if best.is_none_or(|(_, best_priority)| strict_priority > best_priority) {
+                best = Some((index, strict_priority));
+            }
+        }
+        best.map(|(index, _)| index)
+    }
+
+    fn peek(&self) -> Option<&PolicyQueueEntry<T>> {
+        let session_id = self.order.get(self.head_index()?)?;
+        self.sessions.get(session_id)?.peek()
+    }
+
+    fn pop(&mut self) -> Option<PolicyQueueEntry<T>> {
+        let session_id = self.order.remove(self.head_index()?)?;
+        let (entry, empty) = {
+            let pending = self.sessions.get_mut(&session_id)?;
+            let entry = pending.pop()?;
+            (entry, pending.is_empty())
+        };
+        if empty {
+            self.sessions.remove(&session_id);
+        } else {
+            self.order.push_back(session_id);
+        }
+        Some(entry)
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&PolicyQueueEntry<T>) -> bool) {
+        for pending in self.sessions.values_mut() {
+            pending.retain(&mut keep);
+        }
+        self.sessions.retain(|_, pending| !pending.is_empty());
+        self.order
+            .retain(|session_id| self.sessions.contains_key(session_id));
+    }
+}
+
+enum PendingQueue<T> {
+    Request(BinaryHeap<PolicyQueueEntry<T>>),
+    SessionRoundRobin(SessionRoundRobinQueue<T>),
+}
+
+impl<T> PendingQueue<T> {
+    fn new(policy: RouterQueuePolicy) -> Self {
+        match policy {
+            RouterQueuePolicy::AgentRoundRobin => {
+                Self::SessionRoundRobin(SessionRoundRobinQueue::new())
+            }
+            _ => Self::Request(BinaryHeap::new()),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Request(pending) => pending.is_empty(),
+            Self::SessionRoundRobin(pending) => pending.order.is_empty(),
+        }
+    }
+
+    fn peek(&self) -> Option<&PolicyQueueEntry<T>> {
+        match self {
+            Self::Request(pending) => pending.peek(),
+            Self::SessionRoundRobin(pending) => pending.peek(),
+        }
+    }
+
+    fn push(&mut self, session_id: Option<String>, entry: PolicyQueueEntry<T>) {
+        match self {
+            Self::Request(pending) => pending.push(entry),
+            Self::SessionRoundRobin(pending) => pending.push(session_id, entry),
+        }
+    }
+
+    fn pop(&mut self) -> Option<PolicyQueueEntry<T>> {
+        match self {
+            Self::Request(pending) => pending.pop(),
+            Self::SessionRoundRobin(pending) => pending.pop(),
+        }
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&PolicyQueueEntry<T>) -> bool) {
+        match self {
+            Self::Request(pending) => pending.retain(keep),
+            Self::SessionRoundRobin(pending) => pending.retain(&mut keep),
+        }
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = &PolicyQueueEntry<T>> + '_> {
+        match self {
+            Self::Request(pending) => Box::new(pending.iter()),
+            Self::SessionRoundRobin(pending) => {
+                Box::new(pending.sessions.values().flat_map(|queue| queue.iter()))
+            }
+        }
+    }
+
+    fn into_entries(self) -> Vec<PolicyQueueEntry<T>> {
+        match self {
+            Self::Request(pending) => pending.into_iter().collect(),
+            Self::SessionRoundRobin(pending) => pending
+                .sessions
+                .into_values()
+                .flat_map(BinaryHeap::into_iter)
+                .collect(),
+        }
+    }
+}
+
 struct PolicyClassQueue<T> {
     config: PolicyClassConfig,
-    pending: BinaryHeap<PolicyQueueEntry<T>>,
+    pending: PendingQueue<T>,
     stats: PolicyQueueStats,
     deficit: usize,
 }
@@ -152,11 +295,14 @@ impl<T> PolicyQueue<T> {
                 .classes()
                 .iter()
                 .cloned()
-                .map(|config| PolicyClassQueue {
-                    config,
-                    pending: BinaryHeap::new(),
-                    stats: PolicyQueueStats::default(),
-                    deficit: 0,
+                .map(|config| {
+                    let pending = PendingQueue::new(config.queue_policy);
+                    PolicyClassQueue {
+                        config,
+                        pending,
+                        stats: PolicyQueueStats::default(),
+                        deficit: 0,
+                    }
                 })
                 .collect(),
             next_class: 0,
@@ -195,14 +341,10 @@ impl<T> PolicyQueue<T> {
     pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
         self.pending_count = 0;
         for class in &mut self.classes {
-            let pending = std::mem::take(&mut class.pending);
+            class.pending.retain(|entry| keep(entry.payload()));
             class.stats = PolicyQueueStats::default();
-            for entry in pending {
-                if !keep(entry.payload()) {
-                    continue;
-                }
+            for entry in class.pending.iter() {
                 add_stats(&mut class.stats, entry.snapshot);
-                class.pending.push(entry);
                 self.pending_count += 1;
             }
             if class.pending.is_empty() {
@@ -224,6 +366,30 @@ impl<T> PolicyQueue<T> {
         strict_priority: u32,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
+        self.enqueue_for_session(
+            class_index,
+            worker_count,
+            snapshot,
+            arrival_offset_secs,
+            priority_jump,
+            strict_priority,
+            None,
+            payload,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn enqueue_for_session(
+        &mut self,
+        class_index: usize,
+        worker_count: usize,
+        snapshot: QueueSnapshot,
+        arrival_offset_secs: f64,
+        priority_jump: f64,
+        strict_priority: u32,
+        session_id: Option<String>,
+        payload: T,
+    ) -> Result<(), (QueueRejection, T)> {
         let class = &mut self.classes[class_index];
         if let Some(rejection) = queue_rejection(class, worker_count) {
             return Err((rejection, payload));
@@ -235,6 +401,9 @@ impl<T> PolicyQueue<T> {
                 (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
             }
             RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
+            RouterQueuePolicy::AgentRoundRobin => {
+                priority_jump.max(0.0) - arrival_offset_secs.max(0.0)
+            }
         };
         let entry = PolicyQueueEntry {
             class_index,
@@ -248,7 +417,7 @@ impl<T> PolicyQueue<T> {
         };
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
-        class.pending.push(entry);
+        class.pending.push(session_id, entry);
         self.pending_count += 1;
         Ok(())
     }
@@ -343,7 +512,7 @@ impl<T> PolicyQueue<T> {
     pub fn drain(self) -> impl Iterator<Item = PolicyQueueEntry<T>> {
         self.classes
             .into_iter()
-            .flat_map(|class| class.pending.into_iter())
+            .flat_map(|class| class.pending.into_entries())
     }
 
     fn pop_class(&mut self, class_index: usize) -> PolicyQueueEntry<T> {
@@ -657,6 +826,49 @@ policy_classes:
         let second = queue.pop_next(|_, _, _| true).unwrap();
         assert_eq!(first.into_payload(), "fcfs-long");
         assert_eq!(second.into_payload(), "wspt-short");
+    }
+
+    #[test]
+    fn agent_round_robin_rotates_sessions_after_strict_priority() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_family: agent
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: agent
+    policy_family: agent
+    cache_bucket: all
+    queue_policy: agent_round_robin
+    quantum: 1
+"#,
+        ));
+        for (session, strict_priority, payload) in [
+            ("a", 0, "a1"),
+            ("a", 0, "a2"),
+            ("b", 1, "b-high"),
+            ("b", 0, "b-low"),
+            ("c", 0, "c1"),
+        ] {
+            queue
+                .enqueue_for_session(
+                    0,
+                    1,
+                    QueueSnapshot::new(1, 0),
+                    0.0,
+                    0.0,
+                    strict_priority,
+                    Some(session.to_string()),
+                    payload,
+                )
+                .unwrap();
+        }
+
+        let actual: Vec<_> = (0..5)
+            .map(|_| queue.pop_next(|_, _, _| true).unwrap().into_payload())
+            .collect();
+        assert_eq!(actual, ["b-high", "a1", "c1", "b-low", "a2"]);
     }
 
     #[test]

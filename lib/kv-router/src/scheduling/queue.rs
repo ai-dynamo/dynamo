@@ -516,19 +516,21 @@ impl<
         let arrival_offset = self.start_time.elapsed().as_secs_f64();
         let priority_jump = request.priority_jump;
         let strict_priority = request.strict_priority;
+        let session_id = request.session_id.clone();
         let queued = QueuedRequest {
             request,
             enqueue_at: decay_now,
             block_hashes,
         };
         let worker_count = self.workers_with_configs.borrow().len();
-        if let Err((rejection, queued)) = self.pending.enqueue(
+        if let Err((rejection, queued)) = self.pending.enqueue_for_session(
             class_index,
             worker_count,
             snapshot,
             arrival_offset,
             priority_jump,
             strict_priority,
+            session_id,
             queued,
         ) {
             let mut request = queued.request;
@@ -1419,6 +1421,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            session_id: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,

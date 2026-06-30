@@ -245,6 +245,8 @@ pub enum RouterQueuePolicy {
     Fcfs,
     Lcfs,
     Wspt,
+    #[serde(rename = "agent_round_robin")]
+    AgentRoundRobin,
 }
 
 impl fmt::Display for RouterQueuePolicy {
@@ -253,6 +255,7 @@ impl fmt::Display for RouterQueuePolicy {
             Self::Fcfs => f.write_str("fcfs"),
             Self::Lcfs => f.write_str("lcfs"),
             Self::Wspt => f.write_str("wspt"),
+            Self::AgentRoundRobin => f.write_str("agent_round_robin"),
         }
     }
 }
