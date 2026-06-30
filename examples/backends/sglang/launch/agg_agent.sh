@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated serving with session control: sticky routing,
-# KV event tracking, and reasoning/tool-call parsing.
+# Aggregated agent serving with session radix tagging, KV event tracking,
+# and reasoning/tool-call parsing.
 # GPUs: 2 (default model uses --tp 2)
 
 set -e
@@ -49,15 +49,22 @@ done
 GPU_MEM_FRACTION=$(build_sglang_gpu_mem_args)
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching Aggregated + Session Control" "$MODEL" "$HTTP_PORT"
+DYN_REQUEST_TRACE="${DYN_REQUEST_TRACE:-1}"
+DYN_REQUEST_TRACE_SINKS="${DYN_REQUEST_TRACE_SINKS:-jsonl}"
+DYN_REQUEST_TRACE_OUTPUT_PATH="${DYN_REQUEST_TRACE_OUTPUT_PATH:-/tmp/dynamo-request-trace-$(date +%Y%m%d-%H%M%S)-$$.jsonl}"
+DYNAMO_API_KEY="${DYNAMO_API_KEY:-dummy}"
+export DYN_REQUEST_TRACE DYN_REQUEST_TRACE_SINKS DYN_REQUEST_TRACE_OUTPUT_PATH DYNAMO_API_KEY
+
+print_launch_banner "Launching Aggregated Agent Serving" "$MODEL" "$HTTP_PORT"
+echo "Request trace output: $DYN_REQUEST_TRACE_OUTPUT_PATH"
 
 # Frontend with KV routing and state reset
-# Session control activates automatically when requests carry nvext.session_control
 python3 -m dynamo.frontend \
   --router-mode kv \
-  --router-reset-states &
+  --router-reset-states \
+  --enable-anthropic-api &
 
-# Worker with streaming sessions, KV events, and metrics
+# Session-aware radix ownership is built into SGLang 0.5.14+.
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
@@ -65,7 +72,7 @@ python3 -m dynamo.sglang \
   --page-size 16 \
   --tp "$TP" \
   --trust-remote-code \
-  --enable-streaming-session \
+  --radix-eviction-policy priority \
   --skip-tokenizer-init \
   --dyn-reasoning-parser glm45 \
   --dyn-tool-call-parser glm47 \

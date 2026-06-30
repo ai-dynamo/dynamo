@@ -6,7 +6,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.16.4
+    controller-gen.kubebuilder.io/version: v0.17.3
     helm.sh/resource-policy: keep
   name: dynamocomponentdeployments.nvidia.com
 spec:
@@ -146,8 +146,8 @@ spec:
                                 and scale-down and scale-up tolerances of 5% and 1% respectively, scaling will be
                                 triggered when the actual consumption falls below 95Mi or exceeds 101Mi.
 
-                                This is an alpha field and requires enabling the HPAConfigurableTolerance
-                                feature gate.
+                                This is an beta field and requires the HPAConfigurableTolerance feature
+                                gate to be enabled.
                               pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                               x-kubernetes-int-or-string: true
                           type: object
@@ -219,8 +219,8 @@ spec:
                                 and scale-down and scale-up tolerances of 5% and 1% respectively, scaling will be
                                 triggered when the actual consumption falls below 95Mi or exceeds 101Mi.
 
-                                This is an alpha field and requires enabling the HPAConfigurableTolerance
-                                feature gate.
+                                This is an beta field and requires the HPAConfigurableTolerance feature
+                                gate to be enabled.
                               pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                               x-kubernetes-int-or-string: true
                           type: object
@@ -683,56 +683,77 @@ spec:
                         CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.
                         If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
                       type: string
+                    deletionPolicy:
+                      default: Delete
+                      description: |-
+                        DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
+                        artifact are deleted or retained when the owning DGD is deleted.
+                        Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+                      enum:
+                        - Delete
+                        - Retain
+                      type: string
                     enabled:
                       default: false
                       description: Enabled indicates whether checkpointing is enabled for this service
                       type: boolean
                     identity:
                       description: |-
-                        Identity defines the checkpoint identity for hash computation
-                        Used when Mode is Auto or when looking up existing checkpoints
-                        Required when checkpointRef is not specified
+                        Deprecated: omit for DGD-managed checkpoints; no action is needed.
+                        Use CheckpointRef to restore an existing checkpoint.
                       properties:
                         backendFramework:
-                          description: BackendFramework is the runtime framework (vllm, sglang, trtllm)
+                          description: |-
+                            BackendFramework is the runtime framework (vllm, sglang, trtllm)
+                            Deprecated: legacy spec.identity only.
                           enum:
                             - vllm
                             - sglang
                             - trtllm
                           type: string
                         dtype:
-                          description: Dtype is the data type (fp16, bf16, fp8, etc.)
+                          description: |-
+                            Dtype is the data type (fp16, bf16, fp8, etc.).
+                            Deprecated: legacy spec.identity only.
                           type: string
                         dynamoVersion:
                           description: |-
-                            DynamoVersion is the Dynamo platform version (optional)
-                            If not specified, version is not included in identity hash
-                            This ensures checkpoint compatibility across Dynamo releases
+                            DynamoVersion is the Dynamo platform version (optional).
+                            Deprecated: legacy spec.identity only.
                           type: string
                         extraParameters:
                           additionalProperties:
                             type: string
                           description: |-
-                            ExtraParameters are additional parameters that affect the checkpoint hash
-                            Use for any framework-specific or custom parameters not covered above
+                            ExtraParameters are additional parameters that affect the checkpoint hash.
+                            Use for any framework-specific or custom parameters not covered above.
+                            Deprecated: legacy spec.identity only.
                           type: object
                         maxModelLen:
-                          description: MaxModelLen is the maximum sequence length
+                          description: |-
+                            MaxModelLen is the maximum sequence length.
+                            Deprecated: legacy spec.identity only.
                           format: int32
                           minimum: 1
                           type: integer
                         model:
-                          description: Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
+                          description: |-
+                            Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
+                            Deprecated: legacy spec.identity only.
                           type: string
                         pipelineParallelSize:
                           default: 1
-                          description: PipelineParallelSize is the pipeline parallel configuration
+                          description: |-
+                            PipelineParallelSize is the pipeline parallel configuration.
+                            Deprecated: checkpoint launch uses the pod template instead.
                           format: int32
                           minimum: 1
                           type: integer
                         tensorParallelSize:
                           default: 1
-                          description: TensorParallelSize is the tensor parallel configuration
+                          description: |-
+                            TensorParallelSize is the tensor parallel configuration.
+                            Deprecated: checkpoint launch uses the pod template instead.
                           format: int32
                           minimum: 1
                           type: integer
@@ -740,20 +761,61 @@ spec:
                         - backendFramework
                         - model
                       type: object
+                    job:
+                      description: Job customizes the DGD-managed checkpoint Job.
+                      properties:
+                        gmsClientContainers:
+                          description: |-
+                            GMSClientContainers lists checkpoint Job containers that should receive
+                            GMS client wiring. Requires gpuMemoryService on the service.
+                          items:
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: set
+                        podTemplate:
+                          description: |-
+                            PodTemplate customizes the checkpoint Job pod. The operator starts from the
+                            selected workload container and merges this template so users can add helper
+                            containers such as gms-saver.
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+                      type: object
                     mode:
-                      default: Auto
                       description: |-
-                        Mode defines how checkpoint creation is handled
-                        - Auto: DGD controller creates Checkpoint CR automatically
-                        - Manual: User must create Checkpoint CR
+                        Deprecated: omit mode. Use enabled=true without checkpointRef for a
+                        DGD-managed automatic checkpoint, or use checkpointRef to restore the
+                        named checkpoint.
                       enum:
                         - Auto
                         - Manual
                       type: string
+                    startupPolicy:
+                      default: Immediate
+                      description: |-
+                        StartupPolicy defines when normal worker replicas are started relative to
+                        automatic checkpoint readiness.
+                        - Immediate: start workers cold immediately; later Pods restore from the
+                          checkpoint once it is Ready.
+                        - WaitForCheckpoint: keep worker replicas at zero until the checkpoint is
+                          Ready, then start them from the checkpoint.
+                      enum:
+                        - Immediate
+                        - WaitForCheckpoint
+                      type: string
+                    targetContainerName:
+                      default: main
+                      description: TargetContainerName is the workload container to snapshot and restore.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
                   type: object
                   x-kubernetes-validations:
-                    - message: When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified
-                      rule: '!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))'
+                    - message: checkpoint.job cannot be set when checkpointRef is specified
+                      rule: '!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0'
                 componentType:
                   description: ComponentType indicates the role of this component (for example, "main").
                   type: string
@@ -2803,7 +2865,9 @@ spec:
                                 type: integer
                             type: object
                           resizePolicy:
-                            description: Resources resize policy for the container.
+                            description: |-
+                              Resources resize policy for the container.
+                              This field cannot be set on ephemeral containers.
                             items:
                               description: ContainerResizePolicy represents resource resize policy for the container.
                               properties:
@@ -3027,7 +3091,6 @@ spec:
                                   procMount denotes the type of proc mount to use for the containers.
                                   The default value is Default which uses the container runtime defaults for
                                   readonly paths and masked paths.
-                                  This requires the ProcMountType feature flag to be enabled.
                                   Note that this field cannot be set when spec.os.name is windows.
                                 type: string
                               readOnlyRootFilesystem:
@@ -4522,7 +4585,6 @@ spec:
                                   procMount denotes the type of proc mount to use for the containers.
                                   The default value is Default which uses the container runtime defaults for
                                   readonly paths and masked paths.
-                                  This requires the ProcMountType feature flag to be enabled.
                                   Note that this field cannot be set when spec.os.name is windows.
                                 type: string
                               readOnlyRootFilesystem:
@@ -4988,7 +5050,6 @@ spec:
                         When set to false, a new userns is created for the pod. Setting false is useful for
                         mitigating container breakout vulnerabilities even allowing users to run their
                         containers as root without actually having root privileges on the host.
-                        This field is alpha-level and is only honored by servers that enable the UserNamespacesSupport feature.
                       type: boolean
                     hostname:
                       description: |-
@@ -5876,7 +5937,9 @@ spec:
                                 type: integer
                             type: object
                           resizePolicy:
-                            description: Resources resize policy for the container.
+                            description: |-
+                              Resources resize policy for the container.
+                              This field cannot be set on ephemeral containers.
                             items:
                               description: ContainerResizePolicy represents resource resize policy for the container.
                               properties:
@@ -6100,7 +6163,6 @@ spec:
                                   procMount denotes the type of proc mount to use for the containers.
                                   The default value is Default which uses the container runtime defaults for
                                   readonly paths and masked paths.
-                                  This requires the ProcMountType feature flag to be enabled.
                                   Note that this field cannot be set when spec.os.name is windows.
                                 type: string
                               readOnlyRootFilesystem:
@@ -7339,7 +7401,9 @@ spec:
                               type: integer
                           type: object
                         resizePolicy:
-                          description: Resources resize policy for the container.
+                          description: |-
+                            Resources resize policy for the container.
+                            This field cannot be set on ephemeral containers.
                           items:
                             description: ContainerResizePolicy represents resource resize policy for the container.
                             properties:
@@ -7563,7 +7627,6 @@ spec:
                                 procMount denotes the type of proc mount to use for the containers.
                                 The default value is Default which uses the container runtime defaults for
                                 readonly paths and masked paths.
-                                This requires the ProcMountType feature flag to be enabled.
                                 Note that this field cannot be set when spec.os.name is windows.
                               type: string
                             readOnlyRootFilesystem:
@@ -8095,8 +8158,8 @@ spec:
                         will be made available to those containers which consume them
                         by name.
 
-                        This is an alpha field and requires enabling the
-                        DynamicResourceAllocation feature gate.
+                        This is a stable field but requires that the
+                        DynamicResourceAllocation feature gate is enabled.
 
                         This field is immutable.
                       items:
@@ -8107,6 +8170,14 @@ spec:
 
                           It adds a name to it that uniquely identifies the ResourceClaim inside the Pod.
                           Containers that need access to the ResourceClaim reference it with this name.
+
+                          When the DRAWorkloadResourceClaims feature gate is enabled and this Pod
+                          belongs to a PodGroup, a PodResourceClaim is matched to a
+                          PodGroupResourceClaim if all of their fields are equal (Name,
+                          ResourceClaimName, and ResourceClaimTemplateName). A matched claim references
+                          a single ResourceClaim shared across all Pods in the PodGroup, reserved for
+                          the PodGroup in ResourceClaimStatus.ReservedFor rather than for individual
+                          Pods.
                         properties:
                           name:
                             description: |-
@@ -8131,6 +8202,16 @@ spec:
                               will also be deleted. The pod name and resource name, along with a
                               generated component, will be used to form a unique name for the
                               ResourceClaim, which will be recorded in pod.status.resourceClaimStatuses.
+
+                              When the DRAWorkloadResourceClaims feature gate is enabled and the pod
+                              belongs to a PodGroup that defines a PodGroupResourceClaim with the same
+                              Name and ResourceClaimTemplateName, this PodResourceClaim resolves to the
+                              ResourceClaim generated for the PodGroup. All pods in the group that
+                              define an equivalent PodResourceClaim matching the
+                              PodGroupResourceClaim's Name and ResourceClaimTemplateName share the same
+                              generated ResourceClaim. ResourceClaims generated for a PodGroup are
+                              owned by the PodGroup and their lifecycles are tied to the PodGroup
+                              instead of any individual pod.
 
                               This field is immutable and no changes will be made to the
                               corresponding ResourceClaim by the control plane after creating the
@@ -8256,6 +8337,28 @@ spec:
                       x-kubernetes-list-map-keys:
                         - name
                       x-kubernetes-list-type: map
+                    schedulingGroup:
+                      description: |-
+                        SchedulingGroup provides a reference to the immediate scheduling runtime
+                        grouping object that this Pod belongs to.
+                        This field is used by the scheduler to identify the group and apply the
+                        correct group scheduling policies. The association with a group also
+                        impacts other lifecycle aspects of a Pod that are relevant in a wider context
+                        of scheduling like preemption, resource attachment, etc. If not specified,
+                        the Pod is treated as a single unit in all of these aspects.
+                        The group object referenced by this field may not exist at the time the
+                        Pod is created.
+                        This field is immutable, but a group object with the same name may be
+                        recreated with different policies. Doing this during pod scheduling
+                        may result in the placement not conforming to the expected policies.
+                      properties:
+                        podGroupName:
+                          description: |-
+                            PodGroupName specifies the name of the standalone PodGroup object
+                            that represents the runtime instance of this group.
+                            Must be a DNS subdomain.
+                          type: string
+                      type: object
                     securityContext:
                       description: |-
                         SecurityContext holds pod-level security attributes and common container settings.
@@ -8548,9 +8651,10 @@ spec:
                           operator:
                             description: |-
                               Operator represents a key's relationship to the value.
-                              Valid operators are Exists and Equal. Defaults to Equal.
+                              Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
                               Exists is equivalent to wildcard for value, so that a pod can
                               tolerate all taints of a particular category.
+                              Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
                             type: string
                           tolerationSeconds:
                             description: |-
@@ -9322,7 +9426,7 @@ spec:
                                       resources:
                                         description: |-
                                           resources represents the minimum resources the volume should have.
-                                          If RecoverVolumeExpansionFailure feature is enabled users are allowed to specify resource requirements
+                                          Users are allowed to specify resource requirements
                                           that are lower than previous value but must still be higher than capacity recorded in the
                                           status field of the claim.
                                           More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#resources
@@ -9641,7 +9745,7 @@ spec:
                               A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff and will be reported on the pod reason and message.
                               The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported by the container image field.
                               The OCI object gets mounted in a single directory (spec.containers[*].volumeMounts.mountPath) by merging the manifest layers in the same way as for container images.
-                              The volume will be mounted read-only (ro) and non-executable files (noexec).
+                              The volume will be mounted read-only (ro).
                               Sub path mounts for containers are not supported (spec.containers[*].volumeMounts.subpath) before 1.33.
                               The field spec.securityContext.fsGroupChangePolicy has no effect on this volume type.
                             properties:
@@ -9809,8 +9913,7 @@ spec:
                             description: |-
                               portworxVolume represents a portworx volume attached and mounted on kubelets host machine.
                               Deprecated: PortworxVolume is deprecated. All operations for the in-tree portworxVolume type
-                              are redirected to the pxd.portworx.com CSI driver when the CSIMigrationPortworx feature-gate
-                              is on.
+                              are redirected to the pxd.portworx.com CSI driver.
                             properties:
                               fsType:
                                 description: |-
@@ -10157,6 +10260,24 @@ spec:
                                         signerName:
                                           description: Kubelet's generated CSRs will be addressed to this signer.
                                           type: string
+                                        userAnnotations:
+                                          additionalProperties:
+                                            type: string
+                                          description: |-
+                                            userAnnotations allow pod authors to pass additional information to
+                                            the signer implementation.  Kubernetes does not restrict or validate this
+                                            metadata in any way.
+
+                                            These values are copied verbatim into the `spec.unverifiedUserAnnotations` field of
+                                            the PodCertificateRequest objects that Kubelet creates.
+
+                                            Entries are subject to the same validation as object metadata annotations,
+                                            with the addition that all keys must be domain-prefixed. No restrictions
+                                            are placed on values, except an overall size limitation on the entire field.
+
+                                            Signers should document the keys and values they support. Signers should
+                                            deny requests that contain keys they do not recognize.
+                                          type: object
                                       required:
                                         - keyType
                                         - signerName
@@ -10792,9 +10913,50 @@ spec:
                       type: string
                     enabled:
                       description: |-
-                        Enabled activates the GMS sidecar. GPU resources on the main container
-                        are replaced with a DRA ResourceClaim for shared GPU access.
+                        Enabled activates GMS wiring. GPU resources on client containers are
+                        replaced with a DRA ResourceClaim for shared GPU access.
                       type: boolean
+                    extraClientContainers:
+                      description: |-
+                        ExtraClientContainers lists additional user-declared containers that should
+                        be wired as GMS clients in pods rendered from the enclosing spec.
+                        DGD/DCD services apply this to service pods. Auto-created checkpoints
+                        apply checkpoint job clients before creating the DynamoCheckpoint; manual
+                        DynamoCheckpoint users must provide an already-prepared pod template.
+                        In each rendered pod, only matching container names are wired; absent
+                        names are ignored.
+                      items:
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                      type: array
+                      x-kubernetes-list-type: set
+                    extraClientPods:
+                      description: |-
+                        ExtraClientPods declares additional GMS client pods for inter-pod GMS. This field is
+                        reserved for future use and is rejected until inter-pod client orchestration is wired.
+                      items:
+                        description: GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
+                        properties:
+                          name:
+                            description: Name identifies this client pod.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          podTemplate:
+                            description: PodTemplate configures the pod to run as a GMS client.
+                            type: object
+                            x-kubernetes-preserve-unknown-fields: true
+                        required:
+                          - name
+                          - podTemplate
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                        - name
+                      x-kubernetes-list-type: map
                     mode:
                       default: intraPod
                       description: Mode selects the GMS deployment topology.
@@ -10805,6 +10967,13 @@ spec:
                   required:
                     - enabled
                   type: object
+                  x-kubernetes-validations:
+                    - message: extraClientContainers is only supported with mode=intraPod
+                      rule: '!has(self.extraClientContainers) || size(self.extraClientContainers) == 0 || self.mode == ''intraPod'''
+                    - message: extraClientPods is only supported with mode=interPod
+                      rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == ''interPod'''
+                    - message: extraClientPods is reserved for inter-pod GMS and is not implemented yet
+                      rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
                 ingress:
                   description: Ingress config to expose the component outside the cluster (or through a service mesh).
                   properties:
@@ -10999,6 +11168,24 @@ spec:
                       format: int32
                       type: integer
                   type: object
+                minAvailable:
+                  description: |-
+                    MinAvailable maps to Grove PodClique minAvailable for single-node and
+                    Grove PodCliqueScalingGroup minAvailable for multi-node components.
+                    This field determines 1) the minimum number of replicas guaranteed to be
+                    gang-scheduled, and 2) when violating minAvailable replicas triggers gang
+                    termination.
+
+                    For Grove-backed DynamoGraphDeployment components, minAvailable defaults to
+                    1 when omitted and is immutable after creation. Positive replica counts must
+                    be greater than or equal to minAvailable. Replicas may be scaled to 0 as a
+                    special scale-to-zero state; minAvailable remains configured but is not
+                    enforced again until replicas is scaled back to a positive value.
+
+                    For non-Grove deployments, setting this field will result in a validation error.
+                  format: int32
+                  minimum: 1
+                  type: integer
                 modelRef:
                   description: |-
                     ModelRef references a model that this component serves
@@ -11340,6 +11527,11 @@ spec:
                     type: object
                   type: array
               type: object
+              x-kubernetes-validations:
+                - message: minAvailable must be less than or equal to replicas unless replicas is 0
+                  rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
+                - message: minAvailable is immutable after creation
+                  rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
             status:
               description: Status reflects the current observed state of the component deployment.
               properties:
@@ -11719,21 +11911,20 @@ spec:
                     In v1beta1 this block holds `gpuMemoryService` and `failover` (which
                     remain tightly coupled -- failover requires GMS -- and are expected to
                     evolve together as the DRA-based GPU sharing story matures), and
-                    `checkpoint` (whose interaction with the standalone DynamoCheckpoint
-                    resource and identity-hash computation is still settling). Fields here
-                    are explicitly NOT covered by the normal v1beta1 deprecation policy;
-                    do not depend on them for production workloads.
+                    `checkpoint` (whose API shape is still settling). Fields here are
+                    explicitly NOT covered by the normal v1beta1 deprecation policy; do not
+                    depend on them for production workloads.
                   properties:
                     checkpoint:
                       description: |-
                         checkpoint configures container-image snapshotting and restore for
-                        this component. When set, the DGD controller can produce a
-                        DynamoCheckpoint CR from a running pod and later restore pods from
-                        that checkpoint for faster cold start. The user-facing shape of this
-                        field -- especially its interaction with the standalone
-                        DynamoCheckpoint resource and the identity-hash computation -- is
-                        still settling, which is why it lives under `experimental` in v1beta1
-                        instead of at the top level.
+                        this component. Set `checkpoint.enabled: true` to opt in. Without
+                        checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint
+                        CR and later restores pods in the same DGD generation from that
+                        checkpoint. With checkpointRef, the DGD restores from that existing
+                        checkpoint instead. The user-facing shape of this field is still settling,
+                        which is why it lives under `experimental` in v1beta1 instead of at the
+                        top level.
                       properties:
                         checkpointRef:
                           description: |-
@@ -11741,51 +11932,80 @@ spec:
                             When set, this component's `identity` is ignored and the referenced
                             checkpoint is used directly.
                           type: string
+                        deletionPolicy:
+                          default: Delete
+                          description: |-
+                            DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
+                            artifact are deleted or retained when the owning DGD is deleted.
+                            Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+                          enum:
+                            - Delete
+                            - Retain
+                          type: string
+                        enabled:
+                          description: |-
+                            enabled indicates whether checkpointing is enabled for this component.
+                            When true, omit checkpointRef for a DGD-managed automatic checkpoint or
+                            set checkpointRef to restore an existing checkpoint. Omit the checkpoint
+                            block, or set enabled=false, to disable checkpointing.
+                          type: boolean
                         identity:
                           description: |-
-                            identity defines the checkpoint identity for hash computation. Used
-                            when `mode` is `Auto` or when looking up existing checkpoints.
-                            Required when `checkpointRef` is not specified.
+                            Deprecated: omit for DGD-managed checkpoints; no action is needed.
+                            Use checkpointRef to restore an existing checkpoint.
                           properties:
                             backendFramework:
-                              description: backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
+                              description: |-
+                                backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
+                                Deprecated: legacy identity only.
                               enum:
                                 - vllm
                                 - sglang
                                 - trtllm
                               type: string
                             dtype:
-                              description: dtype is the data type (`fp16`, `bf16`, `fp8`, etc.).
+                              description: |-
+                                dtype is the data type (`fp16`, `bf16`, `fp8`, etc.).
+                                Deprecated: legacy identity only.
                               type: string
                             dynamoVersion:
                               description: |-
-                                dynamoVersion is the Dynamo platform version. If empty, the version is
-                                not included in the identity hash, so checkpoints remain compatible
-                                across releases.
+                                dynamoVersion is the Dynamo platform version.
+                                Deprecated: legacy identity only.
                               type: string
                             extraParameters:
                               additionalProperties:
                                 type: string
-                              description: extraParameters are additional parameters that affect the checkpoint hash.
+                              description: |-
+                                extraParameters are additional parameters that affect the checkpoint hash.
+                                Deprecated: legacy identity only.
                               type: object
                             maxModelLen:
-                              description: maxModelLen is the maximum sequence length.
+                              description: |-
+                                maxModelLen is the maximum sequence length.
+                                Deprecated: legacy identity only.
                               format: int32
                               minimum: 1
                               type: integer
                             model:
-                              description: model is the model identifier (e.g. "meta-llama/Llama-3-70B").
+                              description: |-
+                                model is the model identifier (e.g. "meta-llama/Llama-3-70B").
+                                Deprecated: legacy identity only.
                               minLength: 1
                               type: string
                             pipelineParallelSize:
                               default: 1
-                              description: pipelineParallelSize is the pipeline parallel configuration.
+                              description: |-
+                                pipelineParallelSize is the pipeline parallel configuration.
+                                Deprecated: checkpoint launch uses the pod template instead.
                               format: int32
                               minimum: 1
                               type: integer
                             tensorParallelSize:
                               default: 1
-                              description: tensorParallelSize is the tensor parallel configuration.
+                              description: |-
+                                tensorParallelSize is the tensor parallel configuration.
+                                Deprecated: checkpoint launch uses the pod template instead.
                               format: int32
                               minimum: 1
                               type: integer
@@ -11793,20 +12013,63 @@ spec:
                             - backendFramework
                             - model
                           type: object
+                        job:
+                          description: job customizes the DGD-managed checkpoint Job.
+                          properties:
+                            gmsClientContainers:
+                              description: |-
+                                gmsClientContainers lists checkpoint Job containers that should receive
+                                GMS client wiring. Requires gpuMemoryService on the component.
+                              items:
+                                maxLength: 63
+                                minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: set
+                            podTemplate:
+                              description: |-
+                                podTemplate customizes the checkpoint Job pod. The operator starts from the
+                                selected workload container and merges this template so users can add helper
+                                containers such as gms-saver.
+                              type: object
+                              x-kubernetes-preserve-unknown-fields: true
+                          type: object
                         mode:
-                          default: Auto
                           description: |-
-                            mode defines how checkpoint creation is handled.
-                            `Auto`: DGD controller creates the DynamoCheckpoint CR automatically.
-                            `Manual`: user must create the DynamoCheckpoint CR.
+                            Deprecated: omit mode. Use enabled=true without checkpointRef for a
+                            DGD-managed automatic checkpoint, or use checkpointRef to restore the
+                            named checkpoint.
                           enum:
                             - Auto
                             - Manual
                           type: string
+                        startupPolicy:
+                          default: Immediate
+                          description: |-
+                            startupPolicy defines when normal worker replicas are started relative to
+                            automatic checkpoint readiness.
+                            `Immediate` (default): start workers cold immediately; later Pods restore
+                            from the checkpoint once it is Ready.
+                            `WaitForCheckpoint`: keep worker replicas at zero until the checkpoint is
+                            Ready, then start them from the checkpoint.
+                          enum:
+                            - Immediate
+                            - WaitForCheckpoint
+                          type: string
+                        targetContainerName:
+                          default: main
+                          description: targetContainerName is the workload container to snapshot and restore.
+                          maxLength: 63
+                          minLength: 1
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                      required:
+                        - enabled
                       type: object
                       x-kubernetes-validations:
-                        - message: When checkpoint is configured, either checkpointRef or identity must be specified
-                          rule: (has(self.checkpointRef) && size(self.checkpointRef) > 0) || has(self.identity)
+                        - message: checkpoint.job cannot be set when checkpointRef is specified
+                          rule: '!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0'
                     failover:
                       description: |-
                         failover configures active-passive GPU failover for this component.
@@ -11837,13 +12100,51 @@ spec:
                       type: object
                     gpuMemoryService:
                       description: |-
-                        gpuMemoryService configures the GPU Memory Service (GMS) sidecar.
-                        When set, a GMS sidecar is injected and GPU access is managed via DRA.
+                        gpuMemoryService configures the GPU Memory Service (GMS). When set, GPU
+                        access for GMS clients is managed via DRA.
                       properties:
                         deviceClassName:
                           default: gpu.nvidia.com
                           description: deviceClassName is the DRA `DeviceClass` to request GPUs from.
                           type: string
+                        extraClientContainers:
+                          description: |-
+                            extraClientContainers lists additional user-declared containers that should
+                            be wired as GMS clients in service pods. Checkpoint Job clients are declared
+                            under checkpoint.job.gmsClientContainers. In each rendered pod, only
+                            matching container names are wired; absent names are ignored.
+                          items:
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: set
+                        extraClientPods:
+                          description: |-
+                            extraClientPods declares additional GMS client pods for inter-pod GMS. This field is
+                            reserved for future use and is rejected until inter-pod client orchestration is wired.
+                          items:
+                            description: GMSClientPodSpec declares an additional GMS client pod for inter-pod GMS.
+                            properties:
+                              name:
+                                description: name identifies this client pod.
+                                maxLength: 63
+                                minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
+                              podTemplate:
+                                description: podTemplate configures the pod to run as a GMS client.
+                                type: object
+                                x-kubernetes-preserve-unknown-fields: true
+                            required:
+                              - name
+                              - podTemplate
+                            type: object
+                          type: array
+                          x-kubernetes-list-map-keys:
+                            - name
+                          x-kubernetes-list-type: map
                         mode:
                           default: IntraPod
                           description: mode selects the GMS deployment topology.
@@ -11852,6 +12153,13 @@ spec:
                             - InterPod
                           type: string
                       type: object
+                      x-kubernetes-validations:
+                        - message: extraClientContainers is only supported with mode=IntraPod
+                          rule: '!has(self.extraClientContainers) || size(self.extraClientContainers) == 0 || self.mode == ''IntraPod'''
+                        - message: extraClientPods is only supported with mode=InterPod
+                          rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0 || self.mode == ''InterPod'''
+                        - message: extraClientPods is reserved for inter-pod GMS and is not implemented yet
+                          rule: '!has(self.extraClientPods) || size(self.extraClientPods) == 0'
                   type: object
                 frontendSidecar:
                   description: |-
@@ -11872,6 +12180,24 @@ spec:
                     namespace rather than the per-deployment namespace derived from the
                     DGD name.
                   type: boolean
+                minAvailable:
+                  description: |-
+                    minAvailable maps to Grove PodClique minAvailable for single-node and
+                    Grove PodCliqueScalingGroup minAvailable for multi-node components.
+                    This field determines 1) the minimum number of replicas guaranteed to be
+                    gang-scheduled, and 2) when violating minAvailable replicas triggers gang
+                    termination.
+
+                    For Grove-backed DynamoGraphDeployment components, minAvailable defaults to
+                    1 when omitted and is immutable after creation. Positive replica counts must
+                    be greater than or equal to minAvailable. Replicas may be scaled to 0 as a
+                    special scale-to-zero state; minAvailable remains configured but is not
+                    enforced again until replicas is scaled back to a positive value.
+
+                    For non-Grove deployments, setting this field will result in a validation error.
+                  format: int32
+                  minimum: 1
+                  type: integer
                 modelRef:
                   description: |-
                     modelRef references a model served by this component. When specified,
@@ -13675,7 +14001,9 @@ spec:
                                     type: integer
                                 type: object
                               resizePolicy:
-                                description: Resources resize policy for the container.
+                                description: |-
+                                  Resources resize policy for the container.
+                                  This field cannot be set on ephemeral containers.
                                 items:
                                   description: ContainerResizePolicy represents resource resize policy for the container.
                                   properties:
@@ -13899,7 +14227,6 @@ spec:
                                       procMount denotes the type of proc mount to use for the containers.
                                       The default value is Default which uses the container runtime defaults for
                                       readonly paths and masked paths.
-                                      This requires the ProcMountType feature flag to be enabled.
                                       Note that this field cannot be set when spec.os.name is windows.
                                     type: string
                                   readOnlyRootFilesystem:
@@ -15394,7 +15721,6 @@ spec:
                                       procMount denotes the type of proc mount to use for the containers.
                                       The default value is Default which uses the container runtime defaults for
                                       readonly paths and masked paths.
-                                      This requires the ProcMountType feature flag to be enabled.
                                       Note that this field cannot be set when spec.os.name is windows.
                                     type: string
                                   readOnlyRootFilesystem:
@@ -15860,7 +16186,6 @@ spec:
                             When set to false, a new userns is created for the pod. Setting false is useful for
                             mitigating container breakout vulnerabilities even allowing users to run their
                             containers as root without actually having root privileges on the host.
-                            This field is alpha-level and is only honored by servers that enable the UserNamespacesSupport feature.
                           type: boolean
                         hostname:
                           description: |-
@@ -16748,7 +17073,9 @@ spec:
                                     type: integer
                                 type: object
                               resizePolicy:
-                                description: Resources resize policy for the container.
+                                description: |-
+                                  Resources resize policy for the container.
+                                  This field cannot be set on ephemeral containers.
                                 items:
                                   description: ContainerResizePolicy represents resource resize policy for the container.
                                   properties:
@@ -16972,7 +17299,6 @@ spec:
                                       procMount denotes the type of proc mount to use for the containers.
                                       The default value is Default which uses the container runtime defaults for
                                       readonly paths and masked paths.
-                                      This requires the ProcMountType feature flag to be enabled.
                                       Note that this field cannot be set when spec.os.name is windows.
                                     type: string
                                   readOnlyRootFilesystem:
@@ -17509,8 +17835,8 @@ spec:
                             will be made available to those containers which consume them
                             by name.
 
-                            This is an alpha field and requires enabling the
-                            DynamicResourceAllocation feature gate.
+                            This is a stable field but requires that the
+                            DynamicResourceAllocation feature gate is enabled.
 
                             This field is immutable.
                           items:
@@ -17521,6 +17847,14 @@ spec:
 
                               It adds a name to it that uniquely identifies the ResourceClaim inside the Pod.
                               Containers that need access to the ResourceClaim reference it with this name.
+
+                              When the DRAWorkloadResourceClaims feature gate is enabled and this Pod
+                              belongs to a PodGroup, a PodResourceClaim is matched to a
+                              PodGroupResourceClaim if all of their fields are equal (Name,
+                              ResourceClaimName, and ResourceClaimTemplateName). A matched claim references
+                              a single ResourceClaim shared across all Pods in the PodGroup, reserved for
+                              the PodGroup in ResourceClaimStatus.ReservedFor rather than for individual
+                              Pods.
                             properties:
                               name:
                                 description: |-
@@ -17545,6 +17879,16 @@ spec:
                                   will also be deleted. The pod name and resource name, along with a
                                   generated component, will be used to form a unique name for the
                                   ResourceClaim, which will be recorded in pod.status.resourceClaimStatuses.
+
+                                  When the DRAWorkloadResourceClaims feature gate is enabled and the pod
+                                  belongs to a PodGroup that defines a PodGroupResourceClaim with the same
+                                  Name and ResourceClaimTemplateName, this PodResourceClaim resolves to the
+                                  ResourceClaim generated for the PodGroup. All pods in the group that
+                                  define an equivalent PodResourceClaim matching the
+                                  PodGroupResourceClaim's Name and ResourceClaimTemplateName share the same
+                                  generated ResourceClaim. ResourceClaims generated for a PodGroup are
+                                  owned by the PodGroup and their lifecycles are tied to the PodGroup
+                                  instead of any individual pod.
 
                                   This field is immutable and no changes will be made to the
                                   corresponding ResourceClaim by the control plane after creating the
@@ -17670,6 +18014,28 @@ spec:
                           x-kubernetes-list-map-keys:
                             - name
                           x-kubernetes-list-type: map
+                        schedulingGroup:
+                          description: |-
+                            SchedulingGroup provides a reference to the immediate scheduling runtime
+                            grouping object that this Pod belongs to.
+                            This field is used by the scheduler to identify the group and apply the
+                            correct group scheduling policies. The association with a group also
+                            impacts other lifecycle aspects of a Pod that are relevant in a wider context
+                            of scheduling like preemption, resource attachment, etc. If not specified,
+                            the Pod is treated as a single unit in all of these aspects.
+                            The group object referenced by this field may not exist at the time the
+                            Pod is created.
+                            This field is immutable, but a group object with the same name may be
+                            recreated with different policies. Doing this during pod scheduling
+                            may result in the placement not conforming to the expected policies.
+                          properties:
+                            podGroupName:
+                              description: |-
+                                PodGroupName specifies the name of the standalone PodGroup object
+                                that represents the runtime instance of this group.
+                                Must be a DNS subdomain.
+                              type: string
+                          type: object
                         securityContext:
                           description: |-
                             SecurityContext holds pod-level security attributes and common container settings.
@@ -17962,9 +18328,10 @@ spec:
                               operator:
                                 description: |-
                                   Operator represents a key's relationship to the value.
-                                  Valid operators are Exists and Equal. Defaults to Equal.
+                                  Valid operators are Exists, Equal, Lt, and Gt. Defaults to Equal.
                                   Exists is equivalent to wildcard for value, so that a pod can
                                   tolerate all taints of a particular category.
+                                  Lt and Gt perform numeric comparisons (requires feature gate TaintTolerationComparisonOperators).
                                 type: string
                               tolerationSeconds:
                                 description: |-
@@ -18736,7 +19103,7 @@ spec:
                                           resources:
                                             description: |-
                                               resources represents the minimum resources the volume should have.
-                                              If RecoverVolumeExpansionFailure feature is enabled users are allowed to specify resource requirements
+                                              Users are allowed to specify resource requirements
                                               that are lower than previous value but must still be higher than capacity recorded in the
                                               status field of the claim.
                                               More info: https://kubernetes.io/docs/concepts/storage/persistent-volumes#resources
@@ -19055,7 +19422,7 @@ spec:
                                   A failure to resolve or pull the image during pod startup will block containers from starting and may add significant latency. Failures will be retried using normal volume backoff and will be reported on the pod reason and message.
                                   The types of objects that may be mounted by this volume are defined by the container runtime implementation on a host machine and at minimum must include all valid types supported by the container image field.
                                   The OCI object gets mounted in a single directory (spec.containers[*].volumeMounts.mountPath) by merging the manifest layers in the same way as for container images.
-                                  The volume will be mounted read-only (ro) and non-executable files (noexec).
+                                  The volume will be mounted read-only (ro).
                                   Sub path mounts for containers are not supported (spec.containers[*].volumeMounts.subpath) before 1.33.
                                   The field spec.securityContext.fsGroupChangePolicy has no effect on this volume type.
                                 properties:
@@ -19223,8 +19590,7 @@ spec:
                                 description: |-
                                   portworxVolume represents a portworx volume attached and mounted on kubelets host machine.
                                   Deprecated: PortworxVolume is deprecated. All operations for the in-tree portworxVolume type
-                                  are redirected to the pxd.portworx.com CSI driver when the CSIMigrationPortworx feature-gate
-                                  is on.
+                                  are redirected to the pxd.portworx.com CSI driver.
                                 properties:
                                   fsType:
                                     description: |-
@@ -19571,6 +19937,24 @@ spec:
                                             signerName:
                                               description: Kubelet's generated CSRs will be addressed to this signer.
                                               type: string
+                                            userAnnotations:
+                                              additionalProperties:
+                                                type: string
+                                              description: |-
+                                                userAnnotations allow pod authors to pass additional information to
+                                                the signer implementation.  Kubernetes does not restrict or validate this
+                                                metadata in any way.
+
+                                                These values are copied verbatim into the `spec.unverifiedUserAnnotations` field of
+                                                the PodCertificateRequest objects that Kubelet creates.
+
+                                                Entries are subject to the same validation as object metadata annotations,
+                                                with the addition that all keys must be domain-prefixed. No restrictions
+                                                are placed on values, except an overall size limitation on the entire field.
+
+                                                Signers should document the keys and values they support. Signers should
+                                                deny requests that contain keys they do not recognize.
+                                              type: object
                                           required:
                                             - keyType
                                             - signerName
@@ -20048,6 +20432,10 @@ spec:
               x-kubernetes-validations:
                 - message: eppConfig may only be set when type is epp
                   rule: '!has(self.eppConfig) || (has(self.type) && self.type == ''epp'')'
+                - message: minAvailable must be less than or equal to replicas unless replicas is 0
+                  rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
+                - message: minAvailable is immutable after creation
+                  rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
             status:
               description: status reflects the current observed state of the component deployment.
               properties:
@@ -20175,3 +20563,14 @@ spec:
       storage: false
       subresources:
         status: {}
+  conversion:
+    strategy: Webhook
+    webhook:
+      clientConfig:
+        # CA will be patched in by the Dynamo operator or other means, depending on cert mode auto or manual
+        service:
+          namespace: dynamo-system
+          name: dynamo-operator-webhook-service
+          path: /convert
+      conversionReviewVersions:
+        - v1

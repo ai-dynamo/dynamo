@@ -132,15 +132,47 @@ impl WorkerSet {
         self.has_chat_engine() || self.has_completions_engine()
     }
 
-    /// Whether this set tracks a prefill model (no engine, just lifecycle)
+    /// Whether this set has any engine capable of producing output for an
+    /// inference request. Single source of truth for the "is something attached
+    /// that can serve a request?" question — keep the engine-kind list here so
+    /// new modalities don't need to be added in multiple readiness predicates.
+    pub fn has_any_serving_engine(&self) -> bool {
+        self.has_chat_engine()
+            || self.has_completions_engine()
+            || self.has_embeddings_engine()
+            || self.has_images_engine()
+            || self.has_tensor_engine()
+            || self.has_videos_engine()
+            || self.has_audios_engine()
+            || self.has_realtime_engine()
+    }
+
+    /// Whether this set tracks an Encode worker. Encode WorkerSets carry
+    /// no serving engines (the watcher's Encode role gate skips
+    /// pipeline construction) -- if we let `is_prefill_set` classify
+    /// them, model-displayability logic would gate /v1/models on a
+    /// PrefillRouter that doesn't exist for Encode. Keep the two
+    /// mutually exclusive.
+    ///
+    /// **Role-based, not engine-field-based.** Unlike `has_chat_engine()`
+    /// / `has_completions_engine()` / etc. (which inspect typed engine
+    /// slots on the WorkerSet), `is_encode_set` reads `card.worker_type`
+    /// directly. The Encode role intentionally has no `encode_engine`
+    /// field -- Encode workers don't expose a public OpenAI-shaped
+    /// endpoint, so there is nothing to slot. The role itself is the
+    /// contract.
+    pub fn is_encode_set(&self) -> bool {
+        matches!(
+            self.card.worker_type,
+            Some(crate::worker_type::WorkerType::Encode),
+        )
+    }
+
+    /// Whether this set tracks a prefill model (no engine, just
+    /// lifecycle). Excludes Encode sets, which also lack engines but
+    /// are not gated through PrefillRouter.
     pub fn is_prefill_set(&self) -> bool {
-        !self.has_decode_engine()
-            && !self.has_embeddings_engine()
-            && !self.has_images_engine()
-            && !self.has_videos_engine()
-            && !self.has_audios_engine()
-            && !self.has_tensor_engine()
-            && !self.has_realtime_engine()
+        !self.is_encode_set() && !self.has_any_serving_engine()
     }
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
@@ -372,5 +404,60 @@ mod tests {
 
         tx.send(vec![100, 200, 300]).unwrap();
         assert_eq!(ws.worker_count(), 3);
+    }
+
+    // -------------------------------------------------------------------
+    // Encode-set classification
+    //
+    // Encode WorkerSets carry no serving engines (the watcher's role
+    // gate skips pipeline construction), so the legacy "no engines =
+    // prefill" rule would misclassify them. is_encode_set distinguishes
+    // them via card.worker_type and is_prefill_set excludes them so the
+    // two predicates stay mutually exclusive.
+    // -------------------------------------------------------------------
+
+    fn make_encode_worker_set() -> WorkerSet {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Encode);
+        WorkerSet::new("ns1".to_string(), "abc".to_string(), card)
+    }
+
+    #[test]
+    fn encode_set_is_classified_as_encode_not_prefill() {
+        let ws = make_encode_worker_set();
+        assert!(ws.is_encode_set());
+        // The two predicates must be mutually exclusive: an Encode set
+        // has no engines but must NOT be classified as prefill, since
+        // model-displayability logic gates /v1/models on PrefillRouter
+        // for prefill sets and Encode workers have no such router.
+        assert!(!ws.is_prefill_set());
+    }
+
+    #[test]
+    fn non_encode_engineless_set_stays_classified_as_prefill() {
+        // Regression guard: the existing "engineless = prefill" rule
+        // must still hold for worker_type = None / Prefill / Decode /
+        // Aggregated. Only Encode is carved out.
+        let mut card_none = ModelDeploymentCard::default();
+        card_none.worker_type = None;
+        let ws = WorkerSet::new("ns1".to_string(), "abc".to_string(), card_none);
+        assert!(!ws.is_encode_set());
+        assert!(ws.is_prefill_set());
+
+        for role in [
+            crate::worker_type::WorkerType::Prefill,
+            crate::worker_type::WorkerType::Decode,
+            crate::worker_type::WorkerType::Aggregated,
+        ] {
+            let mut card = ModelDeploymentCard::default();
+            card.worker_type = Some(role);
+            let ws = WorkerSet::new("ns1".to_string(), "abc".to_string(), card);
+            assert!(!ws.is_encode_set(), "{:?} should not be Encode", role);
+            assert!(
+                ws.is_prefill_set(),
+                "{:?} should remain prefill-classified",
+                role
+            );
+        }
     }
 }

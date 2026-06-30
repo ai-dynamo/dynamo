@@ -14,6 +14,20 @@ use dynamo_runtime::protocols::maybe_error::MaybeError;
 pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
 
+/// Per-position prompt logprob entry reported by an engine adapter.
+#[derive(Serialize, Deserialize, utoipa::ToSchema, Debug, Clone, PartialEq)]
+pub struct PromptLogprobEntry {
+    pub logprob: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoded_token: Option<String>,
+}
+
+/// Per-token map of `token_id -> PromptLogprobEntry`. The first position
+/// is `None` (no logprob exists for BOS / the very first prompt token).
+pub type PromptLogprobs = Vec<Option<std::collections::HashMap<TokenIdType, PromptLogprobEntry>>>;
+
 /// Output type discriminator for different modalities
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -111,6 +125,13 @@ pub struct BackendOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_params: Option<serde_json::Value>,
 
+    /// Multimodal encoder handoff payload (object-only by contract).
+    /// Set by Encode workers on their terminal chunk; consumed by the
+    /// frontend and threaded onto the downstream PreprocessedRequest.
+    /// Engine-opaque; framework does not inspect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_result: Option<serde_json::Value>,
+
     /// Framework-owned link to the prefill worker's span. Propagated
     /// alongside the engine's `disaggregated_params` so the decode worker
     /// can record an OTel `Link` on its `engine.generate` span. Engines
@@ -122,6 +143,12 @@ pub struct BackendOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
+
+    /// Router-computed data handed back to the frontend (e.g. per-request timing from
+    /// a standalone router) so it joins this request's trace/metrics. Dynamo-internal,
+    /// consumed by the frontend and not surfaced to clients. See [`RoutingData`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -176,6 +203,14 @@ pub struct LLMEngineOutput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_params: Option<serde_json::Value>,
 
+    /// Multimodal encoder handoff payload (object-only by contract).
+    /// Set by Encode workers on their terminal chunk via
+    /// `LLMEngineOutput::encode_terminal`; the post-processor copies it
+    /// through to `BackendOutput.encoder_result`. Engine-opaque payload;
+    /// framework does not inspect or mutate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_result: Option<serde_json::Value>,
+
     /// Framework-owned link to the prefill worker's span (cross-process
     /// trace linking on disagg requests). Set by the framework on the
     /// prefill terminal chunk; consumed by the decode adapter. Engines
@@ -195,6 +230,11 @@ pub struct LLMEngineOutput {
     /// Dynamo does not inspect this field; it is serialized as-is into `nvext.engine_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_data: Option<serde_json::Value>,
+
+    /// Router-computed data handed back to the frontend (e.g. standalone-router timing).
+    /// Dynamo-internal; consumed by the frontend. See [`RoutingData`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_data: Option<crate::protocols::common::timing::RoutingData>,
 }
 
 impl LLMEngineOutput {
@@ -212,10 +252,12 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -233,10 +275,12 @@ impl LLMEngineOutput {
             top_logprobs: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -254,10 +298,12 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
 
@@ -275,12 +321,59 @@ impl LLMEngineOutput {
             stop_reason: None,
             index: None,
             disaggregated_params: None,
+            encoder_result: None,
             worker_trace_link: None,
             extra_args: None,
             completion_usage: None,
             engine_data: None,
+            routing_data: None,
         }
     }
+
+    /// Terminal chunk for an Encode-mode stream. The `encoder_result`
+    /// payload is the engine-opaque handoff dict the downstream
+    /// Prefill/Aggregated worker will receive on its
+    /// `PreprocessedRequest.encoder_result`.
+    ///
+    /// Signature takes `serde_json::Map<String, serde_json::Value>` (not
+    /// bare `Value`) so the object-only Wire Shape invariant is
+    /// type-enforced and the constructor stays infallible -- there is no
+    /// way to pass an array or scalar through this API. The constructor
+    /// wraps the `Map` in `Value::Object(...)` internally.
+    ///
+    /// `index: Some(0)` matches the Python helper `encoder_terminal_chunk`
+    /// so Rust and Python producers emit byte-identical terminals for the
+    /// same `encoder_result`.
+    pub fn encode_terminal(encoder_result: serde_json::Map<String, serde_json::Value>) -> Self {
+        LLMEngineOutput {
+            token_ids: vec![],
+            tokens: None,
+            text: None,
+            output_type: OutputType::default(),
+            content_parts: None,
+            cum_log_probs: None,
+            log_probs: None,
+            top_logprobs: None,
+            finish_reason: Some(FinishReason::Stop),
+            stop_reason: None,
+            index: Some(0),
+            disaggregated_params: None,
+            encoder_result: Some(serde_json::Value::Object(encoder_result)),
+            worker_trace_link: None,
+            extra_args: None,
+            completion_usage: None,
+            engine_data: None,
+            routing_data: None,
+        }
+    }
+}
+
+pub(crate) fn prompt_logprobs_from_engine_data(
+    engine_data: Option<&serde_json::Value>,
+) -> Option<PromptLogprobs> {
+    engine_data?
+        .get("prompt_logprobs")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
 impl MaybeError for LLMEngineOutput {
@@ -323,5 +416,32 @@ mod tests {
         assert!(format!("{}", output.err().unwrap()).contains("Test error"));
         assert!(!output.is_ok());
         assert!(output.is_err());
+    }
+
+    /// `encode_terminal` produces an Encode-mode terminal chunk with the
+    /// exact field shape required by the Wire Shape contract:
+    /// empty token_ids, FinishReason::Stop, index = Some(0), and the
+    /// encoder_result wrapped as `Value::Object(_)` (object-only by type).
+    #[test]
+    fn encode_terminal_pins_terminal_chunk_shape() {
+        let payload = serde_json::json!({
+            "embedding_handle": {"uri": "nixl://encoder/0", "shape": [1, 1024]},
+        });
+        let map = payload.as_object().unwrap().clone();
+        let chunk = LLMEngineOutput::encode_terminal(map);
+
+        assert!(chunk.token_ids.is_empty(), "encode terminal has no tokens");
+        assert_eq!(chunk.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(chunk.index, Some(0));
+        let result = chunk
+            .encoder_result
+            .as_ref()
+            .expect("encoder_result must be set");
+        assert!(result.is_object(), "encoder_result must be a JSON object");
+        assert_eq!(result, &payload);
+        // Sibling Option fields stay None on the producer terminal.
+        assert!(chunk.disaggregated_params.is_none());
+        assert!(chunk.worker_trace_link.is_none());
+        assert!(chunk.completion_usage.is_none());
     }
 }

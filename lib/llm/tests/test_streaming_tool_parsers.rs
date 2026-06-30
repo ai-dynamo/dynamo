@@ -118,6 +118,7 @@ fn load_test_data(file_path: &str) -> TestData {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -170,8 +171,9 @@ async fn parse_response_stream(
         if let Some(tool_parser) = tool_parser_str {
             Box::pin(OpenAIPreprocessor::apply_tool_calling_jail(
                 Some(tool_parser),
-                None, // No tool_choice in this test
-                None, // No tool_definitions in this test
+                None,  // No tool_choice in this test
+                None,  // No tool_definitions in this test
+                false, // No structural_tag in this test
                 stream,
             ))
         } else {
@@ -1231,7 +1233,7 @@ mod tests {
         );
     }
 
-    /// `PARSER.stream.1` — single tool call over the streaming pipeline,
+    /// `TOOLCALLING.stream.1` — single tool call over the streaming pipeline,
     /// paired with reasoning. Also validates finish_reason=tool_calls passthrough.
     #[tokio::test]
     async fn test_deepseek_v4_e2e_with_tools_vllm() {
@@ -1242,7 +1244,7 @@ mod tests {
         run_deepseek_v4_tool_call_fixture(&file_path).await;
     }
 
-    /// `PARSER.batch.3` over the streaming pipeline — no tool call,
+    /// `TOOLCALLING.batch.3` over the streaming pipeline — no tool call,
     /// reasoning plus plain body, and finish_reason=stop passthrough.
     #[tokio::test]
     async fn test_deepseek_v4_e2e_with_no_tools_vllm() {
@@ -1282,7 +1284,7 @@ mod tests {
         );
     }
 
-    /// `PARSER.stream.2` — two parallel tool calls inside one DSML block.
+    /// `TOOLCALLING.stream.2` — two parallel tool calls inside one DSML block.
     #[tokio::test]
     async fn test_deepseek_v4_e2e_multi_tool_vllm() {
         let file_path = format!(
@@ -1294,7 +1296,7 @@ mod tests {
 
     /// string="true" vs string="false" — numbers, booleans, arrays, objects must
     /// round-trip as their proper JSON types inside arguments.
-    /// `PARSER.batch.7.a` over the streaming pipeline — complex args
+    /// `TOOLCALLING.batch.7.a` over the streaming pipeline — complex args
     /// (mixed string="true|false" to strings / numbers / bools / arrays / objects).
     #[tokio::test]
     async fn test_deepseek_v4_e2e_mixed_param_types_vllm() {
@@ -1307,7 +1309,7 @@ mod tests {
 
     /// Body text emitted before the DSML block — parser must populate both
     /// normal_content and tool_calls.
-    /// `PARSER.batch.8.a` over the streaming pipeline — normal text
+    /// `TOOLCALLING.batch.8.a` over the streaming pipeline — normal text
     /// interleaved before the DSML block.
     #[tokio::test]
     async fn test_deepseek_v4_e2e_content_before_tool_vllm() {
@@ -1321,8 +1323,8 @@ mod tests {
     /// Parameter value containing unicode, emoji, embedded quotes/newlines/tabs,
     /// and fragments that look like sentinels but aren't — must not confuse the
     /// parser, which anchors only on the exact </｜DSML｜parameter> token.
-    /// `PARSER.batch.7.b` over the streaming pipeline — Unicode / special
-    /// characters inside argument values. (`PARSER.xml.1` is N/A for DSML.)
+    /// `TOOLCALLING.batch.7.b` over the streaming pipeline — Unicode / special
+    /// characters inside argument values. (`TOOLCALLING.xml.1` is N/A for DSML.)
     #[tokio::test]
     async fn test_deepseek_v4_e2e_special_chars_vllm() {
         let file_path = format!(
@@ -1334,7 +1336,7 @@ mod tests {
 
     /// Adversarial streaming: every DSML character is its own delta (~200 chunks).
     /// Exercises buffer accumulation across chunk boundaries.
-    /// `PARSER.stream.3` — streaming chunk-boundary splits
+    /// `TOOLCALLING.stream.3` — streaming chunk-boundary splits
     /// (grammar tokens straddle chunks).
     #[tokio::test]
     async fn test_deepseek_v4_e2e_fragmented_tokens_vllm() {
@@ -1343,6 +1345,46 @@ mod tests {
             DATA_ROOT_PATH
         );
         run_deepseek_v4_tool_call_fixture(&file_path).await;
+    }
+
+    /// `TOOLCALLING.stream.4.a` — stream ends after a complete invoke but before
+    /// `</｜DSML｜tool_calls>`. Finalization should recover the complete invoke
+    /// without enabling early stream exit on unterminated DSML wrappers.
+    #[tokio::test]
+    async fn test_deepseek_v4_stream_finalize_recovers_complete_invoke_without_outer_close() {
+        let input_stream = stream::iter(vec![make_chunk(
+            "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>",
+            Some(FinishReason::Stop),
+        )]);
+
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            false,
+            Some("deepseek_v4".to_string()),
+            None,
+        )
+        .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+        assert_eq!(aggregated.normal_content, "");
+        assert!(aggregated.has_tool_calls);
+        assert_tool_calls(
+            &aggregated.tool_calls,
+            &[serde_json::json!({
+                "function": {
+                    "name": "get_weather",
+                    "arguments": "{\"location\":\"NYC\"}"
+                }
+            })],
+        );
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::ToolCalls),
+            "finish_reason validation failed for finalized DSML tool call"
+        );
     }
 
     // ---- Kimi K2 streaming jail reproduction tests ----
@@ -1384,6 +1426,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             event: None,
             comment: None,
@@ -1391,7 +1434,7 @@ mod tests {
         }
     }
 
-    /// `PARSER.stream.1.b` — complete Kimi K2 tool call stream split
+    /// `TOOLCALLING.stream.1.b` — complete Kimi K2 tool call stream split
     /// across parser-significant boundaries; section_end present.
     #[tokio::test]
     async fn test_kimi_k2_streaming_complete_section() {
@@ -1422,7 +1465,7 @@ mod tests {
         );
     }
 
-    /// `PARSER.stream.4.a` — model hits max_tokens before emitting section_end.
+    /// `TOOLCALLING.stream.4.a` — model hits max_tokens before emitting section_end.
     /// Individual tool call is complete (call_begin + args + call_end), but
     /// section_end is missing. The jail should still extract the tool call at
     /// finalize time instead of emitting raw marker text.
@@ -1461,7 +1504,7 @@ mod tests {
         );
     }
 
-    /// `PARSER.stream.4.a` plus `PARSER.stream.2` — multiple complete tool
+    /// `TOOLCALLING.stream.4.a` plus `TOOLCALLING.stream.2` — multiple complete tool
     /// calls, no section_end (max_tokens).
     #[tokio::test]
     async fn test_kimi_k2_streaming_multiple_calls_missing_section_end() {
@@ -1496,7 +1539,211 @@ mod tests {
         assert_eq!(aggregated.tool_calls.len(), 2);
     }
 
-    /// `PARSER.stream.4.b` — Kimi K2 truncated mid-argument (no
+    // ── Streaming-jail markup suppression (hermes / qwen25) ─────────────────
+    // These exercise `create_tool_call_choice`'s no-tool-calls finalize branch
+    // directly. The conformance suite validates the batch parser, not this
+    // streaming-jail glue, so it lives here in-repo.
+
+    /// Truncated wrapper with leading prose: keep the prose, drop the markup.
+    #[tokio::test]
+    async fn test_hermes_stream_truncated_with_prose_keeps_prose_drops_markup() {
+        let chunks = vec![
+            make_chunk(
+                "I'll check the weather. <tool_call>{\"name\": \"get_w",
+                None,
+            ),
+            make_chunk("eather\", \"arguments\": {\"loc", None),
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.has_tool_calls,
+            "no call should be recovered; got {:?}",
+            agg.tool_calls
+        );
+        assert!(
+            !agg.normal_content.contains("<tool_call>"),
+            "markup must not leak; got: {:?}",
+            agg.normal_content
+        );
+        assert!(
+            agg.normal_content.contains("I'll check the weather"),
+            "pre-marker prose must be preserved; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// Truncated wrapper with no prose: content suppressed to empty.
+    #[tokio::test]
+    async fn test_hermes_stream_truncated_no_prose_is_empty() {
+        let chunks = vec![
+            make_chunk("<tool_call>{\"name\": \"get_w", None),
+            make_chunk("eather\", \"arguments\": {\"loc", None),
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.has_tool_calls,
+            "no call should be recovered; got {:?}",
+            agg.tool_calls
+        );
+        assert!(
+            agg.normal_content.trim().is_empty(),
+            "truncated call with no prose must suppress to empty; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// Orphan close with no opener: strip the markers, keep the inner body.
+    #[tokio::test]
+    async fn test_hermes_stream_orphan_close_strips_markers_keeps_body() {
+        let chunks = vec![make_chunk(
+            "{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}</tool_call></tool_call></tool_call>",
+            Some(FinishReason::Length),
+        )];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.normal_content.contains("</tool_call>"),
+            "orphan close markers must be stripped; got: {:?}",
+            agg.normal_content
+        );
+        assert!(
+            agg.normal_content.contains("get_weather"),
+            "inner JSON body must be kept; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// Mid-buffer orphan close: every occurrence is removed, not just trailing
+    /// ones (guards the `.replace()` over trim-suffix).
+    #[tokio::test]
+    async fn test_hermes_stream_mid_buffer_orphan_close_stripped() {
+        let chunks = vec![make_chunk(
+            "{\"name\": \"get_weather\"}</tool_call> and then more text",
+            Some(FinishReason::Length),
+        )];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.normal_content.contains("</tool_call>"),
+            "a mid-buffer orphan marker must be stripped, not just trailing ones; got: {:?}",
+            agg.normal_content
+        );
+        assert!(
+            agg.normal_content.contains("more text"),
+            "surrounding text must be preserved; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// qwen25 shares the never-leak gate: same suppression for truncated and
+    /// orphan-close streams.
+    #[tokio::test]
+    async fn test_qwen25_stream_suppresses_truncated_and_orphan() {
+        // truncated mid-body -> empty
+        let truncated = vec![
+            make_chunk("<tool_call>{\"name\": \"get_w", None),
+            make_chunk("eather\", \"arguments\": {\"loc", None),
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+        let agg = aggregate_content_from_chunks(
+            &parse_response_stream(
+                stream::iter(truncated),
+                true,
+                false,
+                Some("qwen25".to_string()),
+                None,
+            )
+            .await,
+        );
+        assert!(
+            agg.normal_content.trim().is_empty() && !agg.has_tool_calls,
+            "qwen25 truncated must suppress to empty; got: {:?}",
+            agg.normal_content
+        );
+
+        // orphan close -> markers stripped, body kept
+        let orphan = vec![make_chunk(
+            "{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}</tool_call></tool_call></tool_call>",
+            Some(FinishReason::Length),
+        )];
+        let agg = aggregate_content_from_chunks(
+            &parse_response_stream(
+                stream::iter(orphan),
+                true,
+                false,
+                Some("qwen25".to_string()),
+                None,
+            )
+            .await,
+        );
+        assert!(
+            !agg.normal_content.contains("</tool_call>")
+                && agg.normal_content.contains("get_weather"),
+            "qwen25 orphan close must strip markers and keep the body; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// False-positive: content with no tool-call markers passes through verbatim
+    /// (suppression must not eat ordinary prose).
+    #[tokio::test]
+    async fn test_hermes_stream_no_markers_passes_through_verbatim() {
+        let text = "I will not call any tools today.";
+        let chunks = vec![make_chunk(text, Some(FinishReason::Stop))];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.has_tool_calls,
+            "no tool calls expected; got {:?}",
+            agg.tool_calls
+        );
+        assert_eq!(
+            agg.normal_content, text,
+            "marker-free prose must pass through unchanged; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// `TOOLCALLING.stream.4.b` — Kimi K2 truncated mid-argument (no
     /// `<|tool_call_end|>`), customer regression. Also validates
     /// finish_reason=stop passthrough.
     ///
@@ -1564,6 +1811,107 @@ mod tests {
         assert!(
             validate_finish_reason(&output_chunks, FinishReason::Stop),
             "finish_reason should pass through as Stop when no tool calls are emitted"
+        );
+    }
+
+    // TOOLCALLING.stream.4.c — recover complete bare inner calls without
+    // leaking protocol markup, matching DeepSeek V3.2/V4 behavior.
+
+    #[tokio::test]
+    async fn test_deepseek_v3_streaming_orphan_call_recovered() {
+        let chunks = vec![
+            make_chunk(
+                "<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{\"location\": \"NYC\"}\n```\n<｜tool▁call▁end｜>\n<｜tool▁call▁end｜>\n<｜tool▁call▁end｜>",
+                None,
+            ),
+            make_chunk("", Some(FinishReason::Length)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            false,
+            Some("deepseek_v3".to_string()),
+            None,
+        )
+        .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            aggregated.has_tool_calls,
+            "Bare DeepSeek V3 inner call (no outer wrapper) should be recovered"
+        );
+        assert_eq!(aggregated.tool_calls.len(), 1);
+        assert_eq!(
+            aggregated.tool_calls[0]["function"]["name"].as_str(),
+            Some("get_weather")
+        );
+        let args: serde_json::Value = serde_json::from_str(
+            aggregated.tool_calls[0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args["location"], "NYC");
+        assert!(
+            aggregated.normal_content.is_empty(),
+            "Orphan tool-call markup must not leak into normal_content. Got: {:?}",
+            aggregated.normal_content
+        );
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Length),
+            "finish_reason validation failed for recovered orphan DeepSeek V3 call"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_1_streaming_orphan_call_recovered() {
+        let chunks = vec![
+            make_chunk(
+                "<｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"location\":\"NYC\"}<｜tool▁call▁end｜><｜tool▁call▁end｜><｜tool▁call▁end｜>",
+                None,
+            ),
+            make_chunk("", Some(FinishReason::Length)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            false,
+            Some("deepseek_v3_1".to_string()),
+            None,
+        )
+        .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            aggregated.has_tool_calls,
+            "Bare DeepSeek V3.1 inner call (no outer wrapper) should be recovered"
+        );
+        assert_eq!(aggregated.tool_calls.len(), 1);
+        assert_eq!(
+            aggregated.tool_calls[0]["function"]["name"].as_str(),
+            Some("get_weather")
+        );
+        let args: serde_json::Value = serde_json::from_str(
+            aggregated.tool_calls[0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args["location"], "NYC");
+        assert!(
+            aggregated.normal_content.is_empty(),
+            "Orphan tool-call markup must not leak into normal_content. Got: {:?}",
+            aggregated.normal_content
+        );
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Length),
+            "finish_reason validation failed for recovered orphan DeepSeek V3.1 call"
         );
     }
 }

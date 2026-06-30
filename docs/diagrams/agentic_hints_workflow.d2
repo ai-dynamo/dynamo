@@ -23,7 +23,7 @@ dynamo_box: "Dynamo" {
       shape: rectangle
       style.font-size: 24
     }
-    frontend_parse: "Parses nvext → agentic_hints, cache_control" {
+    frontend_parse: "Parses nvext → agentic_hints" {
       shape: text
       style.font-size: 20
     }
@@ -62,7 +62,7 @@ footer: "Every request can also include predictive metadata for 'expected future
 }
 
 # Request label in top half of arrow (intermediate node to avoid overlap with Dynamo box)
-request_label: "POST /v1/chat/completions\nbody: { ... \"nvext\": { \"agent_hints\": {...}, \"cache_control\": {...} } }" {
+request_label: "POST /v1/chat/completions\nbody: { ... \"nvext\": { \"agent_hints\": {...} } }" {
   shape: text
   style.font-size: 20
 }

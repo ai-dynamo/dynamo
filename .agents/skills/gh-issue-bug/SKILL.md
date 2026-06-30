@@ -6,6 +6,11 @@ user-invocable: true
 
 # File a Dynamo Bug Issue
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 Use the current conversation context to file a well-structured bug report against `ai-dynamo/dynamo` via the `gh` CLI.
 
 ## Instructions

@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Amazon EFS Setup for EKS
+subtitle: Creates an Amazon EFS file system so Dynamo workers on EKS share model weights and compilation cache across nodes.
 ---
-
-# Create an Amazon EFS File System for Amazon EKS
 
 This guide walks through creating an Amazon EFS file system and connecting it to your EKS cluster. The EFS CSI Driver was already installed as an addon via `eksctl.yaml` during cluster creation. Now we need to create the actual file system and make it available to Kubernetes workloads.
 

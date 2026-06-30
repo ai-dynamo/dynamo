@@ -160,6 +160,14 @@ curl http://localhost:8090/metrics
 | `dynamo_kvindexer_models` | Gauge | — | Number of active model+tenant indexers |
 | `dynamo_kvindexer_workers` | Gauge | — | Number of registered worker instances |
 | `dynamo_kvindexer_listeners` | Gauge | `status` | Number of ZMQ listeners by status (`pending`, `active`, `paused`, `failed`) |
+| `dynamo_kvrouter_kv_cache_events_applied` | Counter | `event_type`, `status` | Primary device-tier KV events applied, partitioned by event type and result |
+| `dynamo_kvrouter_kv_cache_event_warnings` | Counter | `warning_kind` | Suspicious-but-valid primary device-tier events, including duplicate STORE content |
+
+The core event counters aggregate process-wide across model and tenant indexers and
+across all indexer threads. A `duplicate_store` warning is not necessarily an error:
+peer recovery replay can reapply content already restored from a snapshot. Lower-tier
+events and listener transport or replay failures are not represented by these core
+event counters; use the standalone service metrics and logs for those paths.
 
 ### `POST /register` — Register an endpoint
 
@@ -231,8 +239,22 @@ curl -X POST http://localhost:8090/unregister \
 
 ### `GET /workers` — List registered instances
 
+Returns all registered workers, optionally filtered by model and/or tenant.
+
+| Query parameter | Description |
+|-----------------|-------------|
+| `model_name` | Return only workers registered for this model. Omit to return all models. |
+| `tenant_id` | Return only workers registered for this tenant. Omit to return all tenants. |
+
 ```bash
+# All workers
 curl http://localhost:8090/workers
+
+# Workers for a specific model
+curl "http://localhost:8090/workers?model_name=llama-3-8b"
+
+# Workers for a specific model and tenant
+curl "http://localhost:8090/workers?model_name=llama-3-8b&tenant_id=customer-a"
 ```
 
 Returns:
@@ -242,6 +264,9 @@ Returns:
     "instance_id": 1,
     "source": "zmq",
     "status": "active",
+    "model_name": "llama-3-8b",
+    "tenant_id": "default",
+    "block_size": 16,
     "endpoints": {
       "0": "tcp://127.0.0.1:5557",
       "1": "tcp://127.0.0.1:5558"
@@ -256,18 +281,22 @@ Returns:
         "status": "active"
       }
     }
-  },
-  {
-    "instance_id": 2,
-    "source": "discovery",
-    "status": "active",
-    "endpoints": {},
-    "listeners": {}
   }
 ]
 ```
 
-For ZMQ-managed workers, `status` is aggregated across listeners with priority `failed > pending > active > paused`. Each listener entry may also expose a `last_error` field when the most recent startup or recv-loop attempt failed.
+| Response field | Description |
+|----------------|-------------|
+| `instance_id` | Worker instance identifier |
+| `source` | Always `"zmq"` for ZMQ-managed workers |
+| `status` | Aggregated listener status: `failed > pending > active > paused` |
+| `model_name` | Model this worker is registered under |
+| `tenant_id` | Tenant this worker is registered under |
+| `block_size` | KV cache block size for this worker's `(model_name, tenant_id)` indexer |
+| `endpoints` | Map of `dp_rank → zmq_address` |
+| `listeners` | Per-dp_rank listener detail; each entry may include a `last_error` field when the most recent startup or recv-loop attempt failed |
+
+Filters are independent — providing both `model_name` and `tenant_id` returns only workers matching both. An empty array is returned (not a 404) when no workers match the filter.
 
 ### `POST /query` — Query overlap for token IDs
 

@@ -4,8 +4,6 @@
 title: Google Kubernetes Engine (GKE)
 ---
 
-# Dynamo Deployment on GKE
-
 ## Pre-requisites
 
 ### Install gcloud CLI
@@ -57,9 +55,10 @@ gcloud container node-pools create gpu-pool \
 
 ```bash
 git clone https://github.com/ai-dynamo/dynamo.git
+cd dynamo
 
-# Checkout to the desired branch
-git checkout release/0.6.0
+# Checkout the release branch matching your Dynamo platform version
+git checkout release/1.2.1
 ```
 
 ### Set environment variables for GKE
@@ -116,35 +115,36 @@ export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
 /sbin/ldconfig
 ```
 
-For example, refer to the following from [`examples/deployments/GKE/vllm/disagg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/GKE/vllm/disagg.yaml)
+For example, refer to [`examples/deployments/GKE/vllm/v1beta1/disagg.yaml`](../../../../examples/deployments/GKE/vllm/v1beta1/disagg.yaml):
 
 ```yaml
 metadata:
   name: vllm-disagg
-  namespace: dynamo-system
 spec:
-  services:
-    Frontend:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
-    VllmDecodeWorker:
-​​      resources:
-        limits:
-          gpu: "3"
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.0
-          args:
-            - |
+  components:
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - |
             export LD_LIBRARY_PATH=/usr/local/nvidia/lib64:$LD_LIBRARY_PATH
             export PATH=$PATH:/usr/local/nvidia/bin:/usr/local/nvidia/lib64
             /sbin/ldconfig
-            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
+            python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --disaggregation-mode decode
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
 ```
 
 ## Deploy the model
 
 ```bash
-cd dynamo/examples/deployments/GKE/vllm
+cd examples/deployments/GKE/vllm/v1beta1
 
-kubectl apply -f disagg_gke.yaml -n ${NAMESPACE}
+kubectl apply -f disagg.yaml -n ${NAMESPACE}
 ```
 
 **Expected output after successful deployment**

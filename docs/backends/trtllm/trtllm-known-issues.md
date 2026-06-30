@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Known Issues and Mitigations
+subtitle: Known issues for TensorRT-LLM in Dynamo, including disaggregated KV cache exhaustion and driver mismatch errors, with mitigations.
 ---
 
 For general TensorRT-LLM features and configuration, see the [Reference Guide](trtllm-reference-guide.md).

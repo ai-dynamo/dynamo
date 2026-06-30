@@ -120,6 +120,24 @@ pub static DETOKENIZE_TOKEN_COUNT: Lazy<Counter> = Lazy::new(|| {
     .expect("detokenize_token_count counter")
 });
 
+/// Cumulative L1 tokenizer cache hits. The cache is enabled unless `DYN_TOKENIZER_CACHE=0`.
+pub static TOKENIZER_CACHE_HITS_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    Counter::with_opts(Opts::new(
+        frontend_metric_name(frontend_perf::TOKENIZER_CACHE_HITS_TOTAL),
+        "Cumulative L1 tokenizer prefix-cache hits",
+    ))
+    .expect("tokenizer_cache_hits_total counter")
+});
+
+/// Cumulative L1 tokenizer cache misses. The cache is enabled unless `DYN_TOKENIZER_CACHE=0`.
+pub static TOKENIZER_CACHE_MISSES_TOTAL: Lazy<Counter> = Lazy::new(|| {
+    Counter::with_opts(Opts::new(
+        frontend_metric_name(frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL),
+        "Cumulative L1 tokenizer prefix-cache misses",
+    ))
+    .expect("tokenizer_cache_misses_total counter")
+});
+
 /// Guards idempotency for the `MetricsRegistry` registration path.
 static REGISTERED: OnceCell<()> = OnceCell::new();
 
@@ -143,6 +161,12 @@ pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
         registry
             .add_metric(Box::new(DETOKENIZE_TOKEN_COUNT.clone()))
             .ok();
+        registry
+            .add_metric(Box::new(TOKENIZER_CACHE_HITS_TOTAL.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(TOKENIZER_CACHE_MISSES_TOTAL.clone()))
+            .ok();
     });
 }
 
@@ -160,6 +184,8 @@ pub fn ensure_frontend_perf_metrics_registered_prometheus(
     registry.register(Box::new(TEMPLATE_SECONDS.clone()))?;
     registry.register(Box::new(DETOKENIZE_TOTAL_US.clone()))?;
     registry.register(Box::new(DETOKENIZE_TOKEN_COUNT.clone()))?;
+    registry.register(Box::new(TOKENIZER_CACHE_HITS_TOTAL.clone()))?;
+    registry.register(Box::new(TOKENIZER_CACHE_MISSES_TOTAL.clone()))?;
     let _ = PROMETHEUS_REGISTERED.set(());
     Ok(())
 }

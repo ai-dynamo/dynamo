@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: glm-5-nvfp4
+title: GLM-5 NVFP4
+page: recipes/glm-5-nvfp4.mdx
+provider: zai
+model:
+  name: GLM-5
+  hf_id: nvidia/GLM-5-NVFP4
+  precision: NVFP4 (FP8 KV cache, FP8 MTP layer at load)
+status: validated
+targets:
+- id: sglang-disagg
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 20
+  runtime:
+    framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1-cuda13
+  topology: disaggregated
+  techniques:
+  - disagg-pd
+  - eagle-mtp-spec-dec
+  - fp8-kv-cache
+  - mnnvl-computedomain
+  - nixl-ucx
+  workload:
+    type: static-synthetic
+    traffic: ISL 1000 / OSL 8192, 512 concurrency (32/decode GPU), 1536 requests
+  deploy:
+    asset: recipes/glm-5-nvfp4/sglang/disagg/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/glm-5-nvfp4/sglang/disagg/perf.yaml
+  expected_performance:
+    available: true
+    summary: 16,824 tok/s output, 2.05 req/s, TTFT p50 15,423 ms, ITL avg 23.31 ms/token, 43.39 tok/user/s, 0 errors over
+      1,536 requests / 747.87 s
+- id: sglang-disagg-efa
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 20
+  runtime:
+    framework: sglang
+    image: custom build from recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa (patched libfabric, no prebuilt image)
+  topology: disaggregated
+  techniques:
+  - disagg-pd
+  - eagle-mtp-spec-dec
+  - fp8-kv-cache
+  - efa-rdma
+  - nixl-libfabric
+  workload:
+    type: static-synthetic
+    traffic: ISL 1000 / OSL 8192, 512 concurrency, 1536 requests (identical to non-EFA)
+  deploy:
+    asset: recipes/glm-5-nvfp4/sglang/disagg/efa/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/glm-5-nvfp4/sglang/disagg/efa/perf.yaml
+  expected_performance:
+    available: true
+    summary: 'parity with non-EFA: 19,131 tok/s output, TTFT p50 621 ms, ITL avg 24.5 ms/token; at ISL 20k/OSL 2k LIBFABRIC
+      is +39% throughput / -56% TTFT p50 vs UCX'
+related_benchmarks: []
+maintainer: null
+gaps:
+- prototype had wrong model id (zai-org/...) — corrected to nvidia/GLM-5-NVFP4
+- EFA variant has no prebuilt container image — custom Dockerfile.efa build required
+- EFA README's non-EFA comparison numbers are approximate; page cites exact baseline table from main README
+- no related feature benchmark exists
+- maintainer unknown

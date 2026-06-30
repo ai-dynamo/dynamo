@@ -5,7 +5,7 @@
 
 use dynamo_kv_hashing::{
     KvHashingError, Request, RequestMmObjectInfo, SaltHash, Token, TokenBlockMmInfo,
-    compute_block_hash,
+    compute_block_hash, compute_salt_hash,
 };
 use dynamo_tokens::{TokenBlockSequence, Tokens};
 
@@ -430,5 +430,46 @@ fn request_sequence_hashes_match_canonical_chain() {
             sequence_hashes[i], expected,
             "chain step at position {i} must use compute_next_sequence_hash"
         );
+    }
+}
+
+#[test]
+fn consuming_sequence_hashes_match_borrowed_path() {
+    let tokens: Vec<Token> = (1u32..=20).collect();
+    let block_size: u32 = 4;
+
+    let request = req(tokens, None, None, vec![]);
+    let borrowed = request.sequence_hashes(block_size).unwrap();
+    let consuming = request.into_sequence_hashes(block_size).unwrap();
+
+    assert_eq!(consuming, borrowed);
+}
+
+// -----------------------------------------------------------------------------
+// compute_salt_hash is the public seam for producers without a Request
+// -----------------------------------------------------------------------------
+#[test]
+fn compute_salt_hash_matches_request_driven_hashing() {
+    let tokens: Vec<Token> = (1..=12).collect();
+    let no_mm: &[TokenBlockMmInfo] = &[];
+
+    for lora in [None, Some("lora-a")] {
+        let request = req(tokens.clone(), lora, None, vec![]);
+        let via_request = request.positional_lineage_hashes(BS).unwrap();
+
+        // A producer driving TokenBlockSequence directly (no Request) must land
+        // on the same chain when seeded with compute_salt_hash.
+        let salt = compute_salt_hash(None, lora).unwrap();
+        assert_eq!(salt, request.salt_hash().unwrap());
+
+        let seq =
+            TokenBlockSequence::new_with_mm(Tokens::from(tokens.clone()), no_mm, BS, Some(salt))
+                .unwrap();
+        let via_sequence: Vec<_> = seq
+            .blocks()
+            .iter()
+            .map(|b| b.positional_lineage_hash())
+            .collect();
+        assert_eq!(via_sequence, via_request, "lora={lora:?}");
     }
 }

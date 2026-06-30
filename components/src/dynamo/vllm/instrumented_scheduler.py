@@ -120,6 +120,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_FPM_PORT = 20380
 ENV_FPM_PORT = "DYN_FORWARDPASS_METRIC_PORT"
+ENV_FPM_WORKER_ID = "DYN_FPM_WORKER_ID"
+ENV_FPM_BENCHMARK_OUTPUT_PATH = "DYN_FPM_BENCHMARK_OUTPUT_PATH"
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +273,7 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
         dp_rank = self._resolve_dp_rank(vllm_config.parallel_config)
-        self._fpm_worker_id = vllm_config.additional_config.get("fpm_worker_id", "")
+        self._fpm_worker_id = os.environ.get(ENV_FPM_WORKER_ID, "")
         self._fpm_dp_rank = dp_rank
 
         self._schedule_times: deque[float] = deque()
@@ -322,7 +324,7 @@ class InstrumentedScheduler(AsyncScheduler):
             return True
         return super().has_requests()
 
-    def schedule(self) -> SchedulerOutput:
+    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         if self._bench_active and self._bench_phase != _BenchPhase.IDLE:
             try:
                 output = self._bench_step()
@@ -331,7 +333,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_cleanup_requests()
                 self._bench_active = False
                 self._bench_phase = _BenchPhase.IDLE
-                return self._schedule_and_record_time()
+                return self._schedule_and_record_time(throttle_prefills)
             if output is not None:
                 self.kv_cache_manager.new_step_starts()
                 self._update_after_schedule(output)
@@ -374,10 +376,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._update_after_schedule(empty)
                 return empty
 
-        return self._schedule_and_record_time()
+        return self._schedule_and_record_time(throttle_prefills)
 
-    def _schedule_and_record_time(self) -> SchedulerOutput:
-        output = super().schedule()
+    def _schedule_and_record_time(
+        self, throttle_prefills: bool = False
+    ) -> SchedulerOutput:
+        output = super().schedule(throttle_prefills)
         if output.total_num_scheduled_tokens > 0:
             self._schedule_times.append(time.monotonic())
         return output
@@ -592,6 +596,10 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_config = BenchmarkConfig(
             **{k: v for k, v in cfg.items() if k in known}
         )
+        self._bench_config.output_path = os.environ.get(
+            ENV_FPM_BENCHMARK_OUTPUT_PATH,
+            self._bench_config.output_path,
+        )
 
         dp_rank = self._fpm_dp_rank
         if dp_rank > 0:
@@ -777,6 +785,12 @@ class InstrumentedScheduler(AsyncScheduler):
                     block_ids=block_ids,
                     num_computed_tokens=ctx_len,
                     lora_request=None,
+                    # vLLM >=0.22's v2 GPU model runner requires `prefill_token_ids`
+                    # (asserted non-None in gpu/model_runner.add_requests, used as the
+                    # request's `all_token_ids`). vLLM's own scheduler passes
+                    # `req._all_token_ids` for new requests; mirror that here for the
+                    # synthetic decode requests we build directly. Older runners ignore it.
+                    prefill_token_ids=req._all_token_ids,
                 )
             )
             num_scheduled_tokens[req_id] = 1
