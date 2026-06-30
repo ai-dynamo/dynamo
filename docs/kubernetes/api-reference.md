@@ -737,6 +737,8 @@ _Appears in:_
 | `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 | `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | RollingUpdate tracks the progress of operator manged rolling updates.<br />Currently only supported for singl-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
+| `placementScore` _float_ | PlacementScore is the DGD-level scheduler placement score aggregated from<br />relevant scheduler placement units when reported. |  | Optional: \{\} <br /> |
+| `placementScoreState` _[PlacementScoreState](#placementscorestate)_ | PlacementScoreState indicates placement score reporting state. |  | Enum: [Reported Partial Unsupported NotReported Unknown] <br />Optional: \{\} <br /> |
 
 
 #### DynamoModel
@@ -1124,6 +1126,27 @@ _Appears in:_
 | `storageClass` _string_ | StorageClass to be used for PVC creation. Required when create is true. |  |  |
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | Size of the volume in Gi, used during PVC creation. Required when create is true. |  |  |
 | `volumeAccessMode` _[PersistentVolumeAccessMode](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#persistentvolumeaccessmode-v1-core)_ | VolumeAccessMode is the volume access mode of the PVC. Required when create is true. |  |  |
+
+
+#### PlacementScoreState
+
+_Underlying type:_ _string_
+
+
+
+_Validation:_
+- Enum: [Reported Partial Unsupported NotReported Unknown]
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description |
+| --- | --- |
+| `Reported` |  |
+| `Partial` |  |
+| `Unsupported` |  |
+| `NotReported` |  |
+| `Unknown` |  |
 
 
 #### PodReference
@@ -2371,6 +2394,8 @@ _Appears in:_
 | `restart` _[RestartStatus](#restartstatus)_ | restart contains the status of a graph-level restart. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ComponentCheckpointStatus](#componentcheckpointstatus))_ | checkpoints contains per-component checkpoint status, keyed by component name. |  | Optional: \{\} <br /> |
 | `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | rollingUpdate tracks the progress of operator-managed rolling updates.<br />Currently only supported for single-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
+| `placementScore` _float_ | placementScore is the DGD-level scheduler placement score aggregated from<br />relevant scheduler placement units when reported. |  | Optional: \{\} <br /> |
+| `placementScoreState` _[PlacementScoreState](#placementscorestate)_ | placementScoreState indicates placement score reporting state. |  | Enum: [Reported Partial Unsupported NotReported Unknown] <br />Optional: \{\} <br /> |
 
 
 #### EPPConfig
@@ -2735,6 +2760,28 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `config` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Config is the full deployment configuration for this Pareto point. |  | Type: object <br /> |
+
+
+#### PlacementScoreState
+
+_Underlying type:_ _string_
+
+PlacementScoreState describes whether placement score is available and how
+complete the reported score is for a graph deployment.
+
+_Validation:_
+- Enum: [Reported Partial Unsupported NotReported Unknown]
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description |
+| --- | --- |
+| `Reported` |  |
+| `Partial` |  |
+| `Unsupported` |  |
+| `NotReported` |  |
+| `Unknown` |  |
 
 
 #### ProfilingPhase

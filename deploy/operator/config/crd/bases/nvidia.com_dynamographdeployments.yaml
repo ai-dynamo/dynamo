@@ -11947,6 +11947,20 @@ spec:
                   description: ObservedGeneration is the most recent generation observed by the controller.
                   format: int64
                   type: integer
+                placementScore:
+                  description: |-
+                    PlacementScore is the DGD-level scheduler placement score aggregated from
+                    relevant scheduler placement units when reported.
+                  type: number
+                placementScoreState:
+                  description: PlacementScoreState indicates placement score reporting state.
+                  enum:
+                    - Reported
+                    - Partial
+                    - Unsupported
+                    - NotReported
+                    - Unknown
+                  type: string
                 restart:
                   description: Restart contains the status of the restart of the graph deployment.
                   properties:
@@ -21313,6 +21327,20 @@ spec:
                   description: observedGeneration is the most recent generation observed by the controller.
                   format: int64
                   type: integer
+                placementScore:
+                  description: |-
+                    placementScore is the DGD-level scheduler placement score aggregated from
+                    relevant scheduler placement units when reported.
+                  type: number
+                placementScoreState:
+                  description: placementScoreState indicates placement score reporting state.
+                  enum:
+                    - Reported
+                    - Partial
+                    - Unsupported
+                    - NotReported
+                    - Unknown
+                  type: string
                 restart:
                   description: restart contains the status of a graph-level restart.
                   properties:
