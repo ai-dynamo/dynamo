@@ -18,6 +18,7 @@ pub mod inference_pool;
 pub mod offline_preprocessor;
 pub mod picker;
 pub mod proto;
+pub mod selector_client;
 pub mod selector_config;
 pub mod selector_reflector;
 pub mod server;
@@ -26,6 +27,9 @@ pub use epp::Router;
 pub use inference_pool::PoolState;
 pub use offline_preprocessor::build_offline_preprocessor;
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo};
+pub use selector_client::{
+    SelectRequest, SelectResponse, SelectorClient, WorkerPatch, WorkerRegistration,
+};
 pub use selector_config::SelectorConfig;
 pub use selector_reflector::{RawWorker, SelectorReflector};
 pub use server::ExtProcServer;
