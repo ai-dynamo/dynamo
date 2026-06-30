@@ -109,7 +109,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:1.3.0
           imagePullPolicy: IfNotPresent
   - name: VllmDecodeWorker
     type: decode
@@ -146,7 +146,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           imagePullPolicy: IfNotPresent
           resources:
             limits:
@@ -163,7 +163,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu
@@ -204,7 +204,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           imagePullPolicy: IfNotPresent
           resources:
             limits:
@@ -221,7 +221,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu

@@ -43,7 +43,7 @@ related_recipes: []
 maintainer: null
 gaps:
 - result numbers approximate (~) in source; Pareto plot only as embedded image
-- deploy.yaml image tag placeholder (tensorrtllm-runtime:my-tag)
+- deploy.yaml image tag placeholder (tensorrtllm-runtime:1.3.0)
 - maintainer unknown
 promotion_candidate:
   deferred_recipe_id: kimi-k2-5
