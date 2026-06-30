@@ -2207,6 +2207,7 @@ fn derive_decode_router_config(
 ) -> KvRouterConfig {
     let mut config = base_router_config(args, router_config);
     config.overlap_score_credit = 0.0;
+    config.router_selection_policy = dynamo_kv_router::config::RouterSelectionPolicy::Linear;
     config.router_assume_kv_reuse = false;
     config.router_track_prefill_tokens = false;
     config.router_prefill_load_model = dynamo_kv_router::config::RouterPrefillLoadModel::None;

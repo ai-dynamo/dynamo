@@ -24,6 +24,8 @@ The cost function combines two worker-specific projections:
 - **Prefill cost**: Active prompt work already assigned to the worker plus the incoming request's uncached prompt work. Device, host, disk, and shared-cache hits reduce this cost according to their configured credits.
 - **Decode cost**: Active KV blocks already assigned to the worker plus the blocks projected for the incoming request.
 
+By default, the router uses the linear score:
+
 ```text
 raw_prefill_blocks = active_prefill_blocks + incoming_prompt_blocks
 adjusted_prefill_blocks = max(raw_prefill_blocks - overlap_credit_blocks, 0)
@@ -31,7 +33,13 @@ decode_blocks = active_decode_blocks + incoming_active_blocks
 cost = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 ```
 
-`overlap_credit_blocks` combines the configured device, host, disk, and shared-cache credits. `overlap_score_credit_decay` can reduce the device-local portion when a cache-rich worker has excess active prefill load. The router selects the lowest-cost eligible worker. For exact tuning behavior, see [Configuration and Tuning](router-configuration.md#tuning-guidelines).
+Set `router_selection_policy=lmetric` to use the Blitz-router-inspired multiplicative score:
+
+```text
+cost = adjusted_prefill_blocks * (decode_blocks + 1)
+```
+
+`decode_blocks` is Dynamo's projected decode-load proxy at worker selection time. `overlap_credit_blocks` combines the configured device, host, disk, and shared-cache credits. `overlap_score_credit_decay` can reduce the device-local portion when a cache-rich worker has excess active prefill load. The router selects the lowest-cost eligible worker. For exact tuning behavior, see [Configuration and Tuning](router-configuration.md#tuning-guidelines).
 
 ### Active Load Modeling
 

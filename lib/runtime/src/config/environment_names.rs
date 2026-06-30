@@ -520,6 +520,10 @@ pub mod router {
 
     /// Scheduling policy for the router queue ("fcfs" or "wspt").
     pub const DYN_ROUTER_QUEUE_POLICY: &str = "DYN_ROUTER_QUEUE_POLICY";
+
+    /// Worker selection scoring policy ("linear" or "lmetric").
+    pub const DYN_ROUTER_SELECTION_POLICY: &str = "DYN_ROUTER_SELECTION_POLICY";
+
     pub const DYN_ROUTER_POLICY_CONFIG: &str = "DYN_ROUTER_POLICY_CONFIG";
 }
 
@@ -765,6 +769,7 @@ mod tests {
             router::DYN_ROUTER_PREFILL_LOAD_SCALE,
             router::DYN_ROUTER_QUEUE_THRESHOLD,
             router::DYN_ROUTER_QUEUE_POLICY,
+            router::DYN_ROUTER_SELECTION_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream

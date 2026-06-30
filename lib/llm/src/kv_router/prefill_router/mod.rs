@@ -9,7 +9,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use dynamo_kv_router::{
-    PrefillLoadEstimator, config::RouterConfigOverride, protocols::RoutingConstraints,
+    PrefillLoadEstimator,
+    config::{RouterConfigOverride, RouterSelectionPolicy},
+    protocols::RoutingConstraints,
     scheduling::QueueRejection,
 };
 use dynamo_runtime::{
@@ -401,6 +403,7 @@ fn build_decode_router_override(
 ) -> RouterConfigOverride {
     RouterConfigOverride {
         overlap_score_credit: Some(0.0),
+        router_selection_policy: Some(RouterSelectionPolicy::Linear),
         assume_kv_reuse: Some(false),
         track_prefill_tokens: Some(false),
         ..existing_override.unwrap_or_default()
@@ -445,6 +448,10 @@ mod tests {
         }));
 
         assert_eq!(override_config.overlap_score_credit, Some(0.0));
+        assert_eq!(
+            override_config.router_selection_policy,
+            Some(RouterSelectionPolicy::Linear)
+        );
         assert_eq!(override_config.assume_kv_reuse, Some(false));
         assert_eq!(override_config.track_prefill_tokens, Some(false));
         assert_eq!(override_config.router_temperature, Some(0.7));

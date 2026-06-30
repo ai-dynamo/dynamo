@@ -234,7 +234,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, router_policy_config=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, durable_kv_events=false, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_snapshot_threshold=1000000, router_reset_states=false, router_ttl_secs=120.0, router_queue_threshold=Some(16.0), router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, *, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, router_selection_policy="linear", router_policy_config=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -263,6 +263,7 @@ impl KvRouterConfig {
         mut overlap_score_credit: f64,
         overlap_score_credit_decay: f64,
         mut prefill_load_scale: f64,
+        router_selection_policy: &str,
         router_policy_config: Option<String>,
     ) -> PyResult<Self> {
         if let Some(value) = overlap_score_weight {
@@ -277,6 +278,9 @@ impl KvRouterConfig {
             overlap_score_credit,
             overlap_score_credit_decay,
             prefill_load_scale,
+            router_selection_policy: router_selection_policy
+                .parse()
+                .map_err(PyValueError::new_err)?,
             host_cache_hit_weight,
             disk_cache_hit_weight,
             router_temperature,
@@ -383,13 +387,28 @@ impl KvRouterConfig {
         Ok(())
     }
 
-    #[pyo3(signature = (overlap_score_weight=None, *, overlap_score_credit=None, overlap_score_credit_decay=None, prefill_load_scale=None))]
+    #[getter]
+    fn router_selection_policy(&self) -> String {
+        self.inner.router_selection_policy.to_string()
+    }
+
+    #[setter]
+    fn set_router_selection_policy(&mut self, value: &str) -> PyResult<()> {
+        let mut inner = self.inner.clone();
+        inner.router_selection_policy = value.parse().map_err(PyValueError::new_err)?;
+        validate_kv_router_config(&inner)?;
+        self.inner = inner;
+        Ok(())
+    }
+
+    #[pyo3(signature = (overlap_score_weight=None, *, overlap_score_credit=None, overlap_score_credit_decay=None, prefill_load_scale=None, router_selection_policy=None))]
     fn with_overrides(
         &self,
         overlap_score_weight: Option<f64>,
         overlap_score_credit: Option<f64>,
         overlap_score_credit_decay: Option<f64>,
         prefill_load_scale: Option<f64>,
+        router_selection_policy: Option<&str>,
     ) -> PyResult<Self> {
         let mut inner = self.inner.clone();
         if let Some(credit) = overlap_score_credit {
@@ -400,6 +419,9 @@ impl KvRouterConfig {
         }
         if let Some(scale) = prefill_load_scale {
             inner.prefill_load_scale = scale;
+        }
+        if let Some(policy) = router_selection_policy {
+            inner.router_selection_policy = policy.parse().map_err(PyValueError::new_err)?;
         }
         if let Some(weight) = overlap_score_weight {
             apply_deprecated_overlap_score_weight(

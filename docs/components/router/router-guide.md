@@ -40,6 +40,7 @@ Backend workers register themselves using the `register_model` API. For accurate
 | `--load-aware` / `--no-load-aware` | `--no-load-aware` | Route by active load without cache-reuse signals; implies `--router-mode kv` on the frontend |
 | `--router-kv-overlap-score-credit <float>` | `1.0` | Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 |
 | `--router-prefill-load-scale <float>` | `1.0` | Scale adjusted prompt-side prefill load before adding decode blocks |
+| `--router-selection-policy <linear\|lmetric>` | `linear` | Worker selection scoring policy |
 | `--router-track-prefill-tokens` / `--no-router-track-prefill-tokens` | `--router-track-prefill-tokens` | Include prompt-side load in active worker load accounting |
 | `--router-prefill-load-model <none\|aic>` | `none` | Prompt-side load model; see [Routing Concepts](router-concepts.md#active-load-modeling) and [Configuration and Tuning](router-configuration.md#aic-prefill-load-model) |
 | `--router-queue-threshold <float>` | `16.0` | Queue threshold fraction; priority hints only reorder requests while this queue is non-empty |
@@ -88,6 +89,7 @@ All CLI arguments can be configured via environment variables using the `DYN_` p
 | `--no-router-kv-events` | `DYN_ROUTER_USE_KV_EVENTS=false` | `true` |
 | `--router-kv-overlap-score-credit` | `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` | `1.0` |
 | `--router-prefill-load-scale` | `DYN_ROUTER_PREFILL_LOAD_SCALE` | `1.0` |
+| `--router-selection-policy` | `DYN_ROUTER_SELECTION_POLICY` | `linear` |
 | `--router-queue-policy` | `DYN_ROUTER_QUEUE_POLICY` | `fcfs` |
 | `DYN_ENCODER_CUDA_TO_CPU_RATIO` | `8` | Throughput ratio of a non-CPU worker relative to one CPU worker for `device-aware-weighted` routing |
 

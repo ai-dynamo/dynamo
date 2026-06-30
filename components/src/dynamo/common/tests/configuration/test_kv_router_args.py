@@ -221,6 +221,27 @@ def test_prefill_load_scale_env_uses_kv_router_config_field(monkeypatch) -> None
     assert not hasattr(args, "router_prefill_load_scale")
 
 
+def test_router_selection_policy_cli_flows_to_binding_kwargs() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(["--router-selection-policy", "lmetric"])
+
+    config = KvRouterConfigBase.from_cli_args(args)
+    assert config.kv_router_kwargs()["router_selection_policy"] == "lmetric"
+
+
+def test_router_selection_policy_env_flows_to_binding_kwargs(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_ROUTER_SELECTION_POLICY", "lmetric")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    args = parser.parse_args([])
+
+    config = KvRouterConfigBase.from_cli_args(args)
+    assert config.kv_router_kwargs()["router_selection_policy"] == "lmetric"
+
+
 def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)

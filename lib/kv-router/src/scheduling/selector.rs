@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use rand::Rng;
 use rustc_hash::FxHashMap;
 
-use super::config::KvRouterConfig;
+use super::config::{KvRouterConfig, RouterSelectionPolicy};
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
@@ -96,6 +96,7 @@ struct LogitWeights {
     overlap_score_credit: f64,
     overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
+    selection_policy: RouterSelectionPolicy,
     shared_cache_multiplier: f64,
 }
 
@@ -206,31 +207,42 @@ impl DefaultWorkerSelector {
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let worker_load = worker_load.unwrap_or_default();
         let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
-        let logit = prefill_cost_blocks + decode_cost_blocks;
+        let logit = match weights.selection_policy {
+            RouterSelectionPolicy::Linear => prefill_cost_blocks + decode_cost_blocks,
+            RouterSelectionPolicy::Lmetric => adjusted_prefill_blocks * (decode_cost_blocks + 1.0),
+        };
+        let formula_detail = match weights.selection_policy {
+            RouterSelectionPolicy::Linear => {
+                "prefill_load_scale * adjusted_prefill_blocks + decode_blocks"
+            }
+            RouterSelectionPolicy::Lmetric => "adjusted_prefill_blocks * (decode_blocks + 1)",
+        };
 
         if shared_beyond > 0 {
             tracing::debug!(
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
                  {shared_beyond} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
-                 = prefill_load_scale * adjusted_prefill_blocks + decode_blocks \
-                 = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} \
-                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
+                 using {selection_policy} score: {formula_detail} \
+                 (prefill_load_scale: {prefill_load_scale:.3}, adjusted_prefill_blocks: {adjusted_prefill_blocks:.3}, \
+                 decode_blocks: {decode_cost_blocks:.3}, raw_prefill_blocks: {raw_prefill_blocks:.3}, \
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
                 shared_cache_multiplier = weights.shared_cache_multiplier,
-                prefill_load_scale = weights.prefill_load_scale
+                prefill_load_scale = weights.prefill_load_scale,
+                selection_policy = weights.selection_policy
             );
         } else {
             tracing::debug!(
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
-                 = prefill_load_scale * adjusted_prefill_blocks + decode_blocks \
-                 = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} \
-                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
+                 using {selection_policy} score: {formula_detail} \
+                 (prefill_load_scale: {prefill_load_scale:.3}, adjusted_prefill_blocks: {adjusted_prefill_blocks:.3}, \
+                 decode_blocks: {decode_cost_blocks:.3}, raw_prefill_blocks: {raw_prefill_blocks:.3}, \
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
-                prefill_load_scale = weights.prefill_load_scale
+                prefill_load_scale = weights.prefill_load_scale,
+                selection_policy = weights.selection_policy
             );
         }
 
@@ -283,6 +295,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 .as_ref()
                 .and_then(|cfg| cfg.prefill_load_scale)
                 .unwrap_or(self.kv_router_config.prefill_load_scale),
+            selection_policy: request
+                .router_config_override
+                .as_ref()
+                .and_then(|cfg| cfg.router_selection_policy)
+                .unwrap_or(self.kv_router_config.router_selection_policy),
             shared_cache_multiplier: request
                 .router_config_override
                 .as_ref()
@@ -1246,6 +1263,77 @@ mod tests {
     }
 
     #[test]
+    fn test_lmetric_selection_policy_uses_multiplicative_score() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let block_size = 1u32;
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let worker1 = WorkerWithDpRank::from_worker_id(1);
+
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+
+        let mut request = base_request(21);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(worker0, 11);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(worker0, 11);
+        request.worker_loads.insert(
+            worker0,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 10,
+                ..Default::default()
+            },
+        );
+        request.worker_loads.insert(
+            worker1,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 0,
+                ..Default::default()
+            },
+        );
+
+        let linear = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let lmetric = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                router_selection_policy: RouterSelectionPolicy::Lmetric,
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+
+        let linear_result = linear
+            .select_worker(&workers, &request, request.eligibility(), block_size)
+            .unwrap();
+        let lmetric_result = lmetric
+            .select_worker(&workers, &request, request.eligibility(), block_size)
+            .unwrap();
+
+        assert_eq!(
+            linear_result.worker, worker0,
+            "linear score should prefer 10 prefill + 10 decode over 21 prefill + 0 decode"
+        );
+        assert_eq!(
+            lmetric_result.worker, worker1,
+            "lmetric score should prefer 21 * (0 + 1) over 10 * (10 + 1)"
+        );
+    }
+
+    #[test]
     fn test_worker_logit_preserves_prefill_accounting_edges() {
         let worker = WorkerWithDpRank::from_worker_id(0);
         let mut request = base_request(64);
@@ -1264,6 +1352,7 @@ mod tests {
             overlap_score_credit: 1.0,
             overlap_score_credit_decay: 0.0,
             prefill_load_scale: 2.0,
+            selection_policy: RouterSelectionPolicy::Linear,
             shared_cache_multiplier: 0.0,
         };
 

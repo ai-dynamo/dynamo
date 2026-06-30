@@ -123,6 +123,8 @@ adjusted_prefill_blocks = max(
 logit = prefill_load_scale * adjusted_prefill_blocks + decode_blocks
 ```
 
+These examples show the default `router_selection_policy=linear` score. With `router_selection_policy=lmetric`, the same `adjusted_prefill_blocks` value is scored as `adjusted_prefill_blocks * (decode_blocks + 1)`.
+
 `hits_beyond(n)` counts shared-cache pages at positions `>= n` — "pages past my device prefix that I can still fetch from Mooncake instead of recomputing."
 
 **Worked example.** Request is 4 blocks, `shared_cache_multiplier = 0.5`, `block_size = 1`, `overlap_score_credit = 1.0` (the maximum device-local overlap credit). Shared pool contains blocks 0–3.

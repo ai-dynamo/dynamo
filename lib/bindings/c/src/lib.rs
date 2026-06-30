@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use dynamo_kv_router::{
-    config::{RouterConfigOverride, kv_router_config_from_dynamo_env},
+    config::{RouterConfigOverride, RouterSelectionPolicy, kv_router_config_from_dynamo_env},
     protocols::*,
 };
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
@@ -529,6 +529,7 @@ impl RouterHandles {
         let config_override = if is_disaggregated {
             Some(RouterConfigOverride {
                 overlap_score_credit: Some(0.0),
+                router_selection_policy: Some(RouterSelectionPolicy::Linear),
                 assume_kv_reuse: Some(false),
                 track_prefill_tokens: Some(false),
                 ..Default::default()
@@ -898,6 +899,7 @@ pub unsafe extern "C" fn add_request(
             let worker = WorkerWithDpRank::new(worker_id, dp_rank);
             let router_config_override = RouterConfigOverride {
                 overlap_score_credit: Some(0.0),
+                router_selection_policy: Some(RouterSelectionPolicy::Linear),
                 assume_kv_reuse: Some(false),
                 track_prefill_tokens: Some(false),
                 ..Default::default()

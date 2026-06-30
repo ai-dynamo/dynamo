@@ -98,6 +98,7 @@ pub fn kv_router_config_from_dynamo_env() -> KvRouterConfig {
         overlap_score_credit = config.overlap_score_credit,
         overlap_score_credit_decay = config.overlap_score_credit_decay,
         prefill_load_scale = config.prefill_load_scale,
+        router_selection_policy = %config.router_selection_policy,
         router_temperature = config.router_temperature,
         use_kv_events = config.use_kv_events,
         router_replica_sync = config.router_replica_sync,
@@ -135,6 +136,14 @@ fn kv_router_config_from_lookup(get_env: impl Fn(&str) -> Option<String>) -> KvR
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREFILL_LOAD_SCALE") {
         config.prefill_load_scale = value;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_SELECTION_POLICY") {
+        match value.parse() {
+            Ok(policy) => config.router_selection_policy = policy,
+            Err(error) => {
+                tracing::warn!("Ignoring invalid DYN_ROUTER_SELECTION_POLICY={value:?}: {error}")
+            }
+        }
     }
     for key in [
         "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT",
@@ -201,6 +210,15 @@ fn validate_router_config_override(config: &RouterConfigOverride) -> Result<(), 
     if let Some(credit) = config.overlap_score_credit {
         validate_overlap_score_credit(credit)?;
     }
+    if matches!(
+        config.router_selection_policy,
+        Some(RouterSelectionPolicy::Lmetric)
+    ) && matches!(config.track_prefill_tokens, Some(false))
+    {
+        return Err(ValidationError::new(
+            "router_selection_policy_lmetric_requires_prefill_tokens",
+        ));
+    }
     Ok(())
 }
 
@@ -259,6 +277,31 @@ impl fmt::Display for RouterQueuePolicy {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+pub enum RouterSelectionPolicy {
+    /// Existing additive score:
+    /// `prefill_load_scale * adjusted_prefill_blocks + decode_blocks`.
+    #[default]
+    Linear,
+    /// Blitz-router LMetric-inspired multiplicative score:
+    /// `adjusted_prefill_blocks * (decode_blocks + 1)`.
+    ///
+    /// Dynamo currently uses projected decode blocks as the load proxy available
+    /// at selection time, keeping the core LMetric prefill-load x load shape
+    /// without adding a separate batch-size state path.
+    Lmetric,
+}
+
+impl fmt::Display for RouterSelectionPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Linear => f.write_str("linear"),
+            Self::Lmetric => f.write_str("lmetric"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RouterPrefillLoadModel {
     #[default]
     None,
@@ -294,6 +337,20 @@ impl RouterPrefillLoadModel {
     }
 }
 
+impl FromStr for RouterSelectionPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "linear" => Ok(Self::Linear),
+            "lmetric" => Ok(Self::Lmetric),
+            _ => Err(format!(
+                "unknown selection policy: {s:?}, expected 'linear' or 'lmetric'"
+            )),
+        }
+    }
+}
+
 impl FromStr for RouterQueuePolicy {
     type Err = String;
 
@@ -314,6 +371,7 @@ struct RouterConfigOverrideSerde {
     overlap_score_credit: Option<f64>,
     prefill_load_scale: Option<f64>,
     overlap_score_weight: Option<f64>,
+    router_selection_policy: Option<RouterSelectionPolicy>,
     router_temperature: Option<f64>,
     assume_kv_reuse: Option<bool>,
     track_prefill_tokens: Option<bool>,
@@ -335,6 +393,10 @@ pub struct RouterConfigOverride {
     #[builder(default)]
     #[validate(range(min = 0.0))]
     pub prefill_load_scale: Option<f64>,
+
+    /// Per-request override of the worker selection scoring policy.
+    #[builder(default)]
+    pub router_selection_policy: Option<RouterSelectionPolicy>,
 
     #[builder(default)]
     #[validate(range(min = 0.0))]
@@ -370,6 +432,7 @@ impl TryFrom<RouterConfigOverrideSerde> for RouterConfigOverride {
         validate_and_return(Self {
             overlap_score_credit,
             prefill_load_scale,
+            router_selection_policy: compat.router_selection_policy,
             router_temperature: compat.router_temperature,
             assume_kv_reuse: compat.assume_kv_reuse,
             track_prefill_tokens: compat.track_prefill_tokens,
@@ -385,6 +448,7 @@ struct KvRouterConfigSerde {
     overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
     overlap_score_weight: Option<f64>,
+    router_selection_policy: RouterSelectionPolicy,
     host_cache_hit_weight: f64,
     disk_cache_hit_weight: f64,
     router_temperature: f64,
@@ -420,6 +484,7 @@ impl Default for KvRouterConfigSerde {
             overlap_score_credit_decay: config.overlap_score_credit_decay,
             prefill_load_scale: config.prefill_load_scale,
             overlap_score_weight: None,
+            router_selection_policy: config.router_selection_policy,
             host_cache_hit_weight: config.host_cache_hit_weight,
             disk_cache_hit_weight: config.disk_cache_hit_weight,
             router_temperature: config.router_temperature,
@@ -468,6 +533,13 @@ pub struct KvRouterConfig {
     /// prefill load. Defaults to 1.0.
     #[validate(range(min = 0.0))]
     pub prefill_load_scale: f64,
+
+    /// Worker selection scoring policy.
+    /// "linear" keeps the existing additive score. "lmetric" uses the
+    /// Blitz-router-inspired multiplicative score
+    /// `adjusted_prefill_blocks * (decode_blocks + 1)`, where decode blocks are
+    /// Dynamo's current load proxy at selection time.
+    pub router_selection_policy: RouterSelectionPolicy,
 
     #[serde(default = "default_host_cache_hit_weight")]
     #[validate(range(min = 0.0, max = 1.0))]
@@ -594,6 +666,7 @@ impl Default for KvRouterConfig {
             overlap_score_credit: 1.0,
             overlap_score_credit_decay: default_overlap_score_credit_decay(),
             prefill_load_scale: default_prefill_load_scale(),
+            router_selection_policy: RouterSelectionPolicy::default(),
             host_cache_hit_weight: default_host_cache_hit_weight(),
             disk_cache_hit_weight: default_disk_cache_hit_weight(),
             router_temperature: 0.0,
@@ -643,6 +716,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             overlap_score_credit,
             overlap_score_credit_decay: compat.overlap_score_credit_decay,
             prefill_load_scale,
+            router_selection_policy: compat.router_selection_policy,
             host_cache_hit_weight: compat.host_cache_hit_weight,
             disk_cache_hit_weight: compat.disk_cache_hit_weight,
             router_temperature: compat.router_temperature,
@@ -693,6 +767,22 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), ValidationEr
     if config.router_prefill_load_model.is_enabled() && !config.router_track_prefill_tokens {
         return Err(ValidationError::new(
             "router_prefill_load_model requires router_track_prefill_tokens=true",
+        ));
+    }
+    if matches!(
+        config.router_selection_policy,
+        RouterSelectionPolicy::Lmetric
+    ) && !config.router_track_prefill_tokens
+    {
+        return Err(ValidationError::new(
+            "router_selection_policy_lmetric_requires_prefill_tokens",
+        ));
+    }
+    if config.router_prefill_load_model.is_enabled()
+        && !matches!(config.router_queue_policy, RouterQueuePolicy::Fcfs)
+    {
+        return Err(ValidationError::new(
+            "router_prefill_load_model currently requires router_queue_policy='fcfs'",
         ));
     }
     if config.use_remote_indexer && config.serve_indexer {
@@ -1203,6 +1293,47 @@ models:
     }
 
     #[test]
+    fn test_kv_router_config_deserializes_router_selection_policy() {
+        let config: KvRouterConfig =
+            serde_json::from_str(r#"{"router_selection_policy":"lmetric"}"#).unwrap();
+
+        assert_eq!(config.router_selection_policy, RouterSelectionPolicy::Lmetric);
+    }
+
+    #[test]
+    fn test_kv_router_config_rejects_lmetric_without_prefill_tokens() {
+        let config = KvRouterConfig {
+            router_selection_policy: RouterSelectionPolicy::Lmetric,
+            router_track_prefill_tokens: false,
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_router_config_override_deserializes_router_selection_policy() {
+        let config: RouterConfigOverride =
+            serde_json::from_str(r#"{"router_selection_policy":"lmetric"}"#).unwrap();
+
+        assert_eq!(
+            config.router_selection_policy,
+            Some(RouterSelectionPolicy::Lmetric)
+        );
+    }
+
+    #[test]
+    fn test_router_config_override_rejects_lmetric_without_prefill_tokens() {
+        let error = serde_json::from_str::<RouterConfigOverride>(
+            r#"{"router_selection_policy":"lmetric","track_prefill_tokens":false}"#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("router_selection_policy"));
+    }
+
+    #[test]
     fn test_kv_router_config_rejects_out_of_range_overlap_score_credit() {
         let too_small = KvRouterConfig {
             overlap_score_credit: -0.1,
@@ -1344,6 +1475,7 @@ models:
         let too_small = RouterConfigOverride {
             overlap_score_credit: None,
             prefill_load_scale: None,
+            router_selection_policy: None,
             router_temperature: None,
             assume_kv_reuse: None,
             track_prefill_tokens: None,
@@ -1352,6 +1484,7 @@ models:
         let too_large = RouterConfigOverride {
             overlap_score_credit: None,
             prefill_load_scale: None,
+            router_selection_policy: None,
             router_temperature: None,
             assume_kv_reuse: None,
             track_prefill_tokens: None,
@@ -1367,6 +1500,7 @@ models:
         let too_small = RouterConfigOverride {
             overlap_score_credit: Some(-0.1),
             prefill_load_scale: None,
+            router_selection_policy: None,
             router_temperature: None,
             assume_kv_reuse: None,
             track_prefill_tokens: None,
@@ -1375,6 +1509,7 @@ models:
         let too_large = RouterConfigOverride {
             overlap_score_credit: Some(1.1),
             prefill_load_scale: None,
+            router_selection_policy: None,
             router_temperature: None,
             assume_kv_reuse: None,
             track_prefill_tokens: None,

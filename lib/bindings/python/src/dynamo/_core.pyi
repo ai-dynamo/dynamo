@@ -1780,6 +1780,7 @@ class KvRouterConfig:
         overlap_score_credit: float = 1.0,
         overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
+        router_selection_policy: str = "linear",
         router_policy_config: Optional[str] = None,
     ) -> None:
         """
@@ -1789,6 +1790,7 @@ class KvRouterConfig:
             overlap_score_weight: Deprecated positional/keyword alias for prefill_load_scale. When present, it takes precedence over prefill_load_scale; a value of 0 also sets overlap_score_credit to 0.
             overlap_score_credit: Credit multiplier for device-local prefix overlap, from 0.0 to 1.0 (default: 1.0). Use prefill_load_scale above 1.0 to weigh TTFT/prompt-side load more heavily.
             prefill_load_scale: Scale for adjusted prompt-side prefill load after cache-hit credits (default: 1.0)
+            router_selection_policy: Worker selection scoring policy, "linear" or "lmetric" (default: "linear").
             host_cache_hit_weight: Credit multiplier for host-pinned cache hits (default: 0.75)
             disk_cache_hit_weight: Credit multiplier for disk/external cache hits (default: 0.25)
             router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
@@ -1861,6 +1863,10 @@ class KvRouterConfig:
     def prefill_load_scale(self) -> float: ...
     @prefill_load_scale.setter
     def prefill_load_scale(self, value: float) -> None: ...
+    @property
+    def router_selection_policy(self) -> str: ...
+    @router_selection_policy.setter
+    def router_selection_policy(self, value: str) -> None: ...
 
     def with_overrides(
         self,
@@ -1869,6 +1875,7 @@ class KvRouterConfig:
         overlap_score_credit: Optional[float] = None,
         overlap_score_credit_decay: Optional[float] = None,
         prefill_load_scale: Optional[float] = None,
+        router_selection_policy: Optional[str] = None,
     ) -> "KvRouterConfig": ...
 
 class ReasoningConfig:
