@@ -45,7 +45,8 @@ async fn start_kv_router_background_event_plane(
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
-    let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer).await?;
+    let worker_query_client =
+        WorkerQueryClient::spawn(component.clone(), indexer, wait_for_initial_recovery).await?;
     let worker_query_client_for_events = worker_query_client.clone();
     let event_loop_cancellation_token = cancellation_token.clone();
     let kv_event_subject = format!(
