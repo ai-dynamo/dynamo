@@ -345,7 +345,7 @@ def setup_metrics_collection(
 def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional[int]:
     """Use the Rust frontend's routing placeholder resolver.
 
-    Returns None for unsupported models and Llama 4's structured sequence.
+    Returns None for unsupported models.
     """
     try:
         from dynamo._core import resolve_routing_image_token_id

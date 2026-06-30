@@ -37,8 +37,7 @@ Without MM-aware routing, the standard router treats image token blocks as opaqu
 ## Supported Model Families (Rust frontend path)
 
 The Rust frontend owns six image-token counting algorithms and recognizes ten
-model families. It enables image-aware routing for nine of them. It matches the
-model's `model_type` first, then its model ID.
+model families. It matches the model's `model_type` first, then its model ID.
 
 | Counter | Model Families | Routing Status |
 |---------|----------------|----------------|
@@ -46,7 +45,7 @@ model's `model_type` first, then its model ID.
 | Qwen3 | Qwen3-VL, Qwen3.5, Qwen3.6 | Enabled |
 | LLaVA-1.5 | LLaVA-1.5 | Enabled |
 | LLaVA-NeXT | LLaVA-NeXT | Enabled |
-| Llama 4 | Llama 4 | Text-prefix fallback |
+| Llama 4 | Llama 4 | Compatibility behavior; see warning below |
 | Kimi K2 | Kimi-K2.5, Kimi-K2.6 | Enabled |
 
 A model outside this list falls back to text-prefix-only KV routing. The
@@ -54,11 +53,11 @@ request still completes, but routing cannot account for cache overlap across
 images.
 
 > [!WARNING]
-> The Llama 4 counter preserves Dynamo's current scalar count for compatibility,
-> but the Rust path falls back to text-prefix routing. vLLM applies pixel
-> shuffle to produce 144 image positions per tile and adds structural tokens;
-> Dynamo's current routing representation cannot encode that sequence. Use the
-> Python chat-processor path for image-aware Llama 4 routing.
+> The Llama 4 counter and single-placeholder expansion preserve Dynamo's current
+> behavior. vLLM applies pixel shuffle to produce 144 image positions per tile
+> and adds structural tokens, so the Rust routing sequence differs from vLLM's
+> processed sequence. Use the Python chat-processor path when routing must follow
+> vLLM's structured Llama 4 sequence.
 
 The Python chat-processor variant doesn't share this constraint — it
 delegates to vLLM's own multimodal processor and works with any VLM vLLM
@@ -82,8 +81,8 @@ Frontend (Rust + KV router) → Backend Workers
               vLLM's multi_modal_uuids (cache key match)
 ```
 
-1. With frontend decoding, the Rust frontend computes `mm_hash` as `xxh3_64` of decoded RGB bytes. Otherwise it hashes the full URL string, including a complete `data:` URI. Passthrough reuse therefore requires identical URLs, while decoded mode reuses identical image content across URLs.
-2. The frontend selects one of the nine image-routed model families and resolves its image-placeholder token ID. It reads the applicable `config.json` field (`image_token_id`, `image_token_index`, or `media_placeholder_token_id`) and falls back to exact Dynamo tokenizer vocabulary lookup when the model registers only a placeholder string. Llama 4 is recognized but takes the text-prefix fallback described above.
+1. With frontend decoding, the Rust frontend computes `mm_hash` as `xxh3_64` over the decoded tensor identity: rank and shape, data type, and RGB payload. Otherwise it hashes the full URL string, including a complete `data:` URI. Passthrough reuse therefore requires identical URLs, while decoded mode reuses identical decoded tensors across URLs.
+2. The frontend selects one of the ten model families and resolves its image-placeholder token ID. It reads the applicable `config.json` field (`image_token_id`, `image_token_index`, or `media_placeholder_token_id`) and falls back to exact Dynamo tokenizer vocabulary lookup when the model registers only a placeholder string. Llama 4 retains the compatibility behavior described above.
 3. Per-image `(W, H)` is read from a 64KB `Range`-bounded header fetch (or from in-memory bytes for `data:` URIs); the selected Dynamo-owned counter computes the expanded token count.
 4. The single placeholder token is expanded to N copies in `routing_token_ids` (a router-only view); the worker still sees one placeholder per image in `token_ids`.
 5. Each replacement token encodes the image's `mm_hash` as a canonical `pad_value`. `block_mm_infos` remains empty because the image identity already resides in the routing token stream.
@@ -187,7 +186,7 @@ VLLM_EXTRA_ARGS="--frontend-decoding" \
     bash examples/backends/vllm/launch/agg_multimodal_router.sh
 ```
 
-The worker then registers a `media_decoder` on its model card; the frontend's `MediaLoader` runs in-process and hashes decoded RGB bytes via xxh3. Two distinct (signed) URLs of the same image bytes collide on the same routing key.
+The worker then registers a `media_decoder` on its model card; the frontend's `MediaLoader` runs in-process and hashes the decoded tensor's shape, data type, and RGB payload via xxh3. Two distinct signed URLs that decode to the same tensor use the same routing key.
 
 ### vLLM (alternative — Python chat-processor variant)
 

@@ -8,8 +8,153 @@
 //! retained; image decoding, tensor construction, video, and model prompt
 //! rewriting deliberately remain outside this module.
 
-use serde::de::DeserializeOwned;
-use serde_json::Value;
+use std::collections::HashMap;
+
+use serde::Deserialize;
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub(super) struct PreprocessorConfig {
+    do_convert_rgb: Option<bool>,
+    do_normalize: Option<bool>,
+    do_pad: Option<bool>,
+    do_rescale: Option<bool>,
+    do_resize: Option<bool>,
+    do_center_crop: Option<bool>,
+    image_processor_type: Option<String>,
+    im_start_token: Option<String>,
+    im_end_token: Option<String>,
+    slice_start_token: Option<String>,
+    slice_end_token: Option<String>,
+    vision_start_token: Option<String>,
+    vision_end_token: Option<String>,
+    #[serde(alias = "norm_mean")]
+    image_mean: Option<Vec<f64>>,
+    #[serde(alias = "norm_std")]
+    image_std: Option<Vec<f64>>,
+    rescale_factor: Option<f64>,
+    #[serde(alias = "resample")]
+    resampling: Option<usize>,
+    patch_size: Option<PatchSize>,
+    merge_size: Option<usize>,
+    min_pixels: Option<usize>,
+    max_pixels: Option<usize>,
+    temporal_patch_size: Option<usize>,
+    num_crops: Option<usize>,
+    dynamic_hd: Option<usize>,
+    max_image_tiles: Option<usize>,
+    num_img_tokens: Option<usize>,
+    size: Option<HashMap<String, u32>>,
+    crop_size: Option<HashMap<String, u32>>,
+    #[serde(default, deserialize_with = "deserialize_media_proc_config")]
+    media_proc_cfg: Option<MediaProcConfig>,
+}
+
+impl PreprocessorConfig {
+    fn patch_size(&self, default: usize) -> usize {
+        match self.patch_size.as_ref() {
+            Some(patch_size) => patch_size.height().unwrap_or(default),
+            None => self
+                .media_proc_cfg
+                .as_ref()
+                .and_then(|config| config.patch_size)
+                .map(|value| value as usize)
+                .unwrap_or(default),
+        }
+    }
+
+    fn merge_size(&self) -> Option<usize> {
+        self.merge_size.or_else(|| {
+            self.media_proc_cfg
+                .as_ref()
+                .and_then(|config| config.merge_kernel_size)
+        })
+    }
+
+    fn size_field(&self, field: &str) -> Option<usize> {
+        self.size
+            .as_ref()?
+            .get(field)
+            .copied()
+            .map(|value| value as usize)
+    }
+
+    fn target_height(&self) -> Option<u32> {
+        let size = self.size.as_ref()?;
+        Some(
+            size.get("height")
+                .or_else(|| size.get("shortest_edge"))
+                .copied()
+                .unwrap_or(224),
+        )
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct MediaProcConfig {
+    #[serde(default, deserialize_with = "deserialize_lenient_option")]
+    patch_size: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_lenient_option")]
+    merge_kernel_size: Option<usize>,
+}
+
+fn deserialize_media_proc_config<'de, D>(
+    deserializer: D,
+) -> Result<Option<MediaProcConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if !value.is_object() {
+        return Ok(None);
+    }
+    Ok(serde_json::from_value(value).ok())
+}
+
+fn deserialize_lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PatchSize {
+    Scalar(u32),
+    Dimensions(PatchDimensions),
+}
+
+impl PatchSize {
+    fn height(&self) -> Option<usize> {
+        match self {
+            Self::Scalar(value) => Some(*value as usize),
+            Self::Dimensions(dimensions) => dimensions.height.map(|value| value as usize),
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct PatchDimensions {
+    #[serde(deserialize_with = "deserialize_present")]
+    height: Option<u32>,
+    #[serde(deserialize_with = "deserialize_present")]
+    width: Option<u32>,
+}
+
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModelFamily {
@@ -35,7 +180,9 @@ impl ModelFamily {
     fn from_model_type(model_type: &str) -> Option<Self> {
         match model_type.to_ascii_lowercase().as_str() {
             "qwen2_vl" | "qwen2_5_vl" => Some(Self::Qwen2),
-            "qwen3_vl" | "qwen3_5" | "qwen3_5_moe" | "qwen3_6" | "qwen3_6_moe" => Some(Self::Qwen3),
+            "qwen3_vl" | "qwen3_vl_moe" | "qwen3_5" | "qwen3_5_moe" | "qwen3_6" | "qwen3_6_moe" => {
+                Some(Self::Qwen3)
+            }
             "llava_next" => Some(Self::LlavaNext),
             "llava" => Some(Self::Llava),
             "llama4" => Some(Self::Llama4),
@@ -89,8 +236,10 @@ pub(super) enum ImageTokenEstimator {
 }
 
 impl ImageTokenEstimator {
-    pub(super) fn from_config(family: ModelFamily, config: &Value) -> anyhow::Result<Self> {
-        validate_config_field_types(config)?;
+    pub(super) fn from_config(
+        family: ModelFamily,
+        config: &PreprocessorConfig,
+    ) -> anyhow::Result<Self> {
         let estimator = match family {
             ModelFamily::Qwen2 => Self::Qwen(QwenEstimator::qwen2(config)),
             ModelFamily::Qwen3 => Self::Qwen(QwenEstimator::qwen3(config)),
@@ -140,27 +289,29 @@ impl QwenEstimator {
     const QWEN3_MIN_PIXELS: usize = 65_536;
     const QWEN3_MAX_PIXELS: usize = 16_777_216;
 
-    fn qwen2(config: &Value) -> Self {
+    fn qwen2(config: &PreprocessorConfig) -> Self {
         Self {
-            patch_size: patch_size(config, 14),
-            merge_size: usize_field(config, "merge_size").unwrap_or(2),
-            min_pixels: usize_field(config, "min_pixels").unwrap_or(Self::QWEN2_MIN_PIXELS),
-            max_pixels: usize_field(config, "max_pixels").unwrap_or(Self::QWEN2_MAX_PIXELS),
-            temporal_patch_size: usize_field(config, "temporal_patch_size").unwrap_or(2),
+            patch_size: config.patch_size(14),
+            merge_size: config.merge_size().unwrap_or(2),
+            min_pixels: config.min_pixels.unwrap_or(Self::QWEN2_MIN_PIXELS),
+            max_pixels: config.max_pixels.unwrap_or(Self::QWEN2_MAX_PIXELS),
+            temporal_patch_size: config.temporal_patch_size.unwrap_or(2),
         }
     }
 
-    fn qwen3(config: &Value) -> Self {
+    fn qwen3(config: &PreprocessorConfig) -> Self {
         Self {
-            patch_size: patch_size(config, 16),
-            merge_size: usize_field(config, "merge_size").unwrap_or(2),
-            min_pixels: usize_field(config, "min_pixels")
-                .or_else(|| size_field(config, "shortest_edge"))
+            patch_size: config.patch_size(16),
+            merge_size: config.merge_size().unwrap_or(2),
+            min_pixels: config
+                .min_pixels
+                .or_else(|| config.size_field("shortest_edge"))
                 .unwrap_or(Self::QWEN3_MIN_PIXELS),
-            max_pixels: usize_field(config, "max_pixels")
-                .or_else(|| size_field(config, "longest_edge"))
+            max_pixels: config
+                .max_pixels
+                .or_else(|| config.size_field("longest_edge"))
                 .unwrap_or(Self::QWEN3_MAX_PIXELS),
-            temporal_patch_size: usize_field(config, "temporal_patch_size").unwrap_or(2),
+            temporal_patch_size: config.temporal_patch_size.unwrap_or(2),
         }
     }
 
@@ -266,10 +417,10 @@ pub(super) struct LlavaEstimator {
 }
 
 impl LlavaEstimator {
-    fn from_config(config: &Value) -> Self {
+    fn from_config(config: &PreprocessorConfig) -> Self {
         Self {
-            patch_size: patch_size(config, 14),
-            image_size: target_height(config).unwrap_or(336) as usize,
+            patch_size: config.patch_size(14),
+            image_size: config.target_height().unwrap_or(336) as usize,
         }
     }
 
@@ -303,9 +454,9 @@ impl LlavaNextEstimator {
     const GRID_PINPOINTS: [(u32, u32); 5] =
         [(336, 672), (672, 336), (672, 672), (1008, 336), (336, 1008)];
 
-    fn from_config(config: &Value) -> Self {
+    fn from_config(config: &PreprocessorConfig) -> Self {
         Self {
-            image_size: target_height(config).unwrap_or(Self::BASE_IMAGE_SIZE) as usize,
+            image_size: config.target_height().unwrap_or(Self::BASE_IMAGE_SIZE) as usize,
         }
     }
 
@@ -381,14 +532,19 @@ pub(super) struct Llama4Estimator {
     max_patches: usize,
 }
 
+#[derive(Clone, Copy)]
+struct TileCandidate {
+    scale: f64,
+    tiles: usize,
+}
+
 impl Llama4Estimator {
     const PATCH_SIZE: usize = 14;
-    const MAX_IMAGE_TILES: usize = 64;
 
-    fn from_config(config: &Value) -> Self {
+    fn from_config(config: &PreprocessorConfig) -> Self {
         Self {
-            tile_size: size_field(config, "height").unwrap_or(336),
-            max_patches: usize_field(config, "max_image_tiles").unwrap_or(16),
+            tile_size: config.size_field("height").unwrap_or(336),
+            max_patches: config.max_image_tiles.unwrap_or(16),
         }
     }
 
@@ -403,13 +559,16 @@ impl Llama4Estimator {
             "Llama4 tile size exceeds the supported image dimension range"
         );
         anyhow::ensure!(
-            (1..=Self::MAX_IMAGE_TILES).contains(&self.max_patches),
-            "Llama4 max_image_tiles must be between 1 and {}",
-            Self::MAX_IMAGE_TILES
+            self.max_patches > 0,
+            "Llama4 max_image_tiles must be greater than zero"
         );
-        self.tile_size
-            .checked_mul(self.max_patches)
-            .ok_or_else(|| anyhow::anyhow!("Llama4 tile canvas overflowed"))?;
+        let tokens_per_tile = (self.tile_size / Self::PATCH_SIZE)
+            .checked_pow(2)
+            .ok_or_else(|| anyhow::anyhow!("Llama4 tokens per tile overflowed"))?;
+        self.max_patches
+            .checked_add(1)
+            .and_then(|tiles| tiles.checked_mul(tokens_per_tile))
+            .ok_or_else(|| anyhow::anyhow!("Llama4 maximum token count overflowed"))?;
         Ok(())
     }
 
@@ -430,47 +589,159 @@ impl Llama4Estimator {
     }
 
     fn best_fit_tile_count(&self, original_h: u32, original_w: u32) -> usize {
-        let mut has_upscaling = false;
-        let mut selected_scale = f64::NEG_INFINITY;
+        if original_h == 0 && original_w == 0 {
+            return 0;
+        }
 
-        for local_tiles in 1..=self.max_patches {
-            for h_tiles in 1..=local_tiles {
-                if !local_tiles.is_multiple_of(h_tiles) {
-                    continue;
-                }
-                let w_tiles = local_tiles / h_tiles;
-                let scale_w = (w_tiles * self.tile_size) as f64 / original_w as f64;
-                let scale_h = (h_tiles * self.tile_size) as f64 / original_h as f64;
-                let scale = scale_w.min(scale_h);
-                if scale >= 1.0 {
-                    if !has_upscaling || scale < selected_scale {
-                        has_upscaling = true;
-                        selected_scale = scale;
-                    }
-                } else if !has_upscaling && scale > selected_scale {
-                    selected_scale = scale;
-                }
+        let min_h_tiles = (original_h as usize).div_ceil(self.tile_size).max(1);
+        let min_w_tiles = (original_w as usize).div_ceil(self.tile_size).max(1);
+        if min_h_tiles
+            .checked_mul(min_w_tiles)
+            .is_some_and(|tiles| tiles <= self.max_patches)
+        {
+            let tiles = min_h_tiles * min_w_tiles;
+            let selected_scale =
+                self.canvas_scale(original_h, original_w, min_h_tiles, min_w_tiles);
+            return self
+                .min_tiles_within_scale_epsilon(original_h, original_w, selected_scale)
+                .unwrap_or(tiles);
+        }
+
+        // Below the first upscaling canvas, height scale increases with
+        // `h_tiles` while width scale decreases, so the optimum brackets
+        // their monotonic crossing.
+        let scale_is_height_limited = |h_tiles: usize| {
+            if original_h == 0 {
+                return false;
+            }
+            if original_w == 0 {
+                return true;
+            }
+            let w_tiles = self.max_patches / h_tiles;
+            h_tiles as u128 * original_w as u128 <= w_tiles as u128 * original_h as u128
+        };
+
+        let mut lower = 1usize;
+        let mut upper = self.max_patches;
+        let mut crossing = 0usize;
+        while lower <= upper {
+            let middle = lower + (upper - lower) / 2;
+            if scale_is_height_limited(middle) {
+                crossing = middle;
+                lower = middle + 1;
+            } else {
+                upper = middle - 1;
             }
         }
 
-        let mut best_tiles = 0;
-        for local_tiles in 1..=self.max_patches {
-            for h_tiles in 1..=local_tiles {
-                if !local_tiles.is_multiple_of(h_tiles) {
-                    continue;
-                }
-                let w_tiles = local_tiles / h_tiles;
-                let scale_w = (w_tiles * self.tile_size) as f64 / original_w as f64;
-                let scale_h = (h_tiles * self.tile_size) as f64 / original_h as f64;
-                let scale = scale_w.min(scale_h);
-                if (scale - selected_scale).abs() < 1e-9
-                    && (best_tiles == 0 || local_tiles < best_tiles)
-                {
-                    best_tiles = local_tiles;
-                }
+        let candidates = [
+            1,
+            self.max_patches,
+            crossing.max(1),
+            crossing.saturating_add(1).min(self.max_patches),
+        ];
+        let mut best: Option<TileCandidate> = None;
+        for h_tiles in candidates {
+            let candidate = self.downscale_candidate(original_h, original_w, h_tiles);
+            let replace = best.is_none_or(|current| {
+                candidate.scale > current.scale
+                    || (candidate.scale == current.scale && candidate.tiles < current.tiles)
+            });
+            if replace {
+                best = Some(candidate);
             }
         }
-        best_tiles
+        let best = best.expect("Llama4 downscale search has at least one candidate");
+        self.min_tiles_within_scale_epsilon(original_h, original_w, best.scale)
+            .unwrap_or(best.tiles)
+    }
+
+    fn downscale_candidate(
+        &self,
+        original_h: u32,
+        original_w: u32,
+        h_tiles: usize,
+    ) -> TileCandidate {
+        let w_tiles = self.max_patches / h_tiles;
+        if original_h == 0 {
+            return TileCandidate {
+                scale: self.canvas_scale(original_h, original_w, 1, w_tiles),
+                tiles: w_tiles,
+            };
+        }
+        if original_w == 0 {
+            return TileCandidate {
+                scale: self.canvas_scale(original_h, original_w, h_tiles, 1),
+                tiles: h_tiles,
+            };
+        }
+
+        if h_tiles as u128 * original_w as u128 <= w_tiles as u128 * original_h as u128 {
+            let min_w_tiles = (h_tiles as u128 * original_w as u128)
+                .div_ceil(original_h as u128)
+                .max(1) as usize;
+            TileCandidate {
+                scale: self.canvas_scale(original_h, original_w, h_tiles, min_w_tiles),
+                tiles: h_tiles * min_w_tiles,
+            }
+        } else {
+            let min_h_tiles = (w_tiles as u128 * original_h as u128)
+                .div_ceil(original_w as u128)
+                .max(1) as usize;
+            TileCandidate {
+                scale: self.canvas_scale(original_h, original_w, min_h_tiles, w_tiles),
+                tiles: min_h_tiles * w_tiles,
+            }
+        }
+    }
+
+    fn canvas_scale(
+        &self,
+        original_h: u32,
+        original_w: u32,
+        h_tiles: usize,
+        w_tiles: usize,
+    ) -> f64 {
+        let height_scale = if original_h == 0 {
+            f64::INFINITY
+        } else {
+            h_tiles as f64 * self.tile_size as f64 / original_h as f64
+        };
+        let width_scale = if original_w == 0 {
+            f64::INFINITY
+        } else {
+            w_tiles as f64 * self.tile_size as f64 / original_w as f64
+        };
+        height_scale.min(width_scale)
+    }
+
+    fn min_tiles_within_scale_epsilon(
+        &self,
+        original_h: u32,
+        original_w: u32,
+        selected_scale: f64,
+    ) -> Option<usize> {
+        const SCALE_EPSILON: f64 = 1e-9;
+
+        let lower_bound = (selected_scale - SCALE_EPSILON).max(0.0);
+        let h_tiles = if original_h == 0 {
+            1
+        } else {
+            ((lower_bound * original_h as f64 / self.tile_size as f64).floor() as usize)
+                .saturating_add(1)
+        };
+        let w_tiles = if original_w == 0 {
+            1
+        } else {
+            ((lower_bound * original_w as f64 / self.tile_size as f64).floor() as usize)
+                .saturating_add(1)
+        };
+        let tiles = h_tiles.checked_mul(w_tiles)?;
+        if tiles > self.max_patches {
+            return None;
+        }
+        let scale = self.canvas_scale(original_h, original_w, h_tiles, w_tiles);
+        ((scale - selected_scale).abs() < SCALE_EPSILON).then_some(tiles)
     }
 }
 
@@ -483,7 +754,7 @@ pub(super) struct KimiK2Estimator {
 }
 
 impl KimiK2Estimator {
-    fn from_config(_config: &Value) -> Self {
+    fn from_config(_config: &PreprocessorConfig) -> Self {
         // The 1.7.0 registry constructs this counter with defaults and its
         // count method ignores `media_proc_cfg`. Preserve that quirk even
         // though the full image-preprocessing path applies those overrides.
@@ -529,183 +800,45 @@ impl KimiK2Estimator {
     }
 }
 
-fn usize_field(config: &Value, field: &str) -> Option<usize> {
-    config
-        .get(field)
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-}
-
-/// Validate every typed field recognized by the former 1.7.0 config parser.
-/// Missing, null, and unknown fields preserve its permissive behavior, but a
-/// malformed known field must disable MM routing instead of silently selecting
-/// a different count.
-fn validate_config_field_types(config: &Value) -> anyhow::Result<()> {
-    let object = config
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("preprocessor config must be a JSON object"))?;
-
-    for (canonical, alias) in [
-        ("image_mean", "norm_mean"),
-        ("image_std", "norm_std"),
-        ("resampling", "resample"),
-    ] {
-        anyhow::ensure!(
-            !(object.contains_key(canonical) && object.contains_key(alias)),
-            "preprocessor config contains both {canonical} and its alias {alias}"
-        );
-    }
-
-    for field in [
-        "do_convert_rgb",
-        "do_normalize",
-        "do_pad",
-        "do_rescale",
-        "do_resize",
-        "do_center_crop",
-    ] {
-        validate_optional_json_type::<bool>(config.get(field), field)?;
-    }
-    for field in [
-        "image_processor_type",
-        "im_start_token",
-        "im_end_token",
-        "slice_start_token",
-        "slice_end_token",
-        "vision_start_token",
-        "vision_end_token",
-    ] {
-        validate_optional_json_type::<String>(config.get(field), field)?;
-    }
-    for field in ["image_mean", "norm_mean", "image_std", "norm_std"] {
-        validate_optional_json_type::<Vec<f64>>(config.get(field), field)?;
-    }
-    validate_optional_json_type::<f64>(config.get("rescale_factor"), "rescale_factor")?;
-    for field in [
-        "resampling",
-        "resample",
-        "merge_size",
-        "min_pixels",
-        "max_pixels",
-        "temporal_patch_size",
-        "num_crops",
-        "dynamic_hd",
-        "max_image_tiles",
-        "num_img_tokens",
-    ] {
-        validate_optional_usize(config.get(field), field)?;
-    }
-    validate_patch_size(config.get("patch_size"))?;
-    validate_u32_map(config.get("size"), "size")?;
-    validate_u32_map(config.get("crop_size"), "crop_size")?;
-    Ok(())
-}
-
-fn validate_optional_json_type<T>(value: Option<&Value>, field: &str) -> anyhow::Result<()>
-where
-    T: DeserializeOwned,
-{
-    let Some(value) = value else {
-        return Ok(());
-    };
-    serde_json::from_value::<Option<T>>(value.clone())
-        .map(|_| ())
-        .map_err(|error| anyhow::anyhow!("invalid {field}: {error}"))
-}
-
-fn validate_optional_usize(value: Option<&Value>, field: &str) -> anyhow::Result<()> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    if value.is_null() {
-        return Ok(());
-    }
-    let raw = value
-        .as_u64()
-        .ok_or_else(|| anyhow::anyhow!("{field} must be a non-negative integer or null"))?;
-    usize::try_from(raw)
-        .map(|_| ())
-        .map_err(|_| anyhow::anyhow!("{field} exceeds usize"))
-}
-
-fn validate_patch_size(value: Option<&Value>) -> anyhow::Result<()> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    if value.is_null() {
-        return Ok(());
-    }
-    if let Some(raw) = value.as_u64() {
-        anyhow::ensure!(raw <= u32::MAX as u64, "patch_size exceeds u32");
-        return Ok(());
-    }
-    let object = value
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("patch_size must be an integer, object, or null"))?;
-    for field in ["height", "width"] {
-        let Some(component) = object.get(field) else {
-            continue;
-        };
-        let raw = component
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("patch_size.{field} must be a non-negative integer"))?;
-        anyhow::ensure!(raw <= u32::MAX as u64, "patch_size.{field} exceeds u32");
-    }
-    Ok(())
-}
-
-fn validate_u32_map(value: Option<&Value>, field: &str) -> anyhow::Result<()> {
-    let Some(value) = value else {
-        return Ok(());
-    };
-    if value.is_null() {
-        return Ok(());
-    }
-    let object = value
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("{field} must be an object or null"))?;
-    for (key, component) in object {
-        let raw = component
-            .as_u64()
-            .ok_or_else(|| anyhow::anyhow!("{field}.{key} must be a non-negative integer"))?;
-        anyhow::ensure!(raw <= u32::MAX as u64, "{field}.{key} exceeds u32");
-    }
-    Ok(())
-}
-
-fn size_field(config: &Value, field: &str) -> Option<usize> {
-    config.get("size").and_then(|size| usize_field(size, field))
-}
-
-fn patch_size(config: &Value, default: usize) -> usize {
-    patch_size_optional(config).unwrap_or(default)
-}
-
-fn patch_size_optional(config: &Value) -> Option<usize> {
-    let value = config.get("patch_size")?;
-    value
-        .as_u64()
-        .and_then(|value| usize::try_from(value).ok())
-        .or_else(|| {
-            value
-                .get("height")
-                .and_then(Value::as_u64)
-                .and_then(|value| usize::try_from(value).ok())
-        })
-}
-
-fn target_height(config: &Value) -> Option<u32> {
-    let size = config.get("size")?;
-    size.get("height")
-        .or_else(|| size.get("shortest_edge"))
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .or(Some(224))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn llama4_tile_count_reference(
+        tile_size: usize,
+        max_patches: usize,
+        original_h: u32,
+        original_w: u32,
+    ) -> usize {
+        let mut scales = Vec::new();
+        for tiles in 1..=max_patches {
+            for h_tiles in 1..=tiles {
+                if tiles.is_multiple_of(h_tiles) {
+                    let w_tiles = tiles / h_tiles;
+                    let scale_h = h_tiles as f64 * tile_size as f64 / original_h as f64;
+                    let scale_w = w_tiles as f64 * tile_size as f64 / original_w as f64;
+                    scales.push((scale_h.min(scale_w), tiles));
+                }
+            }
+        }
+        let selected_scale = scales
+            .iter()
+            .filter(|(scale, _)| *scale >= 1.0)
+            .map(|(scale, _)| *scale)
+            .reduce(f64::min)
+            .unwrap_or_else(|| {
+                scales
+                    .iter()
+                    .map(|(scale, _)| *scale)
+                    .fold(f64::NEG_INFINITY, f64::max)
+            });
+        scales
+            .into_iter()
+            .filter(|(scale, _)| (*scale - selected_scale).abs() < 1e-9)
+            .map(|(_, tiles)| tiles)
+            .min()
+            .unwrap()
+    }
 
     #[test]
     fn model_type_has_priority_over_model_id() {
@@ -727,5 +860,131 @@ mod tests {
     fn half_to_even_matches_python() {
         assert_eq!(round_half_to_even(12.5), 12.0);
         assert_eq!(round_half_to_even(13.5), 14.0);
+    }
+
+    #[test]
+    fn llama4_tile_search_matches_reference_without_artificial_cap() {
+        const DIMENSIONS: &[(u32, u32)] = &[
+            (0, 1),
+            (1, 0),
+            (1, 1),
+            (336, 336),
+            (337, 511),
+            (1_000, 100),
+            (100, 1_000),
+            (21_840, 336),
+            (2_529_745_434, 1_689_440_957),
+            (u32::MAX, 1),
+        ];
+
+        for max_patches in 1..=128 {
+            let estimator = Llama4Estimator {
+                tile_size: 336,
+                max_patches,
+            };
+            for &(width, height) in DIMENSIONS {
+                assert_eq!(
+                    estimator.best_fit_tile_count(height, width),
+                    llama4_tile_count_reference(336, max_patches, height, width),
+                    "{width}x{height}, max_patches={max_patches}"
+                );
+            }
+        }
+
+        let estimator = Llama4Estimator {
+            tile_size: 336,
+            max_patches: 65,
+        };
+        assert_eq!(estimator.count_tokens(21_840, 336), 38_016);
+
+        let epsilon_tie = Llama4Estimator {
+            tile_size: 15,
+            max_patches: 50,
+        };
+        assert_eq!(
+            epsilon_tie.best_fit_tile_count(4_271_543_601, 2_305_564_504),
+            45
+        );
+        assert_eq!(epsilon_tie.best_fit_tile_count(0, 0), 0);
+    }
+
+    #[test]
+    fn typed_config_preserves_permissive_fields() {
+        let config: PreprocessorConfig = serde_json::from_str(
+            r#"{
+                "patch_size": null,
+                "merge_size": null,
+                "size": null,
+                "unknown_field": {"malformed": "ignored"}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.patch_size(14), 14);
+        assert_eq!(config.merge_size, None);
+        assert_eq!(config.target_height(), None);
+    }
+
+    #[test]
+    fn typed_config_accepts_aliases_and_rejects_duplicates() {
+        let config: PreprocessorConfig =
+            serde_json::from_str(r#"{"norm_mean":[0.5],"norm_std":[0.25],"resample":3}"#).unwrap();
+        assert_eq!(config.image_mean, Some(vec![0.5]));
+        assert_eq!(config.image_std, Some(vec![0.25]));
+        assert_eq!(config.resampling, Some(3));
+
+        for duplicate in [
+            r#"{"image_mean":[0.5],"norm_mean":[0.5]}"#,
+            r#"{"image_std":[0.5],"norm_std":[0.5]}"#,
+            r#"{"resampling":3,"resample":3}"#,
+        ] {
+            assert!(serde_json::from_str::<PreprocessorConfig>(duplicate).is_err());
+        }
+    }
+
+    #[test]
+    fn typed_patch_size_rejects_malformed_known_components() {
+        for malformed in [
+            r#"{"patch_size":{"height":null}}"#,
+            r#"{"patch_size":{"height":"14"}}"#,
+            r#"{"patch_size":{"width":4294967296}}"#,
+        ] {
+            assert!(serde_json::from_str::<PreprocessorConfig>(malformed).is_err());
+        }
+
+        let config: PreprocessorConfig =
+            serde_json::from_str(r#"{"patch_size":{"height":16,"unknown":null}}"#).unwrap();
+        assert_eq!(config.patch_size(14), 16);
+    }
+
+    #[test]
+    fn nested_media_proc_config_preserves_1_7_0_overlay() {
+        let nested: PreprocessorConfig = serde_json::from_str(
+            r#"{
+                "min_pixels": 65536,
+                "media_proc_cfg": {"patch_size": 16, "merge_kernel_size": 2}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(QwenEstimator::qwen2(&nested).count_tokens(400, 400), 144);
+        assert_eq!(LlavaEstimator::from_config(&nested).count_tokens(), 441);
+
+        let top_level: PreprocessorConfig = serde_json::from_str(
+            r#"{
+                "patch_size": 14,
+                "merge_size": 2,
+                "min_pixels": 65536,
+                "media_proc_cfg": {"patch_size": 16, "merge_kernel_size": 4}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(QwenEstimator::qwen2(&top_level).count_tokens(400, 400), 196);
+
+        let malformed_nested: PreprocessorConfig = serde_json::from_str(
+            r#"{"media_proc_cfg":{"patch_size":"16","merge_kernel_size":"2"}}"#,
+        )
+        .unwrap();
+        assert_eq!(malformed_nested.patch_size(14), 14);
+        assert_eq!(malformed_nested.merge_size(), None);
     }
 }

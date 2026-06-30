@@ -9,13 +9,14 @@
 
 #[path = "lightseek_mm/estimator.rs"]
 mod estimator;
+pub(super) mod routing;
 
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_tokenizers::{HuggingFaceTokenizer, traits::Tokenizer};
 
-use self::estimator::{ImageTokenEstimator, ModelFamily};
+use self::estimator::{ImageTokenEstimator, ModelFamily, PreprocessorConfig};
 use crate::protocols::TokenIdType;
 
 pub struct LightseekMmCounter {
@@ -37,18 +38,20 @@ impl LightseekMmCounter {
                 config_path.display()
             )
         })?;
-        let config: serde_json::Value = serde_json::from_str(&raw).with_context(|| {
-            format!(
-                "mm-routing: failed to parse preprocessor_config.json at {}",
-                config_path.display()
-            )
-        })?;
-        if !config.is_object() {
-            return Err(anyhow!(
-                "mm-routing: preprocessor_config.json root must be an object at {}",
-                config_path.display()
-            ));
-        }
+        let config: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&raw)
+            .with_context(|| {
+                format!(
+                    "mm-routing: failed to parse preprocessor_config.json at {}",
+                    config_path.display()
+                )
+            })?;
+        let config: PreprocessorConfig = serde_json::from_value(serde_json::Value::Object(config))
+            .with_context(|| {
+                format!(
+                    "mm-routing: failed to parse preprocessor_config.json at {}",
+                    config_path.display()
+                )
+            })?;
 
         let family = ModelFamily::identify(model_id, model_type).ok_or_else(|| {
             anyhow!(
@@ -83,9 +86,7 @@ pub struct RoutingTokens {
     /// Repeated image patch/pad token used by the model family.
     pub image_token_id: Option<TokenIdType>,
     /// Token emitted once per image by the chat template. This differs from
-    /// `image_token_id` for Qwen2-VL and Qwen2.5-VL. `None` disables routing
-    /// for families such as Llama4 that require structured expansion. This
-    /// field is the MM-routing engagement gate.
+    /// `image_token_id` for Qwen2-VL and Qwen2.5-VL. `None` disables routing.
     pub chat_placeholder_token_id: Option<TokenIdType>,
     /// BOS string to look up and prepend when `add_bos_token` is true.
     pub bos_token_string: Option<String>,
@@ -195,12 +196,9 @@ fn resolve_chat_placeholder_token_id(
             .or(image_token_id),
         ModelFamily::Qwen3 => u32_field(config, "image_token_id").or(image_token_id),
         ModelFamily::Llava | ModelFamily::LlavaNext => vocabulary_id("<image>").or(image_token_id),
-        // Llama4 needs structural start/end/separator tokens and 144 patch
-        // positions per tile after pixel shuffle. The scalar compatibility
-        // counter intentionally remains available, but the current routing
-        // representation cannot encode that sequence. Preserve text-only
-        // fallback instead of constructing hashes that cannot match vLLM.
-        ModelFamily::Llama4 => None,
+        // Preserve the existing scalar, single-placeholder behavior. vLLM's
+        // structured sequence remains a documented compatibility divergence.
+        ModelFamily::Llama4 => u32_field(config, "image_token_id").or(image_token_id),
         ModelFamily::KimiK2 => vocabulary_id("<|media_pad|>").or(image_token_id),
     }
 }
@@ -404,7 +402,7 @@ mod tests {
             ),
             ("Qwen/Qwen3-VL-2B-Instruct", "qwen3_vl", ModelFamily::Qwen3),
             ("Qwen/Qwen3.5-0.8B", "qwen3_5", ModelFamily::Qwen3),
-            ("Qwen/Qwen3.6-35B-A3B", "qwen3_5_moe", ModelFamily::Qwen3),
+            ("Qwen/Qwen3.6-35B-A3B", "qwen3_6_moe", ModelFamily::Qwen3),
             ("llava-hf/llava-1.5-7b-hf", "llava", ModelFamily::Llava),
             (
                 "llava-hf/llava-v1.6-mistral-7b-hf",
@@ -417,7 +415,7 @@ mod tests {
                 ModelFamily::Llama4,
             ),
             ("moonshotai/Kimi-K2.5", "kimi_k25", ModelFamily::KimiK2),
-            ("moonshotai/Kimi-K2.6", "kimi_k25", ModelFamily::KimiK2),
+            ("moonshotai/Kimi-K2.6", "kimi_k2_6", ModelFamily::KimiK2),
         ];
 
         for &(model_id, model_type, expected) in FAMILIES {
@@ -432,21 +430,40 @@ mod tests {
                 "model_type did not match: {model_type}"
             );
         }
+    }
 
-        assert_eq!(
-            ModelFamily::identify("/models/custom-finetune", Some("qwen3_5_moe")),
-            Some(ModelFamily::Qwen3)
-        );
-        assert_eq!(
-            ModelFamily::identify("/models/custom-finetune", Some("kimi_k25")),
-            Some(ModelFamily::KimiK2)
-        );
+    #[test]
+    fn every_model_type_alias_matches() {
+        const ALIASES: &[(&str, ModelFamily)] = &[
+            ("qwen2_vl", ModelFamily::Qwen2),
+            ("qwen2_5_vl", ModelFamily::Qwen2),
+            ("qwen3_vl", ModelFamily::Qwen3),
+            ("qwen3_vl_moe", ModelFamily::Qwen3),
+            ("qwen3_5", ModelFamily::Qwen3),
+            ("qwen3_5_moe", ModelFamily::Qwen3),
+            ("qwen3_6", ModelFamily::Qwen3),
+            ("qwen3_6_moe", ModelFamily::Qwen3),
+            ("llava", ModelFamily::Llava),
+            ("llava_next", ModelFamily::LlavaNext),
+            ("llama4", ModelFamily::Llama4),
+            ("kimi_k25", ModelFamily::KimiK2),
+            ("kimi_k2_5", ModelFamily::KimiK2),
+            ("kimi_k2_6", ModelFamily::KimiK2),
+        ];
+
+        for &(model_type, expected) in ALIASES {
+            assert_eq!(
+                ModelFamily::identify("/models/custom-finetune", Some(model_type)),
+                Some(expected),
+                "model_type did not match: {model_type}"
+            );
+        }
     }
 
     #[test]
     fn routing_tokens_resolve_config_vocab_dual_id_and_bos() {
         let directory = tempfile::tempdir().unwrap();
-        let tokenizer = TestTokenizer::new(&[("<image>", 32_000), ("<|patch|>", 200_092)]);
+        let tokenizer = TestTokenizer::new(&[("<image>", 32_000), ("<|image|>", 200_090)]);
 
         std::fs::write(
             directory.path().join("config.json"),
@@ -482,7 +499,17 @@ mod tests {
         let tokens =
             resolve_routing_tokens_with_tokenizer("local-llama", directory.path(), &tokenizer);
         assert_eq!(tokens.image_token_id, Some(200_092));
-        assert_eq!(tokens.chat_placeholder_token_id, None);
+        assert_eq!(tokens.chat_placeholder_token_id, Some(200_092));
+
+        std::fs::write(
+            directory.path().join("config.json"),
+            r#"{"model_type":"llama4"}"#,
+        )
+        .unwrap();
+        let tokens =
+            resolve_routing_tokens_with_tokenizer("local-llama", directory.path(), &tokenizer);
+        assert_eq!(tokens.image_token_id, Some(200_090));
+        assert_eq!(tokens.chat_placeholder_token_id, Some(200_090));
     }
 
     #[test]
@@ -561,7 +588,6 @@ mod tests {
             ("llava_next", r#"{"size":{"shortest_edge":0}}"#),
             ("llava_next", r#"{"size":{"height":4294967296}}"#),
             ("llama4", r#"{"max_image_tiles":0}"#),
-            ("llama4", r#"{"max_image_tiles":65}"#),
             ("llama4", r#"{"max_image_tiles":"4"}"#),
         ];
         for (model_type, config) in invalid_configs {

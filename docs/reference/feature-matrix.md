@@ -51,7 +51,7 @@ vLLM offers the broadest feature coverage in Dynamo, with full support for disag
 | **Speculative Decoding** | ✅ | ✅ | — | ✅ | — | ✅ | ✅ | — | ✅ | — |
 
 > **Notes:**
-> 1. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported in the documented vLLM paths. The default Rust frontend uses Dynamo-owned counters and enables image-aware routing for nine model families; the Python chat-processor path delegates to vLLM's multimodal processor. Llama 4 falls back to text-prefix routing in the Rust path. ([Source][mm-kv-routing])
+> 1. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported in the documented vLLM paths. The default Rust frontend uses Dynamo-owned counters for ten model families; the Python chat-processor path delegates to vLLM's multimodal processor. The Rust Llama 4 sequence retains compatibility behavior that differs from vLLM's structured sequence. ([Source][mm-kv-routing])
 > 2. **KV-Aware LoRA Routing**: vLLM supports routing requests based on LoRA adapter affinity.
 > 3. **Audio Support**: vLLM supports audio models like Qwen2-Audio (experimental). ([Source][mm-vllm])
 > 4. **Video Support**: vLLM supports video input with frame sampling. ([Source][mm-vllm])
@@ -77,7 +77,7 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **Speculative Decoding** | 🚧 | 🚧 | — | 🚧 | — | 🚧 | — | | 🚧 | — |
 
 > **Notes:**
-> 1. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported through the Rust frontend for the nine enabled model families documented in the multimodal KV routing guide. It requires the `mm-routing` feature and SGLang's `mm_hashes` request field. ([Source][mm-kv-routing])
+> 1. **Multimodal + KV-Aware Routing**: Image-aware KV routing is supported through the Rust frontend for the ten model families documented in the multimodal KV routing guide. It requires the `mm-routing` feature and SGLang's `mm_hashes` request field. ([Source][mm-kv-routing])
 > 2. **Multimodal Patterns**: Supports simple Aggregated **EPD**, **E/PD**, and **E/P/D** patterns. Traditional Disagg **EP/D** is not supported. ([Source][mm-sglang])
 > 3. **Request Cancellation**: Cancellation during the remote prefill phase is not supported in disaggregated mode. ([Source][sglang-readme])
 > 4. **Speculative Decoding**: Code hooks exist (`spec_decode_stats` in publisher), but no examples or documentation yet.

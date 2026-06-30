@@ -321,7 +321,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 }
 
 /// Resolve the same routing placeholder ID as the Rust frontend.
-/// Returns `None` for unsupported models and Llama4's structured sequence.
+/// Returns `None` for unsupported models.
 #[cfg(feature = "mm-routing")]
 #[pyfunction]
 #[pyo3(text_signature = "(model_id, model_dir)")]
