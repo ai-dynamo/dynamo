@@ -178,7 +178,7 @@ kv_backend: LIBFABRIC                   # the one non-UCX fabric -- select per e
 securityContext: privileged + IPC_LOCK, SYS_PTRACE
 ```
 
-**Merge** ([`AGENTS.md`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md)): append `env`, apply the image rule (+verify the `-efa` tag), set LIBFABRIC for your engine. After deploy, confirm `NIXL ... Backend LIBFABRIC was instantiated` — UCX is a *silent* slow fallback, not an error.
+**To apply:** append the `env`, apply the image rule (verify the `-efa` tag exists), and set LIBFABRIC for your engine; after deploy, confirm `NIXL ... Backend LIBFABRIC was instantiated` (UCX is a *silent* slow fallback). Full step-by-step: [AGENTS.md →](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md).
 
 </div>
 
@@ -195,7 +195,7 @@ kv_backend:  UCX                        # default -- nothing to select
 securityContext: privileged + IPC_LOCK, SYS_PTRACE
 ```
 
-**Merge** ([`AGENTS.md`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md)): the `device` RDMA networks and the `interfaces` annotation must match your A4X pool. The GKE GIB driver host-mounts stay in the base recipe.
+**To apply:** the `device` RDMA networks and the `interfaces` annotation must match your A4X pool; the GKE GIB driver host-mounts stay in the base recipe. Full step-by-step: [AGENTS.md →](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md).
 
 </div>
 
@@ -212,7 +212,7 @@ kv_backend: UCX                         # default -- nothing to select
 securityContext: privileged + IPC_LOCK, SYS_PTRACE
 ```
 
-**Merge** ([`AGENTS.md`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md)): `UCX_NET_DEVICES` is load-bearing — omit it and UCX binds a side NIC, giving degraded BW + a zeroed KV counter. Prefill + decode must share **one agentpool** (per-agentpool IB pkeys) — pin via `nodeSelector` in the base DGD.
+**To apply:** `UCX_NET_DEVICES` is load-bearing — omit it and UCX binds a side NIC (degraded BW + a zeroed KV counter); prefill + decode must share **one agentpool** (per-agentpool IB pkeys), pinned via `nodeSelector` in the base DGD. Full step-by-step: [AGENTS.md →](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md).
 
 </div>
 
@@ -228,7 +228,7 @@ kv_backend: UCX                         # default -- nothing to select
 securityContext: privileged + IPC_LOCK, SYS_PTRACE
 ```
 
-**Merge** ([`AGENTS.md`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md)): the simplest IB case — base image + the IB device slot; no NIC list to derive.
+**To apply:** the simplest IB case — base image + the IB device slot; no NIC list to derive. Full step-by-step: [AGENTS.md →](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md).
 
 </div>
 
@@ -245,7 +245,7 @@ kv_backend: UCX                         # default -- nothing to select
 securityContext: privileged + IPC_LOCK, SYS_PTRACE
 ```
 
-**Merge** ([`AGENTS.md`](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md)): Nscale nodes expose a **mixed** fabric — list only the compute NICs (`mlx5_0..5,10,11`) and exclude the side fabric (`mlx5_6..9`), or the first KV transfer fails with `NIXL_ERR_REMOTE_DISCONNECT`.
+**To apply:** list only the compute NICs (`mlx5_0..5,10,11`) and exclude the side fabric (`mlx5_6..9`) — Nscale exposes a *mixed* fabric, and mixing them fails the first KV transfer with `NIXL_ERR_REMOTE_DISCONNECT`. Full step-by-step: [AGENTS.md →](https://github.com/ai-dynamo/dynamo/blob/jihao/csp-kustomize-addons/recipes/addons/providers/AGENTS.md).
 
 </div>
 
