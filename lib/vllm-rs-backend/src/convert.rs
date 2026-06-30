@@ -681,6 +681,7 @@ mod tests {
                 }],
             }),
             finish_reason: Some(VllmFinishReason::Stop(Some(VllmStopReason::TokenId(42)))),
+            cached_token_count: 0,
             kv_transfer_params: Some(json!({"connector": "kv"})),
         };
 
@@ -713,6 +714,7 @@ mod tests {
                 positions: vec![PositionLogprobs { entries: vec![] }],
             }),
             finish_reason: None,
+            cached_token_count: 0,
             kv_transfer_params: None,
         };
 
@@ -788,6 +790,7 @@ mod tests {
             token_ids: vec![1, 2],
             logprobs: None,
             finish_reason: Some(reason),
+            cached_token_count: 0,
             kv_transfer_params: None,
         }
     }
