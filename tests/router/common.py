@@ -9,6 +9,7 @@ import os
 import random
 import threading
 import time
+import uuid
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import aiohttp
@@ -519,6 +520,208 @@ def _test_router_two_routers(
         # Clean up any remaining routers (in case of error before consumer verification)
         for kv_router in kv_routers:
             kv_router.__exit__(None, None, None)
+
+
+def _test_distributed_session_affinity(
+    engine_workers,
+    block_size: int,
+    request,
+    router_ports: list[int],
+    test_payload: dict[str, Any],
+    store_backend: str = "etcd",
+):
+    """Verify shared affinity claims override conflicting KV-prefix placement."""
+    with (
+        FrontendRouterProcess(
+            request,
+            block_size,
+            router_ports[0],
+            engine_workers.namespace,
+            store_backend,
+            router_mode="kv",
+            min_initial_workers=engine_workers.num_workers,
+            event_plane="nats",
+            session_affinity_ttl_secs=300,
+        ) as first_router,
+        FrontendRouterProcess(
+            request,
+            block_size,
+            router_ports[1],
+            engine_workers.namespace,
+            store_backend,
+            router_mode="kv",
+            min_initial_workers=engine_workers.num_workers,
+            event_plane="nats",
+            session_affinity_ttl_secs=300,
+        ) as second_router,
+    ):
+        urls = [f"http://localhost:{port}/v1/chat/completions" for port in router_ports]
+
+        async def run_test() -> None:
+            runtime = get_runtime(store_backend, "nats")
+            endpoint = runtime.endpoint(
+                f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+            )
+            worker_ids = sorted(
+                await poll_for_worker_instances(endpoint, engine_workers.num_workers)
+            )
+            assert len(worker_ids) >= 2
+            worker_a, worker_b = worker_ids[:2]
+
+            for port in router_ports:
+                await wait_for_frontend_ready(
+                    frontend_url=f"http://localhost:{port}",
+                    expected_num_workers=engine_workers.num_workers,
+                    timeout=120,
+                    engine_workers=engine_workers,
+                    store_backend=store_backend,
+                    request_plane="nats",
+                )
+
+            suffix = uuid.uuid4().hex
+            prefix_a = " ".join([f"affinity-alpha-{suffix}"] * (block_size * 2))
+            prefix_b = " ".join([f"affinity-beta-{suffix}"] * (block_size * 2))
+            session_a = f"distributed-affinity-a-{uuid.uuid4()}"
+            session_b = f"distributed-affinity-b-{uuid.uuid4()}"
+
+            def payload(content: str, *, query_only: bool = False) -> dict[str, Any]:
+                annotations = ["query_instance_id:"] if query_only else []
+                return {
+                    **test_payload,
+                    "messages": [{"role": "user", "content": content}],
+                    "stream": True,
+                    "max_tokens": 1,
+                    "nvext": {
+                        "annotations": annotations,
+                        "extra_fields": ["worker_id"],
+                    },
+                }
+
+            async def send(
+                client: aiohttp.ClientSession,
+                url: str,
+                request_payload: dict[str, Any],
+                headers: dict[str, str] | None = None,
+            ) -> tuple[int, int]:
+                async with client.post(
+                    url, json=request_payload, headers=headers
+                ) as response:
+                    body = await response.text()
+                    assert response.status == 200, body
+
+                worker_info = None
+                for line in body.splitlines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        continue
+                    candidate = json.loads(data).get("nvext", {}).get("worker_id")
+                    if candidate:
+                        worker_info = candidate
+
+                assert worker_info is not None, body
+                return (
+                    worker_info["decode_worker_id"],
+                    worker_info["decode_dp_rank"],
+                )
+
+            async def wait_for_prefix_target(
+                client: aiohttp.ClientSession,
+                url: str,
+                content: str,
+                expected: tuple[int, int],
+            ) -> None:
+                for _ in range(50):
+                    if (
+                        await send(client, url, payload(content, query_only=True))
+                        == expected
+                    ):
+                        return
+                    await asyncio.sleep(0.1)
+                raise AssertionError(
+                    f"KV events did not make prefix target {expected} visible"
+                )
+
+            session_a_headers = {"x-dynamo-session-id": session_a}
+            session_b_headers = {"x-dynamo-session-id": session_b}
+            proposal_a = {
+                **session_a_headers,
+                "x-dynamo-worker-instance-id": str(worker_a),
+                "x-dynamo-dp-rank": "0",
+            }
+            proposal_b = {
+                **session_b_headers,
+                "x-dynamo-worker-instance-id": str(worker_b),
+                "x-dynamo-dp-rank": "0",
+            }
+
+            async with aiohttp.ClientSession() as client:
+                assert await send(client, urls[0], payload(prefix_a), proposal_a) == (
+                    worker_a,
+                    0,
+                )
+                assert await send(client, urls[1], payload(prefix_b), proposal_b) == (
+                    worker_b,
+                    0,
+                )
+
+                await wait_for_prefix_target(client, urls[0], prefix_a, (worker_a, 0))
+                await wait_for_prefix_target(client, urls[1], prefix_b, (worker_b, 0))
+
+                assert await send(
+                    client, urls[0], payload(prefix_a), session_b_headers
+                ) == (worker_b, 0)
+                assert await send(
+                    client, urls[1], payload(prefix_b), session_a_headers
+                ) == (worker_a, 0)
+
+                first_evictions = first_router.read_logs().count(
+                    "evicted session affinity cache entry"
+                )
+                second_evictions = second_router.read_logs().count(
+                    "evicted session affinity cache entry"
+                )
+                assert await send(
+                    client,
+                    urls[1],
+                    payload(prefix_b),
+                    {
+                        **session_a_headers,
+                        "x-dynamo-session-final": "true",
+                    },
+                ) == (worker_a, 0)
+                assert await send(
+                    client,
+                    urls[0],
+                    payload(prefix_a),
+                    {
+                        **session_b_headers,
+                        "x-dynamo-session-final": "true",
+                    },
+                ) == (worker_b, 0)
+
+                for _ in range(50):
+                    first_observed = (
+                        first_router.read_logs().count(
+                            "evicted session affinity cache entry"
+                        )
+                        > first_evictions
+                    )
+                    second_observed = (
+                        second_router.read_logs().count(
+                            "evicted session affinity cache entry"
+                        )
+                        > second_evictions
+                    )
+                    if first_observed and second_observed:
+                        return
+                    await asyncio.sleep(0.1)
+                raise AssertionError(
+                    "frontends did not observe terminal claim deletion invalidation"
+                )
+
+        asyncio.run(run_test())
 
 
 def _test_remote_indexer_decisions(
