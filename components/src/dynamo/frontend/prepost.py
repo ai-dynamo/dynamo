@@ -554,6 +554,9 @@ class StreamingPostProcessor:
                 tool_call_start = getattr(
                     self.tool_parser, "tool_call_start_token", None
                 )
+                if not tool_call_start:
+                    # MistralToolParser names its [TOOL_CALLS] marker bot_token.
+                    tool_call_start = getattr(self.tool_parser, "bot_token", None)
                 if post_content and tool_call_start and tool_call_start in post_content:
                     # Tool call markup present — buffer for non-streaming
                     # extraction (streaming parser can't handle the combined
