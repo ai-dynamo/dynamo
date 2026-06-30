@@ -854,6 +854,23 @@ func TestAppendMissingPVCVolumesForMountsAddsMissingPVCs(t *testing.T) {
 	assert.Equal(t, "config", got[2].Name)
 }
 
+func TestAppendMissingPVCVolumesForMountsKeepsRepeatedVolumeMountsUnique(t *testing.T) {
+	volumes := []corev1.Volume{
+		{Name: "shared-model", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-cache-pvc"}}},
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: "shared-model", MountPath: "/model-store", SubPath: "models/glm"},
+		{Name: "shared-model", MountPath: "/cache/sglang", SubPath: "cache/sglang/glm"},
+	}
+
+	got := appendMissingPVCVolumesForMounts(volumes, mounts)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "shared-model", got[0].Name)
+	require.NotNil(t, got[0].PersistentVolumeClaim)
+	assert.Equal(t, "model-cache-pvc", got[0].PersistentVolumeClaim.ClaimName)
+}
+
 func TestGenerateDynamoComponentsDeployments_PropagatesPreservedAlphaServiceAnnotations(t *testing.T) {
 	className := "nginx"
 	alpha := &v1alpha1.DynamoGraphDeployment{

@@ -63,8 +63,14 @@ impl BandwidthSharingModel {
     /// Pass an `Arc` clone of the same counter to every model whose
     /// [`TransferId`]s can coexist in shared maps.
     pub fn new(gbps: f64, id_counter: Arc<AtomicU64>) -> Self {
+        assert!(gbps.is_finite(), "bandwidth must be finite, got {gbps}");
         let bandwidth_bytes_per_ms = if gbps > 0.0 {
-            gbps * 1e6
+            let bandwidth_bytes_per_ms = gbps * 1e6;
+            assert!(
+                bandwidth_bytes_per_ms.is_finite(),
+                "bandwidth conversion overflowed for {gbps} GB/s"
+            );
+            bandwidth_bytes_per_ms
         } else {
             f64::INFINITY
         };
@@ -84,11 +90,29 @@ impl BandwidthSharingModel {
     /// `now_ms` is clamped up to `last_update_ms` so the model's
     /// simulation time stays monotonic — trace replay's `current_time_ms`
     /// can rewind between passes (jumping to the next arrival timestamp),
-    /// but an in-flight transfer can't "un-copy" bytes.
+    /// but an in-flight transfer can't "un-copy" bytes. Panics if time moves
+    /// forward while transfers are active without a preceding
+    /// [`advance_to`](Self::advance_to).
     pub fn start_transfer(&mut self, now_ms: f64, bytes: usize) -> TransferId {
+        assert_valid_time("transfer start time", now_ms);
+        assert!(
+            self.active.is_empty() || now_ms <= self.last_update_ms,
+            "advance_to must be called before starting a transfer at {now_ms} ms; \
+             active transfers were last updated at {} ms",
+            self.last_update_ms
+        );
         let now_ms = now_ms.max(self.last_update_ms);
         self.last_update_ms = now_ms;
-        let id = self.id_counter.fetch_add(1, Ordering::Relaxed);
+        let id = self
+            .id_counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .expect("transfer id counter exhausted");
+        assert!(
+            self.active.iter().all(|transfer| transfer.id != id),
+            "duplicate active transfer id {id}"
+        );
         let remaining = if self.bandwidth_bytes_per_ms.is_finite() {
             bytes as f64
         } else {
@@ -112,6 +136,7 @@ impl BandwidthSharingModel {
     /// prior pass's `end_ms`), the call is a no-op — the model stays
     /// at `last_update_ms`. Physical bytes already copied can't un-copy.
     pub fn advance_to(&mut self, now_ms: f64) -> Vec<TransferId> {
+        assert_valid_time("bandwidth model advance time", now_ms);
         let mut completed = Vec::new();
         if now_ms < self.last_update_ms {
             return completed;
@@ -143,6 +168,7 @@ impl BandwidthSharingModel {
                 0.0
             };
             let next_event_ms = self.last_update_ms + time_to_next_completion;
+            assert_valid_time("transfer completion deadline", next_event_ms);
 
             if next_event_ms > now_ms + 1e-9 {
                 // Not enough elapsed time for the next completion. Deduct
@@ -180,22 +206,54 @@ impl BandwidthSharingModel {
     /// happen. `None` if no transfers are active. Used by the scheduler's
     /// stall-advance to know when to wake up next.
     pub fn earliest_finish(&self) -> Option<f64> {
-        if self.active.is_empty() {
-            return None;
-        }
-        let n = self.active.len() as f64;
-        let rate_per = self.bandwidth_bytes_per_ms / n;
-        let min_remaining = self
+        self.earliest_finish_with_id()
+            .map(|(_transfer_id, deadline_ms)| deadline_ms)
+    }
+
+    /// The next active transfer to complete and its deadline.
+    ///
+    /// This is allocation-free so scheduler dependency tracking can retain the
+    /// exact transfer that provides its next wakeup.
+    pub fn earliest_finish_with_id(&self) -> Option<(TransferId, f64)> {
+        let next = self.active.iter().min_by(|left, right| {
+            left.remaining_bytes
+                .partial_cmp(&right.remaining_bytes)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+        Some((next.id, self.deadline_for_remaining(next.remaining_bytes)))
+    }
+
+    /// Completion deadline for one active transfer.
+    pub fn deadline_for(&self, transfer_id: TransferId) -> Option<f64> {
+        let remaining = self
             .active
             .iter()
-            .map(|t| t.remaining_bytes)
-            .fold(f64::INFINITY, f64::min);
-        let delta = if rate_per.is_finite() && rate_per > 0.0 {
-            min_remaining / rate_per
+            .find(|transfer| transfer.id == transfer_id)?
+            .remaining_bytes;
+        Some(self.deadline_for_remaining(remaining))
+    }
+
+    /// Whether `transfer_id` is still active on this link.
+    pub fn is_active(&self, transfer_id: TransferId) -> bool {
+        self.active
+            .iter()
+            .any(|transfer| transfer.id == transfer_id)
+    }
+
+    fn deadline_for_remaining(&self, remaining: f64) -> f64 {
+        let delta = if self.bandwidth_bytes_per_ms.is_finite() && self.bandwidth_bytes_per_ms > 0.0
+        {
+            self.active
+                .iter()
+                .map(|transfer| transfer.remaining_bytes.min(remaining))
+                .sum::<f64>()
+                / self.bandwidth_bytes_per_ms
         } else {
             0.0
         };
-        Some(self.last_update_ms + delta)
+        let deadline = self.last_update_ms + delta;
+        assert_valid_time("earliest transfer deadline", deadline);
+        deadline
     }
 
     /// Number of currently active (in-flight) transfers.
@@ -207,6 +265,13 @@ impl BandwidthSharingModel {
     pub fn is_idle(&self) -> bool {
         self.active.is_empty()
     }
+}
+
+fn assert_valid_time(name: &str, time_ms: f64) {
+    assert!(
+        time_ms.is_finite() && time_ms >= 0.0,
+        "{name} must be finite and nonnegative, got {time_ms}"
+    );
 }
 
 #[cfg(test)]
@@ -283,6 +348,15 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "advance_to must be called before starting a transfer")]
+    fn starting_after_earliest_finish_without_advance_panics() {
+        let mut model = make_model(1.0);
+        model.start_transfer(0.0, 1_000_000);
+
+        model.start_transfer(2.0, 1_000_000);
+    }
+
+    #[test]
     fn staggered_later_arrival_inherits_remaining_bandwidth() {
         // T1 arrives at 0 and finishes alone at 1.0 ms (rate 1 MB/ms).
         // T2 arrives at 5 ms (long after T1 done). T2 should finish at 6 ms.
@@ -323,7 +397,7 @@ mod tests {
         // Two models sharing a single `Arc<AtomicU64>` counter must
         // never hand out the same TransferId. This is the invariant
         // `TransferState` relies on when keying `awaiters` and
-        // `swap_in_flags` by TransferId — a collision would cause
+        // swap-in completion publishers by TransferId — a collision would cause
         // completion signals to cross-fire into the wrong transfer.
         let counter = Arc::new(AtomicU64::new(0));
         let mut a = BandwidthSharingModel::new(1.0, counter.clone());

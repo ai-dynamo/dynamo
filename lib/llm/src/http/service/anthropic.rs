@@ -247,16 +247,14 @@ async fn anthropic_messages(
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
         .map_err(|e| match e {
-            // Registered but no complete worker set yet → retryable 503
-            // (mapped to "overloaded_error" by `anthropic_error`), matching the
-            // OpenAI path. Anything else is a genuine missing model → 404.
+            // Registered but not ready to serve yet → retryable 503 (mapped to
+            // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
+            // canonical, customer-facing message so both APIs report the same
+            // text. Anything else is a genuine missing model → 404.
             crate::discovery::ModelManagerError::ModelUnavailable(_) => anthropic_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "overloaded_error",
-                &format!(
-                    "Model '{}' is registered but has no complete worker set",
-                    model
-                ),
+                &super::openai::model_not_ready_message(&model),
             ),
             _ => anthropic_error(
                 StatusCode::NOT_FOUND,
