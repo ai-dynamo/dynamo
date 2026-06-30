@@ -5,8 +5,8 @@
 
 use dynamo_backend_common::DynamoError;
 use serde::Deserialize;
-use vllm_engine_core_client::protocol::utility::PauseMode;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::protocol::utility::PauseMode;
 
 const SUPPORTED_CONTROLS: [&str; 3] = ["sleep", "wake_up", "reset_prefix_cache"];
 

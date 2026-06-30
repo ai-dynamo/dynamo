@@ -208,10 +208,15 @@ impl LLMEngine for VllmBackend {
             .map_err(|e| cannot_connect(format!("failed to resolve handshake port: {e:#}")))?;
 
         let managed_config = {
-            let mut config =
-                self.managed_engine
-                    .clone()
-                    .into_config(self.model.clone(), None, None, false, false, 0, handshake_port);
+            let mut config = self.managed_engine.clone().into_config(
+                self.model.clone(),
+                None,
+                None,
+                false,
+                false,
+                0,
+                handshake_port,
+            );
             self.extra.append_python_args(&mut config.python_args);
             config
         };
