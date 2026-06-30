@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_ext_proc::{ExtProcServer, Router};
+use dynamo_ext_proc::{EppConfig, EppMode, ExtProcServer, Router};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -123,6 +123,9 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Fail fast on an unknown DYN_EPP_MODE rather than silently booting full mode.
+    let router_only = matches!(EppMode::from_env()?, EppMode::RouterOnly);
+
     let config = Config::from_env();
 
     tracing::info!(
@@ -130,8 +133,27 @@ async fn main() -> Result<()> {
         health_port = HEALTH_PORT,
         namespace = %config.namespace,
         component = %config.component,
+        router_only,
         "Starting Dynamo Rust EPP"
     );
+
+    // Router-only (selector) mode fronts raw vLLM pods with no Dynamo runtime and
+    // delegates KV-aware selection to the standalone selection service. The
+    // config surface is validated here; the runtime wiring lands in a follow-up
+    // (see crate::selector_router).
+    if router_only {
+        let selector_cfg = EppConfig::from_env()?;
+        tracing::info!(
+            pool_name = %selector_cfg.pool_name,
+            model_name = %selector_cfg.model_name,
+            block_size = selector_cfg.block_size,
+            "Parsed router-only selector configuration"
+        );
+        anyhow::bail!(
+            "DYN_EPP_MODE=router-only is not yet wired; selector runtime assembly lands in a \
+             follow-up change"
+        );
+    }
 
     // Start plaintext gRPC health server immediately (NOT_SERVING until router ready).
     let (health_reporter, health_service) = tonic_health::server::health_reporter();
