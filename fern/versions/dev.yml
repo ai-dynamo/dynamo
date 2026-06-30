@@ -314,6 +314,12 @@ navigation:
                 path: ../pages-dev/features/multimodal/encoder-disaggregation.md
               - page: Multimodal KV Routing
                 path: ../pages-dev/features/multimodal/multimodal-kv-routing.md
+              - page: SGLang Multimodal
+                path: ../pages-dev/features/multimodal/multimodal-sglang.md
+              - page: TensorRT-LLM Multimodal
+                path: ../pages-dev/features/multimodal/multimodal-trtllm.md
+              - page: vLLM Multimodal
+                path: ../pages-dev/features/multimodal/multimodal-vllm.md
           - section: Diffusion
             slug: diffusion
             path: ../pages-dev/features/diffusion/README.md
