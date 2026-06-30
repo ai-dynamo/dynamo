@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use crate::epp_config::EppConfig;
 use crate::pod_discovery::{PodDiscovery, RawWorker};
-use crate::selector_client::{SelectorClient, WorkerRegistration};
+use crate::selection_backend::{SelectionBackend, WorkerRegistration};
 
 /// Periodic re-reconcile interval. Bounds how long a selection-service restart
 /// (or any transient upsert/delete failure) can leave a catalog stale while the
@@ -65,7 +65,7 @@ impl TopologyAdapter {
     /// then re-reconciles whenever the reflector reports a pod change.
     pub fn spawn(
         reflector: Arc<PodDiscovery>,
-        client: Arc<SelectorClient>,
+        backend: Arc<dyn SelectionBackend>,
         defaults: RegistrationDefaults,
     ) -> Self {
         let task = tokio::spawn(async move {
@@ -74,7 +74,7 @@ impl TopologyAdapter {
             let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                reconcile_once(&reflector, &client, &defaults, &mut current).await;
+                reconcile_once(&reflector, backend.as_ref(), &defaults, &mut current).await;
                 // Re-reconcile on the next pod change OR on a periodic tick. The
                 // timer recovers a selection-service restart (which drops the
                 // catalog) even when the pod set is stable and no reflector event
@@ -100,7 +100,7 @@ impl TopologyAdapter {
 /// was successfully pushed to the selector replicas.
 async fn reconcile_once(
     reflector: &PodDiscovery,
-    client: &SelectorClient,
+    backend: &dyn SelectionBackend,
     defaults: &RegistrationDefaults,
     current: &mut HashMap<u64, WorkerRegistration>,
 ) {
@@ -113,7 +113,7 @@ async fn reconcile_once(
     let (upserts, deletes) = plan(&desired, current);
 
     for reg in upserts {
-        match client.upsert_worker(&reg).await {
+        match backend.upsert_worker(&reg).await {
             Ok(()) => {
                 current.insert(reg.worker_id, reg);
             }
@@ -124,7 +124,7 @@ async fn reconcile_once(
     }
 
     for worker_id in deletes {
-        match client.delete_worker(worker_id).await {
+        match backend.delete_worker(worker_id).await {
             Ok(()) => {
                 current.remove(&worker_id);
             }

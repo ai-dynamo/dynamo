@@ -21,12 +21,34 @@
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
 const DEFAULT_DATA_PARALLEL_SIZE: u32 = 1;
+const DEFAULT_SELECTOR_THREADS: usize = 4;
 
 /// Value of `DYN_EPP_MODE` that selects router-only (selector) mode.
 pub const ROUTER_ONLY_MODE: &str = "router-only";
 
 /// Environment variable that selects the EPP operating mode.
 pub const DYN_EPP_MODE: &str = "DYN_EPP_MODE";
+
+/// How the EPP reaches the worker selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectorBackendMode {
+    /// Replicated/production: HTTP client to one or more selection-service
+    /// replicas (`selector-http` feature).
+    Http,
+    /// Single-image evaluation: an in-process `SelectionCore` called directly,
+    /// with no HTTP client (`selector-embedded` feature).
+    Embedded,
+}
+
+/// Default mode when `DYN_EPP_SELECTOR_MODE` is unset: HTTP when that backend is
+/// compiled in, otherwise embedded.
+fn default_mode() -> SelectorBackendMode {
+    if cfg!(feature = "selector-http") {
+        SelectorBackendMode::Http
+    } else {
+        SelectorBackendMode::Embedded
+    }
+}
 
 /// Configuration for router-only (selector) mode.
 ///
@@ -35,10 +57,15 @@ pub const DYN_EPP_MODE: &str = "DYN_EPP_MODE";
 /// named by `pool_name` at runtime.
 #[derive(Debug, Clone)]
 pub struct EppConfig {
+    /// How the EPP reaches the selector (HTTP vs in-process embedded).
+    pub mode: SelectorBackendMode,
     /// Comma-separated HTTP base URLs of the selection-service replicas, e.g.
     /// `http://selector-0:8092,http://selector-1:8092`. Catalog writes fan out
-    /// to all replicas; selection reads target one replica.
+    /// to all replicas; selection reads target one replica. Required for
+    /// [`SelectorBackendMode::Http`]; unused for [`SelectorBackendMode::Embedded`].
     pub selector_urls: Vec<String>,
+    /// KV indexer thread-pool size for [`SelectorBackendMode::Embedded`].
+    pub selector_threads: usize,
     /// Name of the `InferencePool` this EPP backs. Its selector and target port
     /// drive pod discovery.
     pub pool_name: String,
@@ -73,6 +100,15 @@ impl EppConfig {
     /// Parse and validate the router-only environment contract. Fails fast on a
     /// missing required field or a malformed numeric/boolean value.
     pub fn from_env() -> anyhow::Result<Self> {
+        let mode = match env_trimmed("DYN_EPP_SELECTOR_MODE").as_deref() {
+            None => default_mode(),
+            Some("http") => SelectorBackendMode::Http,
+            Some("embedded") => SelectorBackendMode::Embedded,
+            Some(other) => anyhow::bail!(
+                "DYN_EPP_SELECTOR_MODE has invalid value {other:?}; expected 'http' or 'embedded'"
+            ),
+        };
+
         let selector_urls = env_trimmed("DYN_EPP_SELECTOR_URLS")
             .map(|raw| {
                 raw.split(',')
@@ -81,12 +117,15 @@ impl EppConfig {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if selector_urls.is_empty() {
+        if matches!(mode, SelectorBackendMode::Http) && selector_urls.is_empty() {
             anyhow::bail!(
-                "DYN_EPP_SELECTOR_URLS is required in {ROUTER_ONLY_MODE} mode \
+                "DYN_EPP_SELECTOR_URLS is required in http selector mode \
                  (comma-separated selection-service base URLs)"
             );
         }
+
+        let selector_threads =
+            opt_parse::<usize>("DYN_EPP_SELECTOR_THREADS")?.unwrap_or(DEFAULT_SELECTOR_THREADS);
 
         let pool_name = require("DYN_EPP_POOL_NAME")?;
         let pool_namespace = env_trimmed("DYN_EPP_POOL_NAMESPACE");
@@ -109,7 +148,9 @@ impl EppConfig {
         let max_num_batched_tokens = opt_parse::<u64>("DYN_MAX_NUM_BATCHED_TOKENS")?;
 
         Ok(Self {
+            mode,
             selector_urls,
+            selector_threads,
             pool_name,
             pool_namespace,
             model_name,
@@ -192,6 +233,8 @@ mod tests {
     fn clear_all() {
         for k in [
             "DYN_EPP_MODE",
+            "DYN_EPP_SELECTOR_MODE",
+            "DYN_EPP_SELECTOR_THREADS",
             "DYN_EPP_SELECTOR_URLS",
             "DYN_EPP_POOL_NAME",
             "DYN_EPP_POOL_NAMESPACE",
@@ -255,6 +298,35 @@ mod tests {
     }
 
     #[test]
+    fn embedded_mode_does_not_require_urls() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_all();
+        let _g = EnvGuard::set(&[
+            ("DYN_EPP_SELECTOR_MODE", "embedded"),
+            ("DYN_EPP_POOL_NAME", "vllm-qwen-pool"),
+            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+        ]);
+        let cfg = EppConfig::from_env().expect("embedded config should parse without urls");
+        assert_eq!(cfg.mode, SelectorBackendMode::Embedded);
+        assert!(cfg.selector_urls.is_empty());
+        assert_eq!(cfg.selector_threads, 4);
+    }
+
+    #[test]
+    fn invalid_selector_mode_fails() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_all();
+        let _g = EnvGuard::set(&[
+            ("DYN_EPP_SELECTOR_MODE", "grpc"),
+            ("DYN_EPP_POOL_NAME", "vllm-qwen-pool"),
+            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+        ]);
+        assert!(EppConfig::from_env().is_err());
+    }
+
+    #[test]
     fn missing_pool_name_fails() {
         let _lock = ENV_LOCK.lock().unwrap();
         clear_all();
@@ -267,10 +339,14 @@ mod tests {
     }
 
     #[test]
-    fn empty_selector_urls_fails() {
+    fn empty_selector_urls_fails_in_http_mode() {
         let _lock = ENV_LOCK.lock().unwrap();
         clear_all();
+        // Explicitly select http mode so this holds regardless of which selector
+        // backend feature the crate is built with (the default mode is
+        // feature-dependent).
         let _g = EnvGuard::set(&[
+            ("DYN_EPP_SELECTOR_MODE", "http"),
             ("DYN_EPP_SELECTOR_URLS", " , "),
             ("DYN_EPP_POOL_NAME", "vllm-qwen-pool"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
