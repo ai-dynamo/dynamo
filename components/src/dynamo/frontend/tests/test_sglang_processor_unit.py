@@ -2344,6 +2344,67 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         assert "42" in content
 
 
+class TestReasoningTokenCount:  # FRONTEND.9 — usage.completion_tokens_details.reasoning_tokens
+    """reasoning_token_count() re-encodes the accumulated reasoning span.
+
+    This is the per-request source for usage.completion_tokens_details.reasoning_tokens:
+    SGLang's scheduler only counts reasoning when require_reasoning=True, which the
+    Dynamo bare-Engine path never sets, so the count must come from the frontend parser.
+    """
+
+    def test_zero_without_reasoning_parser(self, tokenizer):
+        """No reasoning parser → no reasoning span → 0."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+        )
+        post.process_output(
+            {"token_ids": tokenizer.encode("Hello"), "finish_reason": "stop"}
+        )
+        assert post.reasoning_token_count() == 0
+
+    def test_zero_when_nothing_reasoned(self, tokenizer):
+        """Reasoning parser active but the model emitted no reasoning → 0."""
+        from sglang.srt.parser.reasoning_parser import ReasoningParser
+
+        rp = ReasoningParser(model_type="qwen3", stream_reasoning=True)
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=rp
+        )
+        assert post.reasoning_token_count() == 0
+
+    def test_counts_accumulated_reasoning(self, tokenizer):
+        """<think>...</think> tokens are reported, and match a re-encode of the span."""
+        from sglang.srt.parser.reasoning_parser import ReasoningParser
+
+        rp = ReasoningParser(model_type="qwen3", stream_reasoning=True)
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=rp
+        )
+        text = (
+            "<think>\nLet me think about this carefully.\n</think>\n\nThe answer is 42."
+        )
+        token_ids = tokenizer.encode(text)
+        reasoning_parts: list[str] = []
+        for i in range(0, len(token_ids), 5):
+            batch = token_ids[i : i + 5]
+            is_last = i + 5 >= len(token_ids)
+            choice = post.process_output(
+                {"token_ids": batch, "finish_reason": "stop" if is_last else None}
+            )
+            if choice:
+                reasoning_parts.append(
+                    choice.get("delta", {}).get("reasoning_content", "")
+                )
+        reasoning = "".join(reasoning_parts)
+
+        count = post.reasoning_token_count()
+        assert count > 0
+        # Equals a re-encode of exactly the reasoning text the parser surfaced.
+        assert count == len(tokenizer.encode(reasoning, add_special_tokens=False))
+        # And it's strictly less than the whole completion (content excluded).
+        assert count < len(token_ids)
+
+
 # ---------------------------------------------------------------------------
 # Utility functions
 # ---------------------------------------------------------------------------

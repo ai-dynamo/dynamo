@@ -905,6 +905,12 @@ class SglangStreamingPostProcessor:
         self._tool_call_args: dict[int, list[str]] = {}  # tool_index -> arg chunks
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
+        # Reasoning text deltas, accumulated so usage can report
+        # reasoning_tokens. Counting here (not in the worker) is the only
+        # per-request-correct place: SGLang's scheduler only counts reasoning
+        # when require_reasoning=True, which the Dynamo bare-Engine path never
+        # sets. See reasoning_token_count().
+        self._reasoning_text_parts: list[str] = []
 
     def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
         if not self._eos_token_ids:
@@ -959,6 +965,27 @@ class SglangStreamingPostProcessor:
 
         return window_text[len(prefix_text) :]
 
+    def reasoning_token_count(self) -> int:
+        """Token count of the reasoning span for usage.completion_tokens_details.
+
+        Re-encodes the accumulated reasoning text. This is approximate vs the
+        exact generated count (it excludes the think markers and relies on BPE
+        re-tokenization being faithful), but it is per-request and
+        version-stable -- and it is the only viable source here, because the
+        engine's own scheduler counter is gated on ``require_reasoning`` which
+        the Dynamo bare-Engine path never sets. We re-encode the full text
+        rather than tallying per-chunk ``token_ids`` because the streaming
+        reasoning detector buffers across chunks, so token_ids do not align to
+        the reasoning/normal split per chunk.
+        """
+        if not self._reasoning_text_parts:
+            return 0
+        return len(
+            self.tokenizer.encode(
+                "".join(self._reasoning_text_parts), add_special_tokens=False
+            )
+        )
+
     def process_output(self, engine_response: dict[str, Any]) -> dict[str, Any] | None:
         """Process a single engine response chunk into an OpenAI SSE choice dict.
 
@@ -1001,6 +1028,8 @@ class SglangStreamingPostProcessor:
             r_text, n_text = self.reasoning_parser.parse_stream_chunk(delta_text)
             reasoning_text = r_text or None
             normal_text = n_text or ""
+            if r_text:
+                self._reasoning_text_parts.append(r_text)
 
         # -- Tool call parsing (accumulate deltas) --
         content_text = normal_text
