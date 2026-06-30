@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Benchmarking only: this Job generates the synthetic multimodal dataset used by the
+# embedding-cache benchmark. It is NOT required to serve the model -- skip it for a
+# normal deployment.
 apiVersion: batch/v1
 kind: Job
 metadata:
