@@ -321,14 +321,15 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 }
 
 /// Resolve the routing-side image-placeholder token id for a model using the
-/// same per-family logic the frontend's MM-aware KV routing uses (lightseek
-/// `resolve_routing_tokens`). Returns `chat_placeholder_token_id` — the exact
-/// id `OpenAIPreprocessor` substitutes `pad_value` over — so the vLLM worker's
-/// KV-event normalizer keys on the identical token (no cross-process drift).
+/// same Dynamo-owned per-family logic the frontend's MM-aware KV routing uses.
+/// Returns `chat_placeholder_token_id` — the exact
+/// id `OpenAIPreprocessor` finds in the unexpanded prompt. Sequence-compatible
+/// families use the same ID for vLLM KV-event normalization. Returns `None`
+/// for Llama4 because its backend emits a structured token sequence.
 ///
-/// `model_id` is the HF id (used for registry matching); `model_dir` is the
-/// local directory holding `config.json`/`tokenizer.json`. Returns `None` when
-/// the model isn't in the MM-routing registry or its config can't be read.
+/// `model_id` is the Hugging Face ID used by ordered family fallback;
+/// `model_dir` holds `config.json` and `tokenizer.json`. Returns `None` when
+/// no supported family matches or its routing token cannot be resolved.
 #[cfg(feature = "mm-routing")]
 #[pyfunction]
 #[pyo3(text_signature = "(model_id, model_dir)")]

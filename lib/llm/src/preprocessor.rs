@@ -176,8 +176,8 @@ struct ReasoningState {
     guided_json_bypass_decision: Option<bool>,
 }
 
-/// Per-image routing payload accumulated by `gather_multi_modal_data` and
-/// consumed by `gather_mm_exact_routing_info`.
+/// Per-image routing payload accumulated and consumed by
+/// `gather_multi_modal_data`.
 #[derive(Debug, Clone, Copy)]
 pub struct MmImageEntry {
     pub mm_hash: u64,
@@ -185,10 +185,145 @@ pub struct MmImageEntry {
     pub height: u32,
 }
 
+/// Bound routing-only prompt materialization even when a malformed model
+/// config advertises an implausible image-token count or context length.
+#[cfg(feature = "mm-routing")]
+const MAX_MM_ROUTING_TOKENS: usize = 1_048_576;
+
+/// Expand one chat placeholder per image into the routing-only token stream.
+///
+/// Callers validate the placeholder/image cardinality and a non-zero block
+/// size before entering this allocation-heavy request path.
+#[cfg(feature = "mm-routing")]
+fn build_mm_routing_info(
+    token_ids: &[TokenIdType],
+    find_token_id: TokenIdType,
+    mm_image_entries: &[MmImageEntry],
+    image_token_counts: &[usize],
+    routing_prepend_bos: Option<TokenIdType>,
+    block_size: usize,
+    max_expanded_prompt_len: usize,
+) -> Result<crate::protocols::common::preprocessor::MmRoutingInfo> {
+    use crate::protocols::common::preprocessor::MmRoutingInfo;
+
+    anyhow::ensure!(
+        mm_image_entries.len() == image_token_counts.len(),
+        "MM image/count cardinality mismatch"
+    );
+    anyhow::ensure!(block_size > 0, "MM routing block size must be non-zero");
+    anyhow::ensure!(
+        token_ids
+            .iter()
+            .filter(|&&token_id| token_id == find_token_id)
+            .count()
+            == mm_image_entries.len(),
+        "MM placeholder/image cardinality mismatch"
+    );
+
+    let replacement_tokens = image_token_counts.iter().try_fold(0usize, |total, count| {
+        total
+            .checked_add(*count)
+            .ok_or_else(|| anyhow::anyhow!("MM routing image-token count overflowed usize"))
+    })?;
+    let bos_extra = usize::from(routing_prepend_bos.is_some());
+    let retained_text_tokens = token_ids
+        .len()
+        .checked_sub(mm_image_entries.len())
+        .ok_or_else(|| anyhow::anyhow!("MM placeholders exceed prompt token count"))?;
+    let expanded_prompt_len = retained_text_tokens
+        .checked_add(replacement_tokens)
+        .and_then(|total| total.checked_add(bos_extra))
+        .ok_or_else(|| anyhow::anyhow!("MM routing expanded prompt length overflowed usize"))?;
+    anyhow::ensure!(
+        expanded_prompt_len <= max_expanded_prompt_len,
+        "MM routing expanded prompt length {expanded_prompt_len} exceeds limit {max_expanded_prompt_len}"
+    );
+    let total_tokens = expanded_prompt_len
+        .checked_add(block_size - 1)
+        .and_then(|rounded| rounded.checked_div(block_size))
+        .and_then(|blocks| blocks.checked_mul(block_size))
+        .ok_or_else(|| anyhow::anyhow!("MM routing block padding overflowed usize"))?;
+    anyhow::ensure!(
+        total_tokens <= MAX_MM_ROUTING_TOKENS,
+        "MM routing padded token length {total_tokens} exceeds hard limit {MAX_MM_ROUTING_TOKENS}"
+    );
+
+    let mut expanded = Vec::new();
+    expanded
+        .try_reserve_exact(total_tokens)
+        .map_err(|error| anyhow::anyhow!("failed to reserve MM routing token buffer: {error}"))?;
+    if let Some(bos) = routing_prepend_bos {
+        expanded.push(bos);
+    }
+
+    let mut image_index = 0usize;
+    for &token_id in token_ids {
+        if token_id == find_token_id && image_index < mm_image_entries.len() {
+            let fill_token = dynamo_kv_router::protocols::pad_value_for_mm_hash(
+                mm_image_entries[image_index].mm_hash,
+            );
+            expanded.extend(std::iter::repeat_n(
+                fill_token,
+                image_token_counts[image_index],
+            ));
+            image_index += 1;
+        } else {
+            expanded.push(token_id);
+        }
+    }
+
+    debug_assert_eq!(expanded.len(), expanded_prompt_len);
+    expanded.resize(total_tokens, 0);
+
+    Ok(MmRoutingInfo {
+        routing_token_ids: expanded,
+        block_mm_infos: Vec::new(),
+        expanded_prompt_len,
+    })
+}
+
+/// Routing tokens and worker-visible image identities are constructed as one
+/// payload so either both sides use multimodal keys or both fall back to the
+/// unmodified text prefix.
+#[cfg(feature = "mm-routing")]
+struct MmRoutingPayload {
+    routing_info: crate::protocols::common::preprocessor::MmRoutingInfo,
+    mm_hashes: Vec<serde_json::Value>,
+}
+
+#[cfg(feature = "mm-routing")]
+fn build_mm_routing_payload(
+    token_ids: &[TokenIdType],
+    find_token_id: TokenIdType,
+    mm_image_entries: &[MmImageEntry],
+    image_token_counts: &[usize],
+    routing_prepend_bos: Option<TokenIdType>,
+    block_size: usize,
+    max_expanded_prompt_len: usize,
+) -> Result<MmRoutingPayload> {
+    let routing_info = build_mm_routing_info(
+        token_ids,
+        find_token_id,
+        mm_image_entries,
+        image_token_counts,
+        routing_prepend_bos,
+        block_size,
+        max_expanded_prompt_len,
+    )?;
+    let mm_hashes = mm_image_entries
+        .iter()
+        .map(|entry| serde_json::Value::String(format!("{:016x}", entry.mm_hash)))
+        .collect();
+    Ok(MmRoutingPayload {
+        routing_info,
+        mm_hashes,
+    })
+}
+
 /// Derive the model's local directory from the MDC. The directory is the
 /// parent of `config.json` (which lives in `mdc.model_info` as `HfConfigJson`)
 /// and contains the other artifacts MM-aware routing reads at startup
-/// (`tokenizer.json`, `processor_config.json`, `preprocessor_config.json`).
+/// (`tokenizer.json`, `tokenizer_config.json`, `preprocessor_config.json`).
 /// Returns `None` for cards built from non-disk sources.
 #[cfg(feature = "mm-routing")]
 fn mdc_model_dir(mdc: &ModelDeploymentCard) -> Option<std::path::PathBuf> {
@@ -253,16 +388,14 @@ pub struct OpenAIPreprocessor {
     /// Max context length (in tokens) this model can handle, from ModelDeploymentCard
     context_length: u32,
     /// Per-image token-count engine. `None` when the feature is disabled, the
-    /// model isn't covered by the registry, or `preprocessor_config.json` is
-    /// unreadable.
+    /// model isn't covered by a Dynamo estimator, or
+    /// `preprocessor_config.json` is unreadable.
     #[cfg(feature = "mm-routing")]
     image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
-    /// Image-placeholder token id the routing-side sequence fills per image.
-    /// Resolved from `config.json`'s `image_token_id` field when present,
-    /// otherwise falls back to the `ModelProcessorSpec` registry value. This
-    /// is the id the backend's HF processor emits in the expanded sequence
-    /// (per-patch token for Qwen-VL families, the single placeholder for
-    /// LLaVA), so block hashes align bit-for-bit with the worker.
+    /// Image-placeholder token id emitted once per image by the chat template.
+    /// The preprocessor finds this id in the unexpanded prompt and replaces it
+    /// only in the router's token view. It can differ from the model's repeated
+    /// patch token, notably for Qwen2-VL.
     ///
     /// `None` disables MM-aware routing for this model and the router falls
     /// back to text-prefix routing.
@@ -272,7 +405,7 @@ pub struct OpenAIPreprocessor {
     /// hashes match the backend's HF processor output on models with
     /// `add_bos_token: true` (LLaVA-1.5 and other `LlamaTokenizer`
     /// families). `None` when the model doesn't need it or `bos_token`
-    /// doesn't round-trip to a single id.
+    /// has no exact vocabulary id.
     #[cfg(feature = "mm-routing")]
     routing_prepend_bos: Option<crate::protocols::TokenIdType>,
 }
@@ -421,9 +554,8 @@ impl OpenAIPreprocessor {
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
 
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
-        // model_type comes from config.json (e.g. "qwen3_vl") and lets the
-        // image-processor registry resolve fine-tunes loaded from
-        // custom-named directories where the family substring isn't in the path.
+        // model_type comes from config.json (e.g. "qwen3_vl") and resolves
+        // custom-named fine-tunes whose directory omits the family substring.
         #[cfg(feature = "mm-routing")]
         let model_dir_for_routing: Option<std::path::PathBuf> = mdc_model_dir(&mdc);
         // TODO(mm-routing): fastokens lacks a special-token mutator, so it
@@ -477,13 +609,15 @@ impl OpenAIPreprocessor {
                     };
                     // One-shot config/tokenizer_config read for all
                     // routing-side token info. Parsing lives next to the
-                    // spec resolution in the MM-routing module.
-                    let routing_tokens =
-                        lightseek_mm::resolve_routing_tokens(&model_id, &model_dir);
-                    // `chat_placeholder_token_id` already prefers config.json's
-                    // explicit field and falls back to the spec value, so it's
-                    // the single id used both for the engagement gate and the
-                    // routing-fill below.
+                    // family-specific resolution in the MM-routing module.
+                    let routing_tokens = lightseek_mm::resolve_routing_tokens_with_tokenizer(
+                        &model_id,
+                        &model_dir,
+                        tokenizer.as_ref(),
+                    );
+                    // `chat_placeholder_token_id` already applies the family
+                    // config/vocabulary fallbacks, so it is the single ID used
+                    // for both the engagement gate and routing fill below.
                     let img_tok = routing_tokens.chat_placeholder_token_id;
                     let bos_tok_string = routing_tokens.bos_token_string;
 
@@ -498,15 +632,15 @@ impl OpenAIPreprocessor {
                             let mut reasons: Vec<String> = Vec::new();
                             if !counter_ok {
                                 reasons.push(format!(
-                                    "model not supported by the MM-routing registry ({})",
+                                    "model not supported by the MM-routing estimators ({})",
                                     counter_err.as_deref().unwrap_or("unknown error")
                                 ));
                             }
                             if !img_ok {
                                 reasons.push(
                                     "image-placeholder token unresolvable from \
-                                 config.json / processor_config.json / \
-                                 tokenizer_config.json / vocab probe"
+                                 config.json / tokenizer_config.json / \
+                                 tokenizer vocabulary"
                                         .to_string(),
                                 );
                             }
@@ -548,43 +682,27 @@ impl OpenAIPreprocessor {
 
         // Resolve the routing-side BOS prepend for models with
         // `add_bos_token: true` (see `routing_prepend_bos` doc). Only kept
-        // when the configured `bos_token` round-trips to a single id. The
+        // when the configured `bos_token` has an exact vocabulary id. The
         // BOS string was harvested above by `resolve_routing_tokens` from
         // the same `tokenizer_config.json` pass.
         #[cfg(feature = "mm-routing")]
-        let routing_prepend_bos = match bos_token_string {
-            Some(bos_text) => match tokenizer.encode(&bos_text) {
-                Ok(enc) if enc.token_ids().len() == 1 => {
-                    let id = enc.token_ids()[0];
-                    tracing::debug!(
-                        target: "mm_routing",
-                        bos_token = %bos_text,
-                        bos_token_id = id,
-                        "routing-side BOS prepend enabled (tokenizer_config.json add_bos_token=true)"
-                    );
-                    Some(id)
-                }
-                Ok(enc) => {
-                    tracing::debug!(
-                        target: "mm_routing",
-                        bos_token = %bos_text,
-                        round_trip_ids = ?enc.token_ids(),
-                        "BOS token does not round-trip to a single id; routing-side prepend disabled"
-                    );
-                    None
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        target: "mm_routing",
-                        bos_token = %bos_text,
-                        error = %e,
-                        "BOS token failed to re-encode; routing-side prepend disabled"
-                    );
-                    None
-                }
-            },
-            None => None,
-        };
+        let routing_prepend_bos = bos_token_string.and_then(|bos_text| {
+            let id = tokenizer.token_to_id(&bos_text);
+            match id {
+                Some(id) => tracing::debug!(
+                    target: "mm_routing",
+                    bos_token = %bos_text,
+                    bos_token_id = id,
+                    "routing-side BOS prepend enabled (tokenizer_config.json add_bos_token=true)"
+                ),
+                None => tracing::debug!(
+                    target: "mm_routing",
+                    bos_token = %bos_text,
+                    "BOS token has no exact vocabulary id; routing-side prepend disabled"
+                ),
+            }
+            id
+        });
 
         Ok(Arc::new(Self {
             formatter,
@@ -678,26 +796,17 @@ impl OpenAIPreprocessor {
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
-        let _mm_image_entries = self
-            .gather_multi_modal_data(
-                request,
-                &mut builder,
-                formatted_prompt.as_deref(),
-                &token_ids,
-            )
-            .await
-            .with_context(|| "Failed to gather multimodal data")?;
+        self.gather_multi_modal_data(
+            request,
+            &mut builder,
+            formatted_prompt.as_deref(),
+            &token_ids,
+        )
+        .await
+        .with_context(|| "Failed to gather multimodal data")?;
 
-        // Build the MM-aware view (expanded routing_token_ids + per-block
-        // mm_hashes) for the KV router. No-op when no images are present or
-        // the model has no resolved image-placeholder.
-        #[cfg(feature = "mm-routing")]
-        self.gather_mm_exact_routing_info(&mut builder, &_mm_image_entries, &token_ids)
-            .with_context(|| "Failed to build MM routing info")?;
-
-        // Install tokens on the builder. Done after MM routing built its
-        // view so the routing-side borrow stays cheap and builder ownership
-        // moves once.
+        // Install tokens on the builder after multimodal routing has borrowed
+        // the worker-bound view.
         builder.token_ids(token_ids);
 
         STAGE_DURATION_SECONDS
@@ -1025,9 +1134,8 @@ impl OpenAIPreprocessor {
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<&str>,
-        // Worker-bound token ids; used (mm-routing only) to gate `mm_hashes`
-        // forwarding on the same placeholder-count precondition as
-        // `gather_mm_exact_routing_info`, so the two never diverge.
+        // Worker-bound token ids; used (mm-routing only) to construct routing
+        // tokens and `mm_hashes` as one atomic payload.
         token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<Vec<MmImageEntry>> {
         // `token_ids` is only consumed by the mm-routing `mm_hashes` gate below.
@@ -1038,8 +1146,9 @@ impl OpenAIPreprocessor {
         let mut fetch_tasks: Vec<(String, &ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
         // Per-image (mm_hash, width, height) for the MM-routing path.
-        // Accumulated in message order so we don't walk messages twice.
-        // Cleared and returned to the caller; empty for non-image / text-only requests.
+        // Accumulated in message order so we don't walk messages twice. Empty
+        // for non-image and text-only requests; returned for direct callers
+        // after this method installs any viable routing payload.
         #[cfg(feature = "mm-routing")]
         let mut mm_image_entries: Vec<MmImageEntry> = Vec::new();
         // Total `image_url` content parts in the request. Bumped at every
@@ -1277,43 +1386,23 @@ impl OpenAIPreprocessor {
                 extra_args_obj.extend(backend_extra_args);
             }
 
-            // Forward routing-side mm_hashes in `extra_args["mm_hashes"]` so the
-            // backend's KV events publish under the same key the router computes.
-            // Always the canonical 16-char hex (u64); each backend adapts it:
-            // sglang reads `int(hex, 16)` as-is, vLLM pads to its 64-char
-            // BlockStored form. No information is lost — both carry the same u64.
-            //
-            // Skip forwarding entirely if any image failed dim resolution —
-            // a shorter `mm_hashes` list would misalign with the image
-            // positions the backend derives from `multi_modal_data`, and
-            // the wrong UUIDs would get injected onto the wrong images.
-            //
-            // Also gate on the single-token placeholder count matching the
-            // image count — the same precondition `gather_mm_exact_routing_info`
-            // uses to build routing info. Forwarding `mm_hashes` makes the
-            // worker pad_value-key its KV blocks; if the router then falls back
-            // to plain `token_ids` (e.g. numbered-placeholder models like Phi-3,
-            // where the count won't match), the keys diverge and overlap is
-            // lost. Keeping both gated together leaves that fallback as clean
-            // text-prefix routing.
+            // Build routing tokens and worker-visible image hashes atomically.
+            // Forwarding `mm_hashes` makes the worker pad-value-key its KV
+            // blocks, so a failed routing expansion must omit both fields to
+            // preserve clean text-prefix fallback.
             #[cfg(feature = "mm-routing")]
-            if let Some(find_token_id) = self.routing_image_token_id
-                && !mm_image_entries.is_empty()
-                && mm_image_entries.len() == total_image_count
-                && token_ids.iter().filter(|&&t| t == find_token_id).count()
-                    == mm_image_entries.len()
+            if mm_image_entries.len() == total_image_count
+                && let Some(payload) =
+                    self.build_mm_exact_routing_payload(&mm_image_entries, token_ids)
             {
-                let hexes: Vec<serde_json::Value> = mm_image_entries
-                    .iter()
-                    .map(|e| serde_json::Value::String(format!("{:016x}", e.mm_hash)))
-                    .collect();
-                extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
+                extra_args["mm_hashes"] = serde_json::Value::Array(payload.mm_hashes);
+                builder.mm_routing_info(Some(payload.routing_info));
             } else if !mm_image_entries.is_empty() && self.routing_image_token_id.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
                     resolved = mm_image_entries.len(),
                     expected = total_image_count,
-                    "mm-routing: exact MM routing info not built (dim resolution or placeholder-count mismatch); skipping mm_hashes forwarding"
+                    "mm-routing: exact MM routing payload not built; using text-prefix routing and skipping mm_hashes"
                 );
             }
 
@@ -1326,36 +1415,33 @@ impl OpenAIPreprocessor {
         Ok(Vec::new())
     }
 
-    /// Build `MmRoutingInfo` for exact MM-aware KV routing. The worker-bound
-    /// `token_ids` are unchanged — only the routing-side view is expanded.
+    /// Build the routing-side token expansion and worker-side image identities
+    /// as one payload. The worker-bound `token_ids` remain unchanged.
     /// Supports single-special-token placeholder families (Qwen-VL, LLaVA).
-    /// Returns `Ok(())` with no work performed on any precondition miss
-    /// (caller falls back to text-prefix routing).
+    /// Any precondition or allocation failure returns `None`, keeping both the
+    /// router and worker on text-prefix routing.
     #[cfg(feature = "mm-routing")]
-    pub fn gather_mm_exact_routing_info(
+    fn build_mm_exact_routing_payload(
         &self,
-        builder: &mut PreprocessedRequestBuilder,
         mm_image_entries: &[MmImageEntry],
         token_ids: &[crate::protocols::TokenIdType],
-    ) -> Result<()> {
-        use crate::protocols::common::preprocessor::MmRoutingInfo;
-
+    ) -> Option<MmRoutingPayload> {
         if mm_image_entries.is_empty() {
-            return Ok(());
+            return None;
         }
         let Some(find_token_id) = self.routing_image_token_id else {
             tracing::debug!(
                 target: "mm_routing",
                 "routing_image_token_id unresolved; skipping MM routing info"
             );
-            return Ok(());
+            return None;
         };
         let Some(counter) = self.image_token_counter.as_ref() else {
             tracing::debug!(
                 target: "mm_routing",
                 "image_token_counter unavailable; skipping MM routing info"
             );
-            return Ok(());
+            return None;
         };
         let block_size = self.kv_cache_block_size;
         if block_size == 0 {
@@ -1363,7 +1449,7 @@ impl OpenAIPreprocessor {
                 target: "mm_routing",
                 "kv_cache_block_size is 0; skipping MM routing info"
             );
-            return Ok(());
+            return None;
         }
 
         // Single-special-token placeholders (Qwen-VL `<|image_pad|>`, LLaVA
@@ -1381,17 +1467,15 @@ impl OpenAIPreprocessor {
                 "placeholder token count in tokenized prompt does not match image count; \
                  skipping MM routing info (text-prefix routing only)"
             );
-            return Ok(());
+            return None;
         }
         let normalized_token_ids = token_ids;
 
-        // Compute per-image N via the registry + run the expansion.
+        // Compute per-image N with the selected estimator, then expand.
         let n_tokens: Vec<usize> = mm_image_entries
             .iter()
             .map(|e| counter.count_tokens(e.width, e.height))
             .collect();
-        let n_total: usize = n_tokens.iter().sum();
-
         // Canonical pad_value fill at image positions for ALL backends. sglang
         // consumes pad_value natively; vLLM events are normalized to pad_value
         // in the kv-router (see `create_stored_blocks`), so the frontend stays
@@ -1401,37 +1485,29 @@ impl OpenAIPreprocessor {
         // Prepend the routing-side BOS for `add_bos_token: true` models
         // (LlamaTokenizer family, e.g. LLaVA-1.5) so per-block hashes match
         // the backend's HF processor output.
-        let bos_extra = self.routing_prepend_bos.is_some() as usize;
-        let mut expanded: Vec<crate::protocols::TokenIdType> =
-            Vec::with_capacity(normalized_token_ids.len() + n_total + bos_extra);
-        if let Some(bos) = self.routing_prepend_bos {
-            expanded.push(bos);
-        }
-        let mut i = 0usize;
-        for &t in normalized_token_ids.iter() {
-            if t == find_token_id && i < mm_image_entries.len() {
-                let fill_token =
-                    dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_image_entries[i].mm_hash);
-                expanded.extend(std::iter::repeat_n(fill_token, n_tokens[i]));
-                i += 1;
-            } else {
-                expanded.push(t);
+        let max_expanded_prompt_len = match self.context_length as usize {
+            0 => MAX_MM_ROUTING_TOKENS,
+            context_length => context_length.min(MAX_MM_ROUTING_TOKENS),
+        };
+        let payload = match build_mm_routing_payload(
+            normalized_token_ids,
+            find_token_id,
+            mm_image_entries,
+            &n_tokens,
+            self.routing_prepend_bos,
+            block_size,
+            max_expanded_prompt_len,
+        ) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(
+                    target: "mm_routing",
+                    %error,
+                    "MM routing expansion rejected; falling back to text-prefix routing"
+                );
+                return None;
             }
-        }
-
-        // Unpadded expanded length, before the block-padding added below.
-        let expanded_prompt_len = expanded.len();
-
-        // Pad to a whole multiple of kv_cache_block_size. The router's
-        // compute_block_hash_for_seq only hashes whole blocks, so the partial
-        // tail block doesn't influence routing either way; aligning the length
-        // keeps our routing_token_ids and `block_mm_infos` agreeing on count.
-        // `div_ceil` guarantees `total_tokens >= expanded.len()`, so resize
-        // only ever grows.
-        let total_tokens = expanded.len().div_ceil(block_size) * block_size;
-        if expanded.len() < total_tokens {
-            expanded.resize(total_tokens, 0);
-        }
+        };
 
         // pad_value already encodes mm_hash in the routing tokens the router
         // hashes, so block_mm_infos is always empty (the canonical scheme for
@@ -1441,20 +1517,31 @@ impl OpenAIPreprocessor {
             target: "mm_routing",
             n_images = mm_image_entries.len(),
             block_size,
-            total_tokens,
+            total_tokens = payload.routing_info.routing_token_ids.len(),
             "MmRoutingInfo built (exact, pad_value)"
         );
+        Some(payload)
+    }
 
-        builder.mm_routing_info(Some(MmRoutingInfo {
-            routing_token_ids: expanded,
-            block_mm_infos: Vec::new(),
-            expanded_prompt_len,
-        }));
+    /// Compatibility entry point for callers that explicitly install routing
+    /// information after gathering multimodal data. The normal preprocessing
+    /// path now installs routing tokens and worker hashes atomically inside
+    /// [`Self::gather_multi_modal_data`].
+    #[cfg(feature = "mm-routing")]
+    pub fn gather_mm_exact_routing_info(
+        &self,
+        builder: &mut PreprocessedRequestBuilder,
+        mm_image_entries: &[MmImageEntry],
+        token_ids: &[crate::protocols::TokenIdType],
+    ) -> Result<()> {
+        if let Some(payload) = self.build_mm_exact_routing_payload(mm_image_entries, token_ids) {
+            builder.mm_routing_info(Some(payload.routing_info));
+        }
         Ok(())
     }
 
     /// xxh3-64 of the raw URL bytes. Used as the routing `mm_hash` in the
-    /// URL-passthrough path: two requests with byte-identical URLs route to
+    /// URL-passthrough path: two requests with identical URLs route to
     /// the same worker, anything else routes independently.
     ///
     /// We deliberately do NOT strip cache-buster / signed-URL query
@@ -3871,6 +3958,160 @@ mod tests {
                 "FAILED: {desc}",
             );
         }
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn build_mm_routing_info_expands_multiple_images_and_pads_blocks() {
+        let entries = [
+            MmImageEntry {
+                mm_hash: 0x1234,
+                width: 640,
+                height: 480,
+            },
+            MmImageEntry {
+                mm_hash: 0x5678,
+                width: 320,
+                height: 240,
+            },
+        ];
+        let counts = [2, 3];
+        let first_fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(entries[0].mm_hash);
+        let second_fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(entries[1].mm_hash);
+
+        let info = build_mm_routing_info(
+            &[10, 99, 11, 99, 12],
+            99,
+            &entries,
+            &counts,
+            Some(1),
+            4,
+            1024,
+        )
+        .unwrap();
+
+        assert_eq!(info.expanded_prompt_len, 9);
+        assert_eq!(info.routing_token_ids.len(), 12);
+        assert_eq!(
+            &info.routing_token_ids[..9],
+            &[
+                1,
+                10,
+                first_fill,
+                first_fill,
+                11,
+                second_fill,
+                second_fill,
+                second_fill,
+                12,
+            ]
+        );
+        assert_eq!(&info.routing_token_ids[9..], &[0, 0, 0]);
+        assert!(info.block_mm_infos.is_empty());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn build_mm_routing_info_uses_image_hash_as_identity() {
+        let count = [2];
+        let make = |mm_hash| {
+            build_mm_routing_info(
+                &[7],
+                7,
+                &[MmImageEntry {
+                    mm_hash,
+                    width: 1,
+                    height: 1,
+                }],
+                &count,
+                None,
+                2,
+                1024,
+            )
+            .unwrap()
+            .routing_token_ids
+        };
+
+        assert_eq!(make(42), make(42));
+        assert_ne!(make(42), make(43));
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn build_mm_routing_payload_rejects_oversized_expansion_atomically() {
+        let entries = [MmImageEntry {
+            mm_hash: 42,
+            width: 1,
+            height: 1,
+        }];
+        let payload = build_mm_routing_payload(&[7], 7, &entries, &[1025], None, 16, 1024).ok();
+
+        assert!(
+            payload
+                .as_ref()
+                .map(|payload| &payload.routing_info)
+                .is_none(),
+            "routing info must be absent on expansion rejection"
+        );
+        assert!(
+            payload.as_ref().map(|payload| &payload.mm_hashes).is_none(),
+            "worker mm_hashes must be absent on expansion rejection"
+        );
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn build_mm_routing_info_rejects_count_overflow() {
+        let entries = [
+            MmImageEntry {
+                mm_hash: 42,
+                width: 1,
+                height: 1,
+            },
+            MmImageEntry {
+                mm_hash: 43,
+                width: 1,
+                height: 1,
+            },
+        ];
+        let error = build_mm_routing_info(
+            &[7, 7],
+            7,
+            &entries,
+            &[usize::MAX, 1],
+            None,
+            16,
+            MAX_MM_ROUTING_TOKENS,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("image-token count overflowed usize")
+        );
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn build_mm_routing_info_rejects_oversized_block_padding() {
+        let entries = [MmImageEntry {
+            mm_hash: 42,
+            width: 1,
+            height: 1,
+        }];
+        let error = build_mm_routing_info(
+            &[7],
+            7,
+            &entries,
+            &[1],
+            None,
+            MAX_MM_ROUTING_TOKENS + 1,
+            MAX_MM_ROUTING_TOKENS,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("padded token length"));
     }
 
     /// Different query strings must produce different hashes. `?v=1` and

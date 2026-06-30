@@ -292,14 +292,14 @@ def _make_image_handler(image_map: dict[str, bytes]) -> type:
 @pytest.fixture(scope="module")
 def http_image_server_with_alias() -> Generator[dict[str, str], None, None]:
     """Serve PNGs over HTTP. Two distinct paths (`/image_A.png` and
-    `/image_A_alias.png`) return *byte-identical* content; the
-    content-hash assertion below relies on this. Distinct paths defeat
-    URL-string hashing — only content hashing collides them."""
+    `/image_A_alias.png`) return identical content; the content-hash assertion
+    below verifies this. Distinct paths defeat URL-string hashing — only
+    content hashing collides them."""
     (port,) = allocate_ports(count=1, start_port=18600)
     primary_bytes = _make_png_bytes((180, 30, 90))
     image_map: dict[str, bytes] = {
         "/image_A.png": primary_bytes,
-        "/image_A_alias.png": primary_bytes,  # byte-identical, different URL
+        "/image_A_alias.png": primary_bytes,  # identical bytes, different URL
     }
     server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
     thread = threading.Thread(target=server.serve_forever, daemon=True)

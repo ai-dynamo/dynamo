@@ -2066,15 +2066,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "document-features"
-version = "0.2.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
-dependencies = [
- "litrs",
-]
-
-[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2210,19 +2201,17 @@ dependencies = [
  "futures",
  "futures-util",
  "galil-seiferas",
- "hf-hub 0.4.3",
+ "hf-hub",
  "image",
  "ipnet",
  "json-five",
- "llm-multimodal",
- "llm-tokenizer",
  "lru 0.16.4",
  "memfile",
  "minijinja",
  "modelexpress-client",
  "modelexpress-common",
  "moka",
- "ndarray 0.16.1",
+ "ndarray",
  "nix 0.26.4",
  "nixl-sys",
  "object_store",
@@ -2243,7 +2232,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tmq",
- "tokenizers 0.21.4",
+ "tokenizers",
  "tokio",
  "tokio-rayon",
  "tokio-stream",
@@ -2296,7 +2285,7 @@ dependencies = [
  "kvbm-engine",
  "kvbm-logical",
  "kvbm-physical",
- "ndarray 0.16.1",
+ "ndarray",
  "ndarray-interp",
  "ndarray-npy",
  "rand 0.9.4",
@@ -2520,7 +2509,7 @@ dependencies = [
  "serde_json",
  "strum",
  "tiktoken-rs",
- "tokenizers 0.21.4",
+ "tokenizers",
  "tracing",
 ]
 
@@ -2781,20 +2770,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast_image_resize"
-version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12dd43e5011e8d8411a3215a0d57a2ec5c68282fb90eb5d7221fab0113442174"
-dependencies = [
- "bytemuck",
- "cfg-if",
- "document-features",
- "image",
- "num-traits",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "fastokens"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2802,7 +2777,7 @@ checksum = "8728655e193e0d08d7a95d63cf1fdb9b768d282cab0a112ecb006615bae9f067"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",
- "hf-hub 0.4.3",
+ "hf-hub",
  "icu_normalizer",
  "memchr",
  "pcre2",
@@ -3343,27 +3318,6 @@ dependencies = [
  "tokio",
  "ureq",
  "windows-sys 0.60.2",
-]
-
-[[package]]
-name = "hf-hub"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aef3982638978efa195ff11b305f51f1f22f4f0a6cabee7af79b383ebee6a213"
-dependencies = [
- "dirs",
- "futures",
- "indicatif 0.18.4",
- "libc",
- "log",
- "num_cpus",
- "rand 0.9.4",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4411,66 +4365,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
-name = "litrs"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
-
-[[package]]
-name = "llm-multimodal"
-version = "1.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dd7a7376b9308e4a34c4626e7e96de5173a75ba11703b2181bc463e303cd4817"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "blake3",
- "bytes",
- "fast_image_resize",
- "hf-hub 0.5.0",
- "image",
- "llm-tokenizer",
- "ndarray 0.17.2",
- "once_cell",
- "reqwest",
- "serde",
- "serde_bytes",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "llm-tokenizer"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7e66c065fba12ae39766881bdda1acb51188a2a7141972182bb4f00b4ff8652"
-dependencies = [
- "aho-corasick",
- "anyhow",
- "base64 0.22.1",
- "blake3",
- "dashmap",
- "futures",
- "hf-hub 0.5.0",
- "minijinja",
- "minijinja-contrib",
- "rayon",
- "rustc-hash 1.1.0",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tiktoken-rs",
- "tokenizers 0.23.1",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "local-ip-address"
 version = "0.6.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4721,7 +4615,6 @@ dependencies = [
  "indexmap 2.14.0",
  "memo-map",
  "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -4807,7 +4700,7 @@ dependencies = [
  "chrono",
  "clap",
  "config",
- "hf-hub 0.4.3",
+ "hf-hub",
  "jiff",
  "prost 0.13.5",
  "serde",
@@ -4894,27 +4787,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "ndarray"
-version = "0.17.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d"
-dependencies = [
- "matrixmultiply",
- "num-complex",
- "num-integer",
- "num-traits",
- "portable-atomic",
- "portable-atomic-util",
- "rawpointer",
-]
-
-[[package]]
 name = "ndarray-interp"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e43087829efb5ec2736598e88587df286425b59df5a9ce991994cdd2c5855d3f"
 dependencies = [
- "ndarray 0.16.1",
+ "ndarray",
  "num-traits",
  "thiserror 2.0.18",
 ]
@@ -4926,7 +4804,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b313788c468c49141a9d9b6131fc15f403e6ef4e8446a0b2e18f664ddb278a9"
 dependencies = [
  "byteorder",
- "ndarray 0.16.1",
+ "ndarray",
  "num-complex",
  "num-traits",
  "py_literal",
@@ -7976,41 +7854,7 @@ dependencies = [
  "derive_builder",
  "esaxx-rs",
  "getrandom 0.3.4",
- "hf-hub 0.4.3",
- "itertools 0.14.0",
- "log",
- "macro_rules_attribute",
- "monostate",
- "onig",
- "paste",
- "rand 0.9.4",
- "rayon",
- "rayon-cond",
- "regex",
- "regex-syntax",
- "serde",
- "serde_json",
- "spm_precompiled",
- "thiserror 2.0.18",
- "unicode-normalization-alignments",
- "unicode-segmentation",
- "unicode_categories",
-]
-
-[[package]]
-name = "tokenizers"
-version = "0.23.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44e5bea67576e04b6ff8564c5d9e09c2ef0cf476502245f2f120e497769d3112"
-dependencies = [
- "ahash",
- "compact_str",
- "daachorse",
- "dary_heap",
- "derive_builder",
- "esaxx-rs",
- "getrandom 0.3.4",
- "indicatif 0.18.4",
+ "hf-hub",
  "itertools 0.14.0",
  "log",
  "macro_rules_attribute",

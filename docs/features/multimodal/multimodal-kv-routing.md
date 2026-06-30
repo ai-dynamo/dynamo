@@ -27,21 +27,38 @@ Without MM-aware routing, the standard router treats image token blocks as opaqu
 
 | Backend | Path | Supported | Notes |
 |---------|------|-----------|-------|
-| **vLLM** | Rust frontend (default) | ✅ | Uses `llm-multimodal` crate for image-token counting + placeholder expansion. Supported models tracked below. |
+| **vLLM** | Rust frontend (default) | ✅ | Uses Dynamo-owned image-token counting and placeholder expansion for the model families listed below. |
 | **vLLM** | Python chat-processor (`--dyn-chat-processor vllm --router-mode kv`) | ✅ | Uses vLLM's own multimodal processor — supports any VLM that vLLM supports. |
 | **TRT-LLM** | — | ✅ | Uses dedicated MM Router Worker. Requires `--publish-events-and-metrics` on TRT-LLM workers. |
-| **SGLang** | Rust frontend (default) | ✅ (\*) | Uses `llm-multimodal` crate for image-token counting; engaged automatically when the worker reports `backend_framework="sglang"`. |
+| **SGLang** | Rust frontend (default) | ✅ (\*) | Uses the same Dynamo-owned image-token counters; engaged automatically when the worker reports `backend_framework="sglang"`. |
 
-(\*) The SGLang Rust-frontend path substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix cache key (`MM_PAD_SHIFT_VALUE + mm_hash % 2^30`) matches byte-for-byte. Requires the sglang fork with the `mm_hashes` field on `GenerateReqInput` ([sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300)).
+(\*) The SGLang Rust-frontend path substitutes per-image `pad_value` tokens in the routing-side view so SGLang's RadixAttention prefix cache key (`MM_PAD_SHIFT_VALUE + mm_hash % 2^30`) is identical to the frontend key. Requires the SGLang fork with the `mm_hashes` field on `GenerateReqInput` ([sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300)).
 
 ## Supported Model Families (Rust frontend path)
 
-The Rust frontend's MM-aware routing path supports whatever VLM families the
-`llm-multimodal` crate registers — see
-[`ImageProcessorRegistry::with_defaults()`](https://docs.rs/llm-multimodal/1.5.0/llm_multimodal/vision/image_processor/struct.ImageProcessorRegistry.html#method.with_defaults)
-for the up-to-date list. A model the registry doesn't recognize falls back
-to text-prefix-only KV routing (request still completes; just no prefix-cache
-benefit across images).
+The Rust frontend owns six image-token counting algorithms and recognizes ten
+model families. It enables image-aware routing for nine of them. It matches the
+model's `model_type` first, then its model ID.
+
+| Counter | Model Families | Routing Status |
+|---------|----------------|----------------|
+| Qwen2 | Qwen2-VL, Qwen2.5-VL | Enabled |
+| Qwen3 | Qwen3-VL, Qwen3.5, Qwen3.6 | Enabled |
+| LLaVA-1.5 | LLaVA-1.5 | Enabled |
+| LLaVA-NeXT | LLaVA-NeXT | Enabled |
+| Llama 4 | Llama 4 | Text-prefix fallback |
+| Kimi K2 | Kimi-K2.5, Kimi-K2.6 | Enabled |
+
+A model outside this list falls back to text-prefix-only KV routing. The
+request still completes, but routing cannot account for cache overlap across
+images.
+
+> [!WARNING]
+> The Llama 4 counter preserves Dynamo's current scalar count for compatibility,
+> but the Rust path falls back to text-prefix routing. vLLM applies pixel
+> shuffle to produce 144 image positions per tile and adds structural tokens;
+> Dynamo's current routing representation cannot encode that sequence. Use the
+> Python chat-processor path for image-aware Llama 4 routing.
 
 The Python chat-processor variant doesn't share this constraint — it
 delegates to vLLM's own multimodal processor and works with any VLM vLLM
@@ -55,22 +72,22 @@ supports.
 Frontend (Rust + KV router) → Backend Workers
         │
         ├─ Hash image (xxh3_64 of the raw URL — full-URL identity; use --frontend-decoding for content-addressed hashing)
-        ├─ Resolve image-token id via per-model ModelProcessorSpec
+        ├─ Resolve image-token id from model config or the Dynamo tokenizer
         ├─ Read (W, H) from a Range: 0-65535 header fetch (or in-memory data: bytes)
         ├─ count_tokens(W, H) → expanded image-token count N
         ├─ Expand placeholder × N in routing_token_ids (worker token_ids unchanged)
-        ├─ Build per-block MM metadata (block_mm_infos)
+        ├─ Encode mm_hash in per-image pad-value tokens
         ├─ KV router selects best worker
         └─ Forward mm_hash to worker via extra_args["mm_hashes"] →
               vLLM's multi_modal_uuids (cache key match)
 ```
 
-1. The Rust frontend computes an `mm_hash` per image: `xxh3_64` of the decoded bytes for `data:` URIs (and for `http(s)://` when `media_decoder` is enabled on the model), otherwise `xxh3_64` of the full URL string. Two callers will share an `mm_hash` only when they send byte-identical URLs.
-2. The image-placeholder token id is resolved by delegating to a per-model `ModelProcessorSpec` (one spec per supported VLM family — Qwen3-VL, Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Llama-4, Kimi-K2.5, Kimi-K2.6, Qwen3.5, Qwen3.6). Each spec reads the appropriate `config.json` field for its model family (`image_token_id`, `image_token_index`, or `media_placeholder_token_id`) and falls back to probing the tokenizer's vocab when only the placeholder string is registered. Models the registry doesn't recognise fall back to text-prefix-only routing.
-3. Per-image `(W, H)` is read from a 64KB `Range`-bounded header fetch (or from in-memory bytes for `data:` URIs); the image-processor registry computes the per-image expanded token count.
+1. With frontend decoding, the Rust frontend computes `mm_hash` as `xxh3_64` of decoded RGB bytes. Otherwise it hashes the full URL string, including a complete `data:` URI. Passthrough reuse therefore requires identical URLs, while decoded mode reuses identical image content across URLs.
+2. The frontend selects one of the nine image-routed model families and resolves its image-placeholder token ID. It reads the applicable `config.json` field (`image_token_id`, `image_token_index`, or `media_placeholder_token_id`) and falls back to exact Dynamo tokenizer vocabulary lookup when the model registers only a placeholder string. Llama 4 is recognized but takes the text-prefix fallback described above.
+3. Per-image `(W, H)` is read from a 64KB `Range`-bounded header fetch (or from in-memory bytes for `data:` URIs); the selected Dynamo-owned counter computes the expanded token count.
 4. The single placeholder token is expanded to N copies in `routing_token_ids` (a router-only view); the worker still sees one placeholder per image in `token_ids`.
-5. Per-block MM metadata (`block_mm_infos`) is built from the expanded view; the KV router evaluates overlap across workers including image-bearing blocks.
-6. The frontend forwards each image's `mm_hash` (16-hex-char prefix, padded) via `extra_args["mm_hashes"]`; the backend handler injects them as vLLM's `multi_modal_uuids`, so vLLM's own KV-cache key matches the hash the router used.
+5. Each replacement token encodes the image's `mm_hash` as a canonical `pad_value`. `block_mm_infos` remains empty because the image identity already resides in the routing token stream.
+6. The frontend forwards each image's `mm_hash` as 16 hexadecimal characters via `extra_args["mm_hashes"]`; the backend pads it to vLLM's 64-character `multi_modal_uuids` form, so vLLM's own KV-cache key matches the hash the router used.
 
 ### vLLM (alternative — Python chat-processor variant)
 
@@ -128,7 +145,7 @@ Frontend (Rust + KV router) → SGLang Workers
 
 Unlike the vLLM path (which forwards `mm_hashes` as `multi_modal_uuids` for vLLM's own KV-event publisher to consume), SGLang's RadixAttention computes its cache key from the **token IDs** of the prompt, including the per-image `pad_value` token that gets inserted in place of image placeholders. The router has to substitute that `pad_value` itself in its token-id view so its overlap calculation matches what the worker will actually cache.
 
-Two preconditions for byte-for-byte alignment between routing-side and server-side hashes:
+Two preconditions produce identical routing-side and server-side hashes:
 
 1. **Dynamo Rust frontend** computes `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)` for each image and substitutes that value (× N expansion) in `routing_token_ids`. Engaged automatically when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"`.
 2. **SGLang fork** exposes `GenerateReqInput.mm_hashes: Optional[List[str]]`. When set, `set_pad_value()` skips its internal `hash_feature()` recompute and uses the caller's hash directly, so the worker's derived `pad_value` matches the router's substitution. See [upstream PR sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300).
@@ -144,9 +161,9 @@ cd $DYNAMO_HOME
 bash examples/backends/vllm/launch/agg_multimodal_router.sh
 ```
 
-The Rust frontend computes per-image token counts and expands placeholders
-in-process via the `llm-multimodal` crate, so the router can match vLLM's
-expanded image-token count without invoking the HF image processor. Each
+The Rust frontend computes per-image token counts with Dynamo-owned counters
+and expands placeholders in-process, so the router can match the backend's
+expanded image-token count without invoking the Hugging Face image processor. Each
 `mm_hash` is then forwarded to the worker as `multi_modal_uuids` so vLLM's
 KV events publish the same key the router computes.
 
@@ -267,4 +284,3 @@ The default Rust frontend path doesn't run the HF processor or pre-render `mm_kw
 - **`shm`** (default): POSIX shared memory via a `/dev/shm` segment. Intended for same-node deployments, where frontend and backend share the host filesystem. If the backend can't access the segment (e.g., running on a different node), it falls back to re-processing the image from the URL.
 - **`nixl`**: NIXL RDMA transfer. Required for cross-node deployments where `/dev/shm` is not shared between frontend and backend. Works across nodes over InfiniBand or TCP (whichever UCX selects).
 - **`DYNAMO_DISABLE_NIXL_MM=1`**: Disables pre-processed mm_kwargs transfer entirely. The backend downloads and processes images itself from the original URLs. Useful for debugging or when transfer overhead exceeds re-processing cost.
-

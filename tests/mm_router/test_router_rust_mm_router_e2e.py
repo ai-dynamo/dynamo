@@ -6,23 +6,22 @@
 Architecture:
   Frontend (Rust preprocessor + KV router)
        └─ resolves <|image_pad|>, computes per-image N,
-          expands placeholders, hashes URL→u64→64-char hex,
+          expands placeholders, hashes URL→u64→16-char hex,
           forwards mm_hashes via extra_args["mm_hashes"]
-       → vLLM worker (publishes KV events with the forwarded UUID)
+       → vLLM worker (right-pads UUID to 64 chars and publishes KV events)
 
 These tests assert that:
   1. Same-image repeats see >1 block of router-side overlap and high
-     vLLM cached_tokens (the bit-exact MM cache hit).
+     vLLM cached_tokens (verifying matching MM cache keys).
   2. The data: URI path works equivalently to http URLs.
   3. Different images on the same prompt produce strictly less overlap
      than identical-image repeats.
 
-The fallback path (model unsupported by the image-processor registry or image-token
-unresolvable) is unit-tested via `image_token::tests` and the
-graceful-degrade branches in `gather_mm_exact_routing_info`; reproducing
-it e2e would require a model whose loading is heavy and whose worker
-support is fragile (e.g. Phi-4-multimodal-instruct + trust_remote_code),
-so we cover that path at the Rust unit-test boundary.
+The fallback path (model unsupported by Dynamo's estimators, unresolved image
+token, or rejected expansion) is covered by the Rust preprocessor unit tests.
+Reproducing it e2e would require a model whose loading is heavy and whose worker
+support is fragile (for example, Phi-4-multimodal-instruct with
+`trust_remote_code`), so that path stays at the unit-test boundary.
 """
 
 from __future__ import annotations
@@ -263,7 +262,7 @@ def test_router_rust_mm_repeated_single_image_overlap(
     start_router_rust_mm_services, predownload_models
 ):
     """Same image twice → second request shows full image-block overlap and
-    high vLLM cached_tokens (proves bit-exact mm_hash forwarding works)."""
+    high vLLM cached_tokens (verifies matching forwarded mm_hash keys)."""
     frontend_port, router_proc = start_router_rust_mm_services
     image = _make_data_uri((201, 17, 99))
     payload = _build_payload([image])

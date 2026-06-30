@@ -2,23 +2,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# MM-aware exact KV routing for vLLM workers.
+# MM-aware KV routing for vLLM workers.
 #
 # Architecture:
 #   HTTP client
 #     -> Rust frontend
-#          - resolves the image-placeholder token id from the per-model
-#            ModelProcessorSpec registry (Qwen3-VL, Qwen2.5-VL, Qwen2-VL,
-#            LLaVA-NeXT, LLaVA-1.5, Llama-4, Kimi-K2.5);
-#            each spec reads the appropriate config.json field
-#          - per-image token-count math (header-only fetch for W,H)
+#          - resolves the image-placeholder token id from model config or the
+#            Dynamo tokenizer (Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3.5,
+#            Qwen3.6, LLaVA-1.5, LLaVA-NeXT, Kimi-K2.5, Kimi-K2.6)
+#            Llama-4 falls back to text-prefix routing because its vLLM prompt
+#            uses a structured image-token sequence
+#          - Dynamo-owned per-image token-count math (header-only fetch for W,H)
 #          - expands placeholder -> N copies in routing_token_ids
-#          - hashes URL (xxh3) -> u64 -> 64-char hex -> extra_args["mm_hashes"]
-#          - builds block_mm_infos and feeds the KV router
+#          - hashes URL (xxh3) -> u64 -> 16-char hex -> extra_args["mm_hashes"]
+#          - encodes mm_hash in pad-value tokens and feeds the KV router
 #     -> N x vLLM worker
 #          - publishes KV events via zmq (one port per worker)
-#          - vLLM's mm_uuid is the frontend's hex string -> events match
-#            the router's routing-side block hashes -> bit-exact cache hits
+#          - worker right-pads mm_uuid to 64 chars -> events match
+#            the router's routing-side block hashes -> matching cache keys
 #
 # Build prerequisite (run once inside the dynamo dev container):
 #   cd /workspace/lib/bindings/python && maturin develop --release --features mm-routing
@@ -98,7 +99,7 @@ EOF
     esac
 done
 
-echo "=== MM-aware Exact KV Routing Launch ==="
+echo "=== MM-aware KV Routing Launch ==="
 echo "MODEL=${MODEL}"
 echo "NUM_WORKERS=${NUM_WORKERS}, BLOCK_SIZE=${BLOCK_SIZE}, GPU_MEM_FRAC=${GPU_MEMORY_UTILIZATION}"
 echo "HTTP_PORT=${HTTP_PORT}, NAMESPACE=${NAMESPACE}"
@@ -161,7 +162,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i"
 done
 
-echo "=== Starting frontend (KV router, MM-aware exact routing) ==="
+echo "=== Starting frontend (KV router, MM-aware routing) ==="
 env "${COMMON_ENV[@]}" \
     "DYN_LOG=${DYN_LOG_VAL}" \
 python -m dynamo.frontend \
@@ -190,7 +191,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
 done
 echo
 echo "Architecture: Rust frontend (MM-aware KV router) -> ${NUM_WORKERS}x vLLM workers"
-echo "  - mm_hashes forwarded as multi_modal_uuids -> bit-exact match with vLLM KV events"
+echo "  - mm_hashes forwarded as multi_modal_uuids -> matching vLLM KV-event keys"
 echo "  - Image dims via header-only HTTP fetch (Range: bytes=0-65535)"
 echo "  - No PyO3, no GIL, no Python deps in the routing path"
 echo

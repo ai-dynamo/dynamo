@@ -2,26 +2,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Lightseek-powered exact MM-aware routing.
+# MM-aware KV routing for vLLM workers.
 #
 # Architecture:
 #   HTTP client
 #     -> Rust frontend
-#          - resolves the image-placeholder token id via lightseek's
-#            per-model ModelProcessorSpec (Qwen3-VL, Qwen2.5-VL, Qwen2-VL,
-#            LLaVA-NeXT, LLaVA-1.5, Phi-3-vision, Llama-4, Kimi-K2.5);
-#            each spec reads the appropriate config.json field
-#          - lightseek `calculate_num_tokens(W,H)` per image (header-only fetch)
+#          - resolves the image-placeholder token id from model config or the
+#            Dynamo tokenizer (Qwen2-VL, Qwen2.5-VL, Qwen3-VL, Qwen3.5,
+#            Qwen3.6, LLaVA-1.5, LLaVA-NeXT, Kimi-K2.5, Kimi-K2.6)
+#            Llama-4 falls back to text-prefix routing because its vLLM prompt
+#            uses a structured image-token sequence
+#          - Dynamo-owned per-image token-count math (header-only fetch for W,H)
 #          - expands placeholder -> N copies in routing_token_ids
-#          - hashes URL (xxh3) -> u64 -> 64-char hex -> extra_args["mm_hashes"]
-#          - builds block_mm_infos and feeds the KV router
+#          - hashes URL (xxh3) -> u64 -> 16-char hex -> extra_args["mm_hashes"]
+#          - encodes mm_hash in pad-value tokens and feeds the KV router
 #     -> N x vLLM worker
 #          - publishes KV events via zmq (one port per worker)
-#          - vLLM's mm_uuid is the frontend's hex string -> events match
-#            the router's routing-side block hashes -> bit-exact cache hits
+#          - worker right-pads mm_uuid to 64 chars -> events match
+#            the router's routing-side block hashes -> matching cache keys
 #
 # Build prerequisite (run once inside the dynamo dev container):
-#   cd /workspace/lib/bindings/python && maturin develop --release --features lightseek-mm
+#   cd /workspace/lib/bindings/python && maturin develop --release --features mm-routing
 #
 # Run inside the dynamo container that already has /workspace mounted.
 
@@ -35,7 +36,7 @@ source "${SCRIPT_DIR}/../../../../common/gpu_utils.sh"
 source "${SCRIPT_DIR}/../../../../common/launch_utils.sh"
 
 MODEL="${MODEL:-Qwen/Qwen3-VL-2B-Instruct}"
-NAMESPACE="${NAMESPACE:-lightseek-poc}"
+NAMESPACE="${NAMESPACE:-mm-router}"
 HTTP_PORT="${HTTP_PORT:-${DYN_HTTP_PORT:-8000}}"
 BLOCK_SIZE="${BLOCK_SIZE:-16}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.20}"
@@ -49,7 +50,7 @@ NATS_SERVER="${NATS_SERVER:-nats://127.0.0.1:4222}"
 ETCD_ENDPOINTS="${ETCD_ENDPOINTS:-http://127.0.0.1:2379}"
 VLLM_SYSTEM_PORT_BASE="${VLLM_SYSTEM_PORT_BASE:-18081}"
 KV_EVENTS_PORT_BASE="${KV_EVENTS_PORT_BASE:-5557}"
-DYN_LOG_VAL="${DYN_LOG:-info,lightseek_mm=debug,dynamo_kv_router::scheduling=debug}"
+DYN_LOG_VAL="${DYN_LOG:-info,mm_routing=debug,dynamo_kv_router::scheduling=debug}"
 
 # Pass-through extra args for `python -m dynamo.vllm`.
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
@@ -72,7 +73,7 @@ Env vars:
   BLOCK_SIZE                  (default 16)
   MAX_MODEL_LEN               (default 4096)
   KV_EVENTS_PORT_BASE         (default 5557 — worker i uses port BASE + (i-1))
-  DYN_LOG                     (default info + lightseek_mm + scheduling debug)
+  DYN_LOG                     (default info + mm_routing + scheduling debug)
 
 Routing test (run after the script reports "All services are ready"):
   # Same image twice -> 2nd request should pin to same worker (high overlap_blocks)
@@ -98,7 +99,7 @@ EOF
     esac
 done
 
-echo "=== Lightseek MM Exact Routing Launch ==="
+echo "=== MM-aware KV Routing Launch ==="
 echo "MODEL=${MODEL}"
 echo "NUM_WORKERS=${NUM_WORKERS}, BLOCK_SIZE=${BLOCK_SIZE}, GPU_MEM_FRAC=${GPU_MEMORY_UTILIZATION}"
 echo "HTTP_PORT=${HTTP_PORT}, NAMESPACE=${NAMESPACE}"
@@ -200,7 +201,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i"
 done
 
-echo "=== Starting frontend (KV router, lightseek MM exact routing) ==="
+echo "=== Starting frontend (KV router, MM-aware routing) ==="
 env "${COMMON_ENV[@]}" \
     "DYN_LOG=${DYN_LOG_VAL}" \
 python -m dynamo.frontend \
@@ -234,8 +235,8 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     echo "Worker $i kv-events: tcp://*:$((KV_EVENTS_PORT_BASE + (i - 1)))"
 done
 echo
-echo "Architecture: Rust frontend + lightseek -> ${NUM_WORKERS}x vLLM workers"
-echo "  - mm_hashes forwarded as multi_modal_uuids -> bit-exact match with vLLM KV events"
+echo "Architecture: Rust frontend -> ${NUM_WORKERS}x vLLM workers"
+echo "  - mm_hashes forwarded as multi_modal_uuids -> matching vLLM KV-event keys"
 echo "  - Image dims via header-only HTTP fetch (Range: bytes=0-65535)"
 echo "  - No PyO3, no GIL, no Python deps in the routing path"
 echo

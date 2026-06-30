@@ -42,7 +42,7 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg": "xpu/agg_multimodal_xpu.sh",
     "agg_video": "xpu/agg_multimodal_xpu.sh",
     # Aggregated MM-aware router. Default uses the Rust frontend with the
-    # `lightseek-mm` feature; the `_chat_processor` variant uses the vLLM
+    # `mm-routing` feature; the `_chat_processor` variant uses the vLLM
     # Python preprocessor (`--dyn-chat-processor=vllm`) to enable the
     # DYNAMO_MM_TRANSFER shm/NIXL pre-rendered mm_kwargs delivery channel.
     "agg_router": "xpu/agg_multimodal_router_xpu.sh",
@@ -110,7 +110,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     )
                 ],
             ),
-            # Pre_merge gater for the lightseek MM-routing path. Fine-grained
+            # Pre_merge gater for the Dynamo-owned MM-routing path. Fine-grained
             # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py
             # (post_merge).
             "agg_router": TopologyConfig(
@@ -124,8 +124,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
             # The chat-processor variant of the MM-aware router: same routing
             # architecture, but the frontend uses --dyn-chat-processor=vllm
-            # (Python preprocessor) instead of the Rust+lightseek path. Kept
-            # on post_merge — the lightseek variant above (`agg_router`) is
+            # (Python preprocessor) instead of Dynamo's Rust estimator path. Kept
+            # on post_merge — the Rust variant above (`agg_router`) is
             # the pre_merge gate; adding chat_processor doubles the XPU0
             # queue time at worker scale without catching distinct bugs
             # (both paths share the kv_router downstream).
@@ -164,11 +164,11 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         },
         extra_vllm_args=["--block-size", "16"],
     ),
-    # Lightseek-supported VLM coverage on `agg_router` (Rust-frontend
+    # Dynamo-owned estimator coverage on `agg_router` (Rust-frontend
     # MM-aware routing path). Each profile below adds the same smoke test
     # as Qwen3-VL-2B's agg_router (pre_merge), but on post_merge with the
     # corresponding family (Qwen2.5-VL, Qwen2-VL) — Qwen-family coverage,
-    # not the full lightseek FAMILIES list. SINGLE_GPU=true packs both workers onto GPU 0 to match
+    # not the full supported-family list. SINGLE_GPU=true packs both workers onto GPU 0 to match
     # the gpu_1 single-GPU box. Initial VRAM profiles are estimates; the
     # first post_merge run will surface real peaks and we'll tighten.
     MultimodalModelProfile(
@@ -360,8 +360,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             ),
         },
     ),
-    # LLaVA-NeXT covers a separate lightseek processor (LlavaNextProcessor,
-    # anyres multi-crop) vs LLaVA-1.5's plain LlavaProcessor. Same gpu_2
+    # LLaVA-NeXT covers Dynamo's separate any-resolution count kernel rather
+    # than LLaVA-1.5's fixed-grid kernel. Same gpu_2
     # multi-GPU layout as LLaVA-1.5 agg_router above; ~14 GiB / GPU.
     #
     # Skipped: LLaVA-NeXT inherits the same LLaVA-on-vLLM-0.20 output

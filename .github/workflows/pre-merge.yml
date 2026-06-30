@@ -184,6 +184,10 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Run MM routing tests
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked -p dynamo-llm --lib --no-default-features --features mm-routing
     - name: Run KVBM offload Mooncake trace test
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -237,6 +241,10 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+    - name: Run MM routing clippy
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --no-deps -p dynamo-llm --lib --no-default-features --features mm-routing -- -D warnings
     - name: Run KVBM offload Mooncake trace clippy
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

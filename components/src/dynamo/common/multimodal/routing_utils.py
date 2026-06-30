@@ -7,9 +7,9 @@ Utilities for building multimodal routing metadata from vLLM's mm_features.
 Converts vLLM's EngineCoreRequest.mm_features (mm_hashes + mm_placeholders)
 into the canonical pad_value routing scheme used by dynamo's KvRouter: image
 positions in the routing token stream are replaced with pad_value(mm_hash), and
-no block_mm_infos side channel is emitted. This matches the Rust frontend
-(`gather_mm_exact_routing_info`) and the kv-router's vLLM-event normalization,
-so request-side and event-side block hashes agree across backends.
+no block_mm_infos side channel is emitted. This matches the Rust frontend's
+atomic routing payload and the kv-router's vLLM-event normalization, so
+request-side and event-side block hashes agree across backends.
 """
 
 from __future__ import annotations
