@@ -27,7 +27,10 @@ Division of labour (author vs. Dynamo):
   concurrent.** Deterministic, thread-safe, CUDA-free (fetch / resize / patchify
   on CPU/pinned memory). ``cost`` is a **scalar** — how much the item adds toward
   ``max_batch_cost`` (e.g. its visual-token count). Raise to reject a bad input —
-  it fails only that image, before any GPU work.
+  it fails only that image, before any GPU work. **Off by default:** override
+  ``preprocess`` *and* set ``preprocess_concurrency > 0`` together to enable this
+  pool. With the defaults (identity passthrough, ``preprocess_concurrency = 0``)
+  there is no preprocess phase — raws go straight to ``forward_batch``.
 - ``forward_batch(items, target_bucket=None) -> list[torch.Tensor]`` — **actor
   thread, serialized.** ``items`` are a cost-bounded batch (summed ``cost`` within
   the budget). Fence (stream event + sync) and **copy outputs to CPU** before
@@ -47,6 +50,10 @@ Attributes read **once at setup** (never per-request):
   default) ⇒ **pass-through**: no cap (the author owns sizing).
 - ``buckets`` — sorted graph ladder, forward-compatible (unused until CUDA-graph
   batching is supported). ``None``/empty ⇒ eager.
+- ``preprocess_concurrency`` — size of the off-thread pool Dynamo runs
+  ``preprocess`` on. ``0`` (the **default**) ⇒ no preprocess phase: raws go
+  straight to ``forward_batch``. Set ``> 0`` (with an overridden ``preprocess``)
+  for off-loop fetch / resize / patchify.
 
 Batching is **one-dimensional**: Dynamo packs by scalar ``cost`` up to
 ``max_batch_cost`` and never inspects item shape — the author owns any
@@ -90,9 +97,10 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
 
     A pure policy + compute backend — no threads, no futures. Dynamo drives it
     on a dedicated actor thread (``ThreadedMicroBatcher``) and exposes the async
-    request API (``AsyncVisionEncoder``). Subclasses implement ``build`` /
-    ``preprocess`` / ``forward_batch``, and set ``image_token_id`` (and
-    ``max_batch_cost`` / ``buckets`` as needed).
+    request API (``AsyncVisionEncoder``). Subclasses implement ``build`` and
+    ``forward_batch`` and set ``image_token_id``; ``preprocess`` (default identity
+    passthrough), ``max_batch_cost``, ``buckets``, and ``preprocess_concurrency``
+    are overridden only as needed.
     """
 
     #: Image placeholder token id — **hardcode it for your model** (e.g. ``151655``
@@ -111,6 +119,14 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
     #: until CUDA-graph batching is supported. ``None``/empty ⇒ eager.
     buckets: Optional[Sequence[int]] = None
 
+    #: Off-loop preprocess pool size Dynamo runs ``preprocess`` on. ``0`` (the
+    #: **default**) ⇒ **no preprocess phase**: raws go straight to ``forward_batch``
+    #: (``raw`` is the item; do any prep there). Set ``> 0`` (with an overridden
+    #: ``preprocess``) to fetch / resize / patchify off the actor thread. Whether an
+    #: encoder needs off-loop prep is a property of the encoder, so it lives here;
+    #: the driver takes an optional override for tuning.
+    preprocess_concurrency: int = 0
+
     # ---- subclass contract -------------------------------------------------
 
     @abstractmethod
@@ -123,15 +139,16 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT]):
         """
         ...
 
-    @abstractmethod
     def preprocess(self, raw: RawT) -> Preprocessed[ItemT]:
         """Turn a raw input into a ``Preprocessed`` item (off the actor thread).
 
-        Runs concurrently on a preprocess pool, so it is the place for image
-        fetch + HF processing. Must be deterministic, thread-safe, and CUDA-free.
+        The default is an **identity passthrough** (``raw`` is the item, ``cost``
+        ``1``), so by default there is no preprocessing. Override it for off-loop
+        fetch + HF processing **and** set ``preprocess_concurrency > 0`` to run it
+        on the pool — it must then be deterministic, thread-safe, and CUDA-free.
         Raise to reject a bad input — it fails only that image, before submit.
         """
-        ...
+        return Preprocessed(item=raw)  # type: ignore[arg-type]  # ItemT == RawT
 
     @abstractmethod
     def forward_batch(

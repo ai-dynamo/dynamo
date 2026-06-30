@@ -41,6 +41,19 @@ class _MinimalBackend(VisionEncoderBackend):
         return [torch.zeros(1, 1) for _ in items]
 
 
+class _PassthroughBackend(VisionEncoderBackend):
+    """Backend that does NOT override preprocess — exercises the identity default
+    (no preprocess phase; raws go straight to forward_batch)."""
+
+    image_token_id = 151655
+
+    def build(self, model_id):
+        ...
+
+    def forward_batch(self, items, target_bucket=None):
+        return [torch.zeros(1, 1) for _ in items]
+
+
 def test_preprocessed_is_frozen():
     p = Preprocessed(item="x", cost=3)
     assert (p.item, p.cost) == ("x", 3)
@@ -59,14 +72,30 @@ def test_preprocessed_has_no_bucket_key():
 
 
 def test_abc_cannot_be_instantiated():
+    # build + forward_batch are still abstract (preprocess is not).
     with pytest.raises(TypeError):
         VisionEncoderBackend()  # type: ignore[abstract]
 
 
+def test_preprocess_defaults_to_identity_passthrough():
+    # Not overriding preprocess ⇒ raw IS the item, cost 1 (no preprocess phase).
+    p = _PassthroughBackend().preprocess("http://img")
+    assert isinstance(p, Preprocessed)
+    assert (p.item, p.cost) == ("http://img", 1)
+
+
+def test_preprocess_concurrency_defaults_to_0():
+    # No pool by default — authors opt in by overriding preprocess + setting > 0.
+    assert _PassthroughBackend().preprocess_concurrency == 0
+    assert _MinimalBackend().preprocess_concurrency == 0
+
+
 def test_default_attrs_and_close_noop():
     e = _MinimalBackend()
-    # Defaults from the ABC: eager (no ladder) + pass-through (no cost cap).
+    # Defaults from the ABC: eager (no ladder) + pass-through (no cost cap) + no
+    # preprocess pool.
     assert e.buckets is None
     assert e.max_batch_cost is None
+    assert e.preprocess_concurrency == 0
     assert e.image_token_id == 151655
     assert e.close() is None
