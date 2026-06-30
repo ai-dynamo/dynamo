@@ -18,6 +18,7 @@ use dynamo_kv_router::{
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::common::extensions::routing_constraints_to_kv;
 use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::{DistributedRuntime, Worker};
 
@@ -454,7 +455,6 @@ impl RouterHandles {
         &self,
         tokens: &[u32],
         block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
-        update_states: bool,
         lora_name: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
@@ -470,7 +470,6 @@ impl RouterHandles {
             .query_prefill_worker(
                 tokens,
                 block_mm_infos,
-                update_states,
                 lora_name,
                 priority_jump,
                 strict_priority,
@@ -483,23 +482,15 @@ impl RouterHandles {
                 QueryRouterResult::ErrQueryFailed
             })?;
         match outcome {
-            // External-dispatch query: the C caller routes/tracks the worker
-            // itself, so we don't retain the occupancy booking (drop the permit).
-            PrefillQueryOutcome::Routed {
-                worker_id,
-                dp_rank,
-                permit: _,
-            } => Ok((worker_id, dp_rank)),
-            PrefillQueryOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => {
+            // Advisory only: the external caller owns dispatch and lifecycle state.
+            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
+            PrefillQueryOutcome::QueueRejected { rejection } => {
                 tracing::warn!(
-                    reason = ?reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens = ?max_queued_isl_tokens,
-                    "Prefill query rejected due to router backpressure"
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Prefill query rejected by policy-class queue limit"
                 );
                 Err(QueryRouterResult::ErrBackpressure)
             }
@@ -574,16 +565,13 @@ impl RouterHandles {
                 overlap_blocks,
                 ..
             } => Ok((worker, overlap_blocks)),
-            dynamo_llm::kv_router::FindBestMatchOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => {
+            dynamo_llm::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
                 tracing::warn!(
-                    reason = ?reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens = ?max_queued_isl_tokens,
-                    "Decode query rejected due to router backpressure"
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Decode query rejected by policy-class queue limit"
                 );
                 Err(QueryRouterResult::ErrBackpressure)
             }
@@ -825,9 +813,13 @@ pub unsafe extern "C" fn create_routers(
             Some(prefill_config),
             None,
             enforce_disagg,
+            None,
             model_name.clone(),
             actual_namespace.clone(),
             enable_eagle,
+            // C bindings construct no KvWorkerMonitor; overload publishing is
+            // unused on this path (matches the prior namespace-lookup miss).
+            None,
         );
 
         // Spawn background discovery watcher for prefill workers.
@@ -1153,6 +1145,7 @@ unsafe fn preprocess_request(
         .nvext
         .as_ref()
         .and_then(|nvext| nvext.routing_constraints.clone())
+        .map(routing_constraints_to_kv)
         .unwrap_or_default();
 
     let formatted_prompt = match preprocessor.apply_template(&request) {
@@ -1285,7 +1278,6 @@ pub unsafe extern "C" fn route_prefill_request(
             .query_prefill_worker(
                 &tokens,
                 None,
-                false,
                 None,
                 priority_jump,
                 strict_priority,

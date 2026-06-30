@@ -33,6 +33,13 @@ impl RoutingOccupancyState {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) async fn select_exact_min(&self, instance_ids: &[u64]) -> Option<u64> {
+        instance_ids
+            .iter()
+            .min_by_key(|&&id| self.load(id))
+            .copied()
+    }
+
     pub(crate) async fn select_exact_min_and_increment(&self, instance_ids: &[u64]) -> Option<u64> {
         let _guard = self.exact_selection_lock.lock().await;
 
@@ -373,7 +380,6 @@ impl RoutingInstancesState {
         self.snapshot().routable_ids().to_vec()
     }
 
-    #[cfg(test)]
     fn free_ids(&self) -> Vec<u64> {
         self.snapshot().free_ids.clone()
     }
@@ -513,8 +519,9 @@ impl Client {
         self.routing_instances.routable_ids()
     }
 
-    #[cfg(test)]
-    pub(crate) fn instance_ids_free(&self) -> Vec<u64> {
+    /// Routable instance ids excluding those currently flagged overloaded — the set used
+    /// for load-aware (random / round-robin) worker selection.
+    pub fn instance_ids_free(&self) -> Vec<u64> {
         self.routing_instances.free_ids()
     }
 

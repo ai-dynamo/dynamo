@@ -504,10 +504,19 @@ async def init_llm_worker(
         config.disaggregation_mode,
         component_gauges=component_gauges,
     ) as engine:
-        # Expose engine to the drain callback installed by main.py (#7319).
+        # Expose engine to the drain callback installed by main.py.
         # The callback uses this to poll active request count during shutdown.
         if engine_holder is not None:
             engine_holder.append(engine)
+
+        # Snapshot mode must capture the initialized TRT-LLM/CUDA state before
+        # Dynamo runtime endpoints, health routes, or discovery sockets exist.
+        # The snapshot runtime proxy waits here for capture/restore and creates
+        # the real runtime only after restore; normal runtimes skip this hook.
+        snapshot_before_endpoint = getattr(runtime, "snapshot_before_endpoint", None)
+        if snapshot_before_endpoint is not None:
+            await snapshot_before_endpoint(engine, config)
+
         engine.start_health_monitor(runtime=runtime, shutdown_event=shutdown_event)
 
         endpoint = runtime.endpoint(

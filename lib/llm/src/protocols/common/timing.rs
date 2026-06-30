@@ -20,7 +20,7 @@ use crate::http::service::metrics::{
     WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE, WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE,
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
-use crate::protocols::openai::nvext::WorkerIdInfo;
+use crate::protocols::common::extensions::WorkerIdInfo;
 
 /// Worker type constants for Prometheus metric labels.
 /// These are stored in RequestTracker at routing time to avoid costly MDC lookups
@@ -165,7 +165,7 @@ pub struct RequestTracker {
     router_queue_depth: OnceLock<usize>,
 
     /// When the prefill result arrived at the router (disaggregated, original path only).
-    /// Set in execute_prefill() after the first output is received from the prefill worker.
+    /// Set after the first output is received from the prefill worker.
     prefill_complete_time: OnceLock<Instant>,
 
     /// Timing computed in another process — a standalone router built on the
@@ -1091,7 +1091,7 @@ mod tests {
         // Simulate the buggy prefill-phase sequence:
         // 1. RequestGuard::on_item() calls record_first_token() during prefill
         tracker.record_first_token();
-        // 2. execute_prefill() calls record_prefill_complete() immediately after
+        // 2. Prefill stream consumption calls record_prefill_complete() immediately after
         tracker.record_prefill_complete();
 
         // The OLD computation (first_token_time - prefill_complete_time) would be 0

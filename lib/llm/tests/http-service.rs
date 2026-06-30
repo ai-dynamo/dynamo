@@ -1112,7 +1112,7 @@ async fn test_nvext_disabled_strips_request_and_response() {
 
     let response = reqwest::Client::new()
         .post(format!("http://localhost:{port}/v1/chat/completions"))
-        .header("x-worker-instance-id", "42")
+        .header("x-dynamo-worker-instance-id", "42")
         .json(&serde_json::json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "hi"}],

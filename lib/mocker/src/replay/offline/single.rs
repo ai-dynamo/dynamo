@@ -5,8 +5,8 @@ use super::core::ReplayWorkerCore;
 use super::progress::ReplayProgress;
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::WorkloadDriver;
-use crate::replay::TraceCollector;
-use anyhow::bail;
+use crate::replay::{ReplayTerminalStatus, TraceCollector};
+use anyhow::{Context, bail};
 use std::collections::VecDeque;
 use uuid::Uuid;
 
@@ -65,11 +65,17 @@ impl SingleRuntime {
             AdmissionSource::Requests(pending) => pending.len(),
             AdmissionSource::Workload(driver) => driver.total_turns(),
         };
+        // The single-worker runtime has exactly one (decode) worker for the
+        // whole run and no event loop to integrate, so declare a static count;
+        // `finish()` derives worker-seconds as 1 × duration_s.
+        let mut collector = TraceCollector::default();
+        collector.set_static_worker_count(0, 1);
+        collector.set_gpus_per_worker(0, args.aic_gpus_per_worker());
         Self {
             current_time_ms: 0.0,
             admission,
             worker: ReplayWorkerCore::new(args),
-            collector: TraceCollector::default(),
+            collector,
             mode,
             progress: ReplayProgress::new(total_requests, "offline replay"),
             consecutive_no_progress_passes: 0,
@@ -216,10 +222,27 @@ impl SingleRuntime {
             || !pass.output_signals.is_empty()
             || !pass.kv_events.is_empty();
         if let AdmissionSource::Workload(driver) = &mut self.admission {
-            for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
-                driver
-                    .on_complete(signal.uuid, self.current_time_ms)
-                    .expect("completed workload request must belong to a session");
+            for signal in &pass.output_signals {
+                if let Some(token_id) = signal.token_id {
+                    driver
+                        .on_output_token(signal.uuid, token_id)
+                        .with_context(|| {
+                            format!(
+                                "failed to record output token for workload request {}",
+                                signal.uuid
+                            )
+                        })?;
+                }
+                if signal.completed {
+                    driver
+                        .on_terminal(signal.uuid, self.current_time_ms, signal.rejected)
+                        .with_context(|| {
+                            format!(
+                                "failed to process terminal signal for workload request {}",
+                                signal.uuid
+                            )
+                        })?;
+                }
             }
         }
         let completed_requests = pass
@@ -227,6 +250,14 @@ impl SingleRuntime {
             .iter()
             .filter(|signal| signal.completed)
             .count();
+        for signal in pass.output_signals.iter().filter(|signal| signal.completed) {
+            let status = if signal.rejected {
+                ReplayTerminalStatus::Rejected
+            } else {
+                ReplayTerminalStatus::Completed
+            };
+            self.collector.on_terminal(signal.uuid, status);
+        }
         for _ in 0..completed_requests {
             self.progress.inc_completed();
         }
@@ -387,6 +418,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(11)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
@@ -395,6 +427,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1, 1, 1, 1, 2, 2, 2, 2],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(22)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(101.0),
@@ -403,6 +436,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![9, 9, 9, 9, 8, 8, 8, 8],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(33)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(500.0),
@@ -763,8 +797,15 @@ mod tests {
     ) {
         let args = replay_args(enable_prefix_caching, enable_chunked_prefill);
         let manual = run_trace_manually(&args, replay_fixture());
-        let replay_report =
-            simulate_trace_single(args, replay_fixture(), 1.0, false, None).unwrap();
+        let replay_report = simulate_trace_single(
+            args,
+            replay_fixture(),
+            1.0,
+            false,
+            None,
+            crate::replay::SlaThresholds::default(),
+        )
+        .unwrap();
 
         let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
         let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();
@@ -794,12 +835,51 @@ mod tests {
     }
 
     #[test]
+    fn test_trace_replay_emits_goodput_only_with_sla() {
+        // Threading regression: the plain (non-planner) trace replay computes
+        // goodput iff an SLA is supplied. A loose SLA -> every request qualifies.
+        let with_sla = simulate_trace_single(
+            replay_args(false, false),
+            replay_fixture(),
+            1.0,
+            false,
+            None,
+            crate::replay::SlaThresholds {
+                ttft_ms: Some(1.0e9),
+                itl_ms: Some(1.0e9),
+                e2e_ms: Some(1.0e9),
+            },
+        )
+        .unwrap();
+        assert!(
+            with_sla.goodput.is_some(),
+            "goodput should be present when an SLA is supplied"
+        );
+
+        // No SLA (the default) -> goodput stays absent (unchanged behavior).
+        let no_sla = simulate_trace_single(
+            replay_args(false, false),
+            replay_fixture(),
+            1.0,
+            false,
+            None,
+            crate::replay::SlaThresholds::default(),
+        )
+        .unwrap();
+        assert!(
+            no_sla.goodput.is_none(),
+            "goodput should be omitted without an SLA"
+        );
+    }
+
+    #[test]
     fn test_concurrency_replay_matches_manual_steps() {
         let args = replay_args(false, false);
         let requests = vec![
             DirectRequest {
                 tokens: vec![1, 2, 3, 4, 5, 6, 7, 8],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(11)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(900.0),
@@ -808,6 +888,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![1, 2, 3, 4, 5, 9, 10, 11],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(22)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(1000.0),
@@ -816,6 +897,7 @@ mod tests {
             DirectRequest {
                 tokens: vec![12, 13, 14, 15, 16, 17, 18, 19],
                 max_output_tokens: 2,
+                output_token_ids: None,
                 uuid: Some(Uuid::from_u128(33)),
                 dp_rank: 0,
                 arrival_timestamp_ms: Some(100.0),
@@ -823,7 +905,15 @@ mod tests {
             },
         ];
         let manual = run_concurrency_manually(&args, requests.clone(), 2);
-        let replay_report = simulate_concurrency_single(args, requests, 2, false, None).unwrap();
+        let replay_report = simulate_concurrency_single(
+            args,
+            requests,
+            2,
+            false,
+            None,
+            crate::replay::SlaThresholds::default(),
+        )
+        .unwrap();
 
         let request_1 = manual.snapshots.get(&Uuid::from_u128(11)).unwrap();
         let request_2 = manual.snapshots.get(&Uuid::from_u128(22)).unwrap();
@@ -908,6 +998,7 @@ mod tests {
             1,
             false,
             None,
+            crate::replay::SlaThresholds::default(),
         )
         .unwrap();
 
@@ -920,6 +1011,7 @@ mod tests {
         DirectRequest {
             tokens: vec![1; 4],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             arrival_timestamp_ms: Some(arrival_ms),

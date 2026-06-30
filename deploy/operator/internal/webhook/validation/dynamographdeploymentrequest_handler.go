@@ -58,6 +58,10 @@ func NewDynamoGraphDeploymentRequestHandler(isClusterWide bool, gpuDiscoveryEnab
 func (h *DynamoGraphDeploymentRequestHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentRequestWebhookName)
 
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK); err != nil {
+		return nil, err
+	}
+
 	request, err := castToDynamoGraphDeploymentRequest(obj)
 	if err != nil {
 		return nil, err
@@ -73,6 +77,10 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateCreate(ctx context.Context
 // ValidateUpdate validates a DynamoGraphDeploymentRequest update request.
 func (h *DynamoGraphDeploymentRequestHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentRequestWebhookName)
+
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK); err != nil {
+		return nil, err
+	}
 
 	newRequest, err := castToDynamoGraphDeploymentRequest(newObj)
 	if err != nil {
@@ -100,6 +108,10 @@ func (h *DynamoGraphDeploymentRequestHandler) ValidateUpdate(ctx context.Context
 // ValidateDelete validates a DynamoGraphDeploymentRequest delete request.
 func (h *DynamoGraphDeploymentRequestHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoGraphDeploymentRequestWebhookName)
+
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentRequestGVK); err != nil {
+		return nil, err
+	}
 
 	request, err := castToDynamoGraphDeploymentRequest(obj)
 	if err != nil {

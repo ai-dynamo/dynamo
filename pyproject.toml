@@ -48,13 +48,13 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc18",
+    "tensorrt-llm==1.3.0rc19",
 ]
 
 vllm = [
     "uvloop",
     "nixl[cu13]==1.1.0",
-    "vllm[flashinfer,runai,otel]==0.22.1",
+    "vllm[flashinfer,runai,otel]==0.24.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.
@@ -67,9 +67,10 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.12.post1",
+    "sglang[diffusion]==0.5.14",
     # sglang[diffusion] dropped accelerate in 0.5.12; diffusers still needs it.
     "accelerate>=0.17.0",
+    "blake3>=1.0.0,<2.0.0",
     "nixl[cu13]>=1.0.0,<1.1.0",
     "cupy-cuda12x>=13.0.0",
 ]
@@ -178,6 +179,10 @@ addopts = [
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
+    # power-agent ships a standalone suite run in-image (deploy/power-agent
+    # Dockerfile `test` stage + its own pytest.ini); its tests/ package name
+    # collides with the repo-root tests/ package during repo-wide collection.
+    "--ignore-glob=deploy/power-agent/tests/*",
     "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
     "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
     "--ignore-glob=components/src/dynamo/vllm/multimodal_utils/*",

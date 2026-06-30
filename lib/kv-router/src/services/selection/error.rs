@@ -38,6 +38,25 @@ impl SelectionError {
             Self::Sequence(error) => sequence_error_status(error),
         }
     }
+
+    /// HTTP-style status code for this error, for callers that consume the
+    /// service in-process without an HTTP layer.
+    pub fn status_code(&self) -> u16 {
+        self.status().as_u16()
+    }
+
+    /// Stable, machine-readable category for this error.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::BadRequest(_) => "bad_request",
+            Self::NotReady(_) => "not_ready",
+            Self::NotFound(_) => "not_found",
+            Self::Conflict(_) => "conflict",
+            Self::Internal(_) => "internal",
+            Self::Scheduler(_) => "scheduler",
+            Self::Sequence(_) => "sequence",
+        }
+    }
 }
 
 fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
@@ -45,9 +64,9 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         KvSchedulerError::NoEndpoints
         | KvSchedulerError::SubscriberShutdown
         | KvSchedulerError::InitFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
-        KvSchedulerError::Backpressure { .. }
-        | KvSchedulerError::AllEligibleWorkersOverloaded
+        KvSchedulerError::AllEligibleWorkersOverloaded
         | KvSchedulerError::PinnedWorkerOverloaded { .. } => StatusCode::TOO_MANY_REQUESTS,
+        KvSchedulerError::QueueRejected(_) => StatusCode::SERVICE_UNAVAILABLE,
         KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
         KvSchedulerError::BookingFailed(_) => StatusCode::CONFLICT,
     }
@@ -65,6 +84,17 @@ fn sequence_error_status(error: &SequenceError) -> StatusCode {
 
 impl IntoResponse for SelectionError {
     fn into_response(self) -> Response {
+        if let Self::Scheduler(KvSchedulerError::QueueRejected(rejection)) = &self {
+            return (
+                self.status(),
+                Json(serde_json::json!({
+                    "error": self.to_string(),
+                    "details": rejection,
+                })),
+            )
+                .into_response();
+        }
+
         (
             self.status(),
             Json(serde_json::json!({"error": self.to_string()})),

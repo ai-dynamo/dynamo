@@ -1,0 +1,103 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "DeepSeek V3.2 WideEP Routing A/B"
+subtitle: "Does disaggregated KV-aware routing with WideEP improve latency and goodput against an aggregated round-robin GB200 control?"
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Both configurations run Dynamo + TensorRT-LLM on **32x GB200 GPUs across 8 nodes**: the baseline uses 4x DEP8 aggregated workers with round-robin routing; the comparison splits into 2 prefill + 2 decode workers with WideEP (DEP8) and KV-aware routing. The trace is heavily reuse-biased — roughly 44% KV cache hit rate and 57% of input tokens from shared context prefixes — so KV-aware routing can avoid large amounts of redundant long-context prefill.
+
+<div className="dynamo-target-picker static">
+<p className="dynamo-target-picker-title">Benchmark setup</p>
+<div className="dynamo-target-picker-summary">
+<span><b>Model</b> nvidia/DeepSeek-V3.2-NVFP4</span>
+<span><b>GPUs</b> 32x GB200 (8 nodes)</span>
+<span><b>Runtime</b> TensorRT-LLM</span>
+<span><b>Workload</b> Mooncake-derived synthetic coding trace, fixed-schedule replay: 10,000 requests, 39,186 avg ISL (max 109,459), 344 avg OSL, 44.1% block-level KV hit rate</span>
+<span><b>Metrics</b> TTFT, ITL, total request latency, and goodput at TTFT 20s / ITL 50ms</span>
+<span><b>Held constant</b> Model, TensorRT-LLM runtime, 32x GB200 across 8 nodes, fixed-schedule trace replay, and TTFT 20s / ITL 50ms goodput thresholds</span>
+</div>
+</div>
+
+## Compared Configurations
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Role</th><th>Configuration</th><th>Deploy</th><th>Benchmark</th></tr></thead>
+<tbody><tr>
+<td><em className="role treatment">Comparison</em></td>
+<td><strong>Disaggregated KV router + WideEP</strong><span>2x prefill + 2x decode with WideEP (DEP8), KV-aware routing</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml">perf.yaml</a></td>
+</tr><tr>
+<td><em className="role baseline">Baseline</em></td>
+<td><strong>Aggregated round-robin</strong><span>4x DEP8 aggregated workers, round-robin routing</span></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v32-fp4/trtllm/agg-round-robin/deploy.yaml">deploy.yaml</a></td>
+<td><a href="https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v32-fp4/trtllm/agg-round-robin/perf.yaml">perf.yaml</a></td>
+</tr></tbody>
+</table>
+</div>
+
+## Reproduce
+
+The trace is synthesized from the [Mooncake FAST25 conversation trace](https://github.com/kvcache-ai/Mooncake) using Dynamo's [prefix data generator](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/prefix_data_generator), scaling input lengths and prefix reuse up to a coding-workload shape:
+
+```bash
+datagen synthesize \
+    --input-file conversation_trace.jsonl \
+    --prefix-len-multiplier 16 \
+    --prompt-len-multiplier 10 \
+    --max-isl 110000 \
+    --num-requests 10000
+# emits conversation_trace_synth_16.00x1+10.00_speedup1_maxisl110000.jsonl
+```
+
+The replay uses `--fixed-schedule`, so request arrivals are pinned to the trace — throughput is fixed and the comparison is on TTFT, ITL, total request latency, and goodput. Each configuration's `perf.yaml` wraps this AIPerf command:
+
+```bash
+aiperf profile -m nvidia/DeepSeek-V3.2-NVFP4 \
+  --tokenizer nvidia/DeepSeek-V3.2-NVFP4 \
+  --input-file /model-cache/traces/conversation_trace_synth_16.00x1+10.00_speedup1_maxisl110000.jsonl \
+  --custom-dataset-type mooncake_trace \
+  --fixed-schedule \
+  --url http://<frontend>:8000 \
+  --streaming \
+  --goodput "time_to_first_token:20000 inter_token_latency:50"
+```
+
+The frontend services are `agg-round-robin-dsv32-nvfp4-frontend` and `disagg-kv-dsv32-nvfp4-frontend`. Deploy one configuration at a time:
+
+```bash
+export NAMESPACE=your-namespace
+
+# One-time prep: storage, ComputeDomain (for MNNVL co-location), model download
+kubectl apply -f recipes/deepseek-v32-fp4/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v32-fp4/model-cache/compute-domain.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v32-fp4/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=600s
+
+# Copy the synthesized trace onto the PVC
+kubectl cp <local_trace.jsonl> ${NAMESPACE}/<helper-pod>:/model-cache/traces/
+
+# Pick one configuration from the table above, deploy it, wait for readiness, then apply its perf.yaml.
+kubectl apply -f recipes/deepseek-v32-fp4/trtllm/<configuration>/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v32-fp4/trtllm/<configuration>/perf.yaml -n ${NAMESPACE}
+```
+
+The benchmark runs as a Kubernetes Job; tail it with `kubectl logs -f -l job-name=<bench-job-name> -n ${NAMESPACE}` (each config's `perf.yaml` defines its Job name). Results land under `/model-cache/perf/<epoch>_<job-name>/` on the `model-cache` PVC; copy them out with `kubectl cp`.
+
+## Notes
+
+- The source publishes the comparison as a results video plus the dataset statistics above, not a numeric results table; run both configurations to produce TTFT/ITL/goodput deltas for your cluster.
+- `perf.yaml` pins `transformers==4.57.6` alongside `aiperf==0.10.0` — the trtllm-runtime base ships transformers 4.55.0, and aiperf's `transformers>=4.56.0` floor would otherwise pull 5.x, which cannot load the `deepseek_v32` tokenizer (surfaces as "Failed to load tokenizer").
+- Multi-node GB200 deployments need the ComputeDomain CR so the DRA scheduler co-locates worker pods on MNNVL-connected nodes; if you rename it, mirror the change in each `deploy.yaml` under `extraPodSpec.resourceClaims` and `resources.claims`.
+- Background on the underlying optimizations: [Optimizing DeepSeek-V3.2 on NVIDIA Blackwell GPUs](https://nvidia.github.io/TensorRT-LLM/blogs/tech_blog/blog15_Optimizing_DeepSeek_V32_on_NVIDIA_Blackwell_GPUs.html).
+- Source: [recipes/deepseek-v32-fp4](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4)
+
+## Related Recipe
+
+The disaggregated KV router + WideEP configuration is the promoted deployment target: [DeepSeek V3.2 NVFP4](../recipes/deepseek-v3-2-nvfp4.mdx). The aggregated round-robin configuration exists as a benchmark control only.

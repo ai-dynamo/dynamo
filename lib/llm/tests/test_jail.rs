@@ -60,6 +60,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -102,6 +103,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -148,6 +150,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -195,6 +198,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -242,6 +246,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -1383,17 +1388,30 @@ mod tests {
             "Inner response created should carry forward from real stream chunks, not be 0"
         );
 
-        // Verify accumulated content is returned
+        // The hermes parser (dynamo-parsers 2.0.1, PR #63) never surfaces tool-call
+        // markup to the client: a call truncated at stream end is recovered as a real
+        // tool call and the raw `<tool_call>` markup is stripped, rather than leaking
+        // the buffer as text. So the released chunk carries the recovered call with
+        // empty content (the metadata-preservation checks above are the test's subject).
         let content = &inner.inner.choices[0].delta.content;
-        assert!(content.is_some(), "Should have accumulated content");
-        let content = content.as_ref().unwrap();
-        assert!(
-            test_utils::extract_text(content).contains("<tool_call>"),
-            "Should contain jail start marker in accumulated content"
+        assert_eq!(
+            content.as_ref().map(test_utils::extract_text),
+            Some(""),
+            "Released chunk must not leak raw tool-call markup as content"
         );
-        assert!(
-            test_utils::extract_text(content).contains("incomplete_call"),
-            "Should contain accumulated incomplete content"
+        let tool_calls = inner.inner.choices[0].delta.tool_calls.as_ref();
+        assert_eq!(
+            tool_calls.map(|tc| tc.len()),
+            Some(1),
+            "Truncated call must be recovered as a tool call, not leaked as text"
+        );
+        assert_eq!(
+            tool_calls.unwrap()[0]
+                .function
+                .as_ref()
+                .and_then(|f| f.name.as_deref()),
+            Some("incomplete_call"),
+            "Recovered tool call should carry the parsed function name"
         );
     }
 
@@ -2569,6 +2587,7 @@ mod parallel_jail_tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         };
 
         Annotated {

@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import hashlib
 import json
 import logging
 from typing import Any, AsyncIterator, Dict, Optional
 
 import torch
+from blake3 import blake3
 
 # MMEncoder chain imports compiled CUDA ops; may fail in CPU-only environments.
 try:
@@ -26,6 +26,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 )
 from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.llm import MultimodalEmbeddingCachePublisher
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     MultiModalGroup,
@@ -69,11 +70,14 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         self,
         config: Config,
         pd_worker_client: Client,
+        cache_publisher: MultimodalEmbeddingCachePublisher | None = None,
         shutdown_event: Optional[asyncio.Event] = None,
     ) -> None:
         super().__init__(engine=None, config=config, shutdown_event=shutdown_event)
         self.pd_worker_client = pd_worker_client
+        self._cache_publisher = cache_publisher
         self.model = config.server_args.model_path
+        self._missing_video_cache_key_config_warned = False
 
         if MMEncoder is None:
             raise RuntimeError(
@@ -129,13 +133,76 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             self._embedding_cache = MultimodalEmbeddingCacheManager(capacity_bytes)
             logger.info("Multimodal embedding cache enabled: %.2f GB", capacity_gb)
 
+    def _publish_cache_delta(
+        self, added_keys: list[str], removed_keys: list[str]
+    ) -> None:
+        if self._cache_publisher is None or (not added_keys and not removed_keys):
+            return
+        try:
+            self._cache_publisher.publish_delta(added_keys, removed_keys)
+        except Exception:
+            logger.warning(
+                "Failed to publish embedding cache delta; "
+                "routing cache state may be stale",
+                exc_info=True,
+            )
+
     def cleanup(self) -> None:
         pass
 
     @staticmethod
     def _url_hash(url: str) -> str:
-        """Stable blake2b hash of an image URL, used as embedding cache key."""
-        return hashlib.blake2b(url.encode(), digest_size=32).hexdigest()
+        """Stable blake3 hash of a media URL, used as embedding cache key."""
+        return blake3(url.encode()).hexdigest()
+
+    @classmethod
+    def _normalize_cache_key_value(cls, value: Any) -> Any:
+        """Convert nested config values into a stable JSON-serializable form."""
+        if isinstance(value, dict):
+            return {
+                str(key): cls._normalize_cache_key_value(nested_value)
+                for key, nested_value in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._normalize_cache_key_value(item) for item in value]
+        if isinstance(value, torch.Tensor):
+            return value.item() if value.ndim == 0 else value.tolist()
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    def _media_cache_key(self, url: str, modality: Any, encoder: Any) -> str:
+        """Build a cache key that is URL-stable for images and config-aware for video."""
+        if modality != Modality.VIDEO:
+            return self._url_hash(url)
+
+        video_config = {}
+        missing_config_fields: list[str] = []
+        vision_config = getattr(encoder, "vision_config", None)
+        if isinstance(vision_config, dict):
+            video_config = self._normalize_cache_key_value(
+                vision_config.get("video", {})
+            )
+        else:
+            missing_config_fields.append("vision_config")
+
+        if missing_config_fields and not getattr(
+            self, "_missing_video_cache_key_config_warned", False
+        ):
+            logger.warning(
+                "Video embedding cache key could not include encoder %s; "
+                "cache reuse may not reflect all video processor settings.",
+                ", ".join(missing_config_fields),
+            )
+            self._missing_video_cache_key_config_warned = True
+
+        cache_key_payload = {
+            "url": url,
+            "video_config": video_config,
+        }
+        return self._url_hash(
+            json.dumps(cache_key_payload, sort_keys=True, separators=(",", ":"))
+        )
 
     def _resolve_mm_token_id(
         self, token_str: Optional[str], preferred_token: Optional[str] = None
@@ -164,6 +231,22 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 return candidate_id
 
         return None
+
+    @staticmethod
+    def _ensure_batched_grid(grid_dim: Any, item_count: int) -> list:
+        grid_list = (
+            grid_dim.tolist() if isinstance(grid_dim, torch.Tensor) else grid_dim
+        )
+        if (
+            item_count == 1
+            and isinstance(grid_list, list)
+            and len(grid_list) == 3
+            and not isinstance(grid_list[0], list)
+        ):
+            # SGLang may squeeze the batch dimension for a single media item.
+            # Normalize that flat THW grid to the batched shape used below.
+            return [grid_list]
+        return grid_list
 
     @staticmethod
     def _grid_units(grid_item: Any, modality: str) -> int:
@@ -205,28 +288,60 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             )
         return token_counts
 
+    @staticmethod
+    def _jsonable_media_value(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            return value.item() if value.ndim == 0 else value.tolist()
+        return value
+
+    @classmethod
+    def _aux_value_for_item(
+        cls,
+        value: Any,
+        index: int,
+        item_count: int,
+    ) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, torch.Tensor):
+            if value.ndim == 0:
+                return value.item()
+            value = value.tolist()
+        if isinstance(value, (list, tuple)):
+            if len(value) == item_count:
+                return cls._jsonable_media_value(value[index])
+            if item_count == 1:
+                return cls._jsonable_media_value(value)
+            raise ValueError(
+                "Auxiliary media metadata length mismatch: "
+                f"expected {item_count} items, got {len(value)}"
+            )
+        return cls._jsonable_media_value(value)
+
     async def _encode_with_cache(
-        self, image_urls: list[str]
-    ) -> tuple[Any, torch.Tensor]:
-        """Cache-aware vision encoding.
+        self, media_urls: list[str], modality: Any
+    ) -> tuple[Any, torch.Tensor, list[CachedEmbedding]]:
+        """Cache-aware multimodal encoding.
 
-        Checks the CPU LRU cache per URL. Uncached URLs are batch-encoded,
-        split per image, stored in cache, then reassembled with the cached
-        hits in the original URL order.
-
-        Returns the same (image_grid_dim, embeddings) shape as
-        ``self.encoder._encode()``.
+        Checks the CPU LRU cache per media URL. Uncached URLs are batch-encoded,
+        split per item, stored in cache, then reassembled with the cached hits in
+        the original URL order.
         """
         assert self._embedding_cache is not None
 
+        modality_name = getattr(modality, "name", str(modality))
         cached: dict[int, CachedEmbedding] = {}
         uncached_indices: list[int] = []
         uncached_urls: list[str] = []
 
-        for i, url in enumerate(image_urls):
-            hit = self._embedding_cache.get(self._url_hash(url))
+        cache_keys = [
+            self._media_cache_key(url, modality, self.encoder) for url in media_urls
+        ]
+
+        for i, (url, cache_key) in enumerate(zip(media_urls, cache_keys)):
+            hit = self._embedding_cache.get(cache_key)
             if hit is not None:
-                logger.debug("Embedding cache hit for URL index %d", i)
+                logger.info("Embedding cache hit for %s URL index %d", modality_name, i)
                 cached[i] = hit
             else:
                 uncached_indices.append(i)
@@ -236,8 +351,8 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         # SGLang's _encode outputs are already on CPU; use CPU as target for consistency
         target_device = torch.device("cpu")
         if uncached_urls:
-            grid_dim, new_embeddings, _aux = await self.encoder._encode(
-                uncached_urls, Modality.IMAGE
+            grid_dim, new_embeddings, aux_data = await self.encoder._encode(
+                uncached_urls, modality
             )
             # Verify SGLang output is on CPU as expected
             if new_embeddings.device != target_device:
@@ -246,9 +361,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                     f"expected CPU. Moving to CPU."
                 )
                 new_embeddings = new_embeddings.to(target_device)
-            grid_list: list = (
-                grid_dim.tolist() if isinstance(grid_dim, torch.Tensor) else grid_dim
-            )
+            grid_list = self._ensure_batched_grid(grid_dim, len(uncached_urls))
             if not (
                 isinstance(new_embeddings, torch.Tensor) and new_embeddings.ndim == 2
             ):
@@ -256,29 +369,59 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                     f"Unsupported embeddings type from encoder: {type(new_embeddings)}"
                 )
             token_counts = self._split_token_counts(
-                grid_list, new_embeddings.shape[0], "IMAGE"
+                grid_list, new_embeddings.shape[0], modality_name
             )
             split_tensors = torch.split(new_embeddings, token_counts, dim=0)
-            for orig_idx, url, tensor, grid_thw in zip(
-                uncached_indices, uncached_urls, split_tensors, grid_list
+            item_count = len(grid_list)
+            for local_idx, (orig_idx, _url, tensor, grid_thw) in enumerate(
+                zip(uncached_indices, uncached_urls, split_tensors, grid_list)
             ):
-                entry = CachedEmbedding(
-                    tensor=tensor.contiguous(),
-                    image_grid_thw=grid_thw,
+                entry_kwargs: dict[str, Any] = {"tensor": tensor.contiguous()}
+                if modality_name == "IMAGE":
+                    entry_kwargs["image_grid_thw"] = grid_thw
+                elif modality_name == "VIDEO":
+                    entry_kwargs["video_grid_thw"] = grid_thw
+                    if aux_data:
+                        entry_kwargs["second_per_grid_ts"] = self._aux_value_for_item(
+                            aux_data.get("second_per_grid_ts"),
+                            local_idx,
+                            item_count,
+                        )
+                        entry_kwargs["video_timestamps"] = self._aux_value_for_item(
+                            aux_data.get("video_timestamps"),
+                            local_idx,
+                            item_count,
+                        )
+                else:
+                    raise ValueError(f"Unsupported multimodal modality: {modality}")
+                entry = CachedEmbedding(**entry_kwargs)
+                mutation = self._embedding_cache.set_with_delta(
+                    cache_keys[orig_idx], entry
                 )
-                self._embedding_cache.set(self._url_hash(url), entry)
+                self._publish_cache_delta(mutation.added_keys, mutation.removed_keys)
                 new_entries[orig_idx] = entry
 
         # Reassemble results in original URL order
         all_grid_thw: list = []
+        all_entries: list[CachedEmbedding] = []
         embedding_parts: list[torch.Tensor] = []
-        for i in range(len(image_urls)):
+        for i in range(len(media_urls)):
             entry = cached[i] if i in cached else new_entries[i]
-            all_grid_thw.append(entry.image_grid_thw)
+            grid_thw = (
+                entry.image_grid_thw
+                if modality_name == "IMAGE"
+                else entry.video_grid_thw
+            )
+            if grid_thw is None:
+                raise ValueError(
+                    f"{modality_name.lower()}_grid_thw is required for cached item"
+                )
+            all_grid_thw.append(grid_thw)
+            all_entries.append(entry)
             embedding_parts.append(entry.tensor)
 
         full_embeddings = torch.cat(embedding_parts, dim=0)
-        return torch.tensor(all_grid_thw), full_embeddings
+        return torch.tensor(all_grid_thw), full_embeddings, all_entries
 
     def _extract_media_urls(
         self, request: Dict[str, Any]
@@ -424,27 +567,21 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                         f"{modality_name.lower()} token is not defined in chat template"
                     )
 
+                aux_data: dict[str, Any] | None = None
+                cached_entries: list[CachedEmbedding] | None = None
                 with _nvtx.annotate("mm:enc:vision_encode", color="red"):
-                    if modality_name == "IMAGE" and self._embedding_cache is not None:
-                        grid_dim, embeddings = await self._encode_with_cache(urls)
+                    if self._embedding_cache is not None:
+                        (
+                            grid_dim,
+                            embeddings,
+                            cached_entries,
+                        ) = await self._encode_with_cache(urls, modality_enum)
                     else:
-                        grid_dim, embeddings, _aux = await self.encoder._encode(
+                        grid_dim, embeddings, aux_data = await self.encoder._encode(
                             urls, modality_enum
                         )
 
-                grid_list = (
-                    grid_dim.tolist()
-                    if isinstance(grid_dim, torch.Tensor)
-                    else grid_dim
-                )
-                if len(urls) == 1:
-                    if modality_name in ("IMAGE", "VIDEO"):
-                        if (
-                            isinstance(grid_list, list)
-                            and len(grid_list) == 3
-                            and not isinstance(grid_list[0], list)
-                        ):
-                            grid_list = [grid_list]
+                grid_list = self._ensure_batched_grid(grid_dim, len(urls))
 
                 if not isinstance(grid_list, list) or len(grid_list) != len(urls):
                     raise ValueError(
@@ -454,8 +591,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
 
                 if not isinstance(embeddings, torch.Tensor) or embeddings.ndim != 2:
                     raise ValueError(
-                        "Unsupported embeddings type from encoder: "
-                        f"{type(embeddings)}"
+                        f"Unsupported embeddings type from encoder: {type(embeddings)}"
                     )
 
                 token_counts = self._split_token_counts(
@@ -469,11 +605,30 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                     )
 
                 group_slice = multimodal_groups[group_offset : group_offset + len(urls)]
-                for mm_group, grid_item, token_count in zip(
-                    group_slice, grid_list, token_counts
+                for idx, (mm_group, grid_item, token_count) in enumerate(
+                    zip(group_slice, grid_list, token_counts)
                 ):
                     setattr(mm_group, grid_attr, grid_item)
                     mm_group.num_mm_tokens = int(token_count)
+                    if modality_name == "VIDEO":
+                        if cached_entries is not None:
+                            mm_group.second_per_grid_ts = cached_entries[
+                                idx
+                            ].second_per_grid_ts
+                            mm_group.video_timestamps = cached_entries[
+                                idx
+                            ].video_timestamps
+                        elif aux_data:
+                            mm_group.second_per_grid_ts = self._aux_value_for_item(
+                                aux_data.get("second_per_grid_ts"),
+                                idx,
+                                len(urls),
+                            )
+                            mm_group.video_timestamps = self._aux_value_for_item(
+                                aux_data.get("video_timestamps"),
+                                idx,
+                                len(urls),
+                            )
                     if mm_group.multimodal_input is not None:
                         setattr(mm_group.multimodal_input, url_attr, None)
 
