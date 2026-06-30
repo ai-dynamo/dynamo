@@ -3923,9 +3923,9 @@ class EmbeddingWorkerHandler:
                     "Invalid 'truncate_prompt_tokens' type "
                     f"{type(truncate_prompt_tokens).__name__}; expected int"
                 )
-            if truncate_prompt_tokens < 1:
+            if truncate_prompt_tokens < -1:
                 raise ValueError(
-                    "truncate_prompt_tokens must be >= 1, "
+                    "truncate_prompt_tokens must be >= -1, "
                     f"got {truncate_prompt_tokens}"
                 )
             tokenization_kwargs = {

@@ -17,9 +17,10 @@ pub struct NvCreateEmbeddingRequest {
     #[schema(value_type = Object)]
     pub inner: dynamo_protocols::types::CreateEmbeddingRequest,
 
-    /// vLLM tokenizer option for raw-text embedding requests.
+    /// vLLM tokenizer option for raw-text embedding requests. vLLM accepts
+    /// -1 as the sentinel for truncating to the model's maximum length.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub truncate_prompt_tokens: Option<u32>,
+    pub truncate_prompt_tokens: Option<i64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -96,17 +97,19 @@ mod tests {
 
     #[test]
     fn truncate_prompt_tokens_round_trips() {
-        let request: NvCreateEmbeddingRequest = serde_json::from_value(json!({
-            "model": "test-model",
-            "input": "hello",
-            "truncate_prompt_tokens": 2048
-        }))
-        .unwrap();
+        for truncate_prompt_tokens in [2048, -1] {
+            let request: NvCreateEmbeddingRequest = serde_json::from_value(json!({
+                "model": "test-model",
+                "input": "hello",
+                "truncate_prompt_tokens": truncate_prompt_tokens
+            }))
+            .unwrap();
 
-        assert_eq!(request.truncate_prompt_tokens, Some(2048));
+            assert_eq!(request.truncate_prompt_tokens, Some(truncate_prompt_tokens));
 
-        let value = serde_json::to_value(request).unwrap();
-        assert_eq!(value["truncate_prompt_tokens"], 2048);
+            let value = serde_json::to_value(request).unwrap();
+            assert_eq!(value["truncate_prompt_tokens"], truncate_prompt_tokens);
+        }
     }
 
     #[test]
