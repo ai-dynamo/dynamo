@@ -100,11 +100,10 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=1_719_075_000,
                 tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
             ),
-            # Pre_merge gater for the MM-routing path. Fine-grained
-            # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py
-            # (post_merge).
+            # Post_merge MM-routing coverage for the Qwen3-VL family — the
+            # smaller Qwen3.5-0.8B (`agg_router` below) is the pre_merge gater.
             "agg_router": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
                 requested_vllm_kv_cache_bytes=536_870_912,
@@ -122,7 +121,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # The chat-processor variant of the MM-aware router: same routing
             # architecture, but the frontend uses --dyn-chat-processor=vllm
             # (Python preprocessor) instead of the Rust MM-routing path. Kept
-            # on post_merge — the Rust-frontend variant above (`agg_router`) is
+            # on post_merge — the Rust-frontend variant of Qwen3.5-0.8B is
             # the pre_merge gate; adding chat_processor doubles the GPU0
             # queue time at 4-worker scale without catching distinct bugs
             # (both paths share the kv_router downstream).
@@ -261,18 +260,38 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=920_126_000,  # 2x safety over min=460_062_720
                 tests=[
                     # HTTP-URL color test on hybrid Mamba/full-attention VL.
-                    # post_merge — qwen3-vl-2b carries the pre_merge baseline.
                     MmCase(payload=make_image_payload(["green"])),
-                    # Inline-base64 + --frontend-decoding (NIXL RDMA path) on
-                    # the hybrid Mamba/full-attention VL. post_merge for the
-                    # same NIXL-stub reason as qwen3-vl-2b's frontend_decoding
-                    # cases — see that topology for the rationale.
+                    # Inline-base64 + --frontend-decoding (NIXL RDMA path).
+                    # post_merge for the NIXL-stub reason — local pre-merge
+                    # builds outside Docker ship a NIXL stub that errors on
+                    # the runtime cudaMemcpy backend; CI post_merge runs in a
+                    # container with real NIXL.
                     MmCase(
                         suffix="b64_frontend_decoding",
                         payload=make_image_payload_b64(["green"]),
                         extra_script_args=["--frontend-decoding"],
                         marks=[pytest.mark.post_merge],
                     ),
+                ],
+            ),
+            # qwen3_5 hybrid GDN: routing block_size ~544 (Mamba page-aligned),
+            # hit-rate ceiling (N-1)/N. Filler 120 → ~6 blocks → ceiling ≈0.83;
+            # threshold 0.7 fires on real degradation, tolerates variance.
+            "agg_router": TopologyConfig(
+                marks=[pytest.mark.pre_merge],
+                timeout_s=400,
+                profiled_vram_gib=8.0,
+                requested_vllm_kv_cache_bytes=536_870_912,
+                env={"SINGLE_GPU": "true"},
+                tests=[
+                    MmCase(
+                        payload=make_image_payload_cached_tokens(
+                            ["green"],
+                            require_rust_processor_init=True,
+                            min_avg_kv_hit_rate=0.7,
+                            prompt_filler_repeats=120,
+                        )
+                    )
                 ],
             ),
         },

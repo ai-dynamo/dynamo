@@ -31,7 +31,11 @@ from tests.router.helper import (
 from tests.utils.constants import DefaultPort
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.port_utils import allocate_ports, deallocate_ports
+from tests.utils.port_utils import (
+    allocate_contiguous_ports,
+    allocate_ports,
+    deallocate_ports,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +145,26 @@ class VLLMProcess(ManagedEngineProcessMixin):
         self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
         self._kv_event_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
         self._nixl_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        # Per-worker forward-pass-metrics (FPM) base ports. Setting
+        # DYN_FORWARDPASS_METRIC_PORT makes dynamo.vllm auto-inject
+        # InstrumentedScheduler, whose ZMQ PUB binds ``base_port + dp_rank`` in
+        # every EngineCore child (see instrumented_scheduler.py). Each worker
+        # therefore needs a contiguous block of ``data_parallel_size`` ports so
+        # a second DP rank -- or another worker co-located on the same GPU --
+        # can't collide on the bind (which is fatal: there is no try/except
+        # around it). Non-DP workers use a block of 1, matching the per-worker
+        # port arrays above.
+        #
+        # The relay subscribes ``base + dp_rank`` for dp_rank in
+        # get_dp_range_for_worker() == (data_parallel_rank, dp_size). This
+        # harness launches internal-LB DP (only --data-parallel-size, no
+        # --data-parallel-rank), so data_parallel_rank == 0 and each worker owns
+        # local ranks [0, dp_size) -- fully inside its block. (The one DP test
+        # uses num_workers=1.) External/hybrid LB, where dp_start > 0, isn't used.
+        self._fpm_block = max(1, data_parallel_size or 1)
+        self._fpm_ports = allocate_contiguous_ports(
+            num_workers, self._fpm_block, DefaultPort.SYSTEM1.value
+        )
         self._replay_ports = (
             allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
             if standalone_indexer and zmq_replay
@@ -157,6 +181,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 self._system_ports
                 + self._kv_event_ports
                 + self._nixl_ports
+                + self._fpm_ports
                 + self._replay_ports
                 + self._indexer_ports
             )
@@ -275,6 +300,13 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 "DYN_REQUEST_PLANE": request_plane,
                 "DYN_SYSTEM_PORT": str(system_port),
                 "VLLM_NIXL_SIDE_CHANNEL_PORT": str(nixl_port),
+                # Enable forward-pass metrics: a unique, block-aligned base port
+                # per worker so InstrumentedScheduler's ZMQ PUB (base + dp_rank)
+                # and the FpmEventRelay run -- exercising the load-based Planner
+                # path that consumes these events.
+                "DYN_FORWARDPASS_METRIC_PORT": str(
+                    self._fpm_ports[worker_idx * self._fpm_block]
+                ),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
 

@@ -23,7 +23,7 @@ You can install Fluid on any Kubernetes cluster using Helm.
 - `Helm` >= 3.5
 
 **Quick Install:**
-```sh
+```bash
 kubectl create ns fluid-system
 helm repo add fluid https://fluid-cloudnative.github.io/charts
 helm repo update
