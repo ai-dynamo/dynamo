@@ -264,6 +264,7 @@ jobs:
 
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    if: false # ci/eep-only throwaway: skip non-vllm build
     needs: [create-fresh-builder, resolve-source-sha]
     uses: ./.github/workflows/shared-build-image.yml
     with:
@@ -281,6 +282,7 @@ jobs:
 
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
+    if: false # ci/eep-only throwaway: skip non-vllm build
     needs: [create-fresh-builder, resolve-source-sha]
     uses: ./.github/workflows/shared-build-image.yml
     with:
@@ -363,7 +365,9 @@ jobs:
   vllm-elastic-ep-test:
     name: vllm-runtime # Groups with other vllm jobs in the UI
     needs: [vllm-build, resolve-source-sha, compute-release-mode]
-    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    # ci/eep-only throwaway: force-run regardless of run_tests so a run_tests=false
+    # dispatch skips every other gated test job but still runs this one.
+    if: ${{ always() && needs.vllm-build.result == 'success' }}
     uses: ./.github/workflows/shared-test.yml
     with:
       dd_env: nightly
@@ -504,6 +508,7 @@ jobs:
   # ============================================================================
   dynamo-pipeline:
     name: dynamo-runtime
+    if: false # ci/eep-only throwaway: skip the un-gated runtime pipeline
     needs: [create-fresh-builder, compute-dev-version, resolve-source-sha]
     uses: ./.github/workflows/dynamo-pipeline.yml
     with:
