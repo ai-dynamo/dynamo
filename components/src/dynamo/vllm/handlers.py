@@ -3953,6 +3953,20 @@ class EmbeddingWorkerHandler:
             # final per-input vector -- no post-hoc truncation here.
             embedding = _pooling_output_to_list(final_output.outputs.data)
 
+            # vLLM rejects an unsupported ``dimensions`` for models that
+            # declare a ``matryoshka_dimensions`` list, but a model enabled
+            # via ``--hf-overrides '{"is_matryoshka": true}'`` (no explicit
+            # list) is only validated for ``dimensions >= 1`` -- the pooler
+            # then silently clamps an oversized request to the model's native
+            # size (``embeddings[..., :dimensions]``). Surface the same clear
+            # error the old post-hoc path raised instead of returning a
+            # shorter-than-requested vector.
+            if dimensions is not None and len(embedding) < dimensions:
+                raise ValueError(
+                    f"dimensions={dimensions} exceeds model embedding "
+                    f"dimension {len(embedding)}"
+                )
+
             # Always emit base64 over the worker->frontend wire format. The
             # Rust frontend decodes back to float when the client's
             # ``encoding_format`` is float (or unset). 15x1024-float responses
