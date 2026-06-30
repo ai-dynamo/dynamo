@@ -397,12 +397,12 @@ impl DiscoverySpec {
         })
     }
 
-    /// Creates a discovery instance owned by the given process.
+    /// Converts this registration spec into a discovery instance.
     ///
-    /// Endpoint and model instances use the process-level ID. Event channels
-    /// use their publisher-level ID because one process may own multiple
-    /// publishers for the same topic.
-    pub fn with_instance_id(self, owner_instance_id: u64) -> DiscoveryInstance {
+    /// Endpoint and model specs use `default_instance_id`, normally the
+    /// discovery client's process-level ID. Event channel specs already carry
+    /// a publisher-level ID, so they use that instead.
+    pub fn into_instance(self, default_instance_id: u64) -> DiscoveryInstance {
         match self {
             Self::Endpoint {
                 namespace,
@@ -414,7 +414,7 @@ impl DiscoverySpec {
                 namespace,
                 component,
                 endpoint,
-                instance_id: owner_instance_id,
+                instance_id: default_instance_id,
                 transport,
                 device_type,
             }),
@@ -428,7 +428,7 @@ impl DiscoverySpec {
                 namespace,
                 component,
                 endpoint,
-                instance_id: owner_instance_id,
+                instance_id: default_instance_id,
                 card_json,
                 model_suffix,
             },
@@ -446,6 +446,11 @@ impl DiscoverySpec {
                 transport,
             },
         }
+    }
+
+    /// Compatibility alias for [`DiscoverySpec::into_instance`].
+    pub fn with_instance_id(self, default_instance_id: u64) -> DiscoveryInstance {
+        self.into_instance(default_instance_id)
     }
 }
 

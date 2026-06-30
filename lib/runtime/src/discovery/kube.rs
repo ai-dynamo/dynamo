@@ -129,15 +129,13 @@ impl Discovery for KubeDiscoveryClient {
     }
 
     async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
-        let owner_instance_id = self.instance_id();
-        let instance = spec.with_instance_id(owner_instance_id);
-        let registered_instance_id = instance.instance_id();
+        let instance = spec.into_instance(self.instance_id());
+        let instance_id = instance.instance_id();
 
         tracing::debug!(
-            "Registering instance: {:?} with instance_id={:x}, owner_instance_id={:x}",
+            "Registering discovery instance: {:?}, instance_id={:x}",
             instance,
-            registered_instance_id,
-            owner_instance_id
+            instance_id
         );
 
         // Write to local metadata and persist to CR
@@ -154,7 +152,7 @@ impl Discovery for KubeDiscoveryClient {
                     inst.namespace,
                     inst.component,
                     inst.endpoint,
-                    registered_instance_id
+                    instance_id
                 );
                 metadata.register_endpoint(instance.clone())?;
             }
@@ -169,7 +167,7 @@ impl Discovery for KubeDiscoveryClient {
                     namespace,
                     component,
                     endpoint,
-                    registered_instance_id
+                    instance_id
                 );
                 metadata.register_model_card(instance.clone())?;
             }
@@ -184,7 +182,7 @@ impl Discovery for KubeDiscoveryClient {
                     namespace,
                     component,
                     topic,
-                    registered_instance_id
+                    instance_id
                 );
                 metadata.register_event_channel(instance.clone())?;
             }

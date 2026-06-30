@@ -448,14 +448,14 @@ impl EventPublisher {
                     transport: transport_config,
                 };
 
-                let registered_instance = drt.discovery().register(spec).await?;
+                let discovery_instance = drt.discovery().register(spec).await?;
                 tracing::info!(
                     topic = %topic,
                     transport = ?transport_kind,
-                    instance_id = %registered_instance.instance_id(),
+                    publisher_id = %publisher_id,
                     "EventPublisher registered with discovery"
                 );
-                (tx, codec, Some(registered_instance))
+                (tx, codec, Some(discovery_instance))
             }
             TransportSetup::ZmqDirect(tx, codec, public_endpoint) => {
                 let transport_config = EventTransport::zmq(public_endpoint);
@@ -467,14 +467,14 @@ impl EventPublisher {
                     transport: transport_config,
                 };
 
-                let registered_instance = drt.discovery().register(spec).await?;
+                let discovery_instance = drt.discovery().register(spec).await?;
                 tracing::info!(
                     topic = %topic,
                     transport = ?transport_kind,
-                    instance_id = %registered_instance.instance_id(),
+                    publisher_id = %publisher_id,
                     "EventPublisher registered with discovery (direct mode)"
                 );
-                (tx, codec, Some(registered_instance))
+                (tx, codec, Some(discovery_instance))
             }
             TransportSetup::ZmqBroker(tx, codec) => {
                 tracing::info!(
@@ -548,7 +548,7 @@ impl Drop for EventPublisher {
             (self.discovery_client.take(), self.discovery_instance.take())
         {
             let topic = self.topic.clone();
-            let instance_id = instance.instance_id();
+            let publisher_id = instance.instance_id();
             let runtime_handle = self.runtime_handle.clone();
             let shutdown_guard = self.graceful_shutdown_tracker.register_task();
 
@@ -561,14 +561,14 @@ impl Drop for EventPublisher {
                         Ok(()) => {
                             tracing::info!(
                                 topic = %topic,
-                                instance_id = %instance_id,
+                                publisher_id = %publisher_id,
                                 "EventPublisher unregistered from discovery"
                             );
                         }
                         Err(e) => {
                             tracing::warn!(
                                 topic = %topic,
-                                instance_id = %instance_id,
+                                publisher_id = %publisher_id,
                                 error = %e,
                                 "Failed to unregister EventPublisher from discovery"
                             );
@@ -580,7 +580,7 @@ impl Drop for EventPublisher {
             if spawn_result.is_err() {
                 tracing::warn!(
                     topic = %self.topic,
-                    instance_id = %instance_id,
+                    publisher_id = %publisher_id,
                     "Skipping EventPublisher unregister during drop because the runtime is unavailable"
                 );
             }
@@ -824,7 +824,7 @@ mod tests {
     use crate::config::environment_names::zmq_broker as broker_env;
 
     #[tokio::test]
-    async fn same_topic_publishers_are_discovered_and_delivered_independently() {
+    async fn same_topic_publishers_are_independent_across_recreation() {
         temp_env::async_with_vars(
             [
                 (broker_env::DYN_ZMQ_BROKER_URL, None::<&str>),
@@ -931,29 +931,59 @@ mod tests {
                 .expect("subscriber should receive events from both publishers");
 
                 drop(publisher_a);
+                let publisher_a_recreated = EventPublisher::for_component_with_transport(
+                    &component,
+                    "events",
+                    EventTransportKind::Zmq,
+                )
+                .await
+                .expect("recreate first publisher");
+                let publisher_a_recreated_id = publisher_a_recreated.publisher_id();
+
+                assert_ne!(publisher_a_recreated_id, publisher_a_id);
+                assert_ne!(publisher_a_recreated_id, publisher_b_id);
+                assert_eq!(
+                    publisher_a_recreated.sequence.load(Ordering::SeqCst),
+                    0,
+                    "a recreated publisher starts a new sequence space"
+                );
+
                 tokio::time::timeout(std::time::Duration::from_secs(1), async {
                     loop {
                         let instances = drt
                             .discovery()
                             .list(query.clone())
                             .await
-                            .expect("list event publishers after drop");
-                        if instances.len() == 1 {
-                            assert_eq!(instances[0].instance_id(), publisher_b_id);
+                            .expect("list event publishers after recreation");
+                        if instances.len() == 2
+                            && instances
+                                .iter()
+                                .any(|instance| instance.instance_id() == publisher_b_id)
+                            && instances
+                                .iter()
+                                .any(|instance| instance.instance_id() == publisher_a_recreated_id)
+                        {
                             break;
                         }
                         tokio::task::yield_now().await;
                     }
                 })
                 .await
-                .expect("first publisher should unregister without removing the second");
+                .expect("old publisher should unregister without removing current publishers");
+
+                let mut received_b_after_recreation = false;
+                let mut received_recreated_a = false;
 
                 tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                    loop {
+                    while !received_b_after_recreation || !received_recreated_a {
                         publisher_b
                             .publish_bytes(vec![0xb3])
                             .await
-                            .expect("publish from remaining publisher");
+                            .expect("publish from second publisher after recreation");
+                        publisher_a_recreated
+                            .publish_bytes(vec![0xa2])
+                            .await
+                            .expect("publish from recreated publisher");
 
                         if let Ok(Some(envelope)) = tokio::time::timeout(
                             std::time::Duration::from_millis(100),
@@ -965,7 +995,11 @@ mod tests {
                             if envelope.publisher_id == publisher_b_id
                                 && envelope.payload.as_ref() == [0xb3]
                             {
-                                break;
+                                received_b_after_recreation = true;
+                            } else if envelope.publisher_id == publisher_a_recreated_id
+                                && envelope.payload.as_ref() == [0xa2]
+                            {
+                                received_recreated_a = true;
                             }
                         }
 
@@ -973,7 +1007,7 @@ mod tests {
                     }
                 })
                 .await
-                .expect("remaining publisher should stay connected after peer removal");
+                .expect("subscriber should receive from surviving and recreated publishers");
             },
         )
         .await;
