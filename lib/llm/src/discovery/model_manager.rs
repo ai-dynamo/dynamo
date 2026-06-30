@@ -30,6 +30,7 @@ use crate::{
         shared_cache::HicacheSharedKvCache,
     },
     local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig, topology_taint},
+    lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -102,6 +103,20 @@ pub struct ModelManager {
 
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     runtime_configs: DashMap<EndpointId, RuntimeConfigWatch>,
+
+    // LoRA allocation state. The state objects are always created so discovery can
+    // populate them, but `lora_filter()` only hands out the filter when LoRA serving is
+    // enabled (DYN_LORA_ENABLED) — so non-LoRA deployments keep the unmodified routing
+    // path. The controller is additionally gated on the allocation config.
+    lora_routing_table: LoraRoutingTable,
+    lora_state_tracker: LoraStateTracker,
+    lora_load_estimator: Arc<LoadEstimator>,
+    lora_filter: Arc<LoraFilter>,
+    lora_enabled: bool,
+    /// Per-decode-component LoRA load-feed subscription handles, so we start exactly one feed
+    /// per component and can restart it if the previous one exited (avoids double counting on
+    /// rebuilds while keeping the feed durable).
+    lora_load_feeds: DashMap<String, tokio::task::JoinHandle<()>>,
 }
 
 impl Default for ModelManager {
@@ -112,11 +127,24 @@ impl Default for ModelManager {
 
 impl ModelManager {
     pub fn new() -> Self {
+        let lora_routing_table = LoraRoutingTable::new();
+        let lora_state_tracker = LoraStateTracker::new();
+        let lora_filter = Arc::new(LoraFilter::new(
+            lora_routing_table.clone(),
+            lora_state_tracker.clone(),
+        ));
+
         Self {
             models: DashMap::new(),
             cards: DashMap::new(),
             prefill_router_activators: DashMap::new(),
             runtime_configs: DashMap::new(),
+            lora_routing_table,
+            lora_state_tracker,
+            lora_load_estimator: Arc::new(LoadEstimator::new()),
+            lora_filter,
+            lora_enabled: crate::lora::lora_serving_enabled(),
+            lora_load_feeds: DashMap::new(),
         }
     }
 
@@ -178,6 +206,10 @@ impl ModelManager {
     }
 
     /// Remove and return model card for this instance's key. We do this when the instance stops.
+    pub fn get_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
+        self.cards.get(key).map(|r| r.value().clone())
+    }
+
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
         self.cards.remove(key).map(|(_, v)| v)
     }
@@ -717,6 +749,18 @@ impl ModelManager {
 
     // -- KV Router creation --
 
+    /// Whether to start the LoRA load-estimator feed for a KV router being built for `worker_type`.
+    ///
+    /// The feed must run for the worker mode that carries the routable request load. In dynamo's
+    /// KV path that is `WORKER_TYPE_DECODE`, which the binding assigns to BOTH aggregated and
+    /// disaggregated-decode endpoints (any non-prefill endpoint that tracks active blocks; see
+    /// `create_kv_router_from_endpoint`). Only disaggregated PREFILL is excluded, so its transient
+    /// load does not double-count the decode component's active sequences. Returns false when LoRA
+    /// serving is disabled.
+    fn should_start_lora_load_feed(lora_enabled: bool, worker_type: &str) -> bool {
+        lora_enabled && worker_type == crate::protocols::common::timing::WORKER_TYPE_DECODE
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn kv_chooser_for(
         &self,
@@ -786,8 +830,65 @@ impl ModelManager {
             model_name,
             is_eagle,
             shared_cache,
+            self.lora_filter(),
         )
         .await?;
+
+        // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
+        // subscription per "decode" component. WORKER_TYPE_DECODE is the routing path for BOTH
+        // aggregated and disaggregated-decode deployments: the binding maps any non-prefill,
+        // active-block-tracking endpoint to WORKER_TYPE_DECODE (see create_kv_router_from_endpoint
+        // in bindings/python/rust/llm/kv.rs), so aggregated KV feeds load here too. Only
+        // disaggregated PREFILL is excluded — its load is transient and would double-count the
+        // decode component's active sequences. Without this feed the estimator is never fed in KV
+        // mode and every LoRA stays "inactive" forever. (Edge case specific to the Python KV path:
+        // create_kv_router_from_endpoint infers WORKER_TYPE_PREFILL for a non-prefill endpoint when
+        // router_track_active_blocks=false, so that aggregated worker would skip this feed and KV
+        // routing is not load-aware — dynamic LoRA allocation then degrades to cold-start pins while
+        // the filter still routes by loaded worker. Constructors that pass WORKER_TYPE_DECODE
+        // directly, e.g. the watcher / C bindings, are unaffected.)
+        if Self::should_start_lora_load_feed(self.lora_enabled, worker_type) {
+            let feed_key = format!("{}/{}", endpoint.id().namespace, endpoint.id().component);
+            // Start a feed if none runs for this component yet, or restart it if the previous
+            // one exited (so a dead subscription does not permanently disable load tracking).
+            //
+            // Use the DashMap entry API so the check-and-insert is atomic per key: two
+            // concurrent `kv_chooser_for` calls for the same component otherwise both observe
+            // "no feed" and each spawn a subscription, double-counting active sequences.
+            // Holding the entry lock across the spawn serializes them — the loser sees the
+            // winner's live handle and skips.
+            let started = match self.lora_load_feeds.entry(feed_key) {
+                Entry::Occupied(mut entry) => {
+                    if entry.get().is_finished() {
+                        // Previous feed exited; replace it (aborting the dead handle is a no-op).
+                        let handle = self
+                            .lora_load_estimator
+                            .clone()
+                            .start_event_subscription(endpoint.component().clone());
+                        entry.insert(handle);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Entry::Vacant(entry) => {
+                    let handle = self
+                        .lora_load_estimator
+                        .clone()
+                        .start_event_subscription(endpoint.component().clone());
+                    entry.insert(handle);
+                    true
+                }
+            };
+            if started {
+                tracing::info!(
+                    namespace = %endpoint.id().namespace,
+                    component = %endpoint.id().component,
+                    "Started decode-side LoRA load feed (KV active-sequence subscription)"
+                );
+            }
+        }
+
         Ok(Arc::new(chooser))
     }
 
@@ -799,6 +900,75 @@ impl ModelManager {
     /// and registration guards.
     pub(crate) fn model_namespace_key(model_name: &str, namespace: &str) -> String {
         format!("{}:{}", model_name, namespace)
+    }
+
+    // ── LoRA allocation accessors ───────────────────────────────────────
+
+    pub fn lora_routing_table(&self) -> &LoraRoutingTable {
+        &self.lora_routing_table
+    }
+
+    pub fn lora_state_tracker(&self) -> &LoraStateTracker {
+        &self.lora_state_tracker
+    }
+
+    pub fn lora_load_estimator(&self) -> &Arc<LoadEstimator> {
+        &self.lora_load_estimator
+    }
+
+    pub fn lora_filter(&self) -> Option<Arc<LoraFilter>> {
+        // Only expose the filter when LoRA serving is enabled, so non-LoRA deployments
+        // keep the unmodified routing path (no wrapper, no avail-vs-free regression).
+        self.lora_enabled.then(|| self.lora_filter.clone())
+    }
+
+    /// Start the LoRA allocation controller background loop.
+    pub fn start_lora_controller(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let config = crate::lora::LoraAllocationConfig::from_env();
+
+        // F10: respect the allocation-enabled config (DYN_LORA_ALLOCATION_ENABLED). When
+        // disabled, skip the controller entirely — routing still works via the filter's
+        // loaded-worker fallback, just without dynamic replica recomputation.
+        if !config.enabled {
+            tracing::info!(
+                "LoRA allocation controller disabled (DYN_LORA_ALLOCATION_ENABLED=false); \
+                 routing uses the loaded-worker fallback without dynamic allocation"
+            );
+            return tokio::spawn(async {});
+        }
+
+        let rate_window_secs = config.effective_rate_window_secs();
+        // F11: apply the full estimator config (rate window + bucket granularity +
+        // predictor type/alpha), not just the rate window.
+        self.lora_load_estimator
+            .set_config(crate::lora::LoadEstimatorConfig {
+                rate_window: std::time::Duration::from_secs(rate_window_secs),
+                buckets_per_second: config.buckets_per_second,
+                predictor_type: config.predictor_type,
+                ema_alpha: config.ema_alpha,
+                ..Default::default()
+            });
+
+        tracing::info!(
+            enabled = config.enabled,
+            algorithm = ?config.algorithm,
+            timestep_secs = config.timestep_secs,
+            rate_window_secs = rate_window_secs,
+            rate_window_multiplier = config.rate_window_multiplier,
+            buckets_per_second = config.buckets_per_second,
+            predictor_type = ?config.predictor_type,
+            "Starting LoRA allocation controller"
+        );
+        crate::lora::LoraController::start(
+            config,
+            self.lora_routing_table.clone(),
+            self.lora_state_tracker.clone(),
+            self.lora_load_estimator.clone(),
+            cancel_token,
+        )
     }
 
     /// Register a prefill router for a decode WorkerSet. Returns a receiver that will be
@@ -1233,6 +1403,30 @@ mod tests {
             .topology_domains
             .insert("zone".to_string(), "us-east-1a".to_string());
         config
+    }
+
+    #[test]
+    fn lora_load_feed_starts_for_aggregated_and_decode_not_prefill() {
+        use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
+        // Aggregated and disaggregated-decode deployments both route via WORKER_TYPE_DECODE
+        // (create_kv_router_from_endpoint maps any non-prefill, active-block-tracking endpoint to
+        // it), so the LoRA load feed must start for that worker type — otherwise the controller
+        // would treat every adapter as inactive and never run dynamic allocation.
+        assert!(
+            ModelManager::should_start_lora_load_feed(true, WORKER_TYPE_DECODE),
+            "decode/aggregated KV must start the LoRA load feed"
+        );
+        // Disaggregated prefill load is fed via the decode component, so prefill must NOT start its
+        // own feed (avoids double-counting active sequences).
+        assert!(
+            !ModelManager::should_start_lora_load_feed(true, WORKER_TYPE_PREFILL),
+            "prefill KV must not start its own LoRA load feed"
+        );
+        // LoRA serving disabled: never start the feed.
+        assert!(
+            !ModelManager::should_start_lora_load_feed(false, WORKER_TYPE_DECODE),
+            "no feed when LoRA serving is disabled"
+        );
     }
 
     #[test]
@@ -1727,6 +1921,7 @@ mod tests {
             std::sync::Arc::new(ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
             enforce_disagg,
+            None,
         );
         pr.mark_active_for_test();
         ws.prefill_router = Some(pr);

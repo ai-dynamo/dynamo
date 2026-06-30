@@ -1,9 +1,10 @@
 # Dynamo Python Backend
 
-**Supported today:** aggregated and disaggregated (prefill/decode)
-inference, metrics + Prometheus bridging, KV event publishing,
-KV-aware (DP-rank) routing, health-check canaries, OpenTelemetry
-tracing, and request-side guided decoding / structural tag.
+**Supported today:** aggregated and disaggregated (prefill/decode/encode)
+inference, the shared multimodal request and encoder-handoff contract,
+metrics + Prometheus bridging, KV event publishing, KV-aware (DP-rank)
+routing, health-check canaries, OpenTelemetry tracing, and request-side
+guided decoding / structural tag.
 
 > **Work in progress.** Multimodal, diffusion (image/video/DLLM),
 > LoRA (SGLang / TRT-LLM — vLLM is supported),
@@ -28,7 +29,7 @@ LLMEngine (ABC)                <-- engine boundary (engine.py)
     |   - start(worker_id) -> EngineConfig    (start engine, return metadata)
     |   - generate(request, context)         (streaming inference)
     |   - abort(context)                     (cancel request, optional)
-    |   - drain()                            (pre-cleanup drain, optional)
+    |   - is_quiescent() -> Optional[bool]   (prefill drain early-exit, optional)
     |   - cleanup()                          (shutdown)
     |
     +-- VllmLLMEngine          <-- vllm/llm_engine.py
@@ -42,7 +43,7 @@ Worker                  <-- runtime integration (worker.py)
     - sets up endpoints, signal handlers
     - calls engine.start(worker_id), registers model
     - serves generate endpoint with cancellation monitoring
-    - calls engine.drain() then engine.cleanup() on shutdown
+    - drains prefill workers (polls engine.is_quiescent()) then calls engine.cleanup() on shutdown
 ```
 
 ## Quick Start
@@ -142,6 +143,12 @@ def main():
 ```
 
 See `sample_engine.py` for a complete, runnable reference implementation.
+The sample engine includes synthetic multimodal handling for aggregated and
+Encode/Prefill/Decode deployments. CPU-only direct worker-handoff smokes live in
+`examples/backends/sample/launch/multimodal_agg.sh` and
+`examples/backends/sample/launch/multimodal_disagg.sh`. These smokes exercise
+distinct worker processes and TCP request transport; they intentionally bypass
+the frontend and do not claim frontend routing coverage.
 
 ## Request / Response Types
 
@@ -259,7 +266,7 @@ Each backend's protocol is different:
 |---------|---------|--------|
 | **vLLM** | Sets `kv_transfer_params.do_remote_decode=True`, caps `max_tokens=1`, packs the connector's transfer handle into the response. | Pulls `kv_transfer_params` from `request.prefill_result` and feeds it back through `sampling_params.extra_args` so the `NixlConnector` imports KV. |
 | **SGLang** | Yields `{bootstrap_host, bootstrap_port, bootstrap_room}` as the first chunk, then drains the engine stream silently. Warmup happens in `start()`. | Reads bootstrap info from `request.prefill_result`, passes it to `engine.async_generate` so SGLang's NIXL transport pulls KV. |
-| **TRT-LLM** | Builds `LlmDisaggregatedParams(request_type="context_only")`, generates one token, packs the encoded handoff into the response. `drain()` polls the scheduler until idle so in-flight NIXL transfers finish before GPU memory is freed (issue #7319). | Decodes `request.prefill_result.disaggregated_params`, flips `request_type` to `generation_only`, generates normally. |
+| **TRT-LLM** | Builds `LlmDisaggregatedParams(request_type="context_only")`, generates one token, packs the encoded handoff into the response. Inherits the default `is_quiescent` (None), so the prefill drain waits the full budget for transfers to finish. | Decodes `request.prefill_result.disaggregated_params`, flips `request_type` to `generation_only`, generates normally. |
 
 ### Smoke testing without GPUs
 
@@ -319,6 +326,47 @@ Two surfaces:
 `ComponentSnapshot.kv_cache_hit_rate` is tri-state: `None` means "no data
 yet" or "no prefix cache" (gauge skipped); `0.0` is a legitimate
 zero-hit measurement.
+
+## KV Event Publishing
+
+On the unified path, `Worker` owns `KvEventPublisher` construction. Engines
+declare sources with `kv_event_sources()`; they do not instantiate
+`KvEventPublisher` directly.
+
+Use `ZmqSource` when the engine already emits Dynamo-compatible KV events on a
+ZMQ socket:
+
+```python
+from dynamo.common.backend.publisher import ZmqSource
+
+async def kv_event_sources(self):
+    return [
+        ZmqSource(endpoint="tcp://127.0.0.1:5557", dp_rank=0),
+    ]
+```
+
+Use `PushSource` when the engine needs a live publisher and drives
+`publish_stored()` / `publish_removed()` from its own thread:
+
+```python
+from dynamo.common.backend.publisher import PushSource
+
+def _on_kv_publisher_ready(self, publisher):
+    self._kv_publisher = publisher
+    self._start_kv_event_thread()
+
+async def kv_event_sources(self):
+    return [PushSource(on_ready=self._on_kv_publisher_ready, dp_rank=0)]
+```
+
+Return one source per DP rank owned by this worker, and keep that rank ownership
+stable for the engine lifetime. `EngineConfig.llm.kv_cache_block_size` must be
+set or `Worker` skips KV event publishers; snapshot publishers still work
+without a block size.
+
+For `PushSource`, cleanup is the engine's responsibility. Stop event threads in
+`cleanup()`, prevent new publishes once cleanup begins, and let any in-flight
+publish loop observe the shutdown signal before resources are released.
 
 ## Telemetry
 
@@ -437,7 +485,7 @@ Lifecycle and runtime:
 - Model registration with endpoint types
 - Request cancellation via `abort()` + `context.is_stopped()` monitoring
 - Graceful shutdown with signal handling
-- `drain()` hook for pre-cleanup work
+- `is_quiescent()` prefill-drain early-exit hook
 - `DynamoException` error chain wrapping
 - Finish reason normalization handled by the Rust layer
 - Engine control plumbing, with per-backend profiling, pause/resume, and supported weight-update controls
@@ -522,7 +570,7 @@ Request handling:
 | Feature | Description |
 |---------|-------------|
 | Text-in-text-out mode | OpenAI-compatible chat/completion with engine-side tokenization. Unified hardcodes `ModelInput.Tokens`. |
-| Multimodal | Images / video / embeddings, NIXL embedding transfer, encode workers. `worker.py:_to_rust_disaggregation_mode` rejects the `ENCODE` role. |
+| Multimodal | The shared request and `encoder_result` contract, Encode role, and discovery wiring are available. Frontend Encode-to-Prefill/Aggregated request routing and backend-specific encoder implementations remain separate work. |
 | Diffusion | Image (FLUX), video (Wan2.1), LLM diffusion (DLLM) workers; no diffusion engine, MediaOutput, or media scheduling on the unified path. |
 | LoRA adapters (SGLang / TRT-LLM) | Dynamic load / unload / list, ModelDeploymentCard publishing, per-adapter serialization locks, per-request adapter threading. **vLLM is supported on the unified path** — see [What works today](#what-works-today); SGLang and TRT-LLM advertise no LoRA updates yet. |
 | Snapshot / checkpoint | CRIU-based engine state save/restore + identity reload. |

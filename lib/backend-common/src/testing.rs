@@ -4,8 +4,8 @@
 //! Conformance test kit for [`LLMEngine`] and [`RawEngine`] implementations.
 //!
 //! Engines wire themselves into the test suite with one call —
-//! [`run_conformance`] for token engines, [`run_raw_conformance`] for raw
-//! media engines:
+//! [`run_conformance`] for token engines, [`run_encode_conformance`] for
+//! Encode-role engines, and [`run_raw_conformance`] for raw media engines:
 //!
 //! ```ignore
 //! #[tokio::test]
@@ -27,7 +27,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
+use dynamo_llm::protocols::common::preprocessor::{MultimodalData, PreprocessedRequest};
 use dynamo_llm::protocols::common::{FinishReason, OutputOptions, SamplingOptions, StopConditions};
 use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
@@ -59,6 +59,7 @@ pub fn cancelling_context(after: Duration) -> Arc<dyn AsyncEngineContext> {
 
 /// Which conformance check failed, and why.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ConformanceFailure {
     StartFailed(String),
     EmptyModelInConfig,
@@ -91,6 +92,25 @@ pub enum ConformanceFailure {
         chunked: usize,
         reported: u32,
     },
+    /// Encode conformance requires exactly one terminal handoff chunk.
+    EncodeChunkCount {
+        count: usize,
+    },
+    /// Encode terminals use the standard `Stop` finish reason.
+    EncodeTerminalExpected,
+    /// Encode workers produce a handoff payload, not generated tokens.
+    EncodeTokensNotEmpty {
+        count: usize,
+    },
+    /// Encode terminal usage must describe a zero-token handoff response.
+    EncodeUsageMismatch {
+        expected_prompt: u32,
+        prompt: u32,
+        completion: u32,
+        total: u32,
+    },
+    /// The encoder handoff contract is object-shaped at every boundary.
+    EncoderResultExpectedObject,
 }
 
 impl std::fmt::Display for ConformanceFailure {
@@ -148,6 +168,34 @@ impl std::fmt::Display for ConformanceFailure {
                  completion_usage.completion_tokens = {reported} on the terminal \
                  (engine bookkeeping diverges from streamed output)"
             ),
+            EncodeChunkCount { count } => write!(
+                f,
+                "encode generate() must yield exactly one terminal chunk; got {count}"
+            ),
+            EncodeTerminalExpected => write!(
+                f,
+                "encode generate() must yield a terminal chunk with \
+                 finish_reason = FinishReason::Stop"
+            ),
+            EncodeTokensNotEmpty { count } => write!(
+                f,
+                "encode terminal chunk must have empty token_ids; got {count} tokens"
+            ),
+            EncodeUsageMismatch {
+                expected_prompt,
+                prompt,
+                completion,
+                total,
+            } => write!(
+                f,
+                "encode terminal usage must report prompt={expected_prompt}, completion=0, \
+                 total={expected_prompt}; got prompt={prompt}, completion={completion}, \
+                 total={total}"
+            ),
+            EncoderResultExpectedObject => write!(
+                f,
+                "encode terminal chunk must carry an object-shaped encoder_result"
+            ),
         }
     }
 }
@@ -190,10 +238,16 @@ where
     // 5. Interleaved generate() calls both complete — catches shared-state bugs.
     //    Uses tokio::join! under the test runtime (single-threaded by default),
     //    so this is interleaving rather than true parallelism.
-    check_concurrent_generates(&engine, &config.model).await?;
+    check_concurrent_generates(&engine, &config.model, LlmConformanceMode::Token).await?;
 
     // 6. Cancellation is observed within a bounded deadline.
-    check_cancellation(&engine, &config.model, DEFAULT_CANCEL_DEADLINE).await?;
+    check_cancellation(
+        &engine,
+        &config.model,
+        LlmConformanceMode::Token,
+        DEFAULT_CANCEL_DEADLINE,
+    )
+    .await?;
 
     // 7. cleanup() succeeds and is idempotent.
     engine
@@ -217,6 +271,114 @@ where
     Ok(())
 }
 
+/// Run the Encode-role conformance suite against an [`LLMEngine`].
+///
+/// Encode engines have a narrower response shape than token generators, but
+/// share the same routing, metrics, concurrency, cancellation, and cleanup
+/// lifecycle contracts.
+pub async fn run_encode_conformance<E, F>(mut factory: F) -> Result<(), ConformanceFailure>
+where
+    E: LLMEngine,
+    F: FnMut() -> E,
+{
+    let engine = factory();
+    let config = engine
+        .start(0)
+        .await
+        .map_err(|e| StartFailed(e.to_string()))?;
+    if config.model.is_empty() {
+        return Err(EmptyModelInConfig);
+    }
+
+    check_kv_event_sources(&engine).await?;
+    check_setup_metrics(&engine).await?;
+    check_encode_generate(&engine, &config.model).await?;
+    check_concurrent_generates(&engine, &config.model, LlmConformanceMode::Encode).await?;
+    check_cancellation(
+        &engine,
+        &config.model,
+        LlmConformanceMode::Encode,
+        DEFAULT_CANCEL_DEADLINE,
+    )
+    .await?;
+
+    engine
+        .cleanup()
+        .await
+        .map_err(|e| CleanupFailed(e.to_string()))?;
+    engine
+        .cleanup()
+        .await
+        .map_err(|e| SecondCleanupFailed(e.to_string()))?;
+
+    let fresh = factory();
+    fresh
+        .cleanup()
+        .await
+        .map_err(|e| CleanupWithoutStartFailed(e.to_string()))?;
+
+    Ok(())
+}
+
+async fn check_encode_generate<E: LLMEngine>(
+    engine: &E,
+    model: &str,
+) -> Result<(), ConformanceFailure> {
+    let request = encode_request(model);
+    let expected_prompt = request.token_ids.len() as u32;
+    let stream = engine
+        .generate(request, GenerateContext::new(mock_context(), None))
+        .await
+        .map_err(|e| GenerateFailed(e.to_string()))?;
+    let items: Vec<_> = stream.collect().await;
+    validate_encode_items(items, expected_prompt)
+}
+
+fn validate_encode_items(
+    items: Vec<Result<crate::engine::LLMEngineOutput, crate::error::DynamoError>>,
+    expected_prompt: u32,
+) -> Result<(), ConformanceFailure> {
+    if items.len() != 1 {
+        return Err(EncodeChunkCount { count: items.len() });
+    }
+    let chunk = items
+        .into_iter()
+        .next()
+        .expect("length checked")
+        .map_err(|e| StreamYieldedError(e.to_string()))?;
+
+    if !matches!(chunk.finish_reason, Some(FinishReason::Stop)) {
+        return Err(EncodeTerminalExpected);
+    }
+    if !chunk.token_ids.is_empty() {
+        return Err(EncodeTokensNotEmpty {
+            count: chunk.token_ids.len(),
+        });
+    }
+    if !chunk.encoder_result.as_ref().is_some_and(|v| v.is_object()) {
+        return Err(EncoderResultExpectedObject);
+    }
+    if let Some(usage) = chunk.completion_usage.as_ref()
+        && (usage.prompt_tokens != expected_prompt
+            || usage.completion_tokens != 0
+            || usage.total_tokens != expected_prompt)
+    {
+        return Err(EncodeUsageMismatch {
+            expected_prompt,
+            prompt: usage.prompt_tokens,
+            completion: usage.completion_tokens,
+            total: usage.total_tokens,
+        });
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum LlmConformanceMode {
+    Token,
+    Encode,
+}
+
 fn request(model: &str) -> PreprocessedRequest {
     // Keep conformance smokes bounded for real LLM engines. The separate
     // cancellation check still requests enough tokens to catch ignored cancels.
@@ -235,6 +397,28 @@ fn request_with_max_tokens(model: &str, max_tokens: Option<u32>) -> Preprocessed
         .output_options(OutputOptions::default())
         .build()
         .expect("build request")
+}
+
+fn encode_request(model: &str) -> PreprocessedRequest {
+    let multi_modal_data = std::collections::HashMap::from([(
+        "image".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:image/png;base64,AA==".to_string(),
+        )],
+    )]);
+    PreprocessedRequest::builder()
+        .model(model.to_string())
+        .token_ids(vec![1, 2, 3])
+        .multi_modal_data(Some(multi_modal_data))
+        .mm_processor_kwargs(Some(serde_json::json!({ "min_pixels": 64 })))
+        .stop_conditions(StopConditions {
+            max_tokens: Some(8),
+            ..Default::default()
+        })
+        .sampling_options(SamplingOptions::default())
+        .output_options(OutputOptions::default())
+        .build()
+        .expect("build encode request")
 }
 
 async fn check_single_generate<E: LLMEngine>(
@@ -291,6 +475,7 @@ async fn check_single_generate<E: LLMEngine>(
 async fn check_concurrent_generates<E: LLMEngine>(
     engine: &E,
     model: &str,
+    mode: LlmConformanceMode,
 ) -> Result<(), ConformanceFailure> {
     // 8 in-flight streams — enough to catch state-tramping under interleaved
     // polls. Under a single-threaded test runtime this is interleaving rather
@@ -298,15 +483,27 @@ async fn check_concurrent_generates<E: LLMEngine>(
     const CONCURRENT: usize = 8;
     let futs = (0..CONCURRENT).map(|_| async {
         let ctx = mock_context();
+        let request = match mode {
+            LlmConformanceMode::Token => request(model),
+            LlmConformanceMode::Encode => encode_request(model),
+        };
+        let expected_prompt = request.token_ids.len() as u32;
         let stream = engine
-            .generate(request(model), GenerateContext::new(ctx, None))
+            .generate(request, GenerateContext::new(ctx, None))
             .await
             .map_err(|e| ConcurrentGenerateFailed(e.to_string()))?;
-        let n = stream.count().await;
-        if n == 0 {
-            Err(ConcurrentGenerateFailed("stream was empty".to_string()))
-        } else {
-            Ok(())
+        match mode {
+            LlmConformanceMode::Token => {
+                let n = stream.count().await;
+                if n == 0 {
+                    Err(ConcurrentGenerateFailed("stream was empty".to_string()))
+                } else {
+                    Ok(())
+                }
+            }
+            LlmConformanceMode::Encode => {
+                validate_encode_items(stream.collect().await, expected_prompt)
+            }
         }
     });
     for result in futures::future::join_all(futs).await {
@@ -367,6 +564,7 @@ async fn check_setup_metrics<E: LLMEngine>(engine: &E) -> Result<(), Conformance
 async fn check_cancellation<E: LLMEngine>(
     engine: &E,
     model: &str,
+    mode: LlmConformanceMode,
     deadline: Duration,
 ) -> Result<(), ConformanceFailure> {
     // Request enough tokens that an engine which ignores cancellation
@@ -374,11 +572,12 @@ async fn check_cancellation<E: LLMEngine>(
     const LONG_MAX_TOKENS: u32 = 10_000;
 
     let ctx = mock_context();
+    let request = match mode {
+        LlmConformanceMode::Token => request_with_max_tokens(model, Some(LONG_MAX_TOKENS)),
+        LlmConformanceMode::Encode => encode_request(model),
+    };
     let stream = engine
-        .generate(
-            request_with_max_tokens(model, Some(LONG_MAX_TOKENS)),
-            GenerateContext::new(ctx.clone(), None),
-        )
+        .generate(request, GenerateContext::new(ctx.clone(), None))
         .await
         .map_err(|e| GenerateFailed(e.to_string()))?;
 
@@ -556,7 +755,9 @@ async fn check_cancellation_raw<E: RawEngine>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{EngineConfig, PreprocessedRequest};
+    use crate::engine::{
+        EngineConfig, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, usage,
+    };
     use crate::error::DynamoError;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
@@ -616,6 +817,170 @@ mod tests {
             dp_ranks: vec![0, 1, 2],
         };
         assert!(check_setup_metrics(&engine).await.is_ok());
+    }
+
+    #[derive(Clone, Copy)]
+    enum EncodeMockResponse {
+        Valid,
+        MissingEncoderResult,
+        WrongCount,
+        WrongFinish,
+        Tokens,
+        BadUsage,
+        Empty,
+    }
+
+    struct EncodeConformanceMock {
+        response: EncodeMockResponse,
+        honor_cancel: bool,
+    }
+
+    fn encode_mock(response: EncodeMockResponse) -> EncodeConformanceMock {
+        EncodeConformanceMock {
+            response,
+            honor_cancel: true,
+        }
+    }
+
+    fn valid_encode_chunk() -> LLMEngineOutput {
+        LLMEngineOutput::encode_terminal(serde_json::Map::from_iter([(
+            "handle".to_string(),
+            serde_json::json!("sample-encoder:test"),
+        )]))
+    }
+
+    #[async_trait]
+    impl LLMEngine for EncodeConformanceMock {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig {
+                model: "encode-mock".to_string(),
+                ..EngineConfig::default()
+            })
+        }
+
+        async fn generate(
+            &self,
+            request: PreprocessedRequest,
+            ctx: GenerateContext,
+        ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
+            assert!(
+                request
+                    .multi_modal_data
+                    .as_ref()
+                    .is_some_and(|data| !data.is_empty()),
+                "encode conformance request must contain multi_modal_data"
+            );
+            assert_eq!(
+                request.mm_processor_kwargs,
+                Some(serde_json::json!({ "min_pixels": 64 })),
+                "encode conformance request must contain mm_processor_kwargs"
+            );
+            let chunks = match self.response {
+                EncodeMockResponse::Valid => vec![Ok(valid_encode_chunk())],
+                EncodeMockResponse::MissingEncoderResult => vec![Ok(LLMEngineOutput::stop())],
+                EncodeMockResponse::WrongCount => {
+                    vec![Ok(valid_encode_chunk()), Ok(valid_encode_chunk())]
+                }
+                EncodeMockResponse::WrongFinish => {
+                    let mut chunk = valid_encode_chunk();
+                    chunk.finish_reason = Some(FinishReason::Length);
+                    vec![Ok(chunk)]
+                }
+                EncodeMockResponse::Tokens => {
+                    let mut chunk = valid_encode_chunk();
+                    chunk.token_ids = vec![1];
+                    vec![Ok(chunk)]
+                }
+                EncodeMockResponse::BadUsage => {
+                    vec![Ok(valid_encode_chunk().with_usage(usage(3, 1)))]
+                }
+                EncodeMockResponse::Empty => vec![],
+            };
+            let honor_cancel = self.honor_cancel;
+            let ctx = ctx.inner_arc();
+            Ok(Box::pin(async_stream::stream! {
+                if honor_cancel && ctx.is_stopped() {
+                    yield Ok(LLMEngineOutput::cancelled());
+                    return;
+                }
+                for chunk in chunks {
+                    yield chunk;
+                }
+            }))
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn encode_mock_without_usage_satisfies_conformance() {
+        run_encode_conformance(|| encode_mock(EncodeMockResponse::Valid))
+            .await
+            .expect("encode conformance");
+    }
+
+    #[tokio::test]
+    async fn encode_conformance_rejects_missing_encoder_result() {
+        let result =
+            run_encode_conformance(|| encode_mock(EncodeMockResponse::MissingEncoderResult)).await;
+        assert!(
+            matches!(result, Err(EncoderResultExpectedObject)),
+            "expected EncoderResultExpectedObject, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn encode_conformance_rejects_wrong_chunk_count() {
+        let engine = encode_mock(EncodeMockResponse::WrongCount);
+        let result = check_encode_generate(&engine, "encode-mock").await;
+        assert!(matches!(result, Err(EncodeChunkCount { count: 2 })));
+    }
+
+    #[tokio::test]
+    async fn encode_conformance_rejects_wrong_finish_reason() {
+        let engine = encode_mock(EncodeMockResponse::WrongFinish);
+        let result = check_encode_generate(&engine, "encode-mock").await;
+        assert!(matches!(result, Err(EncodeTerminalExpected)));
+    }
+
+    #[tokio::test]
+    async fn encode_conformance_rejects_generated_tokens() {
+        let engine = encode_mock(EncodeMockResponse::Tokens);
+        let result = check_encode_generate(&engine, "encode-mock").await;
+        assert!(matches!(result, Err(EncodeTokensNotEmpty { count: 1 })));
+    }
+
+    #[tokio::test]
+    async fn encode_conformance_rejects_inconsistent_usage() {
+        let engine = encode_mock(EncodeMockResponse::BadUsage);
+        let result = check_encode_generate(&engine, "encode-mock").await;
+        assert!(matches!(result, Err(EncodeUsageMismatch { .. })));
+    }
+
+    #[tokio::test]
+    async fn encode_conformance_rejects_ignored_cancellation() {
+        let engine = EncodeConformanceMock {
+            response: EncodeMockResponse::Valid,
+            honor_cancel: false,
+        };
+        let result = check_cancellation(
+            &engine,
+            "encode-mock",
+            LlmConformanceMode::Encode,
+            Duration::from_millis(150),
+        )
+        .await;
+        assert!(matches!(result, Err(CancellationIgnored)));
+    }
+
+    #[tokio::test]
+    async fn encode_conformance_validates_concurrent_streams() {
+        let engine = encode_mock(EncodeMockResponse::Empty);
+        let result =
+            check_concurrent_generates(&engine, "encode-mock", LlmConformanceMode::Encode).await;
+        assert!(matches!(result, Err(EncodeChunkCount { count: 0 })));
     }
 
     /// Minimal `RawEngine` for exercising the raw conformance kit itself.

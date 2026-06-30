@@ -18,6 +18,7 @@ use dynamo_kv_router::{
 use dynamo_llm::kv_router::publisher::KvEventPublisher;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::common::extensions::routing_constraints_to_kv;
 use dynamo_runtime::discovery::{DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::{DistributedRuntime, Worker};
 
@@ -483,16 +484,13 @@ impl RouterHandles {
         match outcome {
             // Advisory only: the external caller owns dispatch and lifecycle state.
             PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
-            PrefillQueryOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => {
+            PrefillQueryOutcome::QueueRejected { rejection } => {
                 tracing::warn!(
-                    reason = ?reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens = ?max_queued_isl_tokens,
-                    "Prefill query rejected due to router backpressure"
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Prefill query rejected by policy-class queue limit"
                 );
                 Err(QueryRouterResult::ErrBackpressure)
             }
@@ -567,16 +565,13 @@ impl RouterHandles {
                 overlap_blocks,
                 ..
             } => Ok((worker, overlap_blocks)),
-            dynamo_llm::kv_router::FindBestMatchOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => {
+            dynamo_llm::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
                 tracing::warn!(
-                    reason = ?reason,
-                    queued_isl_tokens,
-                    max_queued_isl_tokens = ?max_queued_isl_tokens,
-                    "Decode query rejected due to router backpressure"
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Decode query rejected by policy-class queue limit"
                 );
                 Err(QueryRouterResult::ErrBackpressure)
             }
@@ -818,6 +813,7 @@ pub unsafe extern "C" fn create_routers(
             Some(prefill_config),
             None,
             enforce_disagg,
+            None,
             model_name.clone(),
             actual_namespace.clone(),
             enable_eagle,
@@ -1149,6 +1145,7 @@ unsafe fn preprocess_request(
         .nvext
         .as_ref()
         .and_then(|nvext| nvext.routing_constraints.clone())
+        .map(routing_constraints_to_kv)
         .unwrap_or_default();
 
     let formatted_prompt = match preprocessor.apply_template(&request) {
