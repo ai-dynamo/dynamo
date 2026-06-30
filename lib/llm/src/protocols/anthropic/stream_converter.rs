@@ -404,8 +404,10 @@ impl AnthropicStreamConverter {
         }
 
         // A tool-call finish reason is the first explicit guarantee that all
-        // argument fragments in this choice are complete. Flush only after every
-        // choice and delta in the terminal chunk has been recorded.
+        // argument fragments in this choice are complete. `JailedStream` rewrites
+        // `Stop` to `ToolCalls` after emitting tool-call chunks; interrupted
+        // `Length`/`ContentFilter` streams use the EOF fallback below. Flush only
+        // after every choice and delta in the terminal chunk has been recorded.
         if should_flush_tool_blocks {
             self.append_buffered_tool_events(events);
         }
@@ -660,6 +662,9 @@ impl AnthropicStreamConverter {
             }
         }
 
+        // Keep this test path aligned with `process_chunk`: normal tool-call
+        // streams carry a tool-call finish reason, while interrupted streams use
+        // the EOF fallback in `emit_end_events_tagged`.
         if should_flush_tool_blocks {
             for (event_type, event) in self.drain_buffered_tool_events() {
                 events.push(make_tagged_event(event_type, &event));

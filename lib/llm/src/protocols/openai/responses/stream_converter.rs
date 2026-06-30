@@ -420,6 +420,9 @@ impl ResponseStreamConverter {
                 }
             }
 
+            // `JailedStream` rewrites `Stop` to `ToolCalls` after emitting
+            // tool-call chunks. Interrupted `Length`/`ContentFilter` streams
+            // retain their reason and use the EOF fallback in `append_end_events`.
             if choice.finish_reason == Some(FinishReason::ToolCalls)
                 || choice.finish_reason == Some(FinishReason::FunctionCall)
             {
@@ -436,6 +439,8 @@ impl ResponseStreamConverter {
         &mut self,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
+        // `started` is set only after `has_identity()` observes both required
+        // fields, matching Anthropic's `is_emit_ready()` identity requirement.
         let mut pending: Vec<_> = self
             .function_call_items
             .iter_mut()
