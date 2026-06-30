@@ -24,7 +24,13 @@ from pathlib import Path
 
 import uvloop
 
-from dynamo.llm import EngineType, EntrypointArgs, make_engine, run_input
+from dynamo.llm import (
+    EngineType,
+    EntrypointArgs,
+    ModelRuntimeConfig,
+    make_engine,
+    run_input,
+)
 from dynamo.runtime import DistributedRuntime
 
 
@@ -136,7 +142,9 @@ async def run():
     if flags.model_name is not None:
         entrypoint_kwargs["model_name"] = flags.model_name
     if flags.context_length is not None:
-        entrypoint_kwargs["context_length"] = flags.context_length
+        runtime_config = ModelRuntimeConfig()
+        runtime_config.context_length = flags.context_length
+        entrypoint_kwargs["runtime_config"] = runtime_config
     if flags.template_file is not None:
         entrypoint_kwargs["template_file"] = flags.template_file
     if flags.kv_cache_block_size is not None:

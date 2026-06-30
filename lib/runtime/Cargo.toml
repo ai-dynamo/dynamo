@@ -32,7 +32,7 @@ async-nats = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 tmq = { workspace = true }
-lru = { version = "0.12" }
+lru = { version = "0.16" }
 axum = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
@@ -78,10 +78,22 @@ bincode = { version = "1" }
 console-subscriber = { version = "0.4", optional = true }
 educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
-notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
+# FSEvents omits deletes for FileStore's revision-zero hard-link publication path.
+notify = { version = "6.1", default-features = false, features = ["macos_kqueue"] }
 libc = { version = "0.2" }
 local-ip-address = { version = "0.6.3" }
-log = { version = "0.4" }
+# `release_max_level_debug` compiles out `log::trace!` in release builds (a
+# compile-time `STATIC_MAX_LEVEL` check — no runtime cost, cannot be overridden).
+# Dependencies that log through the `log` crate — notably HF `tokenizers`, whose
+# `NormalizedString::transform_range` emits a `log::trace!` *per character*
+# during normalization — otherwise route tens of thousands of filtered-out
+# events per request through the `log`->tracing bridge + EnvFilter, which
+# profiling showed costing ~half the frontend CPU on the stock-tokenizer path.
+# We cap at `debug` (not `info`) so `log::debug!` from deps and Dynamo's own
+# `log::debug!` (e.g. the NATS transport) are still available in release; only
+# the per-char `trace!` spam is removed. Dynamo's own logging is `tracing` (a
+# separate crate), so `DYN_LOG=trace` still surfaces all Dynamo logs in release.
+log = { version = "0.4", features = ["release_max_level_debug"] }
 nuid = { version = "0.5" }
 once_cell = { version = "1" }
 percent-encoding = { version = "2.3.2" } # also used by tonic, reqwest, axum, etc

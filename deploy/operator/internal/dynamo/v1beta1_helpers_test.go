@@ -169,6 +169,7 @@ func TestGetDCDWorkloadComponentTypePreservesLegacyAlphaWorkerSelector(t *testin
 
 func TestToAlphaCheckpointConfigSetsNilIdentityThroughConverter(t *testing.T) {
 	got := ToAlphaCheckpointConfig(&v1beta1.ComponentCheckpointConfig{
+		Enabled:       true,
 		Mode:          v1beta1.CheckpointMode("auto"),
 		CheckpointRef: ptr.To("checkpoint"),
 	})

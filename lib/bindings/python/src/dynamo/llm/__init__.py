@@ -22,20 +22,19 @@ from dynamo._core import KvRouterConfig as KvRouterConfig
 from dynamo._core import LoRADownloader as LoRADownloader
 from dynamo._core import MediaDecoder as MediaDecoder
 from dynamo._core import MediaFetcher as MediaFetcher
-from dynamo._core import MockEngineArgs as MockEngineArgs
 from dynamo._core import ModelCardInstanceId as ModelCardInstanceId
 from dynamo._core import ModelInput as ModelInput
 from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
 from dynamo._core import ModelType as ModelType
+from dynamo._core import (
+    MultimodalEmbeddingCachePublisher as MultimodalEmbeddingCachePublisher,
+)
 from dynamo._core import OverlapScores as OverlapScores
-from dynamo._core import PlannerReplayBridge as PlannerReplayBridge
 from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
 from dynamo._core import RadixTree as RadixTree
-from dynamo._core import ReasoningConfig as ReasoningConfig
 from dynamo._core import RouterConfig as RouterConfig
 from dynamo._core import RouterMode as RouterMode
 from dynamo._core import RoutingConstraints as RoutingConstraints
-from dynamo._core import SglangArgs as SglangArgs
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import WorkerType as WorkerType
 from dynamo._core import compute_block_hash_for_seq as compute_block_hash_for_seq
@@ -45,10 +44,17 @@ from dynamo._core import make_engine
 from dynamo._core import register_model as register_model
 from dynamo._core import run_input
 from dynamo._core import run_kv_indexer as run_kv_indexer
-from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
+from dynamo._core import run_select_service as run_select_service
+from dynamo._core import run_slot_tracker as run_slot_tracker
 from dynamo._core import unregister_model as unregister_model
 
+try:
+    from dynamo._core import SelectionService as SelectionService
+except ImportError:
+    pass
+
 from .exceptions import HttpError
+from .exceptions import RouterQueueLimitExceeded as RouterQueueLimitExceeded
 
 
 class RoutedEngine(Protocol):
@@ -60,32 +66,3 @@ class RoutedEngine(Protocol):
 fetch_llm = fetch_model
 register_llm = register_model
 unregister_llm = unregister_model
-
-
-def run_mocker_trace_replay(
-    trace_file,
-    extra_engine_args=None,
-    router_config=None,
-    num_workers=1,
-    replay_concurrency=None,
-    router_mode="round_robin",
-    arrival_speedup_ratio=1.0,
-    trace_block_size=512,
-    trace_format="mooncake",
-    trace_shared_prefix_ratio=0.0,
-    trace_num_prefix_groups=0,
-):
-    return _run_mocker_trace_replay(
-        trace_file,
-        extra_engine_args=extra_engine_args,
-        router_config=router_config,
-        num_workers=num_workers,
-        replay_concurrency=replay_concurrency,
-        replay_mode="offline",
-        router_mode=router_mode,
-        arrival_speedup_ratio=arrival_speedup_ratio,
-        trace_block_size=trace_block_size,
-        trace_format=trace_format,
-        trace_shared_prefix_ratio=trace_shared_prefix_ratio,
-        trace_num_prefix_groups=trace_num_prefix_groups,
-    )

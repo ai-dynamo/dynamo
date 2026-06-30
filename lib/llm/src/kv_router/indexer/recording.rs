@@ -3,7 +3,9 @@
 
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed,
-    indexer::{KvIndexer, KvIndexerInterface, KvRouterError, ThreadPoolIndexer},
+    indexer::{
+        KvIndexer, KvIndexerInterface, KvRouterError, RoutingDecisionHashes, ThreadPoolIndexer,
+    },
     protocols::{LocalBlockHash, TokensWithHashes, WorkerWithDpRank},
 };
 use dynamo_tokens::SequenceHash;
@@ -71,7 +73,23 @@ impl Indexer {
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<(), KvRouterError> {
         self.recording_target()
-            .record_hashed(worker, local_hashes, sequence_hashes)
+            .record_routing_hashes(
+                worker,
+                RoutingDecisionHashes {
+                    local_hashes,
+                    sequence_hashes,
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn record_routing_decision_hashes(
+        &self,
+        worker: WorkerWithDpRank,
+        hashes: RoutingDecisionHashes,
+    ) -> Result<(), KvRouterError> {
+        self.recording_target()
+            .record_routing_hashes(worker, hashes)
             .await
     }
 
@@ -93,41 +111,51 @@ impl Indexer {
         let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
         let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
         target
-            .record_hashed(worker, local_hashes, sequence_hashes)
+            .record_routing_hashes(
+                worker,
+                RoutingDecisionHashes {
+                    local_hashes,
+                    sequence_hashes,
+                },
+            )
             .await
     }
 }
 
 impl<'a> RouteRecordingTarget<'a> {
-    async fn record_hashed(
+    async fn record_routing_hashes(
         self,
         worker: WorkerWithDpRank,
-        local_hashes: Vec<LocalBlockHash>,
-        sequence_hashes: Vec<SequenceHash>,
+        hashes: RoutingDecisionHashes,
     ) -> Result<(), KvRouterError> {
         match self {
             Self::Disabled => Ok(()),
             Self::PrimaryLocal(primary) => {
                 primary
-                    .process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
+                    .process_routing_decision_with_hashes(
+                        worker,
+                        hashes.local_hashes,
+                        hashes.sequence_hashes,
+                    )
                     .await
             }
             Self::PrimaryConcurrent(primary) => {
                 primary
-                    .process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
+                    .process_routing_decision_hash_slices(
+                        worker,
+                        &hashes.local_hashes,
+                        &hashes.sequence_hashes,
+                    )
                     .await
             }
             Self::PrimaryRemote(primary) => primary
-                .record_hashed_routing_decision(worker, local_hashes, sequence_hashes)
+                .record_hashed_routing_decision(worker, hashes.local_hashes, hashes.sequence_hashes)
                 .await
                 .map_err(|error| {
                     tracing::warn!(error = %error, "Remote indexer write failed");
                     KvRouterError::IndexerDroppedRequest
                 }),
-            Self::SideOverlay(side) => {
-                side.process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
-                    .await
-            }
+            Self::SideOverlay(side) => side.process_routing_decision_hashes(worker, hashes).await,
         }
     }
 }

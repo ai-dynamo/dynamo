@@ -14,6 +14,10 @@ pub struct TraceSimulationReport {
     pub prefix_cache_reused_ratio: f64,
     pub first_admission_prefix_cache_reused_ratio: f64,
     pub latency: TraceLatencyStats,
+    /// SLA-goodput stats. `Some` only when an SLA was supplied to the collector
+    /// (via `set_sla_thresholds`); `None` otherwise — goodput is undefined
+    /// without an SLA, so the `goodput_*` keys are omitted from the report.
+    pub goodput: Option<TraceGoodputStats>,
     /// Per-request records, one per admitted request. Populated by
     /// `TraceCollector::finish`. Intentionally NOT serialized into the summary
     /// JSON (see custom `Serialize` impl below) — consumers that want per-
@@ -38,6 +42,43 @@ pub struct TraceThroughputStats {
     pub input_throughput_tok_s: f64,
     pub output_throughput_tok_s: f64,
     pub total_throughput_tok_s: f64,
+    /// Provisioned worker-time per role, in **worker-seconds**: the time-integral
+    /// of the *provisioned* worker count over the whole simulated run. The
+    /// provisioned count is every worker physically holding a GPU (active +
+    /// starting-up + draining), so this captures the startup ramp and the
+    /// scale-down drain tail, unlike a snapshot of the active/serving count.
+    /// Populated on the collector by the runtime: `add_worker_seconds` accrues
+    /// the integral each clock advance (agg / disagg), and
+    /// `set_static_worker_count` covers the single-worker path; 0.0 otherwise.
+    /// Multiply by GPUs-per-worker for GPU-seconds (/3600 for GPU-hours).
+    /// Aggregated replay reports through `decode_worker_seconds`, leaving
+    /// `prefill_worker_seconds` at 0.0.
+    pub prefill_worker_seconds: f64,
+    pub decode_worker_seconds: f64,
+    /// GPUs per worker per role, derived from the mocker engine parallelism
+    /// (`MockEngineArgs::aic_gpus_per_worker` = aic_tp × aic_attention_dp); the
+    /// runtime sets it on the collector. 0 when not set (e.g. the online path).
+    pub prefill_gpus_per_worker: usize,
+    pub decode_gpus_per_worker: usize,
+    /// GPU-hours = Σ_role `worker_seconds × gpus_per_worker / 3600` — the
+    /// deployment's provisioned GPU-time (already including the startup ramp and
+    /// drain tail, since `*_worker_seconds` do). Computed in `finish()` straight
+    /// from the mocker's own worker parallelism, so it needs no external config.
+    pub gpu_hours: f64,
+}
+
+/// Goodput: throughput restricted to the requests that satisfy the SLA. Present
+/// on the report only when an SLA was supplied to the collector (goodput is
+/// undefined without one). A completed request counts as "good" per
+/// [`SlaThresholds::is_good`].
+#[derive(Debug, Clone)]
+pub struct TraceGoodputStats {
+    /// Completed requests that satisfied the SLA.
+    pub completed_requests: usize,
+    /// Good requests per second, over the simulated `duration_s`.
+    pub request_throughput_rps: f64,
+    /// Output tokens from good requests per second, over `duration_s`.
+    pub output_throughput_tok_s: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -152,7 +193,7 @@ impl Serialize for TraceSimulationReport {
     where
         S: Serializer,
     {
-        let mut map = serializer.serialize_map(Some(62))?;
+        let mut map = serializer.serialize_map(Some(70))?;
         map.serialize_entry("num_requests", &self.request_counts.num_requests)?;
         map.serialize_entry(
             "completed_requests",
@@ -184,6 +225,34 @@ impl Serialize for TraceSimulationReport {
             "total_throughput_tok_s",
             &self.throughput.total_throughput_tok_s,
         )?;
+        map.serialize_entry(
+            "prefill_worker_seconds",
+            &self.throughput.prefill_worker_seconds,
+        )?;
+        map.serialize_entry(
+            "decode_worker_seconds",
+            &self.throughput.decode_worker_seconds,
+        )?;
+        map.serialize_entry(
+            "prefill_gpus_per_worker",
+            &self.throughput.prefill_gpus_per_worker,
+        )?;
+        map.serialize_entry(
+            "decode_gpus_per_worker",
+            &self.throughput.decode_gpus_per_worker,
+        )?;
+        map.serialize_entry("gpu_hours", &self.throughput.gpu_hours)?;
+        if let Some(goodput) = &self.goodput {
+            map.serialize_entry("goodput_completed_requests", &goodput.completed_requests)?;
+            map.serialize_entry(
+                "goodput_request_throughput_rps",
+                &goodput.request_throughput_rps,
+            )?;
+            map.serialize_entry(
+                "goodput_output_throughput_tok_s",
+                &goodput.output_throughput_tok_s,
+            )?;
+        }
         map.serialize_entry("processed_tokens", &self.processed_tokens())?;
         map.serialize_entry("processed_tokens_per_s", &self.processed_tokens_per_s())?;
         map.serialize_entry(
@@ -275,6 +344,31 @@ struct TraceRequestStats {
     /// single-shot request lists.
     session_id: Option<String>,
     turn_index: Option<usize>,
+    detail: Option<Box<PerRequestDetail>>,
+}
+
+#[derive(Debug, Default)]
+struct PerRequestDetail {
+    prefill_reused_input_tokens: Option<usize>,
+    prefill_admit_ms: Option<f64>,
+    source_held_ms: Option<f64>,
+    destination_reserved_ms: Option<f64>,
+    destination_activated_ms: Option<f64>,
+    decode_admit_ms: Option<f64>,
+    source_released_ms: Option<f64>,
+    decode_reused_input_tokens: Option<usize>,
+    prefill_route_overlap_tokens: Option<usize>,
+    decode_route_overlap_tokens: Option<usize>,
+    terminal_status: Option<ReplayTerminalStatus>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayTerminalStatus {
+    Completed,
+    Rejected,
+    Canceled,
+    Failed,
 }
 
 /// Flat per-request record for `--report-jsonl` emission. One JSON line per
@@ -307,6 +401,16 @@ pub struct PerRequestRecord {
     pub reused_input_tokens: usize,
     pub prefill_worker_idx: Option<usize>,
     pub decode_worker_idx: Option<usize>,
+    pub prefill_admit_ms: Option<f64>,
+    pub source_held_ms: Option<f64>,
+    pub destination_reserved_ms: Option<f64>,
+    pub destination_activated_ms: Option<f64>,
+    pub decode_admit_ms: Option<f64>,
+    pub source_released_ms: Option<f64>,
+    pub decode_reused_input_tokens: Option<usize>,
+    pub prefill_route_overlap_tokens: Option<usize>,
+    pub decode_route_overlap_tokens: Option<usize>,
+    pub terminal_status: ReplayTerminalStatus,
 }
 
 #[cfg(test)]
@@ -322,6 +426,56 @@ pub(crate) struct TraceRequestStatsSnapshot {
     pub first_admission_reused_input_tokens: usize,
 }
 
+/// SLA thresholds used to classify requests for goodput. Mirrors Spica's
+/// `SLATarget` shape: set `ttft_ms` + `itl_ms` together, or `e2e_ms` alone.
+/// Only the thresholds that are set are checked, so an e2e-only SLA gates on
+/// e2e and a ttft+itl SLA gates on both. All-`None` (the default) means "no
+/// SLA", which suppresses goodput entirely.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SlaThresholds {
+    pub ttft_ms: Option<f64>,
+    pub itl_ms: Option<f64>,
+    pub e2e_ms: Option<f64>,
+}
+
+impl SlaThresholds {
+    pub(crate) fn is_set(&self) -> bool {
+        self.ttft_ms.is_some() || self.itl_ms.is_some() || self.e2e_ms.is_some()
+    }
+
+    /// Whether a completed request satisfies the SLA. Each *set* threshold must
+    /// hold; unset thresholds are ignored.
+    ///
+    /// - `ttft_ms`: time-to-first-token ≤ bound.
+    /// - `e2e_ms`: end-to-end latency ≤ bound.
+    /// - `itl_ms`: the per-request **average inter-token latency** ≤ bound,
+    ///   computed the same way as aiperf / genai-perf:
+    ///   `avg_itl = (e2e_ms − ttft_ms) / (output_length − 1)`. When
+    ///   `output_length ≤ 1` there is no inter-token interval, so the ITL check
+    ///   is skipped (treated as satisfied).
+    fn is_good(&self, ttft_ms: f64, e2e_ms: f64, output_length: usize) -> bool {
+        if let Some(bound) = self.e2e_ms
+            && e2e_ms > bound
+        {
+            return false;
+        }
+        if let Some(bound) = self.ttft_ms
+            && ttft_ms > bound
+        {
+            return false;
+        }
+        if let Some(bound) = self.itl_ms
+            && output_length > 1
+        {
+            let avg_itl_ms = (e2e_ms - ttft_ms) / (output_length as f64 - 1.0);
+            if avg_itl_ms > bound {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct TraceCollector {
     requests: FxHashMap<Uuid, TraceRequestStats>,
@@ -329,6 +483,24 @@ pub(crate) struct TraceCollector {
     /// Default `false` to skip the ~100ms terminal pass + ~30MB allocation
     /// when the caller doesn't need per-request granularity.
     capture_per_request: bool,
+    /// SLA thresholds for goodput classification. All-`None` by default, in
+    /// which case `finish()` leaves `TraceSimulationReport::goodput` as `None`.
+    sla: SlaThresholds,
+    /// Accumulated provisioned worker-seconds per role, integrated by the
+    /// runtime over the sim clock (see `add_worker_seconds`). Used for the
+    /// runtimes that have an event loop (agg / disagg), where the provisioned
+    /// count varies with startup / drain / scaling.
+    prefill_worker_seconds: f64,
+    decode_worker_seconds: f64,
+    /// Static provisioned worker counts `(prefill, decode)` for runtimes with a
+    /// fixed worker (the single-worker path, which has no event loop to
+    /// integrate). When `Some`, `finish()` derives worker-seconds as
+    /// `count × duration_s` instead of using the accumulator.
+    static_worker_count: Option<(usize, usize)>,
+    /// GPUs per worker per role, from the mocker engine parallelism. Used in
+    /// `finish()` to turn worker-seconds into gpu_hours.
+    prefill_gpus_per_worker: usize,
+    decode_gpus_per_worker: usize,
 }
 
 impl TraceRequestStats {
@@ -372,6 +544,37 @@ impl TraceCollector {
         self.capture_per_request = value;
     }
 
+    /// Set the SLA thresholds used to classify goodput in `finish()`. With no
+    /// SLA set (the default), the report's `goodput` field stays `None`.
+    pub(crate) fn set_sla_thresholds(&mut self, sla: SlaThresholds) {
+        self.sla = sla;
+    }
+
+    /// Add provisioned worker-seconds for the interval just elapsed. The runtime
+    /// calls this each time it advances the sim clock, with
+    /// `provisioned_count × dt_ms / 1000` per role — the time-integral of the
+    /// *provisioned* worker count (active + starting-up + draining), so the
+    /// startup ramp and drain tail are included. Agg replay passes `prefill = 0`
+    /// and reports through `decode`.
+    pub(crate) fn add_worker_seconds(&mut self, prefill: f64, decode: f64) {
+        self.prefill_worker_seconds += prefill;
+        self.decode_worker_seconds += decode;
+    }
+
+    /// Declare a fixed `(prefill, decode)` provisioned worker count for a runtime
+    /// with no event loop to integrate (the single-worker path). `finish()` then
+    /// reports `count × duration_s` worker-seconds.
+    pub(crate) fn set_static_worker_count(&mut self, prefill: usize, decode: usize) {
+        self.static_worker_count = Some((prefill, decode));
+    }
+
+    /// Set GPUs-per-worker per role (from the mocker engine parallelism). Used
+    /// in `finish()` to derive gpu_hours from the worker-seconds.
+    pub(crate) fn set_gpus_per_worker(&mut self, prefill: usize, decode: usize) {
+        self.prefill_gpus_per_worker = prefill;
+        self.decode_gpus_per_worker = decode;
+    }
+
     pub(crate) fn on_arrival(
         &mut self,
         uuid: Uuid,
@@ -393,6 +596,9 @@ impl TraceCollector {
                 session_id: None,
                 turn_index: None,
                 first_admission_reused_input_tokens: 0,
+                detail: self
+                    .capture_per_request
+                    .then(|| Box::new(PerRequestDetail::default())),
             },
         );
     }
@@ -451,6 +657,91 @@ impl TraceCollector {
         }
     }
 
+    pub(crate) fn on_prefill_admit(
+        &mut self,
+        uuid: Uuid,
+        admit_time_ms: f64,
+        reused_input_tokens: usize,
+    ) {
+        self.on_admit(uuid, admit_time_ms, reused_input_tokens);
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.prefill_admit_ms.get_or_insert(admit_time_ms);
+            detail.prefill_reused_input_tokens = Some(
+                detail
+                    .prefill_reused_input_tokens
+                    .unwrap_or_default()
+                    .max(reused_input_tokens),
+            );
+        }
+    }
+
+    pub(crate) fn on_decode_admit(
+        &mut self,
+        uuid: Uuid,
+        admit_time_ms: f64,
+        reused_input_tokens: usize,
+    ) {
+        self.on_admit(uuid, admit_time_ms, reused_input_tokens);
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.decode_admit_ms.get_or_insert(admit_time_ms);
+            detail.decode_reused_input_tokens = Some(
+                detail
+                    .decode_reused_input_tokens
+                    .unwrap_or_default()
+                    .max(reused_input_tokens),
+            );
+        }
+    }
+
+    pub(crate) fn on_source_held(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.source_held_ms.get_or_insert(at_ms);
+        }
+    }
+
+    pub(crate) fn on_destination_reserved(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.destination_reserved_ms.get_or_insert(at_ms);
+        }
+    }
+
+    pub(crate) fn on_destination_activated(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.destination_activated_ms.get_or_insert(at_ms);
+        }
+    }
+
+    pub(crate) fn on_source_released(&mut self, uuid: Uuid, at_ms: f64) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.source_released_ms.get_or_insert(at_ms);
+        }
+    }
+
+    pub(crate) fn on_prefill_route_overlap(&mut self, uuid: Uuid, tokens: usize) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.prefill_route_overlap_tokens.get_or_insert(tokens);
+        }
+    }
+
+    pub(crate) fn on_decode_route_overlap(&mut self, uuid: Uuid, tokens: usize) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.decode_route_overlap_tokens.get_or_insert(tokens);
+        }
+    }
+
+    pub(crate) fn on_terminal(&mut self, uuid: Uuid, status: ReplayTerminalStatus) {
+        if let Some(detail) = self.detail_mut(uuid) {
+            detail.terminal_status.get_or_insert(status);
+        }
+    }
+
+    fn detail_mut(&mut self, uuid: Uuid) -> Option<&mut PerRequestDetail> {
+        if !self.capture_per_request {
+            return None;
+        }
+        self.requests.get_mut(&uuid)?.detail.as_deref_mut()
+    }
+
     pub(crate) fn on_token(&mut self, uuid: Uuid, token_time_ms: f64) {
         if let Some(stats) = self.requests.get_mut(&uuid) {
             stats.token_times_ms.push(token_time_ms);
@@ -477,6 +768,12 @@ impl TraceCollector {
         } else {
             Vec::new()
         };
+        let sla = self.sla;
+        let static_worker_count = self.static_worker_count;
+        let accumulated_prefill_worker_seconds = self.prefill_worker_seconds;
+        let accumulated_decode_worker_seconds = self.decode_worker_seconds;
+        let prefill_gpus_per_worker = self.prefill_gpus_per_worker;
+        let decode_gpus_per_worker = self.decode_gpus_per_worker;
         let requests = self.requests;
         let request_count = requests.len();
         let mut ttfts = Vec::with_capacity(request_count);
@@ -491,6 +788,9 @@ impl TraceCollector {
         let mut completed_requests = 0usize;
         let mut total_reused_tokens = 0usize;
         let mut total_first_admission_reused_tokens = 0usize;
+        // Goodput: completed requests (and their output tokens) that satisfy the SLA.
+        let mut goodput_requests = 0usize;
+        let mut goodput_output_tokens = 0usize;
 
         for stats in requests.values() {
             if stats.first_admit_ms.is_none() {
@@ -515,6 +815,12 @@ impl TraceCollector {
             ttfts.push(ttft_ms);
             e2e_latencies.push(e2e_ms);
 
+            // Goodput classification (aiperf avg-ITL; see SlaThresholds::is_good).
+            if sla.is_set() && sla.is_good(ttft_ms, e2e_ms, stats.output_length) {
+                goodput_requests += 1;
+                goodput_output_tokens += stats.output_length;
+            }
+
             if let Some(ttst_ms) = stats.ttst_ms() {
                 ttsts.push(ttst_ms);
             }
@@ -531,7 +837,27 @@ impl TraceCollector {
         }
 
         let duration_s = (duration_ms / 1000.0).max(1e-9);
+        // Provisioned worker-seconds: static count × duration for the
+        // single-worker path, else the runtime-integrated accumulator.
+        let (prefill_worker_seconds, decode_worker_seconds) = match static_worker_count {
+            Some((prefill, decode)) => (prefill as f64 * duration_s, decode as f64 * duration_s),
+            None => (
+                accumulated_prefill_worker_seconds,
+                accumulated_decode_worker_seconds,
+            ),
+        };
+        // GPU-hours straight from the mocker's own worker parallelism (no
+        // external GPU-count config). 0 when gpus_per_worker was not set.
+        let gpu_hours = (prefill_worker_seconds * prefill_gpus_per_worker as f64
+            + decode_worker_seconds * decode_gpus_per_worker as f64)
+            / 3600.0;
         let itl_distribution = build_distribution_stats(itls);
+        // Goodput only when an SLA was supplied; otherwise it is undefined.
+        let goodput = sla.is_set().then(|| TraceGoodputStats {
+            completed_requests: goodput_requests,
+            request_throughput_rps: goodput_requests as f64 / duration_s,
+            output_throughput_tok_s: goodput_output_tokens as f64 / duration_s,
+        });
         TraceSimulationReport {
             request_counts: TraceRequestCounts {
                 num_requests: request_count,
@@ -547,6 +873,11 @@ impl TraceCollector {
                 output_throughput_tok_s: total_output_tokens as f64 / duration_s,
                 total_throughput_tok_s: (total_input_tokens + total_output_tokens) as f64
                     / duration_s,
+                prefill_worker_seconds,
+                decode_worker_seconds,
+                prefill_gpus_per_worker,
+                decode_gpus_per_worker,
+                gpu_hours,
             },
             prefix_cache_reused_ratio: if total_input_tokens == 0 {
                 0.0
@@ -571,6 +902,7 @@ impl TraceCollector {
                     output_token_throughput_per_user,
                 ),
             },
+            goodput,
             per_request,
         }
     }
@@ -579,42 +911,48 @@ impl TraceCollector {
     /// Used by the `--report-jsonl` CLI path to emit one JSON object per
     /// request to the JSONL file, mirroring AIPerf's per-request output shape.
     ///
-    /// Only fully-completed requests (admitted, first token observed, last
-    /// token observed) are emitted, so the JSONL row count matches the
-    /// completed-request count in the aggregate report. Incomplete requests
-    /// (e.g. truncated by a sim-time cap) appear in the summary's incomplete
-    /// counters but not here.
+    /// Only requests with a terminal outcome are emitted. Requests truncated
+    /// by a simulation-time cap have no terminal outcome and remain omitted.
     pub fn per_request_records(&self) -> Vec<PerRequestRecord> {
         let mut records = Vec::with_capacity(self.requests.len());
         for (uuid, stats) in &self.requests {
-            let Some(first_admit_ms) = stats.first_admit_ms else {
+            let Some(detail) = stats.detail.as_deref() else {
                 continue;
             };
-            let Some(first_token_ms) = stats.first_token_ms() else {
+            let Some(terminal_status) = detail.terminal_status else {
                 continue;
             };
-            let Some(last_token_ms) = stats.last_token_ms() else {
-                continue;
-            };
-            let ttft_ms = (first_token_ms - stats.arrival_time_ms).max(0.0);
-            let e2e_latency_ms = (last_token_ms - stats.arrival_time_ms).max(0.0);
+            let first_token_ms = stats.first_token_ms();
+            let last_token_ms = stats.last_token_ms();
             records.push(PerRequestRecord {
                 session_id: stats.session_id.clone(),
                 turn_index: stats.turn_index,
                 uuid: uuid.to_string(),
                 arrival_time_ms: stats.arrival_time_ms,
-                first_admit_ms: Some(first_admit_ms),
-                first_token_ms: Some(first_token_ms),
-                last_token_ms: Some(last_token_ms),
-                ttft_ms: Some(ttft_ms),
+                first_admit_ms: stats.first_admit_ms,
+                first_token_ms,
+                last_token_ms,
+                ttft_ms: first_token_ms.map(|time| (time - stats.arrival_time_ms).max(0.0)),
                 ttst_ms: stats.ttst_ms(),
-                e2e_latency_ms: Some(e2e_latency_ms),
+                e2e_latency_ms: last_token_ms.map(|time| (time - stats.arrival_time_ms).max(0.0)),
                 itl_ms: stats.mean_tpot_ms(),
                 input_length: stats.input_length,
                 output_length: stats.output_length,
-                reused_input_tokens: stats.reused_input_tokens,
+                reused_input_tokens: detail
+                    .prefill_reused_input_tokens
+                    .unwrap_or(stats.reused_input_tokens),
                 prefill_worker_idx: stats.prefill_worker_idx,
                 decode_worker_idx: stats.decode_worker_idx,
+                prefill_admit_ms: detail.prefill_admit_ms,
+                source_held_ms: detail.source_held_ms,
+                destination_reserved_ms: detail.destination_reserved_ms,
+                destination_activated_ms: detail.destination_activated_ms,
+                decode_admit_ms: detail.decode_admit_ms,
+                source_released_ms: detail.source_released_ms,
+                decode_reused_input_tokens: detail.decode_reused_input_tokens,
+                prefill_route_overlap_tokens: detail.prefill_route_overlap_tokens,
+                decode_route_overlap_tokens: detail.decode_route_overlap_tokens,
+                terminal_status,
             });
         }
         // Stable ordering: by arrival_time_ms (with uuid as tiebreaker) so the
@@ -800,13 +1138,21 @@ mod tests {
         collector.set_capture_per_request(true);
         let uuid = Uuid::from_u128(1);
         collector.on_arrival(uuid, 0.0, 100, 4);
-        collector.on_admit(uuid, 5.0, 30);
+        collector.on_prefill_route_overlap(uuid, 64);
+        collector.on_prefill_admit(uuid, 5.0, 30);
+        collector.on_source_held(uuid, 10.0);
+        collector.on_destination_reserved(uuid, 12.0);
+        collector.on_destination_activated(uuid, 20.0);
+        collector.on_source_released(uuid, 21.0);
+        collector.on_decode_route_overlap(uuid, 32);
+        collector.on_decode_admit(uuid, 25.0, 40);
         collector.on_prefill_assigned(uuid, 2);
         collector.on_decode_assigned(uuid, 7);
         collector.on_token(uuid, 50.0);
         collector.on_token(uuid, 60.0);
         collector.on_token(uuid, 75.0);
         collector.on_token(uuid, 95.0);
+        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
         assert_eq!(report.per_request.len(), 1);
@@ -826,6 +1172,16 @@ mod tests {
         assert_eq!(rec.reused_input_tokens, 30);
         assert_eq!(rec.prefill_worker_idx, Some(2));
         assert_eq!(rec.decode_worker_idx, Some(7));
+        assert_eq!(rec.prefill_admit_ms, Some(5.0));
+        assert_eq!(rec.source_held_ms, Some(10.0));
+        assert_eq!(rec.destination_reserved_ms, Some(12.0));
+        assert_eq!(rec.destination_activated_ms, Some(20.0));
+        assert_eq!(rec.source_released_ms, Some(21.0));
+        assert_eq!(rec.decode_admit_ms, Some(25.0));
+        assert_eq!(rec.decode_reused_input_tokens, Some(40));
+        assert_eq!(rec.prefill_route_overlap_tokens, Some(64));
+        assert_eq!(rec.decode_route_overlap_tokens, Some(32));
+        assert_eq!(rec.terminal_status, ReplayTerminalStatus::Completed);
     }
 
     /// A conditional-prefill bypass is reflected by `prefill_worker_idx ==
@@ -842,6 +1198,7 @@ mod tests {
         collector.on_decode_assigned(uuid, 1);
         collector.on_token(uuid, 30.0);
         collector.on_token(uuid, 45.0);
+        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
         assert_eq!(report.per_request.len(), 1);
@@ -866,10 +1223,135 @@ mod tests {
         collector.on_token(uuid, 50.0);
         collector.on_token(uuid, 60.0);
 
+        assert!(collector.requests[&uuid].detail.is_none());
+
         let report = collector.finish();
         assert!(report.per_request.is_empty());
         // Summary stats still work.
         assert_eq!(report.request_counts.completed_requests, 1);
+    }
+
+    /// Register a completed request: arrival, output length (osl), and the
+    /// explicit per-output-token timestamps (first → ttft, last → e2e).
+    fn add_completed(
+        collector: &mut TraceCollector,
+        uuid_n: u128,
+        arrival_ms: f64,
+        output_length: usize,
+        token_times_ms: &[f64],
+    ) {
+        let uuid = Uuid::from_u128(uuid_n);
+        collector.on_arrival(uuid, arrival_ms, 100, output_length);
+        collector.on_admit(uuid, arrival_ms, 0);
+        collector.on_decode_assigned(uuid, 0);
+        for &t in token_times_ms {
+            collector.on_token(uuid, t);
+        }
+    }
+
+    /// Goodput classifies a request "good" using aiperf's average ITL,
+    /// `avg_itl = (e2e − ttft) / (osl − 1)`, and skips the ITL check when
+    /// `osl ≤ 1`.
+    #[test]
+    fn goodput_classifies_by_aiperf_avg_itl() {
+        let mut collector = TraceCollector::default();
+        collector.set_sla_thresholds(SlaThresholds {
+            ttft_ms: Some(150.0),
+            itl_ms: Some(30.0),
+            e2e_ms: None,
+        });
+        // A: ttft=100, e2e=200, osl=3 → avg_itl=(200−100)/2=50 > 30 → BAD.
+        add_completed(&mut collector, 1, 0.0, 3, &[100.0, 150.0, 200.0]);
+        // B: ttft=100, e2e=140, osl=3 → avg_itl=20 ≤ 30, ttft ok → GOOD.
+        add_completed(&mut collector, 2, 0.0, 3, &[100.0, 120.0, 140.0]);
+        // C: osl=1 → ITL check skipped; ttft=100 ≤ 150 → GOOD.
+        add_completed(&mut collector, 3, 0.0, 1, &[100.0]);
+
+        let goodput = collector
+            .finish()
+            .goodput
+            .expect("SLA set → goodput present");
+        assert_eq!(goodput.completed_requests, 2); // B and C
+        // duration = max last token = 200ms → 0.2s; good output tokens = 3 (B) + 1 (C) = 4.
+        assert!((goodput.output_throughput_tok_s - 4.0 / 0.2).abs() < 1e-6);
+        assert!((goodput.request_throughput_rps - 2.0 / 0.2).abs() < 1e-6);
+    }
+
+    /// A request straddling the ITL bound flips good↔bad at the boundary.
+    #[test]
+    fn goodput_itl_boundary_is_inclusive() {
+        let sla = SlaThresholds {
+            ttft_ms: None,
+            itl_ms: Some(50.0),
+            e2e_ms: None,
+        };
+        // avg_itl = (200−100)/(3−1) = 50.0, exactly the bound → good (≤).
+        let mut at_bound = TraceCollector::default();
+        at_bound.set_sla_thresholds(sla);
+        add_completed(&mut at_bound, 1, 0.0, 3, &[100.0, 150.0, 200.0]);
+        assert_eq!(at_bound.finish().goodput.unwrap().completed_requests, 1);
+        // avg_itl = (201−100)/2 = 50.5 > 50 → bad.
+        let mut over = TraceCollector::default();
+        over.set_sla_thresholds(sla);
+        add_completed(&mut over, 1, 0.0, 3, &[100.0, 150.0, 201.0]);
+        assert_eq!(over.finish().goodput.unwrap().completed_requests, 0);
+    }
+
+    /// An e2e-only SLA gates on end-to-end latency alone.
+    #[test]
+    fn goodput_e2e_only_sla() {
+        let mut collector = TraceCollector::default();
+        collector.set_sla_thresholds(SlaThresholds {
+            ttft_ms: None,
+            itl_ms: None,
+            e2e_ms: Some(150.0),
+        });
+        add_completed(&mut collector, 1, 0.0, 2, &[100.0, 200.0]); // e2e=200 > 150 → BAD
+        add_completed(&mut collector, 2, 0.0, 2, &[60.0, 120.0]); // e2e=120 ≤ 150 → GOOD
+        assert_eq!(collector.finish().goodput.unwrap().completed_requests, 1);
+    }
+
+    /// No SLA → goodput is omitted entirely.
+    #[test]
+    fn goodput_absent_without_sla() {
+        let mut collector = TraceCollector::default();
+        add_completed(&mut collector, 1, 0.0, 2, &[10.0, 20.0]);
+        assert!(collector.finish().goodput.is_none());
+    }
+
+    /// Worker-seconds: the accumulator (agg/disagg) sums runtime contributions;
+    /// the static path (single worker) reports `count × duration_s`.
+    #[test]
+    fn worker_seconds_accumulated_and_static() {
+        let mut accumulated = TraceCollector::default();
+        add_completed(&mut accumulated, 1, 0.0, 2, &[10.0, 20.0]);
+        accumulated.add_worker_seconds(1.5, 4.0);
+        accumulated.add_worker_seconds(0.5, 1.0);
+        let report = accumulated.finish();
+        assert!((report.throughput.prefill_worker_seconds - 2.0).abs() < 1e-9);
+        assert!((report.throughput.decode_worker_seconds - 5.0).abs() < 1e-9);
+
+        let mut static_single = TraceCollector::default();
+        static_single.set_static_worker_count(0, 1);
+        add_completed(&mut static_single, 1, 0.0, 2, &[100.0, 200.0]); // duration = 0.2s
+        let report = static_single.finish();
+        assert!(report.throughput.prefill_worker_seconds.abs() < 1e-9);
+        assert!((report.throughput.decode_worker_seconds - 0.2).abs() < 1e-9);
+    }
+
+    /// gpu_hours derives from worker-seconds x the per-role GPUs/worker that the
+    /// runtime records from the mocker's own parallelism.
+    #[test]
+    fn gpu_hours_from_worker_seconds_and_gpus_per_worker() {
+        let mut collector = TraceCollector::default();
+        collector.set_gpus_per_worker(2, 4); // prefill 2 GPUs/worker, decode 4
+        add_completed(&mut collector, 1, 0.0, 2, &[100.0, 200.0]);
+        collector.add_worker_seconds(10.0, 5.0); // prefill_ws=10, decode_ws=5
+        let report = collector.finish();
+        assert_eq!(report.throughput.prefill_gpus_per_worker, 2);
+        assert_eq!(report.throughput.decode_gpus_per_worker, 4);
+        // gpu_hours = (10*2 + 5*4) / 3600 = 40 / 3600
+        assert!((report.throughput.gpu_hours - 40.0 / 3600.0).abs() < 1e-9);
     }
 
     /// Records emerge in arrival-time order, so the JSONL file produced from
@@ -885,6 +1367,7 @@ mod tests {
             collector.on_admit(uuid, arrival + 1.0, 0);
             collector.on_decode_assigned(uuid, 0);
             collector.on_token(uuid, arrival + 5.0);
+            collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
         }
         let report = collector.finish();
         let arrivals: Vec<f64> = report
@@ -909,6 +1392,7 @@ mod tests {
         collector.on_decode_assigned(uuid, 1);
         collector.on_token(uuid, 20.0);
         collector.on_token(uuid, 25.0);
+        collector.on_terminal(uuid, ReplayTerminalStatus::Completed);
 
         let report = collector.finish();
         let line = serde_json::to_string(&report.per_request[0])
@@ -923,6 +1407,46 @@ mod tests {
         assert_eq!(parsed["prefill_worker_idx"], 0);
         assert_eq!(parsed["decode_worker_idx"], 1);
         assert!(parsed["itl_ms"].is_number());
+        assert_eq!(parsed["terminal_status"], "completed");
+    }
+
+    #[test]
+    fn terminal_failures_emit_nullable_latencies_and_unfinished_requests_are_omitted() {
+        let mut collector = TraceCollector::default();
+        collector.set_capture_per_request(true);
+        for (uuid_n, status) in [
+            (1, ReplayTerminalStatus::Rejected),
+            (2, ReplayTerminalStatus::Canceled),
+            (3, ReplayTerminalStatus::Failed),
+        ] {
+            let uuid = Uuid::from_u128(uuid_n);
+            collector.on_arrival(uuid, uuid_n as f64, 64, 2);
+            collector.on_terminal(uuid, status);
+        }
+        collector.on_arrival(Uuid::from_u128(4), 4.0, 64, 2);
+
+        let report = collector.finish();
+
+        assert_eq!(report.per_request.len(), 3);
+        assert_eq!(
+            report
+                .per_request
+                .iter()
+                .map(|record| record.terminal_status)
+                .collect::<Vec<_>>(),
+            vec![
+                ReplayTerminalStatus::Rejected,
+                ReplayTerminalStatus::Canceled,
+                ReplayTerminalStatus::Failed,
+            ]
+        );
+        assert!(report.per_request.iter().all(|record| {
+            record.first_admit_ms.is_none()
+                && record.first_token_ms.is_none()
+                && record.last_token_ms.is_none()
+                && record.ttft_ms.is_none()
+                && record.e2e_latency_ms.is_none()
+        }));
     }
 
     #[test]

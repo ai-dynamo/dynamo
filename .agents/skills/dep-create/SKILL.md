@@ -5,6 +5,11 @@ description: Create or update Dynamo Enhancement Proposals as GitHub issues, inc
 
 # Skill: Create a DEP as a GitHub Issue
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 ## Purpose
 
 Create a new Dynamo Enhancement Proposal (DEP) as a GitHub Issue on

@@ -51,30 +51,6 @@ impl<T: Send + Sync + 'static> Context<T> {
         }
     }
 
-    pub fn with_controller_and_metadata(
-        current: T,
-        controller: Controller,
-        metadata: BTreeMap<String, String>,
-    ) -> Self {
-        Context {
-            current,
-            controller: Arc::new(controller),
-            registry: Registry::new(),
-            stages: Vec::new(),
-            metadata,
-        }
-    }
-
-    pub fn with_id(current: T, id: String) -> Self {
-        Context {
-            current,
-            controller: Arc::new(Controller::new(id)),
-            registry: Registry::new(),
-            stages: Vec::new(),
-            metadata: BTreeMap::new(),
-        }
-    }
-
     pub fn with_id_and_metadata(
         current: T,
         id: String,
@@ -132,6 +108,14 @@ impl<T: Send + Sync + 'static> Context<T> {
     /// Retrieve an object from the registry by key and type.
     pub fn get<V: Send + Sync + 'static>(&self, key: &str) -> Result<Arc<V>, String> {
         self.registry.get_shared(key)
+    }
+
+    /// Retrieve an optional object from the registry by key and type.
+    pub fn get_optional<V: Send + Sync + 'static>(
+        &self,
+        key: &str,
+    ) -> Result<Option<Arc<V>>, String> {
+        self.registry.get_shared_optional(key)
     }
 
     /// Clone a unique object from the registry by key and type.

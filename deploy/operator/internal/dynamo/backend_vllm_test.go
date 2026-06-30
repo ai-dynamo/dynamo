@@ -682,6 +682,36 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 
 func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 	backend := &VLLMBackend{ParentGraphDeploymentName: "test-dgd"}
+	mpMultinodePodSpec := func(image string) *corev1.PodSpec {
+		return &corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:    "main",
+					Image:   image,
+					Command: []string{"python3"},
+					Args:    []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16", distributedExecutorFlag, "mp"},
+				},
+			},
+		}
+	}
+	dpMultinodePodSpec := func(image string) *corev1.PodSpec {
+		return &corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:    "main",
+					Image:   image,
+					Command: []string{"python3"},
+					Args: []string{
+						"-m", "dynamo.vllm",
+						tensorParallelSizeFlag, "1",
+						dataParallelSizeFlag, "16",
+						"--data-parallel-hybrid-lb",
+						dataParallelSizeLocalFlag, "8",
+					},
+				},
+			},
+		}
+	}
 
 	tests := []struct {
 		name                string
@@ -695,26 +725,75 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 		expectedLeaderHost  string
 	}{
 		{
-			name:          "mp worker with Grove deployer injects init container",
-			numberOfNodes: 2,
-			role:          RoleWorker,
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
-				},
-			},
-			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialPodSpec: &corev1.PodSpec{
-				Containers: []corev1.Container{
-					{Name: "main", Image: "vllm:latest"},
-				},
-			},
+			name:                "mp worker with Grove deployer injects init container",
+			numberOfNodes:       2,
+			role:                RoleWorker,
+			multinodeDeployer:   &GroveMultinodeDeployer{},
+			initialPodSpec:      mpMultinodePodSpec("vllm:latest"),
 			expectInitContainer: true,
 			expectedInitImage:   "vllm:latest",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
 		{
-			name:          "mp worker with LWS deployer injects init container",
+			name:                "mp worker with LWS deployer injects init container",
+			numberOfNodes:       2,
+			role:                RoleWorker,
+			multinodeDeployer:   &LWSMultinodeDeployer{},
+			initialPodSpec:      mpMultinodePodSpec("vllm:v2"),
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:v2",
+			expectedLeaderHost:  "${LWS_LEADER_ADDRESS}",
+		},
+		{
+			name:              "mp worker with executor flag in command injects init container",
+			numberOfNodes:     2,
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "main",
+						Image:   "vllm:command",
+						Command: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16", distributedExecutorFlag, "mp"},
+					},
+				},
+			},
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:command",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+		},
+		{
+			name:              "mp worker with shell-form command injects init container",
+			numberOfNodes:     2,
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "vllm:shell-command",
+						Command: []string{
+							"sh",
+							"-c",
+							fmt.Sprintf("exec python3 -m dynamo.vllm %s 16 %s    mp", tensorParallelSizeFlag, distributedExecutorFlag),
+						},
+					},
+				},
+			},
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:shell-command",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+		},
+		{
+			name:                "mp leader does not inject init container",
+			numberOfNodes:       2,
+			role:                RoleLeader,
+			multinodeDeployer:   &GroveMultinodeDeployer{},
+			initialPodSpec:      mpMultinodePodSpec("vllm:latest"),
+			expectInitContainer: false,
+		},
+		{
+			name:          "data parallel worker with mp origin does not inject init container",
 			numberOfNodes: 2,
 			role:          RoleWorker,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -722,42 +801,23 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
 				},
 			},
-			multinodeDeployer: &LWSMultinodeDeployer{},
-			initialPodSpec: &corev1.PodSpec{
-				Containers: []corev1.Container{
-					{Name: "main", Image: "vllm:v2"},
-				},
-			},
-			expectInitContainer: true,
-			expectedInitImage:   "vllm:v2",
-			expectedLeaderHost:  "${LWS_LEADER_ADDRESS}",
-		},
-		{
-			name:          "mp leader does not inject init container",
-			numberOfNodes: 2,
-			role:          RoleLeader,
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
-				},
-			},
-			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialPodSpec: &corev1.PodSpec{
-				Containers: []corev1.Container{
-					{Name: "main", Image: "vllm:latest"},
-				},
-			},
+			multinodeDeployer:   &LWSMultinodeDeployer{},
+			initialPodSpec:      dpMultinodePodSpec("vllm:dp"),
 			expectInitContainer: false,
 		},
 		{
-			name:              "ray worker does not inject init container (legacy)",
+			name:              "non-mp worker command does not inject init container",
 			numberOfNodes:     2,
 			role:              RoleWorker,
-			component:         &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialPodSpec: &corev1.PodSpec{
 				Containers: []corev1.Container{
-					{Name: "main", Image: "vllm:latest"},
+					{
+						Name:    "main",
+						Image:   "vllm:latest",
+						Command: []string{"/bin/sh", "-c"},
+						Args:    []string{"ray start --address=leader:6379 --block"},
+					},
 				},
 			},
 			expectInitContainer: false,
@@ -780,119 +840,18 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			expectInitContainer: false,
 		},
 		{
-			name:          "mp worker preserves existing init containers",
-			numberOfNodes: 2,
-			role:          RoleWorker,
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
-				},
-			},
+			name:              "mp worker preserves existing init containers",
+			numberOfNodes:     2,
+			role:              RoleWorker,
 			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialPodSpec: &corev1.PodSpec{
-				InitContainers: []corev1.Container{
-					{Name: "existing-init", Image: "busybox"},
-				},
-				Containers: []corev1.Container{
-					{Name: "main", Image: "vllm:latest"},
-				},
-			},
+			initialPodSpec: func() *corev1.PodSpec {
+				podSpec := mpMultinodePodSpec("vllm:latest")
+				podSpec.InitContainers = []corev1.Container{{Name: "existing-init", Image: "busybox"}}
+				return podSpec
+			}(),
 			expectInitContainer: true,
 			expectedInitImage:   "vllm:latest",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
-		},
-		// Elastic EP regression: UpdatePodSpec must NOT inject the MP init container
-		// when --enable-elastic-ep is present in ExtraPodSpec.MainContainer. The elastic
-		// EP path uses a Ray cluster, not the MP coordinator; the MP init container waits
-		// on VLLMMpMasterPort (29500) which never opens in the elastic EP path.
-		{
-			name:          "elastic EP worker Grove: no MP init container injected",
-			numberOfNodes: 2,
-			role:          RoleWorker,
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
-				},
-				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{
-						Command: []string{"python3", "-m", "dynamo.vllm"},
-						Args:    []string{"--model", "test", dataParallelSizeFlag, "4", "--data-parallel-backend", "ray", enableElasticEPFlag},
-					},
-				},
-			},
-			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialPodSpec: &corev1.PodSpec{
-				Containers: []corev1.Container{
-					{Name: "main", Image: "vllm:latest"},
-				},
-			},
-			expectInitContainer: false,
-		},
-		{
-			name:          "elastic EP worker LWS: no MP init container injected",
-			numberOfNodes: 2,
-			role:          RoleWorker,
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
-				},
-				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{
-						Command: []string{"python3", "-m", "dynamo.vllm"},
-						Args:    []string{"--model", "test", dataParallelSizeFlag, "4", "--data-parallel-backend", "ray", enableElasticEPFlag},
-					},
-				},
-			},
-			multinodeDeployer: &LWSMultinodeDeployer{},
-			initialPodSpec: &corev1.PodSpec{
-				Containers: []corev1.Container{
-					{Name: "main", Image: "vllm:v2"},
-				},
-			},
-			expectInitContainer: false,
-		},
-		{
-			name:          "elastic EP worker command in pod spec: no MP init container injected",
-			numberOfNodes: 2,
-			role:          RoleWorker,
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
-				},
-			},
-			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialPodSpec: &corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:    "main",
-						Image:   "vllm:latest",
-						Command: []string{"python3 -m dynamo.vllm --model test --enable-elastic-ep"},
-					},
-				},
-			},
-			expectInitContainer: false,
-		},
-		{
-			name:          "elastic EP worker command in component: no MP init container injected",
-			numberOfNodes: 2,
-			role:          RoleWorker,
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
-				},
-				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-					MainContainer: &corev1.Container{
-						Command: []string{"python3 -m dynamo.vllm --model test --enable-elastic-ep"},
-					},
-				},
-			},
-			multinodeDeployer: &GroveMultinodeDeployer{},
-			initialPodSpec: &corev1.PodSpec{
-				Containers: []corev1.Container{
-					{Name: "main", Image: "vllm:latest"},
-				},
-			},
-			expectInitContainer: false,
 		},
 	}
 
@@ -1037,59 +996,82 @@ func TestShouldUseMpBackend(t *testing.T) {
 	}
 }
 
-// TestVLLMBackend_UpdateContainer_InterPodGMS asserts that when the inter-pod
-// GMS layout is enabled (gpuMemoryService.mode=interPod, with or without
-// failover), the vLLM backend is the one responsible for injecting both the
-// --load-format=gms flag and the DYN_VLLM_GMS_SHADOW_MODE env var. These are
-// vLLM-runtime switches and must live in the backend adapter, not in the
-// backend-agnostic GMS helpers (see gmsEngineEnvVars).
+// TestVLLMBackend_UpdateContainer_InterPodGMS asserts that standalone
+// inter-pod GMS and inter-pod GMS failover share the same GMS load path, but
+// only failover enables vLLM's shadow/standby behavior.
 func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
-	backend := &VLLMBackend{}
-	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
-		GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
-			Enabled: true,
-			Mode:    v1alpha1.GMSModeInterPod,
+	tests := []struct {
+		name            string
+		component       *v1alpha1.DynamoComponentDeploymentSharedSpec
+		wantShadowMode  bool
+		wantLoadFormat  bool
+		shadowModeCount int
+	}{
+		{
+			name: "standalone inter-pod GMS injects load-format only",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    v1alpha1.GMSModeInterPod,
+				},
+			},
+			wantLoadFormat: true,
 		},
-		Failover: &v1alpha1.FailoverSpec{
-			Enabled: true,
-			Mode:    v1alpha1.GMSModeInterPod,
+		{
+			name: "inter-pod GMS failover injects load-format and shadow mode",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    v1alpha1.GMSModeInterPod,
+				},
+				Failover: &v1alpha1.FailoverSpec{
+					Enabled: true,
+					Mode:    v1alpha1.GMSModeInterPod,
+				},
+			},
+			wantLoadFormat:  true,
+			wantShadowMode:  true,
+			shadowModeCount: 1,
 		},
-	})
-	container := &corev1.Container{
-		Command: []string{"python3"},
-		Args:    []string{"-m", "dynamo.vllm"},
 	}
 
-	backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{})
-
-	// --load-format gms flag must be injected into the container args.
-	joined := ""
-	for _, a := range container.Args {
-		joined += " " + a
-	}
-	if !reflect.DeepEqual(containerHasArg(container, "--load-format", "gms"), true) {
-		t.Errorf("expected --load-format gms to be injected; got args=%q", joined)
-	}
-
-	// DYN_VLLM_GMS_SHADOW_MODE must be set exactly once.
-	count := 0
-	for _, e := range container.Env {
-		if e.Name == "DYN_VLLM_GMS_SHADOW_MODE" {
-			count++
-			if e.Value != "true" {
-				t.Errorf("DYN_VLLM_GMS_SHADOW_MODE value = %q, want %q", e.Value, "true")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &VLLMBackend{}
+			component := betaComponent(t, tt.component)
+			container := &corev1.Container{
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.vllm"},
 			}
-		}
-	}
-	if count != 1 {
-		t.Errorf("DYN_VLLM_GMS_SHADOW_MODE env var count = %d, want 1", count)
+
+			backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{})
+
+			if got := containerHasArg(container, "--load-format", "gms"); got != tt.wantLoadFormat {
+				t.Errorf("containerHasArg(--load-format gms) = %v, want %v; args=%v", got, tt.wantLoadFormat, container.Args)
+			}
+
+			count := 0
+			for _, e := range container.Env {
+				if e.Name == "DYN_VLLM_GMS_SHADOW_MODE" {
+					count++
+					if e.Value != "true" {
+						t.Errorf("DYN_VLLM_GMS_SHADOW_MODE value = %q, want %q", e.Value, "true")
+					}
+				}
+			}
+			if count != tt.shadowModeCount {
+				t.Errorf("DYN_VLLM_GMS_SHADOW_MODE env var count = %d, want %d", count, tt.shadowModeCount)
+			}
+			if got := count > 0; got != tt.wantShadowMode {
+				t.Errorf("DYN_VLLM_GMS_SHADOW_MODE present = %v, want %v", got, tt.wantShadowMode)
+			}
+		})
 	}
 }
 
 // TestVLLMBackend_UpdateContainer_NoInterPodGMS asserts the complementary
-// invariant: when inter-pod GMS failover is NOT enabled, the vLLM backend
-// must not inject the GMS-specific env var (it is meaningless outside the
-// inter-pod layout).
+// invariant: when inter-pod GMS is not enabled, the vLLM backend must not
+// inject the inter-pod GMS load path or shadow/standby mode.
 func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 	backend := &VLLMBackend{}
 	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{})
@@ -1100,6 +1082,9 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 
 	backend.UpdateContainer(container, 1, RoleMain, component, "svc", &GroveMultinodeDeployer{})
 
+	if containerHasArg(container, "--load-format", "gms") {
+		t.Errorf("--load-format gms must not be injected when inter-pod GMS is disabled")
+	}
 	for _, e := range container.Env {
 		if e.Name == "DYN_VLLM_GMS_SHADOW_MODE" {
 			t.Errorf("DYN_VLLM_GMS_SHADOW_MODE must not be injected when inter-pod GMS is disabled")

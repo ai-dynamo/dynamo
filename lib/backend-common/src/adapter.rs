@@ -29,7 +29,7 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::disagg::DisaggregationMode;
-use crate::engine::{GenerateContext, LLMEngine};
+use crate::engine::{GenerateContext, LLMEngine, RawEngine};
 
 /// Test-only override count. Compiled out of release builds — tests acquire
 /// an `OtlpExportOverride` RAII guard to force-enable the recording
@@ -353,12 +353,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let guard = CancelMonitorGuard { drop_token };
 
         #[cfg(debug_assertions)]
-        let chunks = crate::validate::wrap(chunks);
+        let chunks = crate::validate::wrap(chunks, self.mode);
 
         let stream_ctx = ctx.clone();
         let stream_span = span.clone();
         let should_record_attrs = is_otlp_export_enabled();
-        let is_prefill_mode = self.mode.is_prefill();
+        // Prefill and Encode both produce empty-token terminals carrying
+        // their handoff payload (disaggregated_params and encoder_result
+        // respectively), so both need the worker_trace_link stamped on
+        // the terminal even when the chunk has no tokens.
+        let is_handoff_terminal_mode = self.mode.is_prefill() || self.mode.is_encode();
         let finalizer_span = span.clone();
         let mapped = async_stream::stream! {
             let _guard = guard;
@@ -418,13 +422,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             stream_span.record("cancelled", stream_ctx.is_stopped());
                             record_itl_distribution(&stream_span, &mut itl_samples_ms);
                         }
-                        // Prefill-only: also stamp on the terminal chunk
-                        // (which may be the FIRST chunk for prefill, with
-                        // token_ids empty if the handoff is via
-                        // disaggregated_params). Belt-and-suspenders so the
-                        // decode peer always sees the link even when the
-                        // prefill terminal has no tokens.
-                        if is_prefill_mode
+                        // Prefill / Encode handoff terminals: also stamp
+                        // on the terminal chunk (which may be the FIRST
+                        // chunk for these modes, with token_ids empty
+                        // when the handoff is via disaggregated_params or
+                        // encoder_result). Belt-and-suspenders so the
+                        // downstream peer always sees the link even when
+                        // the terminal has no tokens.
+                        if is_handoff_terminal_mode
                             && is_terminal
                             && chunk.worker_trace_link.is_none()
                             && let Some(link) = &worker_trace_link
@@ -473,6 +478,117 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // `stream_span.record(...)` from the closure mutates the same span
         // we just dropped — `Span` is a cheap handle, clones share storage.
 
+        Ok(ResponseStream::new(Box::pin(mapped), ctx))
+    }
+}
+
+/// Bridges a [`RawEngine`] to [`AsyncEngine`] — the non-token sibling of
+/// [`EngineAdapter`]. Request/response pass through as [`serde_json::Value`]:
+/// no `PreprocessedRequest`, no token telemetry (TTFT/ITL), no disagg
+/// first-token logic (media generation is aggregated-only). Since the wire
+/// shape is already JSON, this doubles as its own health-check probe — no
+/// `JsonProbeAdapter` wrapper needed.
+pub(crate) struct RawEngineAdapter {
+    engine: Arc<dyn RawEngine>,
+}
+
+impl RawEngineAdapter {
+    pub(crate) fn new(engine: Arc<dyn RawEngine>) -> Self {
+        Self { engine }
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Value>>, Error>
+    for RawEngineAdapter
+{
+    async fn generate(
+        &self,
+        input: SingleIn<serde_json::Value>,
+    ) -> Result<ManyOut<Annotated<serde_json::Value>>, Error> {
+        let (request, handle) = input.into_parts();
+        let ctx: Arc<dyn AsyncEngineContext> = handle.context();
+
+        // Per-request span (nests under the runtime's `handle_payload`). No
+        // token-level attributes here — just the request id.
+        let span = tracing::info_span!(
+            target: "request_span",
+            "engine.generate",
+            request_id = %ctx.id(),
+            error_kind = tracing::field::Empty,
+        );
+
+        // No first-token signal: raw media engines are aggregated-only, never
+        // a disagg decode peer.
+        let gen_ctx = GenerateContext::with_metadata(ctx.clone(), None, handle.metadata().clone());
+        let chunks = self
+            .engine
+            .generate(request, gen_ctx)
+            .instrument(span.clone())
+            .await
+            .map_err(|e| {
+                span.record("error_kind", "setup_failed");
+                span.set_status(Status::error("setup_failed"));
+                Error::from(e)
+            })?;
+
+        // Cancellation monitor: call engine.abort() on stop/kill. No
+        // first-token deferral (no disagg decode peer to protect).
+        let drop_token = CancellationToken::new();
+        let monitor_token = drop_token.clone();
+        let abort_engine = self.engine.clone();
+        let abort_ctx = ctx.clone();
+        tokio::spawn(async move {
+            let cancelled = tokio::select! {
+                _ = abort_ctx.stopped() => {
+                    tracing::debug!(request_id = abort_ctx.id(), "cancellation observed (stopped)");
+                    true
+                }
+                _ = abort_ctx.killed() => {
+                    tracing::debug!(request_id = abort_ctx.id(), "cancellation observed (killed)");
+                    true
+                }
+                _ = monitor_token.cancelled() => false,
+            };
+            if cancelled {
+                abort_engine.abort(abort_ctx).await;
+            }
+        });
+        let guard = CancelMonitorGuard { drop_token };
+
+        let stream_ctx = ctx.clone();
+        let finalizer_span = span.clone();
+        let mapped = async_stream::stream! {
+            let _guard = guard;
+            let finalizer = StreamSpanFinalizer::new(finalizer_span);
+            let mut inner = chunks;
+            let mut chunk_count: usize = 0;
+            while let Some(item) = inner.next().await {
+                chunk_count += 1;
+                match item {
+                    Ok(value) => yield Annotated::from_data(value),
+                    Err(dynamo_err) => {
+                        tracing::debug!(
+                            request_id = stream_ctx.id(),
+                            error = %dynamo_err,
+                            "raw engine stream yielded typed error",
+                        );
+                        finalizer.mark_completed();
+                        yield Annotated::from_err(dynamo_err);
+                        return;
+                    }
+                }
+            }
+            // A raw stream has no terminal-chunk marker (the JSON carries no
+            // finish_reason); natural end of the generator IS the terminal.
+            finalizer.mark_completed();
+            tracing::debug!(
+                request_id = stream_ctx.id(),
+                chunks = chunk_count,
+                cancelled = stream_ctx.is_stopped(),
+                "raw stream complete"
+            );
+        };
         Ok(ResponseStream::new(Box::pin(mapped), ctx))
     }
 }
@@ -1122,7 +1238,26 @@ mod tests {
 
     /// Force-enable the recording fast-path and install a fresh subscriber
     /// that captures every `engine.generate` field write into a shared map.
+    /// Pin a global default `tracing` subscriber for the whole test binary.
+    ///
+    /// `tracing` caches "is this span enabled?" per callsite in one global
+    /// table. With tests installing and dropping subscribers in parallel, the
+    /// `engine.generate` callsite can briefly be cached as disabled, so the
+    /// trace-context tests miss their span and flake. An always-present global
+    /// default keeps it enabled; per-test `set_default` subscribers still take
+    /// over on their own thread, so what the tests assert on is unchanged.
+    fn ensure_global_test_subscriber() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            // Ignore the error if a global default was already set elsewhere;
+            // any real subscriber is enough to keep the callsite enabled.
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        });
+    }
+
     fn install_capture() -> (CapturedFields, CaptureGuard) {
+        ensure_global_test_subscriber();
         let otlp = OtlpExportOverride::enable();
         let captured = CapturedFields::default();
         let layer = CaptureLayer {
@@ -1237,6 +1372,7 @@ mod tests {
     #[tokio::test]
     async fn auto_span_fires_without_otlp_override() {
         // Install ONLY the capture layer — no `OtlpExportOverride::enable()`.
+        ensure_global_test_subscriber();
         let captured = CapturedFields::default();
         let layer = CaptureLayer {
             out: captured.clone(),
@@ -1435,6 +1571,7 @@ mod tests {
         const TRACE_ID: &str = "11111111111111111111111111111111";
         const SPAN_ID: &str = "2222222222222222";
 
+        ensure_global_test_subscriber();
         let template = Arc::new(std::sync::OnceLock::new());
         let inject = InjectingTraceContext {
             template: template.clone(),
@@ -1545,5 +1682,223 @@ mod tests {
             .expect("prefill terminal with no tokens must be stamped via fallback");
         assert_eq!(link.trace_id, trace_id);
         assert_eq!(link.span_id, span_id);
+    }
+
+    /// Encode terminal with no token chunks (handoff via
+    /// `encoder_result`) must also get stamped via the handoff-mode
+    /// fallback so the downstream Prefill/Aggregated peer sees the
+    /// link. Mirrors the prefill test above with
+    /// `DisaggregationMode::Encode` and an `encode_terminal` chunk.
+    #[tokio::test]
+    async fn encode_mode_terminal_stamps_worker_trace_link() {
+        let (_guard, trace_id, span_id) = install_trace_context_injection();
+
+        let mut map = serde_json::Map::new();
+        map.insert("uri".into(), serde_json::Value::String("nixl://e/0".into()));
+        let (engine, _abort) = MockEngine::new(vec![LLMEngineOutput::encode_terminal(map)]);
+        let adapter = EngineAdapter::new(engine, DisaggregationMode::Encode);
+        let input = Context::new(make_request(vec![1, 2, 3]));
+        let stream = adapter.generate(input).await.unwrap();
+        let chunks: Vec<_> = stream.collect().await;
+
+        assert_eq!(chunks.len(), 1);
+        let data = chunks[0]
+            .data
+            .as_ref()
+            .expect("terminal chunk should have data");
+        assert!(
+            data.token_ids.is_empty(),
+            "test precondition: encode terminal has no tokens"
+        );
+        assert!(
+            data.encoder_result.as_ref().is_some_and(|v| v.is_object()),
+            "encode terminal must carry encoder_result: Some(Object(_))"
+        );
+        let link = data
+            .worker_trace_link
+            .as_ref()
+            .expect("encode terminal with no tokens must be stamped via fallback");
+        assert_eq!(link.trace_id, trace_id);
+        assert_eq!(link.span_id, span_id);
+    }
+
+    // -------------------------------------------------------------------
+    // RawEngineAdapter (image/video/audio JSON passthrough).
+    // -------------------------------------------------------------------
+
+    /// Raw media mock: yields a canned list of JSON values (or a typed
+    /// mid-stream error after `err_after` items), and counts `abort` calls.
+    struct RawMockEngine {
+        chunks: Vec<serde_json::Value>,
+        per_chunk_delay_ms: u64,
+        err_after: Option<usize>,
+        setup_err: Option<fn() -> DynamoError>,
+        abort_calls: Arc<AtomicUsize>,
+    }
+
+    impl RawMockEngine {
+        fn new(chunks: Vec<serde_json::Value>) -> Arc<Self> {
+            Arc::new(Self {
+                chunks,
+                per_chunk_delay_ms: 0,
+                err_after: None,
+                setup_err: None,
+                abort_calls: Arc::new(AtomicUsize::new(0)),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RawEngine for RawMockEngine {
+        async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
+            Ok(EngineConfig::default())
+        }
+
+        async fn generate(
+            &self,
+            _request: serde_json::Value,
+            context: GenerateContext,
+        ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError>
+        {
+            if let Some(make_err) = self.setup_err {
+                return Err(make_err());
+            }
+            let chunks = self.chunks.clone();
+            let delay_ms = self.per_chunk_delay_ms;
+            let err_after = self.err_after;
+            let ctx = context.inner_arc();
+            Ok(Box::pin(async_stream::stream! {
+                for (i, c) in chunks.into_iter().enumerate() {
+                    if Some(i) == err_after {
+                        yield Err(DynamoError::builder()
+                            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                            .message("bad raw mid-stream")
+                            .build());
+                        return;
+                    }
+                    if delay_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
+                    if ctx.is_stopped() { break; }
+                    yield Ok(c);
+                }
+            }))
+        }
+
+        async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {
+            self.abort_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn cleanup(&self) -> Result<(), DynamoError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn raw_adapter_passes_json_chunks_through() {
+        let engine = RawMockEngine::new(vec![
+            serde_json::json!({"progress": 50}),
+            serde_json::json!({"created": 1, "data": [{"url": "http://x/img.png"}]}),
+        ]);
+        let abort_ct = engine.abort_calls.clone();
+        let adapter = RawEngineAdapter::new(engine);
+
+        let input = Context::new(serde_json::json!({"prompt": "a cat"}));
+        let stream = adapter.generate(input).await.unwrap();
+        let collected: Vec<_> = stream.collect().await;
+
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].data.as_ref().unwrap()["progress"], 50);
+        assert_eq!(
+            collected[1].data.as_ref().unwrap()["data"][0]["url"],
+            "http://x/img.png"
+        );
+        assert_eq!(
+            abort_ct.load(Ordering::SeqCst),
+            0,
+            "clean completion must not call engine.abort"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_adapter_setup_error_propagates() {
+        let engine = Arc::new(RawMockEngine {
+            chunks: vec![],
+            per_chunk_delay_ms: 0,
+            err_after: None,
+            setup_err: Some(|| {
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::Unknown))
+                    .message("raw init failed")
+                    .build()
+            }),
+            abort_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let adapter = RawEngineAdapter::new(engine);
+        let input = Context::new(serde_json::json!({"prompt": "x"}));
+        let err = adapter.generate(input).await.unwrap_err();
+        assert!(err.to_string().contains("raw init failed"));
+    }
+
+    #[tokio::test]
+    async fn raw_adapter_forwards_typed_mid_stream_error() {
+        let engine = Arc::new(RawMockEngine {
+            chunks: vec![serde_json::json!({"progress": 10}), serde_json::json!({})],
+            per_chunk_delay_ms: 0,
+            err_after: Some(1),
+            setup_err: None,
+            abort_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let adapter = RawEngineAdapter::new(engine);
+        let input = Context::new(serde_json::json!({"prompt": "x"}));
+        let mut stream = adapter.generate(input).await.unwrap();
+
+        let first = stream.next().await.expect("first chunk");
+        assert!(first.data.is_some());
+
+        let err_item = stream.next().await.expect("typed error item");
+        assert!(err_item.is_error(), "second item must be Annotated::error");
+        let err = err_item.error.expect("typed DynamoError carried through");
+        assert_eq!(
+            err.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(stream.next().await.is_none(), "no items after typed error");
+    }
+
+    #[tokio::test]
+    async fn raw_adapter_cancellation_triggers_engine_abort() {
+        let engine = Arc::new(RawMockEngine {
+            chunks: (0..100).map(|i| serde_json::json!({ "i": i })).collect(),
+            per_chunk_delay_ms: 20,
+            err_after: None,
+            setup_err: None,
+            abort_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let abort_ct = engine.abort_calls.clone();
+        let adapter = RawEngineAdapter::new(engine);
+
+        let input: Context<serde_json::Value> = Context::new(serde_json::json!({"prompt": "x"}));
+        let ctrl = input.context();
+        let mut stream = adapter.generate(input).await.unwrap();
+
+        let _first = stream.next().await.expect("at least one chunk");
+        ctrl.stop_generating();
+
+        let drained = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+            while stream.next().await.is_some() {}
+        })
+        .await;
+        assert!(
+            drained.is_ok(),
+            "stream did not terminate after cancellation"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            abort_ct.load(Ordering::SeqCst),
+            1,
+            "engine.abort should be called exactly once on cancellation"
+        );
     }
 }

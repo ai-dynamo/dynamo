@@ -76,9 +76,8 @@ impl WorkerMetricsPublisher {
             let mut rx = nats_rx;
             let mut last_metrics: Option<WorkerMetrics> = None;
             let mut pending_publish: Option<WorkerMetrics> = None;
-            let mut publish_timer =
-                Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(0)));
-            publish_timer.as_mut().reset(tokio::time::Instant::now());
+            let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
+            tokio::pin!(publish_timer);
 
             loop {
                 tokio::select! {
@@ -91,18 +90,18 @@ impl WorkerMetricsPublisher {
                         }
 
                         let metrics = rx.borrow_and_update().clone();
-                        let has_changed = last_metrics.as_ref() != Some(&metrics);
-
-                        if has_changed {
-                            pending_publish = Some(metrics.clone());
-                            last_metrics = Some(metrics);
-                            publish_timer.as_mut().reset(
-                                tokio::time::Instant::now()
-                                    + tokio::time::Duration::from_millis(1)
-                            );
+                        if last_metrics.as_ref() == Some(&metrics) {
+                            continue;
                         }
+
+                        pending_publish = Some(metrics.clone());
+                        last_metrics = Some(metrics);
+                        publish_timer.as_mut().reset(
+                            tokio::time::Instant::now()
+                                + tokio::time::Duration::from_millis(1)
+                        );
                     }
-                    _ = &mut publish_timer => {
+                    _ = &mut publish_timer, if pending_publish.is_some() => {
                         if let Some(metrics) = pending_publish.take() {
                             let active_load = ActiveLoad {
                                 worker_id,
@@ -116,11 +115,6 @@ impl WorkerMetricsPublisher {
                                 tracing::warn!("Failed to publish metrics: {}", e);
                             }
                         }
-
-                        publish_timer.as_mut().reset(
-                            tokio::time::Instant::now()
-                                + tokio::time::Duration::from_secs(3600)
-                        );
                     }
                 }
             }

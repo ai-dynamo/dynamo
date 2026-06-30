@@ -15,7 +15,7 @@ Go, Ginkgo v2, and typed CRD structs.
      --set operator.image.tag=<your-branch-tag>
    ```
 2. `kubectl` configured for the cluster
-3. Go 1.25+
+3. Go 1.26.3+
 
 ## Image Override
 

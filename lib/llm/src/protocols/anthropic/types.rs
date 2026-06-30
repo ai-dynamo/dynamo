@@ -32,6 +32,28 @@ use crate::protocols::openai::common_ext::CommonExt;
 // ---------------------------------------------------------------------------
 // Conversion: AnthropicCreateMessageRequest -> NvCreateChatCompletionRequest
 // ---------------------------------------------------------------------------
+fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequestMessage>) {
+    messages.push(ChatCompletionRequestMessage::System(
+        ChatCompletionRequestSystemMessage {
+            content: ChatCompletionRequestSystemMessageContent::Text(content),
+            name: None,
+        },
+    ));
+}
+
+fn system_message_content(content: &AnthropicMessageContent) -> String {
+    match content {
+        AnthropicMessageContent::Text { content } => content.clone(),
+        AnthropicMessageContent::Blocks { content } => content
+            .iter()
+            .filter_map(|block| match block {
+                AnthropicContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
 impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
     type Error = anyhow::Error;
 
@@ -40,19 +62,16 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
 
         // Prepend system message if present
         if let Some(system_content) = &req.system {
-            messages.push(ChatCompletionRequestMessage::System(
-                ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(
-                        system_content.text.clone(),
-                    ),
-                    name: None,
-                },
-            ));
+            push_system_message(system_content.text.clone(), &mut messages);
         }
 
         // Convert each Anthropic message
         for msg in &req.messages {
             match (&msg.role, &msg.content) {
+                // System messages may appear in messages[] from agent clients.
+                (AnthropicRole::System, content) => {
+                    push_system_message(system_message_content(content), &mut messages);
+                }
                 // User with plain text
                 (AnthropicRole::User, AnthropicMessageContent::Text { content }) => {
                     messages.push(ChatCompletionRequestMessage::User(
@@ -122,7 +141,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 top_k: req.top_k.map(|k| k as i32),
                 ..Default::default()
             },
-            nvext: None,
+            nvext: crate::protocols::common::extensions::parse_nvext(req.nvext)?,
             // chat_template_args may be augmented by the Anthropic handler
             // (anthropic.rs) after conversion — e.g., setting enable_thinking=true
             // when a reasoning parser is configured. The conversion layer only
@@ -139,6 +158,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
             } else {
                 None
             },
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -561,6 +581,7 @@ mod tests {
                     content: "Hello!".into(),
                 },
             }],
+            nvext: None,
             system: None,
             temperature: Some(0.7),
             top_p: None,
@@ -595,6 +616,65 @@ mod tests {
     }
 
     #[test]
+    fn test_nvext_agent_context_is_rejected() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "nvext": {
+                "agent_context": {
+                    "session_id": "run-123:researcher-0",
+                    "parent_session_id": "run-123:root"
+                }
+            }
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let err = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+
+        assert!(err.to_string().contains("invalid nvext"));
+        assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn test_nvext_agent_context_empty_id_is_still_unknown_field() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "nvext": {
+                "agent_context": {
+                    "session_id": ""
+                }
+            }
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let err = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+
+        assert!(err.to_string().contains("invalid nvext"));
+        assert!(err.to_string().contains("unknown field `agent_context`"));
+    }
+
+    #[test]
+    fn test_nvext_unknown_field_errors_in_llm_layer() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "nvext": {
+                "unsupported_future_field": true
+            }
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        let err = NvCreateChatCompletionRequest::try_from(req).unwrap_err();
+
+        assert!(err.to_string().contains("invalid nvext"));
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
     fn test_system_message_prepended() {
         let req = AnthropicCreateMessageRequest {
             model: "test-model".into(),
@@ -605,6 +685,7 @@ mod tests {
                     content: "Hi".into(),
                 },
             }],
+            nvext: None,
             system: Some(SystemContent {
                 text: "You are helpful.".into(),
                 cache_control: None,
@@ -632,6 +713,48 @@ mod tests {
         ));
         assert!(matches!(
             &chat_req.inner.messages[1],
+            ChatCompletionRequestMessage::User(_)
+        ));
+    }
+
+    #[test]
+    fn test_message_level_system_role_conversion() {
+        let json = r#"{
+            "model": "test-model",
+            "max_tokens": 100,
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Keep answers short."},
+                        {"type": "text", "text": "Use the available shell."}
+                    ]
+                },
+                {"role": "user", "content": "List files"}
+            ]
+        }"#;
+
+        let req: AnthropicCreateMessageRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(req.messages[1].role, AnthropicRole::System));
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert_eq!(chat_req.inner.messages.len(), 3);
+        assert!(matches!(
+            &chat_req.inner.messages[0],
+            ChatCompletionRequestMessage::User(_)
+        ));
+        match &chat_req.inner.messages[1] {
+            ChatCompletionRequestMessage::System(system) => match &system.content {
+                ChatCompletionRequestSystemMessageContent::Text(text) => {
+                    assert_eq!(text, "Keep answers short.\nUse the available shell.");
+                }
+                other => panic!("expected text content, got {other:?}"),
+            },
+            other => panic!("expected system message, got {other:?}"),
+        }
+        assert!(matches!(
+            &chat_req.inner.messages[2],
             ChatCompletionRequestMessage::User(_)
         ));
     }
@@ -671,6 +794,7 @@ mod tests {
                     },
                 },
             ],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -714,6 +838,7 @@ mod tests {
                     content: "Hi".into(),
                 },
             }],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -745,6 +870,7 @@ mod tests {
                     content: "Hi".into(),
                 },
             }],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -840,6 +966,45 @@ mod tests {
         }
     }
 
+    #[allow(deprecated)]
+    #[test]
+    fn test_anthropic_response_does_not_emit_nvext() {
+        let chat_resp = NvCreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                id: "chatcmpl-xyz".into(),
+                choices: vec![dynamo_protocols::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                            "Hello!".to_string(),
+                        )),
+                        refusal: None,
+                        tool_calls: None,
+                        role: dynamo_protocols::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+                    logprobs: None,
+                }],
+                created: 1726000000,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".to_string(),
+                usage: None,
+            },
+            nvext: Some(serde_json::json!({
+                "worker_id": {"decode_worker_id": 1}
+            })),
+        };
+
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
+        let value = serde_json::to_value(response).unwrap();
+        assert!(value.get("nvext").is_none(), "got: {value}");
+    }
+
     #[test]
     fn test_deserialize_simple_message() {
         let json =
@@ -928,6 +1093,7 @@ mod tests {
                     ],
                 },
             }],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -1012,6 +1178,7 @@ mod tests {
             model: "test".into(),
             max_tokens: 100,
             messages: req.messages,
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -1128,6 +1295,7 @@ mod tests {
                 role: AnthropicRole::Assistant,
                 content: AnthropicMessageContent::Blocks { content: blocks },
             }],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -1624,6 +1792,7 @@ mod tests {
                     ],
                 },
             }],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -1696,6 +1865,7 @@ mod tests {
                     ],
                 },
             }],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,
@@ -1769,6 +1939,7 @@ mod tests {
                     },
                 },
             ],
+            nvext: None,
             system: None,
             temperature: None,
             top_p: None,

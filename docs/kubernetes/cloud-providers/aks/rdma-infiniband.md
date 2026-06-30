@@ -4,8 +4,6 @@
 title: RDMA / InfiniBand on AKS
 ---
 
-# RDMA / InfiniBand on AKS
-
 This guide covers setting up RDMA over InfiniBand on AKS for high-performance disaggregated inference with Dynamo. RDMA enables direct memory access between GPUs across nodes, bypassing CPU and kernel overhead — critical for low-latency KV cache transfer between prefill and decode workers.
 
 Without RDMA, disaggregated inference falls back to TCP with severe performance degradation (~98s TTFT vs ~200-500ms with RDMA). See the [Disaggregated Communication Guide](../../disagg-communication-guide.md) for details on transport options and performance expectations.

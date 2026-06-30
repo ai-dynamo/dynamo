@@ -35,10 +35,22 @@ func TestBuildDeviceMap(t *testing.T) {
 			want:   "GPU-aaa=GPU-bbb",
 		},
 		{
+			name:   "single GPU identity returns no map",
+			source: []string{"GPU-aaa"},
+			target: []string{"GPU-aaa"},
+			want:   "",
+		},
+		{
 			name:   "multiple GPUs",
 			source: []string{"GPU-aaa", "GPU-bbb"},
 			target: []string{"GPU-ccc", "GPU-ddd"},
 			want:   "GPU-aaa=GPU-ccc,GPU-bbb=GPU-ddd",
+		},
+		{
+			name:   "multiple GPU identity returns no map",
+			source: []string{"GPU-aaa", "GPU-bbb"},
+			target: []string{"GPU-bbb", "GPU-aaa"},
+			want:   "",
 		},
 		{
 			name:    "mismatched lengths",

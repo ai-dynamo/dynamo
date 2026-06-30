@@ -24,6 +24,7 @@ import (
 )
 
 // DynamoGraphDeploymentSpec defines the desired state of a DynamoGraphDeployment.
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !has(self.restart)",message="spec.restart must be unset on create; set spec.restart.id after creation to request a restart",optionalOldSelf=true
 type DynamoGraphDeploymentSpec struct {
 	// annotations to propagate to all child resources (PCS, DCD, Deployments,
 	// and pod templates). Component-level (`podTemplate`) values take precedence
@@ -34,6 +35,11 @@ type DynamoGraphDeploymentSpec struct {
 	// labels to propagate to all child resources. Same precedence rules as `annotations`.
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
+
+	// priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
+	// Requires the Grove pathway.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 
 	// components are the components deployed as part of this graph. Each entry
 	// carries its own stable logical `name`, and names must be unique within

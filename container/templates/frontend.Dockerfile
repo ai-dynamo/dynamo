@@ -9,7 +9,7 @@
 FROM ${EPP_IMAGE} AS epp
 
 # Build `crick` as a wheel in an isolated stage so the C toolchain never
-# reaches the final frontend image. aiperf 0.8.0 depends on crick==0.0.8,
+# reaches the final frontend image. aiperf 0.10.0 depends on crick==0.0.8,
 # which publishes no manylinux aarch64 wheel — without this, arm64 builds
 # fall back to sdist and fail in the final stage where gcc is intentionally
 # absent. amd64 has a prebuilt manylinux_x86_64 wheel on PyPI, so the build

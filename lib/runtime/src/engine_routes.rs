@@ -33,11 +33,19 @@ impl EngineRouteRegistry {
         }
     }
 
-    /// Register a callback for a route (e.g., "start_profile" for /engine/start_profile)
+    /// Register a callback for a route (e.g., "control/start_profile" for /engine/control/start_profile)
+    ///
+    /// A route name is expected to be registered exactly once. Re-registering an
+    /// existing name overwrites the previous callback and emits a warning, since
+    /// it usually signals two registration mechanisms colliding rather than an
+    /// intentional replacement.
     pub fn register(&self, route: &str, callback: EngineRouteCallback) {
         let mut routes = self.routes.write().unwrap();
-        routes.insert(route.to_string(), callback);
-        tracing::debug!("Registered engine route: /engine/{route}");
+        if routes.insert(route.to_string(), callback).is_some() {
+            tracing::warn!("Overwriting already-registered engine route: /engine/{route}");
+        } else {
+            tracing::debug!("Registered engine route: /engine/{route}");
+        }
     }
 
     /// Get callback for a route

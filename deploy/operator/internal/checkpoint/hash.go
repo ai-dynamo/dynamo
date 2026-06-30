@@ -18,6 +18,7 @@
 package checkpoint
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -25,6 +26,39 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 )
+
+// NewCheckpointID returns a fresh snapshot artifact ID. It is intentionally
+// random: automatic checkpoints are artifacts owned by one DGD/component
+// generation, not compatibility claims that can be reused across DGDs.
+func NewCheckpointID() (string, error) {
+	var data [16]byte
+	if _, err := rand.Read(data[:]); err != nil {
+		return "", fmt.Errorf("generate checkpoint ID: %w", err)
+	}
+	return hex.EncodeToString(data[:]), nil
+}
+
+// DGDCheckpointID returns the snapshot artifact ID for an automatic DGD-owned
+// checkpoint. The DGD UID prevents cross-DGD reuse; the component name and
+// worker hash/generation prevent reuse across incompatible worker generations
+// inside the same DGD.
+func DGDCheckpointID(namespace, dgdName, dgdUID, componentName, workerHash string) string {
+	data, _ := json.Marshal(struct {
+		Namespace     string `json:"namespace,omitempty"`
+		DGDName       string `json:"dgdName"`
+		DGDUID        string `json:"dgdUID,omitempty"`
+		ComponentName string `json:"componentName"`
+		WorkerHash    string `json:"workerHash,omitempty"`
+	}{
+		Namespace:     namespace,
+		DGDName:       dgdName,
+		DGDUID:        dgdUID,
+		ComponentName: componentName,
+		WorkerHash:    workerHash,
+	})
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])[:32]
+}
 
 // normalizedIdentity is the canonical form used for hash computation
 // Only fields that affect checkpoint equivalence are included

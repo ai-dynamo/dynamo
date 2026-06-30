@@ -1,0 +1,51 @@
+// SPDX-FileCopyrightText: Copyright 2025 Envoy Project Authors
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Vendored minimal subset of envoy/config/core/v3/base.proto.
+// Wire-compatible with the upstream Envoy proto: same package name and field
+// numbers produce identical protobuf encoding on the wire. Only includes types
+// used by the ext_proc service (HeaderValue, HeaderValueOption, HeaderMap,
+// Metadata). Annotation imports are stripped to avoid the full Envoy proto
+// dependency tree.
+
+syntax = "proto3";
+
+package envoy.config.core.v3;
+
+import "google/protobuf/struct.proto";
+
+// Header name/value pair.
+message HeaderValue
+{
+  string key = 1;
+  string value = 2;
+  bytes raw_value = 3;
+}
+
+// Header name/value pair plus option to control append behavior.
+message HeaderValueOption
+{
+  enum HeaderAppendAction {
+    APPEND_IF_EXISTS_OR_ADD = 0;
+    ADD_IF_ABSENT = 1;
+    OVERWRITE_IF_EXISTS_OR_ADD = 2;
+    OVERWRITE_IF_EXISTS = 3;
+  }
+
+  HeaderValue header = 1;
+  HeaderAppendAction append_action = 3;
+  bool keep_empty_value = 4;
+}
+
+// Wrapper for a set of headers.
+message HeaderMap
+{
+  repeated HeaderValue headers = 1;
+}
+
+// Metadata provides additional inputs to filters.
+message Metadata
+{
+  map<string, google.protobuf.Struct> filter_metadata = 1;
+}

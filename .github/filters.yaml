@@ -4,6 +4,7 @@
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
 #   snapshot -> snapshot-agent build and test
+#   power_agent -> power-agent image build
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
@@ -11,6 +12,7 @@
 #   trtllm   -> trtllm build and test
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
+#   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
@@ -33,6 +35,8 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
+  # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
+  - 'skills/**'
 
 examples:
   - 'recipes/**'
@@ -64,13 +68,13 @@ ignore:
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
-  - 'container/templates/aws.Dockerfile'
   - 'container/templates/local_dev.Dockerfile'
   - 'container/templates/dev.Dockerfile'
   # Removed by trtllm upstream-base migration; claim here so changed-files
   # validation passes on the deletion diff without triggering trtllm CI.
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
+  - 'scripts/dco_check.py'
 
 ci: &ci
   - '.github/workflows/**'
@@ -88,6 +92,7 @@ core:
   - 'container/templates/args.Dockerfile'
   - 'container/templates/dynamo_*'
   - 'container/templates/wheel_builder.Dockerfile'
+  - 'container/templates/compliance.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
   - 'container/compliance/**'
@@ -95,7 +100,9 @@ core:
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
+  - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
+  - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'components/src/dynamo/gpu_memory_service/**'
@@ -129,6 +136,13 @@ snapshot:
   - 'deploy/snapshot/**'
   - 'deploy/snapshot/.*'
 
+power_agent:
+  - *ci
+  - 'deploy/power-agent/**'
+  - 'deploy/helm/charts/power-agent/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+
 deploy:
   - *ci
   - 'deploy/helm/**'
@@ -145,6 +159,9 @@ planner:
   - 'components/src/dynamo/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
+  # Power-aware planner (PR #9369): per-node power agent component
+  - 'deploy/power-agent/**'
+  - 'deploy/helm/charts/power-agent/**'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'
@@ -156,9 +173,11 @@ vllm:
   - '!**/*.rst'
 
 sglang:
+  - 'container/deps/sglang/**'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
   - 'container/templates/sglang_*'
+  - 'container/deps/sglang/**'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -189,7 +208,9 @@ frontend:
   - 'container/deps/*'
   - 'container/compliance/**'
   - 'components/src/dynamo/router/**'
+  - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
+  - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
@@ -208,3 +229,6 @@ benchmarks:
   - 'benchmarks/**'
   - '!**/*.md'
   - '!**/*.rst'
+
+efa:
+  - 'container/templates/aws.Dockerfile'
