@@ -15,9 +15,9 @@ turns the author's synchronous, thread-affine backend (L2) into an awaitable
   submits if **all** succeed; on any failure it submits nothing (zero GPU work)
   and raises the request-level error, so a text-only LM never sees a partial
   result;
-- handing the preprocessed items (with their off-thread-computed ``cost`` /
-  ``bucket_key``) to a ``ThreadedMicroBatcher``, which coalesces across concurrent
-  ``encode`` calls and runs ``backend.forward_batch`` on the single actor thread.
+- handing the preprocessed items (with their off-thread-computed scalar ``cost``)
+  to a ``ThreadedMicroBatcher``, which coalesces across concurrent ``encode`` calls
+  by cost and runs ``backend.forward_batch`` on the single actor thread.
 
 The backend's ``build`` runs on the batcher's actor thread (so a CUDA graph it
 captures is replayed on the same thread) and its ``close`` runs there at
@@ -76,7 +76,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
 
     # ---- lifecycle ---------------------------------------------------------
 
-    def load(self, model_id: str, device: str) -> None:
+    def load(self, model_id: str) -> None:
         """Start the actor thread (running ``backend.build`` on it) and fail fast.
 
         Re-raises any build error, then ``validate``s the placeholder id so a
@@ -99,7 +99,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
                 self._backend.forward_batch,
                 max_batch_cost=self._backend.max_batch_cost,
                 buckets=self._backend.buckets,
-                on_start=lambda: self._backend.build(model_id, device),
+                on_start=lambda: self._backend.build(model_id),
                 on_stop=self._backend.close,
                 name=self._name,
             )
@@ -110,13 +110,18 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
             raise
 
     def validate(self) -> None:
-        """Fail-fast checks run by ``load`` after ``build`` (resolve the
-        placeholder id once)."""
-        self._backend.get_image_placeholder_token_id()
+        """Fail-fast check run by ``load`` after ``build``: the author hardcoded a
+        usable ``image_token_id``."""
+        tid = getattr(self._backend, "image_token_id", None)
+        if not isinstance(tid, int) or isinstance(tid, bool):
+            raise ValueError(
+                "VisionEncoderBackend.image_token_id must be a hardcoded int (the "
+                f"image placeholder token id); got {tid!r}"
+            )
 
     def get_image_placeholder_token_id(self) -> int:
-        """The token id marking image positions, from the backend."""
-        return self._backend.get_image_placeholder_token_id()
+        """The token id marking image positions (the backend's hardcoded value)."""
+        return self._backend.image_token_id
 
     # ---- request path ------------------------------------------------------
 
@@ -149,8 +154,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         preprocessed: List[Preprocessed] = list(settled)  # type: ignore[arg-type]
         items = [p.item for p in preprocessed]
         costs = [p.cost for p in preprocessed]
-        bucket_keys = [p.bucket_key for p in preprocessed]
-        return await self._batcher.submit(items, costs, bucket_keys)
+        return await self._batcher.submit(items, costs)
 
     def shutdown(self) -> None:
         """Stop the actor thread (running ``backend.close`` on it) and the

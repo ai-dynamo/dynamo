@@ -101,9 +101,9 @@ class HitchhikersVisionEncoder(QwenVisionEncoderBackend):
     buckets = None
     max_batch_cost = 8
 
-    def build(self, model_id: str, device: str) -> None:
+    def build(self, model_id: str) -> None:
         """Load the tokenizer (via the Qwen base) and the LM ``embed_tokens`` weight."""
-        super().build(model_id, device)  # loads self.tokenizer
+        super().build(model_id)  # loads self.tokenizer
         self._embed_weight = _load_embed_tokens_weight(model_id)
         logger.info(
             "[HitchhikersVisionEncoder] ready: embed_weight=%s dtype=%s phrase=%r",
@@ -115,8 +115,8 @@ class HitchhikersVisionEncoder(QwenVisionEncoderBackend):
     def preprocess(self, image_url: str) -> Preprocessed[str]:
         """Pass-through: the URL is ignored, so there is nothing to fetch/decode.
 
-        cost=1 (count-based), bucket_key=None (single bucket, eager)."""
-        return Preprocessed(item=image_url, cost=1, bucket_key=None)
+        cost=1 (count-based)."""
+        return Preprocessed(item=image_url, cost=1)
 
     def forward_batch(
         self, items: List[str], target_bucket: Optional[int] = None

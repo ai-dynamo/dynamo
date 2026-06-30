@@ -7,15 +7,17 @@ The encoder returns only the visual token embeddings; this module builds the
 inputs for vLLM's mixed ``EmbedsPrompt`` mode (``prompt_token_ids`` +
 ``prompt_is_token_ids`` + ``prompt_embeds``):
 
-    prompt_token_ids   = [ text ... <img run> ... text ... ]
-    prompt_is_token_ids = [ True ...  False    ... True ... ]
-    prompt_embeds       = [ zeros... img_embeds... zeros... ]   (seq_len, hidden)
+    prompt_token_ids    = [ text  ... <img> <img> <img> ...  text  ]
+    prompt_is_token_ids = [ True  ... False False False ...  True  ]
+    prompt_embeds       = [ zeros ...  e0    e1    e2   ... zeros  ]   (seq_len, hidden)
 
-vLLM embeds the ``True`` (text) positions itself with the model's real
-embedding table and substitutes the ``False`` (image) positions from
-``prompt_embeds`` in the forward pass.  Dynamo therefore only fills the image
-rows — text rows stay zero (they are overwritten) and no LM embedding weight is
-needed on the Dynamo side.
+One image occupies a **contiguous run** of ``False`` positions — the single
+placeholder token is expanded to the encoder tensor's row count (3 here), and
+that image's embeds (``e0,e1,e2``) fill exactly those rows. vLLM embeds the
+``True`` (text) positions itself with the model's real embedding table and
+substitutes each ``False`` (image) row from ``prompt_embeds`` in the forward
+pass. Dynamo therefore only fills the image rows — text rows stay zero (they are
+overwritten) and no LM embedding weight is needed on the Dynamo side.
 
 The contract is **one placeholder token per image**: each occurrence of the
 placeholder token in ``prompt_token_ids`` is one image slot, matched
@@ -100,6 +102,14 @@ def build_mixed_embeds(
                 f"image tensor {i} has 0 rows (shape {tuple(tensor.shape)}); the "
                 "encoder returned no visual tokens for an image"
             )
+        # forward_batch must fence + copy to CPU before returning, so the scatter
+        # below is a plain assignment into the CPU prompt_embeds buffer. Fail loud
+        # here instead of an opaque cross-device error on the row-copy.
+        if tensor.device.type != "cpu":
+            raise ValueError(
+                f"image tensor {i} is on {tensor.device}; forward_batch must "
+                "return CPU tensors"
+            )
 
     # Build the token-id / mask layout and record where each image block lands,
     # then scatter the image rows into one pre-zeroed (seq_len, hidden) buffer.
@@ -130,7 +140,7 @@ def build_mixed_embeds(
     prompt_embeds = torch.zeros(seq_len, hidden, dtype=dtype)
     for row_start, tensor in image_slots:
         n = tensor.shape[0]
-        prompt_embeds[row_start : row_start + n] = tensor.to(dtype=dtype, device="cpu")
+        prompt_embeds[row_start : row_start + n] = tensor
 
     logger.debug(
         "[custom_embeds] images=%d seq_len=%d hidden=%d dtype=%s",

@@ -9,8 +9,8 @@ submits coalesce into cost-bounded same-bucket batches, the graph ladder rounds 
 batch's cost up to a rung (target_bucket), eager-drain pulls all queued work when
 free, errors reach every awaiting caller, and the shutdown lifecycle behaves.
 
-``fn`` is ``fn(items, target_bucket)``; ``cost`` / ``bucket_key`` are precomputed
-off-thread and ride on ``submit(items, costs, bucket_keys)``.
+``fn`` is ``fn(items, target_bucket)``; ``cost`` is a precomputed scalar that rides
+on ``submit(items, costs)`` (one-dimensional packing — no bucket_key).
 """
 
 import asyncio
@@ -157,19 +157,6 @@ async def test_cost_budget_caps_each_batch():
         b.shutdown()
 
 
-async def test_bucket_key_isolates_batches():
-    """Items with different bucket_key never share a batch."""
-    rec = _Recorder()
-    b = ThreadedMicroBatcher(rec.fn, max_wait_ms=200.0)
-    b.start()
-    try:
-        await asyncio.gather(*(b.submit([i], bucket_keys=[i % 2]) for i in range(6)))
-        for batch in rec.batches:
-            assert len({i % 2 for i in batch}) == 1  # one bucket per batch
-    finally:
-        b.shutdown()
-
-
 async def test_target_bucket_rounds_packed_cost_up_to_nearest_rung():
     """Graph mode: the batcher rounds a batch's sum(cost) up to the nearest rung
     and passes it as target_bucket."""
@@ -256,16 +243,6 @@ async def test_costs_length_mismatch_raises():
     try:
         with pytest.raises(ValueError, match="costs has"):
             await b.submit(["a", "b"], costs=[1])
-    finally:
-        b.shutdown()
-
-
-async def test_bucket_keys_length_mismatch_raises():
-    b = ThreadedMicroBatcher(_echo)
-    b.start()
-    try:
-        with pytest.raises(ValueError, match="bucket_keys has"):
-            await b.submit(["a", "b"], bucket_keys=[0])
     finally:
         b.shutdown()
 
@@ -439,7 +416,7 @@ async def test_nonpositive_cost_is_rejected():
 
 
 async def test_partial_batch_failure_fails_request_once_and_releases():
-    """A multi-item request split across buckets where the FIRST batch raises
+    """A multi-item request split across batches where the FIRST batch raises
     fails the whole request exactly once, releases all of its admission, and the
     later sibling item is tombstoned — it never reaches fn."""
     seen: list = []
@@ -450,13 +427,15 @@ async def test_partial_batch_failure_fails_request_once_and_releases():
             raise ValueError("boom")
         return [("r", x) for x in items]
 
-    # bucket_keys identity → "bad" and "good" are separate batches; "bad" runs
-    # (and fails) first.
-    b = ThreadedMicroBatcher(fn, max_wait_ms=200.0, max_outstanding_cost=10)
+    # max_batch_cost=1 → "bad" and "good" are separate (cost-1) batches; "bad"
+    # runs (and fails) first, tombstoning the request before "good" runs.
+    b = ThreadedMicroBatcher(
+        fn, max_wait_ms=200.0, max_batch_cost=1, max_outstanding_cost=10
+    )
     b.start()
     try:
         with pytest.raises(ValueError, match="boom"):
-            await b.submit(["bad", "good"], bucket_keys=["bad", "good"])
+            await b.submit(["bad", "good"], costs=[1, 1])
         assert b._outstanding == 0
         assert "good" not in seen  # tombstoned sibling never reached fn
     finally:
@@ -477,11 +456,11 @@ async def test_no_fn_after_shutdown_for_collected_items():
             release.wait(timeout=5.0)
         return [("r", x) for x in items]
 
-    # bucket_keys identity → one batch per item; all three collected together,
-    # the "a" batch blocks in fn while shutdown() is called.
-    b = ThreadedMicroBatcher(fn, max_wait_ms=50.0)
+    # max_batch_cost=1 → one batch per item; all three collected together, the
+    # "a" batch blocks in fn while shutdown() is called.
+    b = ThreadedMicroBatcher(fn, max_wait_ms=50.0, max_batch_cost=1)
     b.start()
-    task = asyncio.ensure_future(b.submit(["a", "b", "c"], bucket_keys=["a", "b", "c"]))
+    task = asyncio.ensure_future(b.submit(["a", "b", "c"], costs=[1, 1, 1]))
     for _ in range(200):
         if entered.is_set():
             break

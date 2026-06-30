@@ -108,11 +108,13 @@ class Qwen3VLViTEncoder(QwenVisionEncoderBackend):
             self.buckets = None
             self.max_batch_cost = self._tokens_per_img * _MAX_IMAGES
 
-    def build(self, model_id: str, device: str) -> None:
+    def build(self, model_id: str) -> None:
         """Load tokenizer (Qwen base) + processor + ViT; compile and warm up so one
         CUDA graph per rung is captured on this (the actor) thread."""
-        super().build(model_id, device)  # self.tokenizer
-        self.device = device
+        super().build(model_id)  # self.tokenizer
+        # The worker pins the GPU via CUDA_VISIBLE_DEVICES, so the current device
+        # ("cuda") is correct — the backend picks its own device (no device arg).
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.processor = AutoProcessor.from_pretrained(model_id)
 
         model = AutoModelForImageTextToText.from_pretrained(
@@ -121,14 +123,14 @@ class Qwen3VLViTEncoder(QwenVisionEncoderBackend):
         # Qwen3VLForConditionalGeneration.model is Qwen3VLModel(.visual, .language_model).
         inner = getattr(model, "model", model)
         visual = getattr(inner, "visual", None) or getattr(model, "visual")
-        self.visual = visual.to(device).eval()
+        self.visual = visual.to(self.device).eval()
         del model  # drop the LM half; the vLLM worker owns the LM
         torch.cuda.empty_cache()
 
         vc = self.visual.config
         self.merge = int(vc.spatial_merge_size)
         patch = int(vc.patch_size)
-        # Fixed square so grid_thw (→ cost/bucket_key) is constant: every image is
+        # Fixed square so grid_thw (→ cost) is constant: every image is
         # exactly _tokens_per_img merged tokens.
         self.side = patch * self.merge * _TOKENS_PER_SIDE
         self._fixed_hw = (self.side, self.side)
@@ -184,13 +186,14 @@ class Qwen3VLViTEncoder(QwenVisionEncoderBackend):
     def preprocess(self, image_url: str) -> Preprocessed[Dict[str, Any]]:
         """Off-thread: fetch + resize to the fixed square + HF patchify.
 
-        ``cost`` = merged visual tokens for this image; ``bucket_key`` = its
-        ``grid_thw`` (constant here, so all images share one bucket)."""
+        ``cost`` = merged visual tokens for this image (the scalar Dynamo packs
+        by). Every image is the same fixed square, so the ViT shapes are uniform —
+        the author owns any shape/padding concerns inside ``forward_batch``."""
         img = _load_image(image_url).resize(self._fixed_hw)
         item = self._process(img)
         t, h, w = item["grid_thw"][0].tolist()
         cost = (t * h * w) // (self.merge**2)
-        return Preprocessed(item=item, cost=cost, bucket_key=(t, h, w))
+        return Preprocessed(item=item, cost=cost)
 
     def _process(self, img: Image.Image) -> Dict[str, Any]:
         out = self.processor.image_processor(images=[img], return_tensors="pt")

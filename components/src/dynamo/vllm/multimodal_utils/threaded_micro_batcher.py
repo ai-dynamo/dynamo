@@ -12,19 +12,19 @@ It owns:
   (CUDA graphs, the current device/stream) is captured and replayed on the same
   thread; an optional ``on_stop`` runs on that same thread at teardown;
 - a **coalescing micro-batcher**: items from concurrent ``submit()`` calls are
-  pooled, grouped by ``bucket_key`` (only same-bucket items batch together — the
-  shape constraint a CUDA graph needs), and split into batches whose summed
-  ``cost`` stays within ``max_batch_cost`` (a compute/token budget, not a raw
-  count);
+  pooled and split into batches whose summed ``cost`` stays within
+  ``max_batch_cost`` (a compute/token budget, not a raw count). Packing is
+  **one-dimensional** — by scalar ``cost`` alone; the batcher never inspects item
+  shape;
 - a **graph ladder** (optional ``buckets``): when set, the batcher rounds each
   batch's ``sum(cost)`` **up to the nearest rung** and passes it as
   ``target_bucket`` so ``fn`` can pad to that rung and replay its captured graph.
   ``buckets=None`` ⇒ eager: ``target_bucket=None``.
 
-The caller speaks in opaque items plus a per-item ``cost`` (int) and
-``bucket_key`` (hashable), computed once off-thread (see ``Preprocessed``); the
-batcher never interprets them, so all model knowledge stays in the caller. Final
-padding of a batch to a captured CUDA-graph shape is the ``fn``'s job (it owns
+The caller speaks in opaque items plus a per-item scalar ``cost`` (int), computed
+once off-thread (see ``Preprocessed``); the batcher never interprets the items, so
+all model knowledge stays in the caller. Final padding of a batch to a captured
+CUDA-graph shape is the ``fn``'s job (it owns
 the model), not the batcher's — the batcher only decides *which rung*.
 
 Coalescing window — **eager drain-on-completion, no timer** (the design default):
@@ -62,7 +62,7 @@ import threading
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Callable, Generic, Hashable, List, Optional, Sequence, TypeVar
+from typing import Callable, Generic, List, Optional, Sequence, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,6 @@ class _Work(Generic[T]):
     """A single item plus where its result belongs in the owning request."""
 
     item: T
-    bucket: Hashable
     cost: int
     request: _Request
     index: int
@@ -121,16 +120,16 @@ class _Work(Generic[T]):
 
 class ThreadedMicroBatcher(Generic[T, R]):
     """Run ``fn(list[item], target_bucket) -> list[result]`` on a dedicated thread,
-    coalescing concurrent ``submit()`` calls into cost-bounded, same-bucket batches.
+    coalescing concurrent ``submit()`` calls into cost-bounded batches.
 
     Args:
         fn: Batched work; one result per item, in order. Called as
             ``fn(items, target_bucket)`` on the worker thread — ``target_bucket``
             is the ladder rung to pad to (``None`` in eager mode).
         max_batch_cost: Max summed ``cost`` of a single ``fn`` batch (>= 1).
-            ``None`` (default) ⇒ **pass-through**: no cap — the whole drained
-            same-``bucket_key`` group runs as one ``fn`` call (``cost`` ignored).
-            With ``buckets`` set, ``None`` derives the ceiling as ``max(buckets)``.
+            ``None`` (default) ⇒ **pass-through**: no cap — the whole drained set
+            runs as one ``fn`` call (``cost`` ignored). With ``buckets`` set,
+            ``None`` derives the ceiling as ``max(buckets)``.
         buckets: Optional sorted graph ladder. When set, the batcher rounds a
             batch's ``sum(cost)`` up to the nearest rung and passes it as
             ``target_bucket``; ``None``/empty ⇒ eager (``target_bucket=None``).
@@ -264,13 +263,13 @@ class ThreadedMicroBatcher(Generic[T, R]):
         self,
         items: List[T],
         costs: Optional[List[int]] = None,
-        bucket_keys: Optional[List[Hashable]] = None,
     ) -> List[R]:
         """Submit a group of items; await one result per item, in order.
 
-        ``costs`` and ``bucket_keys`` are computed off-thread by the caller (see
-        ``Preprocessed``). When omitted they default to ``cost=1`` /
-        ``bucket_key=None`` (plain count-based, single-bucket batching).
+        ``costs`` is computed off-thread by the caller (see ``Preprocessed``);
+        when omitted it defaults to ``1`` per item (plain count-based batching).
+        Batching is one-dimensional — the batcher packs by ``cost`` alone and
+        never inspects item shape.
 
         Cancellation-safe: cancelling the await tombstones not-yet-run items,
         releases admission, and returns only once the worker has retired the
@@ -284,12 +283,6 @@ class ThreadedMicroBatcher(Generic[T, R]):
             costs = [1] * len(items)
         elif len(costs) != len(items):
             raise ValueError(f"costs has {len(costs)} entries for {len(items)} items")
-        if bucket_keys is None:
-            bucket_keys = [None] * len(items)
-        elif len(bucket_keys) != len(items):
-            raise ValueError(
-                f"bucket_keys has {len(bucket_keys)} entries for {len(items)} items"
-            )
         for c in costs:
             if not isinstance(c, int) or isinstance(c, bool) or c < 1:
                 raise ValueError(f"cost must be a positive int, got {c!r}")
@@ -306,8 +299,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
             cost_total=sum(costs),
         )
         works = [
-            _Work(item, bucket, c, request, i)
-            for i, (item, c, bucket) in enumerate(zip(items, costs, bucket_keys))
+            _Work(item, c, request, i) for i, (item, c) in enumerate(zip(items, costs))
         ]
         # State check + admission + queue-commit under one lock so a concurrent
         # shutdown() cannot strand the request and capacity cannot leak.
@@ -463,7 +455,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
         return works
 
     def _dispatch(self, works: List[_Work]) -> None:
-        """Group live items by bucket, split by cost budget, run ``fn``.
+        """Split live items by cost budget, run ``fn`` (one-dimensional packing).
 
         Tombstoned (cancelled / failed / done) items are dropped before batching —
         a cancelled or already-failed request never reaches ``fn``."""
@@ -473,24 +465,22 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 self._consume(work)  # account the dropped item
             else:
                 live.append(work)
-        by_bucket: dict = {}
+        if not live:
+            return
+        if self._max_batch_cost is None:
+            # Pass-through: no cost cap — the whole drained set is one batch.
+            self._run_batch(live)
+            return
+        batch: List[_Work] = []
+        batch_cost = 0
         for work in live:
-            by_bucket.setdefault(work.bucket, []).append(work)
-        for group in by_bucket.values():
-            if self._max_batch_cost is None:
-                # Pass-through: no cost cap — the whole drained bucket is one batch.
-                self._run_batch(group)
-                continue
-            batch: List[_Work] = []
-            batch_cost = 0
-            for work in group:
-                if batch and batch_cost + work.cost > self._max_batch_cost:
-                    self._run_batch(batch)
-                    batch, batch_cost = [], 0
-                batch.append(work)
-                batch_cost += work.cost
-            if batch:
+            if batch and batch_cost + work.cost > self._max_batch_cost:
                 self._run_batch(batch)
+                batch, batch_cost = [], 0
+            batch.append(work)
+            batch_cost += work.cost
+        if batch:
+            self._run_batch(batch)
 
     def _run_batch(self, batch: List[_Work]) -> None:
         # Re-filter immediately before fn: a request may have been cancelled (or

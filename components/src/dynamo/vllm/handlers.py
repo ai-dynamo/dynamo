@@ -1131,21 +1131,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"--custom-encoder-class {custom_encoder_class!r} must resolve to a "
                 f"VisionEncoderBackend subclass, got {backend_cls!r}."
             )
-        device = "cuda" if torch.cuda.is_available() else "cpu"
         # The author writes the VisionEncoderBackend (L2); Dynamo wraps it in the
         # AsyncVisionEncoder glue (L3), which owns the preprocess pool + actor
         # thread + micro-batcher. load() runs backend.build() on the actor thread
-        # and cleans that thread up on failure.
+        # (the backend picks its own device — the worker pins it via
+        # CUDA_VISIBLE_DEVICES) and cleans that thread up on failure.
         encoder = AsyncVisionEncoder(backend_cls())
-        encoder.load(config.model, device)
+        encoder.load(config.model)
         # Assign only after a successful load so a failed load (which already shut
         # its own thread down) leaves _custom_encoder None.
         self._custom_encoder = encoder
         logger.info(
-            "Loaded CustomEncoder %s from %s on %s",
+            "Loaded CustomEncoder %s from %s",
             custom_encoder_class,
             config.model,
-            device,
         )
 
     def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
