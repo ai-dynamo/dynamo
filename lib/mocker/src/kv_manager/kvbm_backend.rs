@@ -29,6 +29,7 @@
 //! - `Lru` — simple recency-based LRU.
 //! - `MultiLru` — 4-tier frequency-aware LRU (requires TinyLFU tracker).
 
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 #[cfg(feature = "kvbm-offload")]
 use std::sync::Mutex;
@@ -225,6 +226,34 @@ struct FullBlockMetadata {
     token_ids: Option<Vec<u32>>,
 }
 
+/// One physical full-block pin plus the number of logical request owners.
+///
+/// `ImmutableBlock` clones are physical-lifetime guards, not request block
+/// tables. Keeping a clone per logical owner needlessly makes KVBM's handle
+/// count, allocator traffic, and Arc traffic scale with prefix sharing. The
+/// canonical handle pins the physical block while `logical_refs` tracks the
+/// ownership semantics the mocker needs for Deref.
+struct ActiveFullBlock {
+    handle: ImmutableBlock<G1>,
+    logical_refs: usize,
+}
+
+impl ActiveFullBlock {
+    fn new(handle: ImmutableBlock<G1>) -> Self {
+        Self {
+            handle,
+            logical_refs: 1,
+        }
+    }
+
+    fn retain(&mut self) {
+        self.logical_refs = self
+            .logical_refs
+            .checked_add(1)
+            .expect("active full-block logical reference count overflowed");
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FullBlockCommit {
     Reused,
@@ -244,11 +273,11 @@ pub struct KvManager {
     /// Dropped blocks return to kvbm-logical's reset pool.
     active_partial: FxHashMap<Uuid, MutableBlock<G1>>,
 
-    /// FullBlocks held as `ImmutableBlock`, keyed by `SequenceHash`. The vec
-    /// length is the mocker's reference count — each `Use` pushes a clone,
-    /// each `Deref` pops one. When the vec empties, the block transitions to
-    /// kvbm-logical's inactive pool (RAII return on drop of the last clone).
-    active_full: FxHashMap<SequenceHash, Vec<ImmutableBlock<G1>>>,
+    /// FullBlocks held as one canonical `ImmutableBlock` per physical block,
+    /// keyed by `SequenceHash`, plus the number of logical request owners.
+    /// The final logical `Deref` drops the canonical handle and transitions the
+    /// block to kvbm-logical's inactive pool.
+    active_full: FxHashMap<SequenceHash, ActiveFullBlock>,
 
     /// Shadow registry for every block registered in kvbm-logical. The logical
     /// registry is keyed by `PositionalLineageHash`, while the router's radix
@@ -349,6 +378,45 @@ impl KvManager {
             #[cfg(feature = "kvbm-offload")]
             offload_engine: None,
             capacity_generation: 0,
+        }
+    }
+
+    /// Install a newly acquired physical handle or merge it into an entry that
+    /// became active earlier in the same serial commit.
+    fn insert_or_retain_active_full(&mut self, seq_hash: SequenceHash, handle: ImmutableBlock<G1>) {
+        match self.active_full.entry(seq_hash) {
+            Entry::Vacant(entry) => {
+                entry.insert(ActiveFullBlock::new(handle));
+            }
+            Entry::Occupied(mut entry) => {
+                assert_eq!(
+                    entry.get().handle.block_id(),
+                    handle.block_id(),
+                    "active full-block hash resolved to a different physical block"
+                );
+                entry.get_mut().retain();
+                // `handle` is a redundant physical pin. Dropping it leaves the
+                // canonical entry alive while logical ownership is tracked by
+                // `logical_refs`.
+                drop(handle);
+            }
+        }
+    }
+
+    /// Release one logical owner. Removing the final entry drops the sole
+    /// physical handle and lets KVBM transition the block to inactive.
+    fn release_active_full(&mut self, seq_hash: SequenceHash) {
+        let Entry::Occupied(mut entry) = self.active_full.entry(seq_hash) else {
+            panic!("Deref: full block not in active pool");
+        };
+        assert!(
+            entry.get().logical_refs > 0,
+            "active full block must retain at least one logical owner"
+        );
+        if entry.get().logical_refs == 1 {
+            entry.remove();
+        } else {
+            entry.get_mut().logical_refs -= 1;
         }
     }
 
@@ -1002,7 +1070,7 @@ impl KvManager {
         plh: PositionalLineageHash,
     ) -> Option<ImmutableBlock<G1>> {
         if let Some(active) = self.active_full.get(&seq_hash) {
-            return Some(active[0].clone());
+            return Some(active.handle.clone());
         }
         self.block_manager.match_blocks(&[plh]).into_iter().next()
     }
@@ -1022,10 +1090,7 @@ impl KvManager {
 
         if let Some(canonical) = self.acquire_existing_full(seq_hash, plh) {
             drop(candidate);
-            self.active_full
-                .entry(seq_hash)
-                .or_default()
-                .push(canonical);
+            self.insert_or_retain_active_full(seq_hash, canonical);
             return FullBlockCommit::Reused;
         }
 
@@ -1035,10 +1100,7 @@ impl KvManager {
             .expect("full block stage failed");
         let canonical = self.block_manager.register_block(complete);
         let canonical_block_id = canonical.block_id();
-        self.active_full
-            .entry(seq_hash)
-            .or_default()
-            .push(canonical);
+        self.insert_or_retain_active_full(seq_hash, canonical);
 
         if canonical_block_id != candidate_block_id {
             return FullBlockCommit::Reused;
@@ -1202,7 +1264,7 @@ impl KvManager {
                         let (_, handle) = cached_prefix
                             .next()
                             .expect("reserved prefix handle must exist");
-                        self.active_full.entry(seq_hash).or_default().push(handle);
+                        self.insert_or_retain_active_full(seq_hash, handle);
                         metadata_parent_hash = Some(seq_hash);
                         continue;
                     }
@@ -1471,7 +1533,7 @@ impl KvManager {
                     let entry = if let Some(active) = self.active_full.get(seq_hash) {
                         PreparedUseBlock::ExistingFull {
                             seq_hash: *seq_hash,
-                            handle: active[0].clone(),
+                            handle: active.handle.clone(),
                         }
                     } else if let Some(handle) =
                         self.block_manager.match_blocks(&[plh]).into_iter().next()
@@ -1609,7 +1671,7 @@ impl KvManager {
                             token_ids,
                         );
                     }
-                    self.active_full.entry(seq_hash).or_default().push(handle);
+                    self.insert_or_retain_active_full(seq_hash, handle);
                     metadata_parent_hash = Some(seq_hash);
                     first_store_parent = metadata_parent_hash;
                 }
@@ -1634,10 +1696,7 @@ impl KvManager {
                         candidate_block_id,
                         "prepared fresh Use block unexpectedly resolved to an existing registration"
                     );
-                    self.active_full
-                        .entry(seq_hash)
-                        .or_default()
-                        .push(immutable);
+                    self.insert_or_retain_active_full(seq_hash, immutable);
 
                     let local_hash = signal.local_hashes.get(full_idx).copied();
                     let registry_token_ids = signal
@@ -1801,14 +1860,7 @@ impl KvManager {
                         .expect("Deref: partial block not in active pool");
                 }
                 UniqueBlock::FullBlock(seq_hash) => {
-                    let vec = self
-                        .active_full
-                        .get_mut(seq_hash)
-                        .expect("Deref: full block not in active pool");
-                    vec.pop();
-                    if vec.is_empty() {
-                        self.active_full.remove(seq_hash);
-                    }
+                    self.release_active_full(*seq_hash);
                 }
             }
         }
@@ -1869,11 +1921,17 @@ impl KvManager {
         self.block_manager.total_blocks() - self.block_manager.available_blocks()
     }
 
-    /// Total number of held RAII handles (refcount-style): one per held
-    /// `MutableBlock` plus one per cloned `ImmutableBlock` in `active_full`.
-    /// Shared-prefix reuse inflates this above the distinct-block count.
+    /// Total number of logical block owners: one per held `MutableBlock` plus
+    /// the explicit logical reference count of every full block. This remains
+    /// a request-ownership metric even though KVBM's `inflight_immutable`
+    /// metric now counts only the canonical physical handles retained here.
     pub fn num_active_block_refs(&self) -> usize {
-        self.active_partial.len() + self.active_full.values().map(|v| v.len()).sum::<usize>()
+        self.active_partial.len()
+            + self
+                .active_full
+                .values()
+                .map(|active| active.logical_refs)
+                .sum::<usize>()
     }
 
     #[cfg(test)]
@@ -1885,8 +1943,7 @@ impl KvManager {
                 UniqueBlock::FullBlock(hash) => self
                     .active_full
                     .get(hash)
-                    .and_then(|handles| handles.last())
-                    .map(ImmutableBlock::block_id),
+                    .map(|active| active.handle.block_id()),
                 UniqueBlock::PartialBlock(uuid) => {
                     self.active_partial.get(uuid).map(MutableBlock::block_id)
                 }
@@ -2164,9 +2221,21 @@ mod tests {
         use_full(&mut mgr, 1, plh(100));
         use_full(&mut mgr, 1, plh(100));
         // Same seq_hash used twice: only one distinct physical block is
-        // resident, but the mocker holds two RAII handles.
+        // resident and pinned by one canonical RAII handle, while the mocker
+        // tracks two logical request owners.
         assert_eq!(mgr.num_active_blocks(), 1);
         assert_eq!(mgr.num_active_block_refs(), 2);
+        assert_eq!(mgr.block_manager.metrics().snapshot().inflight_immutable, 1);
+
+        deref_full(&mut mgr, 1);
+        assert_eq!(mgr.num_active_blocks(), 1);
+        assert_eq!(mgr.num_active_block_refs(), 1);
+        assert_eq!(mgr.block_manager.metrics().snapshot().inflight_immutable, 1);
+
+        deref_full(&mut mgr, 1);
+        assert_eq!(mgr.num_active_blocks(), 0);
+        assert_eq!(mgr.num_active_block_refs(), 0);
+        assert_eq!(mgr.block_manager.metrics().snapshot().inflight_immutable, 0);
     }
 
     #[test]
@@ -2350,7 +2419,10 @@ mod tests {
             mgr.process(&MoveBlock::Deref(blocks));
         }
         fn refcount(mgr: &KvManager, id: u64) -> usize {
-            mgr.active_full.get(&id).map(|v| v.len()).unwrap_or(0)
+            mgr.active_full
+                .get(&id)
+                .map(|active| active.logical_refs)
+                .unwrap_or(0)
         }
         fn assert_active(mgr: &KvManager, expected: &[(u64, usize)]) {
             let distinct = expected.len();
@@ -3303,7 +3375,7 @@ mod tests {
             assert!(target_hashes.iter().all(|target| {
                 mgr.active_full
                     .get(target)
-                    .is_some_and(|refs| refs.len() == 1)
+                    .is_some_and(|active| active.logical_refs == 1)
             }));
 
             let committed = sink.take();
