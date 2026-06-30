@@ -6,10 +6,9 @@ sidebar-title: "Experimental: Rust EPP"
 subtitle: Run the native Rust ext_proc EPP with Dynamo router integration.
 ---
 
-<Warning>
-Experimental. Use the Rust EPP for evaluation and development. The operator-managed quickstart uses
-the standard Dynamo EPP path.
-</Warning>
+> [!WARNING]
+> Experimental. Use the Rust EPP for evaluation and development. The operator-managed quickstart uses
+> the standard Dynamo EPP path.
 
 The Rust EPP is a native Envoy ext_proc server that embeds Dynamo router logic directly. It replaces
 the Go EPP plus CGO bridge with a single Rust binary, serves ext_proc gRPC on port `9002`, and uses
