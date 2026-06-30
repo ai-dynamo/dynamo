@@ -23,6 +23,7 @@ pub mod pod_discovery;
 pub mod proto;
 pub mod selector;
 pub mod server;
+pub mod topology_adapter;
 
 pub use epp::Router;
 pub use epp_standalone_config::{EppMode, EppStandaloneConfig};
@@ -32,3 +33,4 @@ pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo};
 pub use pod_discovery::{PodDiscovery, RawWorker};
 pub use selector::{OverlapSummary, SelectRequest, SelectResponse, Selector, WorkerRegistration};
 pub use server::ExtProcServer;
+pub use topology_adapter::{RegistrationDefaults, TopologyAdapter};

@@ -56,7 +56,6 @@ pub async fn spawn_pool_watch(
     );
     let ar = ApiResource::from_gvk(&gvk);
     let api: Api<DynamicObject> = Api::namespaced_with(client, &namespace, &ar);
-    let wcfg = watcher::Config::default().fields(&format!("metadata.name={name}"));
 
     let (tx, rx) = watch::channel::<Option<PoolState>>(None);
 
@@ -68,11 +67,16 @@ pub async fn spawn_pool_watch(
 
     let handle = tokio::spawn(async move {
         use futures::StreamExt;
-        let stream = watcher(api, wcfg);
+        // `watch_object` tracks a single named object and yields its current
+        // state as `Option`: `Some` while it exists, `None` once it is gone.
+        // Crucially, deletions that happen while the watch is disconnected are
+        // reported via `None` on the next relist (not a `Delete` event), so
+        // stale `PoolState` can never survive a reconnect.
+        let stream = watcher::watch_object(api, &name);
         tokio::pin!(stream);
         loop {
             match stream.next().await {
-                Some(Ok(event)) => handle_event(event, &name, &tx),
+                Some(Ok(obj)) => publish_pool_state(obj, &name, &tx),
                 Some(Err(e)) => {
                     tracing::warn!(error = %e, pool = %name, "InferencePool watch error; retrying");
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -88,37 +92,35 @@ pub async fn spawn_pool_watch(
     Ok((rx, handle))
 }
 
-fn handle_event(
-    event: watcher::Event<DynamicObject>,
+/// Publish the latest [`PoolState`] derived from the observed pool object.
+/// Sends `None` when the pool is absent or its spec cannot be parsed, so a
+/// deleted or malformed pool always clears stale discovery state.
+fn publish_pool_state(
+    obj: Option<DynamicObject>,
     name: &str,
     tx: &watch::Sender<Option<PoolState>>,
 ) {
-    match event {
-        watcher::Event::Apply(obj) | watcher::Event::InitApply(obj) => {
-            match parse_pool_state(&obj.data) {
-                Some(state) => {
-                    tracing::info!(
-                        pool = %name,
-                        target_port = state.target_port,
-                        labels = ?state.match_labels,
-                        "InferencePool resolved"
-                    );
-                    let _ = tx.send(Some(state));
-                }
-                None => {
-                    tracing::warn!(
-                        pool = %name,
-                        "InferencePool present but missing matchLabels/targetPort; ignoring"
-                    );
-                }
-            }
+    let state = obj.as_ref().and_then(|o| parse_pool_state(&o.data));
+    match (&obj, &state) {
+        (Some(_), Some(s)) => {
+            tracing::info!(
+                pool = %name,
+                target_port = s.target_port,
+                labels = ?s.match_labels,
+                "InferencePool resolved"
+            );
         }
-        watcher::Event::Delete(_) => {
-            tracing::warn!(pool = %name, "InferencePool deleted; clearing discovery state");
-            let _ = tx.send(None);
+        (Some(_), None) => {
+            tracing::warn!(
+                pool = %name,
+                "InferencePool present but missing matchLabels/targetPort; clearing discovery state"
+            );
         }
-        watcher::Event::Init | watcher::Event::InitDone => {}
+        (None, _) => {
+            tracing::warn!(pool = %name, "InferencePool absent; clearing discovery state");
+        }
     }
+    let _ = tx.send(state);
 }
 
 /// Extract a [`PoolState`] from an `InferencePool` `spec` JSON value. Returns
