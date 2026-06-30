@@ -7,7 +7,7 @@
 
 ---
 # -----------------------------------------------------------------------------
-# vLLM workers - attach the pool to the cluster gateway.
+# vLLM workers - expose OpenAI-compatible endpoints and KV events.
 # -----------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
@@ -48,6 +48,12 @@ spec:
               containerPort: 8000
             - name: kv-events
               containerPort: 5557
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
           env:
             - name: HF_TOKEN
               valueFrom:
