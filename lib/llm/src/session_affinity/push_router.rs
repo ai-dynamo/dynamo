@@ -145,17 +145,18 @@ impl SessionAffinityPushRouter {
         }
         let Some(session_id) = session_id else {
             let explicit = explicit_target(&request, RequestPhase::Prefill)?;
-            let Some(pinned_worker) = explicit else {
+            let Some(target) = explicit else {
                 return Err(invalid_argument(
                     "worker ID required for prefill request in Direct routing mode",
                 ));
             };
+            let rank = target.dp_rank;
             return self
                 .inner
                 .select_and_dispatch_exact(
                     request,
-                    Some(pinned_worker.worker_id),
-                    move |request, worker_id| prepare(request, worker_id, None),
+                    Some(target.worker_id),
+                    move |request, worker_id| prepare(request, worker_id, rank),
                 )
                 .await;
         };
@@ -330,6 +331,8 @@ fn phase_worker_id(request: &PreprocessedRequest, phase: RequestPhase) -> Option
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         distributed::DistributedConfig,
@@ -513,6 +516,53 @@ mod tests {
             phase_worker_id(&decode_only, RequestPhase::Aggregated),
             Some(99)
         );
+
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn direct_prefill_without_session_preserves_explicit_rank_zero() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("session_affinity_direct_prefill_rank".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("prefill".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        let inner = PushRouter::from_client(client, RouterMode::Direct)
+            .await
+            .unwrap();
+        let router =
+            SessionAffinityPushRouter::new(inner, Some(Duration::from_secs(10)), true).unwrap();
+
+        let mut content = request(Some(worker_id), false);
+        content.routing_mut().prefill_worker_id = Some(worker_id);
+        content.routing_mut().prefill_dp_rank = Some(0);
+        let observed = Arc::new(Mutex::new(None));
+        let prepare_observed = observed.clone();
+        let result = router
+            .select_and_dispatch_prefill(Context::new(content), move |request, _, dp_rank| {
+                request.routing_mut().prefill_dp_rank = dp_rank;
+                *prepare_observed.lock().unwrap() = Some((
+                    dp_rank,
+                    request
+                        .routing
+                        .as_ref()
+                        .and_then(|routing| routing.prefill_dp_rank),
+                ));
+                Err::<(), _>(anyhow::anyhow!("stop after preparation"))
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(*observed.lock().unwrap(), Some((Some(0), Some(0))));
 
         runtime.shutdown();
     }

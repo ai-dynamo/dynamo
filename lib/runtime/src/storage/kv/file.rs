@@ -642,10 +642,14 @@ mod tests {
     #[tokio::test]
     async fn external_delete_is_observed_under_noncanonical_root() {
         let t = tempfile::tempdir().unwrap();
+        let canonical_root = t.path().join("canonical");
+        fs::create_dir_all(&canonical_root).unwrap();
+        let linked_root = t.path().join("linked");
+        symlink(&canonical_root, &linked_root).unwrap();
         let watcher_cancel = CancellationToken::new();
         let creator_cancel = CancellationToken::new();
-        let watcher_store = FileStore::new(watcher_cancel.clone(), t.path());
-        let creator_store = FileStore::new(creator_cancel.clone(), t.path());
+        let watcher_store = FileStore::new(watcher_cancel.clone(), &linked_root);
+        let creator_store = FileStore::new(creator_cancel.clone(), &canonical_root);
         let watcher_bucket = watcher_store
             .get_or_create_bucket("v1/claims", None)
             .await

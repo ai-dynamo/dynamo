@@ -432,15 +432,16 @@ async fn distributed_reset_and_disconnect_clear_entries() {
     discovery.emit(ClaimEvent::Reset);
     wait_for_cached_target(&coordinator, &session_id, None).await;
 
-    drop(
-        coordinator
-            .acquire(&session_id)
-            .await
-            .unwrap()
-            .resolve(|| target_payload(target(99, Some(0))))
-            .await
-            .unwrap(),
-    );
+    let resolved = coordinator
+        .acquire(&session_id)
+        .await
+        .unwrap()
+        .resolve(|| target_payload(target(99, Some(0))))
+        .await
+        .unwrap();
+    assert_eq!(resolved.target(), target(8, Some(0)));
+    assert!(!resolved.was_created());
+    drop(resolved);
     discovery.disconnect();
     wait_for_cached_target(&coordinator, &session_id, None).await;
 }
