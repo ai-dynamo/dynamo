@@ -22,6 +22,7 @@ pub mod selector_client;
 pub mod selector_config;
 pub mod selector_reflector;
 pub mod server;
+pub mod topology_adapter;
 
 pub use epp::Router;
 pub use inference_pool::PoolState;
@@ -33,3 +34,4 @@ pub use selector_client::{
 pub use selector_config::SelectorConfig;
 pub use selector_reflector::{RawWorker, SelectorReflector};
 pub use server::ExtProcServer;
+pub use topology_adapter::{RegistrationDefaults, TopologyAdapter};

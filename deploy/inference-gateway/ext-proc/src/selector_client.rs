@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 
 /// Worker registration payload (`POST /workers`). Only the fields router-only
 /// mode populates are included; the service defaults the rest.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkerRegistration {
     pub worker_id: u64,
     pub model_name: String,
