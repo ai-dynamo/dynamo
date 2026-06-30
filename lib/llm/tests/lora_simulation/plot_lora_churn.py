@@ -35,7 +35,8 @@ from pathlib import Path
 try:
     import matplotlib
 
-    matplotlib.use("Agg")
+    if "--save" in sys.argv:
+        matplotlib.use("Agg")
     import matplotlib.colors as mcolors
     import matplotlib.pyplot as plt
     import matplotlib.ticker as ticker
