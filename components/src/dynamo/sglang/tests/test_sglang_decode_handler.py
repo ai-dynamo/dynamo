@@ -471,6 +471,16 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
                             "id": "request-1",
                             "finish_reason": {"type": "stop"},
                         },
+                    },
+                    {
+                        "index": 1,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                            "prompt_tokens": 2,
+                            "completion_tokens": 3,
+                        },
                     }
                 ]
             ),
@@ -478,7 +488,19 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
         )
     )
 
-    assert chunks == [{"index": 0, "finish_reason": "stop", "token_ids": []}]
+    assert chunks == [
+        {"index": 0, "finish_reason": "stop", "token_ids": []},
+        {
+            "index": 1,
+            "finish_reason": "stop",
+            "token_ids": [],
+            "completion_usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 3,
+                "total_tokens": 5,
+            },
+        },
+    ]
 
 
 @pytest.mark.asyncio

@@ -587,12 +587,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if cached_tokens is not None and cached_tokens > 0:
                         prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
                     if input_tokens is not None and completion_tokens is not None:
-                        out["completion_usage"] = {
+                        completion_usage = {
                             "prompt_tokens": input_tokens,
                             "completion_tokens": completion_tokens,
                             "total_tokens": input_tokens + completion_tokens,
-                            "prompt_tokens_details": prefill_prompt_tokens_details,
                         }
+                        if prefill_prompt_tokens_details is not None:
+                            completion_usage["prompt_tokens_details"] = (
+                                prefill_prompt_tokens_details
+                            )
+                        out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:
                             await metadata_uploader.upload_choice(output_idx, meta_info)
