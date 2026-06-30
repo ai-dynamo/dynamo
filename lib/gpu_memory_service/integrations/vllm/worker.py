@@ -7,7 +7,7 @@ This module provides a custom Worker class that properly integrates with
 GPU Memory Service for VA-stable weight sharing and unmap/remap functionality.
 
 Usage:
-    Set --worker-cls=gpu_memory_service.integrations.vllm.worker:GMSWorker
+    Set --load-format gms. Dynamo selects GMSWorker automatically.
 """
 
 from __future__ import annotations

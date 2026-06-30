@@ -1,9 +1,9 @@
-<!--
-SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
--->
-
-# Cold Start Optimizations and Resiliency Support Matrix
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Cold Start Optimizations and Resiliency Support Matrix
+subtitle: Backend support for GMS, Shadow Engine Failover, and Snapshot
+---
 
 Backend status for Dynamo's in-flight features targeting cold-start optimizations and resiliency.
 
@@ -16,8 +16,10 @@ Dynamo is building composable primitives across two themes:
 
 This document tracks backend support across three composable projects in this workstream:
 
-- **[GPU Memory Service (GMS)](#gpu-memory-service-gms)**: out-of-process GPU memory manager for zero-copy sharing of weights and KV across worker processes.
-- **[Dynamo Bulwark](#dynamo-bulwark-shadow-engine-failover)**: pre-initialized "shadow" engines sharing weights and KV cache can be quickly failed over to on software and hardware failures.
+- **[GPU Memory Service (GMS)](#gpu-memory-service-gms)**: out-of-process GPU memory manager for
+  sharing committed model weights and managing backend-specific GPU memory lifecycles.
+- **[Dynamo Bulwark](#dynamo-bulwark-shadow-engine-failover)**: pre-initialized shadow engines reuse
+  resident model weights after same-node software-process failures. KV cache state is not preserved.
 - **[Dynamo Snapshot](./snapshot.md)**: CRIU-based checkpoint/restore of initialized workers, cutting cold starts from minutes to seconds.
 
 **Legend:**
@@ -40,7 +42,9 @@ See the per-feature sections below for detailed per-backend status.
 
 ### GPU Memory Service (GMS)
 
-- Out-of-process GPU memory manager for zero-copy sharing of weights and KV across workers on the same GPU; foundation for Dynamo Bulwark. [Architecture](../../lib/gpu_memory_service/README.md)
+- Out-of-process GPU memory manager for zero-copy import of committed weights and stable virtual
+  address (VA) memory lifecycles on the same GPU; foundation for Dynamo Bulwark. See the
+  [GMS architecture](https://github.com/ai-dynamo/dynamo/blob/main/lib/gpu_memory_service/README.md).
 - In Kubernetes, GMS is wired in via [Dynamic Resource Allocation](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/), configured through the `gpuMemoryService` field on the `DynamoGraphDeployment` CR.
 
 #### Status
@@ -56,7 +60,9 @@ See the per-feature sections below for detailed per-backend status.
 
 ### Dynamo Bulwark (Shadow Engine Failover)
 
-- Shadow engines share weights (and soon KV) with a primary via [GMS](#gpu-memory-service-gms) and take over within seconds on primary failure using a kernel-mediated flock for leader election.
+- Shadow engines reuse committed weights through [GMS](#gpu-memory-service-gms) and take over after
+  a primary software-process failure using a kernel-mediated flock for leader election. The
+  replacement engine allocates fresh KV cache backing.
 - In Kubernetes, configured through the `failover` field on the `DynamoGraphDeployment` CR (on top of `gpuMemoryService`).
 
 #### Status
