@@ -44,7 +44,6 @@ import torch
 from safetensors import safe_open
 from transformers.utils import cached_file
 
-from dynamo.vllm.multimodal_utils.vision_encoder_backend import Preprocessed
 from examples.custom_encoder.qwen_vision_encoder import QwenVisionEncoderBackend
 
 logger = logging.getLogger(__name__)
@@ -97,7 +96,9 @@ class HitchhikersVisionEncoder(QwenVisionEncoderBackend):
     so the spliced prompt reads as a coherent sentence.
     """
 
-    # Eager: no graph ladder. Count-based budget (cost == 1 per image).
+    # Eager: no graph ladder. Count-based budget (cost == 1 per image). The URL is
+    # ignored, so there is nothing to preprocess: it inherits the identity-default
+    # preprocess + preprocess_concurrency=0, and raws go straight to forward_batch.
     buckets = None
     max_batch_cost = 8
 
@@ -111,12 +112,6 @@ class HitchhikersVisionEncoder(QwenVisionEncoderBackend):
             self._embed_weight.dtype,
             _PHRASE,
         )
-
-    def preprocess(self, image_url: str) -> Preprocessed[str]:
-        """Pass-through: the URL is ignored, so there is nothing to fetch/decode.
-
-        cost=1 (count-based)."""
-        return Preprocessed(item=image_url, cost=1)
 
     def forward_batch(
         self, items: List[str], target_bucket: Optional[int] = None

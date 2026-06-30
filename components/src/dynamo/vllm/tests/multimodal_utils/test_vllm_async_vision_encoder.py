@@ -35,6 +35,9 @@ class _FakeBackend(VisionEncoderBackend):
     """A CPU-only fake backend; records its threads and forward-call boundaries."""
 
     image_token_id = 151655
+    # This fake overrides preprocess, so opt into the off-loop pool (the default
+    # is 0 ⇒ no pool); the passthrough path is covered by its own test below.
+    preprocess_concurrency = 4
 
     def __init__(self, *, fail_on=None):
         self.fail_on = set(fail_on or ())
@@ -185,6 +188,37 @@ def test_shutdown_before_load_is_safe():
     AsyncVisionEncoder(_FakeBackend()).shutdown()  # no-op, no raise
 
 
-def test_preprocess_concurrency_must_be_positive():
+async def test_passthrough_skips_preprocess_when_no_pool():
+    """With no pool (preprocess_concurrency=0) preprocess is skipped and raws go
+    straight to forward_batch — no A5 barrier, no pool thread."""
+
+    class _PassthroughBackend(_FakeBackend):
+        preprocess_concurrency = 0
+
+        def preprocess(self, raw):
+            raise AssertionError("preprocess must not run in passthrough mode")
+
+    be = _PassthroughBackend()
+    enc = AsyncVisionEncoder(be)
+    enc.load("m")
+    try:
+        assert enc._pool is None  # no pool created
+        out = await enc.encode(["a", "bb"])
+        assert len(out) == 2
+        assert be.forward_calls == [["a", "bb"]]  # raws passed straight through
+    finally:
+        enc.shutdown()
+
+
+def test_preprocess_concurrency_zero_disables_pool():
+    enc = AsyncVisionEncoder(_FakeBackend(), preprocess_concurrency=0)
+    enc.load("m")
+    try:
+        assert enc._pool is None
+    finally:
+        enc.shutdown()
+
+
+def test_preprocess_concurrency_rejects_negative():
     with pytest.raises(ValueError, match="preprocess_concurrency"):
-        AsyncVisionEncoder(_FakeBackend(), preprocess_concurrency=0)
+        AsyncVisionEncoder(_FakeBackend(), preprocess_concurrency=-1)

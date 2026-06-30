@@ -5,9 +5,11 @@
 
 Hardcodes the Qwen ``<|image_pad|>`` placeholder id and loads the model tokenizer
 (handy for subclasses that tokenize text). A concrete Qwen-family encoder
-subclasses this and implements only ``preprocess`` + ``forward_batch``.
+subclasses this and implements ``forward_batch`` — plus ``preprocess`` (and
+``preprocess_concurrency > 0``) only when it needs off-loop fetch/resize.
 
     class MyQwenEncoder(QwenVisionEncoderBackend):
+        preprocess_concurrency = 4              # enable the off-loop pool
         def build(self, model_id):
             super().build(model_id)             # loads self.tokenizer
             # ... load ViT + projector (pick the device yourself) ...
@@ -30,8 +32,9 @@ class QwenVisionEncoderBackend(VisionEncoderBackend):
 
     Hardcodes ``image_token_id`` to Qwen3-VL's ``<|image_pad|>`` (151655) — override
     it for other versions (e.g. 248056 for Qwen3.5). ``build`` loads the model
-    tokenizer; ``preprocess`` and ``forward_batch`` stay abstract, so this class
-    cannot be instantiated directly — subclass it and implement them.
+    tokenizer; ``forward_batch`` stays abstract, so this class cannot be
+    instantiated directly — subclass it and implement ``forward_batch`` (and
+    ``preprocess`` only if it needs off-loop prep).
     """
 
     # Qwen3-VL <|image_pad|>; override for other Qwen versions.

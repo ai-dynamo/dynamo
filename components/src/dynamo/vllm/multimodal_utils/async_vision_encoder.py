@@ -47,24 +47,32 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
 
     The worker calls ``load`` once at startup and ``await``s ``encode`` per
     request; ``shutdown`` on teardown. All model knowledge lives in ``backend``;
-    this class owns the preprocess pool, the A5 barrier, and the single actor
-    thread that runs ``build`` / ``forward_batch`` / ``close``.
+    this class owns the optional preprocess pool, the A5 barrier, and the single
+    actor thread that runs ``build`` / ``forward_batch`` / ``close``.
     """
 
     def __init__(
         self,
         backend: VisionEncoderBackend[RawT, ItemT],
         *,
-        preprocess_concurrency: int = 4,
+        preprocess_concurrency: int | None = None,
         name: str = "vision-encoder",
     ) -> None:
-        if preprocess_concurrency < 1:
-            raise ValueError("preprocess_concurrency must be >= 1")
+        # The backend declares whether it needs off-loop preprocessing; the
+        # explicit arg is an override for tuning. 0 ⇒ no pool (raws pass straight
+        # to forward_batch).
+        conc = (
+            backend.preprocess_concurrency
+            if preprocess_concurrency is None
+            else preprocess_concurrency
+        )
+        if conc < 0:
+            raise ValueError("preprocess_concurrency must be >= 0")
         self._backend = backend
-        self._preprocess_concurrency = preprocess_concurrency
+        self._preprocess_concurrency = conc
         self._name = name
         self._actor: ThreadPoolExecutor | None = None  # build + every forward
-        self._pool: ThreadPoolExecutor | None = None  # off-loop preprocess
+        self._pool: ThreadPoolExecutor | None = None  # off-loop preprocess (or None)
 
     # ---- lifecycle ---------------------------------------------------------
 
@@ -75,7 +83,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         so a misconfigured encoder errors at startup. Single-shot: a second
         ``load()`` raises rather than orphaning the first actor thread and model.
         """
-        if self._actor is not None or self._pool is not None:
+        if self._actor is not None:
             raise RuntimeError("AsyncVisionEncoder.load() called twice")
         try:
             # One actor thread so build + every forward share a thread; a single
@@ -83,9 +91,14 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
             self._actor = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix=f"{self._name}-actor"
             )
-            self._pool = ThreadPoolExecutor(
-                max_workers=self._preprocess_concurrency,
-                thread_name_prefix=f"{self._name}-pre",
+            # No pool when concurrency is 0 — preprocess is skipped (passthrough).
+            self._pool = (
+                ThreadPoolExecutor(
+                    max_workers=self._preprocess_concurrency,
+                    thread_name_prefix=f"{self._name}-pre",
+                )
+                if self._preprocess_concurrency > 0
+                else None
             )
             self._actor.submit(self._backend.build, model_id).result()
             self.validate()
@@ -110,30 +123,38 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
     # ---- request path ------------------------------------------------------
 
     async def encode(self, raws: List[RawT]) -> List[torch.Tensor]:
-        """Preprocess (off-loop, A5 barrier) then run a single serial forward.
+        """Optionally preprocess (off-loop, A5 barrier) then run a single serial
+        forward.
 
-        Returns one ``(n_visual_tokens, lm_hidden_dim)`` CPU tensor per raw input,
-        in order. Raises if any image's preprocess fails (no GPU work) or if the
-        forward fails.
+        With no preprocess pool (``preprocess_concurrency == 0``) raws go straight
+        to ``forward_batch`` (the backend folds any prep in there). Returns one
+        ``(n_visual_tokens, lm_hidden_dim)`` CPU tensor per raw input, in order.
+        Raises if any image's preprocess fails (no GPU work) or if the forward
+        fails.
         """
-        if self._actor is None or self._pool is None:
+        if self._actor is None:
             raise RuntimeError("AsyncVisionEncoder.encode() called before load()")
         if not raws:
             return []
         loop = asyncio.get_running_loop()
-        # A5 barrier: preprocess all images concurrently, wait for EVERY one to
-        # settle, and run the forward only if all succeeded. return_exceptions=True
-        # makes the gather a true barrier (no short-circuit).
-        tasks = [
-            loop.run_in_executor(self._pool, self._backend.preprocess, raw)
-            for raw in raws
-        ]
-        settled = await asyncio.gather(*tasks, return_exceptions=True)
-        errors = [r for r in settled if isinstance(r, BaseException)]
-        if errors:
-            raise errors[0]
-        preprocessed: List[Preprocessed] = list(settled)  # type: ignore[arg-type]
-        items = [p.item for p in preprocessed]
+        if self._pool is None:
+            # No preprocess phase: raw IS the item. No A5 barrier needed — the
+            # single forward is already all-or-nothing for the request.
+            items: List[ItemT] = list(raws)  # type: ignore[arg-type]  # ItemT==RawT
+        else:
+            # A5 barrier: preprocess all images concurrently, wait for EVERY one to
+            # settle, run the forward only if all succeeded. return_exceptions=True
+            # makes the gather a true barrier (no short-circuit).
+            tasks = [
+                loop.run_in_executor(self._pool, self._backend.preprocess, raw)
+                for raw in raws
+            ]
+            settled = await asyncio.gather(*tasks, return_exceptions=True)
+            errors = [r for r in settled if isinstance(r, BaseException)]
+            if errors:
+                raise errors[0]
+            preprocessed: List[Preprocessed] = list(settled)  # type: ignore[arg-type]
+            items = [p.item for p in preprocessed]
         # Direct, serialized forward on the actor thread (eager; target_bucket
         # defaults to None — there is no graph ladder until CUDA-graph batching
         # is supported).
