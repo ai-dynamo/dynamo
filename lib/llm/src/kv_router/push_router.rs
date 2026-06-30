@@ -385,7 +385,7 @@ impl KvPushRouter {
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
-        F: FnOnce(&mut PreprocessedRequest, u64, Option<u32>) -> Result<M, Error>,
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         let phase = RequestPhase::Prefill;
         let phase_label = phase.to_string();
@@ -398,7 +398,11 @@ impl KvPushRouter {
         let mut guard = self
             .track_selection(&request, &mut selection, is_query_only)
             .await?;
-        let metadata = match prepare(&mut request, selection.instance_id, Some(selection.dp_rank)) {
+        let target = AffinityTarget {
+            worker_id: selection.instance_id,
+            dp_rank: Some(selection.dp_rank),
+        };
+        let metadata = match prepare(&mut request, target) {
             Ok(metadata) => metadata,
             Err(error) => {
                 guard.abort().await;
