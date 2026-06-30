@@ -17,9 +17,11 @@ pub mod epp;
 pub mod epp_standalone_config;
 pub mod inference_pool;
 pub mod offline_preprocessor;
+pub mod peer_discovery;
 pub mod picker;
 pub mod pod_discovery;
 pub mod proto;
+pub mod selector;
 pub mod server;
 
 pub use epp::Router;
@@ -28,4 +30,5 @@ pub use inference_pool::PoolState;
 pub use offline_preprocessor::build_offline_preprocessor;
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo};
 pub use pod_discovery::{PodDiscovery, RawWorker};
+pub use selector::{OverlapSummary, SelectRequest, SelectResponse, Selector, WorkerRegistration};
 pub use server::ExtProcServer;

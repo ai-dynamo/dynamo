@@ -20,6 +20,7 @@ mod tests;
 pub use crate::services::common::replica_sync::ReplicaPeerError;
 pub use core::{SelectionCore, SelectionServiceConfig};
 pub use error::SelectionError;
+pub use input::PromptRequest;
 pub use server::{AppState, run_server};
 pub use service::{SelectionService, SelectionServiceBuilder};
 pub use types::{

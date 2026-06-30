@@ -265,6 +265,36 @@ impl WorkerCatalogRecord {
     }
 }
 
+// Manual `Default` (not derived) so `model_name`/`tenant_id` match the serde
+// defaults (`"default"`) rather than empty strings; a `..Default::default()`
+// caller that forgets to set them would otherwise store the worker under an
+// unexpected `("", "")` scope.
+impl Default for WorkerRequest {
+    fn default() -> Self {
+        Self {
+            worker_id: 0,
+            model_name: default_model_name(),
+            tenant_id: default_tenant_id(),
+            endpoint: None,
+            kv_events_endpoint: None,
+            kv_events_endpoints: HashMap::new(),
+            replay_endpoint: None,
+            block_size: None,
+            data_parallel_start_rank: None,
+            data_parallel_size: None,
+            max_num_batched_tokens: None,
+            total_kv_blocks: None,
+            stable_routing_id: None,
+            is_eagle: None,
+            taints: HashSet::new(),
+            topology_domains: HashMap::new(),
+            kv_transfer_domain: None,
+            kv_transfer_enforcement: None,
+            kv_transfer_preferred_weight: None,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WorkerRequest {
     pub worker_id: WorkerId,
