@@ -22,6 +22,7 @@ pub mod pod_discovery;
 pub mod proto;
 pub mod selector_client;
 pub mod server;
+pub mod topology_adapter;
 
 pub use epp::Router;
 pub use epp_config::EppConfig;
@@ -33,3 +34,4 @@ pub use selector_client::{
     SelectRequest, SelectResponse, SelectorClient, WorkerPatch, WorkerRegistration,
 };
 pub use server::ExtProcServer;
+pub use topology_adapter::{RegistrationDefaults, TopologyAdapter};
