@@ -1,0 +1,408 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# =============================================================================
+# Dynamo EPP on-ramp - DISAGGREGATED, stock vLLM, no Dynamo operator
+# =============================================================================
+#
+# Same on-ramp idea as agg.yaml, but the vLLM fleet is split into prefill and
+# decode pools and the EPP makes a KV-aware prefill+decode decision.
+#
+# Topology:
+#   client -> gateway -> Dynamo EPP (ext_proc) picks decode worker (KV-aware)
+#                        and the prefill worker; emits BOTH:
+#                          x-dynamo-worker-instance-id   (decode target)
+#                          x-prefiller-host-port   (selected prefill pod ip:port)
+#                        gateway forwards the request to the DECODE pod.
+#   decode pod -> a decode-side P/D routing sidecar reads x-prefiller-host-port
+#                 and drives vLLM's kv_transfer_params handshake (NixlConnector),
+#                 so prefill happens on the prefill pod and the KV is transferred
+#                 to decode. This sidecar is the ONE piece you provide on the
+#                 decode pod; the EPP never re-implements the KV-transfer protocol.
+#
+# Both prefill and decode pods carry `app: vllm-qwen` (so the InferencePool
+# selects all of them) plus a role label `dynamo-role: prefill|decode` that the
+# EPP uses to tell the two pools apart.
+#
+# Prereqs: install Gateway API, GAIE, a Gateway implementation, and replace
+#          the pd-router-sidecar image with an image published to your cluster.
+# Apply:   kubectl apply -n <ns> -f disagg.yaml
+# -----------------------------------------------------------------------------
+
+---
+# -----------------------------------------------------------------------------
+# 1a) Raw vanilla vLLM PREFILL pods. NixlConnector + KV events enabled.
+# -----------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen-prefill
+  labels:
+    app: vllm-qwen
+    dynamo-role: prefill
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-qwen
+      dynamo-role: prefill
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen
+        dynamo-role: prefill
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - "--model"
+            - "Qwen/Qwen3-0.6B"
+            - "--served-model-name"
+            - "Qwen/Qwen3-0.6B"
+            - "--port"
+            - "8000"
+            - "--enable-prefix-caching"
+            - "--block-size"
+            - "16"
+            - "--max-model-len"
+            - "16384"
+            - "--gpu-memory-utilization"
+            - "0.50"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu"}'
+            - "--kv-events-config"
+            - '{"enable_kv_cache_events":true,"endpoint":"tcp://*:5557"}'
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: kv-events
+              containerPort: 5557
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          env:
+            - name: UCX_TLS
+              value: "tcp,self"
+            - name: UCX_RNDV_THRESH
+              value: "inf"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+
+---
+# -----------------------------------------------------------------------------
+# 1b) Raw vanilla vLLM DECODE pods. NixlConnector. The decode-side P/D sidecar
+#     (your code; not shipped by Dynamo) consumes x-prefiller-host-port.
+# -----------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen-decode
+  labels:
+    app: vllm-qwen
+    dynamo-role: decode
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-qwen
+      dynamo-role: decode
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen
+        dynamo-role: decode
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - "--model"
+            - "Qwen/Qwen3-0.6B"
+            - "--served-model-name"
+            - "Qwen/Qwen3-0.6B"
+            - "--port"
+            - "8000"
+            - "--enable-prefix-caching"
+            - "--block-size"
+            - "16"
+            - "--max-model-len"
+            - "16384"
+            - "--gpu-memory-utilization"
+            - "0.50"
+            - "--kv-transfer-config"
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu"}'
+            - "--kv-events-config"
+            - '{"enable_kv_cache_events":true,"endpoint":"tcp://*:5557"}'
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: kv-events
+              containerPort: 5557
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          env:
+            - name: UCX_TLS
+              value: "tcp,self"
+            - name: UCX_RNDV_THRESH
+              value: "inf"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+        # decode-side P/D routing sidecar -------------------------
+        - name: pd-router-sidecar
+          image: "<your-registry>/dynamo-pd-sidecar:dev"
+          resources:
+            limits:
+              cpu: "500m"
+              memory: 512Mi
+            requests:
+              cpu: "100m"
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+
+---
+# -----------------------------------------------------------------------------
+# 2) RBAC for the EPP pod reflector.
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: qwen-epp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: qwen-epp
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["inference.networking.k8s.io"]
+    resources: ["inferencepools"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: qwen-epp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: qwen-epp
+subjects:
+  - kind: ServiceAccount
+    name: qwen-epp
+
+---
+# -----------------------------------------------------------------------------
+# 3) Dynamo EPP in experimental router-only mode, disaggregated.
+#    Replace <router-only-epp-image> with an EPP image that implements this mode.
+# -----------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen-epp
+  labels:
+    app: qwen-epp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qwen-epp
+  template:
+    metadata:
+      labels:
+        app: qwen-epp
+    spec:
+      serviceAccountName: qwen-epp
+      containers:
+        - name: epp
+          image: "<router-only-epp-image>"
+          ports:
+            - name: grpc
+              containerPort: 9002
+            - name: grpc-health
+              containerPort: 9003
+          env:
+            - name: DYN_EPP_MODE
+              value: "router-only"
+            # All vLLM pods (prefill + decode) share this selector.
+            - name: DYN_EPP_POD_SELECTOR
+              value: "app=vllm-qwen"
+            # Role label key/values the EPP uses to split prefill vs decode.
+            - name: DYN_EPP_ROLE_LABEL
+              value: "dynamo-role"
+            - name: DYN_EPP_TARGET_PORT
+              value: "8000"
+            - name: DYN_EPP_KV_EVENTS
+              value: "true"
+            - name: DYN_EPP_KV_EVENT_PORT
+              value: "5557"
+            - name: DYN_EPP_KV_EVENT_TOPIC
+              value: ""
+            - name: DYN_MODEL_NAME
+              value: "Qwen/Qwen3-0.6B"
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "16"
+            - name: DYN_ROUTER_PREFILL_LOAD_SCALE
+              value: "1.0"
+            # Require disagg: fail rather than silently falling back to agg.
+            - name: DYN_ENFORCE_DISAGG
+              value: "true"
+            # Emit x-prefiller-host-port so the decode-side P/D sidecar can run
+            # the vLLM KV-transfer handshake.
+            - name: DYN_EPP_EMIT_PREFILLER_HOST_PORT
+              value: "true"
+            - name: DYN_DISCOVERY_BACKEND
+              value: "mem"
+            - name: DYN_EVENT_PLANE
+              value: "zmq"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RUST_LOG
+              value: "info,dynamo_llm::kv_router=debug"
+            # Non-root EPP: writable HuggingFace cache for the startup tokenizer
+            # download (the hf-cache emptyDir mounted below).
+            - name: HF_HOME
+              value: /tmp/hf
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+          readinessProbe:
+            grpc:
+              port: 9003
+              service: inference-extension
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            grpc:
+              port: 9003
+              service: inference-extension
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /tmp/hf
+      volumes:
+        # Writable HuggingFace cache for the non-root EPP (tokenizer download).
+        - name: hf-cache
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qwen-epp
+spec:
+  selector:
+    app: qwen-epp
+  ports:
+    - name: grpc
+      port: 9002
+      targetPort: 9002
+      appProtocol: http2
+
+---
+# -----------------------------------------------------------------------------
+# 4) InferencePool selects ALL vLLM pods (prefill + decode); the EPP decides
+#    which is which via the dynamo-role label.
+# -----------------------------------------------------------------------------
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: qwen-pool
+spec:
+  targetPorts:
+    - number: 8000
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  endpointPickerRef:
+    kind: Service
+    name: qwen-epp
+    port:
+      number: 9002
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: qwen-route
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: inference-gateway
+  rules:
+    - backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: qwen-pool
+          port: 8000
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      timeouts:
+        request: 300s
