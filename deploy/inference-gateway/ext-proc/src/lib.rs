@@ -15,6 +15,7 @@
 pub mod envoy_helpers;
 pub mod epp;
 pub mod epp_config;
+pub mod epp_router;
 pub mod inference_pool;
 pub mod offline_preprocessor;
 pub mod picker;
@@ -26,6 +27,7 @@ pub mod topology_adapter;
 
 pub use epp::Router;
 pub use epp_config::EppConfig;
+pub use epp_router::EppRouter;
 pub use inference_pool::PoolState;
 pub use offline_preprocessor::build_offline_preprocessor;
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo};
