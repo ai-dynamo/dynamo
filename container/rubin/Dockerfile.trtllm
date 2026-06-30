@@ -1,0 +1,59 @@
+# Dynamo + TensorRT-LLM for Vera Rubin (VR200, sbsa/arm64).
+#
+# Build approach (per Ishan Dhanani's bringup guidance): install Dynamo FROM SOURCE
+# inside the Rubin framework image instead of using render.py — the render.py trtllm
+# path assumes a *release* image (tensorrt_llm + python-bundled NIXL) and breaks on the
+# Rubin build base. The pytorch-rubin base has NO tensorrt_llm installed, so we add the
+# prebuilt trtllm wheel first, then build Dynamo on top.
+#
+# Build on a NATIVE arm64 Docker host (e.g. computelab-armbuild-1):
+#   docker build --platform linux/arm64 -t <registry>/<you>-trtllm-rubin:<tag> -f Dockerfile.trtllm .
+# Validated image: nvcr.io/nvidian/dynamo-dev/tzulingk-trtllm-rubin:sbsa-fromsrc-main-7c8b4b19
+
+ARG BASE=urm.nvidia.com/sw-tensorrt-docker/tensorrt-llm:pytorch-rubin-py3-sbsa-ubuntu24.04-trt10.15.1.29-20260512
+FROM ${BASE}
+SHELL ["/bin/bash","-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+
+# (1) Prebuilt TRT-LLM wheel (VR200/sbsa). Installed WITH deps (base lacks trtllm's
+#     pure-python deps); the rubin-tuned torch/tensorrt are unpinned/satisfied so pip
+#     leaves them untouched.
+ARG TRTLLM_WHEEL_URL=https://urm.nvidia.com/artifactory/sw-tensorrt-generic/llm-artifacts/LLM/feat-rubin-bringup/L0_PostMerge/23/RubinBringup-TensorRT-LLM-VR200-CUDA13.4.tar.gz
+RUN cd /tmp \
+ && curl -fSL --retry 3 -o t.tgz "${TRTLLM_WHEEL_URL}" \
+ && tar xzf t.tgz --wildcards 'TensorRT-LLM/tensorrt_llm-*.whl' \
+ && pip install --break-system-packages --no-cache-dir TensorRT-LLM/tensorrt_llm-*.whl \
+ && rm -rf t.tgz TensorRT-LLM
+
+# (2) nats + etcd (arm64)
+RUN cd /tmp \
+ && curl -fSL https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-linux-arm64.tar.gz | tar xz \
+ && install -m755 nats-server-*/nats-server /usr/local/bin/nats-server \
+ && curl -fSL https://github.com/etcd-io/etcd/releases/download/v3.5.30/etcd-v3.5.30-linux-arm64.tar.gz | tar xz \
+ && install -m755 etcd-*/etcd etcd-*/etcdctl /usr/local/bin/ \
+ && rm -rf nats-server-* etcd-*
+
+# (3) Rust toolchain + maturin (the pytorch-rubin base already ships uv, protoc, clang)
+RUN curl -fSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH=/root/.cargo/bin:${PATH}
+RUN pip install --break-system-packages --no-cache-dir "maturin[patchelf]"
+
+# (4) Dynamo from source
+ARG DYNAMO_REF=main
+RUN git clone --depth 1 --branch ${DYNAMO_REF} https://github.com/ai-dynamo/dynamo.git /opt/dynamo
+WORKDIR /opt/dynamo
+
+# REQUIRED on Rubin: cudarc 0.19.3 rejects CUDA 13.4 (its allow-list stops at 13.1).
+# Pin to the 13.1 API — forward-compatible with the 13.4 driver.
+ENV CUDARC_CUDA_VERSION=13010
+
+RUN cd lib/bindings/python \
+ && maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist \
+ && cd /opt/dynamo && uv build --wheel --out-dir /opt/dynamo/dist
+RUN pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/dist/ai_dynamo_runtime*.whl \
+ && pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/dist/ai_dynamo-*.whl \
+ && pip install --break-system-packages --no-cache-dir msgspec uvloop imageio imageio-ffmpeg
+
+ENV DYNAMO_HOME=/opt/dynamo
+WORKDIR /workspace
+ENTRYPOINT ["/bin/bash"]
