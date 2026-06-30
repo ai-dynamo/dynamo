@@ -18,6 +18,7 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
+    pytest.mark.multimodal,
 ]
 
 
@@ -233,6 +234,27 @@ class TestValidateCustomEncoder:
         config.disaggregation_mode = DisaggregationMode.AGGREGATED
         config.use_vllm_tokenizer = True
         with pytest.raises(ValueError, match="use-vllm-tokenizer"):
+            config._validate_custom_encoder()
+
+    @pytest.mark.parametrize(
+        "role_flag",
+        [
+            "multimodal_worker",
+            "multimodal_encode_worker",
+            "multimodal_decode_worker",
+        ],
+    )
+    def test_legacy_multimodal_role_rejected(self, role_flag):
+        # The custom encoder is its own aggregated multimodal path; combining it
+        # with a legacy multimodal role flag sets up two conflicting multimodal
+        # paths (and --multimodal-worker resolves to agg, slipping past the
+        # disaggregation-mode check), so reject the combination up front.
+        config = create_config()
+        config.custom_encoder_class = "my_pkg.MyEncoder"
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        setattr(config, role_flag, True)
+        with pytest.raises(ValueError, match="legacy multimodal role flags"):
             config._validate_custom_encoder()
 
     def test_frontend_decoding_rejected(self):
