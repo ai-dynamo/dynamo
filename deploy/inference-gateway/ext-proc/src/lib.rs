@@ -14,6 +14,7 @@
 
 pub mod envoy_helpers;
 pub mod epp;
+pub mod epp_router;
 pub mod epp_standalone_config;
 pub mod inference_pool;
 pub mod offline_preprocessor;
@@ -26,6 +27,7 @@ pub mod server;
 pub mod topology_adapter;
 
 pub use epp::Router;
+pub use epp_router::EppRouter;
 pub use epp_standalone_config::{EppMode, EppStandaloneConfig};
 pub use inference_pool::PoolState;
 pub use offline_preprocessor::build_offline_preprocessor;
