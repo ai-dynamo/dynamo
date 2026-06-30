@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap, VecDeque, hash_map::Entry as HashMapEntry};
+use std::collections::BinaryHeap;
 
 use ordered_float::OrderedFloat;
 use serde::{Deserialize, Serialize};
 
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
+
+mod session_round_robin;
+use session_round_robin::SessionRoundRobinQueue;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueSnapshot {
@@ -129,78 +132,6 @@ impl<T> PartialOrd for PolicyQueueEntry<T> {
     }
 }
 
-struct SessionRoundRobinQueue<T> {
-    sessions: HashMap<Option<String>, BinaryHeap<PolicyQueueEntry<T>>>,
-    order: VecDeque<Option<String>>,
-}
-
-impl<T> SessionRoundRobinQueue<T> {
-    fn new() -> Self {
-        Self {
-            sessions: HashMap::new(),
-            order: VecDeque::new(),
-        }
-    }
-
-    fn push(&mut self, session_id: Option<String>, entry: PolicyQueueEntry<T>) {
-        match self.sessions.entry(session_id.clone()) {
-            HashMapEntry::Occupied(mut session) => session.get_mut().push(entry),
-            HashMapEntry::Vacant(session) => {
-                self.order.push_back(session_id);
-                let mut pending = BinaryHeap::new();
-                pending.push(entry);
-                session.insert(pending);
-            }
-        }
-    }
-
-    fn head_index(&self) -> Option<usize> {
-        let mut best = None;
-        for (index, session_id) in self.order.iter().enumerate() {
-            let strict_priority = self
-                .sessions
-                .get(session_id)
-                .and_then(|pending| pending.peek())
-                .expect("active session queue must not be empty")
-                .priority
-                .strict_priority;
-            if best.is_none_or(|(_, best_priority)| strict_priority > best_priority) {
-                best = Some((index, strict_priority));
-            }
-        }
-        best.map(|(index, _)| index)
-    }
-
-    fn peek(&self) -> Option<&PolicyQueueEntry<T>> {
-        let session_id = self.order.get(self.head_index()?)?;
-        self.sessions.get(session_id)?.peek()
-    }
-
-    fn pop(&mut self) -> Option<PolicyQueueEntry<T>> {
-        let session_id = self.order.remove(self.head_index()?)?;
-        let (entry, empty) = {
-            let pending = self.sessions.get_mut(&session_id)?;
-            let entry = pending.pop()?;
-            (entry, pending.is_empty())
-        };
-        if empty {
-            self.sessions.remove(&session_id);
-        } else {
-            self.order.push_back(session_id);
-        }
-        Some(entry)
-    }
-
-    fn retain(&mut self, mut keep: impl FnMut(&PolicyQueueEntry<T>) -> bool) {
-        for pending in self.sessions.values_mut() {
-            pending.retain(&mut keep);
-        }
-        self.sessions.retain(|_, pending| !pending.is_empty());
-        self.order
-            .retain(|session_id| self.sessions.contains_key(session_id));
-    }
-}
-
 enum PendingQueue<T> {
     Request(BinaryHeap<PolicyQueueEntry<T>>),
     SessionRoundRobin(SessionRoundRobinQueue<T>),
@@ -219,7 +150,7 @@ impl<T> PendingQueue<T> {
     fn is_empty(&self) -> bool {
         match self {
             Self::Request(pending) => pending.is_empty(),
-            Self::SessionRoundRobin(pending) => pending.order.is_empty(),
+            Self::SessionRoundRobin(pending) => pending.is_empty(),
         }
     }
 
@@ -254,20 +185,14 @@ impl<T> PendingQueue<T> {
     fn iter(&self) -> Box<dyn Iterator<Item = &PolicyQueueEntry<T>> + '_> {
         match self {
             Self::Request(pending) => Box::new(pending.iter()),
-            Self::SessionRoundRobin(pending) => {
-                Box::new(pending.sessions.values().flat_map(|queue| queue.iter()))
-            }
+            Self::SessionRoundRobin(pending) => Box::new(pending.iter()),
         }
     }
 
     fn into_entries(self) -> Vec<PolicyQueueEntry<T>> {
         match self {
             Self::Request(pending) => pending.into_iter().collect(),
-            Self::SessionRoundRobin(pending) => pending
-                .sessions
-                .into_values()
-                .flat_map(BinaryHeap::into_iter)
-                .collect(),
+            Self::SessionRoundRobin(pending) => pending.into_entries().collect(),
         }
     }
 }
