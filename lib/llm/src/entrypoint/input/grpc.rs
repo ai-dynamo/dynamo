@@ -134,6 +134,13 @@ async fn run_watcher(
     metrics_prefix: Option<String>,
     tokenizer_backend: Option<TokenizerBackend>,
 ) -> anyhow::Result<()> {
+    // Start the LoRA allocation controller when LoRA serving is enabled (mirrors http.rs;
+    // additionally gated on DYN_LORA_ALLOCATION_ENABLED inside start_lora_controller). Without
+    // this, gRPC LoRA deployments would never get dynamic placement (N3).
+    if crate::lora::lora_serving_enabled() {
+        let _controller_handle = model_manager.start_lora_controller(runtime.primary_token());
+    }
+
     // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
     let metrics = Arc::new(Metrics::new_with_prefix(metrics_prefix));
     let mut watch_obj = ModelWatcher::new(
