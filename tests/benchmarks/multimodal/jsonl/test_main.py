@@ -33,6 +33,23 @@ def _run_main(tmp_path: Path, argv: list[str]) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
+def _write_test_video(
+    path: Path,
+    seed: int,
+    width: int,
+    height: int,
+    fps: int,
+    seconds: int,
+) -> None:
+    # Keep JSONL benchmark unit tests independent of CI ffmpeg codec availability.
+    path.write_bytes(
+        (
+            f"synthetic-video\nseed={seed}\n"
+            f"size={width}x{height}\nfps={fps}\nseconds={seconds}\n"
+        ).encode()
+    )
+
+
 class TestSingleTurnDefault:
     """single-turn is the default when no subcommand is given."""
 
@@ -144,33 +161,32 @@ class TestVideoSingleTurn:
     def test_video_pool_reuse_with_multiple_videos_per_request(
         self, tmp_path: Path
     ) -> None:
-        pytest.importorskip("imageio")
-        pytest.importorskip("imageio_ffmpeg")
-        lines = _run_main(
-            tmp_path,
-            [
-                "video-single-turn",
-                "-n",
-                "6",
-                "--videos-per-request",
-                "2",
-                "--videos-pool",
-                "3",
-                "--seed",
-                "11",
-                "--synthetic-video-dir",
-                str(tmp_path / "clips"),
-                "--synthetic-video-size",
-                "32",
-                "32",
-                "--synthetic-video-fps",
-                "2",
-                "--synthetic-video-seconds",
-                "1",
-                "-o",
-                str(tmp_path / "videos.jsonl"),
-            ],
-        )
+        with patch("generate_videos._write_synthetic_video", _write_test_video):
+            lines = _run_main(
+                tmp_path,
+                [
+                    "video-single-turn",
+                    "-n",
+                    "6",
+                    "--videos-per-request",
+                    "2",
+                    "--videos-pool",
+                    "3",
+                    "--seed",
+                    "11",
+                    "--synthetic-video-dir",
+                    str(tmp_path / "clips"),
+                    "--synthetic-video-size",
+                    "32",
+                    "32",
+                    "--synthetic-video-fps",
+                    "2",
+                    "--synthetic-video-seconds",
+                    "1",
+                    "-o",
+                    str(tmp_path / "videos.jsonl"),
+                ],
+            )
 
         assert len(lines) == 6
         all_videos = []
@@ -191,8 +207,6 @@ class TestSyntheticVideo:
     def test_synthetic_video_generation_is_reproducible_in_place(
         self, tmp_path: Path
     ) -> None:
-        pytest.importorskip("imageio")
-        pytest.importorskip("imageio_ffmpeg")
         video_dir = tmp_path / "clips"
         kwargs = dict(
             pool_size=1,
@@ -203,46 +217,46 @@ class TestSyntheticVideo:
             seed=123,
         )
 
-        pool = generate_synthetic_video_pool(**kwargs)
-        first_digest = hashlib.sha256(Path(pool[0]).read_bytes()).hexdigest()
-        Path(pool[0]).unlink()
+        with patch("generate_videos._write_synthetic_video", _write_test_video):
+            pool = generate_synthetic_video_pool(**kwargs)
+            first_digest = hashlib.sha256(Path(pool[0]).read_bytes()).hexdigest()
+            Path(pool[0]).unlink()
 
-        pool = generate_synthetic_video_pool(**kwargs)
-        second_digest = hashlib.sha256(Path(pool[0]).read_bytes()).hexdigest()
+            pool = generate_synthetic_video_pool(**kwargs)
+            second_digest = hashlib.sha256(Path(pool[0]).read_bytes()).hexdigest()
 
         assert first_digest == second_digest
 
     def test_video_single_turn_generates_local_synthetic_pool(
         self, tmp_path: Path
     ) -> None:
-        pytest.importorskip("imageio")
-        pytest.importorskip("imageio_ffmpeg")
         video_dir = tmp_path / "clips"
-        lines = _run_main(
-            tmp_path,
-            [
-                "video-single-turn",
-                "-n",
-                "4",
-                "--videos-per-request",
-                "1",
-                "--videos-pool",
-                "2",
-                "--synthetic-video-dir",
-                str(video_dir),
-                "--synthetic-video-size",
-                "32",
-                "32",
-                "--synthetic-video-fps",
-                "2",
-                "--synthetic-video-seconds",
-                "1",
-                "--seed",
-                "17",
-                "-o",
-                str(tmp_path / "synthetic.jsonl"),
-            ],
-        )
+        with patch("generate_videos._write_synthetic_video", _write_test_video):
+            lines = _run_main(
+                tmp_path,
+                [
+                    "video-single-turn",
+                    "-n",
+                    "4",
+                    "--videos-per-request",
+                    "1",
+                    "--videos-pool",
+                    "2",
+                    "--synthetic-video-dir",
+                    str(video_dir),
+                    "--synthetic-video-size",
+                    "32",
+                    "32",
+                    "--synthetic-video-fps",
+                    "2",
+                    "--synthetic-video-seconds",
+                    "1",
+                    "--seed",
+                    "17",
+                    "-o",
+                    str(tmp_path / "synthetic.jsonl"),
+                ],
+            )
 
         refs = [row["videos"][0] for row in lines]
         assert len(lines) == 4
