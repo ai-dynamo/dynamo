@@ -227,7 +227,9 @@ redirects:
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/developing-with-tilt"
     destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/developing-with-tilt"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/inference-gateway-gaie"
-    destination: "/dynamo/dev/integrations/kubernetes-integrations/gateway-api-inference-extension-gaie"
+    destination: "/dynamo/dev/kubernetes-deployment/request-routing/gateway-api-inference-extension/overview"
+  - source: "/dynamo/dev/integrations/kubernetes-integrations/gateway-api-inference-extension-gaie"
+    destination: "/dynamo/dev/kubernetes-deployment/request-routing/gateway-api-inference-extension/overview"
   # SGLang HiCache doc: canonical URL under Integrations > KV Cache Integrations.
   - source: "/dynamo/dev/backends/sg-lang/hi-cache"
     destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
