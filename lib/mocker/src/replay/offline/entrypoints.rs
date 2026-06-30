@@ -174,8 +174,11 @@ pub(crate) fn generate_trace_worker_artifacts_with_visibility(
 
         let output_timestamp_us = timestamp_us_from_ms(current_time_ms);
         for signal in pass.output_signals {
+            if let Some(token_id) = signal.token_id {
+                driver.on_output_token(signal.uuid, token_id)?;
+            }
             if signal.completed {
-                driver.on_complete(signal.uuid, current_time_ms)?;
+                driver.on_terminal(signal.uuid, current_time_ms, signal.rejected)?;
             }
             artifacts.output_signals.push(ReplayTimedOutputSignal {
                 signal,
@@ -983,14 +986,22 @@ pub(super) fn run_trace_workload_multi_collect_with_stats(
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
 ) -> (TraceCollector, AggRuntimeStats) {
+    let driver = if accumulate_session_deltas {
+        trace
+            .into_delta_accumulating_trace_driver_with_block_size(args.block_size)
+            .unwrap()
+    } else {
+        trace
+            .into_trace_driver_with_block_size(args.block_size)
+            .unwrap()
+    };
     AggRuntime::new_workload(
         args,
         None,
         None,
-        trace
-            .into_trace_driver_with_block_size(args.block_size)
-            .unwrap(),
+        driver,
         num_workers,
         AggReplayMode::Trace,
         router_mode,

@@ -33,7 +33,7 @@ func ptr(s string) *string {
 	return &s
 }
 
-func TestSharedSpecValidator_Validate(t *testing.T) {
+func TestSharedSpecValidatorV1Alpha1_Validate(t *testing.T) {
 	var (
 		negativeReplicas = int32(-1)
 		validReplicas    = int32(3)
@@ -463,25 +463,25 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace, false)
+			validator := NewSharedSpecValidatorV1Alpha1(tt.spec, tt.fieldPath, tt.calculatedNamespace, false)
 			_, err := validator.Validate(context.Background())
 
 			if (err != nil) != tt.wantErr {
-				t.Errorf("SharedSpecValidator.Validate() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("SharedSpecValidatorV1Alpha1.Validate() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 
 			if tt.wantErr && tt.errMsg != "" && err.Error() != tt.errMsg {
-				t.Errorf("SharedSpecValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
+				t.Errorf("SharedSpecValidatorV1Alpha1.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
 			}
 			if tt.wantErr && tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
-				t.Errorf("SharedSpecValidator.Validate() error message = %v, want substring %v", err.Error(), tt.errContains)
+				t.Errorf("SharedSpecValidatorV1Alpha1.Validate() error message = %v, want substring %v", err.Error(), tt.errContains)
 			}
 		})
 	}
 }
 
-func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
+func TestSharedSpecValidatorV1Alpha1_Validate_Warnings(t *testing.T) {
 	validReplicas := int32(3)
 
 	tests := []struct {
@@ -531,16 +531,16 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace, false)
+			validator := NewSharedSpecValidatorV1Alpha1(tt.spec, tt.fieldPath, tt.calculatedNamespace, false)
 			warnings, err := validator.Validate(context.Background())
 
 			if err != nil {
-				t.Errorf("SharedSpecValidator.Validate() unexpected error = %v", err)
+				t.Errorf("SharedSpecValidatorV1Alpha1.Validate() unexpected error = %v", err)
 				return
 			}
 
 			if len(warnings) != tt.wantWarnings {
-				t.Errorf("SharedSpecValidator.Validate() warnings count = %d, want %d", len(warnings), tt.wantWarnings)
+				t.Errorf("SharedSpecValidatorV1Alpha1.Validate() warnings count = %d, want %d", len(warnings), tt.wantWarnings)
 			}
 
 			if tt.wantWarningContains != "" && len(warnings) > 0 {
@@ -552,14 +552,14 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 					}
 				}
 				if !found {
-					t.Errorf("SharedSpecValidator.Validate() warnings = %v, want warning containing %q", warnings, tt.wantWarningContains)
+					t.Errorf("SharedSpecValidatorV1Alpha1.Validate() warnings = %v, want warning containing %q", warnings, tt.wantWarningContains)
 				}
 			}
 		})
 	}
 }
 
-// TestSharedSpecValidator_Failover_ModeConstraints covers the layout/failover
+// TestSharedSpecValidatorV1Alpha1_Failover_ModeConstraints covers the layout/failover
 // symmetry invariants enforced by validateFailover / validateGPUMemoryService:
 //
 //  1. gpuMemoryService declares the layout (intra-pod sidecar vs. inter-pod
@@ -575,7 +575,7 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 //  5. When failover.enabled=false, sub-fields (mode, numShadows) are dormant
 //     configuration and are intentionally NOT validated — the render path
 //     ignores them and users may stage a config before enabling failover.
-func TestSharedSpecValidator_Failover_ModeConstraints(t *testing.T) {
+func TestSharedSpecValidatorV1Alpha1_Failover_ModeConstraints(t *testing.T) {
 	workerGPU := &nvidiacomv1alpha1.Resources{
 		Limits: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
 	}
@@ -729,7 +729,7 @@ func TestSharedSpecValidator_Failover_ModeConstraints(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			v := NewSharedSpecValidator(tt.spec, "spec", "default-my-dgd", false)
+			v := NewSharedSpecValidatorV1Alpha1(tt.spec, "spec", "default-my-dgd", false)
 			_, err := v.Validate(context.Background())
 
 			if tt.wantErr {

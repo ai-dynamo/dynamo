@@ -206,24 +206,54 @@ impl BandwidthSharingModel {
     /// happen. `None` if no transfers are active. Used by the scheduler's
     /// stall-advance to know when to wake up next.
     pub fn earliest_finish(&self) -> Option<f64> {
-        if self.active.is_empty() {
-            return None;
-        }
-        let n = self.active.len() as f64;
-        let rate_per = self.bandwidth_bytes_per_ms / n;
-        let min_remaining = self
+        self.earliest_finish_with_id()
+            .map(|(_transfer_id, deadline_ms)| deadline_ms)
+    }
+
+    /// The next active transfer to complete and its deadline.
+    ///
+    /// This is allocation-free so scheduler dependency tracking can retain the
+    /// exact transfer that provides its next wakeup.
+    pub fn earliest_finish_with_id(&self) -> Option<(TransferId, f64)> {
+        let next = self.active.iter().min_by(|left, right| {
+            left.remaining_bytes
+                .partial_cmp(&right.remaining_bytes)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+        Some((next.id, self.deadline_for_remaining(next.remaining_bytes)))
+    }
+
+    /// Completion deadline for one active transfer.
+    pub fn deadline_for(&self, transfer_id: TransferId) -> Option<f64> {
+        let remaining = self
             .active
             .iter()
-            .map(|t| t.remaining_bytes)
-            .fold(f64::INFINITY, f64::min);
-        let delta = if rate_per.is_finite() && rate_per > 0.0 {
-            min_remaining / rate_per
+            .find(|transfer| transfer.id == transfer_id)?
+            .remaining_bytes;
+        Some(self.deadline_for_remaining(remaining))
+    }
+
+    /// Whether `transfer_id` is still active on this link.
+    pub fn is_active(&self, transfer_id: TransferId) -> bool {
+        self.active
+            .iter()
+            .any(|transfer| transfer.id == transfer_id)
+    }
+
+    fn deadline_for_remaining(&self, remaining: f64) -> f64 {
+        let delta = if self.bandwidth_bytes_per_ms.is_finite() && self.bandwidth_bytes_per_ms > 0.0
+        {
+            self.active
+                .iter()
+                .map(|transfer| transfer.remaining_bytes.min(remaining))
+                .sum::<f64>()
+                / self.bandwidth_bytes_per_ms
         } else {
             0.0
         };
         let deadline = self.last_update_ms + delta;
         assert_valid_time("earliest transfer deadline", deadline);
-        Some(deadline)
+        deadline
     }
 
     /// Number of currently active (in-flight) transfers.
@@ -367,7 +397,7 @@ mod tests {
         // Two models sharing a single `Arc<AtomicU64>` counter must
         // never hand out the same TransferId. This is the invariant
         // `TransferState` relies on when keying `awaiters` and
-        // `swap_in_flags` by TransferId — a collision would cause
+        // swap-in completion publishers by TransferId — a collision would cause
         // completion signals to cross-fire into the wrong transfer.
         let counter = Arc::new(AtomicU64::new(0));
         let mut a = BandwidthSharingModel::new(1.0, counter.clone());

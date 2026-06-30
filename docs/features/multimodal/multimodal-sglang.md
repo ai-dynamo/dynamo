@@ -26,7 +26,7 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 
 ## Deployment Patterns
 
-SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Architecture Patterns](README.md#architecture-patterns) for detailed explanations.
+SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Serving](README.md) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|

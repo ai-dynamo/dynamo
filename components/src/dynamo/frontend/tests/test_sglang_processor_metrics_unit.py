@@ -189,7 +189,7 @@ def test_stream_emits_llm_metrics_annotation(module_stubs):
         ),
         tool_call_parser_name=None,
         reasoning_parser_name=None,
-        eos_token_id=None,
+        eos_token_ids=None,
     )
 
     async def collect():

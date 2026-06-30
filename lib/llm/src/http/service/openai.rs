@@ -206,26 +206,18 @@ impl ErrorMessage {
         )
     }
 
-    /// Model exists but is temporarily unable to serve (e.g., prefill not activated,
-    /// no available workers). Returns 503 so clients can retry.
-    pub fn model_unavailable() -> ErrorResponse {
-        let code = StatusCode::SERVICE_UNAVAILABLE;
-        let error_type = map_error_code_to_error_type(code);
-        (
-            code,
-            Json(ErrorMessage {
-                message: "Model temporarily unavailable".to_string(),
-                error_type,
-                code: code.as_u16(),
-                details: None,
-            }),
-        )
-    }
-
     /// Convert a ModelManagerError to the appropriate HTTP response.
+    ///
+    /// `ModelUnavailable` is the dispatch-time backstop for the same condition
+    /// the readiness gate ([`check_model_serving_ready`]) catches up front — a
+    /// registered model with no servable worker set (whichever role is missing).
+    /// It returns the identical canonical 503 body so both code paths speak with
+    /// one voice to the client.
     pub fn from_model_error(e: &crate::discovery::ModelManagerError) -> ErrorResponse {
         match e {
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => Self::model_unavailable(),
+            crate::discovery::ModelManagerError::ModelUnavailable(model) => {
+                Self::service_unavailable_with_body(model_not_ready_message(model))
+            }
             _ => Self::model_not_found(),
         }
     }
@@ -2394,6 +2386,22 @@ pub(crate) fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorRes
     Ok(())
 }
 
+/// Canonical, customer-facing message for "model is registered but not yet
+/// ready to serve requests" (deployment still initializing or incomplete).
+///
+/// One message for every not-ready cause — whichever worker role is missing,
+/// the client sees the same text. Deliberately free of internal taxonomy
+/// (worker types, namespaces, "worker set"): it stays clear and actionable for
+/// end users without leaking deployment internals. Operators get the detailed,
+/// per-role breakdown from `GET /v1/models/{model}/ready` instead.
+pub(crate) fn model_not_ready_message(model_name: &str) -> String {
+    format!(
+        "Model `{model_name}` is not ready to serve requests yet. \
+         The deployment may still be starting up or is not fully provisioned. \
+         Please retry shortly."
+    )
+}
+
 /// Per-model serving readiness gate.
 ///
 /// Composes AND-wise with [`check_ready`]: a request is admitted only when
@@ -2418,11 +2426,9 @@ pub(crate) fn check_model_serving_ready(
     if model.has_ready_workers() {
         return Ok(());
     }
-    Err(ErrorMessage::service_unavailable_with_body(format!(
-        "Model `{model_name}` is registered but no namespace has a complete worker set. \
-         At least one prefill/decode/encode worker type required by a registered worker is missing. \
-         Check worker startup logs for the affected namespace."
-    )))
+    Err(ErrorMessage::service_unavailable_with_body(
+        model_not_ready_message(model_name),
+    ))
 }
 
 /// openai compatible format
@@ -3730,7 +3736,9 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}`thinking.type` must be `enabled` or `disabled`")
+                format!(
+                    "{VALIDATION_PREFIX}`thinking.type` must be `enabled`, `disabled`, or `adaptive`"
+                )
             );
         }
     }
@@ -4594,7 +4602,8 @@ mod tests {
 
     #[test]
     fn test_extract_error_type_from_response_unavailable() {
-        let response = ErrorMessage::model_unavailable();
+        let response =
+            ErrorMessage::from_model_error(&ModelManagerError::ModelUnavailable("x".to_string()));
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::Unavailable
@@ -4614,6 +4623,49 @@ mod tests {
             ErrorMessage::from_model_error(&unavailable).0,
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    /// The not-ready 503 must be customer-facing: clear and actionable, but free
+    /// of internal worker-role / topology taxonomy. Whichever role is missing
+    /// (prefill or decode), the client sees the same text — so the message must
+    /// never name a specific role, namespace, or "worker set".
+    #[test]
+    fn test_model_not_ready_message_hides_internals() {
+        let msg = model_not_ready_message("my-model").to_lowercase();
+        for leak in [
+            "prefill",
+            "decode",
+            "encode",
+            "worker",
+            "namespace",
+            "needs",
+        ] {
+            assert!(
+                !msg.contains(leak),
+                "not-ready message leaks internal term `{leak}`: {msg}"
+            );
+        }
+        // Still names the model and signals retryability.
+        assert!(model_not_ready_message("my-model").contains("my-model"));
+        assert!(msg.contains("retry"));
+    }
+
+    /// The dispatch-time backstop (`from_model_error` on `ModelUnavailable`) and
+    /// the up-front readiness gate must speak with one voice: identical 503 body
+    /// for the same "registered but not servable" condition, regardless of which
+    /// role (prefill vs decode) is the missing one.
+    #[test]
+    fn test_unavailable_paths_share_one_message() {
+        let backstop = ErrorMessage::from_model_error(&ModelManagerError::ModelUnavailable(
+            "my-model".to_string(),
+        ));
+        assert_eq!(backstop.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(backstop.1.message, model_not_ready_message("my-model"));
+
+        // The gate constructs its body from the same canonical helper, so the
+        // two paths cannot drift apart.
+        let gate = ErrorMessage::service_unavailable_with_body(model_not_ready_message("my-model"));
+        assert_eq!(gate.1.message, backstop.1.message);
     }
 
     #[test]

@@ -261,6 +261,23 @@ impl Context {
         }
     }
 
+    /// Create a context with a fresh cancellation controller and request id.
+    ///
+    /// The detached context keeps the trace context, captured span, and a
+    /// snapshot of metadata so disaggregated handoffs keep observability
+    /// parentage without sharing cancellation ownership. The first-token
+    /// signal is intentionally dropped.
+    #[pyo3(signature = (id))]
+    fn detached(&self, id: String) -> Self {
+        Self {
+            inner: Arc::new(Controller::new(id)),
+            trace_context: self.trace_context.clone(),
+            first_token: None,
+            metadata: Arc::new(Mutex::new(self.metadata_snapshot())),
+            span: self.span.clone(),
+        }
+    }
+
     fn is_stopped(&self) -> bool {
         self.inner.is_stopped()
     }

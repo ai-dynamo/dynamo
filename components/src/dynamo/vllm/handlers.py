@@ -121,6 +121,14 @@ logger = logging.getLogger(__name__)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
+_DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
+    {
+        "allow_unpaused",
+        "engine_rpc",
+        "reset_prefix_cache",
+        "weight_version",
+    }
+)
 
 
 class _DeferredAbort:
@@ -954,6 +962,12 @@ def build_sampling_params_openai(
     if "min_tokens" in request and request["min_tokens"] is not None:
         sampling_params.min_tokens = request["min_tokens"]
 
+    nvext_max_thinking_tokens = (request.get("nvext") or {}).get("max_thinking_tokens")
+    if nvext_max_thinking_tokens is not None and hasattr(
+        sampling_params, "thinking_token_budget"
+    ):
+        sampling_params.thinking_token_budget = nvext_max_thinking_tokens
+
     return sampling_params
 
 
@@ -1707,8 +1721,28 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
+        allow_unpaused = body.get("allow_unpaused", False)
+        reset_prefix_cache = body.get("reset_prefix_cache", True)
+        if not isinstance(allow_unpaused, bool):
+            return {
+                "status": "error",
+                "message": "'allow_unpaused' must be a boolean",
+            }
+        if not isinstance(reset_prefix_cache, bool):
+            return {
+                "status": "error",
+                "message": "'reset_prefix_cache' must be a boolean",
+            }
+        if allow_unpaused and reset_prefix_cache:
+            return {
+                "status": "error",
+                "message": (
+                    "Unpaused weight updates cannot reset the prefix cache. "
+                    "Set 'reset_prefix_cache' to false or pause generation first."
+                ),
+            }
         async with self._pause_lock:
-            if not getattr(self, "_paused", False):
+            if not self._paused and not allow_unpaused:
                 return {
                     "status": "error",
                     "message": (
@@ -1722,13 +1756,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             rpc_kwargs = {
                 k: v
                 for k, v in body.items()
-                if k not in ("engine_rpc", "weight_version")
+                if k not in _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS
             }
             try:
                 await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
-                # Weights changed: stale prefix/KV cache must be invalidated
-                # before resume so it is not reused under the new weights.
-                await self.engine_client.reset_prefix_cache()
+                if reset_prefix_cache:
+                    # Weights changed: stale prefix/KV cache must be invalidated
+                    # before resume so it is not reused under the new weights.
+                    await self.engine_client.reset_prefix_cache()
                 self._weight_version = version
                 logger.info(
                     f"[RL] Weights received via distributed "
@@ -2218,6 +2253,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 base_model_path=self.config.model,
                                 worker_type=lora_worker_type,
                                 needs=lora_needs,
+                                # Publish the worker's per-worker LoRA slot budget so the frontend
+                                # allocator sizes placement against real capacity instead of the
+                                # hard-coded default.
+                                max_gpu_lora_count=getattr(
+                                    self.config.engine_args, "max_loras", None
+                                ),
                             )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"

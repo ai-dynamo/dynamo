@@ -617,7 +617,7 @@ mod tests {
     }
 
     #[cfg(feature = "kvbm-offload")]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn idle_destination_reservation_wakes_at_offload_deadline() {
         let args = MockEngineArgs::builder()
             .num_gpu_blocks(2)
