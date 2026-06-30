@@ -88,6 +88,7 @@ pub(crate) fn lower_request(
             .map(structured_outputs_from_guided_decoding),
         logprob_token_ids: None,
         skip_reading_prefix_cache: None,
+        thinking_token_budget: None,
         extra_args: extra_args_as_object(request.extra_args)?,
     };
     apply_disaggregation_mode(

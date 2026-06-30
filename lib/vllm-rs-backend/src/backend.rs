@@ -211,7 +211,7 @@ impl LLMEngine for VllmBackend {
             let mut config =
                 self.managed_engine
                     .clone()
-                    .into_config(self.model.clone(), None, handshake_port);
+                    .into_config(self.model.clone(), None, None, false, false, 0, handshake_port);
             self.extra.append_python_args(&mut config.python_args);
             config
         };
@@ -260,9 +260,7 @@ impl LLMEngine for VllmBackend {
             }
         };
 
-        let context_length = client
-            .max_model_len()
-            .ok_or_else(|| backend_unknown("vLLM engine-core did not report max_model_len"))?;
+        let context_length = client.max_model_len();
         let total_kv_blocks = match client.total_num_gpu_blocks() {
             0 => None,
             blocks => Some(blocks),
