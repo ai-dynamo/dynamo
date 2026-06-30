@@ -2455,6 +2455,7 @@ dependencies = [
  "prost 0.13.5",
  "prost-types 0.13.5",
  "rcgen",
+ "reqwest 0.12.28",
  "rustls 0.23.40",
  "rustls-pemfile",
  "serde",
