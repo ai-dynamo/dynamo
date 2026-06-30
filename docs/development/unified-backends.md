@@ -252,11 +252,13 @@ the runtime wheel from a clone:
 
 ```bash
 git clone https://github.com/ai-dynamo/dynamo.git
-pip install maturin
+pip install 'maturin[patchelf]'
 cd dynamo/lib/bindings/python && maturin build --release --out /tmp/wheels
 pip install /tmp/wheels/*.whl       # ai-dynamo-runtime
 pip install /path/to/dynamo         # ai-dynamo (components/ tree)
 ```
+
+[Maturin](https://github.com/PyO3/maturin) is the Rust-Python bindings build tool. The `patchelf` extra lets maturin patch native extension library paths during the build.
 
 Building the wheel needs a Rust toolchain plus `clang`, `cmake`,
 `protobuf-compiler`, and `libssl-dev`.
@@ -495,6 +497,61 @@ async def cleanup(self) -> None:
         await self._engine.shutdown()
         self._engine = None
 ```
+
+#### Python: KV event publishing (optional)
+
+Unified backends declare KV event sources; the framework constructs and owns
+the `KvEventPublisher` instances. Do not instantiate `KvEventPublisher`
+directly from a unified `LLMEngine`. Instead, implement
+`kv_event_sources()` and return one source for each data-parallel rank hosted
+by the worker.
+
+Rust backends use the equivalent `LLMEngine::kv_event_sources()` trait method;
+see [Rust Step 4](#rust-step-4-implement-the-llmengine-trait) and the
+[`LLMEngine` trait](../../lib/backend-common/src/engine.rs).
+
+Use `ZmqSource` when the engine already emits Dynamo-compatible KV events on a
+ZMQ socket, as vLLM and SGLang do:
+
+```python
+from dynamo.common.backend.publisher import ZmqSource
+
+async def kv_event_sources(self):
+    return [
+        ZmqSource(endpoint="tcp://127.0.0.1:5557", dp_rank=0),
+        ZmqSource(endpoint="tcp://127.0.0.1:5558", dp_rank=1),
+    ]
+```
+
+Use `PushSource` when the engine needs a live publisher object and drives
+`publish_stored()` / `publish_removed()` from its own event thread. The in-tree
+TRT-LLM backend is the reference implementation for this path:
+
+```python
+from dynamo.common.backend.publisher import PushSource
+
+def _on_kv_publisher_ready(self, publisher):
+    self._kv_publisher = publisher
+    self._start_kv_event_thread()
+
+async def kv_event_sources(self):
+    return [PushSource(on_ready=self._on_kv_publisher_ready, dp_rank=0)]
+```
+
+KV event publishers require `EngineConfig.llm.kv_cache_block_size`. If the
+engine declares sources but does not return a block size, `Worker` skips KV
+event publishers because the router cannot map token IDs to cache blocks.
+`WorkerConfig.enable_kv_routing=False` is the operator-level kill switch; when
+it is disabled, the worker does not call `kv_event_sources()`.
+
+Keep rank ownership stable for the engine lifetime. DP-capable engines should
+also advertise the same rank shape in `EngineConfig.llm.data_parallel_size` and
+`data_parallel_start_rank` so router-forced `dp_rank` values line up with the
+published event streams.
+
+`PushSource` engines own cleanup of their event producer. Stop publisher
+threads or tasks in `cleanup()` before returning, and do not publish after
+cleanup begins.
 
 ### Python Step 5: Write `main.py`
 

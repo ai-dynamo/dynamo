@@ -322,6 +322,17 @@ impl ClientOptions {
             }
         };
 
+        // 0 is treated as unset — Duration::from_secs(0) would time out every request immediately.
+        let request_timeout = std::env::var(env_nats::DYN_NATS_REQUEST_TIMEOUT_SECS)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&secs| secs > 0)
+            .map(time::Duration::from_secs);
+        let client = match request_timeout {
+            Some(timeout) => client.request_timeout(Some(timeout)),
+            None => client,
+        };
+
         let (client, _) = build_in_runtime(
             async move {
                 client

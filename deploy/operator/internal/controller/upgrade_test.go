@@ -829,6 +829,7 @@ spec:
 						DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decodeComponent),
 						ComponentName:   "VllmDecodeWorker",
 						Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decodeComponent),
+						Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDGD, "VllmDecodeWorker", decodeComponent),
 						IsK8sDiscovery:  true,
 					})
 					require.NoError(t, err)

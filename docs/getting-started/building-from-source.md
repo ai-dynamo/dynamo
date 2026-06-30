@@ -59,10 +59,10 @@ source .venv/bin/activate
 ## 4. Install Build Tools
 
 ```bash
-uv pip install pip maturin
+uv pip install pip 'maturin[patchelf]'
 ```
 
-[Maturin](https://github.com/PyO3/maturin) is the Rust-Python bindings build tool.
+[Maturin](https://github.com/PyO3/maturin) is the Rust-Python bindings build tool. The `patchelf` extra lets maturin patch native extension library paths during the build.
 
 ## 5. Build the Rust Bindings
 

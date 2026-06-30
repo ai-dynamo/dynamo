@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: EFA (RDMA over AWS Fabric) on EKS
+subtitle: Enables GPU-Direct RDMA over AWS Elastic Fabric Adapter so disaggregated workers transfer KV cache across EKS nodes without TCP.
 ---
 
 This guide covers setting up RDMA over AWS Elastic Fabric Adapter (EFA) on EKS for high-performance disaggregated inference with Dynamo. EFA is the only RDMA fabric available on AWS — InfiniBand and RoCE are not offered. With EFA, Dynamo's prefill and decode workers transfer KV cache directly between GPUs across nodes via GPU-Direct RDMA, bypassing CPU and TCP/IP stacks.

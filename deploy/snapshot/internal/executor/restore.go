@@ -32,6 +32,7 @@ type RestoreRequest struct {
 	NSRestorePath               string
 	PodName                     string
 	PodNamespace                string
+	TargetPodIP                 string
 	ContainerName               string
 	Clientset                   kubernetes.Interface
 }
@@ -212,6 +213,9 @@ func execNSRestore(ctx context.Context, log logr.Logger, req RestoreRequest, sna
 	}
 	if snap.CgroupRoot != "" {
 		args = append(args, "--cgroup-root", snap.CgroupRoot)
+	}
+	if req.TargetPodIP != "" {
+		args = append(args, "--target-pod-ip", req.TargetPodIP)
 	}
 
 	cmd := exec.CommandContext(ctx, "nsenter", args...)

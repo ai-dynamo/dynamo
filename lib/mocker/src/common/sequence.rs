@@ -64,6 +64,8 @@ pub struct ActiveSequence {
     #[getter(copy)]
     generated_tokens: usize,
 
+    planned_output_ids: Option<Vec<u32>>,
+
     #[getter(copy)]
     num_input_tokens: usize,
 
@@ -86,6 +88,24 @@ impl ActiveSequence {
         enable_prefix_caching: bool,
         emit_token_ids: bool,
     ) -> Self {
+        Self::new_with_planned_output_ids(
+            tokens,
+            max_output_tokens,
+            block_size,
+            enable_prefix_caching,
+            emit_token_ids,
+            None,
+        )
+    }
+
+    pub fn new_with_planned_output_ids(
+        tokens: Vec<u32>,
+        max_output_tokens: usize,
+        block_size: Option<usize>,
+        enable_prefix_caching: bool,
+        emit_token_ids: bool,
+        planned_output_ids: Option<Vec<u32>>,
+    ) -> Self {
         let block_size = block_size.unwrap_or(64);
         let num_input_tokens = tokens.len();
 
@@ -101,6 +121,7 @@ impl ActiveSequence {
             block_size,
             max_output_tokens,
             generated_tokens: 0,
+            planned_output_ids,
             num_input_tokens,
             num_allocated_tokens: 0,
             enable_prefix_caching,
@@ -318,14 +339,24 @@ impl ActiveSequence {
     /// Always check `generated_tokens < max_output_tokens` before calling this method.
     #[cfg_attr(feature = "profile", inline(never))]
     pub fn generate(&mut self) -> Vec<MoveBlock> {
+        self.generate_token().1
+    }
+
+    /// Generate the next output token, push it to the sequence, and return the
+    /// token alongside any KV movement signals.
+    #[cfg_attr(feature = "profile", inline(never))]
+    pub fn generate_token(&mut self) -> (u32, Vec<MoveBlock>) {
         // Assert that we haven't reached the maximum output tokens
         assert!(
             self.generated_tokens < self.max_output_tokens,
             "Cannot generate more tokens: reached max_output_tokens limit"
         );
 
-        // Generate a random token
-        let token = random::<u32>();
+        let token = self
+            .planned_output_ids
+            .as_ref()
+            .and_then(|ids| ids.get(self.generated_tokens).copied())
+            .unwrap_or_else(random::<u32>);
 
         // Collect signals
         let mut signals = Vec::new();
@@ -337,30 +368,28 @@ impl ActiveSequence {
 
         // Check if we've reached the limit after pushing
         if self.generated_tokens != self.max_output_tokens {
-            return signals;
+            return (token, signals);
         }
 
         // Free all blocks when we reach max tokens
         signals.extend(self.free_signal_for_tokens(self.len()));
-        signals
+        (token, signals)
     }
 
     fn free_signal_for_tokens(&self, active_tokens: usize) -> Vec<MoveBlock> {
         let active_blocks = active_tokens
             .div_ceil(self.block_size)
             .min(self.unique_blocks.len());
-        self.unique_blocks[..active_blocks]
+        if active_blocks == 0 {
+            return Vec::new();
+        }
+
+        let blocks = self.unique_blocks[..active_blocks]
             .iter()
             .rev()
-            .map(|block| match block {
-                UniqueBlock::PartialBlock(uuid) => {
-                    MoveBlock::Deref(vec![UniqueBlock::PartialBlock(*uuid)])
-                }
-                UniqueBlock::FullBlock(hash) => {
-                    MoveBlock::Deref(vec![UniqueBlock::FullBlock(*hash)])
-                }
-            })
-            .collect()
+            .cloned()
+            .collect();
+        vec![MoveBlock::Deref(blocks)]
     }
 
     /// Free the currently active allocation footprint.
@@ -454,23 +483,12 @@ mod tests {
         }
     }
 
-    fn assert_deref_partial(signal: &MoveBlock) {
+    fn assert_deref_blocks(signal: &MoveBlock, expected: &[UniqueBlock]) {
         match signal {
             MoveBlock::Deref(blocks) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::PartialBlock(_)));
+                assert_eq!(blocks, expected);
             }
-            _ => panic!("Expected MoveBlock::Deref for partial block"),
-        }
-    }
-
-    fn assert_deref_full(signal: &MoveBlock) {
-        match signal {
-            MoveBlock::Deref(blocks) => {
-                assert_eq!(blocks.len(), 1);
-                assert!(matches!(blocks[0], UniqueBlock::FullBlock(_)));
-            }
-            _ => panic!("Expected MoveBlock::Deref for full block"),
+            _ => panic!("Expected MoveBlock::Deref"),
         }
     }
 
@@ -583,9 +601,40 @@ mod tests {
 
         let free_signals = seq.reset_with_signal();
 
-        assert!(!free_signals.is_empty());
+        assert_eq!(free_signals.len(), 1);
+        let expected = seq
+            .unique_blocks()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_deref_blocks(&free_signals[0], &expected);
         assert_eq!(seq.num_allocated_tokens(), 0);
         assert_eq!(seq.generated_tokens(), 2);
+    }
+
+    #[test]
+    fn test_free_signal_is_empty_without_an_active_allocation() {
+        let seq = ActiveSequence::new((0..10).collect(), 4, Some(4), true, false);
+
+        assert!(seq.free_signal().is_empty());
+    }
+
+    #[test]
+    fn test_free_signal_batches_allocated_blocks_in_reverse_order() {
+        let mut seq = ActiveSequence::new((0..10).collect(), 4, Some(4), true, false);
+        seq.commit_allocation(seq.len());
+
+        let expected = seq
+            .unique_blocks()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
+        let signals = seq.free_signal();
+
+        assert_eq!(signals.len(), 1);
+        assert_deref_blocks(&signals[0], &expected);
     }
 
     #[test]
@@ -616,15 +665,17 @@ mod tests {
         let signals_third = seq.generate();
         assert_eq!(signals_third.len(), 0);
 
-        // Generate last token - we reach max_output_tokens, should trigger Deref signals
+        // Generate last token - we reach max_output_tokens, so all blocks should
+        // be dereferenced in one reverse-ordered batch.
+        let expected = seq
+            .unique_blocks()
+            .iter()
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>();
         let signals_last = seq.generate();
-        assert_eq!(signals_last.len(), 2);
-
-        // First signal should be Deref for the partial block
-        assert_deref_partial(&signals_last[0]);
-
-        // Second signal should be Deref for the full block
-        assert_deref_full(&signals_last[1]);
+        assert_eq!(signals_last.len(), 1);
+        assert_deref_blocks(&signals_last[0], &expected);
     }
 
     #[test]

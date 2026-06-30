@@ -152,6 +152,7 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
+	dst.MinAvailable = src.MinAvailable
 
 	if src.Multinode != nil {
 		dst.Multinode = &v1beta1.MultinodeSpec{}
@@ -257,7 +258,7 @@ func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, p
 	if dst.ExtraPodMetadata == nil && extraPodMetadataNeedsPreservation(preserved.ExtraPodMetadata) {
 		dst.ExtraPodMetadata = preserved.ExtraPodMetadata.DeepCopy()
 	}
-	if dst.ExtraPodSpec == nil && extraPodSpecNeedsPreservation(preserved.ExtraPodSpec) {
+	if dst.ExtraPodSpec == nil && shouldRestorePreservedExtraPodSpec(dst, preserved) {
 		cp := *preserved.ExtraPodSpec.DeepCopy()
 		dst.ExtraPodSpec = &cp
 	}
@@ -334,7 +335,8 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 		save.ExtraPodMetadata = src.ExtraPodMetadata.DeepCopy()
 		hasSave = true
 	}
-	if extraPodSpecNeedsPreservation(src.ExtraPodSpec) {
+	if extraPodSpecNeedsPreservation(src.ExtraPodSpec) ||
+		alphaFrontendSidecarConflictNeedsPreservation(src.FrontendSidecar, src.ExtraPodSpec) {
 		save.ExtraPodSpec = src.ExtraPodSpec.DeepCopy()
 		hasSave = true
 	}
@@ -499,6 +501,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 	dst.ComponentType, dst.SubComponentType = sharedComponentTypeFromHub(src.ComponentType)
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
+	dst.MinAvailable = src.MinAvailable
 
 	if src.Multinode != nil {
 		dst.Multinode = &MultinodeSpec{}
@@ -2079,6 +2082,33 @@ func extraPodSpecIsZero(eps *ExtraPodSpec) bool {
 
 func extraPodSpecNeedsPreservation(eps *ExtraPodSpec) bool {
 	return eps != nil && (extraPodSpecIsZero(eps) || extraPodSpecOnlyPreservesMainContainerName(eps))
+}
+
+func shouldRestorePreservedExtraPodSpec(dst, preserved *DynamoComponentDeploymentSharedSpec) bool {
+	return dst != nil &&
+		preserved != nil &&
+		preserved.ExtraPodSpec != nil &&
+		(extraPodSpecNeedsPreservation(preserved.ExtraPodSpec) ||
+			alphaFrontendSidecarConflictNeedsPreservation(preserved.FrontendSidecar, preserved.ExtraPodSpec))
+}
+
+func alphaFrontendSidecarConflictNeedsPreservation(frontendSidecar *FrontendSidecarSpec, eps *ExtraPodSpec) bool {
+	// Keep enough origin data for admission to preserve the v1alpha1 rule that
+	// rejects frontendSidecar when extraPodSpec already declares the generated
+	// sidecar container name.
+	return frontendSidecar != nil && extraPodSpecHasContainer(eps, defaultFrontendSidecarContainerName)
+}
+
+func extraPodSpecHasContainer(eps *ExtraPodSpec, name string) bool {
+	if eps == nil || eps.PodSpec == nil {
+		return false
+	}
+	for _, container := range eps.PodSpec.Containers {
+		if container.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func extraPodSpecOnlyPreservesMainContainerName(eps *ExtraPodSpec) bool {

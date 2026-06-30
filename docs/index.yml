@@ -70,7 +70,7 @@ navigation:
             path: benchmarks/qwen3-32b-kv-routing.mdx
             slug: qwen3-32b-kv-routing
             hidden: true
-          - page: Kimi-K2.5 Feature Stack
+          - page: Agentic Coding Throughput Stack - Kimi-K2.5
             path: benchmarks/kimi-k2-5-feature-stack.mdx
             slug: kimi-k2-5-feature-stack
             hidden: true
@@ -143,6 +143,16 @@ navigation:
                 path: kubernetes/dgdr.md
               - page: DGDR Examples
                 path: kubernetes/dgdr-examples.md
+          - section: Request Routing
+            contents:
+              - section: Gateway API Inference Extension
+                contents:
+                  - page: Overview
+                    path: kubernetes/gateway-api/README.mdx
+                  - page: Quickstart
+                    path: kubernetes/gateway-api/quickstart.mdx
+                  - page: Reference
+                    path: kubernetes/gateway-api/reference.mdx
           - section: Model Loading
             contents:
               - page: Model Caching
@@ -297,14 +307,16 @@ navigation:
             slug: agents
             path: agents/README.md
             contents:
+              - page: Session IDs
+                path: agents/session-ids.md
               - page: Agent Tracing
                 path: agents/agent-tracing.md
+              - page: Agent Simulation
+                path: agents/agent-replay.md
               - page: Agent Hints
                 path: agents/agent-hints.md
-              - page: Priority Scheduling
-                path: agents/priority-scheduling.md
-              - page: Use Pi-Mono with Dynamo
-                path: agents/pi-mono.md
+              - page: Agent Harnesses
+                path: agents/agent-harnesses.md
               - page: ThunderAgent Program Scheduler
                 path: agents/thunderagent-router.md
           - page: LoRA Adapters
@@ -318,6 +330,12 @@ navigation:
                 path: features/multimodal/encoder-disaggregation.md
               - page: Multimodal KV Routing
                 path: features/multimodal/multimodal-kv-routing.md
+              - page: SGLang Multimodal
+                path: features/multimodal/multimodal-sglang.md
+              - page: TensorRT-LLM Multimodal
+                path: features/multimodal/multimodal-trtllm.md
+              - page: vLLM Multimodal
+                path: features/multimodal/multimodal-vllm.md
           - section: Diffusion
             slug: diffusion
             path: features/diffusion/README.md
@@ -410,6 +428,10 @@ navigation:
                 path: components/router/router-concepts.md
               - page: Configuration and Tuning
                 path: components/router/router-configuration.md
+              - page: Deficit Round Robin Queue Scheduling
+                path: components/router/deficit-round-robin.md
+              - page: Priority Scheduling
+                path: components/router/priority-scheduling.md
               - page: Disaggregated Serving
                 path: components/router/router-disaggregated-serving.md
               - page: Topology-Aware KV Transfer
@@ -463,8 +485,6 @@ navigation:
             contents:
               - page: LWS
                 path: kubernetes/lws.md
-              - page: Gateway API Inference Extension (GAIE)
-                path: kubernetes/inference-gateway.md
 
       # ==================== Design Docs ====================
       - section: Design Docs

@@ -241,19 +241,20 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// scheduler to cancel compute early).
     async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
 
-    /// Drain in-flight engine work before shutdown (optional, default no-op).
+    /// Whether in-flight KV transfers are done, so `cleanup` may release GPU
+    /// memory. The `Worker` polls this on prefill workers between the grace
+    /// period and [`cleanup`](LLMEngine::cleanup):
     ///
-    /// Called once during graceful shutdown after the discovery unregister
-    /// + grace-period sleep, but before [`cleanup`](LLMEngine::cleanup).
-    /// Use it for backend-side draining that must complete while the
-    /// distributed runtime (NATS / etcd) is still alive — e.g. waiting for
-    /// in-flight NIXL KV transfers on prefill workers (issue #7319), so
-    /// downstream decode workers don't observe a use-after-free on freed
-    /// GPU memory.
+    /// - `Ok(Some(true))`  — quiescent; exit the drain loop now.
+    /// - `Ok(Some(false))` — busy; poll again next tick.
+    /// - `Ok(None)`        — no introspection (default); poll until the drain
+    ///   budget expires, then cleanup. Never frees KV early.
+    /// - `Err(_)`          — logged and treated as `Ok(None)`.
     ///
-    /// Failures are logged and swallowed; shutdown proceeds regardless.
-    async fn drain(&self) -> Result<(), DynamoError> {
-        Ok(())
+    /// Aggregated/decode workers are never polled. Override only if the engine
+    /// can observe transfer completion (e.g. a connector or scheduler).
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        Ok(None)
     }
 
     /// Release all engine resources. Called exactly once.
@@ -422,10 +423,10 @@ pub trait RawEngine: Send + Sync + 'static {
     /// [`LLMEngine::abort`].
     async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
 
-    /// Drain in-flight work before shutdown (optional, default no-op). See
-    /// [`LLMEngine::drain`].
-    async fn drain(&self) -> Result<(), DynamoError> {
-        Ok(())
+    /// See [`LLMEngine::is_quiescent`]. Raw engines are aggregated, so the
+    /// `Worker` never polls this; the default suffices.
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        Ok(None)
     }
 
     /// Release all engine resources. Called exactly once; must be null-safe
@@ -591,6 +592,17 @@ pub trait LLMEngineOutputExt: Sized {
     fn with_tokens(self, tokens: Vec<u32>) -> Self;
     /// Attach usage stats.
     fn with_usage(self, usage: CompletionUsage) -> Self;
+    /// Attach an `encoder_result` handoff payload.
+    ///
+    /// Signature takes `serde_json::Map<String, serde_json::Value>` (not
+    /// bare `Value`) so the object-only Wire Shape invariant is
+    /// type-enforced and the setter stays infallible -- there is no way
+    /// to pass an array or scalar through this API. The setter wraps the
+    /// `Map` in `Value::Object(...)` internally.
+    fn with_encoder_result(
+        self,
+        encoder_result: serde_json::Map<String, serde_json::Value>,
+    ) -> Self;
 }
 
 impl LLMEngineOutputExt for LLMEngineOutput {
@@ -600,6 +612,13 @@ impl LLMEngineOutputExt for LLMEngineOutput {
     }
     fn with_usage(mut self, usage: CompletionUsage) -> Self {
         self.completion_usage = Some(usage);
+        self
+    }
+    fn with_encoder_result(
+        mut self,
+        encoder_result: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        self.encoder_result = Some(serde_json::Value::Object(encoder_result));
         self
     }
 }
@@ -649,5 +668,27 @@ mod tests {
     fn usage_saturates_on_overflow() {
         let u = usage(u32::MAX, 10);
         assert_eq!(u.total_tokens, u32::MAX);
+    }
+
+    /// `with_encoder_result` takes `Map<String, Value>` (object-only by
+    /// type) and stores it as `Value::Object(_)` so the Wire Shape
+    /// invariant holds end-to-end. Round-trip: input Map -> stored
+    /// Value::Object -> as_object() returns the same Map.
+    #[test]
+    fn ext_with_encoder_result_round_trips_map() {
+        let mut input = serde_json::Map::new();
+        input.insert(
+            "embedding_handle".into(),
+            serde_json::json!({"uri": "nixl://encoder/0", "shape": [1, 1024]}),
+        );
+        input.insert("aux".into(), serde_json::Value::String("extra".into()));
+
+        let chunk = LLMEngineOutput::stop().with_encoder_result(input.clone());
+        let stored = chunk
+            .encoder_result
+            .as_ref()
+            .expect("encoder_result must be set after with_encoder_result");
+        assert!(stored.is_object(), "encoder_result must be Value::Object");
+        assert_eq!(stored.as_object().unwrap(), &input);
     }
 }

@@ -9,7 +9,7 @@ use dynamo_runtime::{
 };
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, sticky::lifecycle::SessionCloseAction},
+    kv_router::{KvRouter, metrics::RouterRequestMetrics},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         llm_backend::LLMEngineOutput,
@@ -17,13 +17,16 @@ use crate::{
     },
 };
 
-/// Owns resources that must be released even when routing setup or streaming is cancelled.
+/// Post-selection owner of scheduler bookkeeping.
+///
+/// `KvPushRouter` installs this through [`RequestGuard`] before its next
+/// fallible await. At that point the scheduling response channel has completed
+/// its admission handoff and no longer represents request lifetime.
 struct RequestCleanup {
     chooser: Arc<KvRouter>,
     context_id: String,
     scheduler_tracked: bool,
     freed: bool,
-    deferred_close: Option<SessionCloseAction>,
 }
 
 impl RequestCleanup {
@@ -33,17 +36,10 @@ impl RequestCleanup {
             context_id,
             scheduler_tracked,
             freed: false,
-            deferred_close: None,
         }
     }
 
-    fn set_deferred_close(&mut self, deferred_close: Option<SessionCloseAction>) {
-        self.deferred_close = deferred_close;
-    }
-
     async fn finish(&mut self) {
-        // Free scheduler state before closing the session so both explicit and
-        // drop cleanup preserve the same lifecycle ordering.
         if self.scheduler_tracked
             && let Err(error) = self.chooser.free(&self.context_id).await
         {
@@ -54,19 +50,13 @@ impl RequestCleanup {
             );
         }
         self.freed = true;
-
-        if let Some(close) = self.deferred_close.take() {
-            close.execute(&self.context_id);
-        }
     }
 }
 
 impl Drop for RequestCleanup {
     fn drop(&mut self) {
-        // Drop cannot await, so transfer any unfinished cleanup into one task.
-        let deferred_close = self.deferred_close.take();
         let needs_free = !self.freed && self.scheduler_tracked;
-        if deferred_close.is_none() && !needs_free {
+        if !needs_free {
             return;
         }
 
@@ -81,16 +71,12 @@ impl Drop for RequestCleanup {
         let chooser = self.chooser.clone();
         let context_id = self.context_id.clone();
         handle.spawn(async move {
-            // Match explicit finish ordering so session KV closes after scheduler cleanup.
-            if needs_free && let Err(error) = chooser.free(&context_id).await {
+            if let Err(error) = chooser.free(&context_id).await {
                 tracing::warn!(
                     request_id = %context_id,
                     %error,
                     "Failed to free request from drop guard"
                 );
-            }
-            if let Some(close) = deferred_close {
-                close.execute(&context_id);
             }
         });
     }
@@ -257,7 +243,9 @@ impl OutputBlockTracker {
     }
 }
 
-/// Coordinates scheduler/session cleanup, observability, and streamed load tracking.
+/// Coordinates scheduler cleanup, observability, and streamed load tracking.
+///
+/// Session-affinity lifetime is separate: `ResolvedAffinity` owns the binding lease.
 pub(super) struct RequestGuard {
     cleanup: RequestCleanup,
     observability: RequestObservability,
@@ -304,10 +292,6 @@ impl RequestGuard {
 
     pub(super) fn start_dispatch(&mut self, phase_label: &str) {
         self.observability.start_dispatch(phase_label);
-    }
-
-    pub(super) fn set_deferred_close(&mut self, deferred_close: Option<SessionCloseAction>) {
-        self.cleanup.set_deferred_close(deferred_close);
     }
 
     pub(super) fn record_prefill_start(&self) {

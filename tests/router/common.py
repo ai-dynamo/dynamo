@@ -9,6 +9,7 @@ import os
 import random
 import threading
 import time
+import uuid
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import aiohttp
@@ -519,6 +520,216 @@ def _test_router_two_routers(
         # Clean up any remaining routers (in case of error before consumer verification)
         for kv_router in kv_routers:
             kv_router.__exit__(None, None, None)
+
+
+def _test_distributed_session_affinity(
+    engine_workers,
+    block_size: int,
+    request,
+    router_ports: list[int],
+    test_payload: dict[str, Any],
+    store_backend: str = "etcd",
+):
+    """Verify shared affinity claims override conflicting KV-prefix placement."""
+    with (
+        FrontendRouterProcess(
+            request,
+            block_size,
+            router_ports[0],
+            engine_workers.namespace,
+            store_backend,
+            router_mode="kv",
+            min_initial_workers=engine_workers.num_workers,
+            event_plane="nats",
+            session_affinity_ttl_secs=300,
+        ) as first_router,
+        FrontendRouterProcess(
+            request,
+            block_size,
+            router_ports[1],
+            engine_workers.namespace,
+            store_backend,
+            router_mode="kv",
+            min_initial_workers=engine_workers.num_workers,
+            event_plane="nats",
+            session_affinity_ttl_secs=300,
+        ) as second_router,
+    ):
+        urls = [f"http://localhost:{port}/v1/chat/completions" for port in router_ports]
+
+        async def run_test() -> None:
+            runtime = get_runtime(store_backend, "nats")
+            endpoint = runtime.endpoint(
+                f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+            )
+            worker_ids = sorted(
+                await poll_for_worker_instances(endpoint, engine_workers.num_workers)
+            )
+            assert len(worker_ids) >= 2
+            worker_a, worker_b = worker_ids[:2]
+
+            for port in router_ports:
+                await wait_for_frontend_ready(
+                    frontend_url=f"http://localhost:{port}",
+                    expected_num_workers=engine_workers.num_workers,
+                    timeout=120,
+                    engine_workers=engine_workers,
+                    store_backend=store_backend,
+                    request_plane="nats",
+                )
+
+            suffix = uuid.uuid4().hex
+            prefix_a = " ".join([f"affinity-alpha-{suffix}"] * (block_size * 2))
+            prefix_b = " ".join([f"affinity-beta-{suffix}"] * (block_size * 2))
+            session_a = f"distributed-affinity-a-{uuid.uuid4()}"
+            session_b = f"distributed-affinity-b-{uuid.uuid4()}"
+
+            def payload(content: str, *, query_only: bool = False) -> dict[str, Any]:
+                annotations = ["query_instance_id:"] if query_only else []
+                return {
+                    **test_payload,
+                    "messages": [{"role": "user", "content": content}],
+                    "stream": True,
+                    "max_tokens": 1,
+                    "nvext": {
+                        "annotations": annotations,
+                        "extra_fields": ["worker_id"],
+                    },
+                }
+
+            async def send(
+                client: aiohttp.ClientSession,
+                url: str,
+                request_payload: dict[str, Any],
+                headers: dict[str, str] | None = None,
+            ) -> tuple[int, int]:
+                async with client.post(
+                    url, json=request_payload, headers=headers
+                ) as response:
+                    body = await response.text()
+                    assert response.status == 200, body
+
+                worker_info = None
+                for line in body.splitlines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        continue
+                    candidate = json.loads(data).get("nvext", {}).get("worker_id")
+                    if candidate:
+                        worker_info = candidate
+
+                assert worker_info is not None, body
+                return (
+                    worker_info["decode_worker_id"],
+                    worker_info["decode_dp_rank"],
+                )
+
+            async def wait_for_prefix_target(
+                client: aiohttp.ClientSession,
+                url: str,
+                content: str,
+                expected: tuple[int, int],
+            ) -> None:
+                for _ in range(50):
+                    if (
+                        await send(client, url, payload(content, query_only=True))
+                        == expected
+                    ):
+                        return
+                    await asyncio.sleep(0.1)
+                raise AssertionError(
+                    f"KV events did not make prefix target {expected} visible"
+                )
+
+            session_a_headers = {"x-dynamo-session-id": session_a}
+            session_b_headers = {"x-dynamo-session-id": session_b}
+            proposal_a = {
+                **session_a_headers,
+                "x-dynamo-worker-instance-id": str(worker_a),
+                "x-dynamo-dp-rank": "0",
+            }
+            proposal_b = {
+                **session_b_headers,
+                "x-dynamo-worker-instance-id": str(worker_b),
+                "x-dynamo-dp-rank": "0",
+            }
+
+            async with aiohttp.ClientSession() as client:
+                assert await send(client, urls[0], payload(prefix_a), proposal_a) == (
+                    worker_a,
+                    0,
+                )
+                assert await send(client, urls[1], payload(prefix_b), proposal_b) == (
+                    worker_b,
+                    0,
+                )
+
+                await wait_for_prefix_target(client, urls[0], prefix_a, (worker_a, 0))
+                await wait_for_prefix_target(client, urls[1], prefix_b, (worker_b, 0))
+
+                assert await send(
+                    client, urls[0], payload(prefix_a), session_b_headers
+                ) == (worker_b, 0)
+                assert await send(
+                    client, urls[1], payload(prefix_b), session_a_headers
+                ) == (worker_a, 0)
+
+                first_evictions = first_router.read_logs().count(
+                    "evicted session affinity cache entry"
+                )
+                assert await send(
+                    client,
+                    urls[1],
+                    payload(prefix_b),
+                    {
+                        **session_a_headers,
+                        "x-dynamo-session-final": "true",
+                    },
+                ) == (worker_a, 0)
+
+                for _ in range(50):
+                    if (
+                        first_router.read_logs().count(
+                            "evicted session affinity cache entry"
+                        )
+                        > first_evictions
+                    ):
+                        break
+                    await asyncio.sleep(0.1)
+                else:
+                    raise AssertionError(
+                        "first frontend did not observe session A claim deletion"
+                    )
+
+                second_evictions = second_router.read_logs().count(
+                    "evicted session affinity cache entry"
+                )
+                assert await send(
+                    client,
+                    urls[0],
+                    payload(prefix_a),
+                    {
+                        **session_b_headers,
+                        "x-dynamo-session-final": "true",
+                    },
+                ) == (worker_b, 0)
+
+                for _ in range(50):
+                    if (
+                        second_router.read_logs().count(
+                            "evicted session affinity cache entry"
+                        )
+                        > second_evictions
+                    ):
+                        return
+                    await asyncio.sleep(0.1)
+                raise AssertionError(
+                    "second frontend did not observe session B claim deletion"
+                )
+
+        asyncio.run(run_test())
 
 
 def _test_remote_indexer_decisions(
@@ -1112,33 +1323,35 @@ def _verify_frontend_rejection_metrics(
     )
 
 
-def _probe_overload_503_and_assert(
+def _probe_overload_529_and_assert(
     frontend_port: int,
     test_payload: dict,
     max_tokens: int,
 ):
-    """Send staggered streaming requests until the router rejects with 503.
+    """Send staggered streaming requests until the router rejects with 529.
 
     Shared core for the aggregated and disaggregated overload tests. The caller
     is responsible for starting the frontend (with the desired thresholds and,
     for disagg, ``enforce_disagg=True``) and for waiting until it is ready.
 
-    Sends unique (shuffled) prompts 0.1s apart to exhaust worker resources, then
+    Sends unique (shuffled) prompts 0.1s apart until the router rejects, then
     asserts:
-    1. At least one request succeeds (routed before the busy state propagates)
-    2. At least one request is rejected with 503 (all eligible workers busy)
-    3. No other status codes appear
-    4. The frontend ``model_rejection_total`` metric matches the 503 count
+    1. At least one request is rejected with 529 (the threshold gates the pool)
+    2. No other status codes appear
+    3. The frontend ``model_rejection_total`` metric matches the 529 count
+
+    Successes are not required: a single overload-shaped request can exceed the
+    threshold before dispatch, so an all-529 burst is a valid outcome.
     """
     url = f"http://localhost:{frontend_port}/v1/chat/completions"
-    test_payload_503 = {
+    test_payload_529 = {
         **test_payload,
         "max_tokens": max_tokens,
     }
 
-    logger.info("Launching streaming requests until the router returns 503...")
+    logger.info("Launching streaming requests until the router returns 529...")
 
-    async def exhaust_resources_and_verify_503():
+    async def exhaust_resources_and_verify_529():
         stop_event = asyncio.Event()
 
         async with aiohttp.ClientSession() as session:
@@ -1148,25 +1361,28 @@ def _probe_overload_503_and_assert(
                 try:
                     async with session.post(url, json=payload) as response:
                         if response.status == 200:
-                            logger.info(f"Request {req_id} accepted")
+                            logger.info("Request %s accepted", req_id)
                             await stop_event.wait()
                             return response.status
 
-                        if response.status == 503:
+                        if response.status == 529:
                             body = await response.text()
-                            logger.info(f"Request {req_id} got expected 503: {body}")
+                            logger.info("Request %s got expected 529: %s", req_id, body)
                             stop_event.set()
                             return response.status
 
                         body = await response.text()
                         logger.info(
-                            f"Request {req_id} got unexpected status {response.status}: {body}"
+                            "Request %s got unexpected status %s: %s",
+                            req_id,
+                            response.status,
+                            body,
                         )
                         return response.status
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    logger.info(f"Request {req_id} failed: {e}")
+                    logger.info("Request %s failed: %s", req_id, e)
                     raise
 
             try:
@@ -1178,7 +1394,7 @@ def _probe_overload_503_and_assert(
                     random.shuffle(content_words)
                     shuffled_content = " ".join(content_words)
                     unique_payload = {
-                        **test_payload_503,
+                        **test_payload_529,
                         "messages": [
                             {
                                 **test_payload["messages"][0],
@@ -1193,17 +1409,17 @@ def _probe_overload_503_and_assert(
                     try:
                         await asyncio.wait_for(stop_event.wait(), timeout=10)
                     except asyncio.TimeoutError:
-                        logger.error("Timed out waiting for overload 503")
+                        logger.error("Timed out waiting for overload 529")
             finally:
                 stop_event.set()
                 # Drain quickly and count only requests that received a status.
-                # This does not race the rejection-metric assertion: a 503 is
+                # This does not race the rejection-metric assertion: a 529 is
                 # returned synchronously by send_request (so every rejected
                 # request is in `done`, never `pending`), and the accepted (200)
                 # requests unblock from stop_event and return immediately. Any
                 # task still pending here received no HTTP status yet — cancelling
-                # it can neither drop a counted 503 nor desync model_rejection_total
-                # (which only counts emitted 503s). Some configs (e.g. slow decode
+                # it can neither drop a counted 529 nor desync model_rejection_total
+                # (which only counts emitted 529s). Some configs (e.g. slow decode
                 # with large max_tokens) leave such in-flight requests, so we must
                 # not block on or fail them.
                 done, pending = await asyncio.wait(tasks, timeout=5)
@@ -1213,24 +1429,25 @@ def _probe_overload_503_and_assert(
 
             return [t.result() for t in done]
 
-    results = asyncio.run(exhaust_resources_and_verify_503())
+    results = asyncio.run(exhaust_resources_and_verify_529())
 
     # Count outcomes
     num_succeeded = sum(1 for s in results if s == 200)
-    num_rejected = sum(1 for s in results if s == 503)
-    num_other = sum(1 for s in results if s not in (200, 503))
+    num_rejected = sum(1 for s in results if s == 529)
+    num_other = sum(1 for s in results if s not in (200, 529))
 
     logger.info(
-        f"Results: {num_succeeded} succeeded, {num_rejected} rejected (503), "
-        f"{num_other} other"
+        "Results: %s succeeded, %s rejected (529), %s other",
+        num_succeeded,
+        num_rejected,
+        num_other,
     )
 
     # Assert minimum thresholds
     assert (
         num_other == 0
-    ), f"Expected only 200 or 503 responses, but got {num_other} other"
+    ), f"Expected only 200 or 529 responses, but got {num_other} other"
     assert num_rejected > 0, f"Expected at least 1 rejection, but got {num_rejected}"
-    assert num_succeeded > 0, f"Expected at least 1 success, but got {num_succeeded}"
 
     # Verify rejection metrics from frontend /metrics endpoint
     model_name = test_payload.get("model", "")
@@ -1239,12 +1456,13 @@ def _probe_overload_503_and_assert(
     )
 
     logger.info(
-        f"Successfully verified overload 503: {num_rejected} rejected, "
-        f"{num_succeeded} succeeded, metrics match"
+        "Successfully verified overload 529: %s rejected, %s succeeded, metrics match",
+        num_rejected,
+        num_succeeded,
     )
 
 
-def _test_router_overload_503(
+def _test_router_overload_529(
     engine_workers,
     block_size: int,
     request,
@@ -1256,15 +1474,15 @@ def _test_router_overload_503(
     router_queue_threshold: float | str | None = None,
     max_tokens: int = 50,
 ):
-    """Test that 503 is returned when all workers are busy, and verify rejection metrics.
+    """Test that 529 is returned when all workers are busy, and verify rejection metrics.
 
     Assumes engine_workers are already initialized. This function manages router lifecycle.
     Uses limited resources to intentionally trigger the overload condition.
 
     Sends staggered requests (0.1s apart) to exhaust worker resources, then verifies:
     1. At least one request succeeds (routed before busy state propagates)
-    2. At least one request is rejected with 503 (worker busy)
-    3. The frontend model_rejection_total metric matches the observed 503 count
+    2. At least one request is rejected with 529 (worker busy)
+    3. The frontend model_rejection_total metric matches the observed 529 count
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -1307,10 +1525,10 @@ def _test_router_overload_503(
             )
         )
 
-        _probe_overload_503_and_assert(frontend_port, test_payload, max_tokens)
+        _probe_overload_529_and_assert(frontend_port, test_payload, max_tokens)
 
 
-def _test_disagg_router_overload_503(
+def _test_disagg_router_overload_529(
     prefill_workers,
     decode_workers,
     block_size: int,
@@ -1325,7 +1543,7 @@ def _test_disagg_router_overload_503(
     store_backend: str = "etcd",
     request_plane: str = "nats",
 ):
-    """Verify disaggregated load-shedding: clients get 503 when the gated pool is busy.
+    """Verify disaggregated load-shedding: clients get 529 when the gated pool is busy.
 
     Assumes the prefill and decode workers are already running (kept alive by the
     caller); this function owns the frontend (router) lifecycle. The frontend is
@@ -1343,11 +1561,11 @@ def _test_disagg_router_overload_503(
       threshold disabled. Gates the decode pool.
 
     In both cases the shared probe asserts that some requests succeed, some are
-    rejected with 503, and the rejection metric matches.
+    rejected with 529, and the rejection metric matches.
 
     Raises:
-        AssertionError: If no 503 is observed (the threshold did not gate the
-        pool) or if any non-200/503 status appears.
+        AssertionError: If no 529 is observed (the threshold did not gate the
+        pool) or if any non-200/529 status appears.
     """
     with KVRouterProcess(
         request=request,
@@ -1364,7 +1582,8 @@ def _test_disagg_router_overload_503(
         min_initial_workers=decode_workers.num_workers,
     ):
         logger.info(
-            f"Starting disagg KV router frontend on port {frontend_port} for overload 503 test"
+            "Starting disagg KV router frontend on port %s for overload 529 test",
+            frontend_port,
         )
         frontend_url = f"http://localhost:{frontend_port}"
 
@@ -1384,7 +1603,7 @@ def _test_disagg_router_overload_503(
             )
         )
 
-        _probe_overload_503_and_assert(frontend_port, test_payload, max_tokens)
+        _probe_overload_529_and_assert(frontend_port, test_payload, max_tokens)
 
 
 def _test_router_threshold_none_disables_rejection(
@@ -1400,7 +1619,7 @@ def _test_router_threshold_none_disables_rejection(
     Assumes engine_workers are already initialized. This function manages router lifecycle.
     Starts the frontend with literal CLI "None" values for all three threshold knobs,
     verifies the /busy_threshold API reports nulls, then sends overload-shaped traffic and
-    confirms no request is rejected with 503 and the frontend rejection metric stays at 0.
+    confirms no request is rejected with 529 and the frontend rejection metric stays at 0.
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -1542,11 +1761,11 @@ def _test_router_threshold_none_disables_rejection(
         results = asyncio.run(verify_thresholds_and_send_load())
 
         num_succeeded = sum(1 for status in results if status == 200)
-        num_rejected = sum(1 for status in results if status == 503)
-        num_other = sum(1 for status in results if status not in (200, 503))
+        num_rejected = sum(1 for status in results if status == 529)
+        num_other = sum(1 for status in results if status not in (200, 529))
 
         logger.info(
-            "Results with explicit None thresholds: %s succeeded, %s rejected (503), %s other",
+            "Results with explicit None thresholds: %s succeeded, %s rejected (529), %s other",
             num_succeeded,
             num_rejected,
             num_other,
@@ -1555,7 +1774,7 @@ def _test_router_threshold_none_disables_rejection(
         assert num_rejected == 0, f"Expected 0 rejections, but got {num_rejected}"
         assert (
             num_other == 0
-        ), f"Expected only 200 or 503 responses, but got {num_other} other"
+        ), f"Expected only 200 or 529 responses, but got {num_other} other"
         assert num_succeeded > 0, "Expected at least one successful request"
         assert (
             num_succeeded == num_requests
@@ -2358,207 +2577,6 @@ def _test_router_decisions_disagg(
         )
 
 
-def _test_disagg_background_prefill_sticky_routing(
-    prefill_workers,
-    decode_workers,
-    block_size: int,
-    request,
-    frontend_port: int,
-    model_name: str,
-    store_backend: str = "file",
-    request_plane: str = "tcp",
-    event_plane: str = "zmq",
-    frontend_already_running: bool = False,
-):
-    """Verify sticky prefill routing overrides normal KV choice in bootstrap disagg."""
-
-    frontend_context = contextlib.nullcontext()
-    if not frontend_already_running:
-        frontend_context = FrontendRouterProcess(
-            request,
-            block_size,
-            frontend_port,
-            decode_workers.namespace,
-            store_backend,
-            enforce_disagg=True,
-            request_plane=request_plane,
-            event_plane=event_plane,
-            durable_kv_events=False,
-            min_initial_workers=decode_workers.num_workers,
-        )
-
-    with frontend_context:
-        frontend_url = f"http://localhost:{frontend_port}"
-        chat_url = f"{frontend_url}/v1/chat/completions"
-
-        async def send_chat(
-            session: aiohttp.ClientSession,
-            content: str,
-            *,
-            session_control: Optional[dict[str, Any]] = None,
-        ) -> tuple[int, int]:
-            payload: dict[str, Any] = {
-                "model": model_name,
-                "messages": [{"role": "user", "content": content}],
-                "stream": True,
-                "max_tokens": 2,
-                "nvext": {"extra_fields": ["worker_id", "timing"]},
-            }
-            if session_control is not None:
-                payload["nvext"]["session_control"] = session_control
-
-            async with session.post(chat_url, json=payload) as response:
-                body = []
-                assert response.status == 200, (
-                    f"Request failed with status {response.status}: "
-                    f"{await response.text()}"
-                )
-
-                prefill_worker_id = None
-                prefill_dp_rank = None
-                async for line in response.content:
-                    line_str = line.decode("utf-8", errors="replace").strip()
-                    body.append(line_str)
-                    if not line_str.startswith("data:"):
-                        continue
-                    data_str = line_str[5:].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
-                    worker_id = data.get("nvext", {}).get("worker_id", {})
-                    prefill_worker_id = worker_id.get(
-                        "prefill_worker_id", prefill_worker_id
-                    )
-                    prefill_dp_rank = worker_id.get("prefill_dp_rank", prefill_dp_rank)
-
-                assert (
-                    prefill_worker_id is not None
-                ), "Missing prefill_worker_id in response body: " + "\n".join(body)
-                assert (
-                    prefill_dp_rank is not None
-                ), "Missing prefill_dp_rank in response body: " + "\n".join(body)
-                return int(prefill_worker_id), int(prefill_dp_rank)
-
-        async def test_sync():
-            await wait_for_frontend_ready(
-                frontend_url=frontend_url,
-                expected_num_workers=(
-                    prefill_workers.num_workers + decode_workers.num_workers
-                ),
-                timeout=120,
-                engine_workers=[prefill_workers, decode_workers],
-                store_backend=store_backend,
-                request_plane=request_plane,
-            )
-
-            runtime = get_runtime(
-                store_backend=store_backend, request_plane=request_plane
-            )
-            prefill_endpoint = runtime.endpoint(
-                f"{prefill_workers.namespace}.prefill.generate"
-            )
-            prefill_session_control_endpoint = runtime.endpoint(
-                f"{prefill_workers.namespace}.prefill.session_control"
-            )
-            await poll_for_worker_instances(
-                prefill_endpoint,
-                prefill_workers.num_workers,
-                max_wait_time=120,
-            )
-            await poll_for_worker_instances(
-                prefill_session_control_endpoint,
-                prefill_workers.num_workers,
-                max_wait_time=120,
-            )
-
-            suffix = random.randint(100_000, 999_999)
-            session_a = f"sticky-a-{suffix}"
-            session_b = f"sticky-b-{suffix}"
-            prompt_a = (
-                f"session alpha {suffix}: "
-                "redwood vectors amber matrix northbound lantern " * 20
-            )
-
-            async with aiohttp.ClientSession() as session:
-                session_a_pair = await send_chat(
-                    session,
-                    prompt_a,
-                    session_control={
-                        "session_id": session_a,
-                        "action": "open",
-                        "timeout": 300,
-                    },
-                )
-
-                competing_pair = None
-                competing_prompt = None
-                for attempt in range(6):
-                    candidate = (
-                        f"session beta {suffix} attempt {attempt}: "
-                        "cerulean ledger quartz valley transit cacheline " * 20
-                    )
-                    pair = await send_chat(
-                        session,
-                        candidate,
-                        session_control={
-                            "session_id": f"{session_b}-{attempt}",
-                            "action": "open",
-                            "timeout": 300,
-                        },
-                    )
-                    if pair != session_a_pair:
-                        competing_pair = pair
-                        competing_prompt = candidate
-                        break
-
-                assert competing_pair is not None, (
-                    "Could not warm a competing prefill worker/rank different from "
-                    f"session A pair {session_a_pair}"
-                )
-
-                control_pair = None
-                for _ in range(10):
-                    control_pair = await send_chat(
-                        session,
-                        competing_prompt
-                        + " control continuation proving normal kv routing",
-                    )
-                    if control_pair == competing_pair:
-                        break
-                    await asyncio.sleep(0.5)
-
-                assert control_pair == competing_pair, (
-                    "No-sticky control did not follow normal KV overlap routing: "
-                    f"expected {competing_pair}, got {control_pair}"
-                )
-
-                followups = [
-                    competing_prompt + f" sticky continuation {idx} {suffix}"
-                    for idx in range(3)
-                ]
-                results = await asyncio.gather(
-                    *[
-                        send_chat(
-                            session,
-                            content,
-                            session_control={"session_id": session_a},
-                        )
-                        for content in followups
-                    ]
-                )
-
-            assert results == [session_a_pair] * len(results), (
-                "Sticky follow-ups should stay pinned to session A prefill pair "
-                f"{session_a_pair}, but got {results}; competing pair was "
-                f"{competing_pair}"
-            )
-
-        asyncio.run(test_sync())
-
-
 def _test_disagg_topology_required_prefill_pin_match_and_mismatch(
     decode_workers,
     block_size: int,
@@ -3220,7 +3238,7 @@ def _test_busy_threshold_endpoint(
     TODO: This doesn't actually test any e2e rejection for now. A proper test would:
     1. Set a very low threshold
     2. Send enough requests to exceed the threshold
-    3. Verify that subsequent requests are rejected with 503
+    3. Verify that subsequent requests are rejected with 529
 
     For now, this test only verifies the endpoint is accessible and returns valid responses.
 
@@ -3528,7 +3546,8 @@ def _test_disagg_direct_mode(
     """E2E test for disaggregated Direct routing mode (simulating GAIE EPP).
 
     In Direct mode, the router does not select workers itself.
-    Worker IDs must be provided via x-worker-instance-id and x-prefill-instance-id
+    Worker IDs must be provided via x-dynamo-worker-instance-id and
+    x-dynamo-prefill-instance-id
     HTTP headers. The test verifies:
       1. Requests with explicit worker ID headers succeed and return a valid response.
       2. Requests without headers fail (Direct mode rejects unaddressed requests).
@@ -3570,10 +3589,10 @@ def _test_disagg_direct_mode(
                 decode_workers.num_workers,
             )
             headers = {
-                "x-worker-instance-id": str(decode_ids[0]),
-                "x-prefill-instance-id": str(prefill_ids[0]),
-                "x-dp-rank": "0",
-                "x-prefill-dp-rank": "0",
+                "x-dynamo-worker-instance-id": str(decode_ids[0]),
+                "x-dynamo-prefill-instance-id": str(prefill_ids[0]),
+                "x-dynamo-dp-rank": "0",
+                "x-dynamo-prefill-dp-rank": "0",
             }
             await wait_for_frontend_ready(
                 frontend_url=frontend_url,
@@ -3602,10 +3621,10 @@ def _test_disagg_direct_mode(
                 "stream": False,
             }
             headers = {
-                "x-worker-instance-id": str(target_decode),
-                "x-prefill-instance-id": str(target_prefill),
-                "x-dp-rank": "0",
-                "x-prefill-dp-rank": "0",
+                "x-dynamo-worker-instance-id": str(target_decode),
+                "x-dynamo-prefill-instance-id": str(target_prefill),
+                "x-dynamo-dp-rank": "0",
+                "x-dynamo-prefill-dp-rank": "0",
             }
 
             async with aiohttp.ClientSession() as session:
