@@ -147,6 +147,21 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_argument(
             g,
+            flag_name="--custom-encoder-class",
+            env_var="DYN_CUSTOM_ENCODER_CLASS",
+            default=None,
+            help=(
+                "Dotted module.ClassName path to a VisionEncoderBackend subclass. "
+                "When set, the aggregated worker wraps it in the in-process "
+                "AsyncVisionEncoder and runs encoder.encode(image_urls) for each "
+                "multimodal request, bypassing vLLM's built-in multimodal "
+                "processing. --model is passed verbatim to the backend's build(). "
+                "Example: 'my_package.encoders.MyEncoder'."
+            ),
+        )
+
+        add_argument(
+            g,
             flag_name="--embedding-transfer-mode",
             env_var="DYN_VLLM_EMBEDDING_TRANSFER_MODE",
             default=EmbeddingTransferMode.NIXL_WRITE.value,
@@ -299,6 +314,9 @@ class DynamoVllmConfig(ConfigBase):
     ]  # resolved to enum in validate()
     embedding_worker: bool = False
 
+    # CustomEncoder (image-only embeddings; worker assembles mixed prompt)
+    custom_encoder_class: Optional[str] = None
+
     # Headless mode for multi-node TP/PP
     headless: bool = False
 
@@ -324,6 +342,7 @@ class DynamoVllmConfig(ConfigBase):
         self._validate_multimodal_role_exclusivity()
         self._validate_multimodal_requires_flag()
         self._validate_embedding_worker_exclusivity()
+        self._validate_custom_encoder()
 
     def _resolve_embedding_transfer_mode(self) -> None:
         """Resolve embedding_transfer_mode from string to enum."""
@@ -486,6 +505,49 @@ class DynamoVllmConfig(ConfigBase):
         if self._count_multimodal_roles() == 1 and not self.enable_multimodal:
             raise ValueError(
                 "Use --enable-multimodal when enabling any multimodal component"
+            )
+
+    def _validate_custom_encoder(self) -> None:
+        """Validate the aggregated CustomEncoder configuration.
+
+        The encoder runs in-process in a single aggregated worker on the
+        token-in/token-out path and produces image embeds for the mixed
+        EmbedsPrompt, so it is a multimodal, aggregated-only, token-mode
+        component. Enforce those here (fail fast) instead of silently bypassing
+        the multimodal gate at request time, no-op'ing in a decode worker that
+        never reaches the custom-encoder branch, or loading the encoder in
+        --use-vllm-tokenizer text mode where it is never invoked.
+        """
+        if not self.custom_encoder_class:
+            return
+        if not self.enable_multimodal:
+            raise ValueError(
+                "--custom-encoder-class requires --enable-multimodal "
+                "(the custom encoder is a multimodal component)."
+            )
+        if self.use_vllm_tokenizer:
+            raise ValueError(
+                "--custom-encoder-class is incompatible with --use-vllm-tokenizer: "
+                "the custom encoder is wired into the token-in/token-out path, "
+                "which --use-vllm-tokenizer bypasses (text mode), so the encoder "
+                "would load but never run."
+            )
+        if self.frontend_decoding:
+            raise ValueError(
+                "--custom-encoder-class is incompatible with --frontend-decoding: "
+                "the custom encoder consumes image URLs, but frontend decoding "
+                "pre-decodes images to tensors the encoder cannot accept."
+            )
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            mode = (
+                self.disaggregation_mode.value
+                if isinstance(self.disaggregation_mode, DisaggregationMode)
+                else self.disaggregation_mode
+            )
+            raise ValueError(
+                f"--custom-encoder-class is only supported with "
+                f"--disaggregation-mode=agg (got {mode}). The custom encoder "
+                "runs in-process in a single aggregated worker."
             )
 
     def _validate_embedding_worker_exclusivity(self) -> None:
