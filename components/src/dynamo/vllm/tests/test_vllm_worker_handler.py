@@ -1488,6 +1488,64 @@ class TestEmbeddingWorkerHandlerCancellation:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
+    async def test_raw_text_truncation_forwarded_to_vllm(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        captured: dict = {}
+
+        async def fake_encode(
+            prompt, pooling_params, request_id, *, tokenization_kwargs=None
+        ):
+            captured["prompt"] = prompt
+            captured["tokenization_kwargs"] = tokenization_kwargs
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {
+            "input": "hello",
+            "model": "test-model",
+            "truncate_prompt_tokens": 2048,
+        }
+        _ = [r async for r in handler.generate(request, context)]
+
+        assert captured["prompt"] == "hello"
+        assert captured["tokenization_kwargs"] == {"truncate_prompt_tokens": 2048}
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_truncation_uses_default_encode_shape_when_not_tokenizing(self):
+        handler = self._make_embedding_handler()
+        context = self._make_context()
+        prompts = []
+
+        async def fake_encode(prompt, pooling_params, request_id):
+            prompts.append(prompt)
+            output = MagicMock()
+            output.outputs.data = torch.tensor([0.1, 0.2, 0.3])
+            output.prompt_token_ids = [1, 2, 3]
+            yield output
+
+        handler.engine_client.encode = fake_encode
+
+        request = {"input": "hello", "model": "test-model"}
+        _ = [r async for r in handler.generate(request, context)]
+
+        request = {
+            "input": [1, 2, 3],
+            "model": "test-model",
+            "truncate_prompt_tokens": 2,
+        }
+        _ = [r async for r in handler.generate(request, context)]
+
+        assert prompts[0] == "hello"
+        assert prompts[1]["prompt_token_ids"] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
     async def test_oversized_dimensions_raises(self):
         """When vLLM silently clamps an oversized ``dimensions`` request (a
         model enabled via ``--hf-overrides '{"is_matryoshka": true}'`` with no
