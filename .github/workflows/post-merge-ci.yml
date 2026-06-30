@@ -1141,6 +1141,11 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1 # Run sequentially to prevent resource conflicts
+      matrix:
+        implementation: [agentgateway, envoy-ai-gateway]
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1167,7 +1172,7 @@ jobs:
         with:
           vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
-      - name: Install GAIE prerequisites (Gateway API, agentgateway, Inference Extension CRDs)
+      - name: Install GAIE prerequisites (Gateway API, ${{ matrix.implementation }}, Inference Extension CRDs)
         shell: bash
         env:
           KUBECONFIG_B64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
@@ -1175,7 +1180,7 @@ jobs:
           echo "${KUBECONFIG_B64}" | base64 -d > ${{ github.workspace }}/.kubeconfig_gaie
           export KUBECONFIG=${{ github.workspace }}/.kubeconfig_gaie
           export NAMESPACE=default
-          bash deploy/inference-gateway/scripts/install_gaie_crd_agentgateway.sh
+          bash deploy/inference-gateway/scripts/install_gaie_crd.sh ${{ matrix.implementation }}
           rm -f ${{ github.workspace }}/.kubeconfig_gaie
       - name: Run GAIE Deploy Test
         id: deploy-test

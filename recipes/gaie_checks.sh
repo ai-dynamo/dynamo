@@ -18,7 +18,26 @@ set -Eeuo pipefail
 # ===== Namespace ensure =====
 # The documented GAIE flow sets NAMESPACE explicitly; the fallback matches the installer.
 : "${NAMESPACE:=default}"
-: "${GATEWAY_CONTROLLER_NAMESPACE:=${AGW_NAMESPACE:-agentgateway-system}}"
+
+GATEWAY_IMPL="${1:-}"
+case "${GATEWAY_IMPL}" in
+  agentgateway)
+    : "${GATEWAY_CONTROLLER_NAMESPACE:=${AGW_NAMESPACE:-agentgateway-system}}"
+    : "${GATEWAY_LABEL_FILTER:=app.kubernetes.io/name=agentgateway}"
+    ;;
+  envoy-ai-gateway)
+    : "${GATEWAY_CONTROLLER_NAMESPACE:=${EAIGW_NAMESPACE:-envoy-gateway-system}}"
+    : "${GATEWAY_LABEL_FILTER:=app.kubernetes.io/instance=eg}"
+    ;;
+  "")
+    echo "Usage: $0 <agentgateway|envoy-ai-gateway>" >&2
+    exit 1
+    ;;
+  *)
+    echo "ERROR: unknown gateway implementation '${GATEWAY_IMPL}'. Must be 'agentgateway' or 'envoy-ai-gateway'." >&2
+    exit 1
+    ;;
+esac
 
 ok()  { printf "✅ %s\n" "$*"; }
 fail(){ printf "❌ %s\n" "$*" >&2; exit 1; }
@@ -50,7 +69,6 @@ GAIE_CRDS=(
   inferenceobjectives.inference.networking.x-k8s.io
   inferencepoolimports.inference.networking.x-k8s.io
   inferencepools.inference.networking.k8s.io
-  inferencepools.inference.networking.x-k8s.io
 )
 
 info "Checking GAIE (Inference Extension) CRDs…"
@@ -60,22 +78,20 @@ for c in "${GAIE_CRDS[@]}"; do
 done
 ok "GAIE CRDs present & Established"
 
-info "Checking agentgateway controller in namespace '$GATEWAY_CONTROLLER_NAMESPACE'…"
+info "Checking gateway controller in namespace '$GATEWAY_CONTROLLER_NAMESPACE' (${GATEWAY_LABEL_FILTER})…"
 # namespace must exist
 kubectl get ns "$GATEWAY_CONTROLLER_NAMESPACE" >/dev/null 2>&1 || fail "Namespace '$GATEWAY_CONTROLLER_NAMESPACE' not found (run step c Helm installs)"
 
+PODS=$(kubectl get pods -n "$GATEWAY_CONTROLLER_NAMESPACE" -o name -l "$GATEWAY_LABEL_FILTER" 2>/dev/null)
+# fallback label (charts sometimes label differently)
+[[ -z "${PODS:-}" ]] && PODS=$(kubectl get pods -n "$GATEWAY_CONTROLLER_NAMESPACE" -o name | grep -E 'agentgateway|envoy-gateway|gateway' || true)
+[[ -z "${PODS:-}" ]] && fail "gateway pods not found in '$GATEWAY_CONTROLLER_NAMESPACE'"
+
 # pods should be running
-if ! kubectl get pods -n "$GATEWAY_CONTROLLER_NAMESPACE" -l app.kubernetes.io/name=agentgateway >/dev/null 2>&1; then
-  # fallback label (charts sometimes label differently)
-  PODS=$(kubectl get pods -n "$GATEWAY_CONTROLLER_NAMESPACE" -o name | grep -E 'agentgateway|gateway' || true)
-  [[ -z "${PODS:-}" ]] && fail "agentgateway pods not found in '$GATEWAY_CONTROLLER_NAMESPACE'"
-else
-  PODS=$(kubectl get pods -n "$GATEWAY_CONTROLLER_NAMESPACE" -l app.kubernetes.io/name=agentgateway -o name)
-fi
 for p in $PODS; do
   kubectl wait -n "$GATEWAY_CONTROLLER_NAMESPACE" --for=condition=Ready "$p" --timeout=180s >/dev/null || fail "Pod not Ready: $p"
 done
-ok "agentgateway controller pods Ready"
+ok "Gateway controller pods Ready ($PODS)"
 
 kubectl get gateway.gateway.networking.k8s.io inference-gateway -n "$NAMESPACE" >/dev/null 2>&1 || fail "Gateway 'inference-gateway' not found in $NAMESPACE (apply step d manifest)"
 

@@ -18,7 +18,7 @@ Integrate Dynamo with the Gateway API Inference Extension, also known as Inferen
 
 - If you want to use LoRA deploy Dynamo without the Inference Gateway.
 
-- These setups use [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-0.6b/vllm/agg/gaie).
+- These setups use [Envoy AI Gateway](https://aigateway.envoyproxy.io/) or [agentgateway](https://agentgateway.dev/) as the Inference Gateway implementation. For the Istio Inference Gateway, check out [`recipes/qwen3-0.6b/vllm/agg/gaie`](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-0.6b/vllm/agg/gaie).
 
 ## Prerequisites
 
@@ -34,14 +34,19 @@ If you are installing from the source tree rather than a release chart, follow [
 
 ### 2. Deploy Inference Gateway ###
 
-First, deploy an inference gateway service. In this example, we'll install agentgateway with the inference extension enabled.
+First, deploy an inference gateway service.
 
 ```bash
 cd deploy/inference-gateway
 export NAMESPACE=my-model # You can put the inference gateway into another namespace and then adjust your http-route.yaml
-./scripts/install_gaie_crd_agentgateway.sh
+
+# To install Envoy AI Gateway
+./scripts/install_gaie_crd.sh envoy-ai-gateway
+
+# To install agentgateway
+./scripts/install_gaie_crd.sh agentgateway
 ```
-This script installs the Gateway API CRDs, the GAIE CRDs, agentgateway into `agentgateway-system`, and a `Gateway` named `inference-gateway` into `${NAMESPACE}`.
+This script installs the Gateway API CRDs, the GAIE CRDs, the selected Inference Gateway implementation, and a `Gateway` named `inference-gateway` into `${NAMESPACE}`.
 
 #### Verify the Gateway is running
 
@@ -211,11 +216,11 @@ supported with the same precedence as the Go EPP.
 > update, restart the Rust EPP so it binds to the new generation namespace.
 > Exact streamed output-block updates are also not yet wired into the Rust EPP.
 
-#### `InferencePool` and the data plane (Istio, kGateway, Agentgateway)
+#### `InferencePool` and the data plane (Istio, kGateway, Agentgateway, Envoy AI Gateway)
 
 Although the Rust EPP does not consult `InferencePool` for worker discovery,
 the CRD is still required by the gateway **data plane**. Gateway
-implementations (Istio, kGateway, Agentgateway) read `InferencePool` to:
+implementations (Istio, kGateway, Agentgateway, Envoy AI Gateway) read `InferencePool` to:
 
 1. Attach the `ext_proc` filter pointing at the EPP service.
 2. Enable the `override_host` LB policy so the EPP's
@@ -733,29 +738,49 @@ If you need to uninstall run:
 kubectl delete dynamoGraphDeployment vllm-agg
 helm uninstall dynamo-gaie -n my-model
 
-# To uninstall GAIE
-# 1. Delete the inference-gateway
+# Delete the inference-gateway
 kubectl delete gateway inference-gateway --ignore-not-found
+```
 
-# 2. Uninstall agentgateway helm releases
+#### Uninstalling agentgateway
+
+```bash
+# 1. Uninstall agentgateway helm releases
 helm uninstall agentgateway -n agentgateway-system
 helm uninstall agentgateway-crds -n agentgateway-system
 
-# 3. Delete the agentgateway-system namespace (optional, cleans up everything in it)
+# 2. Delete the agentgateway-system namespace (optional, cleans up everything in it)
 kubectl delete namespace agentgateway-system --ignore-not-found
 
-# 4. Delete the Inference Extension CRDs
-IGW_LATEST_RELEASE=v1.5.0-rc.2
+# 3. Delete the Inference Extension CRDs
+IGW_LATEST_RELEASE=v1.5.0
 kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml --ignore-not-found
 
-# 5. Delete the Gateway API CRDs
+# 4. Delete the Gateway API CRDs
 GATEWAY_API_VERSION=v1.5.1
 kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml --ignore-not-found
 ```
 
+#### Uninstalling Envoy AI Gateway
+
+```bash
+# 1. Uninstall Envoy AI Gateway helm releases
+helm uninstall envoy-ai-gateway -n envoy-ai-gateway-system
+helm uninstall envoy-ai-gateway-crds -n envoy-ai-gateway-system
+helm uninstall eg -n envoy-gateway-system
+
+# 2. Delete the Envoy AI Gateway namespaces (optional, cleans up everything in it)
+kubectl delete namespace envoy-ai-gateway-system --ignore-not-found
+kubectl delete namespace envoy-gateway-system --ignore-not-found
+
+# 3. Delete the Inference Extension CRDs
+IGW_LATEST_RELEASE=v1.5.0
+kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml --ignore-not-found
+```
+
 ## Gateway API Inference Extension Integration
 
-This section documents the updated plugin implementation for Gateway API Inference Extension **v1.5.0-rc.2**.
+This section documents the updated plugin implementation for Gateway API Inference Extension **v1.5.0**.
 
 ### Router bookkeeping operations
 
