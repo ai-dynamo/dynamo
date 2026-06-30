@@ -231,6 +231,32 @@ def make_audio_payload(expected_response: list[str]) -> ChatPayload:
     )
 
 
+def make_custom_encoder_payload() -> ChatPayload:
+    """Semantic check for the aggregated CustomEncoder path.
+
+    The example HitchhikersVisionEncoder splices the embeddings of "the
+    Ultimate Question of Life, the Universe, and Everything" at the image
+    placeholder, so the assembled prompt must answer "42". The served image
+    content is irrelevant (the encoder ignores the URL). ``expected_log``
+    asserts the encoder loaded in-process at worker startup.
+    """
+    return chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "Based on The Hitchhiker's Guide to the Galaxy, The Answer to",
+            },
+            {"type": "image_url", "image_url": {"url": MULTIMODAL_IMG_URL}},
+            {"type": "text", "text": " is?"},
+        ],
+        repeat_count=1,
+        expected_response=["42"],
+        expected_log=["Loaded CustomEncoder"],
+        max_tokens=32,
+        temperature=0.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Config dataclasses
 # ---------------------------------------------------------------------------
