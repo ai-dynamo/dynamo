@@ -365,6 +365,7 @@ impl AggRuntime {
         mut request: DirectRequest,
         arrival_time_ms: f64,
         replay_hashes: Option<ReplayRequestHashes>,
+        session_id: Option<String>,
     ) -> anyhow::Result<Uuid> {
         let uuid = request.uuid.unwrap_or_else(Uuid::new_v4);
         request.uuid = Some(uuid);
@@ -391,7 +392,7 @@ impl AggRuntime {
         let admissions = {
             let router = self.router.as_mut().expect("router presence checked above");
             router
-                .on_request_arrival(&request, replay_hashes, self.now_ms)?
+                .on_request_arrival_for_session(&request, replay_hashes, session_id, self.now_ms)?
                 .admissions
         };
         self.requests
@@ -626,8 +627,8 @@ impl AggRuntime {
                 session_id,
                 turn_index,
             } = ready;
-            let session_metadata = session_id.zip(turn_index);
-            let uuid = self.assign_request(request, arrival_time_ms, replay_hashes)?;
+            let session_metadata = session_id.clone().zip(turn_index);
+            let uuid = self.assign_request(request, arrival_time_ms, replay_hashes, session_id)?;
             if let Some((session_id, turn_index)) = session_metadata {
                 self.collector
                     .on_session_metadata(uuid, session_id, turn_index);
@@ -1297,6 +1298,54 @@ mod tests {
         .unwrap()
         .run()
         .unwrap()
+    }
+
+    #[test]
+    fn test_trace_workload_agent_round_robin_rotates_queued_sessions() {
+        let turn = |hash_id, max_output_tokens| TurnTrace {
+            input_length: 64,
+            max_output_tokens,
+            hash_ids: vec![hash_id],
+            ..Default::default()
+        };
+        let session = |session_id: &str, timestamp, hash_id, max_output_tokens| SessionTrace {
+            session_id: session_id.to_string(),
+            first_arrival_timestamp_ms: Some(timestamp),
+            turns: vec![turn(hash_id, max_output_tokens)],
+        };
+        let trace = Trace {
+            block_size: 64,
+            sessions: vec![
+                session("blocker", 0.0, 1, 8),
+                session("a", 0.1, 2, 1),
+                session("a", 0.2, 3, 1),
+                session("b", 0.3, 4, 1),
+            ],
+        };
+        let driver = trace.into_trace_driver_with_block_size(64).unwrap();
+        let (collector, stats) = AggRuntime::new_workload(
+            &queueing_router_args(RouterQueuePolicy::AgentRoundRobin),
+            Some(queueing_router_config(RouterQueuePolicy::AgentRoundRobin)),
+            None,
+            driver,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::KvRouter,
+        )
+        .unwrap()
+        .with_per_request_records(true)
+        .run()
+        .unwrap();
+
+        assert!(stats.max_router_pending_count >= 3);
+        assert_eq!(
+            stats
+                .dispatch_order
+                .iter()
+                .map(|uuid| collector.session_id(*uuid))
+                .collect::<Vec<_>>(),
+            [Some("blocker"), Some("a"), Some("b"), Some("a")]
+        );
     }
 
     fn planner_router_config() -> KvRouterConfig {
