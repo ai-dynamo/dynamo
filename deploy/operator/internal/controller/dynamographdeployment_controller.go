@@ -25,6 +25,7 @@ import (
 
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/go-logr/logr"
 	"github.com/imdario/mergo"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -289,16 +290,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// Compute DGD-level placement score from the Grove PodCliqueSet when on
 	// the Grove pathway. Score is sourced from scheduler PodGang statuses and
 	// is purely informational — it does not affect readiness.
-	if r.isGrovePathway(dynamoDeployment) {
-		pcs, pcsErr := r.getExistingGrovePodCliqueSet(ctx, dynamoDeployment)
-		if pcsErr != nil {
-			logger.V(1).Info("Failed to get PodCliqueSet for placement score", "error", pcsErr)
-		} else {
-			score, state := dynamo.AggregatePlacementScore(pcs)
-			dynamoDeployment.Status.PlacementScore = score
-			dynamoDeployment.Status.PlacementScoreState = state
-		}
-	}
+	r.updatePlacementScoreStatus(ctx, logger, dynamoDeployment)
 
 	if err != nil {
 		logger.Error(err, "failed to reconcile the resources")
@@ -702,6 +694,22 @@ func (r *DynamoGraphDeploymentReconciler) getExistingGrovePodCliqueSet(ctx conte
 		return nil, nil
 	}
 	return pcs, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) updatePlacementScoreStatus(ctx context.Context, logger logr.Logger, dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	if !r.isGrovePathway(dgd) {
+		return
+	}
+
+	pcs, pcsErr := r.getExistingGrovePodCliqueSet(ctx, dgd)
+	if pcsErr != nil {
+		logger.V(1).Info("Failed to get PodCliqueSet for placement score", "error", pcsErr)
+		return
+	}
+
+	score, state := dynamo.AggregatePlacementScore(pcs)
+	dgd.Status.PlacementScore = score
+	dgd.Status.PlacementScoreState = state
 }
 
 func restartAnnotationsFromPodCliqueSet(pcs *grovev1alpha1.PodCliqueSet) map[string]string {

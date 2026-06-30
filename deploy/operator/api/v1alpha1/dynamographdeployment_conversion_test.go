@@ -891,9 +891,9 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "status", Namespace: "ns"},
 		Status: v1beta1.DynamoGraphDeploymentStatus{
-			ObservedGeneration: 7,
-			State:              v1beta1.DGDStateSuccessful,
-			PlacementScore:     ptr.To(0.87),
+			ObservedGeneration:  7,
+			State:               v1beta1.DGDStateSuccessful,
+			PlacementScore:      ptr.To(0.87),
 			PlacementScoreState: v1beta1.PlacementScoreStateUnsupported,
 			Conditions: []metav1.Condition{
 				{
