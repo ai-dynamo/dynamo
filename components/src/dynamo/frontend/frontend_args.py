@@ -400,8 +400,8 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_EVENT_PLANE",
             default=None,
             help="Determines how events are published [nats|zmq]. If unset, "
-            "auto-detected from --discovery-backend (zmq for file/mem, nats "
-            "for etcd/kubernetes).",
+            "defaults to 'zmq' for all discovery backends. Set to 'nats' to use a "
+            "NATS-based event plane.",
             choices=["nats", "zmq"],
         )
         add_negatable_bool_argument(

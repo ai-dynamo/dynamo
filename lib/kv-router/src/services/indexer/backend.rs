@@ -4,13 +4,14 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::ConcurrentRadixTreeCompressed;
 use crate::ThreadPoolIndexer;
 use crate::indexer::{
-    KvIndexer, KvIndexerInterface, KvIndexerMetrics, LowerTierIndexers, MatchDetails,
-    TieredMatchDetails, query_lower_tiers,
+    KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
+    MatchDetails, TieredMatchDetails, TieredMatchProvider, query_lower_tiers,
 };
 use crate::protocols::{KvCacheEventData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId};
 
@@ -156,7 +157,7 @@ impl Indexer {
     pub async fn find_tiered_matches(
         &self,
         sequence: Vec<LocalBlockHash>,
-    ) -> Result<TieredMatchDetails> {
+    ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
         match self {
             Indexer::Single {
                 primary,
@@ -219,6 +220,16 @@ impl Indexer {
             }
         }
         Ok(out)
+    }
+}
+
+#[async_trait]
+impl TieredMatchProvider for Indexer {
+    async fn find_tiered_matches(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
+        self.find_tiered_matches(sequence.to_vec()).await
     }
 }
 

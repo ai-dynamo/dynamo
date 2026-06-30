@@ -118,11 +118,17 @@ class MultiModalInput(BaseModel):
     video_url: Optional[str] = None
 
 
+# One MultiModalGroup carries timestamps for a single video.
+SingleVideoTimestamps = List[float]
+
+
 class MultiModalGroup(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     video_grid_thw: Optional[List[Any]] = None
+    second_per_grid_ts: Optional[float] = None
+    video_timestamps: Optional[SingleVideoTimestamps] = None
     num_mm_tokens: Optional[int] = None
 
 

@@ -936,8 +936,7 @@ mod tests_startup_helpers {
     }
 
     //--------------------------------------------------------------------
-    // Test start_zmq_listener without a real socket
-    //   (feed it frames through a ZMQ PAIR tcp socket)
+    // Test start_zmq_listener with a real ZMQ publisher
     //--------------------------------------------------------------------
     #[tokio::test]
     async fn test_start_zmq_listener_pushes_to_channel() {
@@ -956,16 +955,8 @@ mod tests_startup_helpers {
         // Prepare channel that listener should fill
         let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
 
-        // ZMQ TCP endpoint using localhost with an ephemeral port
-        let reserved_listener = reserve_open_port();
-        let endpoint = format!(
-            "tcp://127.0.0.1:{}",
-            reserved_listener
-                .local_addr()
-                .expect("failed to read reserved listener address")
-                .port()
-        );
-        drop(reserved_listener);
+        // Keep the unique IPC directory alive until the sockets shut down.
+        let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let topic = "".to_string(); // subscribe to all
 
         // Publisher side - set up first
@@ -1072,15 +1063,8 @@ mod tests_startup_helpers {
     #[tokio::test]
     async fn test_start_zmq_listener_connects_before_publisher_bind() {
         let (tx, mut rx) = mpsc::unbounded_channel::<PlacementEvent>();
-        let reserved_listener = reserve_open_port();
-        let endpoint = format!(
-            "tcp://127.0.0.1:{}",
-            reserved_listener
-                .local_addr()
-                .expect("failed to read reserved listener address")
-                .port()
-        );
-        drop(reserved_listener);
+        // Keep the unique IPC directory alive until the sockets shut down.
+        let (_ipc_dir, endpoint) = unique_ipc_endpoint();
         let topic = String::new();
         let token = dynamo_runtime::CancellationToken::new();
         let next_event_id = Arc::new(AtomicU64::new(0));
@@ -1143,8 +1127,10 @@ mod tests_startup_helpers {
         let _ = listener_handle.await;
     }
 
-    fn reserve_open_port() -> std::net::TcpListener {
-        std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind probe listener")
+    fn unique_ipc_endpoint() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("failed to create temporary ZMQ directory");
+        let endpoint = format!("ipc://{}", dir.path().join("events.sock").display());
+        (dir, endpoint)
     }
 
     //--------------------------------------------------------------------

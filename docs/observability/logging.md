@@ -251,7 +251,7 @@ You can provide a custom request ID using the `x-request-id` header. This ID wil
 
 ### Example Request with Custom Request ID
 
-```sh
+```bash
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H 'x-request-id: 8372eac7-5f43-4d76-beca-0a94cfb311d0' \

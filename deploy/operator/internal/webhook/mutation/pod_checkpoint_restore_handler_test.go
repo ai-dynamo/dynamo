@@ -115,6 +115,19 @@ func TestPodCheckpointRestoreMutatorHandle(t *testing.T) {
 		assert.Empty(t, resp.Patches)
 	})
 
+	t.Run("update leaves pod unchanged", func(t *testing.T) {
+		pod := checkpointCandidatePod("worker-checkpoint")
+		req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Update,
+			Namespace: "default",
+			Object:    runtime.RawExtension{Raw: mustMarshalPod(t, pod)},
+		}}
+
+		resp := mutator.Handle(context.Background(), req)
+		require.True(t, resp.Allowed)
+		assert.Empty(t, resp.Patches)
+	})
+
 	t.Run("arbitrary annotated pod without operator stamp is ignored", func(t *testing.T) {
 		pod := checkpointCandidatePod("worker-checkpoint")
 		delete(pod.Labels, consts.KubeLabelDynamoComponent)
