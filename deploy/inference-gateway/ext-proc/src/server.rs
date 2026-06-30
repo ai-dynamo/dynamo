@@ -13,6 +13,8 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+
+use bytes::Bytes;
 use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
@@ -46,6 +48,10 @@ struct RequestContext {
     incoming_model_name: String,
     target_model_name: String,
     request_id: String,
+    /// Booking id the picker returned from `pick()` for this stream's load
+    /// reservation (`None` if it booked nothing). Handed back to the lifecycle
+    /// callbacks so the picker frees the exact reservation — no shared map.
+    booking_id: Option<String>,
     request_size: usize,
     response_size: usize,
     response_complete: bool,
@@ -79,6 +85,7 @@ impl RequestContext {
             incoming_model_name: String::new(),
             target_model_name: String::new(),
             request_id: String::new(),
+            booking_id: None,
             request_size: 0,
             response_size: 0,
             response_complete: false,
@@ -239,7 +246,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         let req_info = RequestInfo {
             request_id: ctx.request_id.clone(),
             headers: ctx.request_headers.clone(),
-            body: vec![],
+            body: Bytes::new(),
             model: String::new(),
             candidate_subset: vec![],
         };
@@ -249,6 +256,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             .await
             .map_err(ExtProcError::from_pick_error)?;
 
+        ctx.booking_id = result.reservation_id.clone();
         ctx.target_endpoint = result.endpoint.clone();
         ctx.req_header_resp = Some(envoy_helpers::build_request_header_response(
             &result.endpoint,
@@ -263,18 +271,19 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     async fn handle_request_body(
         picker: &P,
         ctx: &mut RequestContext,
-        raw_body: &[u8],
+        raw_body: Bytes,
         endpoints: &[Endpoint],
     ) -> Result<(), ExtProcError> {
         ctx.request_size = raw_body.len();
 
-        let model = extract_model_from_body(raw_body);
+        let model = extract_model_from_body(&raw_body);
         let candidate_subset = extract_candidate_subset(&ctx.request_metadata);
 
         let req_info = RequestInfo {
             request_id: ctx.request_id.clone(),
             headers: ctx.request_headers.clone(),
-            body: raw_body.to_vec(),
+            // Cheap refcount clone; the picker/renderer share this buffer.
+            body: raw_body.clone(),
             model: model.clone(),
             candidate_subset,
         };
@@ -285,6 +294,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             .map_err(ExtProcError::from_pick_error)?;
 
         ctx.body_routed = true;
+        ctx.booking_id = result.reservation_id.clone();
         ctx.target_endpoint = result.endpoint.clone();
         ctx.incoming_model_name = model;
         ctx.target_model_name = ctx.incoming_model_name.clone();
@@ -310,8 +320,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
 
         // Inject nvext.token_data into the request body JSON so the backend
         // skips redundant tokenization. Mirrors Go EPP's setTokenizedPrompt.
-        let forwarded_body = if let Some(ref token_ids) = result.token_ids {
-            match inject_token_data(raw_body, token_ids) {
+        // Only the injection path allocates a new body; forwarding the unchanged
+        // body is a cheap `Bytes` clone (no copy).
+        let forwarded_body: Bytes = if let Some(ref token_ids) = result.token_ids {
+            match inject_token_data(&raw_body, token_ids) {
                 Ok(modified) => {
                     tracing::debug!(
                         token_count = token_ids.len(),
@@ -319,15 +331,15 @@ impl<P: EndpointPicker> ExtProcServer<P> {
                         body_size_after = modified.len(),
                         "Injected nvext.token_data into request body"
                     );
-                    modified
+                    Bytes::from(modified)
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to inject token_data, forwarding original body");
-                    raw_body.to_vec()
+                    raw_body.clone()
                 }
             }
         } else {
-            raw_body.to_vec()
+            raw_body.clone()
         };
 
         ctx.req_body_resp = envoy_helpers::build_request_body_responses(&forwarded_body);
@@ -437,17 +449,30 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             );
                             ExtProcServer::<P>::handle_request_headers(&mut ctx, hdr);
 
-                            if hdr.end_of_stream
-                                && let Err(e) = ExtProcServer::handle_header_only_request(
-                                    &*picker,
-                                    &mut ctx,
-                                    &[],
-                                )
-                                .await
-                            {
-                                let resp = e.into_processing_response();
-                                let _ = tx.send(Ok(resp)).await;
-                                return Ok(());
+                            if hdr.end_of_stream {
+                                // Same cancellation race as the body path below:
+                                // if the stream closes while the header-only pick
+                                // is queued, drop the pick future to cancel it.
+                                let routed = tokio::select! {
+                                    biased;
+                                    _ = tx.closed() => {
+                                        tracing::debug!(
+                                            request_id = %ctx.request_id,
+                                            "ext_proc stream closed during selection; cancelling"
+                                        );
+                                        return Ok(());
+                                    }
+                                    result = ExtProcServer::handle_header_only_request(
+                                        &*picker,
+                                        &mut ctx,
+                                        &[],
+                                    ) => result,
+                                };
+                                if let Err(e) = routed {
+                                    let resp = e.into_processing_response();
+                                    let _ = tx.send(Ok(resp)).await;
+                                    return Ok(());
+                                }
                             }
                         }
                         Some(processing_request::Request::RequestBody(ref body)) => {
@@ -459,15 +484,35 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             body_buf.extend_from_slice(&body.body);
 
                             if body.end_of_stream {
-                                let raw_body = std::mem::take(&mut body_buf);
-                                if let Err(e) = ExtProcServer::handle_request_body(
-                                    &*picker,
-                                    &mut ctx,
-                                    &raw_body,
-                                    &[],
-                                )
-                                .await
-                                {
+                                // Freeze the accumulated body once into `Bytes`
+                                // (moves the Vec, no copy); downstream sharing is
+                                // by cheap refcount clone.
+                                let raw_body = Bytes::from(std::mem::take(&mut body_buf));
+                                // Race selection against the client dropping the
+                                // stream. If Envoy closes it while `pick()` is
+                                // queued in the selector, dropping the pick future
+                                // closes the scheduler's response receiver, so the
+                                // queued request is cancelled (its capacity
+                                // reservation is skipped/released) instead of
+                                // booking for a request that is already gone.
+                                // Biased: check closure before polling the pick.
+                                let routed = tokio::select! {
+                                    biased;
+                                    _ = tx.closed() => {
+                                        tracing::debug!(
+                                            request_id = %ctx.request_id,
+                                            "ext_proc stream closed during selection; cancelling"
+                                        );
+                                        return Ok(());
+                                    }
+                                    result = ExtProcServer::handle_request_body(
+                                        &*picker,
+                                        &mut ctx,
+                                        raw_body,
+                                        &[],
+                                    ) => result,
+                                };
+                                if let Err(e) = routed {
                                     let resp = e.into_processing_response();
                                     let _ = tx.send(Ok(resp)).await;
                                     return Ok(());
@@ -492,7 +537,13 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 && !body.body.is_empty()
                             {
                                 ctx.prefill_complete_signaled = true;
-                                picker.on_prefill_complete(&ctx.request_id).await;
+                                // Hand back the picker's own booking id (falls
+                                // back to request_id if it booked nothing).
+                                let booking_id = ctx
+                                    .booking_id
+                                    .clone()
+                                    .unwrap_or_else(|| ctx.request_id.clone());
+                                picker.on_prefill_complete(&booking_id).await;
                             }
 
                             // TODO(epp-output-tracking): Parse generated-token progress and
@@ -556,7 +607,11 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
             // Notify the picker that this request is complete so it can free router
             // bookkeeping state (mirrors Go EPP PostResponse).
             if ctx.body_routed && !ctx.request_id.is_empty() {
-                picker.on_request_complete(&ctx.request_id).await;
+                let booking_id = ctx
+                    .booking_id
+                    .clone()
+                    .unwrap_or_else(|| ctx.request_id.clone());
+                picker.on_request_complete(&booking_id).await;
             }
         });
 
@@ -733,6 +788,21 @@ impl ExtProcError {
             PickError::TokenizationFailed(msg) => Self {
                 status_code: StatusCode::BadRequest,
                 message: msg,
+            },
+            // Upstream tokenizer failures are not client errors: preserve their
+            // semantics so clients retry appropriately. `e.to_string()` is the
+            // client-safe variant message; the detailed cause is logged upstream.
+            PickError::TokenizerUnavailable => Self {
+                status_code: StatusCode::ServiceUnavailable,
+                message: e.to_string(),
+            },
+            PickError::TokenizerTimeout => Self {
+                status_code: StatusCode::GatewayTimeout,
+                message: e.to_string(),
+            },
+            PickError::TokenizerUpstreamError => Self {
+                status_code: StatusCode::BadGateway,
+                message: e.to_string(),
             },
         }
     }

@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 
+use bytes::Bytes;
+
 /// Endpoint represents a model server pod endpoint available for serving requests.
 /// Mirrors Go `epplight.Endpoint` in pkg/lwepp/datastore/datastore.go
 #[derive(Debug, Clone)]
@@ -40,8 +42,10 @@ pub struct RequestInfo {
     /// HTTP request headers, preserved as ordered pairs so that repeated
     /// header keys (valid in HTTP) are not silently collapsed.
     pub headers: Vec<(String, String)>,
-    /// Raw request body (empty for GET)
-    pub body: Vec<u8>,
+    /// Raw request body (empty for GET). `Bytes` so it can be shared with the
+    /// tokenizer/renderer and the forwarding path by cheap refcount clones rather
+    /// than copied; a fresh allocation is only needed when the body is mutated.
+    pub body: Bytes,
     /// Model name extracted from the request body
     pub model: String,
     /// From x-gateway-destination-endpoint-subset metadata
@@ -64,6 +68,12 @@ pub struct PickResult {
     /// Injected into the request body as `nvext.token_data` so the backend
     /// skips redundant tokenization. Mirrors Go EPP's `setTokenizedPrompt`.
     pub token_ids: Option<Vec<u32>>,
+    /// Booking id the picker recorded for this request's load reservation, if
+    /// any. The server carries it on the per-stream context and hands it back to
+    /// [`EndpointPicker::on_prefill_complete`] / [`EndpointPicker::on_request_complete`]
+    /// so the picker can free the exact reservation for this stream without a
+    /// shared, request-id-keyed lookup. `None` when the picker booked nothing.
+    pub reservation_id: Option<String>,
 }
 
 /// EndpointPicker is the central abstraction for endpoint selection.
@@ -80,24 +90,39 @@ pub trait EndpointPicker: Send + Sync + 'static {
         endpoints: &[Endpoint],
     ) -> Result<PickResult, PickError>;
 
-    /// Called when the first response body arrives from the backend. This
-    /// signals that prefill is done and decode has started.
-    /// Mirrors Go EPP's PostResponse → MarkPrefillComplete.
-    async fn on_prefill_complete(&self, _request_id: &str) {}
+    /// Called when the first response body arrives from the backend, signalling
+    /// prefill is done and decode has started. `booking_id` is the
+    /// [`PickResult::reservation_id`] this request returned, or its request id if
+    /// the picker booked nothing. Mirrors Go EPP's PostResponse → MarkPrefillComplete.
+    async fn on_prefill_complete(&self, _booking_id: &str) {}
 
-    /// Called when a request's response is fully complete (end-of-stream on
-    /// response body or trailers received). Allows the picker to free
-    /// bookkeeping state. Mirrors Go EPP's PostResponse → FreeRequest.
-    async fn on_request_complete(&self, _request_id: &str) {}
+    /// Called when a request's response is fully complete (end-of-stream on the
+    /// response body or trailers). Lets the picker free bookkeeping state.
+    /// `booking_id` is as in [`Self::on_prefill_complete`]. Mirrors Go EPP's
+    /// PostResponse → FreeRequest.
+    async fn on_request_complete(&self, _booking_id: &str) {}
 }
 
-/// Error from an endpoint picker.
+/// Error from an endpoint picker. Variants map to distinct HTTP statuses at the
+/// ext_proc boundary (see `server.rs::from_pick_error`), so upstream failures are
+/// not mislabelled as client errors. Messages are client-safe; detailed causes
+/// (which may include upstream internals) are logged, not returned to the client.
 #[derive(Debug, thiserror::Error)]
 pub enum PickError {
     #[error("no endpoints available")]
     NoEndpoints,
     #[error("routing failed: {0}")]
     RoutingFailed(String),
+    /// Malformed client input (unparseable body, or a 4xx from the tokenizer) → 400.
     #[error("tokenization failed: {0}")]
     TokenizationFailed(String),
+    /// The upstream tokenization service could not be reached → 503.
+    #[error("tokenization service unavailable")]
+    TokenizerUnavailable,
+    /// The upstream tokenization service did not respond in time → 504.
+    #[error("tokenization service timed out")]
+    TokenizerTimeout,
+    /// The upstream tokenization service returned a 5xx or invalid response → 502.
+    #[error("tokenization service error")]
+    TokenizerUpstreamError,
 }

@@ -43,11 +43,17 @@ pub struct WorkerRegistration {
 #[derive(Debug, Clone)]
 pub struct SelectRequest {
     pub model_name: String,
-    pub selection_id: Option<String>,
+    /// EPP-minted booking key (a fresh UUID per pick). Keyed by an id the EPP
+    /// already knows so the booking is releasable even if this response is lost.
+    pub reservation_id: String,
     pub token_ids: Vec<u32>,
     pub allowed_worker_ids: Option<HashSet<u64>>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
+    /// KV cache-isolation namespace (Dynamo `cache_salt` / `x-tenant-id`); mixed
+    /// into block hashes so different salts never share cached prefixes. `None`
+    /// selects the default (unsalted) namespace.
+    pub cache_salt: Option<String>,
 }
 
 /// Observability overlap summary (matched token counts).
@@ -62,7 +68,8 @@ pub struct OverlapSummary {
 /// The selector's choice for a prompt.
 #[derive(Debug, Clone)]
 pub struct SelectResponse {
-    pub selection_id: Option<String>,
+    /// Booking key the selector recorded (echoes the request's `reservation_id`).
+    pub reservation_id: String,
     pub worker_id: u64,
     pub endpoint: String,
     pub block_size: u32,
@@ -270,13 +277,21 @@ impl Selector {
         Ok(())
     }
 
+    /// Select a worker for a prompt and book its load in one operation. Takes the
+    /// request by value so per-request fields are moved into the core request
+    /// rather than cloned on the hot path.
     pub async fn select_and_reserve(&self, req: SelectRequest) -> Result<SelectResponse> {
+        let reservation_id = req.reservation_id;
         let core_req = CoreSelectAndReserveRequest {
             model_name: req.model_name,
             routing_group: DEFAULT_ROUTING_GROUP.to_string(),
-            selection_id: req.selection_id,
+            // The core keys both its selection cache and the scheduler booking off
+            // this id; feed it the EPP-minted reservation id so the booking stays
+            // EPP-known (releasable even if this response is lost).
+            selection_id: Some(reservation_id.clone()),
             prompt: PromptRequest {
                 token_ids: Some(req.token_ids),
+                cache_namespace: req.cache_salt,
                 ..Default::default()
             },
             router_config_override: None,
@@ -294,7 +309,7 @@ impl Selector {
             .await
             .map_err(|e| anyhow!("select_and_reserve failed: {e}"))?;
         Ok(SelectResponse {
-            selection_id: resp.selection_id,
+            reservation_id,
             worker_id: resp.worker_id,
             endpoint: resp.endpoint,
             block_size: resp.block_size,
@@ -306,6 +321,28 @@ impl Selector {
             },
             effective_prefill_tokens: resp.effective_prefill_tokens,
         })
+    }
+
+    /// Release a booking, removing the request from the selector's slot tracker /
+    /// active-load accounting. Called when the gateway signals the response is
+    /// complete. Idempotent: an unknown reservation (e.g. a body-less request
+    /// that never booked) is treated as success.
+    pub async fn free_reservation(&self, reservation_id: &str) -> Result<()> {
+        match self.service.free_reservation(reservation_id).await {
+            Ok(()) | Err(SelectionError::NotFound(_)) => Ok(()),
+            Err(e) => Err(anyhow!("free_reservation failed: {e}")),
+        }
+    }
+
+    /// Release a booking's prefill-token load at first token, keeping its decode
+    /// load booked until `free_reservation`. Called in aggregated serving too, to
+    /// keep the worker's load model accurate as decode continues. Idempotent: an
+    /// unknown reservation is treated as success.
+    pub async fn prefill_complete(&self, reservation_id: &str) -> Result<()> {
+        match self.service.prefill_complete(reservation_id).await {
+            Ok(()) | Err(SelectionError::NotFound(_)) => Ok(()),
+            Err(e) => Err(anyhow!("prefill_complete failed: {e}")),
+        }
     }
 
     /// Returns `true` once the selector can schedule at least one worker.
