@@ -1455,13 +1455,17 @@ impl JailedStream {
     /// choice that emitted tool calls but never received a finish_reason from the
     /// engine. Used by `fix_finish_reason` to satisfy the OpenAI stream ordering
     /// requirement (the terminal chunk must carry a non-null `finish_reason`)
-    /// when the stream ends without one — DGH-967. The delta is empty; only the
+    /// when the stream ends without one. The delta is empty; only the
     /// `finish_reason` carries information.
     fn synthesize_tool_calls_chunk(
         template: &NvCreateChatCompletionStreamResponse,
         index: u32,
     ) -> Annotated<NvCreateChatCompletionStreamResponse> {
         let mut response = template.clone();
+        // A terminal finish chunk must not repeat accounting data copied from a
+        // usage-only template.
+        response.inner.usage = None;
+        response.llm_metrics = None;
         #[allow(deprecated)]
         let choice = dynamo_protocols::types::ChatChoiceStream {
             index,
@@ -1590,8 +1594,8 @@ impl JailedStream {
             // never emitted a usage chunk). Emit one trailing `ToolCalls` chunk per
             // tool-call choice that never received a finish_reason. Strict OpenAI
             // clients wait for a non-null finish_reason before considering a tool call
-            // complete; without this they hang until their client-side timeout
-            // (DGH-967). Choices that never emitted tool calls are left alone — there
+            // complete; without this they hang until their client-side timeout.
+            // Choices that never emitted tool calls are left alone — there
             // is no signal to invent a finish_reason from for text-only output.
             if !synthesized && let Some(template) = template {
                 for (index, _) in has_tool_calls_per_choice.iter().filter(|(_, has)| **has) {
@@ -1891,7 +1895,21 @@ mod tests {
                     system_fingerprint: None,
                 },
                 nvext: None,
-                llm_metrics: None,
+                llm_metrics: Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    chunk_tokens: 0,
+                    cached_tokens: None,
+                    prefill_worker_id: None,
+                    prefill_dp_rank: None,
+                    prefill_worker_type: None,
+                    decode_worker_id: None,
+                    decode_dp_rank: None,
+                    decode_worker_type: None,
+                    tokenize_latency: None,
+                    detokenize_total_latency: None,
+                    detokenize_count: None,
+                }),
             }),
             id: None,
             event: None,
@@ -2206,7 +2224,7 @@ mod tests {
     }
 
     /// The last `finish_reason` a client sees across the stream. `None` if the
-    /// stream never carried one (the DGH-967 hang condition).
+    /// stream never carried one (the missing-finish-reason hang condition).
     fn final_finish_reason(
         responses: &[Annotated<NvCreateChatCompletionStreamResponse>],
     ) -> Option<FinishReason> {
@@ -2218,12 +2236,12 @@ mod tests {
             .next_back()
     }
 
-    // DGH-967: when the engine emits a complete tool call but the stream ends
-    // WITHOUT any finish_reason chunk (speculative decoding folded EOS into
-    // content, or the terminal signal was dropped), a strict OpenAI client
-    // waits for a non-null finish_reason and hangs until its timeout. The jail
-    // path's finalize() emits the tool call with the (absent) upstream
-    // finish_reason; fix_finish_reason's end-of-stream backstop must synthesize
+    // Missing-finish-reason regression: when the engine emits a complete tool call
+    // but the stream ends without any finish_reason chunk (speculative decoding
+    // folded EOS into content, or the terminal signal was dropped), a strict
+    // OpenAI client waits for a non-null finish_reason and hangs until its timeout.
+    // The jail path's finalize() emits the tool call with the absent upstream
+    // finish_reason; fix_finish_reason's end-of-stream path must synthesize
     // `ToolCalls` so the client gets a terminal signal.
     #[tokio::test]
     async fn jail_synthesizes_tool_calls_finish_reason_when_stream_lacks_one() {
@@ -2250,8 +2268,8 @@ mod tests {
         );
     }
 
-    // DGH-967 corollary: a text-only stream that ends without a finish_reason
-    // must NOT get a synthesized one — there is no signal to invent a
+    // Text-only corollary: a text-only stream that ends without a finish_reason
+    // must not get a synthesized one. There is no signal to invent a
     // finish_reason from when no tool call was emitted.
     #[tokio::test]
     async fn jail_does_not_synthesize_finish_reason_for_text_only_stream() {
@@ -2275,11 +2293,11 @@ mod tests {
         );
     }
 
-    // DGH-967 ordering: the ticket's repro is a tool call followed by a
-    // usage-only chunk, with NO finish_reason chunk from the engine. The
+    // Usage-ordering regression: a tool call is followed by a usage-only chunk,
+    // with no finish_reason chunk from the engine. The
     // synthesized `ToolCalls` terminal chunk must be emitted *before* the
     // usage-only chunk (OpenAI stream ordering — the terminal finish_reason
-    // precedes usage). This mirrors the production repro in the ticket.
+    // precedes usage). This mirrors the production stream ordering.
     #[tokio::test]
     async fn jail_synthesizes_tool_calls_before_usage_only_chunk() {
         let jail = JailedStream::builder().tool_call_parser("hermes").build();
@@ -2326,6 +2344,18 @@ mod tests {
         assert!(
             finish_pos < usage_pos,
             "ToolCalls chunk at {finish_pos} must precede the usage chunk at {usage_pos}"
+        );
+        let finish_data = responses[finish_pos]
+            .data
+            .as_ref()
+            .expect("ToolCalls chunk has no response data");
+        assert!(
+            finish_data.inner.usage.is_none(),
+            "synthesized ToolCalls chunk must not repeat usage data"
+        );
+        assert!(
+            finish_data.llm_metrics.is_none(),
+            "synthesized ToolCalls chunk must not repeat LLM metrics"
         );
     }
 }

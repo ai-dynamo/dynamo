@@ -322,7 +322,7 @@ mod tests {
         }
 
         /// Assert that a stream with tool calls but no upstream finish chunk ends
-        /// with the synthesized `ToolCalls` terminal chunk required by DGH-967.
+        /// with the synthesized `ToolCalls` terminal chunk required by strict clients.
         pub fn assert_synthesized_tool_calls_finish(
             results: &[Annotated<NvCreateChatCompletionStreamResponse>],
             expected_prefix_chunks: usize,

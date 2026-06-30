@@ -307,7 +307,7 @@ where
                 // engine dropped the terminal signal). Strict OpenAI clients wait for
                 // a non-null finish_reason before considering a tool call complete;
                 // emitting `None` here left them hanging until their client-side
-                // timeout (DGH-967). Text-only output without an upstream finish
+                // timeout. Text-only output without an upstream finish
                 // reason stays `None` — we have no signal to invent one from.
                 let finish_reason = if tool_emitted.contains(index) {
                     Some(FinishReason::ToolCalls)
@@ -557,12 +557,12 @@ mod tests {
         );
     }
 
-    // DGH-967: the stream emits a complete tool call but ends WITHOUT any
-    // finish_reason chunk (e.g. speculative decoding folded EOS into content, or
-    // the engine dropped the terminal signal). A strict OpenAI client waits for a
-    // non-null finish_reason before considering the tool call complete; the
-    // end-of-stream backstop must synthesize `ToolCalls` so the client doesn't
-    // hang until its timeout.
+    // Missing-finish-reason regression: the stream emits a complete tool call but
+    // ends without any finish_reason chunk (e.g. speculative decoding folded EOS
+    // into content, or the engine dropped the terminal signal). A strict OpenAI
+    // client waits for a non-null finish_reason before considering the tool call
+    // complete; the end-of-stream backstop must synthesize `ToolCalls` so the
+    // client doesn't hang until its timeout.
     #[tokio::test]
     async fn qwen3_bypass_synthesizes_tool_calls_when_stream_lacks_finish_reason() {
         // Same call as the incremental test, but the final chunk carries NO
@@ -591,10 +591,10 @@ mod tests {
         );
     }
 
-    // DGH-967 corollary: when the stream ends without a finish_reason AND no tool
-    // call was emitted (text-only output), the backstop must NOT invent a
-    // finish_reason — there is no signal to synthesize one from. A trailing
-    // content chunk may be emitted, but its finish_reason stays None.
+    // Text-only corollary: when the stream ends without a finish_reason and no
+    // tool call was emitted, the backstop must not invent a finish_reason. There
+    // is no signal to synthesize one from. A trailing content chunk may be
+    // emitted, but its finish_reason stays None.
     #[tokio::test]
     async fn qwen3_bypass_does_not_synthesize_finish_reason_for_text_only_stream() {
         let chunks = vec![chunk("hello world", false), chunk("", false)];
