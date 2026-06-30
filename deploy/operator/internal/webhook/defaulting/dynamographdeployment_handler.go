@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"strings"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -35,7 +35,7 @@ import (
 
 const (
 	dgdDefaultingWebhookName = "dynamographdeployment-defaulting-webhook"
-	dgdDefaultingWebhookPath = "/mutate-nvidia-com-v1alpha1-dynamographdeployment"
+	dgdDefaultingWebhookPath = "/mutate/nvidia.com/v1beta1/dynamographdeployments"
 )
 
 // DGDDefaulter is a mutating webhook handler that stamps DynamoGraphDeployments
@@ -55,7 +55,7 @@ func NewDGDDefaulter(operatorVersion string, groveEnabled bool) *DGDDefaulter {
 }
 
 // Default implements admission.CustomDefaulter.
-// On every operation: defaults nil Replicas to 1 for all services.
+// On every operation: defaults nil Replicas to 1 for all components.
 // On every Grove-pathway operation: defaults nil MinAvailable to 1. Scaling to
 // replicas=0 does not rewrite MinAvailable; it remains the component's
 // configured minimum viable unit.
@@ -64,11 +64,11 @@ func NewDGDDefaulter(operatorVersion string, groveEnabled bool) *DGDDefaulter {
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	logger := log.FromContext(ctx).WithName(dgdDefaultingWebhookName)
 
-	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoGraphDeploymentGVK); err != nil {
+	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK); err != nil {
 		return err
 	}
 
-	dgd, ok := obj.(*nvidiacomv1alpha1.DynamoGraphDeployment)
+	dgd, ok := obj.(*nvidiacomv1beta1.DynamoGraphDeployment)
 	if !ok {
 		return fmt.Errorf("expected DynamoGraphDeployment but got %T", obj)
 	}
@@ -79,21 +79,19 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		return nil
 	}
 
-	// Default nil replicas to 1 for all services. The Replicas field is
+	// Default nil replicas to 1 for all components. The Replicas field is
 	// *int32 with omitempty, so users can legally omit it. Without this
 	// default the controller panics on a nil pointer dereference in
-	// expandRolesForService(). Apply on every operation so that services
+	// expandRolesForComponent(). Apply on every operation so that components
 	// added via UPDATE also get the default.
 	grovePathway := d.isGrovePathway(dgd)
-	for _, svc := range dgd.Spec.Services {
-		if svc == nil {
-			continue
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if component.Replicas == nil {
+			component.Replicas = ptr.To(int32(1))
 		}
-		if svc.Replicas == nil {
-			svc.Replicas = ptr.To(int32(1))
-		}
-		if grovePathway && svc.MinAvailable == nil {
-			svc.MinAvailable = ptr.To(int32(1))
+		if grovePathway && component.MinAvailable == nil {
+			component.MinAvailable = ptr.To(int32(1))
 		}
 	}
 
@@ -114,7 +112,7 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	return nil
 }
 
-func (d *DGDDefaulter) isGrovePathway(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
+func (d *DGDDefaulter) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
 	return d.GroveEnabled && (dgd.Annotations == nil ||
 		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
 }
@@ -122,7 +120,7 @@ func (d *DGDDefaulter) isGrovePathway(dgd *nvidiacomv1alpha1.DynamoGraphDeployme
 // RegisterWithManager registers the defaulting webhook with the manager.
 func (d *DGDDefaulter) RegisterWithManager(mgr manager.Manager) error {
 	webhook := admission.
-		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoGraphDeployment{}, d).
+		WithCustomDefaulter(mgr.GetScheme(), &nvidiacomv1beta1.DynamoGraphDeployment{}, d).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dgdDefaultingWebhookPath, webhook)
 	return nil

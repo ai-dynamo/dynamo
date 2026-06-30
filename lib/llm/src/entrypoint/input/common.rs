@@ -14,6 +14,7 @@ use crate::{
     http::service::metrics::Metrics,
     kv_router::indexer::try_build_cache_indexer,
     kv_router::{KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics},
+    lora::LoraFilteredRouter,
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
@@ -141,18 +142,76 @@ fn router_client(
     }
 }
 
+/// LoRA-aware routing is only implemented for the KV, Random, and RoundRobin modes. `Direct`
+/// dispatches to a caller-chosen worker and bypasses both the LoRA filter and non-KV load
+/// tracking; the advanced load-based modes (`PowerOfTwoChoices`, `LeastLoaded`,
+/// `DeviceAwareWeighted`) have no 2-stage LoRA filtering. Reject those combinations so a
+/// misconfiguration fails fast — at startup, before the initial-worker wait — instead of
+/// silently mis-routing adapter traffic to a worker without the adapter.
+fn validate_router_mode_for_lora(
+    router_mode: RouterMode,
+    lora_enabled: bool,
+    session_affinity_enabled: bool,
+) -> anyhow::Result<()> {
+    if !lora_enabled {
+        return Ok(());
+    }
+    if session_affinity_enabled
+        && matches!(router_mode, RouterMode::Random | RouterMode::RoundRobin)
+    {
+        anyhow::bail!(
+            "session affinity is unsupported with DYN_LORA_ENABLED and {router_mode:?} routing"
+        );
+    }
+    match router_mode {
+        RouterMode::KV | RouterMode::Random | RouterMode::RoundRobin => Ok(()),
+        RouterMode::Direct
+        | RouterMode::PowerOfTwoChoices
+        | RouterMode::LeastLoaded
+        | RouterMode::DeviceAwareWeighted => anyhow::bail!(
+            "LoRA serving (DYN_LORA_ENABLED) is not supported with router mode {router_mode:?}; \
+             use KV, Random, or RoundRobin for LoRA-aware routing, or disable LoRA serving."
+        ),
+    }
+}
+
 fn preprocessed_backend_engine(
     router: LlmPushRouter,
     router_mode: RouterMode,
     chooser: Option<Arc<KvRouter>>,
+    model_manager: &Arc<crate::discovery::ModelManager>,
     session_affinity_ttl: Option<Duration>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 {
+    // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
+    // the fail-fast check in `build_preprocessed_routing`). After this, the Direct and advanced
+    // arms below are only reached with LoRA serving disabled.
+    validate_router_mode_for_lora(
+        router_mode,
+        model_manager.lora_filter().is_some(),
+        session_affinity_ttl.is_some(),
+    )?;
+
     let engine: ServiceEngine<_, _> = match router_mode {
-        RouterMode::Direct
-        | RouterMode::Random
-        | RouterMode::RoundRobin
-        | RouterMode::PowerOfTwoChoices
+        RouterMode::Direct => Arc::new(SessionAffinityPushRouter::new(
+            router,
+            session_affinity_ttl,
+            true,
+        )?),
+        RouterMode::Random | RouterMode::RoundRobin => match model_manager.lora_filter() {
+            Some(lora_filter) => Arc::new(LoraFilteredRouter::new(
+                router,
+                lora_filter,
+                model_manager.lora_load_estimator().clone(),
+                router_mode,
+            )),
+            None => Arc::new(SessionAffinityPushRouter::new(
+                router,
+                session_affinity_ttl,
+                false,
+            )?),
+        },
+        RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
         | RouterMode::DeviceAwareWeighted => Arc::new(SessionAffinityPushRouter::new(
             router,
@@ -182,6 +241,15 @@ pub async fn build_preprocessed_routing(
     enforce_disagg: bool,
     session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting> {
+    // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
+    // worker set, so a misconfiguration surfaces immediately at startup rather than after the
+    // (possibly long) DYN_ROUTER_MIN_INITIAL_WORKERS wait.
+    validate_router_mode_for_lora(
+        router_mode,
+        model_manager.lora_filter().is_some(),
+        session_affinity_ttl_secs.is_some(),
+    )?;
+
     let min_initial_workers = min_initial_workers_from_env()?;
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
 
@@ -219,7 +287,7 @@ pub async fn build_preprocessed_routing(
 
     let prefill_router = prefill_chooser.unwrap_or_else(|| {
         PrefillRouter::disabled(
-            model_manager,
+            model_manager.clone(),
             router_mode,
             enforce_disagg,
             session_affinity_ttl_secs,
@@ -230,9 +298,9 @@ pub async fn build_preprocessed_routing(
         router,
         router_mode,
         chooser,
+        &model_manager,
         session_affinity_ttl_secs.map(Duration::from_secs),
     )?;
-
     Ok(PreprocessedRouting {
         backend_engine,
         prefill_router,
@@ -266,6 +334,7 @@ pub async fn prepare_engine(
             if !local_model.path().as_os_str().is_empty() {
                 watcher.set_local_model_path(Some(local_model.path().to_path_buf()));
             }
+            watcher.set_tokenizer_backend(local_model.runtime_config().tokenizer_backend);
             let watch_obj = Arc::new(watcher);
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery
@@ -458,5 +527,55 @@ impl PreprocessedRouting {
             .link(frontend)?;
 
         Ok(engine)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_router_mode_for_lora() {
+        use RouterMode::*;
+        let all = [
+            Direct,
+            KV,
+            Random,
+            RoundRobin,
+            PowerOfTwoChoices,
+            LeastLoaded,
+            DeviceAwareWeighted,
+        ];
+
+        // LoRA disabled: every mode is allowed (the unmodified routing path).
+        for m in all {
+            assert!(
+                validate_router_mode_for_lora(m, false, false).is_ok(),
+                "{m:?} must be allowed when LoRA serving is disabled"
+            );
+        }
+
+        // LoRA enabled: only the LoRA-aware modes are accepted.
+        for m in [KV, Random, RoundRobin] {
+            assert!(
+                validate_router_mode_for_lora(m, true, false).is_ok(),
+                "{m:?} must be supported for LoRA-aware routing"
+            );
+        }
+
+        // LoRA enabled: Direct + the advanced load-based modes are rejected with a clear error.
+        for m in [Direct, PowerOfTwoChoices, LeastLoaded, DeviceAwareWeighted] {
+            let err = validate_router_mode_for_lora(m, true, false)
+                .expect_err("must reject unsupported LoRA router mode")
+                .to_string();
+            assert!(
+                err.contains("not supported with router mode"),
+                "{m:?} rejection must explain the unsupported mode, got: {err}"
+            );
+        }
+
+        let err = validate_router_mode_for_lora(Random, true, true)
+            .expect_err("must reject session affinity with LoRA-aware non-KV routing");
+        assert!(err.to_string().contains("session affinity"));
     }
 }

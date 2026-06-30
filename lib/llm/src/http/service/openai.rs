@@ -38,6 +38,8 @@ use super::{
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
+        process_chat_response_and_observe_metrics,
+        process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
@@ -204,26 +206,18 @@ impl ErrorMessage {
         )
     }
 
-    /// Model exists but is temporarily unable to serve (e.g., prefill not activated,
-    /// no available workers). Returns 503 so clients can retry.
-    pub fn model_unavailable() -> ErrorResponse {
-        let code = StatusCode::SERVICE_UNAVAILABLE;
-        let error_type = map_error_code_to_error_type(code);
-        (
-            code,
-            Json(ErrorMessage {
-                message: "Model temporarily unavailable".to_string(),
-                error_type,
-                code: code.as_u16(),
-                details: None,
-            }),
-        )
-    }
-
     /// Convert a ModelManagerError to the appropriate HTTP response.
+    ///
+    /// `ModelUnavailable` is the dispatch-time backstop for the same condition
+    /// the readiness gate ([`check_model_serving_ready`]) catches up front — a
+    /// registered model with no servable worker set (whichever role is missing).
+    /// It returns the identical canonical 503 body so both code paths speak with
+    /// one voice to the client.
     pub fn from_model_error(e: &crate::discovery::ModelManagerError) -> ErrorResponse {
         match e {
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => Self::model_unavailable(),
+            crate::discovery::ModelManagerError::ModelUnavailable(model) => {
+                Self::service_unavailable_with_body(model_not_ready_message(model))
+            }
             _ => Self::model_not_found(),
         }
     }
@@ -1703,6 +1697,14 @@ async fn chat_completions(
             err_response
         })?;
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -1788,7 +1790,7 @@ async fn chat_completions(
 
                 // Convert to SSE event (this consumes the response).
                 // EventConverter will detect `event: "error"` and convert to SSE error events.
-                let sse_result = process_response_using_event_converter_and_observe_metrics(
+                let sse_result = process_chat_response_using_event_converter_and_observe_metrics(
                     EventConverter::from(response),
                     &mut response_collector,
                     &mut http_queue_guard,
@@ -1830,7 +1832,7 @@ async fn chat_completions(
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
-            process_response_and_observe_metrics(
+            process_chat_response_and_observe_metrics(
                 response,
                 &mut response_collector,
                 &mut http_queue_guard,
@@ -2174,6 +2176,14 @@ async fn responses(
             err_response
         })?;
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -2225,7 +2235,7 @@ async fn responses(
             let mut saw_error = false;
 
             while let Some(annotated_chunk) = engine_stream.next().await {
-                process_response_and_observe_metrics(
+                process_chat_response_and_observe_metrics(
                     &annotated_chunk,
                     &mut response_collector,
                     &mut http_queue_guard,
@@ -2281,7 +2291,7 @@ async fn responses(
 
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
-            process_response_and_observe_metrics(
+            process_chat_response_and_observe_metrics(
                 response,
                 &mut response_collector,
                 &mut http_queue_guard,
@@ -2369,12 +2379,27 @@ pub fn validate_response_unsupported_fields(
 }
 
 // todo - abstract this to the top level lib.rs to be reused
-// todo - move the service_observer to its own state/arc
-pub(crate) fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
-    // if state.service_observer.stage() != ServiceStage::Ready {
-    //     return Err(ErrorMessage::service_unavailable());
-    // }
+pub(crate) fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
+    if !state.is_ready() {
+        return Err(ErrorMessage::_service_unavailable());
+    }
     Ok(())
+}
+
+/// Canonical, customer-facing message for "model is registered but not yet
+/// ready to serve requests" (deployment still initializing or incomplete).
+///
+/// One message for every not-ready cause — whichever worker role is missing,
+/// the client sees the same text. Deliberately free of internal taxonomy
+/// (worker types, namespaces, "worker set"): it stays clear and actionable for
+/// end users without leaking deployment internals. Operators get the detailed,
+/// per-role breakdown from `GET /v1/models/{model}/ready` instead.
+pub(crate) fn model_not_ready_message(model_name: &str) -> String {
+    format!(
+        "Model `{model_name}` is not ready to serve requests yet. \
+         The deployment may still be starting up or is not fully provisioned. \
+         Please retry shortly."
+    )
 }
 
 /// Per-model serving readiness gate.
@@ -2401,11 +2426,9 @@ pub(crate) fn check_model_serving_ready(
     if model.has_ready_workers() {
         return Ok(());
     }
-    Err(ErrorMessage::service_unavailable_with_body(format!(
-        "Model `{model_name}` is registered but no namespace has a complete worker set. \
-         At least one prefill/decode/encode worker type required by a registered worker is missing. \
-         Check worker startup logs for the affected namespace."
-    )))
+    Err(ErrorMessage::service_unavailable_with_body(
+        model_not_ready_message(model_name),
+    ))
 }
 
 /// openai compatible format
@@ -3330,6 +3353,18 @@ mod tests {
     }
 
     #[test]
+    fn test_check_ready_rejects_draining_service() {
+        let service = service_v2::HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        assert!(check_ready(&state).is_ok());
+
+        state.start_draining();
+        let response = check_ready(&state).unwrap_err();
+        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
     fn test_error_response_from_anyhow_out_of_range() {
         // Backend-supplied messages outside the 4xx range must NOT be
         // forwarded to the client — they may include internal paths.
@@ -3701,7 +3736,9 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}`thinking.type` must be `enabled` or `disabled`")
+                format!(
+                    "{VALIDATION_PREFIX}`thinking.type` must be `enabled`, `disabled`, or `adaptive`"
+                )
             );
         }
     }
@@ -4380,6 +4417,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -4419,6 +4457,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -4563,7 +4602,8 @@ mod tests {
 
     #[test]
     fn test_extract_error_type_from_response_unavailable() {
-        let response = ErrorMessage::model_unavailable();
+        let response =
+            ErrorMessage::from_model_error(&ModelManagerError::ModelUnavailable("x".to_string()));
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::Unavailable
@@ -4583,6 +4623,49 @@ mod tests {
             ErrorMessage::from_model_error(&unavailable).0,
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    /// The not-ready 503 must be customer-facing: clear and actionable, but free
+    /// of internal worker-role / topology taxonomy. Whichever role is missing
+    /// (prefill or decode), the client sees the same text — so the message must
+    /// never name a specific role, namespace, or "worker set".
+    #[test]
+    fn test_model_not_ready_message_hides_internals() {
+        let msg = model_not_ready_message("my-model").to_lowercase();
+        for leak in [
+            "prefill",
+            "decode",
+            "encode",
+            "worker",
+            "namespace",
+            "needs",
+        ] {
+            assert!(
+                !msg.contains(leak),
+                "not-ready message leaks internal term `{leak}`: {msg}"
+            );
+        }
+        // Still names the model and signals retryability.
+        assert!(model_not_ready_message("my-model").contains("my-model"));
+        assert!(msg.contains("retry"));
+    }
+
+    /// The dispatch-time backstop (`from_model_error` on `ModelUnavailable`) and
+    /// the up-front readiness gate must speak with one voice: identical 503 body
+    /// for the same "registered but not servable" condition, regardless of which
+    /// role (prefill vs decode) is the missing one.
+    #[test]
+    fn test_unavailable_paths_share_one_message() {
+        let backstop = ErrorMessage::from_model_error(&ModelManagerError::ModelUnavailable(
+            "my-model".to_string(),
+        ));
+        assert_eq!(backstop.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(backstop.1.message, model_not_ready_message("my-model"));
+
+        // The gate constructs its body from the same canonical helper, so the
+        // two paths cannot drift apart.
+        let gate = ErrorMessage::service_unavailable_with_body(model_not_ready_message("my-model"));
+        assert_eq!(gate.1.message, backstop.1.message);
     }
 
     #[test]
@@ -4722,6 +4805,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         };
         Annotated {
             id: Some("test-id".to_string()),
@@ -5355,6 +5439,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 

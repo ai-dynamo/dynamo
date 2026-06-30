@@ -355,9 +355,11 @@ overrides:
   - { ecosystem: python, name: matplotlib,                license: "LicenseRef-Matplotlib",  source: "matplotlib upstream — BSD-style — https://matplotlib.org/stable/users/project/license.html" }
   - { ecosystem: python, name: matplotlib-inline,         license: "BSD-3-Clause",  source: "matplotlib-inline upstream — https://github.com/ipython/matplotlib-inline/blob/main/LICENSE" }
   - { ecosystem: python, name: mooncake-transfer-engine,  license: "Apache-2.0",  source: "Mooncake upstream — https://github.com/kvcache-ai/Mooncake/blob/main/LICENSE" }
+  - { ecosystem: python, name: mscclpp,                   license: "MIT",       source: "MSCCL++ upstream — https://github.com/microsoft/mscclpp/blob/main/LICENSE" }
   - { ecosystem: python, name: ninja,                     license: "Apache-2.0",  source: "Ninja upstream — https://github.com/ninja-build/ninja/blob/master/COPYING" }
   - { ecosystem: python, name: nvidia-cutlass-dsl,        license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL — proprietary distribution wrapper around the BSD CUTLASS library" }
   - { ecosystem: python, name: nvidia-cutlass-dsl-libs-base, license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUTLASS DSL libs" }
+  - { ecosystem: python, name: nvidia-mathdx,             license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA MathDx SDK license — https://docs.nvidia.com/cuda/mathdx/license.html" }
   - { ecosystem: python, name: openai-harmony,            license: "MIT",       source: "openai-harmony upstream — https://github.com/openai/harmony/blob/main/LICENSE" }
   - { ecosystem: python, name: pandas,                    license: "BSD-3-Clause",  source: "pandas upstream — https://github.com/pandas-dev/pandas/blob/main/LICENSE" }
   - { ecosystem: python, name: pathspec,                  license: "MPL-2.0",   source: "pathspec upstream — https://github.com/cpburnz/python-pathspec/blob/master/LICENSE" }
