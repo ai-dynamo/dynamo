@@ -74,9 +74,11 @@ class Preprocessed(Generic[ItemT]):
 
     Attributes:
         item: Opaque payload passed verbatim to ``forward_batch``.
-        cost: Scalar token/feature size, ``>= 1``; packs toward ``max_batch_cost``.
-            Defaults to ``1`` and is ignored when ``max_batch_cost`` is ``None``
-            (pass-through), so a pass-through author can omit it.
+        cost: Scalar size of this item (``>= 1``); packs toward ``max_batch_cost``.
+            Read only in **budgeted mode** (``max_batch_cost`` set). In
+            **pass-through mode** (``max_batch_cost`` is ``None``) the batcher
+            never reads it, so a pass-through author can leave it at the default
+            ``1``.
     """
 
     item: ItemT
