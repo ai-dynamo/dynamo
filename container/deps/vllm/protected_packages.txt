@@ -11,7 +11,7 @@ vllm
 transformers
 tokenizers
 # vLLM-Omni (v0.21.0rc1) may require a newer safetensors than the upstream
-# vLLM 0.23.0 image ships, so safetensors is intentionally left unfrozen here.
+# vLLM 0.24.0 image ships, so safetensors is intentionally left unfrozen here.
 # safetensors
 msgspec
 flashinfer-python
