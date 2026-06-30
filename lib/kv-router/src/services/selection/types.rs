@@ -265,7 +265,7 @@ impl WorkerCatalogRecord {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct WorkerRequest {
     pub worker_id: WorkerId,
     #[serde(default = "default_model_name")]
@@ -395,7 +395,7 @@ impl WorkerCatalogRecord {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct SelectRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,

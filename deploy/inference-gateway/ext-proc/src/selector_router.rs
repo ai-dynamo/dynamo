@@ -27,8 +27,8 @@ use dynamo_llm::preprocessor::OpenAIPreprocessor;
 
 use crate::offline_preprocessor::build_offline_preprocessor;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
-use crate::selector_client::{SelectRequest, SelectorClient};
-use crate::selector_config::SelectorConfig;
+use crate::selection_backend::{SelectRequest, SelectionBackend};
+use crate::selector_config::{SelectorConfig, SelectorMode};
 use crate::selector_reflector::SelectorReflector;
 use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
 
@@ -40,7 +40,7 @@ const SELECTOR_READY_WAIT: Duration = Duration::from_secs(30);
 pub struct SelectorRouter {
     preprocessor: Arc<OpenAIPreprocessor>,
     reflector: Arc<SelectorReflector>,
-    client: Arc<SelectorClient>,
+    backend: Arc<dyn SelectionBackend>,
     // Kept alive for the lifetime of the router; the reconcile loop runs on it.
     _adapter: TopologyAdapter,
     reflector_ready: Arc<AtomicBool>,
@@ -55,21 +55,21 @@ impl SelectorRouter {
         let (reflector, reflector_ready) = SelectorReflector::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
 
-        let client = Arc::new(SelectorClient::new(cfg.selector_urls.clone())?);
+        let backend = build_backend(&cfg)?;
 
         let defaults = RegistrationDefaults::from_config(&cfg);
-        let adapter = TopologyAdapter::spawn(reflector.clone(), client.clone(), defaults);
+        let adapter = TopologyAdapter::spawn(reflector.clone(), backend.clone(), defaults);
 
         // Best-effort wait for the selector to admit at least one worker. The
         // reconcile loop must first see Ready pods and register them, after
         // which the selector reports ready. Per-pick checks still apply, so we
         // never block startup beyond the bound.
-        wait_for_selector_ready(&client).await;
+        wait_for_selector_ready(backend.as_ref()).await;
 
         Ok(Self {
             preprocessor,
             reflector,
-            client,
+            backend,
             _adapter: adapter,
             reflector_ready,
             model_name: cfg.model_name,
@@ -101,10 +101,55 @@ impl SelectorRouter {
     }
 }
 
-async fn wait_for_selector_ready(client: &SelectorClient) {
+/// Build the configured selection backend. Each backend is compiled in only
+/// when its feature is enabled; requesting a mode that wasn't built is a
+/// fail-fast error.
+fn build_backend(cfg: &SelectorConfig) -> Result<Arc<dyn SelectionBackend>> {
+    match cfg.mode {
+        SelectorMode::Http => build_http_backend(cfg),
+        SelectorMode::Embedded => build_embedded_backend(cfg),
+    }
+}
+
+#[cfg(feature = "selector-http")]
+fn build_http_backend(cfg: &SelectorConfig) -> Result<Arc<dyn SelectionBackend>> {
+    tracing::info!(selector_urls = ?cfg.selector_urls, "Using HTTP selection backend");
+    Ok(Arc::new(crate::selector_client::HttpSelectionBackend::new(
+        cfg.selector_urls.clone(),
+    )?))
+}
+
+#[cfg(not(feature = "selector-http"))]
+fn build_http_backend(_cfg: &SelectorConfig) -> Result<Arc<dyn SelectionBackend>> {
+    anyhow::bail!(
+        "DYN_EPP_SELECTOR_MODE=http requested but this binary was built without the \
+         `selector-http` feature"
+    )
+}
+
+#[cfg(feature = "selector-embedded")]
+fn build_embedded_backend(cfg: &SelectorConfig) -> Result<Arc<dyn SelectionBackend>> {
+    tracing::info!(
+        selector_threads = cfg.selector_threads,
+        "Using embedded (in-process) selection backend"
+    );
+    Ok(Arc::new(
+        crate::embedded_selector::EmbeddedSelectionBackend::new(cfg.selector_threads)?,
+    ))
+}
+
+#[cfg(not(feature = "selector-embedded"))]
+fn build_embedded_backend(_cfg: &SelectorConfig) -> Result<Arc<dyn SelectionBackend>> {
+    anyhow::bail!(
+        "DYN_EPP_SELECTOR_MODE=embedded requested but this binary was built without the \
+         `selector-embedded` feature"
+    )
+}
+
+async fn wait_for_selector_ready(backend: &dyn SelectionBackend) {
     let deadline = tokio::time::Instant::now() + SELECTOR_READY_WAIT;
     loop {
-        if client.any_ready().await {
+        if backend.any_ready().await {
             tracing::info!("Selection service reports ready");
             return;
         }
@@ -176,7 +221,7 @@ impl EndpointPicker for SelectorRouter {
         };
 
         let resp = self
-            .client
+            .backend
             .select(&select_req)
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;

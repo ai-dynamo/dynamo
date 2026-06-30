@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::selector_client::{SelectorClient, WorkerRegistration};
+use crate::selection_backend::{SelectionBackend, WorkerRegistration};
 use crate::selector_config::SelectorConfig;
 use crate::selector_reflector::{RawWorker, SelectorReflector};
 
@@ -59,14 +59,14 @@ impl TopologyAdapter {
     /// then re-reconciles whenever the reflector reports a pod change.
     pub fn spawn(
         reflector: Arc<SelectorReflector>,
-        client: Arc<SelectorClient>,
+        backend: Arc<dyn SelectionBackend>,
         defaults: RegistrationDefaults,
     ) -> Self {
         let task = tokio::spawn(async move {
             let mut current: HashMap<u64, WorkerRegistration> = HashMap::new();
             let mut changes = reflector.subscribe_changes();
             loop {
-                reconcile_once(&reflector, &client, &defaults, &mut current).await;
+                reconcile_once(&reflector, backend.as_ref(), &defaults, &mut current).await;
                 // Wait for the next reflector change; exit if the sender drops.
                 if changes.changed().await.is_err() {
                     tracing::warn!("Reflector change channel closed; topology adapter stopping");
@@ -82,7 +82,7 @@ impl TopologyAdapter {
 /// was successfully pushed to the selector replicas.
 async fn reconcile_once(
     reflector: &SelectorReflector,
-    client: &SelectorClient,
+    backend: &dyn SelectionBackend,
     defaults: &RegistrationDefaults,
     current: &mut HashMap<u64, WorkerRegistration>,
 ) {
@@ -95,7 +95,7 @@ async fn reconcile_once(
     let (upserts, deletes) = plan(&desired, current);
 
     for reg in upserts {
-        match client.upsert_worker(&reg).await {
+        match backend.upsert_worker(&reg).await {
             Ok(()) => {
                 current.insert(reg.worker_id, reg);
             }
@@ -106,7 +106,7 @@ async fn reconcile_once(
     }
 
     for worker_id in deletes {
-        match client.delete_worker(worker_id).await {
+        match backend.delete_worker(worker_id).await {
             Ok(()) => {
                 current.remove(&worker_id);
             }

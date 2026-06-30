@@ -12,12 +12,16 @@
 //! Envoy ──ext-proc──▶ ExtProcServer<epp::Router> ──EndpointPicker──▶ Dynamo KV Router
 //! ```
 
+#[cfg(feature = "selector-embedded")]
+pub mod embedded_selector;
 pub mod envoy_helpers;
 pub mod epp;
 pub mod inference_pool;
 pub mod offline_preprocessor;
 pub mod picker;
 pub mod proto;
+pub mod selection_backend;
+#[cfg(feature = "selector-http")]
 pub mod selector_client;
 pub mod selector_config;
 pub mod selector_reflector;
@@ -29,10 +33,12 @@ pub use epp::Router;
 pub use inference_pool::PoolState;
 pub use offline_preprocessor::build_offline_preprocessor;
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo};
-pub use selector_client::{
-    SelectRequest, SelectResponse, SelectorClient, WorkerPatch, WorkerRegistration,
+pub use selection_backend::{
+    SelectRequest, SelectResponse, SelectionBackend, WorkerPatch, WorkerRegistration,
 };
-pub use selector_config::SelectorConfig;
+#[cfg(feature = "selector-http")]
+pub use selector_client::{HttpSelectionBackend, SelectorClient};
+pub use selector_config::{SelectorConfig, SelectorMode};
 pub use selector_reflector::{RawWorker, SelectorReflector};
 pub use selector_router::SelectorRouter;
 pub use server::ExtProcServer;
