@@ -174,13 +174,14 @@ def test_preprocess_concurrency_must_be_positive():
 
 
 def test_load_reaps_pool_if_batcher_ctor_fails():
-    """A backend exposing a max_batch_cost the batcher rejects must not leak the pool."""
+    """A backend exposing a ladder the batcher rejects must not leak the pool."""
 
-    class _BadBudget(_FakeBackend):
-        max_batch_cost = 0  # ThreadedMicroBatcher requires >= 1 → ctor raises
+    class _BadBuckets(_FakeBackend):
+        max_batch_cost = 8
+        buckets = [2, 4]  # max(buckets) < max_batch_cost → batcher ctor raises
 
-    enc = AsyncVisionEncoder(_BadBudget())
-    with pytest.raises(ValueError, match="max_batch_cost"):
+    enc = AsyncVisionEncoder(_BadBuckets())
+    with pytest.raises(ValueError, match="ladder must cover"):
         enc.load("m")
     assert enc._pool is not None and enc._pool._shutdown is True
     assert enc._batcher is None
