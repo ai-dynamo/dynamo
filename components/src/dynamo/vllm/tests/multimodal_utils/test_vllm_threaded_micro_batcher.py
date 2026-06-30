@@ -18,10 +18,7 @@ import threading
 
 import pytest
 
-from dynamo.vllm.multimodal_utils.threaded_micro_batcher import (
-    BatcherOverloaded,
-    ThreadedMicroBatcher,
-)
+from dynamo.vllm.multimodal_utils.threaded_micro_batcher import ThreadedMicroBatcher
 
 pytestmark = [
     pytest.mark.unit,
@@ -301,35 +298,6 @@ def test_shutdown_stops_thread():
     assert not b._thread.is_alive()
 
 
-async def test_max_outstanding_cost_rejects_when_full():
-    """submit() raises BatcherOverloaded once accepted-but-incomplete cost is full."""
-    entered = threading.Event()
-    release = threading.Event()
-
-    def blocking(items):
-        entered.set()
-        release.wait(timeout=5.0)
-        return [("r", x) for x in items]
-
-    b = ThreadedMicroBatcher(blocking, max_outstanding_cost=1)
-    b.start()
-    try:
-        first = asyncio.ensure_future(b.submit(["a"]))  # cost 1 fills the budget
-        for _ in range(200):
-            if entered.is_set():
-                break
-            await asyncio.sleep(0.01)
-        assert entered.is_set()
-
-        with pytest.raises(BatcherOverloaded):
-            await b.submit(["b"])
-
-        release.set()
-        assert len(await first) == 1
-    finally:
-        b.shutdown()
-
-
 async def test_worker_supervisor_fails_awaiters_on_crash():
     """An unexpected worker crash fails live awaiters and moves to a failed state
     (later submits raise) instead of hanging."""
@@ -370,10 +338,10 @@ async def test_nonpositive_cost_is_rejected():
         b.shutdown()
 
 
-async def test_partial_batch_failure_fails_request_once_and_releases():
+async def test_partial_batch_failure_fails_request_once():
     """A multi-item request split across batches where the FIRST batch raises
-    fails the whole request exactly once, releases all of its admission, and the
-    later sibling item is tombstoned — it never reaches fn."""
+    fails the whole request exactly once, and the later sibling item is
+    tombstoned — it never reaches fn."""
     seen: list = []
 
     def fn(items):
@@ -384,12 +352,11 @@ async def test_partial_batch_failure_fails_request_once_and_releases():
 
     # max_batch_cost=1 → "bad" and "good" are separate (cost-1) batches; "bad"
     # runs (and fails) first, tombstoning the request before "good" runs.
-    b = ThreadedMicroBatcher(fn, max_batch_cost=1, max_outstanding_cost=10)
+    b = ThreadedMicroBatcher(fn, max_batch_cost=1)
     b.start()
     try:
         with pytest.raises(ValueError, match="boom"):
             await b.submit(["bad", "good"], costs=[1, 1])
-        assert b._outstanding == 0
         assert "good" not in seen  # tombstoned sibling never reached fn
     finally:
         b.shutdown()

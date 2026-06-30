@@ -40,9 +40,9 @@ Concurrency contract (cross-thread correctness):
   ``shutdown()`` cannot race on ``remaining``.
 - The worker runs under a **supervisor**: any unexpected crash fails every live
   request (no hung awaiter) and moves the batcher to ``FAILED``.
-- Admission is bounded by an optional ``max_outstanding_cost``; state + admission
-  are mutated together under the lock (bookkeeping only — never held across
-  ``fn`` / ``join``).
+
+TODO: no admission backpressure — ``submit()`` always accepts. Add a bound on
+accepted-but-incomplete cost if a producer can outrun the encoder.
 """
 
 from __future__ import annotations
@@ -68,16 +68,10 @@ _SHUTDOWN = object()
 _NO_RESULT = object()
 
 
-class BatcherOverloaded(RuntimeError):
-    """Raised by ``submit()`` when admitting the request would exceed
-    ``max_outstanding_cost`` (accepted-but-incomplete cost)."""
-
-
 class _State(Enum):
     NEW = auto()
     RUNNING = auto()
-    CLOSING = auto()
-    CLOSED = auto()
+    CLOSED = auto()  # shutdown begun — no further submits (worker may still be exiting)
     FAILED = auto()
 
 
@@ -93,7 +87,6 @@ class _Request(Generic[R]):
     completion: "concurrent.futures.Future[List[R]]"
     results: List[Optional[R]]
     remaining: int
-    cost_total: int
     error: Optional[BaseException] = None
     done: bool = False
 
@@ -122,8 +115,6 @@ class ThreadedMicroBatcher(Generic[T, R]):
         on_stop: Optional callable run once on the worker thread at teardown (after
             the serving loop ends), iff ``on_start`` succeeded. Its failure is
             logged, never raised.
-        max_outstanding_cost: Optional admission ceiling on accepted-but-incomplete
-            cost; ``submit()`` raises ``BatcherOverloaded`` when exceeded.
         name: Worker thread name.
         join_timeout_s: Seconds ``shutdown()`` waits for an in-flight ``fn``.
     """
@@ -135,19 +126,15 @@ class ThreadedMicroBatcher(Generic[T, R]):
         max_batch_cost: Optional[int] = None,
         on_start: Optional[Callable[[], None]] = None,
         on_stop: Optional[Callable[[], None]] = None,
-        max_outstanding_cost: Optional[int] = None,
         name: str = "micro-batcher",
         join_timeout_s: float = 10.0,
     ) -> None:
         if max_batch_cost is not None and max_batch_cost < 1:
             raise ValueError("max_batch_cost must be >= 1 (or None for pass-through)")
-        if max_outstanding_cost is not None and max_outstanding_cost < 1:
-            raise ValueError("max_outstanding_cost must be >= 1")
         self._fn = fn
         self._max_batch_cost = max_batch_cost
         self._on_start = on_start
         self._on_stop = on_stop
-        self._max_outstanding_cost = max_outstanding_cost
         self._name = name
         self._join_timeout_s = join_timeout_s
 
@@ -156,12 +143,11 @@ class ThreadedMicroBatcher(Generic[T, R]):
         self._terminated = threading.Event()
         self._start_error: Optional[BaseException] = None
         self._terminal_error: Optional[BaseException] = None
-        # Guards _state, _outstanding, _live, every _Request transition, and the
-        # queue-commit so a state change and its work enqueue happen atomically.
-        # Bookkeeping only — never held across fn / join.
+        # Guards _state, _live, every _Request transition, and the queue-commit so
+        # a state change and its work enqueue happen atomically. Bookkeeping only
+        # — never held across fn / join.
         self._lock = threading.Lock()
         self._state = _State.NEW
-        self._outstanding = 0
         self._live: set[_Request] = set()
         self._thread: Optional[threading.Thread] = None
 
@@ -236,7 +222,6 @@ class ThreadedMicroBatcher(Generic[T, R]):
             completion=concurrent.futures.Future(),
             results=[None] * len(items),
             remaining=len(items),
-            cost_total=sum(costs),
         )
         works = [
             _Work(item, c, request, i) for i, (item, c) in enumerate(zip(items, costs))
@@ -250,20 +235,10 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 raise RuntimeError(
                     "ThreadedMicroBatcher.submit() after worker failure"
                 ) from self._terminal_error
-            else:  # NEW / CLOSING / CLOSED
+            else:  # NEW / CLOSED
                 raise RuntimeError(
                     "ThreadedMicroBatcher.submit() called after shutdown()"
                 )
-            if (
-                self._max_outstanding_cost is not None
-                and self._outstanding + request.cost_total > self._max_outstanding_cost
-            ):
-                raise BatcherOverloaded(
-                    f"submit cost {request.cost_total} would exceed outstanding "
-                    f"budget {self._max_outstanding_cost} "
-                    f"(in flight: {self._outstanding})"
-                )
-            self._outstanding += request.cost_total
             self._live.add(request)
             for work in works:
                 self._queue.put(work)
@@ -277,15 +252,13 @@ class ThreadedMicroBatcher(Generic[T, R]):
             return
         to_fail: List[_Work] = []
         with self._lock:
-            if self._state not in (_State.CLOSING, _State.CLOSED, _State.FAILED):
-                self._state = _State.CLOSING
+            if self._state not in (_State.CLOSED, _State.FAILED):
+                self._state = _State.CLOSED
                 to_fail = self._drain_queue_locked()  # fail queued, then signal stop
                 self._queue.put(_SHUTDOWN)
         self._consume_all(to_fail, RuntimeError("ThreadedMicroBatcher shut down"))
         self._thread.join(timeout=self._join_timeout_s)
         with self._lock:
-            if self._state is _State.CLOSING and not self._thread.is_alive():
-                self._state = _State.CLOSED
             leftover = self._drain_queue_locked()  # belt-and-suspenders
         self._consume_all(leftover, RuntimeError("ThreadedMicroBatcher shut down"))
         if self._thread.is_alive():
@@ -458,7 +431,6 @@ class ThreadedMicroBatcher(Generic[T, R]):
             if req.remaining == 0:
                 req.done = True
                 self._live.discard(req)
-                self._outstanding -= req.cost_total
                 finalize = True
         if finalize:
             self._complete(req)
@@ -473,7 +445,6 @@ class ThreadedMicroBatcher(Generic[T, R]):
             if req.error is None:
                 req.error = exc
             self._live.discard(req)
-            self._outstanding -= req.cost_total
         self._complete(req)
 
     def _complete(self, req: _Request) -> None:
