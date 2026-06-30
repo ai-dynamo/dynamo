@@ -1141,8 +1141,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 f"--custom-encoder-class {custom_encoder_class!r} must resolve to a "
                 f"VisionEncoderBackend subclass, got {backend_cls!r}."
             )
-        # The author writes the VisionEncoderBackend (L2); Dynamo wraps it in the
-        # AsyncVisionEncoder glue (L3), which owns the preprocess pool + actor
+        # The author writes the VisionEncoderBackend; Dynamo wraps it in the
+        # AsyncVisionEncoder glue, which owns the preprocess pool + actor
         # thread + micro-batcher. load() runs backend.build() on the actor thread
         # (the backend picks its own device — the worker pins it via
         # CUDA_VISIBLE_DEVICES) and cleans that thread up on failure.

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Serial async glue (L3) between the worker's event loop and a ``VisionEncoderBackend``.
+"""Serial async glue between the worker's event loop and a ``VisionEncoderBackend``.
 
-This is the **eager-milestone** glue: it proves the splice path end to end with a
+This is the **eager** glue: it proves the splice path end to end with a
 **direct call — no micro-batcher**. Per request it preprocesses the images off the
 event loop, enforces request-level atomicity, and runs the author's
 ``forward_batch`` on a single dedicated **actor thread**, serialized — there is no
@@ -17,7 +17,7 @@ Why a single actor thread (not ``asyncio.to_thread``): build and every
 graph in ``build`` can replay it from ``forward_batch`` — the affinity the batched
 version also guarantees. ``max_workers=1`` serializes forwards (FIFO).
 
-Request-level atomicity (design A5): a gather-barrier sits between preprocess and
+Request-level atomicity: a gather-barrier sits between preprocess and
 the forward — ``encode`` waits for *every* image's preprocess to settle and runs
 the forward only if **all** succeed; on any failure it does no GPU work and raises
 the request-level error, so a text-only LM never sees a partial result.
@@ -135,7 +135,8 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         preprocessed: List[Preprocessed] = list(settled)  # type: ignore[arg-type]
         items = [p.item for p in preprocessed]
         # Direct, serialized forward on the actor thread (eager; target_bucket
-        # defaults to None — there is no graph ladder in this milestone).
+        # defaults to None — there is no graph ladder until CUDA-graph batching
+        # is supported).
         return await loop.run_in_executor(
             self._actor, self._backend.forward_batch, items
         )
