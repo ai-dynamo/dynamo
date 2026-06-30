@@ -114,6 +114,10 @@ STUB_MODULES = [
     "transformers.models",
     "transformers.models.qwen2_vl",
     "transformers.models.qwen2_vl.image_processing_qwen2_vl",
+    # safetensors — used by the client-embeddings stub backend
+    # (tests/utils/embeds_passthrough_encoder.py); not in the pre-commit env.
+    "safetensors",
+    "safetensors.torch",
     "pandas",
     "matplotlib",
     "matplotlib.pyplot",
