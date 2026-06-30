@@ -64,7 +64,7 @@ type upgradeCase struct {
 	expectedWorkerSites map[string]string
 }
 
-func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
+func TestLegacyWorkerIdentityUpgradePreservesLabels(t *testing.T) {
 	ctx := context.Background()
 	tests := map[string]upgradeCase{
 		"Deployment": func() upgradeCase {
@@ -878,8 +878,8 @@ spec:
 			oldPodLabels := tt.childPodLabels(t, oldChild)
 			newPodLabels := tt.childPodLabels(t, newChild)
 
-			t.Log("compare old and new child specs; a change here would trigger a rollout")
-			require.Equal(t, specHash(t, oldChild), specHash(t, newChild), "upgrade should not change the child spec hash")
+			t.Log("compare old and new child specs; the worker canary default flip should trigger a rollout")
+			require.NotEqual(t, specHash(t, oldChild), specHash(t, newChild), "upgrade should change the child spec hash when worker canary health checks become enabled by default")
 
 			t.Log("assert worker pod labels keep the legacy worker identity")
 			for site, subComponentType := range tt.expectedWorkerSites {

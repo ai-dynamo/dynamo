@@ -2633,7 +2633,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "false",
+														Value: "true",
 													},
 													{
 														Name:  "NIXL_TELEMETRY_ENABLE",
@@ -2847,7 +2847,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "false",
+														Value: "true",
 													},
 													{
 														Name:  "NIXL_TELEMETRY_ENABLE",
@@ -3655,7 +3655,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "false",
+														Value: "true",
 													},
 													{
 														Name:  "NIXL_TELEMETRY_ENABLE",
@@ -3856,7 +3856,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													},
 													{
 														Name:  "DYN_HEALTH_CHECK_ENABLED",
-														Value: "false",
+														Value: "true",
 													},
 													{
 														Name:  "NIXL_TELEMETRY_ENABLE",
@@ -6113,7 +6113,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 							{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
-							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
+							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
 							{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
