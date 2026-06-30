@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # RIVA NIM Python client used by the cascaded voice pipeline workers.
 # Pure-Python wheel; pinned for reproducible image builds.
 nvidia-riva-client==2.26.0
