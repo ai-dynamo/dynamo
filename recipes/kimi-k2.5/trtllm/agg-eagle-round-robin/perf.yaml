@@ -51,7 +51,7 @@ spec:
           set -euo pipefail
           ulimit -n 600000
           apt-get update && apt-get install -y curl jq procps git && apt-get clean
-          pip install "aiperf==0.7.0" protobuf "transformers==4.57.3"
+          pip install "aiperf==0.10.0" protobuf "transformers==4.57.3"
           sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
           export COLUMNS=200
           EPOCH=$(date +%s)
