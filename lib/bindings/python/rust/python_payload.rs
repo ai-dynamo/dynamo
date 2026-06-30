@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use bytes::Bytes;
-use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::pipeline::PipelineError;
 use dynamo_runtime::pipeline::network::{
     EncodedResponseFrame, IngressRequestDecoder, IngressResponseEncoder, NetworkStreamWrapper,
@@ -10,7 +9,6 @@ use dynamo_runtime::pipeline::network::{
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pythonize::{Depythonizer, Pythonizer, depythonize};
@@ -85,34 +83,6 @@ impl std::fmt::Debug for PythonResponseItem {
     }
 }
 
-// These compatibility implementations retain the bounds used to distinguish
-// unary from bidirectional ingress blanket implementations. The network path
-// always serializes this type through `PythonIngressPayloadAdapter`.
-impl Serialize for PythonResponseItem {
-    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        Err(S::Error::custom(
-            "PythonResponseItem must be serialized by PythonIngressPayloadAdapter",
-        ))
-    }
-}
-
-impl MaybeError for PythonResponseItem {
-    fn from_err(error: impl std::error::Error + 'static) -> Self {
-        Self(Err(PyRuntimeError::new_err(error.to_string())))
-    }
-
-    fn err(&self) -> Option<DynamoError> {
-        // The direct adapter must see Python exceptions so it can classify and
-        // serialize them in the same blocking operation as the response frame.
-        // Returning an error here would make the generic pipeline terminate the
-        // stream before `encode_response` receives the item.
-        None
-    }
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct PythonIngressPayloadAdapter;
 
@@ -146,47 +116,44 @@ impl IngressResponseEncoder<PythonResponseItem> for PythonIngressPayloadAdapter 
         response: Option<PythonResponseItem>,
         complete_final: bool,
     ) -> Result<EncodedResponseFrame, PipelineError> {
-        tokio::task::spawn_blocking(move || {
-            encode_python_response(payload_codec, response, complete_final)
-        })
-        .await
-        .map_err(|error| {
-            PipelineError::SerializationError(format!(
-                "failed to offload {} Python response encode: {error}",
-                payload_codec.name()
-            ))
-        })?
+        if complete_final {
+            let wrapper = NetworkStreamWrapper::<Annotated<()>> {
+                data: None,
+                complete_final: true,
+            };
+            let bytes = payload_codec.encode(&wrapper).map_err(|error| {
+                PipelineError::SerializationError(format!(
+                    "Failed serializing {} request-plane final response: {error}",
+                    payload_codec.name()
+                ))
+            })?;
+            return Ok(EncodedResponseFrame {
+                bytes: bytes.into(),
+                is_error: false,
+                stop_stream: false,
+            });
+        }
+
+        let response = response.ok_or_else(|| {
+            PipelineError::SerializationError(
+                "request-plane response item missing before final frame".to_string(),
+            )
+        })?;
+        tokio::task::spawn_blocking(move || encode_python_response(payload_codec, response))
+            .await
+            .map_err(|error| {
+                PipelineError::SerializationError(format!(
+                    "failed to offload {} Python response encode: {error}",
+                    payload_codec.name()
+                ))
+            })?
     }
 }
 
 fn encode_python_response(
     payload_codec: RequestPlanePayloadCodec,
-    response: Option<PythonResponseItem>,
-    complete_final: bool,
+    response: PythonResponseItem,
 ) -> Result<EncodedResponseFrame, PipelineError> {
-    if complete_final {
-        let wrapper = NetworkStreamWrapper::<Annotated<()>> {
-            data: None,
-            complete_final: true,
-        };
-        let bytes = payload_codec.encode(&wrapper).map_err(|error| {
-            PipelineError::SerializationError(format!(
-                "Failed serializing {} request-plane final response: {error}",
-                payload_codec.name()
-            ))
-        })?;
-        return Ok(EncodedResponseFrame {
-            bytes: bytes.into(),
-            is_error: false,
-            stop_stream: false,
-        });
-    }
-
-    let response = response.ok_or_else(|| {
-        PipelineError::SerializationError(
-            "request-plane response item missing before final frame".to_string(),
-        )
-    })?;
     let (annotated, stop_stream) = match response.into_result() {
         Ok(item) => match Python::with_gil(|py| parse_python_response(item, py)) {
             Ok(annotated) => (annotated, false),
@@ -252,16 +219,14 @@ fn parse_python_response(
         return Ok(Annotated::from_data(PythonPayload(item)));
     }
 
-    let data = dict
-        .get_item("data")
-        .map_err(|error| error.to_string())?
-        .map(|value| PythonPayload(value.unbind()));
+    // Keep the payload itself as the original Python object. Fully
+    // depythonizing `Annotated<PythonPayload>` would rebuild the nested data
+    // subtree and defeat the direct request-plane path's ownership reuse.
+    let data = optional_item(dict, "data")?.map(|value| PythonPayload(value.unbind()));
     let id = extract_optional(dict, "id")?;
     let event = extract_optional(dict, "event")?;
     let comment = extract_optional(dict, "comment")?;
-    let error = dict
-        .get_item("error")
-        .map_err(|error| error.to_string())?
+    let error = optional_item(dict, "error")?
         .map(|value| depythonize(&value).map_err(|error| error.to_string()))
         .transpose()?;
 
@@ -274,12 +239,20 @@ fn parse_python_response(
     })
 }
 
+fn optional_item<'py>(
+    dict: &Bound<'py, PyDict>,
+    name: &str,
+) -> Result<Option<Bound<'py, PyAny>>, String> {
+    dict.get_item(name)
+        .map_err(|error| error.to_string())
+        .map(|value| value.filter(|value| !value.is_none()))
+}
+
 fn extract_optional<'py, T>(dict: &Bound<'py, PyDict>, name: &str) -> Result<Option<T>, String>
 where
     T: FromPyObject<'py>,
 {
-    dict.get_item(name)
-        .map_err(|error| error.to_string())?
+    optional_item(dict, name)?
         .map(|value| value.extract().map_err(|error| error.to_string()))
         .transpose()
 }

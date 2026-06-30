@@ -3,6 +3,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Error, Result};
 use pyo3::prelude::*;
@@ -19,8 +20,8 @@ use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
     pipeline::{
-        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data, ManyOut, ResponseStream,
-        SingleIn,
+        AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Data, DataStream, ManyOut,
+        ResponseStream, SingleIn,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
@@ -56,6 +57,17 @@ fn detect_has_context(generator: &PyObject) -> bool {
 /// item is either a `PyObject` frame or the `PyErr` the generator raised.
 type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 
+#[derive(Clone, Copy)]
+enum PythonStreamPolling {
+    /// Preserve the existing one-item-prefetched bridge for typed, in-process
+    /// engines whose response forwarder snapshots each item into Rust data.
+    Prefetched,
+    /// Poll the Python generator only when the downstream consumer requests
+    /// another item. Network engines need this so a reused mutable PyObject is
+    /// encoded before Python resumes and mutates it for the next yield.
+    DemandDriven,
+}
+
 /// Invoke the Python `generate` callable and convert the async generator it
 /// returns into a Rust [`Stream`] of `PyObject` items.
 ///
@@ -71,6 +83,7 @@ type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 async fn invoke_generator<F, G>(
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
+    stream_polling: PythonStreamPolling,
     to_python_input: F,
     to_python_context: Option<G>,
 ) -> Result<PyItemStream>
@@ -94,15 +107,49 @@ where
             }?;
 
             let locals = TaskLocals::new(event_loop.bind(py).clone());
-            pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
-                locals,
-                gen_result.into_bound(py),
-            )
+            match stream_polling {
+                PythonStreamPolling::Prefetched => {
+                    pyo3_async_runtimes::tokio::into_stream_with_locals_v1(
+                        locals,
+                        gen_result.into_bound(py),
+                    )
+                    .map(|stream| Box::pin(stream) as PyItemStream)
+                }
+                PythonStreamPolling::DemandDriven => {
+                    demand_driven_python_stream(locals, gen_result.into_bound(py))
+                }
+            }
         })
     })
     .await
     .map_err(|e| anyhow::anyhow!("failed to offload python call to blocking task: {e}"))??;
 
+    Ok(stream)
+}
+
+fn demand_driven_python_stream(
+    locals: TaskLocals,
+    generator: Bound<'_, PyAny>,
+) -> PyResult<PyItemStream> {
+    let anext = generator.getattr("__anext__")?.unbind();
+    let stream = futures::stream::unfold((anext, locals), |(anext, locals)| async move {
+        let next = Python::with_gil(|py| {
+            pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
+        });
+        let item = match next {
+            Ok(next) => next.await,
+            Err(error) => Err(error),
+        };
+        if item.as_ref().is_err_and(|error| {
+            Python::with_gil(|py| {
+                error.is_instance_of::<pyo3::exceptions::PyStopAsyncIteration>(py)
+            })
+        }) {
+            None
+        } else {
+            Some((item, (anext, locals)))
+        }
+    });
     Ok(Box::pin(stream))
 }
 
@@ -180,31 +227,14 @@ impl AsyncEngine<SingleIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
         &self,
         request: SingleIn<PythonPayload>,
     ) -> Result<ManyOut<PythonResponseItem>, Error> {
-        let (request, context) = request.transfer(());
-        let ctx = context.context();
-        let id = context.id().to_string();
-        let current_trace_context = get_distributed_tracing_context();
-        let metadata = context.metadata().clone();
-
-        let stream = invoke_generator(
-            self.0.generator.clone(),
-            self.0.event_loop.clone(),
-            move |_py| Ok(request.into_inner()),
-            self.0.has_context.then_some({
-                let ctx = ctx.clone();
-                move |py: Python<'_>| {
-                    Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
-                        .map(|c| c.into_any())
-                }
-            }),
+        generate_python_stream(
+            &self.0,
+            request,
+            PythonStreamPolling::DemandDriven,
+            |_py, request| Ok(request.into_inner()),
+            unbuffered_python_response_stream,
         )
-        .await?;
-
-        let rx = spawn_raw_response_forwarder(stream, ctx, id);
-        Ok(ResponseStream::new(
-            Box::pin(ReceiverStream::new(rx)),
-            context.context(),
-        ))
+        .await
     }
 }
 
@@ -264,40 +294,55 @@ where
     Resp: Data + for<'de> Deserialize<'de>,
 {
     async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
-        // Create a context
-        let (request, context) = request.transfer(());
-        let ctx = context.context();
-
-        let id = context.id().to_string();
-        tracing::trace!("processing request: {}", id);
-
-        // Capture current trace context
-        let current_trace_context = get_distributed_tracing_context();
-        let metadata = context.metadata().clone();
-
-        let stream = invoke_generator(
-            self.generator.clone(),
-            self.event_loop.clone(),
-            move |py| Ok(pythonize(py, &request)?.unbind()),
-            self.has_context.then_some({
-                let ctx = ctx.clone();
-                move |py: Python<'_>| {
-                    Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
-                        .map(|c| c.into_any())
-                }
-            }),
+        generate_python_stream(
+            self,
+            request,
+            PythonStreamPolling::Prefetched,
+            |py, request| Ok(pythonize(py, &request)?.unbind()),
+            buffered_typed_response_stream::<Resp>,
         )
-        .await?;
-
-        // Drain the Python response stream on a dedicated task, mapping any
-        // generator error to a typed annotated error frame.
-        let rx = spawn_response_forwarder::<Resp>(stream, ctx, id);
-
-        Ok(ResponseStream::new(
-            Box::pin(ReceiverStream::new(rx)),
-            context.context(),
-        ))
+        .await
     }
+}
+
+async fn generate_python_stream<Req, Resp, ToPythonInput, ForwardResponses>(
+    engine: &PythonServerStreamingEngine,
+    request: SingleIn<Req>,
+    stream_polling: PythonStreamPolling,
+    to_python_input: ToPythonInput,
+    forward_responses: ForwardResponses,
+) -> Result<ManyOut<Resp>, Error>
+where
+    Req: Data,
+    Resp: Data,
+    ToPythonInput: FnOnce(Python, Req) -> PyResult<Py<PyAny>> + Send + 'static,
+    ForwardResponses:
+        FnOnce(PyItemStream, Arc<dyn AsyncEngineContext>, String) -> DataStream<Resp> + Send,
+{
+    let (request, context) = request.transfer(());
+    let ctx = context.context();
+    let id = context.id().to_string();
+    tracing::trace!("processing request: {}", id);
+
+    let current_trace_context = get_distributed_tracing_context();
+    let metadata = context.metadata().clone();
+    let stream = invoke_generator(
+        engine.generator.clone(),
+        engine.event_loop.clone(),
+        stream_polling,
+        move |py| to_python_input(py, request),
+        engine.has_context.then_some({
+            let ctx = ctx.clone();
+            move |py: Python<'_>| {
+                Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
+                    .map(|context| context.into_any())
+            }
+        }),
+    )
+    .await?;
+
+    let response_stream = forward_responses(stream, ctx, id);
+    Ok(ResponseStream::new(response_stream, context.context()))
 }
 
 async fn process_item<Resp>(
@@ -491,30 +536,101 @@ where
     rx
 }
 
-fn spawn_raw_response_forwarder(
+fn buffered_typed_response_stream<Resp>(
     stream: PyItemStream,
     ctx: Arc<dyn AsyncEngineContext>,
     request_id: String,
-) -> mpsc::Receiver<PythonResponseItem> {
-    let (tx, rx) = mpsc::channel(RESPONSE_CHANNEL_DEPTH);
-    tokio::spawn(async move {
-        let mut stream = stream;
-        while let Some(item) = stream.next().await {
-            let stop_after_item = item.is_err();
-            if tx.send(PythonResponseItem::new(item)).await.is_err() {
-                ctx.stop_generating();
-                tracing::trace!(
-                    request_id,
-                    "direct Python response consumer dropped; stopping generator"
-                );
-                break;
+) -> DataStream<Annotated<Resp>>
+where
+    Resp: Data + for<'de> Deserialize<'de>,
+{
+    Box::pin(ReceiverStream::new(spawn_response_forwarder::<Resp>(
+        stream, ctx, request_id,
+    )))
+}
+
+fn unbuffered_python_response_stream(
+    stream: PyItemStream,
+    ctx: Arc<dyn AsyncEngineContext>,
+    request_id: String,
+) -> DataStream<PythonResponseItem> {
+    // Do not poll the generator again until ingress has encoded the current
+    // Python object. A generator may reuse and mutate the same dict/list for
+    // later yields; buffering raw PyObject handles would make earlier frames
+    // observe those later mutations.
+    Box::pin(DirectPythonResponseStream {
+        stream: Some(stream),
+        ctx,
+        request_id,
+        exhausted: false,
+    })
+}
+
+/// Demand-driven network response stream with cooperative Python cancellation.
+///
+/// Ingress stops the request context when the client response connection
+/// closes, then drops this stream. Give the Python generator one final poll so
+/// it can observe `context.is_stopped()` and run its cancellation path. Normal
+/// response delivery remains unbuffered: the next generator item is not polled
+/// until ingress has encoded the current one.
+struct DirectPythonResponseStream {
+    stream: Option<PyItemStream>,
+    ctx: Arc<dyn AsyncEngineContext>,
+    request_id: String,
+    exhausted: bool,
+}
+
+impl Stream for DirectPythonResponseStream {
+    type Item = PythonResponseItem;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        let poll = self
+            .stream
+            .as_mut()
+            .expect("direct Python response stream missing before exhaustion")
+            .as_mut()
+            .poll_next(cx);
+        match poll {
+            Poll::Ready(Some(item)) => {
+                if item.is_err() {
+                    self.exhausted = true;
+                    self.stream.take();
+                }
+                Poll::Ready(Some(PythonResponseItem::new(item)))
             }
-            if stop_after_item {
-                break;
+            Poll::Ready(None) => {
+                self.exhausted = true;
+                self.stream.take();
+                Poll::Ready(None)
             }
+            Poll::Pending => Poll::Pending,
         }
-    });
-    rx
+    }
+}
+
+impl Drop for DirectPythonResponseStream {
+    fn drop(&mut self) {
+        if self.exhausted || !self.ctx.is_stopped() {
+            return;
+        }
+
+        let Some(mut stream) = self.stream.take() else {
+            return;
+        };
+        let request_id = self.request_id.clone();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            // Cooperative Python generators inspect their Context when polled.
+            // Discard the result: the client has already dropped its stream.
+            let _ = stream.next().await;
+            tracing::trace!(
+                request_id,
+                "polled direct Python response generator after cancellation"
+            );
+        });
+    }
 }
 
 /// Channel depth between the inbound forwarder and the Python iterator.
@@ -609,6 +725,7 @@ impl AsyncEngine<ManyIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
         let stream = invoke_generator(
             self.generator.clone(),
             self.event_loop.clone(),
+            PythonStreamPolling::DemandDriven,
             move |py| Ok(Py::new(py, py_request_stream)?.into_any()),
             self.has_context.then_some({
                 let ctx = ctx.clone();
@@ -620,8 +737,7 @@ impl AsyncEngine<ManyIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
         )
         .await?;
 
-        let rx = spawn_raw_response_forwarder(stream, ctx.clone(), request_id);
-
-        Ok(ResponseStream::new(Box::pin(ReceiverStream::new(rx)), ctx))
+        let response_stream = unbuffered_python_response_stream(stream, ctx.clone(), request_id);
+        Ok(ResponseStream::new(response_stream, ctx))
     }
 }

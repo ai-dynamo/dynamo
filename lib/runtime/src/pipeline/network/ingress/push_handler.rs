@@ -9,10 +9,9 @@ use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
 use crate::pipeline::{ManyIn, RequestStream};
-use crate::protocols::maybe_error::MaybeError;
 use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::Instrument;
@@ -178,6 +177,12 @@ where
                 Err(err) => {
                     tracing::error!(%err, "failed to encode request-plane response");
                     saw_error_response = true;
+                    send_complete_final = false;
+                    if let Some(m) = self.metrics() {
+                        m.error_counter
+                            .with_label_values(&[work_handler::error_types::SERIALIZATION])
+                            .inc();
+                    }
                     break;
                 }
             };
@@ -350,7 +355,7 @@ trait IngressDispatch: Send + Sync {
 impl<T, U, Adapter> IngressDispatch for Ingress<SingleIn<T>, ManyOut<U>, Adapter>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
-    U: Data + Serialize + MaybeError + std::fmt::Debug,
+    U: Data + std::fmt::Debug,
     Adapter: IngressRequestDecoder<T> + Send + Sync + 'static,
 {
     type Request = SingleIn<T>;
@@ -409,7 +414,7 @@ where
 impl<T, U, Adapter> IngressDispatch for Ingress<ManyIn<T>, ManyOut<U>, Adapter>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
-    U: Data + Serialize + MaybeError + std::fmt::Debug,
+    U: Data + std::fmt::Debug,
     Adapter: IngressRequestDecoder<T> + Send + Sync + 'static,
 {
     type Request = ManyIn<T>;
@@ -670,7 +675,7 @@ where
 impl<T, U, Adapter> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>, Adapter>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
-    U: Data + Serialize + MaybeError + std::fmt::Debug,
+    U: Data + std::fmt::Debug,
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn add_metrics(
@@ -702,7 +707,7 @@ where
 impl<T, U, Adapter> PushWorkHandler for Ingress<ManyIn<T>, ManyOut<U>, Adapter>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
-    U: Data + Serialize + MaybeError + std::fmt::Debug,
+    U: Data + std::fmt::Debug,
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
     fn add_metrics(

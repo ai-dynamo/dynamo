@@ -20,6 +20,22 @@ async def _generate(request, context):
     if request["kind"] == "malformed":
         yield object()
         return
+    if request["kind"] == "explicit-none":
+        yield {
+            "_dynamo_annotated": True,
+            "data": {"nested": {"value": 42}},
+            "id": None,
+            "event": None,
+            "comment": None,
+            "error": None,
+        }
+        return
+    if request["kind"] == "reused-mutable":
+        shared = {"sequence": 0}
+        for sequence in range(64):
+            shared["sequence"] = sequence
+            yield shared
+        return
 
     yield request["payload"]
     yield {
@@ -53,6 +69,7 @@ async def request_plane_client(runtime):
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 async def test_python_request_plane_plain_annotated_error_and_malformed_frames(
     request_plane_client,
@@ -82,6 +99,24 @@ async def test_python_request_plane_plain_annotated_error_and_malformed_frames(
     assert responses[1].id() == "chunk-2"
     assert responses[1].event() == "delta"
     assert responses[1].comments() == ["direct", "python"]
+
+    stream = await request_plane_client.generate(
+        {"kind": "explicit-none", "expected_metadata": {}}
+    )
+    explicit_none_responses = [response async for response in stream]
+    assert len(explicit_none_responses) == 1
+    assert explicit_none_responses[0].data() == {"nested": {"value": 42}}
+    assert explicit_none_responses[0].id() is None
+    assert explicit_none_responses[0].event() is None
+    assert explicit_none_responses[0].comments() is None
+
+    stream = await request_plane_client.generate(
+        {"kind": "reused-mutable", "expected_metadata": {}}
+    )
+    reused_mutable_responses = [response.data() async for response in stream]
+    assert reused_mutable_responses == [
+        {"sequence": sequence} for sequence in range(64)
+    ]
 
     for kind, message in [
         ("error", "direct adapter test error"),
