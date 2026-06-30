@@ -18,11 +18,12 @@
 instances:
   - url: dynamo.docs.buildwithfern.com/dynamo
     custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com/dynamo]
+    multi-source: true
 
 title: NVIDIA Dynamo Documentation
 
 agents:
-  page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/llms.txt. For full content including API reference and SDK examples, see https://docs.nvidia.com/dynamo/llms-full.txt."
+  page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/latest/llms.txt. For section-specific indexes, append /llms.txt to any section URL."
 
 
 products:
@@ -239,7 +240,6 @@ metadata:
 experimental:
   mdx-components:
     - ./components
-  basepath-aware: true
 
 colors:
   accentPrimary:

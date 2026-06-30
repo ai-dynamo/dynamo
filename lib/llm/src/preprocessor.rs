@@ -31,7 +31,7 @@ use dynamo_renderer::OAIPromptFormatter;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use futures::Stream;
 use futures::stream::{self, StreamExt};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::metrics::frontend_perf::{
@@ -39,7 +39,7 @@ use dynamo_runtime::metrics::frontend_perf::{
     StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
 };
 use std::borrow::Cow;
-use std::{collections::HashMap, pin::Pin, sync::Arc};
+use std::{any::Any, collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
 
 #[cfg(feature = "mm-routing")]
@@ -82,6 +82,9 @@ use crate::preprocessor::prompt::{MediaRequestExt, prompt_formatter_from_mdc};
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
+pub use crate::protocols::common::metrics::{
+    ANNOTATION_AUDIT_USAGE, ANNOTATION_LLM_METRICS, LLMMetricAnnotation,
+};
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
@@ -112,77 +115,6 @@ fn encode_floats_to_base64(floats: &[f32]) -> String {
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
-pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
-/// Marks the audit-only usage chunk. It carries the same `LLMMetricAnnotation`
-/// payload as `ANNOTATION_LLM_METRICS` but on a dedicated tag so the client-path
-/// `EventConverter` can strip it entirely (data included). It exists solely to
-/// carry `usage` to the audit `DeltaAggregator` and is never sent to the client.
-pub const ANNOTATION_AUDIT_USAGE: &str = "audit_usage";
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LLMMetricAnnotation {
-    pub input_tokens: usize,
-    pub output_tokens: usize,
-    pub chunk_tokens: usize,
-    pub cached_tokens: Option<usize>,
-    /// Prefill worker ID (for TTFT attribution in disaggregated mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_worker_id: Option<u64>,
-    /// Prefill worker DP rank
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_dp_rank: Option<u32>,
-    /// Prefill worker type ("prefill" or "decode") for Prometheus metric labeling.
-    /// Stored at routing time to avoid expensive MDC lookup when updating TTFT metrics.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefill_worker_type: Option<String>,
-    /// Decode worker ID (for ITL attribution in disaggregated mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decode_worker_id: Option<u64>,
-    /// Decode worker DP rank
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decode_dp_rank: Option<u32>,
-    /// Decode worker type ("prefill" or "decode") for Prometheus metric labeling.
-    /// Stored at routing time to avoid expensive MDC lookup when updating ITL metrics.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decode_worker_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokenize_latency: Option<Duration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detokenize_total_latency: Option<Duration>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub detokenize_count: Option<u64>,
-}
-
-impl LLMMetricAnnotation {
-    /// Convert this metrics struct to an Annotated event
-    pub fn to_annotation<T>(&self) -> Result<Annotated<T>, serde_json::Error> {
-        Annotated::from_annotation(ANNOTATION_LLM_METRICS, self)
-    }
-
-    /// Extract LLM metrics from an Annotated event, if present
-    pub fn from_annotation<T>(
-        annotation: &Annotated<T>,
-    ) -> Result<Option<LLMMetricAnnotation>, Box<dyn std::error::Error>> {
-        // Metrics ride on an event-tagged annotation: `ANNOTATION_LLM_METRICS`
-        // for per-chunk metrics (kept on the client stream as content, comment
-        // stripped) and `ANNOTATION_AUDIT_USAGE` for the audit-only final usage
-        // chunk. Both carry the serialized `LLMMetricAnnotation` as their comment.
-        let Some(event) = annotation.event.as_deref() else {
-            return Ok(None);
-        };
-        if event != ANNOTATION_LLM_METRICS && event != ANNOTATION_AUDIT_USAGE {
-            return Ok(None);
-        }
-        let comments = annotation
-            .comment
-            .as_ref()
-            .ok_or("missing comments block")?;
-        if comments.len() != 1 {
-            return Err("malformed comments block - expected exactly 1 comment".into());
-        }
-        let metrics: LLMMetricAnnotation = serde_json::from_str(&comments[0])?;
-        Ok(Some(metrics))
-    }
-}
 
 /// Drain a standalone router's forwarded `routing_data` onto this request's tracker so the
 /// frontend's timing/worker/token surfaces populate, then drop the field to keep it off the
@@ -208,6 +140,34 @@ fn drain_router_routing_data(
     if let Some(token_ids) = routing_data.token_ids {
         tracker.set_external_query_token_ids(token_ids);
     }
+}
+
+fn attach_metrics_annotation<Resp>(response: &mut Annotated<Resp>, metrics: &LLMMetricAnnotation) {
+    if let Ok(metrics_annotated) = metrics.to_annotation::<()>() {
+        response.event = metrics_annotated.event;
+        response.comment = metrics_annotated.comment;
+    } else {
+        tracing::warn!("Failed to serialize LLM metrics annotation");
+    }
+}
+
+fn attach_llm_metrics<Resp>(response: &mut Annotated<Resp>, metrics: LLMMetricAnnotation)
+where
+    Resp: 'static,
+{
+    if response.event.is_some() {
+        return;
+    }
+
+    if let Some(data) = response.data.as_mut()
+        && let Some(chat_response) =
+            (data as &mut dyn Any).downcast_mut::<NvCreateChatCompletionStreamResponse>()
+    {
+        chat_response.llm_metrics = Some(metrics);
+        return;
+    }
+
+    attach_metrics_annotation(response, &metrics);
 }
 
 // Reasoning State for reasoning parsing transformation step
@@ -474,12 +434,12 @@ impl OpenAIPreprocessor {
         // here; remove once fastokens upstream exposes the mutator.
         #[cfg(feature = "mm-routing")]
         let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
-            let fastokens_active = std::env::var("DYN_TOKENIZER").as_deref() == Ok("fastokens");
+            let fastokens_active = runtime_config.effective_tokenizer_backend().is_fastokens();
             if fastokens_active && model_dir_for_routing.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
-                    "DYN_TOKENIZER=fastokens is set; MM-aware KV routing disabled. \
-                     Unset DYN_TOKENIZER (or set it to 'default') to re-enable."
+                    "fastokens tokenizer backend is active; MM-aware KV routing disabled. \
+                     Use the default tokenizer backend to re-enable."
                 );
                 None
             } else {
@@ -704,13 +664,13 @@ impl OpenAIPreprocessor {
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
 
-        // Check if the chat template injected a reasoning start token at the end
-        // of the prompt (e.g., Qwen3.5 appends `<think>\n` when enable_thinking
-        // is not explicitly false). If so, the model's completion starts
-        // mid-reasoning and the parser should begin in reasoning mode.
-        let prompt_injected_reasoning = formatted_prompt
-            .as_ref()
-            .is_some_and(|p| p.trim_end().ends_with("<think>"));
+        // Generic reasoning parsers start from `<think>`; MiniMax M3 starts
+        // from `<mm:think>`. If the chat template injected that opener at the
+        // end of the prompt, the model completion starts mid-reasoning.
+        let prompt_injected_reasoning = Self::prompt_injected_reasoning_start(
+            self.runtime_config.reasoning_parser.as_deref(),
+            formatted_prompt.as_deref(),
+        );
 
         let tokenize_start = Instant::now();
         let (token_ids, annotations) = {
@@ -1542,7 +1502,7 @@ impl OpenAIPreprocessor {
         static DIM_CACHE: LazyLock<Cache<u64, (u32, u32)>> = LazyLock::new(|| {
             Cache::builder()
                 .max_capacity(100_000)
-                .time_to_live(Duration::from_secs(24 * 60 * 60))
+                .time_to_live(std::time::Duration::from_secs(24 * 60 * 60))
                 .build()
         });
 
@@ -1581,7 +1541,7 @@ impl OpenAIPreprocessor {
         // Per-Range tighter bound than MediaFetcher's 30 s default — dim
         // fetch is best-effort; on a slow remote we'd rather skip MM
         // routing for this image than starve the request.
-        const DIM_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+        const DIM_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
         if let Some(rest) = url.strip_prefix("data:") {
             let comma = rest
@@ -2007,18 +1967,43 @@ impl OpenAIPreprocessor {
                 .collect()
         });
 
+        // When DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is set, supported families
+        // (Qwen3-Coder, DeepSeek-V4) stream through the dynamo-parsers-v2 parser
+        // instead of the jail, which is never built for them on this path.
+        // tool_choice=required/named and structural-tag still use the jail's
+        // Immediate mode, since those rely on guided-decoded JSON rather than the
+        // native markup the v2 parser reads. See tool_parser_v2::apply_stream.
+        use crate::protocols::openai::chat_completions::tool_parser_v2;
+        let parser_name = self.tool_call_parser.as_deref();
+        let use_parsers_v2 = tool_parser_v2::enabled()
+            && parser_name.is_some_and(tool_parser_v2::supports_family)
+            && !uses_tool_call_structural_tag
+            && matches!(
+                request.inner.tool_choice.as_ref(),
+                None | Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto)
+            );
+
         // Apply jail conditionally
-        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
-            Box::pin(Self::apply_tool_calling_jail(
-                self.tool_call_parser.clone(),
-                request.inner.tool_choice.clone(),
-                tool_definitions,
-                uses_tool_call_structural_tag,
-                stream,
-            ))
-        } else {
-            Box::pin(stream)
-        };
+        let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> =
+            if should_jail && use_parsers_v2 {
+                Box::pin(tool_parser_v2::apply_stream(
+                    stream,
+                    tool_definitions,
+                    parser_name
+                        .expect("use_parsers_v2 implies a parser name")
+                        .to_string(),
+                ))
+            } else if should_jail {
+                Box::pin(Self::apply_tool_calling_jail(
+                    self.tool_call_parser.clone(),
+                    request.inner.tool_choice.clone(),
+                    tool_definitions,
+                    uses_tool_call_structural_tag,
+                    stream,
+                ))
+            } else {
+                Box::pin(stream)
+            };
 
         Ok(transformed_stream)
     }
@@ -2186,7 +2171,9 @@ impl OpenAIPreprocessor {
                         decode_dp_rank,
                         decode_worker_type,
                         tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
-                        detokenize_total_latency: tracker.as_ref().and_then(|t| t.detokenize_total_latency()),
+                        detokenize_total_latency: tracker
+                            .as_ref()
+                            .and_then(|t| t.detokenize_total_latency()),
                         detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
                     if inner.trace_tokens_enabled {
@@ -2207,18 +2194,7 @@ impl OpenAIPreprocessor {
                         DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
                     }
 
-                    if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
-                        // Per-chunk metrics ride on the content chunk as an
-                        // ANNOTATION_LLM_METRICS event. The metrics collector
-                        // observes them, then the EventConverter strips the event
-                        // and comment while keeping the content `data`. Only set
-                        // event if not already set, to avoid overriding an existing
-                        // event (e.g. an error annotation).
-                        if response.event.is_none() {
-                            response.event = metrics_annotated.event;
-                            response.comment = metrics_annotated.comment;
-                        }
-                    }
+                    attach_llm_metrics(&mut response, llm_metrics);
 
                     // Mark if we've seen a finish_reason
                     if has_finish_reason {
@@ -2295,25 +2271,14 @@ impl OpenAIPreprocessor {
                             DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
                         }
 
-                        // Create annotation string
-                        let annotation = llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to serialize metrics: {}", e);
-                            Annotated::<()>::from_data(())
-                        });
-
                         let usage_requested = inner.response_generator.is_usage_enabled();
 
-                        // Audit decouples usage capture from the client's
-                        // include_usage preference. With an audit sink active we
-                        // emit a dedicated ANNOTATION_AUDIT_USAGE chunk that always
-                        // carries usage for the audit DeltaAggregator (the
-                        // EventConverter strips it entirely from the client), and
-                        // separately buffer the plain client usage chunk only when
-                        // include_usage was requested. With audit off the behavior is
-                        // identical to the non-audit path: a single
-                        // ANNOTATION_LLM_METRICS chunk whose `data` (the usage) is
-                        // forwarded to the client only when include_usage was set.
                         if inner.emit_audit_usage_chunk {
+                            // Audit on: emit a dedicated audit-usage chunk that
+                            // always carries usage for the audit DeltaAggregator
+                            // (the EventConverter strips it entirely from the
+                            // client), and buffer the plain client usage chunk only
+                            // when include_usage was requested.
                             if usage_requested {
                                 inner.pending_client_usage = Some(Annotated::<Resp> {
                                     id: None,
@@ -2324,6 +2289,11 @@ impl OpenAIPreprocessor {
                                 });
                             }
 
+                            let annotation =
+                                llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {
+                                    tracing::warn!("Failed to serialize metrics: {}", e);
+                                    Annotated::<()>::from_data(())
+                                });
                             let audit_usage = Annotated::<Resp> {
                                 id: None,
                                 data: Some(usage_chunk),
@@ -2331,34 +2301,25 @@ impl OpenAIPreprocessor {
                                 comment: annotation.comment,
                                 error: None,
                             };
-
-                            tracing::trace!(
-                                request_id = inner.context.id(),
-                                "Sending audit-only usage chunk, audit_usage: {:?}",
-                                audit_usage
-                            );
-
                             Some((audit_usage, inner))
                         } else {
+                            // Audit off: a single usage chunk; data is present only
+                            // when include_usage was requested. Metrics ride via the
+                            // typed (serde-skip) llm_metrics field for internal
+                            // observation, never reaching the client.
                             let data = if usage_requested {
                                 Some(usage_chunk)
                             } else {
                                 None
                             };
-                            let annotated_usage = Annotated::<Resp> {
+                            let mut annotated_usage = Annotated::<Resp> {
                                 id: None,
                                 data,
-                                event: Some(ANNOTATION_LLM_METRICS.to_string()),
-                                comment: annotation.comment,
+                                event: None,
+                                comment: None,
                                 error: None,
                             };
-
-                            tracing::trace!(
-                                request_id = inner.context.id(),
-                                "Sending final usage chunk for OpenAI compliance, annotated_usage: {:?}",
-                                annotated_usage
-                            );
-
+                            attach_llm_metrics(&mut annotated_usage, llm_metrics);
                             Some((annotated_usage, inner))
                         }
                     } else {
@@ -2552,12 +2513,26 @@ impl OpenAIPreprocessor {
         // - harmony / gpt_oss: `<|channel|>analysis<|message|>...<|end|>`.
         // - kimi_k2: `<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>`.
         // - kimi_k25: `</think>` (special token id 163607).
+        // - minimax_m3: `]<]minimax[>[` tool-call namespace tokens and
+        //   `<mm:think>` reasoning markers.
         matches!(
             tool_call_parser,
-            Some("gemma4") | Some("gemma-4") | Some("harmony") | Some("kimi_k2")
+            Some("gemma4")
+                | Some("gemma-4")
+                | Some("harmony")
+                | Some("kimi_k2")
+                | Some("minimax_m3")
+                | Some("minimax-m3")
+                | Some("minimax_m3_nom")
+                | Some("minimax-m3-nom")
         ) || matches!(
             reasoning_parser,
-            Some("gemma4") | Some("gemma-4") | Some("gpt_oss") | Some("kimi_k25")
+            Some("gemma4")
+                | Some("gemma-4")
+                | Some("gpt_oss")
+                | Some("kimi_k25")
+                | Some("minimax_m3")
+                | Some("minimax-m3")
         )
     }
 
@@ -2606,8 +2581,29 @@ impl OpenAIPreprocessor {
     fn skips_guided_json_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
         matches!(
             reasoning_parser,
-            Some("deepseek_v4" | "deepseek-v4" | "deepseekv4" | "glm45")
+            Some(
+                "deepseek_v4"
+                    | "deepseek-v4"
+                    | "deepseekv4"
+                    | "glm45"
+                    | "minimax_m3"
+                    | "minimax-m3"
+            )
         )
+    }
+
+    fn prompt_injected_reasoning_start(
+        reasoning_parser: Option<&str>,
+        formatted_prompt: Option<&str>,
+    ) -> bool {
+        let Some(prompt) = formatted_prompt.map(str::trim_end) else {
+            return false;
+        };
+
+        match reasoning_parser {
+            Some("minimax_m3") | Some("minimax-m3") => prompt.ends_with("<mm:think>"),
+            _ => prompt.ends_with("<think>"),
+        }
     }
 
     /// Check if reasoning parsing should be disabled based on per-request parameters.
@@ -2622,6 +2618,9 @@ impl OpenAIPreprocessor {
     ///   defined and enable_thinking` (truthy), so when callers explicitly set the
     ///   flag false the model emits no `<|channel>` markers and the parser would
     ///   only ever fall through.
+    /// For MiniMax M3: disabled when chat_template_args contains
+    ///   "thinking_mode": "disabled", matching SGLang's MiniMax M3 request
+    ///   convention.
     fn is_reasoning_disabled_by_request(
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
@@ -2667,6 +2666,14 @@ impl OpenAIPreprocessor {
                 if let Some(enabled) = dynamo_renderer::thinking_bool_from_args(chat_template_args)
                 {
                     return !enabled;
+                }
+                false
+            }
+            Some("minimax_m3") | Some("minimax-m3") => {
+                if let Some(args) = chat_template_args
+                    && let Some(mode) = args.get("thinking_mode").and_then(|v| v.as_str())
+                {
+                    return mode == "disabled";
                 }
                 false
             }
@@ -3379,8 +3386,8 @@ mod tests {
             decode_worker_id: Some(3),
             decode_dp_rank: Some(4),
             decode_worker_type: Some("decode".to_string()),
-            tokenize_latency: Some(Duration::from_millis(5)),
-            detokenize_total_latency: Some(Duration::from_micros(50)),
+            tokenize_latency: Some(std::time::Duration::from_millis(5)),
+            detokenize_total_latency: Some(std::time::Duration::from_micros(50)),
             detokenize_count: Some(6),
         }
     }
@@ -3516,6 +3523,18 @@ mod tests {
                 "kimi_k2 tool-call only → required \
                  (`<|tool_calls_section_begin|>` / `<|tool_calls_section_end|>` are special)",
             ),
+            (
+                Some("minimax_m3"),
+                Some("minimax_m3"),
+                true,
+                "minimax_m3 paired → required",
+            ),
+            (
+                Some("minimax-m3-nom"),
+                Some("minimax-m3"),
+                true,
+                "MiniMax M3 SGLang aliases → required",
+            ),
             (None, None, false, "no parsers → not required"),
         ];
         for (tool, reasoning, expected, desc) in cases {
@@ -3545,6 +3564,57 @@ mod tests {
         // forced-true but parser doesn't need special tokens → fine
         assert!(!f(Some(true), Some("hermes"), None));
         assert!(!f(Some(true), None, None));
+    }
+
+    #[test]
+    fn test_prompt_injected_reasoning_start_by_parser() {
+        let cases = [
+            (
+                Some("minimax_m3"),
+                Some("...<mm:think>\n"),
+                true,
+                "MiniMax M3 starts from <mm:think>",
+            ),
+            (
+                Some("minimax-m3"),
+                Some("...</mm:think>\n"),
+                false,
+                "MiniMax M3 prefilled end marker means not in reasoning",
+            ),
+            (
+                Some("minimax_m3"),
+                Some("...<think>\n"),
+                false,
+                "MiniMax M3 must not use generic <think>",
+            ),
+            (
+                Some("qwen3"),
+                Some("...<think>\n"),
+                true,
+                "Qwen-style templated <think> behavior remains",
+            ),
+            (
+                Some("deepseek_v4"),
+                Some("...<think>\n"),
+                true,
+                "existing <think> parser behavior remains",
+            ),
+            (
+                None,
+                Some("...<think>\n"),
+                true,
+                "legacy no-parser detection",
+            ),
+            (Some("minimax_m3"), None, false, "no prompt"),
+        ];
+
+        for (parser, prompt, expected, desc) in cases {
+            assert_eq!(
+                OpenAIPreprocessor::prompt_injected_reasoning_start(parser, prompt),
+                expected,
+                "FAILED: {desc}",
+            );
+        }
     }
 
     #[test]
@@ -3695,6 +3765,14 @@ mod tests {
             m.insert(
                 "thinking_mode".to_string(),
                 serde_json::Value::String("thinking".to_string()),
+            );
+            m
+        };
+        let thinking_mode_disabled = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "thinking_mode".to_string(),
+                serde_json::Value::String("disabled".to_string()),
             );
             m
         };
@@ -3897,6 +3975,30 @@ mod tests {
                 Some(&enable_thinking_false),
                 true,
                 "gemma-4 (hyphen alias) + enable_thinking=false → disabled",
+            ),
+            (
+                Some("minimax_m3"),
+                Some(&thinking_mode_disabled),
+                true,
+                "minimax_m3 + thinking_mode=disabled → disabled",
+            ),
+            (
+                Some("minimax-m3"),
+                Some(&thinking_mode_disabled),
+                true,
+                "minimax-m3 + thinking_mode=disabled → disabled",
+            ),
+            (
+                Some("minimax_m3"),
+                Some(&thinking_mode_thinking),
+                false,
+                "minimax_m3 + thinking_mode=thinking → enabled",
+            ),
+            (
+                Some("minimax_m3"),
+                None,
+                false,
+                "minimax_m3 + no args → enabled",
             ),
         ];
 

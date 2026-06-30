@@ -297,8 +297,8 @@ navigation:
             slug: agents
             path: agents/README.md
             contents:
-              - page: Trajectory IDs
-                path: agents/trajectory-ids.md
+              - page: Session IDs
+                path: agents/session-ids.md
               - page: Agent Tracing
                 path: agents/agent-tracing.md
               - page: Agent Simulation
@@ -320,6 +320,12 @@ navigation:
                 path: features/multimodal/encoder-disaggregation.md
               - page: Multimodal KV Routing
                 path: features/multimodal/multimodal-kv-routing.md
+              - page: SGLang Multimodal
+                path: features/multimodal/multimodal-sglang.md
+              - page: TensorRT-LLM Multimodal
+                path: features/multimodal/multimodal-trtllm.md
+              - page: vLLM Multimodal
+                path: features/multimodal/multimodal-vllm.md
           - section: Diffusion
             slug: diffusion
             path: features/diffusion/README.md
@@ -412,6 +418,8 @@ navigation:
                 path: components/router/router-concepts.md
               - page: Configuration and Tuning
                 path: components/router/router-configuration.md
+              - page: Deficit Round Robin Queue Scheduling
+                path: components/router/deficit-round-robin.md
               - page: Priority Scheduling
                 path: components/router/priority-scheduling.md
               - page: Disaggregated Serving

@@ -238,9 +238,9 @@ pub struct RequestTraceToolEventIngress {
     pub schema: RequestTraceSchema,
     pub event_type: RequestTraceEventType,
     pub event_time_unix_ms: u64,
-    pub trajectory_id: String,
+    pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_trajectory_id: Option<String>,
+    pub parent_session_id: Option<String>,
     pub tool: RequestTraceToolEvent,
 }
 
@@ -252,9 +252,9 @@ impl From<RequestTraceToolEventIngress> for RequestTraceRecord {
             event_time_unix_ms: ingress.event_time_unix_ms,
             event_source: Some(RequestTraceEventSource::Harness),
             agent_context: Some(AgentContext {
-                trajectory_id: ingress.trajectory_id,
-                parent_trajectory_id: ingress.parent_trajectory_id,
-                trajectory_final: None,
+                session_id: ingress.session_id,
+                parent_session_id: ingress.parent_session_id,
+                session_final: None,
                 kv_hints: None,
             }),
             request: None,

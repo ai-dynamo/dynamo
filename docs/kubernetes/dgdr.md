@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: DGDR Reference
+subtitle: Field reference for DynamoGraphDeploymentRequest, the deploy-by-intent generator that profiles and produces a DGD.
 ---
 
 A `DynamoGraphDeploymentRequest` (DGDR) is Dynamo's deploy-by-intent generator

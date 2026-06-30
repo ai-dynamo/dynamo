@@ -309,6 +309,15 @@ pub mod frontend_service {
     /// Number of in-flight (active) requests for a LoRA adapter
     pub const LORA_ACTIVE_REQUESTS: &str = "lora_active_requests";
 
+    /// Total LoRA loads (new placements) this controller tick
+    pub const LORA_CHURN_LOADS_TOTAL: &str = "lora_churn_loads_total";
+
+    /// Total LoRA unloads (removed placements) this controller tick
+    pub const LORA_CHURN_UNLOADS_TOTAL: &str = "lora_churn_unloads_total";
+
+    /// MCF solver overflow count (unplaceable replicas)
+    pub const LORA_OVERFLOW_COUNT: &str = "lora_overflow_count";
+
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
@@ -362,8 +371,11 @@ pub mod frontend_service {
         /// Model or resource not found (404)
         pub const NOT_FOUND: &str = "not_found";
 
-        /// Service overloaded, too many requests (503)
+        /// Service overloaded or rate limited (429 or 529)
         pub const OVERLOAD: &str = "overload";
+
+        /// Service unavailable because no backend worker can serve the request
+        pub const UNAVAILABLE: &str = "unavailable";
 
         /// Request cancelled by client or timeout
         pub const CANCELLED: &str = "cancelled";

@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::protocols::TokenIdType;
-use crate::protocols::agents::{AgentContextHeaderValues, agent_context_header_values};
+use crate::protocols::agents::{
+    AgentContextHeaderValues, agent_context_header_values, session_affinity_header_value,
+};
 use crate::protocols::common::llm_backend::PromptLogprobs;
 use crate::protocols::common::timing::TimingInfo;
 
@@ -63,25 +65,25 @@ where
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct KvHints {
-    pub evict_trajectory: bool,
+    pub evict_session: bool,
 }
 
 /// Identity metadata for agentic workloads.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentContext {
-    /// Schedulable reasoning/tool trajectory identifier.
-    pub trajectory_id: String,
+    /// Stable reasoning/tool session identifier.
+    pub session_id: String,
 
-    /// Optional parent trajectory for subagents.
+    /// Optional parent session for subagents.
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_trajectory_id: Option<String>,
+    pub parent_session_id: Option<String>,
 
     /// Optional terminal marker for lifecycle-aware internal consumers.
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub trajectory_final: Option<bool>,
+    pub session_final: Option<bool>,
 
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -234,25 +236,30 @@ pub fn parse_nvext(raw: Option<serde_json::Value>) -> anyhow::Result<Option<NvEx
         .map_err(|err| anyhow::anyhow!("invalid nvext: {err}"))
 }
 
-pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
-pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
-pub const HEADER_DP_RANK: &str = "x-dp-rank";
-/// Alias for data-parallel rank routing.
-pub const HEADER_DP_RANK_ALIAS: &str = "x-data-parallel-rank";
-pub const HEADER_PREFILL_DP_RANK: &str = "x-prefill-dp-rank";
+pub const HEADER_WORKER_INSTANCE_ID: &str = "x-dynamo-worker-instance-id";
+pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-dynamo-prefill-instance-id";
+pub const HEADER_DP_RANK: &str = "x-dynamo-dp-rank";
+pub const HEADER_PREFILL_DP_RANK: &str = "x-dynamo-prefill-dp-rank";
 pub const HEADER_REQUEST_PRIORITY: &str = "x-dynamo-request-priority";
 pub const HEADER_REQUEST_STRICT_PRIORITY: &str = "x-dynamo-request-strict-priority";
+// Compatibility aliases for the original unprefixed names. Future agents may remove these after
+// the deprecation window.
+pub const HEADER_WORKER_INSTANCE_ID_ALIAS: &str = "x-worker-instance-id";
+pub const HEADER_PREFILL_INSTANCE_ID_ALIAS: &str = "x-prefill-instance-id";
+pub const HEADER_DP_RANK_ALIAS: &str = "x-dp-rank";
+pub const HEADER_DATA_PARALLEL_RANK_ALIAS: &str = "x-data-parallel-rank";
+pub const HEADER_PREFILL_DP_RANK_ALIAS: &str = "x-prefill-dp-rank";
 const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
 impl From<AgentContextHeaderValues> for AgentContext {
     fn from(values: AgentContextHeaderValues) -> Self {
-        let kv_hints = (values.trajectory_final == Some(true)).then_some(KvHints {
-            evict_trajectory: true,
+        let kv_hints = (values.session_final == Some(true)).then_some(KvHints {
+            evict_session: true,
         });
         Self {
-            trajectory_id: values.trajectory_id,
-            parent_trajectory_id: values.parent_trajectory_id,
-            trajectory_final: values.trajectory_final,
+            session_id: values.session_id,
+            parent_session_id: values.parent_session_id,
+            session_final: values.session_final,
             kv_hints,
         }
     }
@@ -260,17 +267,36 @@ impl From<AgentContextHeaderValues> for AgentContext {
 
 pub const AGENT_CONTEXT_CONTEXT_KEY: &str = "dynamo.llm.agent_context";
 
+pub const SESSION_AFFINITY_CONTEXT_KEY: &str = "dynamo.llm.session_affinity";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionAffinityId(String);
+
+impl SessionAffinityId {
+    pub(crate) fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
     agent_context_header_values(headers).map(AgentContext::from)
+}
+
+pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffinityId> {
+    session_affinity_header_value(headers).map(SessionAffinityId::new)
 }
 
 /// Apply HTTP routing header overrides to nvext.
 ///
 /// Header mappings:
-/// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
-/// - `x-prefill-instance-id` -> `prefill_worker_id`
-/// - `x-dp-rank` -> `dp_rank` (decode worker's DP rank)
-/// - `x-prefill-dp-rank` -> `prefill_dp_rank`
+/// - `x-dynamo-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
+/// - `x-dynamo-prefill-instance-id` -> `prefill_worker_id`
+/// - `x-dynamo-dp-rank` -> `dp_rank` (decode worker's DP rank)
+/// - `x-dynamo-prefill-dp-rank` -> `prefill_dp_rank`
 /// - `x-dynamo-request-priority` -> `agent_hints.priority`
 /// - `x-dynamo-request-strict-priority` -> `agent_hints.strict_priority`
 ///
@@ -279,22 +305,26 @@ pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
 pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap) -> Option<NvExt> {
     let worker_id = headers
         .get(HEADER_WORKER_INSTANCE_ID)
+        .or_else(|| headers.get(HEADER_WORKER_INSTANCE_ID_ALIAS))
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
     let prefill_id = headers
         .get(HEADER_PREFILL_INSTANCE_ID)
+        .or_else(|| headers.get(HEADER_PREFILL_INSTANCE_ID_ALIAS))
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
     let dp_rank = headers
         .get(HEADER_DP_RANK)
         .or_else(|| headers.get(HEADER_DP_RANK_ALIAS))
+        .or_else(|| headers.get(HEADER_DATA_PARALLEL_RANK_ALIAS))
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
 
     let prefill_dp_rank = headers
         .get(HEADER_PREFILL_DP_RANK)
+        .or_else(|| headers.get(HEADER_PREFILL_DP_RANK_ALIAS))
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
     let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
@@ -591,9 +621,10 @@ pub(crate) fn validate_completion_token_ids_single_choice(
 mod tests {
     use super::*;
     use crate::protocols::agents::{
-        HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID,
-        HEADER_DYNAMO_PARENT_TRAJECTORY_ID, HEADER_DYNAMO_TRAJECTORY_FINAL,
-        HEADER_DYNAMO_TRAJECTORY_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
+        HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID, HEADER_DYNAMO_PARENT_SESSION_ID,
+        HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID,
+        HEADER_OPENCODE_SESSION_ID,
     };
 
     #[test]
@@ -673,9 +704,9 @@ mod tests {
     #[test]
     fn nvext_agent_context_is_rejected() {
         for json in [
-            r#"{"agent_context":{"trajectory_id":"run-123"}}"#,
-            r#"{"agent_context":{"trajectory_id":"run-123","parent_trajectory_id":"root-1"}}"#,
-            r#"{"agent_context":{"trajectory_id":"run-123","trajectory_final":true}}"#,
+            r#"{"agent_context":{"session_id":"run-123"}}"#,
+            r#"{"agent_context":{"session_id":"run-123","parent_session_id":"root-1"}}"#,
+            r#"{"agent_context":{"session_id":"run-123","session_final":true}}"#,
         ] {
             let err = serde_json::from_str::<NvExt>(json).unwrap_err();
             assert!(err.to_string().contains("unknown field `agent_context`"));
@@ -727,6 +758,10 @@ mod tests {
         headers.insert(HEADER_PREFILL_INSTANCE_ID, "456".parse().unwrap());
         headers.insert(HEADER_DP_RANK, "3".parse().unwrap());
         headers.insert(HEADER_PREFILL_DP_RANK, "5".parse().unwrap());
+        headers.insert(HEADER_WORKER_INSTANCE_ID_ALIAS, "1".parse().unwrap());
+        headers.insert(HEADER_PREFILL_INSTANCE_ID_ALIAS, "2".parse().unwrap());
+        headers.insert(HEADER_DP_RANK_ALIAS, "4".parse().unwrap());
+        headers.insert(HEADER_PREFILL_DP_RANK_ALIAS, "6".parse().unwrap());
 
         let result = apply_header_routing_overrides(None, &headers).unwrap();
 
@@ -772,6 +807,32 @@ mod tests {
     }
 
     #[test]
+    fn apply_header_routing_overrides_supports_unprefixed_aliases() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_WORKER_INSTANCE_ID_ALIAS, "123".parse().unwrap());
+        headers.insert(HEADER_PREFILL_INSTANCE_ID_ALIAS, "456".parse().unwrap());
+        headers.insert(HEADER_DP_RANK_ALIAS, "3".parse().unwrap());
+        headers.insert(HEADER_PREFILL_DP_RANK_ALIAS, "5".parse().unwrap());
+
+        let result = apply_header_routing_overrides(None, &headers).unwrap();
+
+        assert_eq!(result.backend_instance_id, Some(123));
+        assert_eq!(result.decode_worker_id, Some(123));
+        assert_eq!(result.prefill_worker_id, Some(456));
+        assert_eq!(result.dp_rank, Some(3));
+        assert_eq!(result.prefill_dp_rank, Some(5));
+
+        headers.remove(HEADER_DP_RANK_ALIAS);
+        headers.insert(HEADER_DATA_PARALLEL_RANK_ALIAS, "4".parse().unwrap());
+        assert_eq!(
+            apply_header_routing_overrides(None, &headers)
+                .unwrap()
+                .dp_rank,
+            Some(4)
+        );
+    }
+
+    #[test]
     fn agent_context_from_headers_derives_agent_context_table() {
         use axum::http::{HeaderMap, HeaderName};
 
@@ -790,11 +851,10 @@ mod tests {
                 Some("parent-run-1"),
                 Some("parent-run-1"),
             ),
-            (HEADER_DYNAMO_TRAJECTORY_ID, "generic-run-1", None, None),
+            (HEADER_DYNAMO_SESSION_ID, "generic-run-1", None, None),
         ];
 
-        for (header_name, header_value, parent_header_value, expected_parent_trajectory_id) in cases
-        {
+        for (header_name, header_value, parent_header_value, expected_parent_session_id) in cases {
             let mut headers = HeaderMap::new();
             headers.insert(
                 header_name.parse::<HeaderName>().unwrap(),
@@ -805,18 +865,67 @@ mod tests {
             }
 
             let agent_context = agent_context_from_headers(&headers).unwrap();
-            assert_eq!(agent_context.trajectory_id.as_str(), header_value);
+            assert_eq!(agent_context.session_id.as_str(), header_value);
             assert_eq!(
-                agent_context.parent_trajectory_id.as_deref(),
-                expected_parent_trajectory_id
+                agent_context.parent_session_id.as_deref(),
+                expected_parent_session_id
             );
-            assert_eq!(agent_context.trajectory_final, None);
+            assert_eq!(agent_context.session_final, None);
             assert_eq!(agent_context.kv_hints, None);
         }
     }
 
     #[test]
-    fn agent_context_from_headers_uses_claude_agent_id_as_child_trajectory() {
+    fn session_affinity_requires_explicit_dynamo_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_CLAUDE_CODE_SESSION_ID,
+            "claude-session".parse().unwrap(),
+        );
+        headers.insert(HEADER_CODEX_SESSION_ID, "codex-session".parse().unwrap());
+        headers.insert(
+            HEADER_OPENCODE_SESSION_ID,
+            "opencode-session".parse().unwrap(),
+        );
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "canonical"
+        );
+
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
+        assert!(session_affinity_from_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn native_agent_session_does_not_enable_affinity() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_CLAUDE_CODE_SESSION_ID,
+            "claude-session".parse().unwrap(),
+        );
+        headers.insert(HEADER_CLAUDE_CODE_AGENT_ID, "claude-agent".parse().unwrap());
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "claude-agent");
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        headers.insert(
+            HEADER_DYNAMO_SESSION_ID,
+            "affinity-session".parse().unwrap(),
+        );
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "affinity-session");
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "affinity-session"
+        );
+    }
+
+    #[test]
+    fn agent_context_from_headers_uses_claude_agent_lineage() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
@@ -826,47 +935,91 @@ mod tests {
 
         let agent_context = agent_context_from_headers(&headers).unwrap();
 
-        assert_eq!(agent_context.trajectory_id, "claude-agent");
+        assert_eq!(agent_context.session_id, "claude-agent");
         assert_eq!(
-            agent_context.parent_trajectory_id.as_deref(),
+            agent_context.parent_session_id.as_deref(),
             Some("claude-session")
         );
+
+        headers.insert(
+            HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
+            "claude-parent-agent".parse().unwrap(),
+        );
+        assert_eq!(
+            agent_context_from_headers(&headers)
+                .unwrap()
+                .parent_session_id
+                .as_deref(),
+            Some("claude-parent-agent")
+        );
+
+        headers.remove(HEADER_CLAUDE_CODE_AGENT_ID);
+        let root_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(root_context.session_id, "claude-session");
+        assert_eq!(root_context.parent_session_id, None);
     }
 
     #[test]
     fn agent_context_from_headers_reads_dynamo_parent_and_final() {
         let mut headers = HeaderMap::new();
-        headers.insert(HEADER_DYNAMO_TRAJECTORY_ID, "generic-run".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "generic-run".parse().unwrap());
         headers.insert(
-            HEADER_DYNAMO_PARENT_TRAJECTORY_ID,
+            HEADER_DYNAMO_PARENT_SESSION_ID,
             "generic-parent".parse().unwrap(),
         );
-        headers.insert(HEADER_DYNAMO_TRAJECTORY_FINAL, "true".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_SESSION_FINAL, "true".parse().unwrap());
 
         let agent_context = agent_context_from_headers(&headers).unwrap();
 
-        assert_eq!(agent_context.trajectory_id, "generic-run");
+        assert_eq!(agent_context.session_id, "generic-run");
         assert_eq!(
-            agent_context.parent_trajectory_id.as_deref(),
+            agent_context.parent_session_id.as_deref(),
             Some("generic-parent")
         );
-        assert_eq!(agent_context.trajectory_final, Some(true));
+        assert_eq!(agent_context.session_final, Some(true));
         assert_eq!(
             agent_context.kv_hints,
             Some(KvHints {
-                evict_trajectory: true
+                evict_session: true
             })
         );
 
-        headers.insert(HEADER_DYNAMO_TRAJECTORY_FINAL, "false".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_SESSION_FINAL, "false".parse().unwrap());
         assert_eq!(agent_context_from_headers(&headers).unwrap().kv_hints, None);
     }
 
     #[test]
-    fn apply_header_routing_overrides_ignores_non_identity_session_headers() {
+    fn dynamo_session_headers_override_agent_native_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_CLAUDE_CODE_SESSION_ID,
+            "claude-session".parse().unwrap(),
+        );
+        headers.insert(HEADER_CLAUDE_CODE_AGENT_ID, "claude-agent".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "dynamo-session".parse().unwrap());
+        headers.insert(
+            HEADER_DYNAMO_PARENT_SESSION_ID,
+            "dynamo-parent".parse().unwrap(),
+        );
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+
+        assert_eq!(agent_context.session_id, "dynamo-session");
+        assert_eq!(
+            agent_context.parent_session_id.as_deref(),
+            Some("dynamo-parent")
+        );
+    }
+
+    #[test]
+    fn apply_header_routing_overrides_ignores_session_identity_headers() {
         use axum::http::{HeaderMap, HeaderName};
 
-        for header_name in ["x-session-affinity", "session_id"] {
+        for header_name in [
+            HEADER_DYNAMO_SESSION_ID,
+            HEADER_DYNAMO_PARENT_SESSION_ID,
+            HEADER_DYNAMO_SESSION_FINAL,
+        ] {
             let mut headers = HeaderMap::new();
             headers.insert(
                 header_name.parse::<HeaderName>().unwrap(),

@@ -50,6 +50,60 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out
 }
 
+/// Resolve the static architectural context limit from local HF metadata.
+///
+/// `config.json` is authoritative when it declares `max_position_embeddings`;
+/// multimodal configs may instead nest it under `text_config`; tokenizer
+/// `model_max_length` is only a last resort. Missing fields fall through to the
+/// next source, but malformed present fields return an error so bad model
+/// metadata cannot silently resize request validation and planner limits.
+///
+/// This was added for the MiniMax-M3-VL : its multimodal
+/// Hugging Face config keeps the language model context under
+/// `config.json.text_config.max_position_embeddings`
+fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Result<Option<u32>> {
+    let tokenizer_context_length = || {
+        crate::file_json_field(
+            &local_path.join("tokenizer_config.json"),
+            "model_max_length",
+        )
+        .ok()
+    };
+
+    let config_path = local_path.join("config.json");
+    let config_json = match std::fs::read_to_string(&config_path) {
+        Ok(config_json) => Some(config_json),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err).with_context(|| format!("Failed to read {}", config_path.display()));
+        }
+    };
+    let Some(config_json) = config_json else {
+        return Ok(tokenizer_context_length().filter(|context_length| *context_length > 0));
+    };
+    let config: serde_json::Value = serde_json::from_str(&config_json)
+        .with_context(|| format!("Failed to parse JSON from file: {}", config_path.display()))?;
+
+    let context_length = match config.get("max_position_embeddings") {
+        Some(value) => Some(
+            serde_json::from_value(value.clone())
+                .context("Failed to deserialize max_position_embeddings")?,
+        ),
+        None => match config
+            .get("text_config")
+            .and_then(|text_config| text_config.get("max_position_embeddings"))
+        {
+            Some(value) => Some(
+                serde_json::from_value(value.clone())
+                    .context("Failed to deserialize text_config.max_position_embeddings")?,
+            ),
+            None => tokenizer_context_length(),
+        },
+    };
+
+    Ok(context_length.filter(|context_length| *context_length > 0))
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelInfoType {
@@ -962,8 +1016,9 @@ impl ModelDeploymentCard {
     /// Load the tokenizer as a generic, backend-agnostic `Tokenizer` trait object.
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
-    /// Env-var controls:
-    /// - `DYN_TOKENIZER=fastokens` — use `fastokens` as the encoding backend
+    /// Tokenizer backend controls:
+    /// - `runtime_config.tokenizer_backend=fastokens` — use `fastokens` as the encoding backend
+    /// - `DYN_TOKENIZER=fastokens` — fallback backend for callers without explicit runtime config
     /// - `DYN_TOKENIZER_CACHE=1` — wrap the tokenizer in an L1 prefix cache that records
     ///   tokenizations at special-token boundaries (massive speed-up for shared chat
     ///   prefixes; default off, zero cost when unset)
@@ -974,18 +1029,10 @@ impl ModelDeploymentCard {
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
-        let use_fast = match std::env::var("DYN_TOKENIZER") {
-            Ok(v) if v == "fastokens" => true,
-            Ok(v) if v == "default" || v.is_empty() => false,
-            Ok(v) => {
-                tracing::warn!(
-                    value = %v,
-                    "Unrecognized DYN_TOKENIZER value, expected 'fastokens' or 'default'; falling back to default"
-                );
-                false
-            }
-            Err(_) => false,
-        };
+        let use_fast = self
+            .runtime_config
+            .effective_tokenizer_backend()
+            .is_fastokens();
 
         let cache_enabled = matches!(
             std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref(),
@@ -1438,18 +1485,12 @@ impl ModelDeploymentCard {
     ) -> anyhow::Result<Self> {
         let local_path = local_path.as_ref();
 
-        // This is usually the right choice
+        // Prefer the model config's architectural context length. Some
+        // multimodal HF configs, including MiniMax-M3-VL, store the language
+        // model config under `text_config`; tokenizer `model_max_length` can
+        // be a much larger sentinel/default and must be a last resort.
         let architectural_max_context_length =
-            crate::file_json_field(&local_path.join("config.json"), "max_position_embeddings")
-                // But sometimes this is
-                .or_else(|_| {
-                    crate::file_json_field(
-                        &local_path.join("tokenizer_config.json"),
-                        "model_max_length",
-                    )
-                })
-                .ok()
-                .filter(|context_length| *context_length > 0);
+            architectural_max_context_length_from_repo(local_path)?;
 
         let is_mistral_model = is_exclusively_mistral_model(local_path);
 
@@ -2561,6 +2602,87 @@ mod tests {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+
+    #[test]
+    fn architectural_context_prefers_config_then_text_config_then_tokenizer() -> anyhow::Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": 4096}"#,
+        )?;
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"model_max_length": 131072}"#,
+        )?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(4096)
+        );
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": 8192}}"#,
+        )?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(8192)
+        );
+
+        std::fs::write(dir.path().join("config.json"), r#"{"model_type": "mock"}"#)?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        std::fs::write(dir.path().join("config.json"), r#"{"text_config": {}}"#)?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        std::fs::remove_file(dir.path().join("config.json"))?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn architectural_context_errors_on_malformed_present_fields() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"model_max_length": 131072}"#,
+        )?;
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": "not-a-number"}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize max_position_embeddings"),
+            "{err:?}"
+        );
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": "not-a-number"}}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize text_config.max_position_embeddings"),
+            "{err:?}"
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn effective_context_prefers_runtime_then_architecture_then_unknown() {

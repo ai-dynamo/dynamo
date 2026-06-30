@@ -81,7 +81,12 @@ pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> O
     // `capture_enabled()` is `policy.enabled && CAPTURE_ACTIVE`: it additionally
     // requires the audit subsystem to have been initialized, so a stale handle
     // can't be created before/after the audit lifecycle.
-    create_handle_with_config(req, request_id, config::capture_enabled(), policy.force_logging)
+    create_handle_with_config(
+        req,
+        request_id,
+        config::capture_enabled(),
+        policy.force_logging,
+    )
 }
 
 fn create_handle_with_config(

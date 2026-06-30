@@ -61,19 +61,19 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
         fallbacks: vec![],
         headers: vec![
             (
-                "x-worker-instance-id".to_string(),
+                "x-dynamo-worker-instance-id".to_string(),
                 "2173882273627495".to_string(),
             ),
-            ("x-dp-rank".to_string(), "0".to_string()),
+            ("x-dynamo-dp-rank".to_string(), "0".to_string()),
             (
                 "x-dynamo-routing-mode".to_string(),
                 "disaggregated".to_string(),
             ),
             (
-                "x-prefill-instance-id".to_string(),
+                "x-dynamo-prefill-instance-id".to_string(),
                 "966999679619852".to_string(),
             ),
-            ("x-prefill-dp-rank".to_string(), "0".to_string()),
+            ("x-dynamo-prefill-dp-rank".to_string(), "0".to_string()),
         ],
         token_ids: Some(vec![1, 2, 3, 4, 5]),
     };
@@ -201,7 +201,7 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
         "destination endpoint header"
     );
     assert_eq!(
-        set_headers.get("x-worker-instance-id"),
+        set_headers.get("x-dynamo-worker-instance-id"),
         Some(&"2173882273627495".to_string()),
         "decode worker ID (decimal)"
     );
@@ -211,17 +211,17 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
         "routing mode"
     );
     assert_eq!(
-        set_headers.get("x-prefill-instance-id"),
+        set_headers.get("x-dynamo-prefill-instance-id"),
         Some(&"966999679619852".to_string()),
         "prefill worker ID (decimal)"
     );
     assert_eq!(
-        set_headers.get("x-dp-rank"),
+        set_headers.get("x-dynamo-dp-rank"),
         Some(&"0".to_string()),
         "decode dp_rank"
     );
     assert_eq!(
-        set_headers.get("x-prefill-dp-rank"),
+        set_headers.get("x-dynamo-prefill-dp-rank"),
         Some(&"0".to_string()),
         "prefill dp_rank"
     );

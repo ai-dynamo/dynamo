@@ -68,8 +68,8 @@ class DynamoSGLangArgGroup(ArgGroup):
             env_var="DYN_SGL_MULTIMODAL_WORKER",
             default=False,
             help=(
-                "DEPRECATED: use --enable-multimodal with "
-                "--disaggregation-mode=pd/prefill/decode."
+                "DEPRECATED: use --enable-multimodal --dedicated-mm-encoder "
+                "with --disaggregation-mode=pd/prefill/decode."
             ),
         )
         add_negatable_bool_argument(
@@ -78,9 +78,22 @@ class DynamoSGLangArgGroup(ArgGroup):
             env_var="DYN_SGL_ENABLE_MULTIMODAL",
             default=False,
             help=(
-                "Enable multimodal processing. When an explicit "
-                "--disaggregation-mode is provided, this selects the matching "
-                "Dynamo multimodal EPD worker role."
+                "Enable multimodal processing. This is a capability flag for "
+                "raw multimodal inputs; use --dedicated-mm-encoder when this "
+                "worker is part of the internal encode-worker topology."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--dedicated-mm-encoder",
+            env_var="DYN_SGL_DEDICATED_MM_ENCODER",
+            default=False,
+            help=(
+                "Select the internal SGLang topology with a dedicated "
+                "multimodal encode worker. Required on PD/P/D workers that "
+                "consume or forward precomputed embeddings from that encode "
+                "worker. Do not use it for native P/D workers that receive "
+                "raw media metadata."
             ),
         )
 
@@ -160,6 +173,7 @@ class DynamoSGLangConfig(ConfigBase):
     multimodal_encode_worker: bool
     multimodal_worker: bool
     enable_multimodal: bool = False
+    dedicated_mm_encoder: bool = False
     embedding_transfer_mode: EmbeddingTransferMode
     embedding_worker: bool
     image_diffusion_worker: bool
@@ -195,20 +209,33 @@ class DynamoSGLangConfig(ConfigBase):
         if self.multimodal_worker:
             _warn_deprecated(
                 "--multimodal-worker is deprecated; use --enable-multimodal "
-                "with --disaggregation-mode=pd, --disaggregation-mode=prefill, "
-                "or --disaggregation-mode=decode. This release will map the "
-                "legacy flag to the new arguments."
+                "--dedicated-mm-encoder with --disaggregation-mode=pd, "
+                "--disaggregation-mode=prefill, or --disaggregation-mode=decode. "
+                "This release will map the legacy flag to the new arguments."
             )
             self.enable_multimodal = True
 
+        self.validate_dedicated_mm_encoder()
+
+    def validate_dedicated_mm_encoder(self) -> None:
+        if self.dedicated_mm_encoder and not self.enable_multimodal:
+            raise ValueError(
+                "--dedicated-mm-encoder requires --enable-multimodal. The "
+                "dedicated encoder flag selects the internal encode-worker "
+                "topology; it is not a standalone multimodal capability switch."
+            )
+
     def validate_multimodal_topology(self) -> None:
         if self.frontend_decoding and (
-            self.multimodal_encode_worker or self.multimodal_worker
+            self.multimodal_encode_worker
+            or self.multimodal_worker
+            or self.dedicated_mm_encoder
         ):
             raise ValueError(
                 "--frontend-decoding is incompatible with the EPD multimodal topology "
-                "(--multimodal-encode-worker / --multimodal-worker). The encode worker "
-                "needs URLs to run MMEncoder, while --frontend-decoding ships pre-decoded "
-                "pixels. Use --frontend-decoding on the default aggregated decode worker "
-                "(no --multimodal-* flag) instead."
+                "(--dedicated-mm-encoder / --multimodal-encode-worker / "
+                "--multimodal-worker). The encode worker needs URLs to run "
+                "MMEncoder, while --frontend-decoding ships pre-decoded pixels. "
+                "Use --frontend-decoding on a native worker that does not use "
+                "the dedicated encode-worker topology instead."
             )

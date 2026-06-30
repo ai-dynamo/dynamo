@@ -11,12 +11,13 @@ inputs:
     required: false
     default: ''
   vcluster_namespace:
-    description: 'Host namespace where the vCluster will be created (auto-generated if empty)'
+    description: 'Host namespace where the vCluster will be created. When empty, aws-dev-01 and aws-dev-02 use the shared deploy-test namespace and other clusters use a per-run namespace.'
     required: false
     default: ''
   registry:
-    description: 'Container registry hostname (e.g. myregistry.azurecr.io)'
-    required: true
+    description: 'Container registry hostname (e.g. myregistry.azurecr.io). When empty, the Helm chart default image (nvcr.io/nvidia/ai-dynamo/kubernetes-operator) is used.'
+    required: false
+    default: ''
   operator_tag:
     description: 'Operator image tag (default: main-operator)'
     required: false
@@ -37,6 +38,10 @@ inputs:
     description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
     required: false
     default: 'v1.32.13'
+  vcluster_host_priority_class:
+    description: 'Host PriorityClass to set on pods synced from the vCluster. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-01 or aws-dev-02; use an empty value to disable.'
+    required: false
+    default: 'auto'
   checkpoint_enabled:
     description: 'Enable operator checkpoint/restore injection'
     required: false
@@ -68,10 +73,21 @@ outputs:
   operator_tag:
     description: 'Resolved operator tag'
     value: ${{ steps.resolve-names.outputs.operator_tag }}
+  vcluster_host_priority_class:
+    description: 'Resolved host PriorityClass applied to pods synced from the vCluster'
+    value: ${{ steps.resolve-vcluster-priority.outputs.priority_class }}
 
 runs:
   using: "composite"
   steps:
+    - name: Setup host kubeconfig
+      if: inputs.kubeconfig_base64 != ''
+      shell: bash
+      run: |
+        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig-host
+        chmod 600 ${{ github.workspace }}/.kubeconfig-host
+        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig-host" >> $GITHUB_ENV
+
     - name: Resolve names
       id: resolve-names
       shell: bash
@@ -86,7 +102,14 @@ runs:
           echo "vcluster_name=ci-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
         fi
 
-        if [ -n "${INPUT_NAMESPACE}" ]; then
+        CURRENT_CONTEXT="${KUBE_CONTEXT:-}"
+        if [ -z "${CURRENT_CONTEXT}" ]; then
+          CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
+        fi
+
+        if [[ -z "${INPUT_NAMESPACE}" && ( "${CURRENT_CONTEXT}" == *aws-dev-01* || "${CURRENT_CONTEXT}" == *aws-dev-02* ) ]]; then
+          echo "namespace=dynamo-deploy-test" >> "$GITHUB_OUTPUT"
+        elif [ -n "${INPUT_NAMESPACE}" ]; then
           echo "namespace=${INPUT_NAMESPACE}" >> "$GITHUB_OUTPUT"
         else
           BRANCH_SANITIZED="${BRANCH//\//-}"
@@ -96,16 +119,7 @@ runs:
           echo "namespace=gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt" >> "$GITHUB_OUTPUT"
           echo "namespace_suffix=${BRANCH_SANITIZED}" >> "$GITHUB_OUTPUT"
         fi
-
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
-
-    - name: Setup host kubeconfig
-      if: inputs.kubeconfig_base64 != ''
-      shell: bash
-      run: |
-        echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig-host
-        chmod 600 ${{ github.workspace }}/.kubeconfig-host
-        echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig-host" >> $GITHUB_ENV
 
     - name: Install vCluster CLI
       uses: ./.github/actions/install-vcluster-cli
@@ -120,18 +134,70 @@ runs:
         set -euo pipefail
         set -x
         kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-
         LABELS=(
-          nscleanup/enabled=true \
-          nscleanup/ttl=7200 \
-          dynamo.github/run-id="${{ github.run_id }}" \
-          ngc-api=enabled \
+          ngc-api=enabled
           nvcr-imagepull=enabled
         )
-        if [[ -n "${NAMESPACE_SUFFIX}" ]]; then
-          LABELS+=(dynamo.github/cleanup-key="${NAMESPACE_SUFFIX}")
+        if [[ "${NAMESPACE}" != "dynamo-deploy-test" ]]; then
+          LABELS+=(
+            nscleanup/enabled=true
+            nscleanup/ttl=7200
+            dynamo.github/run-id="${{ github.run_id }}"
+          )
+          if [[ -n "${NAMESPACE_SUFFIX}" ]]; then
+            LABELS+=(dynamo.github/cleanup-key="${NAMESPACE_SUFFIX}")
+          fi
         fi
         kubectl label namespaces "${NAMESPACE}" "${LABELS[@]}" --overwrite
+        echo "::endgroup::"
+
+    - name: Delete existing vCluster for this run
+      shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
+      run: |
+        echo "Checking for existing vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
+        # github.run_id is stable across re-runs, so this catches leftovers from
+        # a failed or canceled attempt of the same workflow run.
+        if kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "Deleting existing vCluster: ${VCLUSTER_NAME}"
+          vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" 2>&1 || \
+            kubectl delete statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" --ignore-not-found 2>&1 || true
+          kubectl wait "statefulset/${VCLUSTER_NAME}" -n "${NAMESPACE}" \
+            --for=delete --timeout=120s 2>/dev/null || true
+        else
+          echo "No existing vCluster named ${VCLUSTER_NAME} found."
+        fi
+
+    - name: Resolve vCluster host priority class
+      id: resolve-vcluster-priority
+      shell: bash
+      env:
+        INPUT_PRIORITY_CLASS: ${{ inputs.vcluster_host_priority_class }}
+      run: |
+        echo "::group::Resolve vCluster host priority class"
+        PRIORITY_CLASS="${INPUT_PRIORITY_CLASS}"
+        CURRENT_CONTEXT="${KUBE_CONTEXT:-}"
+        if [ -z "${CURRENT_CONTEXT}" ]; then
+          CURRENT_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"
+        fi
+
+        if [ "${PRIORITY_CLASS}" = "auto" ]; then
+          PRIORITY_CLASS=""
+          if [[ "${CURRENT_CONTEXT}" == *aws-dev-01* || "${CURRENT_CONTEXT}" == *aws-dev-02* ]]; then
+            PRIORITY_CLASS="ci-nightly-high-priority"
+          fi
+        fi
+
+        if [ -n "${PRIORITY_CLASS}" ]; then
+          kubectl get priorityclass "${PRIORITY_CLASS}" >/dev/null
+          echo "Using host PriorityClass for vCluster synced pods: ${PRIORITY_CLASS}"
+        else
+          echo "No host PriorityClass override for vCluster synced pods."
+        fi
+
+        echo "priority_class=${PRIORITY_CLASS}" >> "$GITHUB_OUTPUT"
         echo "::endgroup::"
 
     - name: Create vCluster
@@ -139,13 +205,16 @@ runs:
       env:
         VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        VCLUSTER_HOST_PRIORITY_CLASS: ${{ steps.resolve-vcluster-priority.outputs.priority_class }}
         CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
       run: |
         echo "::group::Create vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
+        set -euo pipefail
         set -x
-        # The K8s version must be supported by the kr8s Python library used in deploy tests.
-        # This is independent of the host cluster version.
         VCLUSTER_HELM_ARGS=()
+        if [ -n "${VCLUSTER_HOST_PRIORITY_CLASS}" ]; then
+          VCLUSTER_HELM_ARGS+=(--set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}")
+        fi
         if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
           VCLUSTER_CHECKPOINT_VALUES="$(mktemp)"
           cat > "${VCLUSTER_CHECKPOINT_VALUES}" <<'EOF'
@@ -163,8 +232,10 @@ runs:
           VCLUSTER_HELM_ARGS+=(--values "${VCLUSTER_CHECKPOINT_VALUES}")
         fi
 
-        vcluster create ${VCLUSTER_NAME} \
-          --namespace ${NAMESPACE} \
+        # The K8s version must be supported by the kr8s Python library used in deploy tests.
+        # This is independent of the host cluster version.
+        vcluster create "${VCLUSTER_NAME}" \
+          --namespace "${NAMESPACE}" \
           --connect=false \
           --upgrade \
           --set controlPlane.distro.k8s.enabled=true \
@@ -261,13 +332,32 @@ runs:
         CHECKPOINT_STORAGE_ACCESS_MODE: ${{ inputs.checkpoint_storage_access_mode }}
       run: |
         echo "::group::Install Dynamo platform via Helm (inside vCluster)"
+        set -euo pipefail
         set -x
-        OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
-        echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
-
         helm repo add bitnami https://charts.bitnami.com/bitnami
         cd deploy/helm/charts/platform/
         helm dep build .
+
+        IMAGE_ARGS=()
+        if [ -n "${REGISTRY}" ]; then
+          OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
+          echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
+          # OPERATOR_TAG is a mutable, floating tag (e.g. main-operator) that is
+          # re-pushed on every main build. The chart default
+          # imagePullPolicy=IfNotPresent means a CI node that cached an older copy
+          # never re-pulls it, so a PR that doesn't rebuild the operator can run a
+          # stale crd-apply/manager binary (e.g. missing a newly-added flag) and
+          # land in CrashLoopBackOff. Force Always so the floating tag is refreshed
+          # on every pod start; the chart applies this value to both the manager
+          # and the crd-apply init container.
+          IMAGE_ARGS+=(
+            --set dynamo-operator.controllerManager.manager.image.repository="${OPERATOR_REPO}"
+            --set dynamo-operator.controllerManager.manager.image.tag="${OPERATOR_TAG}"
+            --set dynamo-operator.controllerManager.manager.image.pullPolicy=Always
+          )
+        else
+          echo "Using default operator image from Helm chart (nvcr.io/nvidia/ai-dynamo/kubernetes-operator)"
+        fi
 
         CHECKPOINT_HELM_ARGS=(
           --set dynamo-operator.checkpoint.enabled="${CHECKPOINT_ENABLED}"
@@ -285,21 +375,61 @@ runs:
 
         KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
         helm upgrade --install dynamo-platform . --namespace default \
-          --set dynamo-operator.controllerManager.manager.image.repository=${OPERATOR_REPO} \
-          --set dynamo-operator.controllerManager.manager.image.tag=${OPERATOR_TAG} \
+          "${IMAGE_ARGS[@]}" \
           --set dynamo-operator.gpuDiscovery.enabled=false \
           "${CHECKPOINT_HELM_ARGS[@]}" \
           --set global.grove.install=true \
           --set global.kai-scheduler.install=false \
+          --set 'nats.container.merge.resources.requests.cpu=100m' \
+          --set 'nats.container.merge.resources.requests.memory=128Mi' \
+          --set 'nats.container.merge.resources.limits.cpu=500m' \
+          --set 'nats.container.merge.resources.limits.memory=512Mi' \
+          --set 'nats.reloader.merge.resources.requests.cpu=10m' \
+          --set 'nats.reloader.merge.resources.requests.memory=32Mi' \
+          --set 'nats.reloader.merge.resources.limits.cpu=100m' \
+          --set 'nats.reloader.merge.resources.limits.memory=64Mi' \
           --debug
         echo "::endgroup::"
 
-    - name: Wait for operator rollout
+    - name: Wait for operator CRDs to be established
       shell: bash
       run: |
-        echo "::group::Wait for operator rollout inside vCluster"
+        echo "::group::Wait for Dynamo operator CRDs inside vCluster"
+        # CRDs live in the chart's crds/ directory so Helm installs them before any pod
+        # starts. Waiting for Established is independent of vCluster syncer pod-Ready
+        # latency, which is unreliable on some clusters (e.g. AWS with LimitRange QoS mismatch).
         kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
-          rollout status deployment -n default --watch --timeout=900s
+          wait --for=condition=established \
+          crd/dynamographdeployments.nvidia.com \
+          --timeout=1800s
+        echo "::endgroup::"
+
+    - name: Wait for operator pod to be ready
+      shell: bash
+      env:
+        NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+      run: |
+        echo "::group::Wait for operator pod Ready (host namespace)"
+        # Poll the host namespace instead of the vCluster API. The vCluster syncer
+        # on AWS stalls pod-Ready propagation due to a NATS qosClass reconciliation
+        # loop, so kubectl wait against the virtual cluster never returns. The host
+        # pod status is always accurate.
+        end=$((SECONDS + 1800))
+        while true; do
+          STATUS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+            | grep 'dynamo-platform-dynamo-operator-controller-manager' \
+            | awk '{print $2}' | head -1)
+          if [ "${STATUS}" = "1/1" ]; then
+            echo "Operator pod Ready"
+            break
+          fi
+          if [ $SECONDS -ge $end ]; then
+            echo "::error::Operator pod not Ready after 1800s (last status: ${STATUS:-not found})"
+            exit 1
+          fi
+          echo "Waiting for operator pod... status=${STATUS:-not found}"
+          sleep 15
+        done
         echo "::endgroup::"
 
     - name: Wait for CRDs to be established

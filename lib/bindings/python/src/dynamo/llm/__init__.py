@@ -54,6 +54,7 @@ except ImportError:
     pass
 
 from .exceptions import HttpError
+from .exceptions import RouterQueueLimitExceeded as RouterQueueLimitExceeded
 
 
 class RoutedEngine(Protocol):

@@ -86,7 +86,7 @@ fn build_request_end_trace_state_for_policy(
         tracing::warn!(
             %request_id,
             reason,
-            "request trace skipped because the request cannot be represented as one Mooncake row"
+            "request trace skipped because the request cannot be represented as one replay request"
         );
         return None;
     }
@@ -366,9 +366,9 @@ mod tests {
         let state = RequestEndTraceState {
             agent: Some(AgentContextTraceState {
                 agent_context: AgentContext {
-                    trajectory_id: "root".to_string(),
-                    parent_trajectory_id: None,
-                    trajectory_final: None,
+                    session_id: "root".to_string(),
+                    parent_session_id: None,
+                    session_final: None,
                     kv_hints: None,
                 },
                 request_model: "test-model".to_string(),
@@ -415,7 +415,7 @@ mod tests {
                 .agent_context
                 .as_ref()
                 .expect("agent context")
-                .trajectory_id,
+                .session_id,
             "root"
         );
         let request = record.request.as_ref().expect("request payload");
@@ -439,9 +439,9 @@ mod tests {
             ..Default::default()
         });
         request.agent_context = Some(AgentContext {
-            trajectory_id: "root".to_string(),
-            parent_trajectory_id: None,
-            trajectory_final: None,
+            session_id: "root".to_string(),
+            parent_session_id: None,
+            session_final: None,
             kv_hints: None,
         });
         let tracker = Some(Arc::new(RequestTracker::new()));

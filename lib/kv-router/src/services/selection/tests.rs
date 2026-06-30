@@ -17,10 +17,10 @@ use crate::protocols::{
     WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use crate::scheduling::config::RouterConfigOverride;
+use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::services::common::replica_sync::ReplicaSyncConfig;
 
 use super::input::{MmRoutingInfoRequest, PromptRequest};
-use super::scoring::build_overlap_scores_response;
 use super::server::create_router;
 use super::*;
 
@@ -64,16 +64,25 @@ async fn replica_sync_routes_are_mounted() {
 }
 
 async fn post(app: Router, uri: &str, body: &str) -> Response {
-    app.oneshot(
-        Request::builder()
-            .method("POST")
-            .uri(uri)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap(),
-    )
-    .await
-    .unwrap()
+    post_with_policy_class(app, uri, body, None).await
+}
+
+async fn post_with_policy_class(
+    app: Router,
+    uri: &str,
+    body: &str,
+    policy_class: Option<&str>,
+) -> Response {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(policy_class) = policy_class {
+        request = request.header("x-dynamo-meta-policy-class", policy_class);
+    }
+    app.oneshot(request.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap()
 }
 
 async fn register_worker(app: Router, max_tokens: Option<u64>) -> Response {
@@ -164,7 +173,11 @@ fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
         Some(&override_config),
         &tiered,
         4,
+        2,
         [worker, idle_worker],
+        false,
+        None,
+        None,
     );
 
     assert_eq!(response.workers.len(), 2);
@@ -306,6 +319,7 @@ async fn overlap_scores_returns_all_schedulable_worker_ranks() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
+    assert_eq!(body["num_blocks"], 1);
     let workers = body["workers"].as_array().expect("workers array");
     let ids: Vec<_> = workers
         .iter()
@@ -373,6 +387,77 @@ async fn select_and_reserve_books_and_duplicate_reservation_conflicts() {
         .await
         .unwrap();
     assert_eq!(free.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn standalone_policy_classes_apply_header_thresholds_and_structured_rejection() {
+    let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
+    std::fs::write(
+        policy_file.path(),
+        r#"
+default_policy_family: latency
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: latency
+    policy_family: latency
+    cache_bucket: all
+    queue_policy: fcfs
+    quantum: 1
+    prefill_busy_threshold: 0
+    request_queue_limit_per_worker: 0
+  - name: batch
+    policy_family: batch
+    cache_bucket: all
+    queue_policy: wspt
+    quantum: 4
+    prefill_busy_threshold: 1024
+"#,
+    )
+    .expect("write policy file");
+
+    let mut config = test_config();
+    config.router_policy_config = Some(policy_file.path().to_string_lossy().into_owned());
+    let core = Arc::new(SelectionCore::new(config, 1, CancellationToken::new()));
+    let app = create_router(Arc::new(AppState { core }), None);
+
+    assert_eq!(
+        register_worker(app.clone(), Some(4)).await.status(),
+        StatusCode::CREATED
+    );
+
+    let reserved = post_with_policy_class(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"reservation_id":"latency-active"}"#,
+        Some("latency"),
+    )
+    .await;
+    assert_eq!(reserved.status(), StatusCode::OK);
+
+    let batch = post_with_policy_class(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","token_ids":[5,6,7,8]}"#,
+        Some("batch"),
+    )
+    .await;
+    assert_eq!(batch.status(), StatusCode::OK);
+
+    let rejected = post_with_policy_class(
+        app,
+        "/select",
+        r#"{"model_name":"model","token_ids":[9,10,11,12]}"#,
+        Some("latency"),
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = response_json(rejected).await;
+    assert_eq!(body["details"]["policy_class"], "latency");
+    assert_eq!(body["details"]["limit_kind"], "requests");
+    assert_eq!(body["details"]["current"], 0);
+    assert_eq!(body["details"]["limit"], 0);
 }
 
 #[tokio::test]

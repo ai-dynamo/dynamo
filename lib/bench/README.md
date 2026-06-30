@@ -122,6 +122,35 @@ cargo bench --package dynamo-bench --bench offline_replay_bench -- \
 Use `--speedup-ratio` and `--decode-speedup-ratio` if you want a simple scaling
 knob while keeping the same internal polynomial model.
 
+Use `--serving-mode disagg` to replay separate prefill and decode pools:
+
+```bash
+cargo bench --package dynamo-bench --bench offline_replay_bench -- \
+  /path/to/mooncake_trace.jsonl \
+  --serving-mode disagg \
+  --num-prefill-workers 2 \
+  --num-decode-workers 4 \
+  --kv-transfer-bandwidth 64 \
+  --kv-bytes-per-token 131072
+```
+
+KVBM offload is available only when the benchmark is built with
+`mocker-kvbm-offload`. Build and run this configuration on a supported Linux
+environment:
+
+```bash
+cargo bench --package dynamo-bench --bench offline_replay_bench \
+  --features mocker-kvbm-offload -- \
+  /path/to/mooncake_trace.jsonl \
+  --engine-type vllm \
+  --num-gpu-blocks 1024 \
+  --num-g2-blocks 8192 \
+  --kv-bytes-per-token 131072
+```
+
+The KVBM capacity and bandwidth flags are omitted from the benchmark CLI when
+the feature is disabled.
+
 ## KV router / sharded indexer benchmarks
 
 See [kv_router/INDEXER_BENCH.md](kv_router/INDEXER_BENCH.md) for trace

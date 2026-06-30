@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: SGLang for Agentic Workloads
-subtitle: Priority scheduling and trajectory-aware radix KV for agentic serving
+subtitle: Priority scheduling and session-aware radix KV for agentic serving
 ---
 
-This guide covers SGLang-specific configuration for agentic serving with Dynamo. It explains which SGLang engine flags to enable, how Dynamo's [agent hints](../../components/frontend/nvext.md#agent-hints) map to SGLang behavior, and how to tag radix KV by trajectory.
+This guide covers SGLang-specific configuration for agentic serving with Dynamo. It explains which SGLang engine flags to enable, how Dynamo's [agent hints](../../components/frontend/nvext.md#agent-hints) map to SGLang behavior, and how to tag radix KV by session.
 
 ## Overview
 
@@ -111,24 +111,23 @@ for chunk in response:
         print(chunk.choices[0].delta.content, end="")
 ```
 
-## Trajectory Radix Cache
+## Session Radix Cache
 
-SGLang can tag ordinary evictable radix KV with the normalized agent trajectory ID without pinning requests to a worker or creating a separate streaming-session lifecycle.
+SGLang can tag ordinary evictable radix KV with the normalized agent session ID without pinning requests to a worker or creating a separate streaming-session lifecycle.
 
-> **Availability:** This currently requires installing SGLang from source. The necessary server arguments are not available in a released SGLang package yet. Without `--enable-session-radix-cache`, Dynamo leaves this path disabled.
+> **Availability:** Session-aware radix ownership is built into SGLang 0.5.14 and later; no opt-in server argument is required.
 
 Launch the worker with:
 
 ```bash
 python -m dynamo.sglang \
   --model-path <model> \
-  --enable-session-radix-cache \
   --radix-eviction-policy priority
 ```
 
-Dynamo reads trajectory identity from agent headers such as `X-Dynamo-Trajectory-ID` and passes it to SGLang on every generate request. `X-Dynamo-Trajectory-Final: true` is normalized into an internal KV eviction hint and forwarded with the agent context, but the SGLang backend does not act on that hint in this release.
+Dynamo reads session identity from agent headers such as `X-Dynamo-Session-ID` and passes it to SGLang on every generate request. `X-Dynamo-Session-Final: true` is normalized into an internal KV eviction hint and forwarded with the agent context, but the SGLang backend does not act on that hint in this release.
 
-The radix entries remain normally evictable, so this mechanism does not require sticky routing. A separate session-routing API may choose affinity independently of trajectory identity.
+The radix entries remain normally evictable. Session-aware radix ownership does not create router affinity; a configured router can independently use `X-Dynamo-Session-ID` for router-local affinity.
 
 ## Quickstart
 
@@ -139,7 +138,7 @@ bash examples/backends/sglang/launch/agg_agent.sh \
   --model-path zai-org/GLM-4.7-Flash --tp 2
 ```
 
-Agent providers send trajectory headers directly; no body-level lifecycle object is needed.
+Agent providers send session headers directly; no body-level lifecycle object is needed.
 
 ## See Also
 
