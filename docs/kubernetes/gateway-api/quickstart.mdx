@@ -50,6 +50,13 @@ export ISTIO_NAMESPACE=istio-system
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 ```
 
+Clone the Dynamo source tree that contains the recipe manifests used below:
+
+```bash
+git clone https://github.com/ai-dynamo/dynamo.git
+cd dynamo
+```
+
 ## Install Dynamo Platform
 
 Install the Dynamo platform and operator with the [Installation Guide](../installation-guide.md).
@@ -68,7 +75,7 @@ not a GAIE-specific resource. The general Kubernetes quickstart explains the
 [Hugging Face token secret](../README.md#huggingface-token-secret) pattern.
 
 ```bash
-export HF_TOKEN=<your-hf-token>
+export HF_TOKEN='your-hf-token'
 
 kubectl create secret generic hf-token-secret \
   -n "$NAMESPACE" \
@@ -282,7 +289,7 @@ curl --max-time 180 -sS "$GATEWAY_URL/v1/chat/completions" \
   -H "X-Gateway-Model-Name: $ROUTE_MODEL" \
   -H "content-type: application/json" \
   -d '{
-    "model": "Qwen/Qwen3-0.6B",
+    "model": "'"$ROUTE_MODEL"'",
     "messages": [{"role": "user", "content": "Explain KV cache aware routing in one sentence."}],
     "max_tokens": 96
   }' | jq .
