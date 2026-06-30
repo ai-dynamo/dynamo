@@ -99,10 +99,9 @@ impl<T: BlockMetadata + Sync> BlockManager<T> {
             .block_registry
             .register_sequence_hashes(blocks.iter().map(CompleteBlock::sequence_hash));
         let batch_size = blocks.len();
-        let registered = self.store.register_completed_blocks(
-            blocks.into_iter().zip(handles).collect(),
-            self.duplication_policy,
-        );
+        let registered =
+            self.store
+                .register_completed_blocks(blocks, handles, self.duplication_policy);
         // The offline settlement bridge observes this counter as a
         // publication watermark, so publish only after every store transition
         // and presence marker in the batch is complete.

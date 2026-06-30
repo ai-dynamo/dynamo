@@ -43,7 +43,6 @@ use crate::{events::EventsManager, tinylfu::FrequencyTracker};
 
 use crate::blocks::SequenceHash;
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
 
 use handle::BlockRegistrationHandleInner;
@@ -261,38 +260,18 @@ impl BlockRegistry {
             return Vec::new();
         }
 
-        let mut by_position = BTreeMap::<u64, Vec<(usize, SequenceHash)>>::new();
-        for (index, seq_hash) in seq_hashes.iter().copied().enumerate() {
-            by_position
-                .entry(seq_hash.position())
-                .or_default()
-                .push((index, seq_hash));
-        }
-
-        let mut registered = vec![None; seq_hashes.len()];
-        let mut newly_created = vec![false; seq_hashes.len()];
-        for hashes in by_position.into_values() {
-            let map = self.prt.prefix(&hashes[0].1);
-            for (index, seq_hash) in hashes {
-                let mut weak = map.entry(seq_hash).or_default();
-                let (inner, is_new) = match weak.upgrade() {
-                    Some(inner) => (inner, false),
-                    None => {
-                        let inner = self.create_registration(seq_hash);
-                        *weak = Arc::downgrade(&inner);
-                        (inner, true)
-                    }
-                };
-                registered[index] = Some(BlockRegistrationHandle::from_inner(inner));
-                newly_created[index] = is_new;
-            }
-        }
+        let positions_are_monotonic = seq_hashes
+            .windows(2)
+            .all(|pair| pair[0].position() <= pair[1].position());
+        let registered = if positions_are_monotonic {
+            self.register_monotonic_sequence_hashes(&seq_hashes)
+        } else {
+            self.register_grouped_sequence_hashes(&seq_hashes)
+        };
 
         registered
             .into_iter()
-            .zip(newly_created)
             .map(|(handle, is_new)| {
-                let handle = handle.expect("every batched sequence hash must be registered");
                 if is_new {
                     if let Some(event_manager) = &self.event_manager
                         && let Err(e) = event_manager.on_block_registered(&handle)
@@ -304,6 +283,99 @@ impl BlockRegistry {
                 handle
             })
             .collect()
+    }
+
+    /// Fast path for the normal sequence-registration shape: non-decreasing
+    /// block positions. Equal positions are adjacent, so each position needs
+    /// only one radix-prefix guard and results can be appended in input order.
+    fn register_monotonic_sequence_hashes(
+        &self,
+        seq_hashes: &[SequenceHash],
+    ) -> Vec<(BlockRegistrationHandle, bool)> {
+        let mut registered = Vec::with_capacity(seq_hashes.len());
+        let mut group_start = 0;
+        while group_start < seq_hashes.len() {
+            let position = seq_hashes[group_start].position();
+            let group_end = seq_hashes[group_start + 1..]
+                .iter()
+                .position(|seq_hash| seq_hash.position() != position)
+                .map_or(seq_hashes.len(), |offset| group_start + 1 + offset);
+
+            self.register_position_group(
+                seq_hashes[group_start..group_end]
+                    .iter()
+                    .copied()
+                    .map(|seq_hash| ((), seq_hash)),
+                |(), handle, is_new| registered.push((handle, is_new)),
+            );
+            group_start = group_end;
+        }
+        registered
+    }
+
+    /// Fallback for callers that supply positions out of order. A flat index
+    /// vector replaces the previous `BTreeMap` of per-position vectors. It is
+    /// sorted by `(position, original_index)` so registration stays grouped by
+    /// radix prefix without changing which duplicate occurrence is considered
+    /// new. Results are restored to input order before observers run.
+    fn register_grouped_sequence_hashes(
+        &self,
+        seq_hashes: &[SequenceHash],
+    ) -> Vec<(BlockRegistrationHandle, bool)> {
+        let mut ordered: Vec<_> = seq_hashes.iter().copied().enumerate().collect();
+        ordered.sort_unstable_by_key(|(index, seq_hash)| (seq_hash.position(), *index));
+
+        let mut registered = Vec::with_capacity(seq_hashes.len());
+        let mut group_start = 0;
+        while group_start < ordered.len() {
+            let position = ordered[group_start].1.position();
+            let group_end = ordered[group_start + 1..]
+                .iter()
+                .position(|(_, seq_hash)| seq_hash.position() != position)
+                .map_or(ordered.len(), |offset| group_start + 1 + offset);
+
+            self.register_position_group(
+                ordered[group_start..group_end].iter().copied(),
+                |index, handle, is_new| registered.push((index, handle, is_new)),
+            );
+            group_start = group_end;
+        }
+
+        registered.sort_unstable_by_key(|(index, _, _)| *index);
+        registered
+            .into_iter()
+            .map(|(_, handle, is_new)| (handle, is_new))
+            .collect()
+    }
+
+    /// Register one same-position group while holding exactly one outer radix
+    /// guard. `record` only stages the result; user-visible callbacks and
+    /// frequency touches run after this method returns and releases the guard.
+    fn register_position_group<K>(
+        &self,
+        entries: impl IntoIterator<Item = (K, SequenceHash)>,
+        mut record: impl FnMut(K, BlockRegistrationHandle, bool),
+    ) {
+        let mut entries = entries.into_iter();
+        let Some(first) = entries.next() else {
+            return;
+        };
+        let position = first.1.position();
+        let map = self.prt.prefix(&first.1);
+
+        for (key, seq_hash) in std::iter::once(first).chain(entries) {
+            debug_assert_eq!(seq_hash.position(), position);
+            let mut weak = map.entry(seq_hash).or_default();
+            let (inner, is_new) = match weak.upgrade() {
+                Some(inner) => (inner, false),
+                None => {
+                    let inner = self.create_registration(seq_hash);
+                    *weak = Arc::downgrade(&inner);
+                    (inner, true)
+                }
+            };
+            record(key, BlockRegistrationHandle::from_inner(inner), is_new);
+        }
     }
 
     /// Internal method for transferring block registration without triggering frequency tracking.

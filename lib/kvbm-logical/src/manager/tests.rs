@@ -896,6 +896,129 @@ mod registration_tests {
         assert_eq!(snap.stagings, 3);
     }
 
+    #[test]
+    fn test_batch_registration_mixed_rejects_preserves_order_presence_and_guards() {
+        let registry = BlockRegistry::new();
+        let manager = BlockManager::<TestBlockData>::builder()
+            .block_count(5)
+            .block_size(4)
+            .registry(registry)
+            .duplication_policy(BlockDuplicationPolicy::Reject)
+            .build()
+            .expect("Should build manager");
+
+        let token_a = create_test_token_block_from_iota(100);
+        let token_b = create_test_token_block_from_iota(200);
+        let token_c = create_test_token_block_from_iota(300);
+        let hash_a = token_a.kvbm_sequence_hash();
+        let hash_b = token_b.kvbm_sequence_hash();
+        let hash_c = token_c.kvbm_sequence_hash();
+
+        let primary_a = manager
+            .allocate_blocks(1)
+            .expect("allocate primary")
+            .pop()
+            .unwrap()
+            .complete(&token_a)
+            .unwrap();
+        let primary_a_id = primary_a.block_id();
+        let primary_a = manager.register_blocks(vec![primary_a]).pop().unwrap();
+
+        let mut candidates = manager
+            .allocate_blocks(4)
+            .expect("allocate batch candidates")
+            .into_iter();
+        let candidate_b = candidates.next().unwrap();
+        let duplicate_a = candidates.next().unwrap();
+        let duplicate_b = candidates.next().unwrap();
+        let candidate_c = candidates.next().unwrap();
+        let candidate_b_id = candidate_b.block_id();
+        let duplicate_a_id = duplicate_a.block_id();
+        let duplicate_b_id = duplicate_b.block_id();
+        let candidate_c_id = candidate_c.block_id();
+
+        let registered = manager.register_blocks(vec![
+            candidate_b.complete(&token_b).unwrap(),
+            duplicate_a.complete(&token_a).unwrap(),
+            duplicate_b.complete(&token_b).unwrap(),
+            candidate_c.complete(&token_c).unwrap(),
+        ]);
+
+        assert_eq!(
+            registered
+                .iter()
+                .map(|block| (block.sequence_hash(), block.block_id()))
+                .collect::<Vec<_>>(),
+            vec![
+                (hash_b, candidate_b_id),
+                (hash_a, primary_a_id),
+                (hash_b, candidate_b_id),
+                (hash_c, candidate_c_id),
+            ]
+        );
+        assert_eq!(
+            manager
+                .block_registry()
+                .check_presence::<TestBlockData>(&[hash_a, hash_b, hash_c]),
+            vec![(hash_a, true), (hash_b, true), (hash_c, true)]
+        );
+        assert_eq!(manager.metrics().snapshot().registration_dedup, 2);
+
+        // Both rejected candidates must have dropped their re-armed guards
+        // after the store critical section and returned to the reset pool.
+        assert_eq!(manager.available_blocks(), 2);
+        let mut returned_ids = manager
+            .allocate_blocks(2)
+            .expect("rejected candidates returned to reset")
+            .into_iter()
+            .map(|block| block.block_id())
+            .collect::<Vec<_>>();
+        returned_ids.sort_unstable();
+        let mut rejected_ids = vec![duplicate_a_id, duplicate_b_id];
+        rejected_ids.sort_unstable();
+        assert_eq!(returned_ids, rejected_ids);
+
+        drop(primary_a);
+        drop(registered);
+    }
+
+    #[test]
+    fn test_batch_registration_allow_marks_each_same_hash_slot_present() {
+        let registry = BlockRegistry::new();
+        let manager = BlockManager::<TestBlockData>::builder()
+            .block_count(2)
+            .block_size(4)
+            .registry(registry)
+            .duplication_policy(BlockDuplicationPolicy::Allow)
+            .build()
+            .expect("Should build manager");
+
+        let token = create_test_token_block_from_iota(400);
+        let seq_hash = token.kvbm_sequence_hash();
+        let completed = manager
+            .allocate_blocks(2)
+            .expect("allocate same-hash batch")
+            .into_iter()
+            .map(|block| block.complete(&token).unwrap())
+            .collect();
+
+        let mut registered = manager.register_blocks(completed);
+        assert_eq!(registered.len(), 2);
+        assert_ne!(registered[0].block_id(), registered[1].block_id());
+        assert_eq!(manager.metrics().snapshot().duplicate_blocks, 1);
+
+        // The duplicate releases one presence reference. Presence must remain
+        // set for the primary, proving both same-batch outcomes were marked.
+        let duplicate = registered.pop().unwrap();
+        drop(duplicate);
+        assert_eq!(
+            manager
+                .block_registry()
+                .check_presence::<TestBlockData>(&[seq_hash]),
+            vec![(seq_hash, true)]
+        );
+    }
+
     #[rstest]
     #[case(BlockDuplicationPolicy::Allow, 200, "allow", false)]
     #[case(BlockDuplicationPolicy::Reject, 300, "reject", true)]
