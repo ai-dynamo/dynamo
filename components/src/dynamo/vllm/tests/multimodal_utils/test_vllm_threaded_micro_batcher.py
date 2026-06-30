@@ -301,40 +301,6 @@ def test_shutdown_stops_thread():
     assert not b._thread.is_alive()
 
 
-async def test_cancelled_submit_is_retired_and_releases_admission():
-    """Cancelling an await retires the request and frees its admission cost."""
-    entered = threading.Event()
-    release = threading.Event()
-
-    def blocking(items):
-        entered.set()
-        release.wait(timeout=5.0)
-        return [("r", x) for x in items]
-
-    b = ThreadedMicroBatcher(blocking, max_outstanding_cost=10)
-    b.start()
-    try:
-        first = asyncio.ensure_future(b.submit(["a"]))  # occupies the worker
-        for _ in range(200):
-            if entered.is_set():
-                break
-            await asyncio.sleep(0.01)
-        assert entered.is_set()
-
-        second = asyncio.ensure_future(b.submit(["b"]))  # queued behind first
-        await asyncio.sleep(0.05)
-        assert b._outstanding == 2  # both admitted (cost 1 each)
-
-        second.cancel()
-        release.set()  # let the worker finish "a", then collect+retire cancelled "b"
-        with pytest.raises(asyncio.CancelledError):
-            await second
-        assert len(await first) == 1
-        assert b._outstanding == 0  # cancelled request's admission released
-    finally:
-        b.shutdown()
-
-
 async def test_max_outstanding_cost_rejects_when_full():
     """submit() raises BatcherOverloaded once accepted-but-incomplete cost is full."""
     entered = threading.Event()
