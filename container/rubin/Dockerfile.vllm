@@ -1,0 +1,51 @@
+# Dynamo + vLLM for Vera Rubin (VR200, sbsa/arm64).
+#
+# The dl/dgx/vllm:rubin-py3-devel image already has vLLM installed (built from the
+# rubin-devel branch, CUDA 13.4), so unlike trtllm there is no wheel step — we just
+# install Dynamo from source on top (per Ishan Dhanani's bringup guidance).
+#
+# Build on a NATIVE arm64 Docker host:
+#   docker build --platform linux/arm64 -t <registry>/<you>-vllm-rubin:<tag> -f Dockerfile.vllm .
+
+ARG BASE=gitlab-master.nvidia.com:5005/dl/dgx/vllm:rubin-py3-devel
+FROM ${BASE}
+SHELL ["/bin/bash","-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Build tools. clang/libclang are REQUIRED: dynamo's rust bindings use bindgen via
+# nixl-sys, and the dl/dgx bases do not ship libclang (the trtllm pytorch-rubin base does).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl git ca-certificates build-essential protobuf-compiler clang libclang-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# nats + etcd (arm64)
+RUN cd /tmp \
+ && curl -fSL https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-linux-arm64.tar.gz | tar xz \
+ && install -m755 nats-server-*/nats-server /usr/local/bin/nats-server \
+ && curl -fSL https://github.com/etcd-io/etcd/releases/download/v3.5.30/etcd-v3.5.30-linux-arm64.tar.gz | tar xz \
+ && install -m755 etcd-*/etcd etcd-*/etcdctl /usr/local/bin/ \
+ && rm -rf nats-server-* etcd-*
+
+# Rust + maturin + uv
+RUN curl -fSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH=/root/.cargo/bin:${PATH}
+RUN python3 -m pip install --break-system-packages --no-cache-dir "maturin[patchelf]" uv
+
+# Dynamo from source
+ARG DYNAMO_REF=main
+RUN git clone --depth 1 --branch ${DYNAMO_REF} https://github.com/ai-dynamo/dynamo.git /opt/dynamo
+WORKDIR /opt/dynamo
+
+# REQUIRED on Rubin: cudarc 0.19.3 rejects CUDA 13.4; pin to the 13.1 API (driver-forward-compatible).
+ENV CUDARC_CUDA_VERSION=13010
+
+RUN cd lib/bindings/python \
+ && maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass" --out /opt/dynamo/dist \
+ && cd /opt/dynamo && uv build --wheel --out-dir /opt/dynamo/dist
+RUN python3 -m pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/dist/ai_dynamo_runtime*.whl \
+ && python3 -m pip install --break-system-packages --no-cache-dir --no-deps /opt/dynamo/dist/ai_dynamo-*.whl \
+ && python3 -m pip install --break-system-packages --no-cache-dir msgspec uvloop imageio imageio-ffmpeg
+
+ENV DYNAMO_HOME=/opt/dynamo
+WORKDIR /workspace
+ENTRYPOINT ["/bin/bash"]
