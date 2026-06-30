@@ -69,7 +69,10 @@ spec:
           # GLM-5 NVFP4 tokenizer uses the `TokenizersBackend` auto-tokenizer
           # class introduced in transformers 5.x — pin to match the runtime
           # image (see `pip show transformers` inside the sglang decode pod).
-          pip install aiperf==0.6.0 transformers==5.3.0 tokenizers==0.22.2
+          # NOTE: aiperf>=0.8.0 depends on crick (no prebuilt arm64 wheel); on arm64
+          # nodes the apt-get step above must include gcc and libc6-dev so pip can
+          # compile crick from source.
+          pip install aiperf==0.10.0 transformers==5.3.0 tokenizers==0.22.2
 
           # Pre-save tokenizer to a flat directory once, then point aiperf at
           # that path. Avoids each of aiperf's N record-processor subprocesses

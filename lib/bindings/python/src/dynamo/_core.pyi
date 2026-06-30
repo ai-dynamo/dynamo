@@ -456,6 +456,13 @@ class Context:
         """
         ...
 
+    def detached(self, id: str) -> "Context":
+        """
+        Create a context with a fresh cancellation controller and request ID
+        while preserving trace parentage and a metadata snapshot.
+        """
+        ...
+
     def async_killed_or_stopped(self) -> asyncio.Future[bool]:
         """
         Asynchronously wait until the context is killed or stopped.
@@ -2233,6 +2240,7 @@ async def register_model(
     needs: Optional[List[List[WorkerType]]] = None,
     self_host_metadata: Optional[bool] = None,
     ignore_weights: bool = False,
+    max_gpu_lora_count: Optional[int] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
