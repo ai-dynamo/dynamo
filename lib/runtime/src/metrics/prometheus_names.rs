@@ -642,9 +642,9 @@ pub mod frontend_perf {
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor
     pub const TEMPLATE_SECONDS: &str = "template_seconds";
-    /// L1 tokenizer cache hits (cumulative); only incremented when DYN_TOKENIZER_CACHE is enabled
+    /// L1 tokenizer cache hits (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
     pub const TOKENIZER_CACHE_HITS_TOTAL: &str = "tokenizer_cache_hits_total";
-    /// L1 tokenizer cache misses (cumulative); only incremented when DYN_TOKENIZER_CACHE is enabled
+    /// L1 tokenizer cache misses (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
     pub const TOKENIZER_CACHE_MISSES_TOTAL: &str = "tokenizer_cache_misses_total";
     /// Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
     pub const DETOKENIZE_TOTAL_US: &str = "detokenize_total_us";
