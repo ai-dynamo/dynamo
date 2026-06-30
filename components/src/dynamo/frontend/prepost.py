@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -20,7 +21,7 @@ from vllm.renderers import ChatParams
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
-from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+from vllm.utils.async_utils import make_async
 
 
 class _Renderer(Protocol):
@@ -41,15 +42,17 @@ class PreprocessResult:
     prompt_token_ids: list[int]
 
 
-_ASYNC_TOKENIZER_POOL: dict[int, AsyncMicrobatchTokenizer] = {}
+_ASYNC_TOKENIZER_POOL: dict[int, Callable[..., Awaitable[Any]]] = {}
 SKIP_REQUEST_VALIDATION = os.getenv("DYN_VLLM_SKIP_REQUEST_VALIDATION", "1") == "1"
 
 
-def _get_async_tokenizer(tokenizer: TokenizerLike) -> AsyncMicrobatchTokenizer:
+def _get_async_tokenizer(tokenizer: TokenizerLike) -> Callable[..., Awaitable[Any]]:
     key = id(tokenizer)
     async_tokenizer = _ASYNC_TOKENIZER_POOL.get(key)
     if async_tokenizer is None:
-        async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
+        async_tokenizer = make_async(
+            tokenizer, executor=ThreadPoolExecutor(max_workers=1)
+        )
         _ASYNC_TOKENIZER_POOL[key] = async_tokenizer
     return async_tokenizer
 

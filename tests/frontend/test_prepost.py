@@ -20,10 +20,10 @@ if HAS_VLLM:
     )
     from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
     from vllm.outputs import CompletionOutput
-    from vllm.reasoning.qwen3_reasoning_parser import Qwen3ReasoningParser
+    from vllm.reasoning.qwen3_engine_reasoning_parser import Qwen3ParserReasoningAdapter
     from vllm.sampling_params import SamplingParams
     from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
-    from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
+    from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
     from dynamo.frontend.prepost import StreamingPostProcessor
 else:
@@ -1378,7 +1378,7 @@ def processor(tokenizer, request_for_sampling, sampling_params):
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=Qwen3ParserReasoningAdapter,
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1478,7 +1478,7 @@ def test_qwen3_coder_non_streaming_uses_batch_tool_parse(
         request_for_sampling=qwen3_coder_request_for_sampling,
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
-        tool_parser=Qwen3CoderToolParser(
+        tool_parser=Qwen3EngineToolParser(
             tokenizer, qwen3_coder_request_for_sampling.tools
         ),
         reasoning_parser_class=None,
@@ -1497,7 +1497,7 @@ def test_qwen3_coder_non_streaming_uses_batch_tool_parse(
         request_for_sampling=qwen3_coder_request_for_sampling,
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
-        tool_parser=Qwen3CoderToolParser(
+        tool_parser=Qwen3EngineToolParser(
             tokenizer, qwen3_coder_request_for_sampling.tools
         ),
         reasoning_parser_class=None,
@@ -1547,7 +1547,7 @@ def test_qwen3_coder_non_streaming_preserves_content_before_tool_call(
         request_for_sampling=qwen3_coder_request_for_sampling,
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
-        tool_parser=Qwen3CoderToolParser(
+        tool_parser=Qwen3EngineToolParser(
             tokenizer, qwen3_coder_request_for_sampling.tools
         ),
         reasoning_parser_class=None,
@@ -1593,10 +1593,10 @@ def test_qwen3_coder_non_streaming_batches_reasoning_before_tool_parse(
         request_for_sampling=qwen3_coder_request_for_sampling,
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
-        tool_parser=Qwen3CoderToolParser(
+        tool_parser=Qwen3EngineToolParser(
             tokenizer, qwen3_coder_request_for_sampling.tools
         ),
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=Qwen3ParserReasoningAdapter,
         chat_template_kwargs={"reasoning_effort": None},
         stream_response=False,
     )
@@ -1676,7 +1676,7 @@ def test_stream_interval_20(tokenizer, request_for_sampling, sampling_params):
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=Qwen3ParserReasoningAdapter,
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1729,7 +1729,7 @@ def test_stream_interval_20_reasoning_and_tool_finish_same_chunk(
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=Qwen3ParserReasoningAdapter,
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1782,7 +1782,7 @@ def test_stream_terminal_single_chunk(tokenizer, request_for_sampling, sampling_
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=Qwen3ParserReasoningAdapter,
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1847,7 +1847,7 @@ def test_no_tool_call(tokenizer, request_for_sampling, sampling_params):
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=Qwen3ParserReasoningAdapter,
         chat_template_kwargs={"reasoning_effort": None},
     )
 
@@ -1949,7 +1949,7 @@ def test_streaming_parallel_tool_calls_no_think(
         sampling_params=sampling_params,
         prompt_token_ids=PROMPT_TOKEN_IDS,
         tool_parser=tool_parser,
-        reasoning_parser_class=Qwen3ReasoningParser,
+        reasoning_parser_class=Qwen3ParserReasoningAdapter,
         chat_template_kwargs={"enable_thinking": False},
     )
 
