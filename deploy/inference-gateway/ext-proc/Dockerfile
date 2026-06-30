@@ -18,12 +18,21 @@
 ARG RUST_IMAGE=rust:1.93.1
 ARG BASE_IMAGE=ubuntu:24.04
 
+# Cargo build flags controlling which selector backends are compiled in.
+# Default builds BOTH the HTTP client and the in-process embedded selector, so a
+# single image supports either mode at runtime via DYN_EPP_SELECTOR_MODE
+# (selector-http is on by default; adding selector-embedded enables both).
+# For a lean HTTP-only image (no libzmq / no embedded selection service), pass:
+#   --build-arg EPP_CARGO_FLAGS="--no-default-features --features selector-http"
+ARG EPP_CARGO_FLAGS="--features selector-embedded"
+
 # =============================================================================
 # Stage 1: Build Rust EPP binary
 # =============================================================================
 FROM ${RUST_IMAGE} AS builder
 
 ARG TARGETARCH
+ARG EPP_CARGO_FLAGS
 
 # sccache configuration (matches Go EPP pattern)
 ARG USE_SCCACHE
@@ -33,10 +42,14 @@ ARG SCCACHE_REGION=""
 # protobuf-compiler provides protoc; libprotobuf-dev provides the well-known
 # .proto files (google/protobuf/struct.proto etc.) that our vendored Envoy
 # protos import. libclang-dev is needed by bindgen (nixl-sys transitive dep).
+# libzmq3-dev + pkg-config are needed by the `zmq` crate pulled in when the
+# embedded selector (selector-embedded feature) is built.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     libprotobuf-dev \
     libclang-dev \
+    libzmq3-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /dynamo
@@ -76,7 +89,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
-    cargo build --release -p dynamo-ext-proc && \
+    cargo build --release -p dynamo-ext-proc ${EPP_CARGO_FLAGS} && \
     cp target/release/dynamo-ext-proc /dynamo-ext-proc && \
     if [ "$USE_SCCACHE" = "true" ]; then /tmp/use-sccache.sh show-stats "dynamo-ext-proc" || true; fi
 
@@ -85,9 +98,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
 # =============================================================================
 FROM ${BASE_IMAGE}
 
+# libzmq5 is the runtime library for the embedded selector's ZMQ KV-event
+# subscriber (harmless if the binary was built HTTP-only).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libstdc++6 \
+    libzmq5 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /

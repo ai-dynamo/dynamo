@@ -265,6 +265,36 @@ impl WorkerCatalogRecord {
     }
 }
 
+// Manual `Default` (not derived) so `model_name`/`tenant_id` match the serde
+// defaults (`"default"`) rather than empty strings; a `..Default::default()`
+// caller that forgets to set them would otherwise store the worker under an
+// unexpected `("", "")` scope.
+impl Default for WorkerRequest {
+    fn default() -> Self {
+        Self {
+            worker_id: 0,
+            model_name: default_model_name(),
+            tenant_id: default_tenant_id(),
+            endpoint: None,
+            kv_events_endpoint: None,
+            kv_events_endpoints: HashMap::new(),
+            replay_endpoint: None,
+            block_size: None,
+            data_parallel_start_rank: None,
+            data_parallel_size: None,
+            max_num_batched_tokens: None,
+            total_kv_blocks: None,
+            stable_routing_id: None,
+            is_eagle: None,
+            taints: HashSet::new(),
+            topology_domains: HashMap::new(),
+            kv_transfer_domain: None,
+            kv_transfer_enforcement: None,
+            kv_transfer_preferred_weight: None,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WorkerRequest {
     pub worker_id: WorkerId,
@@ -391,6 +421,26 @@ impl WorkerCatalogRecord {
         }
         if patch.kv_transfer_preferred_weight.is_some() {
             self.kv_transfer_preferred_weight = patch.kv_transfer_preferred_weight;
+        }
+    }
+}
+
+// Manual `Default` (not derived) so `model_name`/`tenant_id` match the serde
+// defaults (`"default"`) rather than empty strings.
+impl Default for SelectRequest {
+    fn default() -> Self {
+        Self {
+            model_name: default_model_name(),
+            tenant_id: default_tenant_id(),
+            selection_id: None,
+            prompt: PromptRequest::default(),
+            router_config_override: None,
+            expected_output_tokens: None,
+            priority_jump: None,
+            strict_priority: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: RoutingConstraints::default(),
         }
     }
 }

@@ -18,6 +18,7 @@ mod tests;
 
 pub use core::{SelectionCore, SelectionServiceConfig};
 pub use error::SelectionError;
+pub use input::PromptRequest;
 pub use server::{AppState, run_server};
 pub use types::{
     ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest, OverlapScoresResponse,
