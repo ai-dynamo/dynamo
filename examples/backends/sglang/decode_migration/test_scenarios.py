@@ -321,9 +321,13 @@ def main() -> None:
             f"expected={expected_migrated_ids!r}\nmigrated={migrated_ids!r}"
         )
 
-    wait_for_log(args.log_dir, "frontend.log", "decode migration committed")
+    wait_for_log(
+        args.log_dir,
+        "frontend.log",
+        "decode migration destination handoff started",
+    )
     wait_for_log(args.log_dir, "fast.log", "Decode migration transfer completed")
-    wait_for_log(args.log_dir, "slow.log", "Armed decode migration destination")
+    wait_for_log(args.log_dir, "slow.log", "Bound decode migration destination")
 
     near_boundary_baseline = completion(
         args.base_url,
@@ -434,7 +438,7 @@ def main() -> None:
             ),
         )
     recovery_commits_before = log_text(args.log_dir, "frontend.log").count(
-        "decode migration committed"
+        "decode migration destination handoff started"
     )
     after_cancel = completion(args.base_url, args.model, 24, migration_policy)
     if completion_token_ids(after_cancel) != expected_recovery_ids:
@@ -444,14 +448,14 @@ def main() -> None:
     wait_for_log_count(
         args.log_dir,
         "frontend.log",
-        "decode migration committed",
+        "decode migration destination handoff started",
         recovery_commits_before + 1,
     )
 
     # Two requests can cross the trigger together. Both handoffs must remain
     # independent and neither client stream may corrupt or hang.
     commits_before = log_text(args.log_dir, "frontend.log").count(
-        "decode migration committed"
+        "decode migration destination handoff started"
     )
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = [
@@ -479,7 +483,7 @@ def main() -> None:
     wait_for_log_count(
         args.log_dir,
         "frontend.log",
-        "decode migration committed",
+        "decode migration destination handoff started",
         commits_before + 2,
     )
 

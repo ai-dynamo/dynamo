@@ -40,6 +40,8 @@ SOURCE_PORT=${SOURCE_PORT:-18101}
 DESTINATION_PORT=${DESTINATION_PORT:-18102}
 SOURCE_BOOTSTRAP_PORT=${SOURCE_BOOTSTRAP_PORT:-18201}
 DESTINATION_BOOTSTRAP_PORT=${DESTINATION_BOOTSTRAP_PORT:-18202}
+SOURCE_DIST_INIT_ADDR=${SOURCE_DIST_INIT_ADDR:-}
+DESTINATION_DIST_INIT_ADDR=${DESTINATION_DIST_INIT_ADDR:-}
 STREAM_INTERVAL=${STREAM_INTERVAL:-1}
 PARITY_MODE=${PARITY_MODE:-}
 WORKER_LOG_LEVEL=${WORKER_LOG_LEVEL:-info}
@@ -58,7 +60,10 @@ mkdir -p "$LOG_DIR"
 rm -f "$LOG_DIR"/*.log
 
 if [[ -z "$PARITY_MODE" ]]; then
-    if [[ "$SOURCE_TP" == "$DESTINATION_TP" ]]; then
+    if [[ "$SOURCE_TP" == "$DESTINATION_TP" \
+        && "$SOURCE_DP" == "$DESTINATION_DP" \
+        && "$SOURCE_EP" == "$DESTINATION_EP" \
+        && "$SOURCE_ENABLE_DP_ATTENTION" == "$DESTINATION_ENABLE_DP_ATTENTION" ]]; then
         PARITY_MODE=source
     else
         PARITY_MODE=migration-repeat
@@ -114,10 +119,22 @@ destination_topology_args=(
     --mem-fraction-static "$DESTINATION_MEM_FRACTION_STATIC"
 )
 if [[ "$SOURCE_ENABLE_DP_ATTENTION" == "1" ]]; then
-    source_topology_args+=(--enable-dp-attention)
+    source_topology_args+=(
+        --enable-dp-attention
+        --enable-dp-attention-local-control-broadcast
+    )
 fi
 if [[ "$DESTINATION_ENABLE_DP_ATTENTION" == "1" ]]; then
-    destination_topology_args+=(--enable-dp-attention)
+    destination_topology_args+=(
+        --enable-dp-attention
+        --enable-dp-attention-local-control-broadcast
+    )
+fi
+if [[ -n "$SOURCE_DIST_INIT_ADDR" ]]; then
+    source_topology_args+=(--dist-init-addr "$SOURCE_DIST_INIT_ADDR")
+fi
+if [[ -n "$DESTINATION_DIST_INIT_ADDR" ]]; then
+    destination_topology_args+=(--dist-init-addr "$DESTINATION_DIST_INIT_ADDR")
 fi
 if [[ -n "$SOURCE_MOE_RUNNER_BACKEND" ]]; then
     source_topology_args+=(--moe-runner-backend "$SOURCE_MOE_RUNNER_BACKEND")
@@ -252,8 +269,8 @@ sleep 2
 check_started "$frontend_pid" frontend "$LOG_DIR/frontend.log"
 check_started "$source_pid" source-worker "$LOG_DIR/fast.log"
 check_started "$destination_pid" destination-worker "$LOG_DIR/slow.log"
-wait_for_log_count "$LOG_DIR/fast.log" "Model registration succeeded" 1
-wait_for_log_count "$LOG_DIR/slow.log" "Model registration succeeded" 1
+wait_for_log_count "$LOG_DIR/fast.log" "Model registration succeeded" 1 900
+wait_for_log_count "$LOG_DIR/slow.log" "Model registration succeeded" 1 900
 wait_for_log_count "$LOG_DIR/frontend.log" "Adding worker WorkerWithDpRank" 2
 
 case "$TEST_MODE" in

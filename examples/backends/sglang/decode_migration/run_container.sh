@@ -9,6 +9,7 @@ DYNAMO_ROOT=${DYNAMO_ROOT:-$(cd "$HERE/../../../.." && pwd)}
 SGLANG_ROOT=${SGLANG_ROOT:-$(cd "$DYNAMO_ROOT/../sglang" && pwd)}
 MODEL_ROOT=${MODEL_ROOT:-/root/models/qwen3-0.6b}
 MODEL_PATH_IN_CONTAINER=${MODEL_PATH_IN_CONTAINER:-/models/model}
+MODEL_MOUNT_IN_CONTAINER=${MODEL_MOUNT_IN_CONTAINER:-$MODEL_PATH_IN_CONTAINER}
 RESULT_DIR=${RESULT_DIR:-/tmp/decode-migration-results}
 
 mkdir -p "$RESULT_DIR"
@@ -59,6 +60,8 @@ docker run --rm --user root --gpus all --ipc host --network host \
     -e DESTINATION_PORT="${DESTINATION_PORT:-18102}" \
     -e SOURCE_BOOTSTRAP_PORT="${SOURCE_BOOTSTRAP_PORT:-18201}" \
     -e DESTINATION_BOOTSTRAP_PORT="${DESTINATION_BOOTSTRAP_PORT:-18202}" \
+    -e SOURCE_DIST_INIT_ADDR="${SOURCE_DIST_INIT_ADDR:-}" \
+    -e DESTINATION_DIST_INIT_ADDR="${DESTINATION_DIST_INIT_ADDR:-}" \
     -e STREAM_INTERVAL="${STREAM_INTERVAL:-1}" \
     -e PARITY_MODE="${PARITY_MODE:-}" \
     -e WORKER_LOG_LEVEL="${WORKER_LOG_LEVEL:-info}" \
@@ -74,7 +77,7 @@ docker run --rm --user root --gpus all --ipc host --network host \
     -e LOG_DIR="/results/stream-${STREAM_INTERVAL:-1}" \
     -v "$DYNAMO_ROOT:/workspace/dynamo" \
     -v "$SGLANG_ROOT:/workspace/sglang" \
-    -v "$MODEL_ROOT:$MODEL_PATH_IN_CONTAINER:ro" \
+    -v "$MODEL_ROOT:$MODEL_MOUNT_IN_CONTAINER:ro" \
     -v "$RESULT_DIR:/results" \
     "$IMAGE" \
     /workspace/dynamo/examples/backends/sglang/decode_migration/launch_local.sh
