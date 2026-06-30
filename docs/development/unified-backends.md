@@ -498,13 +498,17 @@ async def cleanup(self) -> None:
         self._engine = None
 ```
 
-### KV Event Publishing for Unified Backends
+#### Python: KV event publishing (optional)
 
 Unified backends declare KV event sources; the framework constructs and owns
 the `KvEventPublisher` instances. Do not instantiate `KvEventPublisher`
 directly from a unified `LLMEngine`. Instead, implement
 `kv_event_sources()` and return one source for each data-parallel rank hosted
 by the worker.
+
+Rust backends use the equivalent `LLMEngine::kv_event_sources()` trait method;
+see [Rust Step 4](#rust-step-4-implement-the-llmengine-trait) and the
+[`LLMEngine` trait](../../lib/backend-common/src/engine.rs).
 
 Use `ZmqSource` when the engine already emits Dynamo-compatible KV events on a
 ZMQ socket, as vLLM and SGLang do:
@@ -520,7 +524,8 @@ async def kv_event_sources(self):
 ```
 
 Use `PushSource` when the engine needs a live publisher object and drives
-`publish_stored()` / `publish_removed()` from its own event thread:
+`publish_stored()` / `publish_removed()` from its own event thread. The in-tree
+TRT-LLM backend is the reference implementation for this path:
 
 ```python
 from dynamo.common.backend.publisher import PushSource
@@ -547,12 +552,6 @@ published event streams.
 `PushSource` engines own cleanup of their event producer. Stop publisher
 threads or tasks in `cleanup()` before returning, and do not publish after
 cleanup begins.
-
-Snapshot publishing is separate from KV event publishing. Use
-`component_metrics_dp_ranks()` plus `attach_snapshot_publisher()` when the
-engine can push per-rank `ComponentSnapshot` values for metrics and the
-router's load signal. Snapshot publishers do not require
-`kv_cache_block_size`.
 
 ### Python Step 5: Write `main.py`
 
