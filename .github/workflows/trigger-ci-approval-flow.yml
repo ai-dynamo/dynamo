@@ -1,6 +1,49 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Intent
+# ------
+# Safely approve trusted CI for the exact head commit of a pull request from a fork. Fork PRs do
+# not receive this approval automatically because their code is external to the repository. This
+# workflow evaluates who is responsible for the PR update, verifies every PR commit, and posts the
+# `/ok to test <head-sha>` command that starts the trusted CI flow only when all checks pass.
+#
+# When this workflow runs
+# -----------------------
+# The workflow receives `pull_request_target` events when a fork PR is opened, synchronized by a
+# new push, or reopened. The job is skipped for branches in this repository because those branches
+# use the normal internal-contributor CI path.
+#
+# A fork PR can reach the signature check through either of these approval paths:
+#
+# 1. The PR author is listed in the `APPROVED_EXTERNAL_CONTRIBUTORS` environment secret. This path
+#    applies when the PR is opened, synchronized, or reopened.
+# 2. A user with write, maintain, or admin access to this repository synchronizes the PR branch.
+#    For example, a maintainer may merge `main` into a contributor's branch. This path approves
+#    only the head created by that synchronization; it does not make the PR or contributor trusted
+#    for later pushes.
+#
+# Both paths require every commit currently in the PR to have a signature that GitHub reports as
+# verified. If any commit is unsigned, the workflow explains which commits failed verification and
+# does not post `/ok to test`. Repository-permission lookup failures fail closed for the maintainer
+# path, and malformed contributor-list configuration fails closed for the approved-author path.
+#
+# Why a contributor's PR may not trigger trusted CI
+# -------------------------------------------------
+# - A new contributor who is not on the approved list needs a maintainer to approve the current
+#   head, either by synchronizing the branch or by posting the approval command manually.
+# - A contributor push after a maintainer synchronization creates a new head and removes the
+#   one-head approval. The new head must be approved again.
+# - Every PR commit must be signed and verified, including commits added before a maintainer update.
+# - Contributors must enable "Allow edits from maintainers" before a maintainer can update a branch
+#   in a user-owned fork.
+#
+# Desired state
+# -------------
+# The workflow posts an `/ok to test` command containing the current PR head SHA only after the
+# current head has a trusted approval path and all commits are verified. Every later push creates a
+# different head SHA and causes the complete approval process to run again.
+
 name: Trigger CI Approval Flow
 
 on:
