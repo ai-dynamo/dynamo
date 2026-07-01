@@ -1164,6 +1164,24 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 
 	// Check resource readiness
 	result := r.checkResourcesReadiness(resources)
+	// replace the generic not-ready reason with a Grove-specific
+	// classification (InsufficientCapacity / PodsNotReady / Updating /
+	// MixedNotReadyReasons / SomeResourcesNotReady) computed from Grove
+	// PodClique / PodCliqueScalingGroup status. Only override when not ready;
+	// the ready path keeps checkResourcesReadiness's success result.
+	//
+	// This is a separate call from checkResourcesReadiness (which produces
+	// the detailed human-readable Message via the Resource closure) because
+	// Condition.Reason must be a bare CamelCase token and cannot be threaded
+	// through the generic Resource.IsReady() -> "<name>: <reason>" wrapping.
+	// Both reads are served from the controller-runtime informer cache, not
+	// the API server, so the cost is negligible and they observe the same
+	// PodClique/PCSG generation within a single reconcile.
+	if result.State != nvidiacomv1beta1.DGDStateSuccessful {
+		if classification := dynamo.ClassifyGroveReadiness(ctx, r.Client, dynamoDeployment); classification != "" {
+			result.Reason = Reason(classification)
+		}
+	}
 	return result, nil
 }
 
