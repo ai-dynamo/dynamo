@@ -22,6 +22,8 @@
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
 const DEFAULT_DATA_PARALLEL_SIZE: u32 = 1;
 const DEFAULT_SELECTOR_THREADS: usize = 4;
+const DEFAULT_SELECTOR_HTTP_PORT: u16 = 8092;
+const DEFAULT_SELECTOR_REPLICA_SYNC_PORT: u16 = 9092;
 
 /// Value of `DYN_EPP_MODE` that selects router-only (selector) mode.
 pub const ROUTER_ONLY_MODE: &str = "router-only";
@@ -59,11 +61,18 @@ fn default_mode() -> SelectorBackendMode {
 pub struct EppConfig {
     /// How the EPP reaches the selector (HTTP vs in-process embedded).
     pub mode: SelectorBackendMode,
-    /// Comma-separated HTTP base URLs of the selection-service replicas, e.g.
-    /// `http://selector-0:8092,http://selector-1:8092`. Catalog writes fan out
-    /// to all replicas; selection reads target one replica. Required for
-    /// [`SelectorBackendMode::Http`]; unused for [`SelectorBackendMode::Embedded`].
-    pub selector_urls: Vec<String>,
+    /// Name of the selection-service Kubernetes `Service`. The EPP watches its
+    /// EndpointSlices to track selector replicas as they come and go. Required
+    /// for [`SelectorBackendMode::Http`]; unused for [`SelectorBackendMode::Embedded`].
+    pub selector_service: String,
+    /// Namespace of the selection-service `Service`. Defaults to the EPP's own
+    /// namespace (`POD_NAMESPACE`) when unset.
+    pub selector_service_namespace: Option<String>,
+    /// HTTP port each selection-service replica serves on.
+    pub selector_http_port: u16,
+    /// ZMQ replica-sync PUB port each selection-service replica binds. Used to
+    /// wire the replica-sync peer mesh as replicas come and go.
+    pub selector_replica_sync_port: u16,
     /// KV indexer thread-pool size for [`SelectorBackendMode::Embedded`].
     pub selector_threads: usize,
     /// Name of the `InferencePool` this EPP backs. Its selector and target port
@@ -109,20 +118,18 @@ impl EppConfig {
             ),
         };
 
-        let selector_urls = env_trimmed("DYN_EPP_SELECTOR_URLS")
-            .map(|raw| {
-                raw.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if matches!(mode, SelectorBackendMode::Http) && selector_urls.is_empty() {
+        let selector_service = env_trimmed("DYN_EPP_SELECTOR_SERVICE").unwrap_or_default();
+        if matches!(mode, SelectorBackendMode::Http) && selector_service.is_empty() {
             anyhow::bail!(
-                "DYN_EPP_SELECTOR_URLS is required in http selector mode \
-                 (comma-separated selection-service base URLs)"
+                "DYN_EPP_SELECTOR_SERVICE is required in http selector mode \
+                 (name of the selection-service Kubernetes Service)"
             );
         }
+        let selector_service_namespace = env_trimmed("DYN_EPP_SELECTOR_SERVICE_NAMESPACE");
+        let selector_http_port =
+            opt_parse::<u16>("DYN_EPP_SELECTOR_HTTP_PORT")?.unwrap_or(DEFAULT_SELECTOR_HTTP_PORT);
+        let selector_replica_sync_port = opt_parse::<u16>("DYN_EPP_SELECTOR_REPLICA_SYNC_PORT")?
+            .unwrap_or(DEFAULT_SELECTOR_REPLICA_SYNC_PORT);
 
         let selector_threads =
             opt_parse::<usize>("DYN_EPP_SELECTOR_THREADS")?.unwrap_or(DEFAULT_SELECTOR_THREADS);
@@ -149,7 +156,10 @@ impl EppConfig {
 
         Ok(Self {
             mode,
-            selector_urls,
+            selector_service,
+            selector_service_namespace,
+            selector_http_port,
+            selector_replica_sync_port,
             selector_threads,
             pool_name,
             pool_namespace,
@@ -235,7 +245,10 @@ mod tests {
             "DYN_EPP_MODE",
             "DYN_EPP_SELECTOR_MODE",
             "DYN_EPP_SELECTOR_THREADS",
-            "DYN_EPP_SELECTOR_URLS",
+            "DYN_EPP_SELECTOR_SERVICE",
+            "DYN_EPP_SELECTOR_SERVICE_NAMESPACE",
+            "DYN_EPP_SELECTOR_HTTP_PORT",
+            "DYN_EPP_SELECTOR_REPLICA_SYNC_PORT",
             "DYN_EPP_POOL_NAME",
             "DYN_EPP_POOL_NAMESPACE",
             "DYN_MODEL_NAME",
@@ -265,13 +278,19 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         clear_all();
         let _g = EnvGuard::set(&[
-            ("DYN_EPP_SELECTOR_URLS", "http://a:8092, http://b:8092"),
+            ("DYN_EPP_SELECTOR_SERVICE", "dynamo-selector"),
             ("DYN_EPP_POOL_NAME", "vllm-qwen-pool"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
         ]);
         let cfg = EppConfig::from_env().expect("config should parse");
-        assert_eq!(cfg.selector_urls, vec!["http://a:8092", "http://b:8092"]);
+        assert_eq!(cfg.selector_service, "dynamo-selector");
+        assert!(cfg.selector_service_namespace.is_none());
+        assert_eq!(cfg.selector_http_port, DEFAULT_SELECTOR_HTTP_PORT);
+        assert_eq!(
+            cfg.selector_replica_sync_port,
+            DEFAULT_SELECTOR_REPLICA_SYNC_PORT
+        );
         assert_eq!(cfg.pool_name, "vllm-qwen-pool");
         assert!(cfg.pool_namespace.is_none());
         assert_eq!(cfg.model_name, "Qwen/Qwen3-0.6B");
@@ -287,7 +306,7 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         clear_all();
         let _g = EnvGuard::set(&[
-            ("DYN_EPP_SELECTOR_URLS", "http://a:8092"),
+            ("DYN_EPP_SELECTOR_SERVICE", "dynamo-selector"),
             ("DYN_EPP_POOL_NAME", "vllm-qwen-pool"),
             ("DYN_EPP_POOL_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
@@ -307,9 +326,9 @@ mod tests {
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
         ]);
-        let cfg = EppConfig::from_env().expect("embedded config should parse without urls");
+        let cfg = EppConfig::from_env().expect("embedded config should parse without a service");
         assert_eq!(cfg.mode, SelectorBackendMode::Embedded);
-        assert!(cfg.selector_urls.is_empty());
+        assert!(cfg.selector_service.is_empty());
         assert_eq!(cfg.selector_threads, 4);
     }
 
@@ -331,7 +350,7 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         clear_all();
         let _g = EnvGuard::set(&[
-            ("DYN_EPP_SELECTOR_URLS", "http://a:8092"),
+            ("DYN_EPP_SELECTOR_SERVICE", "dynamo-selector"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
         ]);
@@ -339,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_selector_urls_fails_in_http_mode() {
+    fn missing_selector_service_fails_in_http_mode() {
         let _lock = ENV_LOCK.lock().unwrap();
         clear_all();
         // Explicitly select http mode so this holds regardless of which selector
@@ -347,7 +366,6 @@ mod tests {
         // feature-dependent).
         let _g = EnvGuard::set(&[
             ("DYN_EPP_SELECTOR_MODE", "http"),
-            ("DYN_EPP_SELECTOR_URLS", " , "),
             ("DYN_EPP_POOL_NAME", "vllm-qwen-pool"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
@@ -360,7 +378,7 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         clear_all();
         let _g = EnvGuard::set(&[
-            ("DYN_EPP_SELECTOR_URLS", "http://a:8092"),
+            ("DYN_EPP_SELECTOR_SERVICE", "dynamo-selector"),
             ("DYN_EPP_POOL_NAME", "vllm-qwen-pool"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "0"),

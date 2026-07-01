@@ -150,7 +150,8 @@ async fn main() -> Result<()> {
     if router_only {
         let selector_cfg = EppConfig::from_env()?;
         tracing::info!(
-            selector_urls = ?selector_cfg.selector_urls,
+            selector_mode = ?selector_cfg.mode,
+            selector_service = %selector_cfg.selector_service,
             pool_name = %selector_cfg.pool_name,
             model_name = %selector_cfg.model_name,
             block_size = selector_cfg.block_size,

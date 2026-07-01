@@ -25,7 +25,7 @@ pub mod pod_discovery;
 pub mod proto;
 pub mod selection_backend;
 #[cfg(feature = "selector-http")]
-pub mod selector_client;
+pub mod selector_fleet;
 pub mod server;
 pub mod topology_adapter;
 
@@ -40,6 +40,6 @@ pub use selection_backend::{
     SelectRequest, SelectResponse, SelectionBackend, WorkerPatch, WorkerRegistration,
 };
 #[cfg(feature = "selector-http")]
-pub use selector_client::{HttpSelectionBackend, SelectorClient};
+pub use selector_fleet::SelectorFleet;
 pub use server::ExtProcServer;
 pub use topology_adapter::{RegistrationDefaults, TopologyAdapter};

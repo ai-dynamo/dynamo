@@ -13,6 +13,7 @@
 //! keeps the small mirror wire types so the production/thin-client build does not
 //! have to compile the selection service.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
@@ -22,6 +23,7 @@ use dynamo_kv_router::services::selection::{
     PromptRequest, SelectRequest as CoreSelectRequest, SelectionCore, SelectionError,
     WorkerRequest as CoreWorkerRequest,
 };
+use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::selection_backend::{
@@ -36,6 +38,15 @@ const DEFAULT_TENANT: &str = "default";
 pub struct EmbeddedSelectionBackend {
     core: Arc<SelectionCore>,
     cancel: CancellationToken,
+    /// Last catalog we pushed into the core, keyed by `worker_id`. The core lives
+    /// and dies with this process, so a locally tracked "current" set is a sound
+    /// source of truth (no replica can restart out from under us) and lets
+    /// [`SelectionBackend::reconcile`] skip no-op upserts that would re-register
+    /// KV-event listeners.
+    current: Mutex<HashMap<u64, WorkerRegistration>>,
+    /// Held so [`SelectionBackend::subscribe_changes`] can hand out receivers.
+    /// The embedded selector is in-process, so this value never changes.
+    changes_tx: watch::Sender<u64>,
 }
 
 impl EmbeddedSelectionBackend {
@@ -50,11 +61,34 @@ impl EmbeddedSelectionBackend {
             indexer_threads,
             cancel.clone(),
         ));
+        let (changes_tx, _) = watch::channel(0u64);
         tracing::info!(
             indexer_threads,
             "Initialized embedded (in-process) selection core"
         );
-        Ok(Self { core, cancel })
+        Ok(Self {
+            core,
+            cancel,
+            current: Mutex::new(HashMap::new()),
+            changes_tx,
+        })
+    }
+
+    fn worker_request(reg: &WorkerRegistration) -> CoreWorkerRequest {
+        CoreWorkerRequest {
+            worker_id: reg.worker_id,
+            model_name: reg.model_name.clone(),
+            tenant_id: DEFAULT_TENANT.to_string(),
+            endpoint: Some(reg.endpoint.clone()),
+            block_size: Some(reg.block_size),
+            data_parallel_size: Some(reg.data_parallel_size),
+            kv_events_endpoints: reg.kv_events_endpoints.clone(),
+            replay_endpoint: reg.replay_endpoint.clone(),
+            total_kv_blocks: reg.total_kv_blocks,
+            max_num_batched_tokens: reg.max_num_batched_tokens,
+            stable_routing_id: reg.stable_routing_id.clone(),
+            ..Default::default()
+        }
     }
 }
 
@@ -68,35 +102,37 @@ impl Drop for EmbeddedSelectionBackend {
 
 #[tonic::async_trait]
 impl SelectionBackend for EmbeddedSelectionBackend {
-    async fn upsert_worker(&self, reg: &WorkerRegistration) -> Result<()> {
-        let req = CoreWorkerRequest {
-            worker_id: reg.worker_id,
-            model_name: reg.model_name.clone(),
-            tenant_id: DEFAULT_TENANT.to_string(),
-            endpoint: Some(reg.endpoint.clone()),
-            block_size: Some(reg.block_size),
-            data_parallel_size: Some(reg.data_parallel_size),
-            kv_events_endpoints: reg.kv_events_endpoints.clone(),
-            replay_endpoint: reg.replay_endpoint.clone(),
-            total_kv_blocks: reg.total_kv_blocks,
-            max_num_batched_tokens: reg.max_num_batched_tokens,
-            stable_routing_id: reg.stable_routing_id.clone(),
-            ..Default::default()
-        };
-        self.core
-            .upsert_worker(req)
-            .await
-            .map_err(|e| anyhow!("embedded upsert_worker failed: {e}"))?;
-        Ok(())
-    }
+    async fn reconcile(&self, desired: &HashMap<u64, WorkerRegistration>) -> Result<()> {
+        let mut current = self.current.lock().await;
 
-    async fn delete_worker(&self, worker_id: u64) -> Result<()> {
-        match self.core.delete_worker(worker_id).await {
-            Ok(_) => Ok(()),
-            // A worker that was never registered is not an error (idempotent).
-            Err(SelectionError::NotFound(_)) => Ok(()),
-            Err(e) => Err(anyhow!("embedded delete_worker failed: {e}")),
+        // Upsert new or changed workers.
+        for (worker_id, reg) in desired {
+            if current.get(worker_id) == Some(reg) {
+                continue;
+            }
+            self.core
+                .upsert_worker(Self::worker_request(reg))
+                .await
+                .map_err(|e| anyhow!("embedded upsert_worker failed: {e}"))?;
+            current.insert(*worker_id, reg.clone());
         }
+
+        // Delete workers that are no longer desired.
+        let stale: Vec<u64> = current
+            .keys()
+            .copied()
+            .filter(|id| !desired.contains_key(id))
+            .collect();
+        for worker_id in stale {
+            match self.core.delete_worker(worker_id).await {
+                // A worker that was never registered is not an error (idempotent).
+                Ok(_) | Err(SelectionError::NotFound(_)) => {}
+                Err(e) => return Err(anyhow!("embedded delete_worker failed: {e}")),
+            }
+            current.remove(&worker_id);
+        }
+
+        Ok(())
     }
 
     async fn select(&self, req: &SelectRequest) -> Result<SelectResponse> {
@@ -136,5 +172,9 @@ impl SelectionBackend for EmbeddedSelectionBackend {
 
     async fn any_ready(&self) -> bool {
         self.core.ready().ready
+    }
+
+    fn subscribe_changes(&self) -> watch::Receiver<u64> {
+        self.changes_tx.subscribe()
     }
 }

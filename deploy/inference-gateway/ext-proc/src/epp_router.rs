@@ -12,7 +12,8 @@
 //! - a [`PodDiscovery`] that discovers Ready raw vLLM pods from Kubernetes,
 //! - a [`TopologyAdapter`] that registers those pods into the selection service,
 //!   and
-//! - a [`SelectorClient`] that asks the selection service to pick a worker.
+//! - a [`SelectionBackend`] (an EndpointSlice-discovered HTTP fleet or an
+//!   in-process embedded core) that asks the selection service to pick a worker.
 //!
 //! On each request it tokenizes the prompt, asks the selection service for a
 //! worker constrained to the currently-Ready pods, and tells Envoy where to send
@@ -55,7 +56,7 @@ impl EppRouter {
         let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
 
-        let backend = build_backend(&cfg)?;
+        let backend = build_backend(&cfg).await?;
 
         let defaults = RegistrationDefaults::from_config(&cfg);
         let adapter = TopologyAdapter::spawn(reflector.clone(), backend.clone(), defaults);
@@ -104,23 +105,26 @@ impl EppRouter {
 /// Build the configured selection backend. Each backend is compiled in only
 /// when its feature is enabled; requesting a mode that wasn't built is a
 /// fail-fast error.
-fn build_backend(cfg: &EppConfig) -> Result<Arc<dyn SelectionBackend>> {
+async fn build_backend(cfg: &EppConfig) -> Result<Arc<dyn SelectionBackend>> {
     match cfg.mode {
-        SelectorBackendMode::Http => build_http_backend(cfg),
+        SelectorBackendMode::Http => build_http_backend(cfg).await,
         SelectorBackendMode::Embedded => build_embedded_backend(cfg),
     }
 }
 
 #[cfg(feature = "selector-http")]
-fn build_http_backend(cfg: &EppConfig) -> Result<Arc<dyn SelectionBackend>> {
-    tracing::info!(selector_urls = ?cfg.selector_urls, "Using HTTP selection backend");
-    Ok(Arc::new(crate::selector_client::HttpSelectionBackend::new(
-        cfg.selector_urls.clone(),
-    )?))
+async fn build_http_backend(cfg: &EppConfig) -> Result<Arc<dyn SelectionBackend>> {
+    tracing::info!(
+        selector_service = %cfg.selector_service,
+        "Using HTTP selection backend (EndpointSlice-discovered fleet)"
+    );
+    Ok(Arc::new(
+        crate::selector_fleet::SelectorFleet::spawn(cfg).await?,
+    ))
 }
 
 #[cfg(not(feature = "selector-http"))]
-fn build_http_backend(_cfg: &EppConfig) -> Result<Arc<dyn SelectionBackend>> {
+async fn build_http_backend(_cfg: &EppConfig) -> Result<Arc<dyn SelectionBackend>> {
     anyhow::bail!(
         "DYN_EPP_SELECTOR_MODE=http requested but this binary was built without the \
          `selector-http` feature"

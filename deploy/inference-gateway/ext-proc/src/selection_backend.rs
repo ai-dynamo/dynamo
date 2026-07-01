@@ -102,21 +102,31 @@ pub struct SelectResponse {
 }
 
 /// A selection backend: worker-catalog reconciliation, query-only selection, and
-/// readiness. Implemented by the HTTP client and the in-process embedded core.
+/// readiness. Implemented by the HTTP selector fleet and the in-process embedded
+/// core.
+///
+/// The backend owns the "actual" catalog state; the caller only supplies the
+/// desired set. This lets the HTTP fleet reconcile each replica independently
+/// (and bootstrap replicas that appear or restart) without the caller tracking
+/// per-replica state.
 #[tonic::async_trait]
 pub trait SelectionBackend: Send + Sync + 'static {
-    /// Register or update a worker in the selector catalog.
-    async fn upsert_worker(&self, reg: &WorkerRegistration) -> anyhow::Result<()>;
-
-    /// Remove a worker from the selector catalog (idempotent: a missing worker
-    /// is treated as success).
-    async fn delete_worker(&self, worker_id: u64) -> anyhow::Result<()>;
+    /// Drive the selector catalog toward `desired` (keyed by `worker_id`).
+    /// Idempotent: safe to call repeatedly. The HTTP fleet applies the diff to
+    /// every live replica; the embedded backend applies it to the in-process
+    /// core.
+    async fn reconcile(&self, desired: &HashMap<u64, WorkerRegistration>) -> anyhow::Result<()>;
 
     /// Query-only worker selection for a prompt.
     async fn select(&self, req: &SelectRequest) -> anyhow::Result<SelectResponse>;
 
     /// Returns `true` once the selector can schedule at least one worker.
     async fn any_ready(&self) -> bool;
+
+    /// Change signal the reconcile loop should also wake on, in addition to pod
+    /// changes. The HTTP fleet bumps this when its selector replica set changes;
+    /// the embedded backend never fires (its selector is in-process).
+    fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64>;
 }
 
 #[cfg(test)]

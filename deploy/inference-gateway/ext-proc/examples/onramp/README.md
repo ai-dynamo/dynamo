@@ -93,38 +93,68 @@ curl http://$GW/v1/chat/completions -H 'content-type: application/json' -d '{
 | `DYN_TOTAL_KV_BLOCKS` | Per-worker total KV blocks hint | optional |
 | `DYN_MAX_NUM_BATCHED_TOKENS` | Per-worker max batched tokens | optional |
 | `DYN_EPP_SELECTOR_THREADS` | KV indexer threads (embedded mode) | optional; default 4 |
-| `DYN_EPP_SELECTOR_URLS` | Selection-service base URLs | required for `http` mode |
+| `DYN_EPP_SELECTOR_SERVICE` | Name of the selection-service `Service`; the EPP watches its EndpointSlices to discover replicas | required for `http` mode |
+| `DYN_EPP_SELECTOR_SERVICE_NAMESPACE` | Namespace of the selection-service `Service` | optional; default `POD_NAMESPACE` |
+| `DYN_EPP_SELECTOR_HTTP_PORT` | HTTP port each selector replica serves on | optional; default 8092 |
+| `DYN_EPP_SELECTOR_REPLICA_SYNC_PORT` | ZMQ replica-sync PUB port each selector replica binds (used to wire the peer mesh) | optional; default 9092 |
 | `POD_NAMESPACE` | EPP's own namespace (downward API) | required |
 
 ## Replicated (http) mode
 
 Embedded mode is single-replica only: the in-process selector has no
 cross-replica index/load synchronization. For a replicated deployment, run a
-separate `dynamo.select_service` (one or more replicas) and switch the EPP to
-http mode at runtime (no rebuild — the default image supports both):
+separate `dynamo.select_service` `Deployment` (one or more replicas) fronted by a
+`Service`, and switch the EPP to http mode at runtime (no rebuild — the default
+image supports both). Point the EPP at the **Service name**, not a static URL:
 
 ```yaml
 - name: DYN_EPP_SELECTOR_MODE
   value: "http"
-- name: DYN_EPP_SELECTOR_URLS
-  value: "http://dynamo-selector:8092"   # comma-separated for multiple replicas
+- name: DYN_EPP_SELECTOR_SERVICE
+  value: "dynamo-selector"            # a headless/ClusterIP Service in this namespace
+# Optional overrides (defaults shown):
+# - name: DYN_EPP_SELECTOR_HTTP_PORT
+#   value: "8092"
+# - name: DYN_EPP_SELECTOR_REPLICA_SYNC_PORT
+#   value: "9092"
 ```
 
-To run multiple selector replicas, give each the others' addresses so they share
-KV index state and active-load lifecycle events:
+The EPP watches the Service's EndpointSlices and keeps its replica set in sync as
+replicas come and go: each new (or restarted) replica is bootstrapped — its
+catalog reconciled from scratch — before it receives selection traffic, and
+replicas that disappear are dropped. It reconciles the catalog on every live
+replica independently (`GET /workers` → diff → `POST`/`DELETE /workers`) and
+routes selections only to replicas reporting `GET /ready`.
+
+The EPP also wires the selectors' **replica-sync peer mesh** dynamically as the
+replica set changes (`POST /replica_sync/register_peer` /
+`.../deregister_peer`), so active-load and admission events propagate across the
+fleet without static `--replica-sync-peers` wiring. Each selector replica only
+needs its own replica-sync port bound:
 
 ```bash
 python -m dynamo.select_service \
   --port 8092 \
-  --indexer-peers http://dynamo-selector-b:8092 \
-  --replica-sync-port 9092 \
-  --replica-sync-peers 'tcp://dynamo-selector-b:9092'
+  --replica-sync-port 9092
 ```
 
-The EPP fans catalog writes out to every replica and reads selections from one.
+`--indexer-peers` remains useful at startup so a fresh replica can recover KV
+index state from an existing peer before the EPP finishes bootstrapping it.
 Replica synchronization is best-effort; see the
 [selection service docs](../../../../../docs/components/router/standalone-selection.md)
 for the consistency invariants.
+
+### Additional RBAC for http mode
+
+HTTP mode discovers selector replicas from EndpointSlices, so the EPP's `Role`
+needs read access to them (in addition to the `pods` / `inferencepools` rules in
+`agg.yaml`):
+
+```yaml
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list", "watch"]
+```
 
 ## Limitations (V1)
 

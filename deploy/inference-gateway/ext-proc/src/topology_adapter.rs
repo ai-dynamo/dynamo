@@ -9,15 +9,15 @@
 //! (endpoint, block size, KV-event endpoints, DP size, capacity hints) is
 //! produced here instead. For each `Ready` pod the [`PodDiscovery`]
 //! surfaces, this adapter normalizes a [`WorkerRegistration`] from environment
-//! defaults plus the pod's resolved endpoints, and reconciles the catalog on
-//! every selection-service replica:
+//! defaults plus the pod's resolved endpoints, and hands the whole desired set
+//! to the [`SelectionBackend`], which owns the actual-vs-desired diff:
 //!
-//! - newly `Ready` pods are upserted (`POST /workers`),
-//! - pods whose registration changed are re-upserted, and
-//! - pods that left the `Ready` set are deleted (`DELETE /workers/{id}`).
+//! - the HTTP fleet applies the diff to every live selector replica (and
+//!   bootstraps replicas that appear or restart), and
+//! - the embedded backend applies it to the in-process core.
 //!
 //! The adapter owns `worker_id` generation (via the reflector's stable hash) and
-//! applies the same id to every replica, so each replica's catalog agrees.
+//! applies the same id everywhere, so each replica's catalog agrees.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,25 +62,27 @@ pub struct TopologyAdapter {
 
 impl TopologyAdapter {
     /// Spawn the reconciliation loop. Performs an initial reconcile immediately,
-    /// then re-reconciles whenever the reflector reports a pod change.
+    /// then re-reconciles whenever the reflector reports a pod change, the
+    /// backend reports a selector-fleet change, or the periodic timer fires.
     pub fn spawn(
         reflector: Arc<PodDiscovery>,
         backend: Arc<dyn SelectionBackend>,
         defaults: RegistrationDefaults,
     ) -> Self {
         let task = tokio::spawn(async move {
-            let mut current: HashMap<u64, WorkerRegistration> = HashMap::new();
-            let mut changes = reflector.subscribe_changes();
+            let mut pod_changes = reflector.subscribe_changes();
+            let mut backend_changes = backend.subscribe_changes();
             let mut ticker = tokio::time::interval(RECONCILE_INTERVAL);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                reconcile_once(&reflector, backend.as_ref(), &defaults, &mut current).await;
-                // Re-reconcile on the next pod change OR on a periodic tick. The
-                // timer recovers a selection-service restart (which drops the
-                // catalog) even when the pod set is stable and no reflector event
-                // fires. Exit if the reflector's sender drops.
+                reconcile_once(&reflector, backend.as_ref(), &defaults).await;
+                // Re-reconcile on a pod change, a selector-fleet change (a
+                // replica appeared/disappeared), OR a periodic tick. The timer
+                // recovers a selection-service restart (which drops the catalog)
+                // even when nothing else changes. Exit if the pod-change sender
+                // drops (the reflector is gone).
                 tokio::select! {
-                    changed = changes.changed() => {
+                    changed = pod_changes.changed() => {
                         if changed.is_err() {
                             tracing::warn!(
                                 "Reflector change channel closed; topology adapter stopping"
@@ -88,6 +90,7 @@ impl TopologyAdapter {
                             break;
                         }
                     }
+                    _ = backend_changes.changed() => {}
                     _ = ticker.tick() => {}
                 }
             }
@@ -96,13 +99,12 @@ impl TopologyAdapter {
     }
 }
 
-/// Run one reconcile pass: apply the plan and update `current` to reflect what
-/// was successfully pushed to the selector replicas.
+/// Run one reconcile pass: build the desired catalog from the Ready pods and
+/// hand it to the backend, which owns the actual-vs-desired diff.
 async fn reconcile_once(
     reflector: &PodDiscovery,
     backend: &dyn SelectionBackend,
     defaults: &RegistrationDefaults,
-    current: &mut HashMap<u64, WorkerRegistration>,
 ) {
     let desired: HashMap<u64, WorkerRegistration> = reflector
         .ready_workers()
@@ -110,28 +112,8 @@ async fn reconcile_once(
         .map(|w| (w.worker_id, build_registration(w, defaults)))
         .collect();
 
-    let (upserts, deletes) = plan(&desired, current);
-
-    for reg in upserts {
-        match backend.upsert_worker(&reg).await {
-            Ok(()) => {
-                current.insert(reg.worker_id, reg);
-            }
-            Err(e) => {
-                tracing::warn!(worker_id = reg.worker_id, error = %e, "Failed to upsert worker; will retry on next change");
-            }
-        }
-    }
-
-    for worker_id in deletes {
-        match backend.delete_worker(worker_id).await {
-            Ok(()) => {
-                current.remove(&worker_id);
-            }
-            Err(e) => {
-                tracing::warn!(worker_id, error = %e, "Failed to delete worker; will retry on next change");
-            }
-        }
+    if let Err(e) = backend.reconcile(&desired).await {
+        tracing::warn!(error = %e, "Selector reconcile failed; will retry on next change or tick");
     }
 }
 
@@ -153,26 +135,6 @@ fn build_registration(w: &RawWorker, defaults: &RegistrationDefaults) -> WorkerR
         max_num_batched_tokens: defaults.max_num_batched_tokens,
         stable_routing_id: Some(w.stable_routing_id.clone()),
     }
-}
-
-/// Compute the upsert and delete actions to move `current` toward `desired`.
-/// Pure function — no I/O — so it is unit-testable.
-fn plan(
-    desired: &HashMap<u64, WorkerRegistration>,
-    current: &HashMap<u64, WorkerRegistration>,
-) -> (Vec<WorkerRegistration>, Vec<u64>) {
-    let mut upserts = Vec::new();
-    for (id, reg) in desired {
-        if current.get(id) != Some(reg) {
-            upserts.push(reg.clone());
-        }
-    }
-    let deletes = current
-        .keys()
-        .filter(|id| !desired.contains_key(id))
-        .copied()
-        .collect();
-    (upserts, deletes)
 }
 
 #[cfg(test)]
@@ -215,38 +177,5 @@ mod tests {
         );
         assert_eq!(reg.total_kv_blocks, Some(1000));
         assert_eq!(reg.stable_routing_id.as_deref(), Some("vllm-7"));
-    }
-
-    #[test]
-    fn plan_upserts_new_and_changed_deletes_gone() {
-        let d = defaults();
-        let mut desired = HashMap::new();
-        desired.insert(1u64, build_registration(&worker(1, "10.0.0.1"), &d));
-        desired.insert(2u64, build_registration(&worker(2, "10.0.0.2"), &d));
-
-        let mut current = HashMap::new();
-        // worker 1 already registered identically; worker 3 no longer ready.
-        current.insert(1u64, build_registration(&worker(1, "10.0.0.1"), &d));
-        current.insert(3u64, build_registration(&worker(3, "10.0.0.3"), &d));
-
-        let (upserts, deletes) = plan(&desired, &current);
-        let upsert_ids: Vec<u64> = upserts.iter().map(|r| r.worker_id).collect();
-        assert_eq!(upsert_ids, vec![2]); // only the new worker
-        assert_eq!(deletes, vec![3]); // the gone worker
-    }
-
-    #[test]
-    fn plan_reupserts_on_endpoint_change() {
-        let d = defaults();
-        let mut desired = HashMap::new();
-        desired.insert(1u64, build_registration(&worker(1, "10.0.0.9"), &d)); // ip changed
-
-        let mut current = HashMap::new();
-        current.insert(1u64, build_registration(&worker(1, "10.0.0.1"), &d));
-
-        let (upserts, deletes) = plan(&desired, &current);
-        assert_eq!(upserts.len(), 1);
-        assert_eq!(upserts[0].endpoint, "http://10.0.0.9:8000");
-        assert!(deletes.is_empty());
     }
 }
