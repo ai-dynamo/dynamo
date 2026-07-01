@@ -323,7 +323,17 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
     covers every eagle variant -- currently EAGLE, EAGLE3, FROZEN_KV_MTP. (NEXTN/EAGLE are
     normalized to EAGLE/FROZEN_KV_MTP in ServerArgs before we see them.)
     """
-    return SpeculativeAlgorithm.from_string(speculative_algorithm).is_eagle()
+    try:
+        return SpeculativeAlgorithm.from_string(speculative_algorithm).is_eagle()
+    except ValueError:
+        # Unknown/unregistered algorithm name: ``from_string`` raises, but registration must not
+        # crash on it -- default to not enabling eagle bigram routing (the previous membership
+        # check ``in ("EAGLE", "NEXTN")`` never raised; preserve that behavior).
+        logging.warning(
+            "Unknown speculative_algorithm %r; not enabling enable_eagle.",
+            speculative_algorithm,
+        )
+        return False
 
 
 async def _get_runtime_config(
