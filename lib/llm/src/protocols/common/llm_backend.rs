@@ -187,6 +187,10 @@ pub struct LLMEngineOutput {
 
     pub top_logprobs: Option<TopLogprobs>,
 
+    /// Metadata emitted only for the engine-native generate API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generate_metadata: Option<crate::protocols::inference::generate::GenerateBackendMetadata>,
+
     // TODO: Enrich this with more information as can apply our first-level postprocessing
     // logic and return more detailed information
     pub finish_reason: Option<FinishReason>,
@@ -248,6 +252,7 @@ impl LLMEngineOutput {
             cum_log_probs: None,
             log_probs: None,
             top_logprobs: None,
+            generate_metadata: None,
             finish_reason: Some(FinishReason::Cancelled),
             stop_reason: None,
             index: None,
@@ -273,6 +278,7 @@ impl LLMEngineOutput {
             finish_reason: Some(FinishReason::Stop),
             stop_reason: None,
             top_logprobs: None,
+            generate_metadata: None,
             index: None,
             disaggregated_params: None,
             encoder_result: None,
@@ -294,6 +300,7 @@ impl LLMEngineOutput {
             cum_log_probs: None,
             log_probs: None,
             top_logprobs: None,
+            generate_metadata: None,
             finish_reason: Some(FinishReason::Length),
             stop_reason: None,
             index: None,
@@ -317,6 +324,7 @@ impl LLMEngineOutput {
             cum_log_probs: None,
             log_probs: None,
             top_logprobs: None,
+            generate_metadata: None,
             finish_reason: Some(FinishReason::Error(err_msg)),
             stop_reason: None,
             index: None,
@@ -354,6 +362,7 @@ impl LLMEngineOutput {
             cum_log_probs: None,
             log_probs: None,
             top_logprobs: None,
+            generate_metadata: None,
             finish_reason: Some(FinishReason::Stop),
             stop_reason: None,
             index: Some(0),

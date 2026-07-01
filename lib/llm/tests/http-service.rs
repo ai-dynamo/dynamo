@@ -206,6 +206,7 @@ fn compare_counter(
 
 fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Status) -> usize {
     let endpoint = match endpoint {
+        Endpoint::InferenceGenerate => todo!(),
         Endpoint::Completions => 0,
         Endpoint::ChatCompletions => 1,
         Endpoint::Embeddings => todo!(),
@@ -215,7 +216,6 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Images => todo!(),
         Endpoint::Videos => todo!(),
         Endpoint::Audios => todo!(),
-        Endpoint::Generate => todo!(),
     };
 
     let request_type = match request_type {

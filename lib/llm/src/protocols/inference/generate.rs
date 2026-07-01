@@ -9,12 +9,16 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use dynamo_protocols::types::{ChatChoiceLogprobs, CompletionUsage};
+use dynamo_protocols::types::CompletionUsage;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
 pub const GENERATE_PATH: &str = "/inference/v1/generate";
+
+/// Private pipeline-context key for vLLM-compatible data-parallel affinity.
+/// This deliberately stays out of the public JSON request contract.
+pub(crate) const GENERATE_DP_RANK_CONTEXT_KEY: &str = "dynamo.llm.generate.dp_rank";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GenerateRequest {
@@ -470,7 +474,7 @@ pub struct GenerateResponse {
 pub struct GenerateResponseChoice {
     pub index: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub logprobs: Option<ChatChoiceLogprobs>,
+    pub logprobs: Option<GenerateChoiceLogprobs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
     pub token_ids: Vec<u32>,
@@ -490,7 +494,7 @@ pub struct GenerateStreamResponse {
 pub struct GenerateStreamResponseChoice {
     pub index: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub logprobs: Option<ChatChoiceLogprobs>,
+    pub logprobs: Option<GenerateChoiceLogprobs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
     pub token_ids: Vec<u32>,
@@ -503,6 +507,42 @@ pub struct GenerateLogprob {
     pub rank: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decoded_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenerateChoiceLogprobs {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<Vec<GenerateTokenLogprob>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<Vec<GenerateTokenLogprob>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenerateTokenLogprob {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Option<Vec<u8>>,
+    pub top_logprobs: Vec<GenerateTopLogprob>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenerateTopLogprob {
+    pub token: String,
+    pub logprob: f32,
+    pub bytes: Option<Vec<u8>>,
+}
+
+/// Typed worker-to-frontend metadata that does not belong in the generic
+/// token delta fields. It stays binary-free except for vLLM's single base64
+/// representation of routed-expert NumPy data.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GenerateBackendMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_logprobs: Option<Vec<Option<HashMap<u32, GenerateLogprob>>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routed_experts: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_params: Option<Value>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

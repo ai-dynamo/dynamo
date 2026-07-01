@@ -288,7 +288,6 @@ struct StateFlags {
     realtime_endpoints_enabled: AtomicBool,
     responses_endpoints_enabled: AtomicBool,
     anthropic_endpoints_enabled: AtomicBool,
-    generate_endpoints_enabled: AtomicBool,
 }
 
 impl StateFlags {
@@ -305,7 +304,6 @@ impl StateFlags {
             EndpointType::AnthropicMessages => {
                 self.anthropic_endpoints_enabled.load(Ordering::Relaxed)
             }
-            EndpointType::Generate => self.generate_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
 
@@ -338,9 +336,6 @@ impl StateFlags {
             EndpointType::AnthropicMessages => self
                 .anthropic_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
-            EndpointType::Generate => self
-                .generate_endpoints_enabled
-                .store(enabled, Ordering::Relaxed),
         }
     }
 }
@@ -368,7 +363,6 @@ impl State {
                 realtime_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
                 anthropic_endpoints_enabled: AtomicBool::new(false),
-                generate_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
             frontend_api_config: config.frontend_api_config,
@@ -880,7 +874,6 @@ impl HttpServiceConfigBuilder {
         let metrics_config = config.metrics_config.clone();
         let frontend_api_config = config.frontend_api_config.clone();
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
-        let engine_api_enabled = frontend_api_config.engine_api_enabled();
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -926,7 +919,6 @@ impl HttpServiceConfigBuilder {
             &EndpointType::AnthropicMessages,
             anthropic_endpoints_enabled,
         );
-        state.flags.set(&EndpointType::Generate, engine_api_enabled);
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -1025,7 +1017,6 @@ impl HttpServiceConfigBuilder {
             state.clone(),
             &config.request_template,
             anthropic_endpoints_enabled,
-            engine_api_enabled,
         );
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
@@ -1115,18 +1106,18 @@ impl HttpServiceConfigBuilder {
         self
     }
 
+    pub fn enable_engine_apis(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_engine_api_enabled(enabled);
+        self
+    }
+
     pub fn strip_anthropic_preamble(mut self, enabled: bool) -> Self {
         self.frontend_api_config
             .get_or_insert_with(FrontendApiConfig::default)
             .anthropic_mut()
             .set_strip_preamble(enabled);
-        self
-    }
-
-    pub fn enable_engine_apis(mut self, enabled: bool) -> Self {
-        self.frontend_api_config
-            .get_or_insert_with(FrontendApiConfig::default)
-            .set_engine_api_enabled(enabled);
         self
     }
 
@@ -1150,9 +1141,11 @@ impl HttpServiceConfigBuilder {
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
-        enable_engine_apis: bool,
     ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
         let mut routes = Vec::new();
+        if state.engine_api_enabled() {
+            routes.push(super::inference_generate::router(state.clone()));
+        }
         // Add chat completions route with conditional middleware
         let (chat_docs, chat_route) = super::openai::chat_completions_router(
             state.clone(),
@@ -1193,11 +1186,6 @@ impl HttpServiceConfigBuilder {
                 EndpointType::AnthropicMessages,
                 (anthropic_docs, anthropic_route),
             );
-        }
-
-        if enable_engine_apis {
-            let (generate_docs, generate_route) = super::generate::generate_router(state.clone());
-            endpoint_routes.insert(EndpointType::Generate, (generate_docs, generate_route));
         }
 
         for endpoint_type in EndpointType::all() {
@@ -1434,6 +1422,36 @@ mod tests {
                 default.state.nvext_enabled(),
                 "default should preserve current behavior (nvext on)"
             );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn engine_generate_route_is_registered_only_when_enabled() {
+        use crate::protocols::inference::generate::GENERATE_PATH;
+        use dynamo_runtime::config::environment_names::llm::DYN_ENABLE_ENGINE_API;
+
+        temp_env::with_var_unset(DYN_ENABLE_ENGINE_API, || {
+            let disabled = HttpService::builder()
+                .enable_engine_apis(false)
+                .build()
+                .unwrap();
+            assert!(!disabled.state.engine_api_enabled());
+            assert!(
+                !disabled
+                    .route_docs()
+                    .iter()
+                    .any(|route| route.path == GENERATE_PATH)
+            );
+
+            let enabled = HttpService::builder()
+                .enable_engine_apis(true)
+                .build()
+                .unwrap();
+            assert!(enabled.state.engine_api_enabled());
+            assert!(enabled.route_docs().iter().any(|route| {
+                route.method == axum::http::Method::POST && route.path == GENERATE_PATH
+            }));
         });
     }
 

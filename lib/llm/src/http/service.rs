@@ -19,13 +19,13 @@
 //! The [`service_v2::HttpService`] can be further extended to host any [`axum::Router`] using the [`service_v2::HttpServiceConfigBuilder`].
 
 mod anthropic;
+mod inference_generate;
 pub mod metadata;
 mod openai;
 
 pub mod busy_threshold;
 pub mod disconnect;
 pub mod error;
-pub mod generate;
 pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
