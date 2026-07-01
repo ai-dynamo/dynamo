@@ -35,6 +35,8 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
+RUN chmod -R 775 /usr/local/lib/python3.12/dist-packages/flashinfer_cubin/cubins || true
+
 {% if device == "xpu" %}
 {# XPU runtime: NIXL + UCX are needed for P2P transport on Intel GPUs.
    CUDA sglang runtime does NOT include NIXL/UCX (matching upstream main);
