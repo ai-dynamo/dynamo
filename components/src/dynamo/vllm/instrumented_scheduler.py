@@ -133,6 +133,7 @@ ENV_FPM_BENCHMARK_OUTPUT_PATH = "DYN_FPM_BENCHMARK_OUTPUT_PATH"
 class BenchmarkConfig:
     mode: Literal["prefill", "decode", "agg"] = "agg"
     prefill_isl_granularity: int = 16
+    prefill_kv_read_granularity: int = 1
     decode_length_granularity: int = 6
     decode_batch_size_granularity: int = 6
     warmup_iterations: int = 5
@@ -151,6 +152,7 @@ class _BenchPhase(enum.Enum):
 class BenchmarkPoint:
     point_type: str  # "prefill" or "decode"
     isl: int = 0
+    kv_read_tokens: int = 0  # KV tokens read by the initial prefill forward pass.
     context_length: int = 0
     batch_size: int = 0
 
@@ -159,6 +161,12 @@ class BenchmarkPoint:
 class BenchmarkPointResult:
     point: BenchmarkPoint
     fpms: list = field(default_factory=list)
+
+
+@dataclass
+class SkippedBenchmarkPoint:
+    point: BenchmarkPoint
+    reason: str
 
 
 # ---------------------------------------------------------------------------
@@ -420,7 +428,7 @@ class InstrumentedScheduler(AsyncScheduler):
             )
             self._publisher.publish(metrics)
 
-            if self._bench_active:
+            if self._bench_active and self._bench_should_record_fpm(metrics):
                 self._bench_current_fpms.append(
                     json.loads(msgspec.json.encode(metrics))
                 )
@@ -497,6 +505,16 @@ class InstrumentedScheduler(AsyncScheduler):
             == _BenchPhase.DECODE_SWEEP
             and req_id in getattr(self, "_bench_active_req_ids", set())
         )
+
+    def _bench_should_record_fpm(self, metrics: ForwardPassMetrics) -> bool:
+        """Keep only the forward-pass type represented by the current point."""
+        point = getattr(self, "_bench_current_point", None)
+        if point is None:
+            return False
+        scheduled = metrics.scheduled_requests
+        if point.point_type == "prefill":
+            return scheduled.num_prefill_requests > 0
+        return scheduled.num_decode_requests > 0
 
     def _compute_queued(self) -> QueuedRequestMetrics:
         """Single-pass aggregation over ``self.waiting`` and ``self.skipped_waiting``.
@@ -585,6 +603,7 @@ class InstrumentedScheduler(AsyncScheduler):
         # the types that BenchmarkConfig expects.
         _INT_FIELDS = {
             "prefill_isl_granularity",
+            "prefill_kv_read_granularity",
             "decode_length_granularity",
             "decode_batch_size_granularity",
             "warmup_iterations",
@@ -616,11 +635,15 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_grid: deque[BenchmarkPoint] = deque()
         self._bench_current_point: BenchmarkPoint | None = None
         self._bench_results: list[BenchmarkPointResult] = []
+        self._bench_skipped_points: list[SkippedBenchmarkPoint] = []
         self._bench_current_fpms: list[dict] = []
         self._bench_active_req_ids: set[str] = set()
         self._bench_seq = 0
         self._bench_grid_built = False
+        self._bench_expected_points = 0
         self._bench_drain_pending = False
+        self._bench_pending_seed_point: BenchmarkPoint | None = None
+        self._bench_pending_seed_salt: str | None = None
 
         # Build block_hasher so benchmark requests work with prefix caching.
         if self.cache_config.enable_prefix_caching:
@@ -648,6 +671,7 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_generate_prefill_grid()
         if mode in ("decode", "agg"):
             self._bench_generate_decode_grid()
+        self._bench_expected_points = len(self._bench_grid)
         logger.info("Benchmark grid: %d points (%s mode)", len(self._bench_grid), mode)
 
     def _bench_generate_prefill_grid(self) -> None:
@@ -661,7 +685,68 @@ class InstrumentedScheduler(AsyncScheduler):
             return
         isls = np.unique(np.linspace(10, max_tokens, n, dtype=int))
         for isl in isls:
-            self._bench_grid.append(BenchmarkPoint(point_type="prefill", isl=int(isl)))
+            isl = int(isl)
+            for kv_read_tokens in self._bench_prefill_kv_read_points(isl):
+                self._bench_grid.append(
+                    BenchmarkPoint(
+                        point_type="prefill",
+                        isl=isl,
+                        kv_read_tokens=kv_read_tokens,
+                    )
+                )
+
+    def _bench_prefill_kv_read_points(self, isl: int) -> list[int]:
+        n = max(1, self._bench_config.prefill_kv_read_granularity)
+        if n == 1:
+            # Preserve the original cache-miss-only prefill sweep by default.
+            return [0]
+
+        max_kv_read_tokens = self._bench_align_prefill_kv_read_tokens(isl - 1)
+        max_kv_read_tokens -= self._bench_eagle_cache_drop_tokens()
+        if max_kv_read_tokens < 1:
+            return [0]
+
+        raw_points = np.unique(np.linspace(0, max_kv_read_tokens, n, dtype=int))
+        points = {
+            self._bench_align_prefill_kv_read_tokens(int(kv_read_tokens))
+            for kv_read_tokens in raw_points
+        }
+        return sorted(points)
+
+    def _bench_align_prefill_kv_read_tokens(self, kv_read_tokens: int) -> int:
+        block_size = max(1, self.block_size)
+        return max(0, kv_read_tokens) // block_size * block_size
+
+    def _bench_eagle_cache_drop_tokens(self) -> int:
+        kv_cache_manager = getattr(self, "kv_cache_manager", None)
+        if self._bench_uses_per_group_cache_lookup():
+            return 0
+        return self.block_size if getattr(kv_cache_manager, "use_eagle", False) else 0
+
+    def _bench_seed_prompt_len(self, kv_read_tokens: int) -> int:
+        # EAGLE/MTP deliberately drops the last matched cache block. Seed one
+        # additional block so the measured request still reads the grid target.
+        return kv_read_tokens + self._bench_eagle_cache_drop_tokens()
+
+    def _bench_uses_per_group_cache_lookup(self) -> bool:
+        kv_cache_manager = getattr(self, "kv_cache_manager", None)
+        coordinator = getattr(kv_cache_manager, "coordinator", None)
+        return (
+            getattr(self, "connector", None) is not None
+            and getattr(self, "has_mamba_layers", False)
+            and hasattr(coordinator, "find_longest_cache_hit_per_group")
+        )
+
+    def _bench_cached_kv_read_tokens(self, req: Request) -> int:
+        if self._bench_uses_per_group_cache_lookup():
+            _, per_group_hits = (
+                self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                    req.block_hashes,
+                    req.num_tokens - 1,
+                )
+            )
+            return max(per_group_hits, default=0)
+        return self.kv_cache_manager.get_computed_blocks(req)[1]
 
     def _bench_generate_decode_grid(self) -> None:
         n_len = max(1, self._bench_config.decode_length_granularity)
@@ -701,8 +786,14 @@ class InstrumentedScheduler(AsyncScheduler):
     # -- Request injection / cleanup ------------------------------------
 
     def _bench_inject_prefill(
-        self, prompt_len: int, max_tokens: int, n: int = 1
-    ) -> None:
+        self,
+        prompt_len: int,
+        max_tokens: int,
+        n: int = 1,
+        cache_salt: str | None = None,
+        expected_kv_read_tokens: int | None = None,
+    ) -> int:
+        injected = 0
         for _ in range(n):
             req_id = f"__bench_{self._bench_seq}"
             req = Request(
@@ -711,11 +802,26 @@ class InstrumentedScheduler(AsyncScheduler):
                 sampling_params=SamplingParams(max_tokens=max_tokens),
                 pooling_params=None,
                 block_hasher=self._bench_block_hasher,
-                cache_salt=req_id,
+                cache_salt=cache_salt or req_id,
             )
+            self._bench_seq += 1
+
+            if expected_kv_read_tokens is not None:
+                actual_kv_read_tokens = self._bench_cached_kv_read_tokens(req)
+                if actual_kv_read_tokens != expected_kv_read_tokens:
+                    logger.warning(
+                        "Skipping benchmark point after seed cache validation "
+                        "failed: expected_kv_read_tokens=%d "
+                        "actual_kv_read_tokens=%d",
+                        expected_kv_read_tokens,
+                        actual_kv_read_tokens,
+                    )
+                    continue
+
             self.add_request(req)
             self._bench_active_req_ids.add(req_id)
-            self._bench_seq += 1
+            injected += 1
+        return injected
 
     def _bench_inject_fake_decode(
         self, ctx_len: int, batch_size: int
@@ -917,11 +1023,49 @@ class InstrumentedScheduler(AsyncScheduler):
             )
             if still_alive:
                 return None
+            if self._bench_pending_seed_point is not None:
+                # The seed pass exists only to populate prefix cache for the
+                # measured request. Drain the async pipeline before reusing its
+                # cache salt, and never record the seed's forward-pass metrics.
+                self._bench_cleanup_requests()
+                self._bench_drain_pending = True
+                return None
             if not self._bench_current_fpms:
                 return None
             self._bench_save_current_point()
             self._bench_cleanup_requests()
             self._bench_drain_pending = True
+            return None
+
+        if self._bench_pending_seed_point is not None:
+            point = self._bench_pending_seed_point
+            cache_salt = self._bench_pending_seed_salt
+            self._bench_pending_seed_point = None
+            self._bench_pending_seed_salt = None
+            assert cache_salt is not None
+
+            self._bench_current_point = point
+            self._bench_current_fpms = []
+            injected = self._bench_inject_prefill(
+                prompt_len=point.isl,
+                max_tokens=1,
+                cache_salt=cache_salt,
+                expected_kv_read_tokens=point.kv_read_tokens,
+            )
+            if injected == 0:
+                self._bench_current_point = None
+                self._bench_skip_point(point, "seed_cache_validation_failed")
+                logger.warning(
+                    "Skipping benchmark prefill point after KV-read seed miss: %s",
+                    point,
+                )
+                return None
+
+            logger.info(
+                "Benchmark prefill: ISL=%d KV reads=%d",
+                point.isl,
+                point.kv_read_tokens,
+            )
             return None
 
         point = self._bench_pop_next("prefill")
@@ -933,10 +1077,30 @@ class InstrumentedScheduler(AsyncScheduler):
                 self._bench_phase = _BenchPhase.DONE
             return None
 
-        self._bench_current_point = point
         self._bench_current_fpms = []
+        if point.kv_read_tokens > 0:
+            cache_salt = f"__bench_kv_seed_{self._bench_seq}"
+            injected = self._bench_inject_prefill(
+                prompt_len=self._bench_seed_prompt_len(point.kv_read_tokens),
+                max_tokens=1,
+                cache_salt=cache_salt,
+            )
+            if injected == 0:
+                self._bench_skip_point(point, "seed_injection_failed")
+                logger.warning(
+                    "Skipping benchmark prefill point after KV-read seed "
+                    "injection failed: %s",
+                    point,
+                )
+                return None
+            self._bench_pending_seed_point = point
+            self._bench_pending_seed_salt = cache_salt
+            logger.info("Benchmark prefill seed: KV tokens=%d", point.kv_read_tokens)
+            return None
+
+        self._bench_current_point = point
         self._bench_inject_prefill(prompt_len=point.isl, max_tokens=1)
-        logger.info("Benchmark prefill: ISL=%d", point.isl)
+        logger.info("Benchmark prefill: ISL=%d KV reads=0", point.isl)
         return None
 
     def _bench_step_decode(self) -> SchedulerOutput | None:
@@ -975,6 +1139,22 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_save_current_point(self) -> None:
         if self._bench_current_point is not None and self._bench_current_fpms:
+            if self._bench_current_point.point_type == "prefill":
+                scheduled = self._bench_current_fpms[0].get("scheduled_requests", {})
+                actual_kv_read_tokens = scheduled.get("sum_prefill_kv_tokens")
+                if actual_kv_read_tokens != self._bench_current_point.kv_read_tokens:
+                    logger.warning(
+                        "Skipping benchmark prefill point after measured KV-read "
+                        "mismatch: point=%s actual_kv_read_tokens=%s",
+                        self._bench_current_point,
+                        actual_kv_read_tokens,
+                    )
+                    self._bench_skip_point(
+                        self._bench_current_point, "measured_kv_read_mismatch"
+                    )
+                    self._bench_current_point = None
+                    self._bench_current_fpms = []
+                    return
             self._bench_results.append(
                 BenchmarkPointResult(
                     point=self._bench_current_point,
@@ -984,10 +1164,26 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_current_point = None
         self._bench_current_fpms = []
 
+    def _bench_skip_point(self, point: BenchmarkPoint, reason: str) -> None:
+        self._bench_skipped_points.append(
+            SkippedBenchmarkPoint(point=point, reason=reason)
+        )
+
     # -- Results output -------------------------------------------------
 
     def _bench_write_results(self) -> None:
+        completed_points = len(self._bench_results)
+        skipped_points = len(self._bench_skipped_points)
         output = {
+            "schema_version": 1,
+            "status": "complete",
+            "valid": completed_points == self._bench_expected_points
+            and skipped_points == 0,
+            "coverage": {
+                "expected_points": self._bench_expected_points,
+                "completed_points": completed_points,
+                "skipped_points": skipped_points,
+            },
             "config": asdict(self._bench_config),
             "limits": {
                 "max_num_scheduled_tokens": self.max_num_scheduled_tokens,
@@ -998,6 +1194,10 @@ class InstrumentedScheduler(AsyncScheduler):
             },
             "results": [
                 {"point": asdict(r.point), "fpms": r.fpms} for r in self._bench_results
+            ],
+            "skipped_points": [
+                {"point": asdict(skipped.point), "reason": skipped.reason}
+                for skipped in self._bench_skipped_points
             ],
         }
         dest = self._bench_config.output_path

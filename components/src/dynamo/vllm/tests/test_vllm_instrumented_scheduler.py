@@ -12,6 +12,8 @@ spinning up vLLM engine internals.
 
 from __future__ import annotations
 
+import json
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -27,7 +29,10 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 # not be resolvable and ``instrumented_scheduler`` will fail to load with
 # ``ModuleNotFoundError: No module named 'vllm.sampling_params'``.
 from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
+    BenchmarkConfig,
+    BenchmarkPoint,
     InstrumentedScheduler,
+    SkippedBenchmarkPoint,
     _BenchPhase,
 )
 
@@ -125,6 +130,18 @@ def test_extract_scheduled_counts_normal_new_requests_as_prefill():
     assert metrics.sum_decode_kv_tokens == 0
 
 
+def test_extract_scheduled_reports_prefill_kv_reads():
+    metrics = _run_extract_scheduled(
+        [_make_new_request("req-1", prompt_len=128, num_computed_tokens=32)],
+        {"req-1": 96},
+    )
+
+    assert metrics.num_prefill_requests == 1
+    assert metrics.sum_prefill_tokens == 96
+    assert metrics.sum_prefill_kv_tokens == 32
+    assert metrics.num_decode_requests == 0
+
+
 def test_extract_scheduled_counts_benchmark_decode_new_requests_as_decode():
     metrics = _run_extract_scheduled(
         [
@@ -140,6 +157,30 @@ def test_extract_scheduled_counts_benchmark_decode_new_requests_as_decode():
     assert metrics.sum_prefill_kv_tokens == 0
     assert metrics.num_decode_requests == 2
     assert metrics.sum_decode_kv_tokens == 32
+
+
+@pytest.mark.parametrize(
+    ("point_type", "num_prefill", "num_decode", "expected"),
+    [
+        ("prefill", 1, 0, True),
+        ("prefill", 0, 1, False),
+        ("decode", 0, 1, True),
+        ("decode", 1, 0, False),
+    ],
+)
+def test_benchmark_records_only_current_point_forward_pass_type(
+    point_type, num_prefill, num_decode, expected
+):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_current_point = BenchmarkPoint(point_type=point_type)
+    metrics = SimpleNamespace(
+        scheduled_requests=SimpleNamespace(
+            num_prefill_requests=num_prefill,
+            num_decode_requests=num_decode,
+        )
+    )
+
+    assert InstrumentedScheduler._bench_should_record_fpm(stub, metrics) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -623,12 +664,214 @@ def test_decode_grid_first_ctx_yields_block_aligned_capacity():
     InstrumentedScheduler._bench_generate_decode_grid(stub)
 
     boundary_points = [p for p in stub._bench_grid if p.context_length == block_size]
-    assert (
-        len(boundary_points) > 0
-    ), f"grid missing ctx_len={block_size} entries: {stub._bench_grid}"
+    assert len(boundary_points) > 0, (
+        f"grid missing ctx_len={block_size} entries: {stub._bench_grid}"
+    )
     # 100 blocks // 2 blocks-per-req == 50 max batch.
     assert max(p.batch_size for p in boundary_points) <= 50, (
         f"boundary ctx_len={block_size}: max batch must not exceed "
         f"num_gpu_blocks // 2 = 50; got "
         f"{[p.batch_size for p in boundary_points]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Prefill KV-read grid and seed lifecycle
+# ---------------------------------------------------------------------------
+
+
+def _prefill_grid_stub(*, kv_read_granularity: int, block_size: int = 8):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_grid = []
+    stub._bench_config = SimpleNamespace(
+        prefill_isl_granularity=2,
+        prefill_kv_read_granularity=kv_read_granularity,
+    )
+    stub.max_num_scheduled_tokens = 40
+    stub.block_size = block_size
+    return stub
+
+
+def test_prefill_kv_read_grid_default_preserves_miss_only_sweep():
+    stub = _prefill_grid_stub(kv_read_granularity=1)
+
+    InstrumentedScheduler._bench_generate_prefill_grid(stub)
+
+    assert [(p.isl, p.kv_read_tokens) for p in stub._bench_grid] == [
+        (10, 0),
+        (40, 0),
+    ]
+
+
+def test_prefill_kv_read_grid_crosses_with_isl_and_aligns_to_blocks():
+    stub = _prefill_grid_stub(kv_read_granularity=3, block_size=8)
+
+    InstrumentedScheduler._bench_generate_prefill_grid(stub)
+
+    assert [(p.isl, p.kv_read_tokens) for p in stub._bench_grid] == [
+        (10, 0),
+        (10, 8),
+        (40, 0),
+        (40, 16),
+        (40, 32),
+    ]
+    assert all(p.kv_read_tokens % stub.block_size == 0 for p in stub._bench_grid)
+    assert all(p.kv_read_tokens <= p.isl - 1 for p in stub._bench_grid)
+
+
+def test_prefill_kv_read_grid_accounts_for_eagle_cache_block_drop():
+    stub = _prefill_grid_stub(kv_read_granularity=3, block_size=8)
+    stub.kv_cache_manager = SimpleNamespace(use_eagle=True)
+
+    assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 40) == [
+        0,
+        8,
+        24,
+    ]
+    assert InstrumentedScheduler._bench_seed_prompt_len(stub, 16) == 24
+
+
+def test_mamba_connector_uses_scheduler_per_group_cache_lookup():
+    stub = _prefill_grid_stub(kv_read_granularity=3, block_size=8)
+    coordinator = SimpleNamespace(
+        find_longest_cache_hit_per_group=MagicMock(return_value=(([], []), (16, 8)))
+    )
+    stub.kv_cache_manager = SimpleNamespace(
+        use_eagle=True,
+        coordinator=coordinator,
+        get_computed_blocks=MagicMock(side_effect=AssertionError("wrong lookup")),
+    )
+    stub.connector = object()
+    stub.has_mamba_layers = True
+    request = SimpleNamespace(block_hashes=[b"hash"], num_tokens=40)
+
+    assert InstrumentedScheduler._bench_eagle_cache_drop_tokens(stub) == 0
+    assert InstrumentedScheduler._bench_seed_prompt_len(stub, 16) == 16
+    assert InstrumentedScheduler._bench_cached_kv_read_tokens(stub, request) == 16
+    coordinator.find_longest_cache_hit_per_group.assert_called_once_with(
+        request.block_hashes, request.num_tokens - 1
+    )
+
+
+def test_prefill_kv_read_seed_drains_then_measures_with_same_salt():
+    point = BenchmarkPoint(point_type="prefill", isl=40, kv_read_tokens=16)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_grid = deque([point])
+    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_active_req_ids = set()
+    stub._bench_current_point = None
+    stub._bench_current_fpms = []
+    stub._bench_pending_seed_point = None
+    stub._bench_pending_seed_salt = None
+    stub._bench_drain_pending = False
+    stub._bench_seq = 7
+    stub._schedule_times = deque()
+    stub.requests = {}
+
+    calls = []
+
+    def inject(**kwargs):
+        calls.append(kwargs)
+        stub._bench_active_req_ids.add(f"request-{len(calls)}")
+        return 1
+
+    stub._bench_inject_prefill = inject
+    stub._bench_cleanup_requests = stub._bench_active_req_ids.clear
+
+    InstrumentedScheduler._bench_step_prefill(stub)
+
+    assert stub._bench_current_point is None
+    assert stub._bench_pending_seed_point is point
+    assert calls[0]["prompt_len"] == point.kv_read_tokens
+    assert calls[0]["max_tokens"] == 1
+    seed_salt = calls[0]["cache_salt"]
+
+    # Simulate the seed finishing. The next step requests an async drain.
+    stub.requests.clear()
+    InstrumentedScheduler._bench_step_prefill(stub)
+    assert stub._bench_drain_pending is True
+    assert len(calls) == 1
+
+    # After the drain, the full ISL request is measured against the seeded KV.
+    InstrumentedScheduler._bench_step_prefill(stub)
+    assert stub._bench_current_point is point
+    assert calls[1] == {
+        "prompt_len": point.isl,
+        "max_tokens": 1,
+        "cache_salt": seed_salt,
+        "expected_kv_read_tokens": point.kv_read_tokens,
+    }
+
+
+def test_prefill_kv_read_validation_miss_skips_measured_point():
+    point = BenchmarkPoint(point_type="prefill", isl=40, kv_read_tokens=16)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_grid = deque()
+    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_active_req_ids = set()
+    stub._bench_current_point = None
+    stub._bench_current_fpms = []
+    stub._bench_pending_seed_point = point
+    stub._bench_pending_seed_salt = "seed-salt"
+    stub._bench_drain_pending = False
+    stub._schedule_times = deque()
+    stub._bench_skipped_points = []
+    stub._bench_inject_prefill = MagicMock(return_value=0)
+
+    InstrumentedScheduler._bench_step_prefill(stub)
+
+    assert stub._bench_current_point is None
+    assert stub._bench_pending_seed_point is None
+    assert stub._bench_skipped_points[0].reason == "seed_cache_validation_failed"
+    stub._bench_inject_prefill.assert_called_once_with(
+        prompt_len=point.isl,
+        max_tokens=1,
+        cache_salt="seed-salt",
+        expected_kv_read_tokens=point.kv_read_tokens,
+    )
+
+
+def test_benchmark_output_marks_skipped_kv_point_invalid(tmp_path):
+    point = BenchmarkPoint(point_type="prefill", isl=40, kv_read_tokens=16)
+    output_path = tmp_path / "benchmark.json"
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = BenchmarkConfig(output_path=str(output_path))
+    stub._bench_expected_points = 1
+    stub._bench_results = []
+    stub._bench_skipped_points = [
+        SkippedBenchmarkPoint(point=point, reason="seed_cache_validation_failed")
+    ]
+    stub.max_num_scheduled_tokens = 40
+    stub.max_num_running_reqs = 8
+    stub.max_model_len = 128
+    stub.block_size = 8
+    stub.cache_config = SimpleNamespace(num_gpu_blocks=64)
+
+    InstrumentedScheduler._bench_write_results(stub)
+
+    output = json.loads(output_path.read_text())
+    assert output["valid"] is False
+    assert output["coverage"] == {
+        "expected_points": 1,
+        "completed_points": 0,
+        "skipped_points": 1,
+    }
+    assert output["skipped_points"] == [
+        {"point": point.__dict__, "reason": "seed_cache_validation_failed"}
+    ]
+
+
+def test_prefill_point_with_measured_kv_mismatch_is_skipped():
+    point = BenchmarkPoint(point_type="prefill", isl=40, kv_read_tokens=16)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_current_point = point
+    stub._bench_current_fpms = [{"scheduled_requests": {"sum_prefill_kv_tokens": 8}}]
+    stub._bench_results = []
+    stub._bench_skipped_points = []
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == []
+    assert stub._bench_skipped_points == [
+        SkippedBenchmarkPoint(point=point, reason="measured_kv_read_mismatch")
+    ]

@@ -97,6 +97,12 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     for i, p in enumerate(rank_paths):
         with open(p) as f:
             data = json.load(f)
+        if data.get("valid") is False:
+            raise RuntimeError(
+                f"Self-benchmark produced incomplete results at {p}: "
+                f"coverage={data.get('coverage')} "
+                f"skipped_points={data.get('skipped_points')}"
+            )
         if i == 0:
             merged = data
             for r in merged.get("results", []):
@@ -106,6 +112,20 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
             for r in data.get("results", []):
                 r["point"]["dp_rank"] = dp_rank
             merged.setdefault("results", []).extend(data.get("results", []))
+            merged_coverage = merged.get("coverage")
+            rank_coverage = data.get("coverage")
+            if isinstance(merged_coverage, dict) and isinstance(rank_coverage, dict):
+                for key in (
+                    "expected_points",
+                    "completed_points",
+                    "skipped_points",
+                ):
+                    merged_coverage[key] = merged_coverage.get(
+                        key, 0
+                    ) + rank_coverage.get(key, 0)
+            merged.setdefault("skipped_points", []).extend(
+                data.get("skipped_points", [])
+            )
 
     logger.info(
         "Benchmark complete, %d points across %d rank(s)",

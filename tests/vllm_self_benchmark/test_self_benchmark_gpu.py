@@ -81,8 +81,8 @@ pytestmark = [
 
 
 # Tight benchmark sweeps keep wall time short. Granularity 2 covers
-# both batch=1 and batch>1 (the case that regressed) and both
-# ctx=block_size and ctx=max-model-len cases.
+# cache-miss and cache-hit prefills, batch=1 and batch>1 decodes, and
+# both ctx=block_size and ctx=max-model-len cases.
 _BENCH_GRANULARITY = "2"
 _BENCH_WARMUP_ITERATIONS = "2"
 
@@ -95,9 +95,9 @@ _GPU_MEMORY_UTILIZATION = "0.45"
 def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
     """Parse the benchmark JSON and assert every point produced a real
     forward-pass measurement (positive ``wall_time``)."""
-    assert (
-        output_path.exists()
-    ), f"benchmark JSON missing at {output_path} -- worker never wrote it"
+    assert output_path.exists(), (
+        f"benchmark JSON missing at {output_path} -- worker never wrote it"
+    )
     data = json.loads(output_path.read_text())
 
     actual_mode = data.get("config", {}).get("mode")
@@ -105,11 +105,15 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
         f"benchmark mode in JSON ({actual_mode}) does not match "
         f"expected ({expected_mode})"
     )
+    assert data.get("valid") is True, (
+        f"benchmark reported incomplete coverage: coverage={data.get('coverage')} "
+        f"skipped_points={data.get('skipped_points')}"
+    )
 
     results = data.get("results") or []
-    assert (
-        len(results) > 0
-    ), f"benchmark JSON has no result points (mode={expected_mode})"
+    assert len(results) > 0, (
+        f"benchmark JSON has no result points (mode={expected_mode})"
+    )
 
     for r in results:
         point = r["point"]
@@ -119,13 +123,28 @@ def _validate_benchmark_results(output_path: Path, expected_mode: str) -> dict:
             f"execute that batch (regression in _bench_inject_fake_decode "
             f"or the empty-frame schedule branch)"
         )
-        for fpm in fpms:
+        for fpm_index, fpm in enumerate(fpms):
             wall_time = fpm.get("wall_time", 0.0)
             assert wall_time > 0, (
                 f"point {point} FPM has non-positive wall_time={wall_time}; "
                 f"the benchmark recorded a heartbeat instead of a real "
                 f"forward-pass measurement"
             )
+
+            if point["point_type"] == "prefill":
+                scheduled = fpm.get("scheduled_requests") or {}
+                assert scheduled.get("num_prefill_requests", 0) > 0, (
+                    f"prefill point {point} captured a non-prefill FPM: "
+                    f"scheduled_requests={scheduled}"
+                )
+                expected_kv_reads = point.get("kv_read_tokens", 0)
+                if fpm_index == 0:
+                    assert scheduled.get("sum_prefill_kv_tokens") == (
+                        expected_kv_reads
+                    ), (
+                        f"point {point} measured the wrong initial KV reads: "
+                        f"scheduled_requests={scheduled}"
+                    )
     return data
 
 
@@ -188,6 +207,8 @@ class _DynamoBenchmarkWorker(ManagedProcess):
             "--benchmark-mode",
             bench_mode,
             "--benchmark-prefill-granularity",
+            _BENCH_GRANULARITY,
+            "--benchmark-prefill-kv-read-granularity",
             _BENCH_GRANULARITY,
             "--benchmark-decode-length-granularity",
             _BENCH_GRANULARITY,
@@ -380,9 +401,18 @@ def test_self_benchmark_agg_serves_after_bench(
             # Sanity: agg sweep produces both prefill and decode points,
             # and the decode sweep includes batch>1 (the regression case).
             point_types = {r["point"]["point_type"] for r in data["results"]}
-            assert (
-                "prefill" in point_types and "decode" in point_types
-            ), f"agg benchmark missing point types: got {point_types}"
+            assert "prefill" in point_types and "decode" in point_types, (
+                f"agg benchmark missing point types: got {point_types}"
+            )
+            prefill_kv_reads = sorted(
+                r["point"].get("kv_read_tokens", 0)
+                for r in data["results"]
+                if r["point"]["point_type"] == "prefill"
+            )
+            assert any(kv_reads > 0 for kv_reads in prefill_kv_reads), (
+                "agg prefill sweep did not exercise a prefix-cache hit: "
+                f"kv_read_tokens={prefill_kv_reads}"
+            )
             decode_batches = sorted(
                 r["point"]["batch_size"]
                 for r in data["results"]
@@ -458,9 +488,16 @@ def test_self_benchmark_disagg_serves_after_bench(
                 # Prefill sweep on the prefill worker must produce
                 # prefill points.
                 p_types = {r["point"]["point_type"] for r in p_data["results"]}
-                assert (
-                    "prefill" in p_types
-                ), f"prefill benchmark missing prefill points: {p_types}"
+                assert "prefill" in p_types, (
+                    f"prefill benchmark missing prefill points: {p_types}"
+                )
+                prefill_kv_reads = sorted(
+                    r["point"].get("kv_read_tokens", 0) for r in p_data["results"]
+                )
+                assert any(kv_reads > 0 for kv_reads in prefill_kv_reads), (
+                    "disaggregated prefill sweep did not exercise a prefix-cache "
+                    f"hit: kv_read_tokens={prefill_kv_reads}"
+                )
 
                 # End-to-end: a real chat completion that traverses
                 # both workers (prefill on one, decode on the other).
