@@ -133,6 +133,10 @@ if yq -e ".products[0].versions[] | select(.\"display-name\" == \"$TAG\")" "$DOC
 else
   echo "Inserting $TAG into docs.yml ..."
   DEV_IDX=$(yq '.products[0].versions | to_entries | map(select(.value."display-name" == "dev")) | .[0].key' "$DOCS_FILE")
+  if [ -z "$DEV_IDX" ] || [ "$DEV_IDX" = "null" ]; then
+    echo "error: could not find dev version entry in $DOCS_FILE" >&2
+    exit 1
+  fi
   INSERT_IDX=$((DEV_IDX + 1))
   yq -i "
     .products[0].versions |= (
@@ -144,8 +148,6 @@ else
   yq -i ".products[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
   yq -i ".products[0].versions[0].path = \"./versions/$TAG.yml\"" "$DOCS_FILE"
   yq -i ".products[0].versions[0].\"display-name\" = \"Latest ($TAG)\"" "$DOCS_FILE"
-  yq -i '.products[0].versions[0].slug = "latest"' "$DOCS_FILE"
-  yq -i '.products[0].versions[0].availability = "stable"' "$DOCS_FILE"
 fi
 
 WANT_FERN="$(jq -r '.version' "$DOCS_CHECKOUT/fern/fern.config.json")"

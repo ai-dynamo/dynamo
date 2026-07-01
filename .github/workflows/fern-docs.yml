@@ -483,6 +483,10 @@ jobs:
 
           # Find the index of the "dev" entry and insert new version right after it
           DEV_IDX=$(yq '.products[0].versions | to_entries | map(select(.value."display-name" == "dev")) | .[0].key' "$DOCS_FILE")
+          if [ -z "$DEV_IDX" ] || [ "$DEV_IDX" = "null" ]; then
+            echo "::error::Could not find dev version entry in $DOCS_FILE"
+            exit 1
+          fi
           INSERT_IDX=$((DEV_IDX + 1))
 
           yq -i "
@@ -549,6 +553,11 @@ jobs:
           git add "fern/pages-$TAG/"
           git add "fern/versions/$TAG.yml"
           git add fern/docs.yml
+
+          if git diff --cached --quiet; then
+            echo "No release artifact changes for $TAG; skipping commit and push."
+            exit 0
+          fi
 
           git commit -m "docs(fern): release version $TAG
 
