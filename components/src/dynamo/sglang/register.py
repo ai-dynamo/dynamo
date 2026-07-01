@@ -325,12 +325,15 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
     """
     try:
         return SpeculativeAlgorithm.from_string(speculative_algorithm).is_eagle()
-    except ValueError:
-        # Unknown/unregistered algorithm name: ``from_string`` raises, but registration must not
-        # crash on it -- default to not enabling eagle bigram routing (the previous membership
-        # check ``in ("EAGLE", "NEXTN")`` never raised; preserve that behavior).
+    except Exception:
+        # Graceful degradation: registration must not crash on an unexpected speculative-algorithm
+        # value. ``from_string`` raises ValueError on unknown/unregistered names (and returns NONE for
+        # ``None``, so the default case does not raise); catch broadly -- matching the sibling
+        # ``_get_mooncake_runtime_data`` above, per python-guidelines.md -- so any future signature/enum
+        # change can't crash the worker either. Default to not enabling eagle bigram routing; the
+        # previous membership check ``in ("EAGLE", "NEXTN")`` never raised, so this preserves behavior.
         logging.warning(
-            "Unknown speculative_algorithm %r; not enabling enable_eagle.",
+            "Could not derive enable_eagle from speculative_algorithm %r; leaving it disabled.",
             speculative_algorithm,
         )
         return False
