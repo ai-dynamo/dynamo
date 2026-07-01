@@ -423,81 +423,36 @@ impl KVStoreDiscovery {
 
     fn parse_instance_id_from_key(key_str: &str, bucket_name: &str) -> Option<DiscoveryInstanceId> {
         let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
-        let key_parts: Vec<&str> = relative_key.split('/').collect();
-
-        // EventChannels need 4 parts (namespace/component/topic/instance_id)
-        // Endpoints/Models need at least 4 parts
-        let min_parts = 4;
-        if key_parts.len() < min_parts {
-            tracing::warn!(
-                key = %key_str,
-                relative_key = %relative_key,
-                actual_parts = key_parts.len(),
-                expected_min = min_parts,
-                bucket = bucket_name,
-                "Delete/resync key doesn't have enough parts"
-            );
-            return None;
-        }
-
-        let namespace = key_parts[0].to_string();
-        let component = key_parts[1].to_string();
-
-        if bucket_name == EVENT_CHANNELS_BUCKET {
-            let topic = key_parts[2].to_string();
-            let instance_id_hex = key_parts[3];
-            let instance_id = match u64::from_str_radix(instance_id_hex, 16) {
-                Ok(instance_id) => instance_id,
-                Err(e) => {
-                    tracing::warn!(
-                        key = %key_str,
-                        error = %e,
-                        instance_id_hex = %instance_id_hex,
-                        "Failed to parse event channel instance_id hex"
-                    );
-                    return None;
-                }
-            };
-            return Some(DiscoveryInstanceId::EventChannel(EventChannelInstanceId {
-                namespace,
-                component,
-                topic,
-                instance_id,
-            }));
-        }
-
-        let endpoint = key_parts[2].to_string();
-        let instance_id_hex = key_parts[3];
-        let instance_id = match u64::from_str_radix(instance_id_hex, 16) {
-            Ok(instance_id) => instance_id,
-            Err(e) => {
+        let parsed = match bucket_name {
+            INSTANCES_BUCKET => {
+                EndpointInstanceId::from_path(relative_key).map(DiscoveryInstanceId::Endpoint)
+            }
+            MODELS_BUCKET => {
+                ModelCardInstanceId::from_path(relative_key).map(DiscoveryInstanceId::Model)
+            }
+            EVENT_CHANNELS_BUCKET => EventChannelInstanceId::from_path(relative_key)
+                .map(DiscoveryInstanceId::EventChannel),
+            _ => {
                 tracing::warn!(
                     key = %key_str,
-                    error = %e,
-                    instance_id_hex = %instance_id_hex,
-                    "Failed to parse instance_id hex from key"
+                    bucket = bucket_name,
+                    "Unknown discovery bucket for delete/resync key"
                 );
                 return None;
             }
         };
 
-        if bucket_name == INSTANCES_BUCKET {
-            Some(DiscoveryInstanceId::Endpoint(EndpointInstanceId {
-                namespace,
-                component,
-                endpoint,
-                instance_id,
-            }))
-        } else {
-            let model_suffix = key_parts.get(4).map(|s| s.to_string());
-            Some(DiscoveryInstanceId::Model(ModelCardInstanceId {
-                namespace,
-                component,
-                endpoint,
-                instance_id,
-                model_suffix,
-            }))
-        }
+        parsed
+            .inspect_err(|err| {
+                tracing::warn!(
+                    key = %key_str,
+                    relative_key = %relative_key,
+                    bucket = bucket_name,
+                    error = %err,
+                    "Failed to parse discovery instance id from key"
+                );
+            })
+            .ok()
     }
 
     fn discovery_events_from_watch_event(
