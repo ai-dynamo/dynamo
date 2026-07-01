@@ -21,13 +21,13 @@ func TestRunAppliesVersionedOverride(t *testing.T) {
 
 	directory := t.TempDir()
 	blueprintPath := writeTestFile(t, directory, "blueprint.yaml", betaBlueprintYAML)
-	dgdrSpecPath := writeTestFile(t, directory, "dgdr-spec.json", alphaOverrideDGDRSpecJSON)
+	overridePath := writeTestFile(t, directory, "override.json", alphaOverrideDGDJSON)
 	outputPath := filepath.Join(directory, "effective.yaml")
 	stderr := &bytes.Buffer{}
 
 	err := run([]string{
 		"--blueprint", blueprintPath,
-		"--dgdr-spec", dgdrSpecPath,
+		"--override", overridePath,
 		"--output", outputPath,
 	}, stderr)
 	require.NoError(t, err)
@@ -40,18 +40,21 @@ func TestRunAppliesVersionedOverride(t *testing.T) {
 	assert.Equal(t, "new-image", mainContainerImage(t, effective))
 }
 
-func TestRunWithoutOverrideNormalizesBlueprint(t *testing.T) {
+func TestRunWithEmptyOverridePreservesBlueprint(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
 	blueprintPath := writeTestFile(t, directory, "blueprint.yaml", betaBlueprintYAML)
-	dgdrSpecPath := writeTestFile(t, directory, "dgdr-spec.yaml", "{}\n")
+	overridePath := writeTestFile(t, directory, "override.yaml", `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+`)
 	outputPath := filepath.Join(directory, "effective.yaml")
 	stderr := &bytes.Buffer{}
 
 	err := run([]string{
 		"--blueprint", blueprintPath,
-		"--dgdr-spec", dgdrSpecPath,
+		"--override", overridePath,
 		"--output", outputPath,
 	}, stderr)
 	require.NoError(t, err)
@@ -64,22 +67,20 @@ func TestRunEmitsWarningsForIgnoredTopology(t *testing.T) {
 
 	directory := t.TempDir()
 	blueprintPath := writeTestFile(t, directory, "blueprint.yaml", betaBlueprintYAML)
-	dgdrSpecPath := writeTestFile(t, directory, "dgdr-spec.yaml", `
-overrides:
-  dgd:
-    apiVersion: nvidia.com/v1beta1
-    kind: DynamoGraphDeployment
-    spec:
-      components:
-      - name: Missing
-        replicas: 2
+	overridePath := writeTestFile(t, directory, "override.yaml", `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: Missing
+    replicas: 2
 `)
 	outputPath := filepath.Join(directory, "effective.yaml")
 	stderr := &bytes.Buffer{}
 
 	err := run([]string{
 		"--blueprint", blueprintPath,
-		"--dgdr-spec", dgdrSpecPath,
+		"--override", overridePath,
 		"--output", outputPath,
 	}, stderr)
 	require.NoError(t, err)
@@ -96,17 +97,15 @@ func TestRunDoesNotReplaceOutputOnFailure(t *testing.T) {
 
 	directory := t.TempDir()
 	blueprintPath := writeTestFile(t, directory, "blueprint.yaml", betaBlueprintYAML)
-	dgdrSpecPath := writeTestFile(t, directory, "dgdr-spec.yaml", `
-overrides:
-  dgd:
-    apiVersion: nvidia.com/v2
-    kind: DynamoGraphDeployment
+	overridePath := writeTestFile(t, directory, "override.yaml", `
+apiVersion: nvidia.com/v2
+kind: DynamoGraphDeployment
 `)
 	outputPath := writeTestFile(t, directory, "effective.yaml", "existing output\n")
 
 	err := run([]string{
 		"--blueprint", blueprintPath,
-		"--dgdr-spec", dgdrSpecPath,
+		"--override", overridePath,
 		"--output", outputPath,
 	}, &bytes.Buffer{})
 	require.Error(t, err)
@@ -140,7 +139,7 @@ func TestRunRejectsInvalidArgumentsAndInput(t *testing.T) {
 	t.Run("missing flags", func(t *testing.T) {
 		err := run(nil, &bytes.Buffer{})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "--blueprint, --dgdr-spec, --output")
+		assert.Contains(t, err.Error(), "--blueprint, --override, --output")
 	})
 
 	t.Run("unexpected positional argument", func(t *testing.T) {
@@ -158,44 +157,45 @@ func TestRunRejectsInvalidArgumentsAndInput(t *testing.T) {
 	t.Run("malformed blueprint", func(t *testing.T) {
 		directory := t.TempDir()
 		blueprintPath := writeTestFile(t, directory, "blueprint.yaml", "spec: [\n")
-		dgdrSpecPath := writeTestFile(t, directory, "dgdr-spec.yaml", "{}\n")
+		overridePath := writeTestFile(t, directory, "override.yaml", alphaOverrideDGDJSON)
 		err := run([]string{
 			"--blueprint", blueprintPath,
-			"--dgdr-spec", dgdrSpecPath,
+			"--override", overridePath,
 			"--output", filepath.Join(directory, "effective.yaml"),
 		}, &bytes.Buffer{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "decode blueprint YAML")
 	})
 
-	t.Run("malformed DGDR spec", func(t *testing.T) {
+	t.Run("malformed override", func(t *testing.T) {
 		directory := t.TempDir()
 		blueprintPath := writeTestFile(t, directory, "blueprint.yaml", betaBlueprintYAML)
-		dgdrSpecPath := writeTestFile(t, directory, "dgdr-spec.yaml", "overrides: [\n")
+		overridePath := writeTestFile(t, directory, "override.yaml", "spec: [\n")
 		err := run([]string{
 			"--blueprint", blueprintPath,
-			"--dgdr-spec", dgdrSpecPath,
+			"--override", overridePath,
 			"--output", filepath.Join(directory, "effective.yaml"),
 		}, &bytes.Buffer{})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "decode DGDR spec")
+		assert.Contains(t, err.Error(), "decode override YAML")
 	})
 
-	t.Run("complete DGDR resource", func(t *testing.T) {
+	t.Run("DGDR resource instead of DGD override", func(t *testing.T) {
 		directory := t.TempDir()
 		blueprintPath := writeTestFile(t, directory, "blueprint.yaml", betaBlueprintYAML)
-		dgdrSpecPath := writeTestFile(t, directory, "dgdr.yaml", `
+		overridePath := writeTestFile(t, directory, "dgdr.yaml", `
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeploymentRequest
 spec: {}
 `)
 		err := run([]string{
 			"--blueprint", blueprintPath,
-			"--dgdr-spec", dgdrSpecPath,
+			"--override", overridePath,
 			"--output", filepath.Join(directory, "effective.yaml"),
 		}, &bytes.Buffer{})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "expected the spec object")
+		assert.Contains(t, err.Error(), "apply DGD override")
+		assert.Contains(t, err.Error(), `kind "DynamoGraphDeploymentRequest"`)
 	})
 }
 
@@ -259,20 +259,16 @@ spec:
           image: old-image
 `
 
-const alphaOverrideDGDRSpecJSON = `
+const alphaOverrideDGDJSON = `
 {
-  "overrides": {
-    "dgd": {
-      "apiVersion": "nvidia.com/v1alpha1",
-      "kind": "DynamoGraphDeployment",
-      "spec": {
-        "services": {
-          "Worker": {
-            "extraPodSpec": {
-              "mainContainer": {
-                "image": "new-image"
-              }
-            }
+  "apiVersion": "nvidia.com/v1alpha1",
+  "kind": "DynamoGraphDeployment",
+  "spec": {
+    "services": {
+      "Worker": {
+        "extraPodSpec": {
+          "mainContainer": {
+            "image": "new-image"
           }
         }
       }

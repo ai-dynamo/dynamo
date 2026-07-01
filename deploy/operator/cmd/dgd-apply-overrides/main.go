@@ -6,8 +6,6 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dgdoverride"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
@@ -24,7 +21,7 @@ import (
 
 type options struct {
 	blueprintPath string
-	dgdrSpecPath  string
+	overridePath  string
 	outputPath    string
 	installPath   string
 }
@@ -55,21 +52,9 @@ func run(args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	dgdrSpec, err := readDGDRSpec(opts.dgdrSpecPath)
+	override, err := readDGD(opts.overridePath, "override")
 	if err != nil {
 		return err
-	}
-
-	override := &unstructured.Unstructured{}
-	if dgdrSpec.Overrides == nil ||
-		dgdrSpec.Overrides.DGD == nil ||
-		len(bytes.TrimSpace(dgdrSpec.Overrides.DGD.Raw)) == 0 {
-		override.SetGroupVersionKind(blueprint.GroupVersionKind())
-	} else {
-		override, err = decodeDGD(dgdrSpec.Overrides.DGD.Raw, "DGDR spec overrides.dgd")
-		if err != nil {
-			return err
-		}
 	}
 
 	effective, warnings, err := dgdoverride.Apply(blueprint, override)
@@ -97,7 +82,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	flags := flag.NewFlagSet("dgd-apply-overrides", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.StringVar(&opts.blueprintPath, "blueprint", "", "Path to the complete DGD blueprint YAML")
-	flags.StringVar(&opts.dgdrSpecPath, "dgdr-spec", "", "Path to the DGDR spec JSON or YAML")
+	flags.StringVar(&opts.overridePath, "override", "", "Path to the partial DGD override JSON or YAML")
 	flags.StringVar(&opts.outputPath, "output", "", "Path for the effective DGD YAML")
 	flags.StringVar(&opts.installPath, "install-to", "", "Copy this executable to the given path and exit")
 	if err := flags.Parse(args); err != nil {
@@ -107,8 +92,8 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 		return options{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flags.Args(), " "))
 	}
 	if opts.installPath != "" {
-		if opts.blueprintPath != "" || opts.dgdrSpecPath != "" || opts.outputPath != "" {
-			return options{}, fmt.Errorf("--install-to cannot be combined with --blueprint, --dgdr-spec, or --output")
+		if opts.blueprintPath != "" || opts.overridePath != "" || opts.outputPath != "" {
+			return options{}, fmt.Errorf("--install-to cannot be combined with --blueprint, --override, or --output")
 		}
 		return opts, nil
 	}
@@ -117,8 +102,8 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	if opts.blueprintPath == "" {
 		missing = append(missing, "--blueprint")
 	}
-	if opts.dgdrSpecPath == "" {
-		missing = append(missing, "--dgdr-spec")
+	if opts.overridePath == "" {
+		missing = append(missing, "--override")
 	}
 	if opts.outputPath == "" {
 		missing = append(missing, "--output")
@@ -151,38 +136,6 @@ func decodeDGD(data []byte, role string) (*unstructured.Unstructured, error) {
 		return nil, fmt.Errorf("decode %s: expected an object, got %T", role, object)
 	}
 	return dgd, nil
-}
-
-func readDGDRSpec(path string) (*nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read DGDR spec %q: %w", path, err)
-	}
-	if len(bytes.TrimSpace(data)) == 0 {
-		return nil, fmt.Errorf("decode DGDR spec %q: document is empty", path)
-	}
-	jsonData, err := yaml.YAMLToJSON(data)
-	if err != nil {
-		return nil, fmt.Errorf("decode DGDR spec %q: %w", path, err)
-	}
-	fields := map[string]json.RawMessage{}
-	if err := json.Unmarshal(jsonData, &fields); err != nil {
-		return nil, fmt.Errorf("decode DGDR spec %q: expected an object: %w", path, err)
-	}
-	if fields == nil {
-		return nil, fmt.Errorf("decode DGDR spec %q: expected an object", path)
-	}
-	_, hasSpec := fields["spec"]
-	_, hasAPIVersion := fields["apiVersion"]
-	_, hasKind := fields["kind"]
-	if hasSpec && (hasAPIVersion || hasKind) {
-		return nil, fmt.Errorf("decode DGDR spec %q: expected the spec object, got a complete Kubernetes resource", path)
-	}
-	spec := &nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{}
-	if err := json.Unmarshal(jsonData, spec); err != nil {
-		return nil, fmt.Errorf("decode DGDR spec %q: %w", path, err)
-	}
-	return spec, nil
 }
 
 func installSelf(path string) error {
