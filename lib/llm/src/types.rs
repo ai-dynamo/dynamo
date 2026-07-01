@@ -49,7 +49,7 @@ pub mod openai {
         use crate::protocols::common::llm_backend::LLMEngineOutput;
         use crate::protocols::common::preprocessor::PreprocessedRequest;
 
-        pub use protocols::openai::generate::{GenerateRequest, GenerateResponse};
+        pub use protocols::inference::generate::{GenerateRequest, GenerateResponse};
 
         /// A [`ServerStreamingEngine`] implementation for the token-in/token-out
         /// `Generate` API.

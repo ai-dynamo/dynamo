@@ -1,0 +1,58 @@
+{
+  "request_id": "generate-fixture",
+  "model": "Qwen/Qwen3-0.6B",
+  "token_ids": [11, 22, 33, 44],
+  "features": {
+    "mm_hashes": {"image": ["image-hash"]},
+    "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+    "kwargs_data": {"image": ["encoded-item"]}
+  },
+  "sampling_params": {
+    "n": 2,
+    "presence_penalty": 0.1,
+    "frequency_penalty": 0.2,
+    "repetition_penalty": 1.1,
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 40,
+    "min_p": 0.01,
+    "seed": 42,
+    "stop": ["done"],
+    "stop_token_ids": [99],
+    "ignore_eos": false,
+    "max_tokens": 8,
+    "min_tokens": 1,
+    "logprobs": 2,
+    "prompt_logprobs": 1,
+    "logprob_token_ids": [7, 8],
+    "flat_logprobs": false,
+    "detokenize": true,
+    "skip_special_tokens": false,
+    "spaces_between_special_tokens": true,
+    "include_stop_str_in_output": true,
+    "structured_outputs": {"choice": ["yes", "no"]},
+    "logit_bias": {"7": -2.0},
+    "allowed_token_ids": [7, 8, 9],
+    "bad_words": ["blocked"],
+    "skip_reading_prefix_cache": true,
+    "thinking_token_budget": 4,
+    "repetition_detection": {
+      "max_pattern_size": 4,
+      "min_pattern_size": 2,
+      "min_count": 3
+    },
+    "routed_experts_prompt_start": 3,
+    "extra_args": {"python_extension": "kept"},
+    "vllm_xargs": {"rust_extension": 7},
+    "future_sampling_field": {"kept": true}
+  },
+  "stream": true,
+  "stream_options": {
+    "include_usage": true,
+    "continuous_usage_stats": true
+  },
+  "cache_salt": "fixture-salt",
+  "priority": -3,
+  "kv_transfer_params": {"connector": "fixture"},
+  "future_top_level": {"enabled": true}
+}
