@@ -104,6 +104,7 @@ vllm:
   # an exact native commit enables an x86_64 source-package installation.
   vllm_precompiled_wheel_commit: ""
   vllm_precompiled_wheel_variant: "cu130"
+  vllm_nccl_version: ""
   nccl_checkpoint_version: ""
 
 sglang:

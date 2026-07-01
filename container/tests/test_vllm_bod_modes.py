@@ -135,15 +135,17 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             if checkpoint_hooks:
                 worker_path = package_dir / "v1/worker/gpu_worker.py"
                 worker_path.parent.mkdir(parents=True)
-                worker_path.write_text(
-                    "class Worker:\n"
-                    "    def checkpoint_prepare(self):\n"
-                    "        pass\n"
-                    "\n"
-                    "    def checkpoint_restore(self):\n"
-                    "        pass\n"
+                worker_path.write_text("class GPUWorker:\n    pass\n")
+                lifecycle_path = package_dir / "distributed/parallel_state.py"
+                lifecycle_path.parent.mkdir(parents=True)
+                lifecycle_path.write_text(
+                    "def checkpoint_prepare_distributed_state():\n"
+                    "    pass\n\n"
+                    "def checkpoint_restore_distributed_state():\n"
+                    "    pass\n"
                 )
                 records.append("vllm/v1/worker/gpu_worker.py,,")
+                records.append("vllm/distributed/parallel_state.py,,")
             records.extend(
                 [
                     "vllm-1.0.dist-info/METADATA,,",
@@ -351,7 +353,9 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
                 )
                 self.assertIn(f"found vllm {vllm_version}", result.stderr)
 
-    def test_exact_native_verifies_hooks_without_importing_vllm(self) -> None:
+    def test_exact_native_verifies_generic_lifecycle_without_worker_override(
+        self,
+    ) -> None:
         result = self.verify_fixture(
             (
                 "_C_stable_libtorch.abi3.so",
@@ -361,7 +365,7 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             checkpoint_hooks=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("without importing vLLM", result.stdout)
+        self.assertIn("no GPUWorker checkpoint override", result.stdout)
 
     def test_exact_native_rejects_unsupported_torch_backend_variants(self) -> None:
         for variant in ("cpu", "cu129", "rocm6.3", "cu130;true"):
@@ -566,13 +570,17 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             "VLLM_RUNTIME_BASE_IMAGE=${{ inputs.vllm_runtime_base_image }}",
             workflow,
         )
+        self.assertIn(
+            "VLLM_NCCL_VERSION=${{ inputs.vllm_nccl_version }}",
+            workflow,
+        )
         self.assertIn("validate_full_source_mode", installer)
         self.assertIn("VLLM_RUNTIME_BASE_IMAGE digest", installer)
         self.assertIn("VLLM_USE_PRECOMPILED=0", installer)
         self.assertIn("VLLM_USE_PRECOMPILED_RUST=0", installer)
         self.assertIn("--no-build-isolation --no-deps .", installer)
         self.assertIn("torchaudio==0", installer)
-        self.assertIn("nvidia-nccl-cu13==${NCCL_CHECKPOINT_VERSION}", installer)
+        self.assertIn("nvidia-nccl-cu13==${VLLM_NCCL_VERSION}", installer)
         checkout = installer.index('vllm_source_sha="${RESOLVED_SOURCE_SHA}"')
         full_source_dispatch = installer.index(
             'if [[ "${VLLM_INSTALL_MODE}" == "full-source" ]]',
@@ -589,6 +597,21 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         self.assertIn("VLLM_NCCL_SO_PATH=/opt/dynamo/nccl/libnccl.so.2", dockerfile)
         self.assertIn(
             'LABEL ai.dynamo.vllm.base="${VLLM_RUNTIME_BASE_IMAGE}"', dockerfile
+        )
+
+    def test_full_source_nccl_runtime_does_not_require_checkpoint_shim(self) -> None:
+        installer = self.installer.read_text()
+        dockerfile = self.render_runtime("amd64")
+
+        self.assertIn(
+            'VLLM_NCCL_VERSION="${VLLM_NCCL_VERSION:-'
+            '${NCCL_CHECKPOINT_VERSION:-}}"',
+            installer,
+        )
+        self.assertIn("VLLM_NCCL_VERSION=2.29.7", installer)
+        self.assertIn(
+            'if [ -f "${NCCL_CHECKPOINT_SHIM}" ]; then',
+            dockerfile,
         )
 
     def test_full_source_verification_requires_current_main_extensions(self) -> None:

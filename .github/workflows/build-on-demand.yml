@@ -85,6 +85,10 @@ on:
         description: 'Immutable standalone vLLM image ref used by full-source builds'
         type: string
         default: 'vllm/vllm-openai:v0.23.0-ubuntu2404'
+      vllm_nccl_version:
+        description: 'nvidia-nccl-cu13 wheel version for full-source vLLM builds'
+        type: string
+        default: ''
       vllm_precompiled_wheel_commit:
         description: 'Optional exact 40-character vLLM main commit providing native artifacts (enables x86_64 source-package mode)'
         type: string
@@ -149,6 +153,7 @@ jobs:
         VLLM_TORCH_BACKEND=cu130
         VLLM_TORCH_CUDA_ARCH_LIST=10.0
         VLLM_RUNTIME_BASE_IMAGE=${{ inputs.vllm_runtime_base_image }}
+        VLLM_NCCL_VERSION=${{ inputs.vllm_nccl_version }}
         VLLM_PRECOMPILED_WHEEL_COMMIT=${{ inputs.vllm_precompiled_wheel_commit }}
         VLLM_PRECOMPILED_WHEEL_VARIANT=${{ inputs.vllm_precompiled_wheel_variant }}
         NCCL_CHECKPOINT_VERSION=${{ inputs.nccl_checkpoint_version }}

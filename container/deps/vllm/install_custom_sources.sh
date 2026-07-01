@@ -14,6 +14,7 @@ VLLM_TORCH_VERSION="${VLLM_TORCH_VERSION:-}"
 VLLM_TORCHVISION_VERSION="${VLLM_TORCHVISION_VERSION:-}"
 VLLM_TORCH_BACKEND="${VLLM_TORCH_BACKEND:-}"
 VLLM_TORCH_CUDA_ARCH_LIST="${VLLM_TORCH_CUDA_ARCH_LIST:-}"
+VLLM_NCCL_VERSION="${VLLM_NCCL_VERSION:-${NCCL_CHECKPOINT_VERSION:-}}"
 VLLM_EXPECTED_TORCH_LOCAL_VERSION=
 PROVENANCE_FILE=/opt/dynamo/source-provenance.txt
 FLASHINFER_VERSION_FILE=/opt/dynamo/flashinfer-source-version.txt
@@ -111,8 +112,8 @@ full-source mode requires the approved official PyTorch stack:
 EOF
         exit 1
     fi
-    if [[ "${NCCL_CHECKPOINT_VERSION:-}" != "2.29.7" ]]; then
-        echo "full-source mode requires NCCL_CHECKPOINT_VERSION=2.29.7" >&2
+    if [[ "${VLLM_NCCL_VERSION}" != "2.29.7" ]]; then
+        echo "full-source mode requires VLLM_NCCL_VERSION=2.29.7" >&2
         exit 1
     fi
     if [[ -z "${VLLM_TORCH_CUDA_ARCH_LIST}" ]]; then
@@ -128,7 +129,7 @@ EOF
 torch==${VLLM_TORCH_VERSION}+${VLLM_TORCH_BACKEND}
 torchvision==${VLLM_TORCHVISION_VERSION}+${VLLM_TORCH_BACKEND}
 torchaudio==0
-nvidia-nccl-cu13==${NCCL_CHECKPOINT_VERSION}
+nvidia-nccl-cu13==${VLLM_NCCL_VERSION}
 EOF
 
     VLLM_EXPECTED_TORCH_LOCAL_VERSION="${VLLM_TORCH_BACKEND}"
@@ -153,7 +154,7 @@ build_full_source_vllm() {
         --torch-backend="${VLLM_TORCH_BACKEND}" \
         "torch==${VLLM_TORCH_VERSION}" \
         "torchvision==${VLLM_TORCHVISION_VERSION}" \
-        "nvidia-nccl-cu13==${NCCL_CHECKPOINT_VERSION}"
+        "nvidia-nccl-cu13==${VLLM_NCCL_VERSION}"
 
     python3 - <<'PY'
 import importlib.metadata as metadata
@@ -382,43 +383,66 @@ for extension in extensions:
 
 if os.environ["REQUIRE_CHECKPOINT_HOOKS"]:
     if os.environ["REQUIRE_EXACT_NATIVE"] or os.environ["REQUIRE_FULL_SOURCE"]:
-        relative_path = "vllm/v1/worker/gpu_worker.py"
+        relative_path = "vllm/distributed/parallel_state.py"
         if relative_path not in distribution_files:
             raise SystemExit(
                 f"Exact-native vLLM distribution does not own {relative_path}"
             )
-        worker_path = Path(distribution.locate_file(relative_path)).resolve()
-        tree = ast.parse(worker_path.read_text(), filename=str(worker_path))
+        lifecycle_path = Path(distribution.locate_file(relative_path)).resolve()
+        tree = ast.parse(lifecycle_path.read_text(), filename=str(lifecycle_path))
+        functions = {
+            node.name
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        missing_functions = {
+            "checkpoint_prepare_distributed_state",
+            "checkpoint_restore_distributed_state",
+        } - functions
+        if missing_functions:
+            raise SystemExit(
+                f"{lifecycle_path} is missing functions: "
+                f"{sorted(missing_functions)!r}"
+            )
+
+        worker_relative_path = "vllm/v1/worker/gpu_worker.py"
+        worker_path = Path(distribution.locate_file(worker_relative_path)).resolve()
+        worker_tree = ast.parse(worker_path.read_text(), filename=str(worker_path))
         worker_classes = [
             node
-            for node in tree.body
-            if isinstance(node, ast.ClassDef) and node.name == "Worker"
+            for node in worker_tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "GPUWorker"
         ]
-        methods = {
+        forbidden_methods = {
             node.name
             for worker_class in worker_classes
             for node in worker_class.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        missing_methods = {
+        } & {
             "checkpoint_prepare",
             "checkpoint_restore",
-        } - methods
-        if missing_methods:
+        }
+        if forbidden_methods:
             raise SystemExit(
-                f"{worker_path} is missing Worker methods: "
-                f"{sorted(missing_methods)!r}"
+                f"{worker_path} must not define checkpoint worker methods: "
+                f"{sorted(forbidden_methods)!r}"
             )
         print(
-            "Verified vLLM checkpoint_prepare/checkpoint_restore Worker "
-            "definitions without importing vLLM"
+            "Verified generic vLLM checkpoint lifecycle functions and no "
+            "GPUWorker checkpoint override without importing vLLM"
         )
     else:
-        from vllm.v1.worker.gpu_worker import Worker
+        from vllm.distributed.parallel_state import (
+            checkpoint_prepare_distributed_state,
+            checkpoint_restore_distributed_state,
+        )
+        from vllm.v1.worker.gpu_worker import GPUWorker
 
-        assert hasattr(Worker, "checkpoint_prepare")
-        assert hasattr(Worker, "checkpoint_restore")
-        print("Verified vLLM checkpoint_prepare/checkpoint_restore worker methods")
+        assert callable(checkpoint_prepare_distributed_state)
+        assert callable(checkpoint_restore_distributed_state)
+        assert not hasattr(GPUWorker, "checkpoint_prepare")
+        assert not hasattr(GPUWorker, "checkpoint_restore")
+        print("Verified generic vLLM checkpoint lifecycle functions")
 PY
 }
 
