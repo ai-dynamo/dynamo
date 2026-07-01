@@ -34,8 +34,6 @@ from dynamo._core import PythonAsyncEngine as PythonAsyncEngine
 from dynamo._core import RadixTree as RadixTree
 from dynamo._core import RouterConfig as RouterConfig
 from dynamo._core import RouterMode as RouterMode
-from dynamo._core import SystemRoute as SystemRoute
-from dynamo._core import SystemRouteContext as SystemRouteContext
 from dynamo._core import RoutingConstraints as RoutingConstraints
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import WorkerType as WorkerType

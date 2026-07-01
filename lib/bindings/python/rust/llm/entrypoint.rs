@@ -912,23 +912,19 @@ async fn select_engine(
 }
 
 #[pyfunction]
-#[pyo3(signature = (distributed_runtime, input, engine_config, system_route_extensions=None))]
+#[pyo3(signature = (distributed_runtime, input, engine_config))]
 pub fn run_input<'p>(
     py: Python<'p>,
     distributed_runtime: super::DistributedRuntime,
     input: &str,
     engine_config: EngineConfig,
-    system_route_extensions: Option<PyObject>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
-    let system_route_extensions =
-        super::system_routes::system_route_extensions_from_py(py, system_route_extensions)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        dynamo_llm::entrypoint::input::run_input_with_system_route_extensions(
+        dynamo_llm::entrypoint::input::run_input(
             distributed_runtime.inner.clone(),
             input_enum,
             engine_config.inner,
-            system_route_extensions,
         )
         .await
         .map_err(to_pyerr)?;

@@ -917,13 +917,6 @@ impl HttpServiceConfigBuilder {
         self
     }
 
-    pub fn add_system_route_extension_arc(mut self, extension: SystemRouteExtension) -> Self {
-        self.system_route_extensions
-            .get_or_insert_with(Vec::new)
-            .push(extension);
-        self
-    }
-
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
         let metrics_config = config.metrics_config.clone();

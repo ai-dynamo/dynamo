@@ -35,4 +35,3 @@ pub mod model_card;
 pub mod preprocessor;
 pub mod replay;
 pub mod routed_engine;
-pub mod system_routes;

@@ -9,10 +9,7 @@ use crate::{
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
     entrypoint::{ChatEngineFactoryCallback, EngineConfig, RouterConfig, input::common},
-    http::service::{
-        SystemRouteExtension,
-        service_v2::{self, HttpService},
-    },
+    http::service::service_v2::{self, HttpService},
     local_model::runtime_config::TokenizerBackend,
     namespace::NamespaceFilter,
     types::openai::{
@@ -27,15 +24,6 @@ use dynamo_runtime::metrics::MetricsHierarchy;
 pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
-) -> anyhow::Result<()> {
-    run_with_system_route_extensions(distributed_runtime, engine_config, Vec::new()).await
-}
-
-/// Build and run an HTTP service with additional system route extensions.
-pub async fn run_with_system_route_extensions(
-    distributed_runtime: DistributedRuntime,
-    engine_config: EngineConfig,
-    system_route_extensions: Vec<SystemRouteExtension>,
 ) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
     let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
@@ -81,9 +69,6 @@ pub async fn run_with_system_route_extensions(
         http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
     http_service_builder =
         http_service_builder.runtime(Some(Arc::new(distributed_runtime.clone())));
-    for extension in system_route_extensions {
-        http_service_builder = http_service_builder.add_system_route_extension_arc(extension);
-    }
 
     let http_service = match engine_config {
         EngineConfig::Dynamic {
