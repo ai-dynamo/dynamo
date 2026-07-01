@@ -3,14 +3,14 @@
 
 use anyhow::Result;
 
-use super::LightseekMmCounter;
+use super::MultimodalTokenCounter;
 use crate::{
     preprocessor::MmImageEntry,
     protocols::{TokenIdType, common::preprocessor::MmRoutingInfo},
 };
 
 pub(in crate::preprocessor) struct MmRoutingModel {
-    pub(in crate::preprocessor) counter: LightseekMmCounter,
+    pub(in crate::preprocessor) counter: MultimodalTokenCounter,
     pub(in crate::preprocessor) placeholder_token_id: TokenIdType,
     pub(in crate::preprocessor) prepend_bos_token_id: Option<TokenIdType>,
 }

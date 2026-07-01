@@ -12,7 +12,6 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub(super) struct PreprocessorConfig {
@@ -138,7 +137,6 @@ impl PatchSize {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct PatchDimensions {

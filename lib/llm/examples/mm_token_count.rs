@@ -13,7 +13,7 @@
 #[cfg(feature = "mm-routing")]
 fn main() -> anyhow::Result<()> {
     use anyhow::Context;
-    use dynamo_llm::preprocessor::lightseek_mm::LightseekMmCounter;
+    use dynamo_llm::preprocessor::multimodal::MultimodalTokenCounter;
     use std::path::PathBuf;
 
     let mut args = std::env::args().skip(1);
@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
         model_type
     );
 
-    let counter = LightseekMmCounter::try_new(&model_id, model_type.as_deref(), &model_dir)?;
+    let counter = MultimodalTokenCounter::try_new(&model_id, model_type.as_deref(), &model_dir)?;
     println!("counter for '{}' constructed", counter.model_id());
 
     let img_bytes = std::fs::read(&image_path)?;

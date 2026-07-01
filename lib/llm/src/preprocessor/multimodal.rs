@@ -7,7 +7,6 @@
 //! the subset of `llm-multimodal` 1.7.0 behavior used by Dynamo while avoiding
 //! its image-processing and tokenizer dependency graph.
 
-#[path = "lightseek_mm/estimator.rs"]
 mod estimator;
 pub(super) mod routing;
 
@@ -19,12 +18,12 @@ use dynamo_tokenizers::{HuggingFaceTokenizer, traits::Tokenizer};
 use self::estimator::{ImageTokenEstimator, ModelFamily, PreprocessorConfig};
 use crate::protocols::TokenIdType;
 
-pub struct LightseekMmCounter {
+pub struct MultimodalTokenCounter {
     estimator: ImageTokenEstimator,
     model_id: String,
 }
 
-impl LightseekMmCounter {
+impl MultimodalTokenCounter {
     /// Construct an estimator from the model's `preprocessor_config.json`.
     ///
     /// Returns `Err` when the file is missing/unparseable or the documented
@@ -371,7 +370,7 @@ mod tests {
                 serde_json::to_vec(&algorithm.preprocessor_config).unwrap(),
             )
             .unwrap();
-            let counter = LightseekMmCounter::try_new(
+            let counter = MultimodalTokenCounter::try_new(
                 &algorithm.model_id,
                 Some(&algorithm.model_type),
                 directory.path(),
@@ -551,17 +550,21 @@ mod tests {
     #[test]
     fn malformed_or_unsupported_configuration_degrades_cleanly() {
         let directory = tempfile::tempdir().unwrap();
-        assert!(LightseekMmCounter::try_new("Qwen/Qwen3-VL", None, directory.path()).is_err());
+        assert!(MultimodalTokenCounter::try_new("Qwen/Qwen3-VL", None, directory.path()).is_err());
         std::fs::write(
             directory.path().join("preprocessor_config.json"),
             "not json",
         )
         .unwrap();
-        assert!(LightseekMmCounter::try_new("Qwen/Qwen3-VL", None, directory.path()).is_err());
+        assert!(MultimodalTokenCounter::try_new("Qwen/Qwen3-VL", None, directory.path()).is_err());
         std::fs::write(directory.path().join("preprocessor_config.json"), "{}").unwrap();
         assert!(
-            LightseekMmCounter::try_new("microsoft/Phi-3-vision", Some("phi3_v"), directory.path())
-                .is_err()
+            MultimodalTokenCounter::try_new(
+                "microsoft/Phi-3-vision",
+                Some("phi3_v"),
+                directory.path(),
+            )
+            .is_err()
         );
 
         let invalid_configs = [
@@ -593,7 +596,7 @@ mod tests {
         for (model_type, config) in invalid_configs {
             std::fs::write(directory.path().join("preprocessor_config.json"), config).unwrap();
             assert!(
-                LightseekMmCounter::try_new(
+                MultimodalTokenCounter::try_new(
                     "/models/custom-finetune",
                     Some(model_type),
                     directory.path()

@@ -12,9 +12,9 @@
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
 #[cfg(feature = "mm-routing")]
-pub mod lightseek_mm;
+pub mod multimodal;
 #[cfg(feature = "mm-routing")]
-use lightseek_mm::routing::{
+use multimodal::routing::{
     MAX_MM_ROUTING_TOKENS, MmRoutingModel, MmRoutingPayload, build_mm_routing_payload,
 };
 pub mod media;
@@ -439,12 +439,12 @@ impl OpenAIPreprocessor {
         #[cfg(feature = "mm-routing")]
         let mm_routing_model = match image_token_inputs {
             Some((model_id, model_type, model_dir)) => {
-                let counter = lightseek_mm::LightseekMmCounter::try_new(
+                let counter = multimodal::MultimodalTokenCounter::try_new(
                     &model_id,
                     Some(&model_type),
                     &model_dir,
                 );
-                let routing_tokens = lightseek_mm::resolve_routing_tokens_with_tokenizer(
+                let routing_tokens = multimodal::resolve_routing_tokens_with_tokenizer(
                     &model_id,
                     &model_dir,
                     tokenizer.as_ref(),
