@@ -205,10 +205,10 @@ async def _initiate_shutdown(self, error: Exception):
 3. Dynamo operator-created pods have `terminationGracePeriodSeconds` to complete (default: 60s)
 4. If not terminated, Kubernetes sends `SIGKILL`
 
-### Recommended Configuration
+### Customize the termination grace period
 
-For production deployments, set the termination grace period based on your workloads and utilization. The following
-example uses 180 seconds:
+Set `terminationGracePeriodSeconds` based on your workloads and utilization. For example, use 180 seconds to allow
+more time for request draining:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
