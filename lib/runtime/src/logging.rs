@@ -287,6 +287,26 @@ fn build_log_exporter(
     }
 }
 
+#[cfg(test)]
+fn with_runtime_context<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => f(),
+        Err(_) => {
+            let return_value = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect(
+                    "Failed to create temporary Tokio runtime for OTLP exporter initialization",
+                );
+            let _guard = return_value.enter();
+            f()
+        }
+    }
+}
+
 fn span_events_for_logging() -> FmtSpan {
     if span_events_enabled() {
         FmtSpan::CLOSE
@@ -1272,8 +1292,26 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         let sample_ratio = trace_sample_ratio_from_env();
 
         // Build tracer and logger providers - with or without OTLP export
-        let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_enabled {
-            // Export enabled: create OTLP exporters with batch processors
+        let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_exporter_enabled() {
+            // Export enabled: create OTLP exporters with batch processors.
+            // Both tonic channel construction and batch-processor task spawning
+            // require an active Tokio reactor. If none is running
+            // (eg a plain `fn main()` that calls `logging::init()` before starting a runtime),
+            // create a temporary one that lives for the entire OTLP setup block
+            // so all four operations - build_span_exporter, tracer_provider.build(),
+            // build_log_exporter, and logger_provider.build() - run inside the same reactor.
+            let _otlp_rt = match tokio::runtime::Handle::try_current() {
+                Ok(_) => None,
+                Err(_) => Some(
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect(
+                            "Failed to create temporary Tokio runtime for OTLP exporter initialization",
+                        ),
+                ),
+            };
+            let _otlp_guard = _otlp_rt.as_ref().map(|rt| rt.enter());
             let protocol = otlp_protocol_from_env();
             let traces_protocol = resolve_signal_otlp_protocol(
                 protocol,
@@ -1987,6 +2025,100 @@ pub mod tests {
             result.push(val);
         }
         Ok(result)
+    }
+
+    #[test] // plain - no Tokio runtime
+    fn with_runtime_context_returns_value_without_existing_runtime() {
+        // Precondition: confirm no runtime is running
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "precondition: test must run outside a Tokio runtime"
+        );
+        let result = with_runtime_context(|| 42u32);
+        assert_eq!(result, 42);
+    }
+
+    #[tokio::test]
+    async fn with_runtime_context_returns_value_within_existing_runtime() {
+        // Precondition: runtime IS running
+        assert!(tokio::runtime::Handle::try_current().is_ok());
+        let result = with_runtime_context(|| 42u32);
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn grpc_span_exporter_builds_without_tokio_reactor() {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "precondition: test must run outside a Tokio runtime"
+        );
+        // This panics before the fix: "there is no reactor running"
+        let result = with_runtime_context(|| {
+            build_span_exporter(OtlpProtocol::Grpc, "http://localhost:4317")
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn grpc_log_exporter_builds_without_tokio_reactor() {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "precondition: test must run outside a Tokio runtime"
+        );
+        let result = with_runtime_context(|| {
+            build_log_exporter(OtlpProtocol::Grpc, "http://localhost:4317")
+        });
+        assert!(
+            result.is_ok(),
+            "log exporter must build without a pre-existing Tokio
+    reactor"
+        );
+    }
+
+    /// Verify that a gRPC OTLP provider built from a sync context (no pre-existing
+    /// Tokio runtime) can call force_flush() after the temporary bootstrap runtime
+    /// is dropped and a separate application runtime is started.
+    ///
+    /// This exercises the claim that tonic's connect_lazy() and the
+    /// BatchSpanProcessor's own internal runtime keep the channel usable even
+    /// after the temporary construction runtime is gone.
+    ///
+    /// force_flush() will return export errors (no real collector at
+    /// localhost:4317) but must NOT panic with "there is no reactor running".
+    #[test]
+    fn grpc_provider_force_flush_after_temp_runtime_dropped() {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "precondition: test must run outside a Tokio runtime"
+        );
+
+        // Phase 1: build the provider inside a temporary runtime, then drop it.
+        let tracer_provider = {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create temp runtime");
+            let _guard = rt.enter();
+
+            let span_exporter = build_span_exporter(OtlpProtocol::Grpc, "http://localhost:4317")
+                .expect("exporter build must succeed");
+
+            opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                .with_batch_exporter(span_exporter)
+                .build()
+            // _guard and rt dropped here — temp runtime is gone
+        };
+
+        // Phase 2: start a separate application runtime, simulating Worker::from_settings().
+        let app_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create app runtime");
+
+        // force_flush() must not panic. Export errors are expected (no collector running).
+        app_rt.block_on(async {
+            let _ = tracer_provider.force_flush();
+        });
     }
 
     // Field validators (W3C Trace Context): each rule is tested directly here.
