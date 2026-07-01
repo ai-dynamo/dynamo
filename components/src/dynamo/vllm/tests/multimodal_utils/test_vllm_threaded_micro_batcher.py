@@ -402,6 +402,55 @@ def test_double_start_raises():
         b.shutdown()
 
 
+def _run_double_start_race() -> tuple[list[str], int]:
+    """Fire two threads into start() at once; return (outcomes, on_start_runs)."""
+    ran = {"n": 0}
+    counter_lock = threading.Lock()
+
+    def on_start():
+        with counter_lock:
+            ran["n"] += 1
+
+    b = ThreadedMicroBatcher(_echo, on_start=on_start)
+    outcomes: list[str] = []
+    out_lock = threading.Lock()
+
+    def do_start():
+        try:
+            b.start()
+            with out_lock:
+                outcomes.append("ok")
+        except RuntimeError:
+            with out_lock:
+                outcomes.append("rejected")
+
+    t1 = threading.Thread(target=do_start)
+    t2 = threading.Thread(target=do_start)
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    try:
+        return outcomes, ran["n"]
+    finally:
+        b.shutdown()
+
+
+def test_concurrent_start_starts_one_worker():
+    """Two threads racing start(): exactly one wins and on_start runs once.
+
+    Regression guard: `_state` stays NEW while the first start() blocks on
+    on_start, so a state-only guard would let a second concurrent start() spawn a
+    second (orphaned) worker and run on_start twice. The guard also keys on
+    `_thread` (published under the lock) to close that window. Repeated to
+    exercise the race window; the invariants hold every run regardless of timing.
+    """
+    for _ in range(40):
+        outcomes, on_start_runs = _run_double_start_race()
+        assert outcomes.count("ok") == 1, outcomes
+        assert on_start_runs == 1  # one worker only — no second spawn
+
+
 def test_worker_thread_is_not_daemon():
     b = ThreadedMicroBatcher(_echo)
     b.start()
