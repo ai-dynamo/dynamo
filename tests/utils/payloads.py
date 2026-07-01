@@ -197,6 +197,54 @@ class ChatPayload(BasePayload):
         )
 
 
+@dataclass
+class GeneratePayload(BasePayload):
+    """Payload for the token-in/token-out ``/inference/v1/generate`` endpoint.
+
+    Posts pre-tokenized ``token_ids`` and asserts the vLLM ``GenerateResponse``
+    shape: raw ``token_ids`` back, a ``finish_reason``, a fresh ``request_id``,
+    and NO ``usage``. With ``max_tokens`` + ``ignore_eos`` the token count is
+    exact, which is a deterministic check that isn't brittle to the specific
+    token values (which can shift across vLLM builds).
+    """
+
+    endpoint: str = "/inference/v1/generate"
+
+    @staticmethod
+    def extract_content(response):
+        response.raise_for_status()
+        result = response.json()
+        assert (
+            "choices" in result and result["choices"]
+        ), f"Missing/empty 'choices' in GenerateResponse: {result}"
+        token_ids = result["choices"][0].get("token_ids")
+        assert token_ids, f"Empty 'token_ids' in first choice: {result}"
+        return " ".join(str(t) for t in token_ids)
+
+    def response_handler(self, response: Any) -> str:
+        return GeneratePayload.extract_content(response)
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        result = response.json()
+        assert result.get("request_id"), f"Missing request_id: {result}"
+        assert (
+            "usage" not in result
+        ), f"GenerateResponse must not carry 'usage': {result}"
+        choice = result["choices"][0]
+        token_ids = choice.get("token_ids")
+        assert (
+            isinstance(token_ids, list) and token_ids
+        ), f"Empty token_ids in choice: {choice}"
+        assert choice.get("finish_reason"), f"Missing finish_reason: {choice}"
+        expected_max = self.body.get("sampling_params", {}).get("max_tokens")
+        if expected_max is not None:
+            assert len(token_ids) == expected_max, (
+                f"Expected {expected_max} tokens (max_tokens + ignore_eos), "
+                f"got {len(token_ids)}: {choice}"
+            )
+
+
 class RouterNvextChatPayload(ChatPayload):
     """Chat payload that validates structured router metadata in nvext."""
 

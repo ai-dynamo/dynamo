@@ -42,6 +42,7 @@ from tests.utils.payload_builder import (
 from tests.utils.payloads import (
     EmbeddingMultiWorkerDispatchPayload,
     EmbeddingPayload,
+    GeneratePayload,
     LoraTestChatPayload,
     ToolCallingChatPayload,
 )
@@ -153,6 +154,22 @@ vllm_configs = {
                 expected_response=[],
                 max_tokens=64,
                 extra_body={"nvext": {"max_thinking_tokens": 16}},
+            ),
+            # Token-in/token-out: POST pre-tokenized token_ids to
+            # /inference/v1/generate and assert the vLLM GenerateResponse shape
+            # (raw token_ids back, finish_reason, no usage). Exercises the RL
+            # TITO path end-to-end through a real worker.
+            GeneratePayload(
+                body={
+                    "token_ids": [785, 6722, 315, 9625, 374],
+                    "sampling_params": {
+                        "temperature": 0,
+                        "max_tokens": 4,
+                        "ignore_eos": True,
+                    },
+                },
+                expected_response=[],
+                expected_log=[],
             ),
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],
