@@ -501,7 +501,12 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
 
         helper_copy = dockerfile.index("validate_pynccl_checkpoint_binding.py")
         build = dockerfile.index("build_nccl_checkpoint", helper_copy)
-        checkpoint_env = dockerfile.index("ENV NCCL_CHECKPOINT_SHIM=", build)
+        checkpoint_env = dockerfile.index(
+            "ENV NCCL_CHECKPOINT_SHIM=${NCCL_CHECKPOINT_VERSION:"
+            "+/opt/nccl-checkpoint/lib/"
+            "libnccl-checkpoint-shim.so",
+            build,
+        )
         self.assertLess(helper_copy, build)
         self.assertLess(build, checkpoint_env)
         final_validation = dockerfile.index(
@@ -523,6 +528,12 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             shim.touch()
             preload = root / "ld.so.preload"
             preload.write_text(f"/unrelated/preload.so\n{shim}\n")
+            provenance = root / "source-provenance.txt"
+            provenance.write_text(
+                "install_mode=full-native-source\n"
+                "nccl_core_sha=legacy\n"
+                "nccl_checkpoint_tree=legacy\n"
+            )
             bin_dir = root / "bin"
             bin_dir.mkdir()
             uv_calls = root / "uv-calls"
@@ -540,6 +551,7 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
                     "NCCL_CHECKPOINT_VERSION": "",
                     "NCCL_CHECKPOINT_PREFIX": str(prefix),
                     "NCCL_CHECKPOINT_LD_PRELOAD_FILE": str(preload),
+                    "NCCL_CHECKPOINT_RUNTIME_PROVENANCE": str(provenance),
                     "UV_CALLS": str(uv_calls),
                 }
             )
@@ -557,6 +569,10 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             self.assertEqual(
                 uv_calls.read_text().strip(),
                 "pip uninstall --system nccl_checkpoint",
+            )
+            self.assertEqual(
+                provenance.read_text(),
+                "install_mode=full-native-source\n",
             )
             self.assertIn("removed inherited NCCLCheckpoint shim", result.stdout)
 

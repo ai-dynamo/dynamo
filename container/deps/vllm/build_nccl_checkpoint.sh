@@ -7,6 +7,7 @@ set -euo pipefail
 PREFIX="${NCCL_CHECKPOINT_PREFIX:-/opt/nccl-checkpoint}"
 SHIM="${PREFIX}/lib/libnccl-checkpoint-shim.so"
 LD_PRELOAD_FILE="${NCCL_CHECKPOINT_LD_PRELOAD_FILE:-/etc/ld.so.preload}"
+RUNTIME_PROVENANCE="${NCCL_CHECKPOINT_RUNTIME_PROVENANCE:-/opt/dynamo/source-provenance.txt}"
 
 if [ -z "${NCCL_CHECKPOINT_VERSION:-}" ]; then
   if [ -f "${LD_PRELOAD_FILE}" ]; then
@@ -22,13 +23,17 @@ if [ -z "${NCCL_CHECKPOINT_VERSION:-}" ]; then
   rm -rf "${PREFIX}"
   uv pip uninstall --system nccl_checkpoint
   python3 -c 'import importlib.util; assert importlib.util.find_spec("nccl_checkpoint") is None'
+  if [ -f "${RUNTIME_PROVENANCE}" ]; then
+    sed -i -E \
+      '/^nccl_(public_git_url|core_sha|core_tree|shim_source_sha|checkpoint_tree|composed_tree)=/d' \
+      "${RUNTIME_PROVENANCE}"
+  fi
   echo "NCCL_CHECKPOINT_VERSION is empty; removed inherited NCCLCheckpoint shim."
   exit 0
 fi
 
 SRC_DIR="${NCCL_CHECKPOINT_SRC_DIR:-/tmp/nccl-src}"
 PYNCCL_SMOKE_CHECK="${PYNCCL_SMOKE_CHECK:-/usr/local/lib/validate_pynccl_checkpoint_binding.py}"
-RUNTIME_PROVENANCE="${NCCL_CHECKPOINT_RUNTIME_PROVENANCE:-/opt/dynamo/source-provenance.txt}"
 
 NCCL_PUBLIC_GIT_URL="https://github.com/NVIDIA/nccl.git"
 NCCL_CORE_SHA="b81d6a5a3d2fa95ad11f6453c51cd6a6ba19f9b8"

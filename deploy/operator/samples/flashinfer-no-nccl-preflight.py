@@ -20,7 +20,7 @@ os.environ.setdefault("VLLM_DISTRIBUTED_USE_SPLIT_GROUP", "0")
 import torch
 import torch.distributed as dist
 
-EXPECTED_VLLM_SHA = "855054d3a61ad0c8597ed29d6d1979cbebdb475a"
+EXPECTED_VLLM_SHA = "e140135bd541358e2c490f7407215149ad888695"
 EXPECTED_FLASHINFER_SHA = "330cc8e1a09f59c1241084459f3df3204b9b8327"
 EXPECTED_FLASHINFER_VERSION = "0.6.14"
 EXPECTED_WORLD_SIZE = 8
@@ -68,6 +68,14 @@ def _mapped_nccl_dsos() -> list[str]:
 
 
 def _validate_runtime() -> dict[str, Any]:
+    expected_dynamo_sha = os.environ["EXPECTED_DYNAMO_SHA"]
+    actual_dynamo_sha = os.environ.get("DYNAMO_COMMIT_SHA")
+    if actual_dynamo_sha != expected_dynamo_sha:
+        raise RuntimeError(
+            f"Dynamo image commit is {actual_dynamo_sha!r}, "
+            f"expected {expected_dynamo_sha!r}"
+        )
+
     provenance = _read_provenance()
     expected_provenance = {
         "install_mode": "full-native-source",
@@ -99,6 +107,24 @@ def _validate_runtime() -> dict[str, Any]:
     }
     if versions != expected_versions:
         raise RuntimeError(f"Unexpected package versions: {versions!r}")
+
+    import vllm.envs  # noqa: F401
+
+    if importlib.util.find_spec("nccl_checkpoint") is not None:
+        raise RuntimeError("NCCL checkpoint Python package must not be installed")
+    if Path("/opt/nccl-checkpoint").exists():
+        raise RuntimeError("NCCL checkpoint native prefix must not exist")
+    preload = Path("/etc/ld.so.preload")
+    if preload.is_file() and "nccl-checkpoint" in preload.read_text(encoding="utf-8"):
+        raise RuntimeError("NCCL checkpoint shim must not be preloaded")
+    nccl_env = {
+        name: value
+        for name, value in os.environ.items()
+        if name.startswith(("NCCL_", "TORCH_NCCL_"))
+        or name == "DYN_SNAPSHOT_NCCL_KVS_ENDPOINT"
+    }
+    if nccl_env:
+        raise RuntimeError(f"NCCL runtime environment is present: {nccl_env}")
 
     from flashinfer.comm import SymmetricAllGatherWorkspace
     from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
@@ -144,7 +170,11 @@ def _validate_runtime() -> dict[str, Any]:
             "vllm.vllm_flash_attn._vllm_fa2_C",
         )
     }
+    native_modules["torch.libtorch_cuda"] = str(
+        Path(torch.__file__).parent / "lib/libtorch_cuda.so"
+    )
     return {
+        "dynamo_commit_sha": actual_dynamo_sha,
         "provenance": provenance,
         "versions": versions,
         "native_modules": native_modules,
