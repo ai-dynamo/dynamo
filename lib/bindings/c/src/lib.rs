@@ -1159,7 +1159,7 @@ unsafe fn preprocess_request(
             }
         };
 
-        tracing::info!(
+        tracing::debug!(
             token_count = token_ids.len(),
             first_tokens = ?&token_ids[..std::cmp::min(5, token_ids.len())],
             priority_jump,
