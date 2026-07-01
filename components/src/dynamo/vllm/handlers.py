@@ -312,7 +312,6 @@ class VllmEnginePauseController:
         self._engine_client = engine_client
         self._is_paused = False
         self._generation_paused = False
-        self._checkpoint_prepared = False
         self._workers_sleeping = False
 
     @property
@@ -330,8 +329,6 @@ class VllmEnginePauseController:
         level = args[0] if args else None
         await self._engine_client.pause_generation()
         self._generation_paused = True
-        self._checkpoint_prepared = True
-        await self._checkpoint_prepare()
         self._workers_sleeping = True
         await self._worker_sleep(level)
         self._is_paused = True
@@ -344,9 +341,6 @@ class VllmEnginePauseController:
         if self._workers_sleeping:
             await self._worker_wake_up(tags)
             self._workers_sleeping = False
-        if self._checkpoint_prepared:
-            await self._checkpoint_restore()
-            self._checkpoint_prepared = False
         if self._generation_paused:
             await self._engine_client.resume_generation()
             self._generation_paused = False
@@ -355,14 +349,7 @@ class VllmEnginePauseController:
     def mark_resumed(self) -> None:
         self._is_paused = False
         self._generation_paused = False
-        self._checkpoint_prepared = False
         self._workers_sleeping = False
-
-    async def _checkpoint_prepare(self) -> None:
-        await self._engine_client.collective_rpc("checkpoint_prepare", kwargs={})
-
-    async def _checkpoint_restore(self) -> None:
-        await self._engine_client.collective_rpc("checkpoint_restore", kwargs={})
 
     async def _worker_sleep(self, level: object) -> None:
         # pause_generation already quiesced the DP scheduler. Calling the

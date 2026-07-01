@@ -85,6 +85,9 @@ vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
 
+[project.entry-points."vllm.general_plugins"]
+dynamo_snapshot = "dynamo.vllm.snapshot_backend:register_dynamo_snapshot_backend"
+
 [dependency-groups]
 docs = [
     # Core Sphinx

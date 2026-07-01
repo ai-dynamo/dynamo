@@ -600,6 +600,9 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    from .snapshot_backend import select_dynamo_snapshot_backend
+
+    select_dynamo_snapshot_backend(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled

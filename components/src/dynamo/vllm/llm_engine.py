@@ -291,6 +291,9 @@ class VllmLLMEngine(LLMEngine):
         vllm_config = self.engine_args.create_engine_config(
             usage_context=UsageContext.OPENAI_API_SERVER
         )
+        from .snapshot_backend import select_dynamo_snapshot_backend
+
+        select_dynamo_snapshot_backend(vllm_config)
         self._vllm_config = vllm_config
         self._default_sampling_params = (
             vllm_config.model_config.get_diff_sampling_param()
