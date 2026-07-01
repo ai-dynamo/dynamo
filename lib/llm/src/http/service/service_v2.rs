@@ -458,6 +458,11 @@ impl State {
         self.frontend_api_config.anthropic().enabled()
     }
 
+    /// Returns true when experimental engine-native HTTP APIs are enabled.
+    pub fn engine_api_enabled(&self) -> bool {
+        self.frontend_api_config.engine_api_enabled()
+    }
+
     /// Returns true if streaming tool call dispatch is enabled.
     ///
     /// When enabled, the chat completions streaming path emits `event: tool_call_dispatch`
@@ -533,14 +538,6 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "true")]
     enable_responses_endpoints: bool,
-
-    /// Experimental token-in/token-out `Generate` API
-    /// (`POST /inference/v1/generate`). Enabled by default, matching vLLM,
-    /// which mounts this endpoint for any generate-capable model. The handler
-    /// is a placeholder (HTTP 501) until request dispatch lands; set to
-    /// `false` to hide the route entirely.
-    #[builder(default = "true")]
-    enable_generate_endpoints: bool,
 
     /// API behavior config retained in HTTP state for route and streaming decisions.
     #[builder(default)]
@@ -877,16 +874,13 @@ static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
 /// Environment variable to set the anthropic messages endpoint path (default: `/v1/messages`)
 static HTTP_SVC_ANTHROPIC_PATH_ENV: &str = "DYN_HTTP_SVC_ANTHROPIC_PATH";
-/// Environment variable to set the generate endpoint path (default: `/inference/v1/generate`)
-static HTTP_SVC_GENERATE_PATH_ENV: &str = "DYN_HTTP_SVC_GENERATE_PATH";
-
 impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
         let metrics_config = config.metrics_config.clone();
         let frontend_api_config = config.frontend_api_config.clone();
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
-        let generate_endpoints_enabled = config.enable_generate_endpoints;
+        let engine_api_enabled = frontend_api_config.engine_api_enabled();
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -932,9 +926,7 @@ impl HttpServiceConfigBuilder {
             &EndpointType::AnthropicMessages,
             anthropic_endpoints_enabled,
         );
-        state
-            .flags
-            .set(&EndpointType::Generate, generate_endpoints_enabled);
+        state.flags.set(&EndpointType::Generate, engine_api_enabled);
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -1033,7 +1025,7 @@ impl HttpServiceConfigBuilder {
             state.clone(),
             &config.request_template,
             anthropic_endpoints_enabled,
-            generate_endpoints_enabled,
+            engine_api_enabled,
         );
         let mut inference_router = axum::Router::new();
         for (route_docs, route) in endpoint_routes {
@@ -1131,6 +1123,13 @@ impl HttpServiceConfigBuilder {
         self
     }
 
+    pub fn enable_engine_apis(mut self, enabled: bool) -> Self {
+        self.frontend_api_config
+            .get_or_insert_with(FrontendApiConfig::default)
+            .set_engine_api_enabled(enabled);
+        self
+    }
+
     pub fn enable_streaming_tool_dispatch(mut self, enabled: bool) -> Self {
         self.frontend_api_config
             .get_or_insert_with(FrontendApiConfig::default)
@@ -1151,7 +1150,7 @@ impl HttpServiceConfigBuilder {
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
         enable_anthropic_endpoints: bool,
-        enable_generate_endpoints: bool,
+        enable_engine_apis: bool,
     ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
         let mut routes = Vec::new();
         // Add chat completions route with conditional middleware
@@ -1196,14 +1195,8 @@ impl HttpServiceConfigBuilder {
             );
         }
 
-        if enable_generate_endpoints {
-            tracing::warn!(
-                "Generate API (/inference/v1/generate) is experimental and not implemented yet."
-            );
-            let (generate_docs, generate_route) = super::generate::generate_router(
-                state.clone(),
-                var(HTTP_SVC_GENERATE_PATH_ENV).ok(),
-            );
+        if enable_engine_apis {
+            let (generate_docs, generate_route) = super::generate::generate_router(state.clone());
             endpoint_routes.insert(EndpointType::Generate, (generate_docs, generate_route));
         }
 

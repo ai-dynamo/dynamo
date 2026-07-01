@@ -4,11 +4,9 @@
 //! HTTP handler for the token-in/token-out `Generate` API
 //! (`POST /inference/v1/generate`).
 //!
-//! This is an experimental endpoint, enabled by default (matching vLLM,
-//! which mounts `/inference/v1/generate` for any generate-capable model).
-//! It registers the route with a placeholder handler that returns HTTP 501
-//! Not Implemented; the real handler (engine dispatch + `LLMEngineOutput`
-//! accumulation) lands in a follow-up. Disable via `enable_generate_endpoints`.
+//! This experimental endpoint is registered only when engine APIs are enabled.
+//! It currently returns HTTP 501; engine dispatch and response accumulation
+//! land in focused follow-up changes.
 
 use std::sync::Arc;
 
@@ -40,16 +38,12 @@ struct GenerateErrorBody {
     code: u16,
 }
 
-/// Create an Axum [`Router`] for the token-in/token-out `Generate` endpoint.
-/// If no path is provided, the default path is `/inference/v1/generate`.
-pub fn generate_router(
-    state: Arc<service_v2::State>,
-    path: Option<String>,
-) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/inference/v1/generate".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+/// Create an Axum [`Router`] for the canonical token-native endpoint.
+pub fn generate_router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
+    const PATH: &str = "/inference/v1/generate";
+    let doc = RouteDoc::new(axum::http::Method::POST, PATH);
     let router = Router::new()
-        .route(&path, post(handler_generate))
+        .route(PATH, post(handler_generate))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
@@ -94,7 +88,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let service = HttpService::builder()
             .port(port)
-            .enable_generate_endpoints(enable_generate)
+            .enable_engine_apis(enable_generate)
             .build()
             .unwrap();
         let cancel_token = CancellationToken::new();
