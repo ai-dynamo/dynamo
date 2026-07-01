@@ -65,6 +65,20 @@ pub struct QueueRejection {
     pub limit: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SessionEnqueueError {
+    #[error(transparent)]
+    QueueRejected(#[from] QueueRejection),
+
+    #[error(
+        "router policy class {policy_class:?} already has a pending request for session {session_id:?}"
+    )]
+    DuplicatePending {
+        policy_class: String,
+        session_id: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PolicyQueueStats {
     pub requests: usize,
@@ -159,9 +173,16 @@ impl<T> PendingQueue<T> {
         }
     }
 
-    fn push(&mut self, session_id: Option<String>, entry: PolicyQueueEntry<T>) {
+    fn push(
+        &mut self,
+        session_id: Option<String>,
+        entry: PolicyQueueEntry<T>,
+    ) -> Result<(), (String, PolicyQueueEntry<T>)> {
         match self {
-            Self::Request(pending) => pending.push(entry),
+            Self::Request(pending) => {
+                pending.push(entry);
+                Ok(())
+            }
             Self::Session(pending) => pending.push(session_id, entry),
         }
     }
@@ -289,7 +310,7 @@ impl<T> PolicyQueue<T> {
         strict_priority: u32,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
-        self.enqueue_for_session(
+        match self.enqueue_for_session(
             class_index,
             worker_count,
             snapshot,
@@ -298,7 +319,15 @@ impl<T> PolicyQueue<T> {
             strict_priority,
             None,
             payload,
-        )
+        ) {
+            Ok(()) => Ok(()),
+            Err((SessionEnqueueError::QueueRejected(rejection), payload)) => {
+                Err((rejection, payload))
+            }
+            Err((SessionEnqueueError::DuplicatePending { .. }, _)) => {
+                unreachable!("request queue enqueue cannot have a duplicate session")
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -312,10 +341,10 @@ impl<T> PolicyQueue<T> {
         strict_priority: u32,
         session_id: Option<String>,
         payload: T,
-    ) -> Result<(), (QueueRejection, T)> {
+    ) -> Result<(), (SessionEnqueueError, T)> {
         let class = &mut self.classes[class_index];
         if let Some(rejection) = queue_rejection(class, worker_count) {
-            return Err((rejection, payload));
+            return Err((rejection.into(), payload));
         }
 
         let policy_score = match class.config.queue_policy {
@@ -338,9 +367,17 @@ impl<T> PolicyQueue<T> {
             snapshot,
             payload,
         };
+        if let Err((session_id, entry)) = class.pending.push(session_id, entry) {
+            return Err((
+                SessionEnqueueError::DuplicatePending {
+                    policy_class: class.config.name.clone(),
+                    session_id,
+                },
+                entry.into_payload(),
+            ));
+        }
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
-        class.pending.push(session_id, entry);
         self.pending_count += 1;
         Ok(())
     }
@@ -520,6 +557,23 @@ mod tests {
         RouterPolicyConfig::from_yaml(yaml)
             .unwrap()
             .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
+    }
+
+    fn agent_round_robin_profile() -> PolicyProfile {
+        profile(
+            r#"
+default_policy_family: agent
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: agent
+    policy_family: agent
+    cache_bucket: all
+    queue_policy: agent_round_robin
+    quantum: 1
+"#,
+        )
     }
 
     #[test]
@@ -752,28 +806,11 @@ policy_classes:
     }
 
     #[test]
-    fn agent_round_robin_rotates_sessions_after_strict_priority() {
-        let mut queue = PolicyQueue::new(profile(
-            r#"
-default_policy_family: agent
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: agent
-    policy_family: agent
-    cache_bucket: all
-    queue_policy: agent_round_robin
-    quantum: 1
-"#,
-        ));
-        for (session, strict_priority, payload) in [
-            ("a", 0, "a1"),
-            ("a", 0, "a2"),
-            ("b", 1, "b-high"),
-            ("b", 0, "b-low"),
-            ("c", 0, "c1"),
-        ] {
+    fn agent_round_robin_rotates_sequential_sessions_after_strict_priority() {
+        let mut queue = PolicyQueue::new(agent_round_robin_profile());
+        for (session, strict_priority, payload) in
+            [("a", 0, "a1"), ("b", 1, "b-high"), ("c", 0, "c1")]
+        {
             queue
                 .enqueue_for_session(
                     0,
@@ -788,10 +825,91 @@ policy_classes:
                 .unwrap();
         }
 
-        let actual: Vec<_> = (0..5)
-            .map(|_| queue.pop_next(|_, _, _| true).unwrap().into_payload())
-            .collect();
+        let mut actual = vec![queue.pop_next(|_, _, _| true).unwrap().into_payload()];
+        queue
+            .enqueue_for_session(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                Some("b".to_string()),
+                "b-low",
+            )
+            .unwrap();
+        actual.push(queue.pop_next(|_, _, _| true).unwrap().into_payload());
+        queue
+            .enqueue_for_session(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                2.0,
+                0.0,
+                0,
+                Some("a".to_string()),
+                "a2",
+            )
+            .unwrap();
+        actual.extend((0..3).map(|_| queue.pop_next(|_, _, _| true).unwrap().into_payload()));
         assert_eq!(actual, ["b-high", "a1", "c1", "b-low", "a2"]);
+    }
+
+    #[test]
+    fn agent_round_robin_rejects_a_second_pending_turn_for_one_session() {
+        let mut queue = PolicyQueue::new(agent_round_robin_profile());
+        queue
+            .enqueue_for_session(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                Some("a".to_string()),
+                "a1",
+            )
+            .unwrap();
+
+        let (error, payload) = queue
+            .enqueue_for_session(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                Some("a".to_string()),
+                "a2",
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            SessionEnqueueError::DuplicatePending {
+                policy_class: "agent".to_string(),
+                session_id: "a".to_string(),
+            }
+        );
+        assert_eq!(payload, "a2");
+        assert_eq!(queue.pending_count(), 1);
+    }
+
+    #[test]
+    fn agent_round_robin_keeps_anonymous_requests_independent() {
+        let mut queue = PolicyQueue::new(agent_round_robin_profile());
+        for payload in ["one", "two"] {
+            queue
+                .enqueue_for_session(0, 1, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, None, payload)
+                .unwrap();
+        }
+
+        assert_eq!(
+            (0..2)
+                .map(|_| queue.pop_next(|_, _, _| true).unwrap().into_payload())
+                .collect::<Vec<_>>(),
+            ["one", "two"]
+        );
     }
 
     #[test]

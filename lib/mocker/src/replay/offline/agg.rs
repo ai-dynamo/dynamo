@@ -1317,8 +1317,11 @@ mod tests {
             block_size: 64,
             sessions: vec![
                 session("blocker", 0.0, 1, 8),
-                session("a", 0.1, 2, 1),
-                session("a", 0.2, 3, 1),
+                SessionTrace {
+                    session_id: "a".to_string(),
+                    first_arrival_timestamp_ms: Some(0.1),
+                    turns: vec![turn(2, 1), turn(3, 1)],
+                },
                 session("b", 0.3, 4, 1),
             ],
         };
@@ -1337,7 +1340,7 @@ mod tests {
         .run()
         .unwrap();
 
-        assert!(stats.max_router_pending_count >= 3);
+        assert!(stats.max_router_pending_count >= 2);
         assert_eq!(
             stats
                 .dispatch_order

@@ -15,6 +15,7 @@ use dynamo_kv_router::protocols::{
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
     OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, ScheduleMode,
+    SessionEnqueueError,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
@@ -291,7 +292,12 @@ impl OfflineReplayRouter {
                     session_id,
                     pending,
                 )
-                .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
+                .map_err(|(error, _)| match error {
+                    SessionEnqueueError::QueueRejected(rejection) => anyhow::Error::new(rejection),
+                    duplicate @ SessionEnqueueError::DuplicatePending { .. } => {
+                        anyhow::Error::new(duplicate)
+                    }
+                })?;
             return Ok(RouterEffects::default());
         }
 

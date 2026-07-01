@@ -16,7 +16,7 @@ use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
 };
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::policy_queue::{PolicyQueue, QueueSnapshot};
+use super::policy_queue::{PolicyQueue, QueueSnapshot, SessionEnqueueError};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
@@ -523,7 +523,7 @@ impl<
             block_hashes,
         };
         let worker_count = self.workers_with_configs.borrow().len();
-        if let Err((rejection, queued)) = self.pending.enqueue_for_session(
+        if let Err((error, queued)) = self.pending.enqueue_for_session(
             class_index,
             worker_count,
             snapshot,
@@ -534,7 +534,15 @@ impl<
             queued,
         ) {
             let mut request = queued.request;
-            request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
+            let error = match error {
+                SessionEnqueueError::QueueRejected(rejection) => {
+                    KvSchedulerError::QueueRejected(rejection)
+                }
+                duplicate @ SessionEnqueueError::DuplicatePending { .. } => {
+                    KvSchedulerError::BookingFailed(duplicate.to_string())
+                }
+            };
+            request.respond(Err(error));
             return;
         }
         self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);
