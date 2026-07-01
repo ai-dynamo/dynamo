@@ -206,7 +206,9 @@ fn compare_counter(
 
 fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Status) -> usize {
     let endpoint = match endpoint {
-        Endpoint::InferenceGenerate => todo!(),
+        Endpoint::InferenceGenerate => {
+            unreachable!("compute_index only covers completion endpoint counters")
+        }
         Endpoint::Completions => 0,
         Endpoint::ChatCompletions => 1,
         Endpoint::Embeddings => todo!(),
