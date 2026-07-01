@@ -20,11 +20,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-const dgdKind = "DynamoGraphDeployment"
-
 var (
-	alphaGVK = nvidiacomv1alpha1.GroupVersion.WithKind(dgdKind)
-	betaGVK  = nvidiacomv1beta1.GroupVersion.WithKind(dgdKind)
+	alphaGVK = nvidiacomv1alpha1.DynamoGraphDeploymentGVK
+	betaGVK  = nvidiacomv1beta1.DynamoGraphDeploymentGVK
 )
 
 // Warning describes a non-fatal part of an override that was ignored to
@@ -245,13 +243,13 @@ func sanitizeMetadata(override *unstructured.Unstructured) ([]Warning, error) {
 		}
 	}
 	warnings := make([]Warning, 0, 2)
-	// Cross-version conversion stores round-trip state under this operator-owned
-	// prefix. Letting an override replace it could silently corrupt preserved fields.
+	// Cross-version conversion stores round-trip state in reserved annotations.
+	// Letting an override replace it could silently corrupt preserved fields.
 	if value, ok := allowed["annotations"]; ok {
 		if annotations, ok := value.(map[string]interface{}); ok {
 			reserved := make([]string, 0)
 			for key := range annotations {
-				if strings.HasPrefix(key, "nvidia.com/dgd-") {
+				if nvidiacomv1alpha1.IsDynamoGraphDeploymentConversionAnnotation(key) {
 					reserved = append(reserved, key)
 					delete(annotations, key)
 				}
@@ -294,7 +292,7 @@ func sanitizeMetadata(override *unstructured.Unstructured) ([]Warning, error) {
 
 func rejectNullValues(value interface{}, path string, openAPISchema *apixv1.JSONSchemaProps) error {
 	if value == nil {
-		if openAPISchema == nil || isUntypedPreservedSchema(openAPISchema) {
+		if isUntypedPreservedSchema(openAPISchema) {
 			return nil
 		}
 		return fmt.Errorf("override %s must not be null; field deletion is not supported", path)
@@ -360,7 +358,8 @@ func schemaForMapKey(
 }
 
 func isUntypedPreservedSchema(openAPISchema *apixv1.JSONSchemaProps) bool {
-	return openAPISchema.XPreserveUnknownFields != nil &&
+	return openAPISchema != nil &&
+		openAPISchema.XPreserveUnknownFields != nil &&
 		*openAPISchema.XPreserveUnknownFields &&
 		openAPISchema.Type == ""
 }

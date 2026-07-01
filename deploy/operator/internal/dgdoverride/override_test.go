@@ -91,7 +91,7 @@ func TestApplyVersionMatrix(t *testing.T) {
 			require.NoError(t, err)
 			assert.Empty(t, warnings)
 			assert.Equal(t, test.wantAPIVersion, result.GetAPIVersion())
-			assert.Equal(t, dgdKind, result.GetKind())
+			assert.Equal(t, betaGVK.Kind, result.GetKind())
 			assert.Equal(t, "generated", result.GetName())
 			assert.Equal(t, "new-image", mainContainerImage(t, result))
 			assert.Equal(t, test.wantArgs, mainContainerArgs(t, result))
@@ -389,6 +389,34 @@ spec:
 `)
 			},
 			wantError: "override spec.backendFramework must not be null",
+		},
+		{
+			name:      "null metadata label",
+			blueprint: func(*testing.T) *unstructured.Unstructured { return validBlueprint.DeepCopy() },
+			override: func(t *testing.T) *unstructured.Unstructured {
+				return mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  labels:
+    existing: null
+`)
+			},
+			wantError: "override metadata.labels.existing must not be null",
+		},
+		{
+			name:      "null metadata annotation",
+			blueprint: func(*testing.T) *unstructured.Unstructured { return validBlueprint.DeepCopy() },
+			override: func(t *testing.T) *unstructured.Unstructured {
+				return mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  annotations:
+    existing: null
+`)
+			},
+			wantError: "override metadata.annotations.existing must not be null",
 		},
 		{
 			name:      "explicit null in typed field below preserve unknown object",
