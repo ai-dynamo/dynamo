@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import argparse
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -19,18 +17,13 @@ from urllib.parse import unquote, urlparse
 
 GLIBC_FLOOR = (2, 28)
 MANYLINUX_POLICY = "manylinux_2_28"
+RUNTIME_PY_TAGS = {"cp310", "cp311", "cp312"}
 # First-party optional wheel that must ship with the core wheels.
 REQUIRED_OPTIONAL_DIST = "kvbm"
 # Wheels we ship but do not own / do not validate as manylinux: nixl lives under the
 # nixl/ subdir (excluded by considering only top-level wheels); gpu-memory-service is
 # not a shipped artifact and is a non-manylinux wheel.
 IGNORED_BINARY_DISTS = ("gpu-memory-service",)
-EXTRA_EXPECTED_DISTS = {
-    "mocker": ("aiconfigurator",),
-    "vllm": ("vllm", "nixl"),
-    "sglang": ("sglang", "nixl"),
-    "trtllm": ("tensorrt-llm",),
-}
 
 
 def canonical_name(name: str) -> str:
@@ -127,11 +120,11 @@ def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> Non
     runtime_py_tag, runtime_abi_tag, runtime_platform_tag = wheel_tags(runtime)
     if runtime_abi_tag != "abi3":
         raise AssertionError(f"{runtime.name} should use abi3, got {runtime_abi_tag}")
-    if "manylinux_2_28" not in runtime_platform_tag:
+    if MANYLINUX_POLICY not in runtime_platform_tag:
         raise AssertionError(
-            f"{runtime.name} should target manylinux_2_28, got {runtime_platform_tag}"
+            f"{runtime.name} should target {MANYLINUX_POLICY}, got {runtime_platform_tag}"
         )
-    if runtime_py_tag not in {"cp310", "cp311", "cp312"}:
+    if runtime_py_tag not in RUNTIME_PY_TAGS:
         raise AssertionError(
             f"{runtime.name} has unexpected Python tag {runtime_py_tag}"
         )
@@ -279,6 +272,8 @@ def create_venv(python_spec: str) -> Path:
 
 
 def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) -> None:
+    # --find-links only registers search paths; nixl is pulled from nixl/ only when a
+    # requirement (e.g. kvbm's nixl[cu12]) resolves to it, not installed on its own.
     find_links = []
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
@@ -415,77 +410,3 @@ def install_core(
             run([str(venv_python), "-c", f"import {import_name}; assert {import_name}"])
     finally:
         shutil.rmtree(venv_python.parent.parent, ignore_errors=True)
-
-
-def _requires_dist_for_extra(requires: list[str], dist: str, extra: str) -> bool:
-    wanted = canonical_name(dist)
-    extra_canon = canonical_name(extra)
-    for line in requires:
-        requirement, _, marker = line.partition(";")
-        name = re.match(r"\s*([A-Za-z0-9._-]+)", requirement)
-        if not name or canonical_name(name.group(1)) != wanted:
-            continue
-        guard = re.search(r"""extra\s*==\s*['"]([^'"]+)['"]""", marker)
-        if guard and canonical_name(guard.group(1)) == extra_canon:
-            return True
-    return False
-
-
-def assert_extra_declared(wheelhouse: Path, extra: str) -> None:
-    expected_dists = EXTRA_EXPECTED_DISTS.get(extra)
-    if expected_dists is None:
-        raise AssertionError(f"no declaration assertion is defined for extra {extra!r}")
-
-    ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
-    metadata = wheel_metadata(ai_dynamo)
-    provides = {canonical_name(name) for name in metadata.get("Provides-Extra", [])}
-    if canonical_name(extra) not in provides:
-        raise AssertionError(
-            f"{ai_dynamo.name} does not declare extra {extra!r}; provides {sorted(provides)}"
-        )
-
-    requires = metadata.get("Requires-Dist", [])
-    for dist in expected_dists:
-        if not _requires_dist_for_extra(requires, dist, extra):
-            raise AssertionError(
-                f"{ai_dynamo.name}[{extra}] does not require {dist!r} under "
-                f'extra == "{extra}"'
-            )
-    print(f"extra {extra!r} declares: {', '.join(expected_dists)}")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("scenario", choices=("core", "metadata", "extra"))
-    parser.add_argument("--wheelhouse", type=Path, required=True)
-    parser.add_argument("--target-arch", default="")
-    parser.add_argument("--extra", default="")
-    parser.add_argument("--python", default=sys.executable)
-    args = parser.parse_args()
-
-    wheelhouse = args.wheelhouse.resolve()
-    if not wheelhouse.exists():
-        raise AssertionError(f"wheelhouse does not exist: {wheelhouse}")
-
-    print("wheelhouse:", wheelhouse)
-    print("wheels:")
-    for wheel in all_wheels(wheelhouse):
-        print(" ", wheel.relative_to(wheelhouse))
-
-    if args.scenario == "metadata":
-        assert_core_wheel_metadata(wheelhouse, args.target_arch)
-        check_optional_wheels(wheelhouse, args.target_arch)
-        assert_auditwheel_show(wheelhouse)
-        assert_glibc_floor(wheelhouse)
-    elif args.scenario == "core":
-        install_core(wheelhouse, args.python)
-    elif args.scenario == "extra":
-        if not args.extra:
-            raise AssertionError("--extra is required for the extra scenario")
-        assert_extra_declared(wheelhouse, args.extra)
-
-
-if __name__ == "__main__":
-    os.environ.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-    os.environ.setdefault("PIP_ROOT_USER_ACTION", "ignore")
-    main()

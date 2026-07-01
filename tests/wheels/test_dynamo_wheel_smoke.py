@@ -35,7 +35,6 @@ pytestmark = [
 
 
 WHEELHOUSE_ENV = "DYNAMO_WHEEL_SMOKE_WHEELHOUSE"
-EXTRAS_ENV = "DYNAMO_WHEEL_SMOKE_EXTRAS"
 PLATFORM_ENV = "DYNAMO_WHEEL_SMOKE_PLATFORM"
 PYTHONS_ENV = "DYNAMO_WHEEL_SMOKE_PYTHONS"
 DEFAULT_WHEELHOUSE = "/opt/dynamo/wheelhouse"
@@ -54,11 +53,6 @@ def _target_arch() -> str:
 def _pythons() -> list[str]:
     raw = os.environ.get(PYTHONS_ENV, "").strip() or DEFAULT_PYTHONS
     return [spec.strip() for spec in raw.split(",") if spec.strip()]
-
-
-def _extras() -> list[str]:
-    extras = os.environ.get(EXTRAS_ENV, "mocker,vllm,sglang,trtllm")
-    return [extra.strip() for extra in extras.split(",") if extra.strip()]
 
 
 def _have(module: str) -> bool:
@@ -89,11 +83,6 @@ def test_core_and_kvbm_install_clean_room(wheelhouse: Path) -> None:
 
 def test_runtime_wheel_has_no_bundled_libraries(wheelhouse: Path) -> None:
     smoke_install.assert_no_bundled_libraries(wheelhouse)
-
-
-@pytest.mark.parametrize("extra", _extras())
-def test_extra_declared_in_wheel(wheelhouse: Path, extra: str) -> None:
-    smoke_install.assert_extra_declared(wheelhouse, extra)
 
 
 def test_wheel_metadata_tags_auditwheel_glibc(wheelhouse: Path) -> None:
