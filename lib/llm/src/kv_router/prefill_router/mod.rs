@@ -28,6 +28,7 @@ use crate::{
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
         timing::{RequestPhase, RequestTracker},
     },
+    session_affinity::AffinityTarget,
 };
 
 mod activation;
@@ -224,8 +225,8 @@ impl
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
-                .select_and_dispatch_prefill(prefill_context, |request, worker_id, dp_rank| {
-                    self.prepare_prefill_dispatch(request, worker_id, dp_rank)
+                .select_and_dispatch_prefill(prefill_context, |request, target| {
+                    self.prepare_prefill_dispatch(request, target)
                 })
                 .await?;
             let topology_constraints = prepared.topology_constraints;
@@ -327,9 +328,9 @@ impl PrefillRouter {
     fn prepare_prefill_dispatch(
         &self,
         request: &mut PreprocessedRequest,
-        worker_id: u64,
-        dp_rank: Option<u32>,
+        target: AffinityTarget,
     ) -> anyhow::Result<PreparedPrefill> {
+        let AffinityTarget { worker_id, dp_rank } = target;
         let endpoint_id = self.endpoint_id.get();
         let topology_constraints =
             self.preflight_kv_transfer_constraints(endpoint_id, worker_id)?;

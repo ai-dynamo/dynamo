@@ -247,16 +247,14 @@ async fn anthropic_messages(
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
         .map_err(|e| match e {
-            // Registered but no complete worker set yet → retryable 503
-            // (mapped to "overloaded_error" by `anthropic_error`), matching the
-            // OpenAI path. Anything else is a genuine missing model → 404.
+            // Registered but not ready to serve yet → retryable 503 (mapped to
+            // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
+            // canonical, customer-facing message so both APIs report the same
+            // text. Anything else is a genuine missing model → 404.
             crate::discovery::ModelManagerError::ModelUnavailable(_) => anthropic_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "overloaded_error",
-                &format!(
-                    "Model '{}' is registered but has no complete worker set",
-                    model
-                ),
+                &super::openai::model_not_ready_message(&model),
             ),
             _ => anthropic_error(
                 StatusCode::NOT_FOUND,
@@ -268,19 +266,21 @@ async fn anthropic_messages(
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
-    // Check if the Anthropic request explicitly disabled thinking.
-    let thinking_explicitly_disabled = orig_request
-        .thinking
-        .as_ref()
-        .is_some_and(|t| t.thinking_type == "disabled");
-
-    // Estimate input tokens before consuming the request via try_into().
-    // Only used in the streaming path to populate message_start.
+    // Anthropic exposes input usage in `message_start`, before the backend's
+    // authoritative count is available. Seed the stream with the same
+    // best-effort estimate as `/count_tokens`; the converter replaces it when
+    // the backend reports final usage.
     let estimated_input_tokens = if streaming {
         estimate_input_tokens(&orig_request)
     } else {
         0
     };
+
+    // Check if the Anthropic request explicitly disabled thinking.
+    let thinking_explicitly_disabled = orig_request
+        .thinking
+        .as_ref()
+        .is_some_and(|t| t.thinking_type == "disabled");
 
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
@@ -773,21 +773,18 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
     }
 }
 
-/// Estimate input token count for an Anthropic request.
+/// Estimate input usage for a streaming `message_start` event.
 ///
-/// Uses the same heuristic as `AnthropicCountTokensRequest::estimate_tokens()`
-/// (sum character lengths / 3). This populates `input_tokens` in the streaming
-/// `message_start` event, since the engine only reports prompt token counts on
-/// the final chunk.
+/// The backend's rendered prompt and cache-hit split are not available when
+/// the event is emitted. Final `message_delta` usage replaces this estimate.
 fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
-    // Build a temporary count-tokens request to reuse the existing estimator.
-    let count_req = AnthropicCountTokensRequest {
+    AnthropicCountTokensRequest {
         model: req.model.clone(),
         messages: req.messages.clone(),
         system: req.system.clone(),
         tools: req.tools.clone(),
-    };
-    count_req.estimate_tokens()
+    }
+    .estimate_tokens()
 }
 
 fn gate_anthropic_nvext(request: &mut AnthropicCreateMessageRequest, nvext_enabled: bool) {
@@ -798,7 +795,7 @@ fn gate_anthropic_nvext(request: &mut AnthropicCreateMessageRequest, nvext_enabl
     if request.nvext.is_some() {
         tracing::warn!(
             endpoint = "anthropic_messages",
-            "request carried nvext data but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
+            "request carried nvext data but the nvext extension is disabled on this frontend; dropping it"
         );
     }
     request.nvext = None;

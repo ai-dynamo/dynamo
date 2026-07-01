@@ -24,7 +24,8 @@ use crate::types::{
         audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
-        images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+        generate::GenerateStreamingEngine, images::OpenAIImagesStreamingEngine,
+        videos::OpenAIVideosStreamingEngine,
     },
 };
 
@@ -221,6 +222,13 @@ impl Model {
         self.worker_sets
             .iter()
             .any(|entry| entry.value().has_realtime_engine())
+    }
+
+    /// Check if any WorkerSet has a generate engine.
+    pub fn has_generate_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_generate_engine())
     }
 
     // -- Model serving readiness --
@@ -564,6 +572,11 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
     }
 
+    pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.generate_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_engine_with_parsing(
@@ -582,6 +595,17 @@ impl Model {
                 .map(|e| (e, ws.parsing_options()))
         })
         .ok_or_else(|| self.engine_error(self.has_completions_engine()))
+    }
+
+    pub fn get_generate_engine_with_parsing(
+        &self,
+    ) -> Result<(GenerateStreamingEngine, ParsingOptions), ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            ws.generate_engine
+                .clone()
+                .map(|e| (e, ws.parsing_options()))
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
 
     // -- Worker monitoring (aggregated across WorkerSets) --

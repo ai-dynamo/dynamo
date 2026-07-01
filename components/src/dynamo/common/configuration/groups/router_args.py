@@ -244,9 +244,11 @@ class RouterArgGroup(ArgGroup):
             env_var="DYN_ROUTER_SESSION_AFFINITY_TTL_SECS",
             default=None,
             help=(
-                "Enable router-local session affinity with this idle TTL in seconds. "
-                "Affinity is disabled when this option is omitted. "
-                "This is independent of KV prediction TTL settings."
+                "Enable session affinity and set the process-local cache eviction TTL "
+                "in seconds. etcd and shared FileStore use immutable distributed claims "
+                "whose lifetime follows the creating frontend, not this TTL. Memory and "
+                "Kubernetes discovery remain process-local. Affinity is disabled when "
+                "this option is omitted."
             ),
             arg_type=int,
             dest="session_affinity_ttl_secs",
