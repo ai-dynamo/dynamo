@@ -4,7 +4,10 @@
 """RIVA ASR worker: transcribe speech to text via a RIVA NIM.
 
 Internal Dynamo worker (called by the orchestrator, not the frontend). Takes a
-base64-encoded audio buffer and returns the recognized transcript.
+base64-encoded audio buffer and returns the recognized transcript. Uses RIVA's
+streaming recognition API (the deployed Parakeet NIM serves a streaming model);
+the full buffer is fed as a sequence of chunks and the final transcript is
+collected.
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ import logging
 
 import uvloop
 from pydantic import BaseModel, Field
-from riva.client import AudioEncoding, RecognitionConfig
+from riva.client import AudioEncoding, RecognitionConfig, StreamingRecognitionConfig
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -26,16 +29,20 @@ from .config import (
     add_riva_connection_args,
     riva_connection_config_from_namespace,
 )
-from .riva_client import await_riva_call, build_asr_service
+from .riva_client import build_asr_service
 
 logger = logging.getLogger(__name__)
 configure_dynamo_logging(service_name="riva-asr")
 
-# RIVA ASR default: 16 kHz LINEAR_PCM input. Empty model lets the server pick.
+# RIVA ASR: 16 kHz LINEAR_PCM input, Parakeet streaming model.
 DEFAULT_SAMPLE_RATE_HZ = 16000
 DEFAULT_LANGUAGE_CODE = "en-US"
-DEFAULT_MODEL = ""
+DEFAULT_MODEL = "parakeet-1.1b-en-US-asr-streaming"
 DEFAULT_TIMEOUT_S = 30.0
+
+# Feed the buffered utterance to the streaming API in fixed-size PCM frames
+# (even byte count keeps 16-bit samples intact).
+_CHUNK_BYTES = 8192
 
 
 class AsrRequest(BaseModel):
@@ -80,27 +87,43 @@ class AsrBackend:
             request: The base64-encoded LINEAR_PCM audio buffer.
 
         Returns:
-            The recognized transcript (concatenated across result segments).
+            The recognized transcript (concatenated across final segments).
         """
         audio = base64.b64decode(request.audio_base64)
-        recognition_config = RecognitionConfig(
-            encoding=AudioEncoding.LINEAR_PCM,
-            sample_rate_hertz=self.sample_rate_hz,
-            language_code=self.language_code,
-            model=self.model,
-            max_alternatives=1,
-            enable_automatic_punctuation=True,
-        )
-        # future=True submits the RPC and returns a gRPC future; await_riva_call
-        # waits off the event loop with a deadline and cancels on timeout.
-        rpc_future = self.asr.offline_recognize(audio, recognition_config, future=True)
-        response = await await_riva_call(rpc_future, self.timeout_s)
-        transcript = " ".join(
-            result.alternatives[0].transcript
-            for result in response.results
-            if result.alternatives
+        if not audio:
+            return AsrResponse(transcript="")
+        # streaming_response_generator is a blocking generator; run it off the
+        # event loop and bound the whole exchange with the client-side deadline.
+        transcript = await asyncio.wait_for(
+            asyncio.to_thread(self._transcribe, audio), self.timeout_s
         )
         return AsrResponse(transcript=transcript)
+
+    def _transcribe(self, audio: bytes) -> str:
+        """Stream ``audio`` to RIVA and join the final transcript segments."""
+        streaming_config = StreamingRecognitionConfig(
+            config=RecognitionConfig(
+                encoding=AudioEncoding.LINEAR_PCM,
+                sample_rate_hertz=self.sample_rate_hz,
+                language_code=self.language_code,
+                model=self.model,
+                max_alternatives=1,
+                enable_automatic_punctuation=True,
+            ),
+            interim_results=False,
+        )
+        chunks = [
+            audio[i : i + _CHUNK_BYTES] for i in range(0, len(audio), _CHUNK_BYTES)
+        ]
+        responses = self.asr.streaming_response_generator(
+            audio_chunks=chunks, streaming_config=streaming_config
+        )
+        return " ".join(
+            result.alternatives[0].transcript
+            for response in responses
+            for result in response.results
+            if result.is_final and result.alternatives
+        )
 
     @dynamo_endpoint(AsrRequest, AsrResponse)
     async def recognize_endpoint(self, request: AsrRequest):

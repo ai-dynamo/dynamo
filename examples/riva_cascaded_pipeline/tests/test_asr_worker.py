@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit test for the ASR worker: audio in, RIVA offline_recognize, transcript out.
+"""Unit test for the ASR worker: audio in, RIVA streaming recognition, transcript out.
 
 Mocks ``riva.client.ASRService`` so it runs without a RIVA server.
 """
@@ -9,7 +9,6 @@ Mocks ``riva.client.ASRService`` so it runs without a RIVA server.
 import base64
 from unittest.mock import MagicMock
 
-import grpc
 import pytest
 from riva.client import AudioEncoding
 from riva_nim import asr_worker, config
@@ -23,52 +22,48 @@ def backend():
         config.RivaConnectionConfig(),
         sample_rate_hz=16000,
         language_code="en-US",
-        model="",
+        model="parakeet-1.1b-en-US-asr-streaming",
         timeout_s=5.0,
     )
     be.asr = MagicMock()
     return be
 
 
-async def test_generate_recognizes_audio_to_transcript(backend):
+def _final_response(transcript):
     alternative = MagicMock()
-    alternative.transcript = "hello world"
+    alternative.transcript = transcript
     result = MagicMock()
+    result.is_final = True
     result.alternatives = [alternative]
-    recognize_response = MagicMock()
-    recognize_response.results = [result]
-    # future=True returns a gRPC future whose result() carries the response.
-    rpc_future = MagicMock()
-    rpc_future.result.return_value = recognize_response
-    backend.asr.offline_recognize.return_value = rpc_future
+    response = MagicMock()
+    response.results = [result]
+    return response
 
-    audio = b"\x00\x01fake-pcm"
+
+async def test_generate_streams_audio_and_joins_final_transcript(backend):
+    backend.asr.streaming_response_generator.return_value = [
+        _final_response("hello world")
+    ]
+
+    audio = b"\x00\x01" * 6000  # ~larger than one chunk, forces multiple frames
     resp = await backend.generate(
         asr_worker.AsrRequest(audio_base64=base64.b64encode(audio).decode())
     )
 
-    # The decoded PCM is forwarded to RIVA with a config carrying the worker's
-    # recognition settings, submitted as a future with the configured deadline.
-    backend.asr.offline_recognize.assert_called_once()
-    args, kwargs = backend.asr.offline_recognize.call_args
-    assert args[0] == audio
-    recognition_config = args[1]
-    assert recognition_config.sample_rate_hertz == 16000
-    assert recognition_config.language_code == "en-US"
-    assert recognition_config.encoding == AudioEncoding.LINEAR_PCM
-    assert kwargs["future"] is True
-    rpc_future.result.assert_called_once_with(5.0)
+    backend.asr.streaming_response_generator.assert_called_once()
+    kwargs = backend.asr.streaming_response_generator.call_args.kwargs
+    # The full buffer is streamed as chunks with the worker's recognition config.
+    assert b"".join(kwargs["audio_chunks"]) == audio
+    rec_config = kwargs["streaming_config"].config
+    assert rec_config.sample_rate_hertz == 16000
+    assert rec_config.language_code == "en-US"
+    assert rec_config.encoding == AudioEncoding.LINEAR_PCM
+    assert rec_config.model == "parakeet-1.1b-en-US-asr-streaming"
 
     assert resp.transcript == "hello world"
 
 
-async def test_generate_cancels_rpc_on_timeout(backend):
-    rpc_future = MagicMock()
-    rpc_future.result.side_effect = grpc.FutureTimeoutError()
-    backend.asr.offline_recognize.return_value = rpc_future
-
-    with pytest.raises(grpc.FutureTimeoutError):
-        await backend.generate(asr_worker.AsrRequest(audio_base64=""))
-
-    # The in-flight RPC is cancelled rather than left to tie up a thread.
-    rpc_future.cancel.assert_called_once()
+async def test_generate_returns_empty_for_empty_audio(backend):
+    resp = await backend.generate(asr_worker.AsrRequest(audio_base64=""))
+    assert resp.transcript == ""
+    backend.asr.streaming_response_generator.assert_not_called()

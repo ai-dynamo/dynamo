@@ -9,6 +9,7 @@ Mocks ``riva.client.SpeechSynthesisService`` so it runs without a RIVA server.
 import base64
 from unittest.mock import MagicMock
 
+import grpc
 import pytest
 from riva_nim import config, tts_worker
 
@@ -54,3 +55,15 @@ async def test_generate_synthesizes_and_base64_encodes_audio(backend):
     # The synthesized PCM is returned base64-encoded, with the sample rate echoed.
     assert base64.b64decode(resp.audio_base64) == b"RIFF....fake-pcm-bytes"
     assert resp.sample_rate_hz == 22050
+
+
+async def test_generate_cancels_rpc_on_timeout(backend):
+    rpc_future = MagicMock()
+    rpc_future.result.side_effect = grpc.FutureTimeoutError()
+    backend.tts.synthesize.return_value = rpc_future
+
+    with pytest.raises(grpc.FutureTimeoutError):
+        await backend.generate(tts_worker.TtsRequest(text="hello"))
+
+    # The in-flight RPC is cancelled rather than left to tie up a thread.
+    rpc_future.cancel.assert_called_once()

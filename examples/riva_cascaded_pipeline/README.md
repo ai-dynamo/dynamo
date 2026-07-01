@@ -182,7 +182,7 @@ docker run --rm -v "$PWD":/work -w /work dynamo-riva:latest \
 
 ## Limitations (proof-of-concept scope)
 
-- **Offline speech, not streaming.** ASR uses `offline_recognize` and TTS `synthesize` (one request → one result) per turn. RIVA streaming and interim transcripts are out of scope.
+- **ASR streams, TTS is offline.** ASR uses RIVA streaming recognition (the Parakeet NIM serves a streaming model), with interim results disabled — only final transcripts are collected per turn. TTS uses offline `synthesize` (one request → one audio result). Streaming TTS (`synthesize_online`) and interim ASR transcripts are out of scope.
 - **Single-turn LLM.** Each turn sends only the current transcript; no conversation history is carried across turns.
 - **Cancellation is observed between stages.** A turn cancelled mid-chain stops before the next stage, but an already-in-flight ASR/LLM/TTS call still completes. Barge-in / interruption is not implemented.
 - **Audio format assumptions.** ASR expects 16 kHz LINEAR_PCM, TTS emits 22.05 kHz LINEAR_PCM. No resampling is done between the realtime transport and RIVA; match the client's audio format to the workers' configured rates.
