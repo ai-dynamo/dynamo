@@ -328,45 +328,19 @@ mod tests {
     use futures::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[derive(Debug)]
-    struct MockContext;
+    #[derive(Debug, Default)]
+    struct MockContext {
+        stopped_polls: AtomicUsize,
+    }
     impl MockContext {
         fn new() -> Self {
-            Self
+            Self::default()
         }
     }
     #[async_trait::async_trait]
     impl dynamo_runtime::engine::AsyncEngineContext for MockContext {
         fn id(&self) -> &str {
             "test"
-        }
-        fn stop(&self) {}
-        fn stop_generating(&self) {}
-        fn kill(&self) {}
-        fn is_stopped(&self) -> bool {
-            false
-        }
-        fn is_killed(&self) -> bool {
-            false
-        }
-        async fn stopped(&self) {
-            std::future::pending::<()>().await;
-        }
-        async fn killed(&self) {
-            std::future::pending::<()>().await;
-        }
-        fn link_child(&self, _: Arc<dyn dynamo_runtime::engine::AsyncEngineContext>) {}
-    }
-
-    #[derive(Debug, Default)]
-    struct CountingContext {
-        stopped_polls: AtomicUsize,
-    }
-
-    #[async_trait::async_trait]
-    impl dynamo_runtime::engine::AsyncEngineContext for CountingContext {
-        fn id(&self) -> &str {
-            "counting-test"
         }
         fn stop(&self) {}
         fn stop_generating(&self) {}
@@ -437,7 +411,7 @@ mod tests {
             true,
             "req-reuse",
         );
-        let context = Arc::new(CountingContext::default());
+        let context = Arc::new(MockContext::new());
         let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);

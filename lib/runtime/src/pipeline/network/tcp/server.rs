@@ -921,6 +921,8 @@ async fn tcp_listener(
 
                 _ = &mut stopped, if can_stop => {
                     tracing::trace!("context stop signal received; shutting down");
+                    // `stopped` is now complete; keep this branch disabled because polling
+                    // the same completed async future again would panic.
                     can_stop = false;
                     let _ = control_tx.send(ControlMessage::Stop).await;
                 }
