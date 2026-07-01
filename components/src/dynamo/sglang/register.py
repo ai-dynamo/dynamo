@@ -325,7 +325,7 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
     """
     try:
         return SpeculativeAlgorithm.from_string(speculative_algorithm).is_eagle()
-    except Exception:
+    except Exception as e:
         # Graceful degradation: registration must not crash on an unexpected speculative-algorithm
         # value. ``from_string`` raises ValueError on unknown/unregistered names (and returns NONE for
         # ``None``, so the default case does not raise); catch broadly -- matching the sibling
@@ -333,8 +333,9 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
         # change can't crash the worker either. Default to not enabling eagle bigram routing; the
         # previous membership check ``in ("EAGLE", "NEXTN")`` never raised, so this preserves behavior.
         logging.warning(
-            "Could not derive enable_eagle from speculative_algorithm %r; leaving it disabled.",
+            "Could not derive enable_eagle from speculative_algorithm %r: %s; leaving it disabled.",
             speculative_algorithm,
+            e,
         )
         return False
 
