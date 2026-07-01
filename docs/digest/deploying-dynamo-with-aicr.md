@@ -9,31 +9,6 @@ keywords: Dynamo, NVIDIA AI Cluster Runtime, AICR, Kubernetes, GPU Operator, EPP
 last-updated: June 11, 2026
 ---
 
-<!--
-Editorial title direction:
-
-- Chosen title:
-  From Kubernetes to Datacenter-Scale Inference with NVIDIA Dynamo and AICR
-- Original direction:
-  From empty Kubernetes to datacenter-scale inference: with NVIDIA Dynamo and NVIDIA AICR Optimized Kubernetes Runtime.
-- Shorter variants considered:
-  - From GPU Kubernetes to Dynamo Inference with AICR
-  - Fast-Tracking Dynamo Inference on Kubernetes with AICR
-  - Dynamo on Kubernetes, Validated by AICR
-  - A Validated Path to Dynamo Inference on Kubernetes
-  - From Kubernetes Cluster to Dynamo Stack with AICR
-  - Deploying the Full Dynamo Stack with AICR
-  - Dynamo Inference on NVIDIA's Validated Kubernetes Runtime
-  - The Fast Path to Dynamo on Kubernetes
-  - AICR: The Validated Runtime Path for Dynamo on Kubernetes
-- Subtitle/narrative direction:
-  NVIDIA AI Cluster Runtime provides the optimized and validated Kubernetes runtime below Dynamo,
-  from GPU operators and node health to NATS, scheduling, observability, and Gateway/EPP routing.
-- Wording constraint:
-  Avoid rendering "empty Kubernetes" as-is because AICR assumes an existing GPU Kubernetes cluster;
-  keep that clarification in the body.
--->
-
 Running a model with [Dynamo](https://github.com/ai-dynamo/dynamo) on
 [Kubernetes](https://kubernetes.io/) starts with a `DynamoGraphDeployment`, but the graph is only the
 top of the stack. A production inference cluster also needs GPU drivers, device discovery,
@@ -50,11 +25,10 @@ validated Dynamo 1.2 inference runtime stack."
 ## Why the Runtime Below Dynamo Matters
 
 Dynamo coordinates inference across multiple components: frontends, routers, workers, the Dynamo
-operator, and optional [Gateway API](https://github.com/kubernetes-sigs/gateway-api)
-[Inference Extension (GAIE)](https://github.com/kubernetes-sigs/gateway-api-inference-extension) /
-[Endpoint Picker Plugin (EPP)](../kubernetes/inference-gateway.md) components. Those components
-depend on cluster-level services that must agree on Kubernetes version, driver stack, GPU allocation
-model, scheduling policy, node health, metrics, and network reachability.
+operator, and optional [Gateway API Inference Extension (GAIE) / Endpoint Picker Plugin (EPP)
+components](../kubernetes/gateway-api/README.mdx). Those components depend on cluster-level services
+that must agree on Kubernetes version, driver stack, GPU allocation model, scheduling policy, node
+health, metrics, and network reachability.
 
 A hand-written Dynamo manifest can start the serving graph, but it does not answer questions like:
 
@@ -399,7 +373,7 @@ an `inference-gateway` Gateway in the `agentgateway-system` namespace. `agentgat
 Gateway API data plane, not the Dynamo EPP. The Dynamo EPP comes from a `DynamoGraphDeployment`
 component of type `epp`; the Dynamo operator generates the matching `InferencePool`, and the Gateway
 path uses an `HTTPRoute` that references that pool, as described in the
-[Gateway API Inference Extension guide](../kubernetes/inference-gateway.md). That is native Dynamo
+[Gateway API Inference Extension overview](../kubernetes/gateway-api/README.mdx). That is native Dynamo
 integration with GAIE: Gateway stays Kubernetes-native at ingress, while Dynamo owns the cache-aware
 endpoint selection.
 
