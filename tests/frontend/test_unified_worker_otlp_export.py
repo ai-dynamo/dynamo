@@ -24,6 +24,7 @@ from opentelemetry.proto.collector.trace.v1 import (
     trace_service_pb2,
     trace_service_pb2_grpc,
 )
+from opentelemetry.proto.trace.v1 import trace_pb2
 
 from tests.frontend.conftest import (
     SampleUnifiedWorkerProcess,
@@ -98,6 +99,8 @@ def _get_attr(span, key):
                 return str(v.int_value)
             if v.HasField("double_value"):
                 return str(v.double_value)
+            if v.HasField("bool_value"):
+                return str(v.bool_value).lower()
     return None
 
 
@@ -173,6 +176,7 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
     otel_env = {
         "OTEL_EXPORT_ENABLED": "1",
         "DYN_LOGGING_JSONL": "1",
+        "DYN_LOG": "warn",
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"http://127.0.0.1:{otlp_port}",
         "OTEL_SERVICE_NAME": "dynamo-unified-worker-test",
     }
@@ -206,10 +210,14 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
                 resp.status_code == 200
             ), f"curl failed: {resp.status_code} {resp.text!r}"
 
-            # Poll until the batch exporter flushes (~5s default delay).
+            # Poll until both worker and full-lifetime route spans flush
+            # (~5s default batch delay).
             deadline = time.monotonic() + 15.0
             while time.monotonic() < deadline:
-                if collector.engine_generate_spans():
+                spans = collector.snapshot()
+                if any(s.name == "engine.generate" for s in spans) and any(
+                    s.name == "router.route_request" for s in spans
+                ):
                     break
                 time.sleep(0.5)
 
@@ -229,6 +237,33 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
     assert (
         _get_attr(span, "input_tokens") is not None
     ), "missing `input_tokens` attribute"
+
+    same_trace = [s for s in collector.snapshot() if s.trace_id == span.trace_id]
+    route_spans = [s for s in same_trace if s.name == "router.route_request"]
+    assert route_spans, "missing frontend `router.route_request` span"
+    route_span = route_spans[0]
+    assert route_span.kind == trace_pb2.Span.SPAN_KIND_CLIENT
+    assert _get_attr(route_span, "request.attempt") == "0"
+    assert _get_attr(route_span, "migration.is_retry") == "false"
+    assert _get_attr(route_span, "request.outcome") == "success"
+
+    worker_spans = [
+        s
+        for s in same_trace
+        if s.name == "handle_payload" and s.parent_span_id == route_span.span_id
+    ]
+    assert (
+        worker_spans
+    ), "worker `handle_payload` must be a remote child of the frontend route span"
+    worker_span = worker_spans[0]
+    assert worker_span.kind == trace_pb2.Span.SPAN_KIND_SERVER
+    assert span.parent_span_id == worker_span.span_id
+    assert (
+        route_span.end_time_unix_nano >= worker_span.end_time_unix_nano
+    ), "route span ended before worker request handling completed"
+    assert (
+        route_span.end_time_unix_nano >= span.end_time_unix_nano
+    ), "route span ended before worker generation completed"
 
 
 def test_unsampled_traceparent_does_not_export_spans_over_otlp(

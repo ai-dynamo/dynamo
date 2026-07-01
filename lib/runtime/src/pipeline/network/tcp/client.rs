@@ -13,6 +13,7 @@ use tokio::{
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 use prometheus::IntCounter;
+use tracing::Instrument;
 
 use super::{CallHomeHandshake, ControlMessage, TcpStreamConnectionInfo};
 use crate::engine::AsyncEngineContext;
@@ -26,6 +27,18 @@ use anyhow::{Context, Result, anyhow as error}; // Import SinkExt to use the `se
 #[allow(dead_code)]
 pub struct TcpClient {
     worker_id: String,
+}
+
+fn record_upstream_cancellation(context: &dyn AsyncEngineContext, signal: &'static str) {
+    tracing::info!(
+        target: "request_span",
+        {
+            request_id = context.id(),
+            { "cancellation.signal" } = signal,
+            { "cancellation.source" } = "upstream"
+        },
+        "request cancellation received"
+    );
 }
 
 impl Default for TcpClient {
@@ -100,12 +113,16 @@ impl TcpClient {
         // captured by the monitor task
         let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let reader_task = tokio::spawn(handle_reader(
-            framed_reader,
-            context.clone(),
-            alive_tx,
-            cancellation_counter,
-        ));
+        let reader_span = tracing::Span::current();
+        let reader_task = tokio::spawn(
+            handle_reader(
+                framed_reader,
+                context.clone(),
+                alive_tx,
+                cancellation_counter,
+            )
+            .instrument(reader_span),
+        );
 
         // transport specific handshake message
         let handshake = CallHomeHandshake {
@@ -232,12 +249,11 @@ impl TcpClient {
 
         let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
 
-        tokio::spawn(handle_request_reader(
-            framed_reader,
-            bytes_tx,
-            context,
-            cancellation_counter,
-        ));
+        let reader_span = tracing::Span::current();
+        tokio::spawn(
+            handle_request_reader(framed_reader, bytes_tx, context, cancellation_counter)
+                .instrument(reader_span),
+        );
 
         Ok(StreamReceiver { rx: bytes_rx })
     }
@@ -293,11 +309,13 @@ async fn handle_request_reader(
                             match ctrl {
                                 ControlMessage::Stop => {
                                     cancellation_seen = true;
+                                    record_upstream_cancellation(context.as_ref(), "stop");
                                     context.stop();
                                     break;
                                 }
                                 ControlMessage::Kill => {
                                     cancellation_seen = true;
+                                    record_upstream_cancellation(context.as_ref(), "kill");
                                     context.kill();
                                     break;
                                 }
@@ -478,10 +496,12 @@ async fn handle_reader(
                                 match msg {
                                     ControlMessage::Stop => {
                                         cancellation_seen = true;
+                                        record_upstream_cancellation(context.as_ref(), "stop");
                                         context.stop();
                                     }
                                     ControlMessage::Kill => {
                                         cancellation_seen = true;
+                                        record_upstream_cancellation(context.as_ref(), "kill");
                                         context.kill();
                                     }
                                     ControlMessage::Sentinel => {
@@ -594,11 +614,86 @@ mod tests {
     use crate::pipeline::network::tcp::test_utils::create_tcp_pair;
     use bytes::Bytes;
     use futures::StreamExt;
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::sync::{mpsc, oneshot};
     use tokio_util::codec::FramedRead;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::{Context as TraceContext, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    type CapturedCancellationEvent = (HashMap<String, String>, Option<String>);
+
+    #[derive(Default)]
+    struct CancellationEventCapture(Mutex<Vec<CapturedCancellationEvent>>);
+
+    struct EventFieldVisitor<'a>(&'a mut HashMap<String, String>);
+
+    impl Visit for EventFieldVisitor<'_> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    struct CancellationEventLayer(Arc<CancellationEventCapture>);
+
+    impl<S> Layer<S> for CancellationEventLayer
+    where
+        S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, ctx: TraceContext<'_, S>) {
+            if event.metadata().target() != "request_span" {
+                return;
+            }
+            let mut fields = HashMap::new();
+            event.record(&mut EventFieldVisitor(&mut fields));
+            if fields
+                .get("message")
+                .is_none_or(|message| message.trim_matches('"') != "request cancellation received")
+            {
+                return;
+            }
+            let parent = ctx.event_span(event).map(|span| span.name().to_string());
+            self.0.0.lock().unwrap().push((fields, parent));
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_cancellation_event_is_parented_to_worker_request_span() {
+        let captured = Arc::new(CancellationEventCapture::default());
+        let _subscriber = tracing_subscriber::registry()
+            .with(CancellationEventLayer(captured.clone()))
+            .set_default();
+        let controller = Arc::new(Controller::new("request-123".to_string()));
+        let span = tracing::info_span!(target: "request_span", "handle_payload");
+
+        async {
+            record_upstream_cancellation(controller.as_ref(), "stop");
+        }
+        .instrument(span)
+        .await;
+
+        let events = captured.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].0.get("cancellation.signal").map(String::as_str),
+            Some("stop")
+        );
+        assert_eq!(
+            events[0].0.get("cancellation.source").map(String::as_str),
+            Some("upstream")
+        );
+        assert_eq!(events[0].1.as_deref(), Some("handle_payload"));
+    }
 
     struct WriterHarness {
         server: tokio::net::TcpStream,

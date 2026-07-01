@@ -3,6 +3,9 @@
 
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
+use crate::pipeline::network::egress::route_span::{
+    get_route_trace_context, record_route_error, record_route_span_start, wrap_route_span,
+};
 use crate::{
     component::{
         Client, DeviceType, Endpoint, Instance, RoutingInstances, RoutingOccupancyState,
@@ -1230,21 +1233,46 @@ where
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
+        let route_trace_context = get_route_trace_context(&request);
         let route_span = if matches!(self.router_mode, RouterMode::KV) {
             tracing::Span::none()
         } else {
             tracing::info_span!(
+                target: "request_span",
                 "router.route_request",
+                otel.kind = "client",
                 request_id = %request_id,
-                worker_id = instance_id,
+                worker_id = tracing::field::Empty,
                 router_mode = ?self.router_mode,
+                "request.attempt" = tracing::field::Empty,
+                "request.outcome" = tracing::field::Empty,
+                "migration.is_retry" = tracing::field::Empty,
+                "migration.reason" = tracing::field::Empty,
+                "migration.from_worker_id" = tracing::field::Empty,
+                "migration.tokens_completed" = tracing::field::Empty,
+                "cancellation.signal" = tracing::field::Empty,
+                "error.type" = tracing::field::Empty,
+                otel.status_code = tracing::field::Empty,
+                otel.status_description = tracing::field::Empty,
             )
         };
+        if let Err(error) = self.check_workers_available(instance_id, &request_id) {
+            record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+            record_route_error(&route_span, error.as_ref());
+            return Err(error);
+        }
 
-        self.check_workers_available(instance_id, &request_id)?;
-
-        let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id, fallback)?;
+        let (instance_id, address, transport_kind, instance) = match self
+            .resolve_transport(instance_id, fallback)
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+                record_route_error(&route_span, error.as_ref());
+                return Err(error);
+            }
+        };
+        record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
 
         STAGE_DURATION_SECONDS
@@ -1255,9 +1283,9 @@ where
         let stream = self
             .addressed
             .generate(request)
-            .instrument(route_span)
+            .instrument(route_span.clone())
             .await;
-        self.wrap_with_fault_detection(stream, instance_id)
+        self.wrap_with_fault_detection(stream, instance_id, route_span)
     }
 
     /// Reject early if the selected worker is overloaded and fault detection
@@ -1382,10 +1410,12 @@ where
         &self,
         stream: anyhow::Result<ManyOut<U>>,
         instance_id: u64,
+        route_span: tracing::Span,
     ) -> anyhow::Result<ManyOut<U>> {
         let stream = match stream {
             Ok(stream) => stream,
             Err(err) => {
+                record_route_error(&route_span, err.as_ref());
                 if self.fault_detection_enabled {
                     if is_inhibited(err.as_ref()) {
                         tracing::debug!(
@@ -1410,7 +1440,7 @@ where
         };
 
         if !self.fault_detection_enabled {
-            return Ok(stream);
+            return Ok(wrap_route_span(stream, route_span));
         }
 
         let engine_ctx = stream.context();
@@ -1463,7 +1493,10 @@ where
                 Box::pin(stream)
             };
 
-        Ok(ResponseStream::new(stream, engine_ctx))
+        Ok(wrap_route_span(
+            ResponseStream::new(stream, engine_ctx),
+            route_span,
+        ))
     }
 }
 
@@ -1505,16 +1538,41 @@ where
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
         let request_id = input.context().id().to_string();
+        let route_trace_context = get_route_trace_context(&input);
         let route_span = tracing::info_span!(
+            target: "request_span",
             "router.route_request_bidirectional",
+            otel.kind = "client",
             request_id = %request_id,
-            worker_id = instance_id,
+            worker_id = tracing::field::Empty,
             router_mode = ?self.router_mode,
+            "request.attempt" = tracing::field::Empty,
+            "request.outcome" = tracing::field::Empty,
+            "migration.is_retry" = tracing::field::Empty,
+            "migration.reason" = tracing::field::Empty,
+            "migration.from_worker_id" = tracing::field::Empty,
+            "migration.tokens_completed" = tracing::field::Empty,
+            "cancellation.signal" = tracing::field::Empty,
+            "error.type" = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            otel.status_description = tracing::field::Empty,
         );
-
-        self.check_workers_available(instance_id, &request_id)?;
-        let (instance_id, address, transport_kind, instance) =
-            self.resolve_transport(instance_id, TransportFallback::Allow)?;
+        if let Err(error) = self.check_workers_available(instance_id, &request_id) {
+            record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+            record_route_error(&route_span, error.as_ref());
+            return Err(error);
+        }
+        let (instance_id, address, transport_kind, instance) = match self
+            .resolve_transport(instance_id, TransportFallback::Allow)
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
+                record_route_error(&route_span, error.as_ref());
+                return Err(error);
+            }
+        };
+        record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
 
         STAGE_DURATION_SECONDS
             .with_label_values(&[STAGE_ROUTE])
@@ -1524,9 +1582,9 @@ where
         let stream: anyhow::Result<ManyOut<U>> = self
             .addressed
             .generate_bidirectional(instance, address, input)
-            .instrument(route_span)
+            .instrument(route_span.clone())
             .await;
-        self.wrap_with_fault_detection(stream, instance_id)
+        self.wrap_with_fault_detection(stream, instance_id, route_span)
     }
 }
 
