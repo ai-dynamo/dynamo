@@ -245,6 +245,8 @@ pub enum RouterQueuePolicy {
     Fcfs,
     Lcfs,
     Wspt,
+    #[serde(rename = "session_las")]
+    SessionLas,
 }
 
 impl fmt::Display for RouterQueuePolicy {
@@ -253,6 +255,7 @@ impl fmt::Display for RouterQueuePolicy {
             Self::Fcfs => f.write_str("fcfs"),
             Self::Lcfs => f.write_str("lcfs"),
             Self::Wspt => f.write_str("wspt"),
+            Self::SessionLas => f.write_str("session_las"),
         }
     }
 }
@@ -302,8 +305,9 @@ impl FromStr for RouterQueuePolicy {
             "fcfs" => Ok(Self::Fcfs),
             "lcfs" => Ok(Self::Lcfs),
             "wspt" => Ok(Self::Wspt),
+            "session_las" => Ok(Self::SessionLas),
             _ => Err(format!(
-                "unknown queue policy: {s:?}, expected 'fcfs', 'lcfs', or 'wspt'"
+                "unknown queue policy: {s:?}, expected 'fcfs', 'lcfs', 'wspt', or 'session_las'"
             )),
         }
     }

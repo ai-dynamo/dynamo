@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::config::{KvRouterConfig, RouterQueuePolicy};
 use dynamo_kv_router::protocols::{
     BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, RoutingConstraints,
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
@@ -274,13 +274,33 @@ impl OfflineReplayRouter {
         let class = self.profile.class(class_index);
         let should_queue = class.queueing_enabled()
             && (self.pending.has_backlog(class_index) || self.all_workers_busy(class, decay_now));
+        let is_session_las = class.queue_policy == RouterQueuePolicy::SessionLas;
+        let attained_service = if is_session_las {
+            let session_id = pending.session_id.as_deref().ok_or_else(|| {
+                anyhow!("router policy class {:?} requires a session ID", class.name)
+            })?;
+            Some(self.pending.session_attained_service(session_id))
+        } else {
+            None
+        };
+        let session_service_tokens = Self::session_service_tokens(&pending);
 
         if should_queue {
             let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&pending));
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
-            self.pending
-                .enqueue(
+            let enqueue = match attained_service {
+                Some(attained_service) => self.pending.enqueue_with_attained_service(
+                    class_index,
+                    self.workers_with_configs.len(),
+                    snapshot,
+                    now_ms.max(0.0) / 1000.0,
+                    priority_jump,
+                    strict_priority,
+                    attained_service,
+                    pending,
+                ),
+                None => self.pending.enqueue(
                     class_index,
                     self.workers_with_configs.len(),
                     snapshot,
@@ -288,15 +308,23 @@ impl OfflineReplayRouter {
                     priority_jump,
                     strict_priority,
                     pending,
-                )
-                .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
+                ),
+            };
+            enqueue.map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
             return Ok(RouterEffects::default());
         }
 
         let uuid = request
             .uuid
             .expect("offline replay requests must have UUIDs before router submission");
+        let session_id = pending.session_id.clone();
         let outcome = self.admit_request(pending, decay_now)?;
+        if is_session_las {
+            self.pending.record_session_dispatch(
+                session_id.as_deref().expect("session ID validated above"),
+                session_service_tokens,
+            );
+        }
         Ok(RouterEffects {
             admissions: vec![WorkerAdmission {
                 uuid,
@@ -473,6 +501,12 @@ impl OfflineReplayRouter {
         self.decay_time_epoch + Duration::from_secs_f64(now_ms.max(0.0) / 1000.0)
     }
 
+    fn session_service_tokens(request: &PendingRequest) -> usize {
+        request.isl_tokens.saturating_add(
+            (request.expected_output_tokens.unwrap_or_default() as usize).saturating_mul(2),
+        )
+    }
+
     fn build_pending_request(
         &self,
         request: &DirectRequest,
@@ -594,9 +628,24 @@ impl OfflineReplayRouter {
             }) else {
                 break;
             };
+            let class_index = popped.class_index();
             let request = popped.into_payload();
             let uuid = request.uuid;
+            let session_dispatch = (self.profile.class(class_index).queue_policy
+                == RouterQueuePolicy::SessionLas)
+                .then(|| {
+                    (
+                        request
+                            .session_id
+                            .clone()
+                            .expect("session_las request validated before queueing"),
+                        Self::session_service_tokens(&request),
+                    )
+                });
             let outcome = self.admit_request(request, decay_now)?;
+            if let Some((session_id, service)) = session_dispatch {
+                self.pending.record_session_dispatch(&session_id, service);
+            }
             admissions.push(WorkerAdmission {
                 uuid,
                 worker_idx: outcome.worker_idx,
@@ -880,6 +929,52 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Uuid::from_u128(2)]
         );
+    }
+
+    #[test]
+    fn session_las_accounts_for_immediate_dispatches() {
+        let mut router = OfflineReplayRouter::new(
+            &queueing_args(),
+            Some(queueing_router_config_with_policy(
+                RouterQueuePolicy::SessionLas,
+            )),
+            None,
+            1,
+        )
+        .unwrap();
+
+        let first = router
+            .on_request_arrival_for_session(&request(1, 1), None, Some("a".to_string()), 0.0)
+            .unwrap();
+        assert_eq!(first.admissions.len(), 1);
+        router
+            .on_request_arrival_for_session(&request(4, 4), None, Some("blocker".to_string()), 1.0)
+            .unwrap();
+        let blocker = router
+            .on_request_completed(Uuid::from_u128(1), 2.0)
+            .unwrap();
+        assert_eq!(blocker.admissions[0].uuid, Uuid::from_u128(4));
+
+        for (uuid, session_id) in [(2, "a"), (3, "b")] {
+            let queued = router
+                .on_request_arrival_for_session(
+                    &request(uuid, uuid as u32),
+                    None,
+                    Some(session_id.to_string()),
+                    uuid as f64 + 1.0,
+                )
+                .unwrap();
+            assert!(queued.admissions.is_empty());
+        }
+
+        let second = router
+            .on_request_completed(Uuid::from_u128(4), 5.0)
+            .unwrap();
+        assert_eq!(second.admissions[0].uuid, Uuid::from_u128(3));
+        let third = router
+            .on_request_completed(Uuid::from_u128(3), 6.0)
+            .unwrap();
+        assert_eq!(third.admissions[0].uuid, Uuid::from_u128(2));
     }
 
     #[test]

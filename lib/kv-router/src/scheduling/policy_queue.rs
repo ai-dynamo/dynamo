@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
 
+mod session_las;
+use session_las::SessionTable;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueSnapshot {
     pub raw_isl_tokens: usize,
@@ -138,6 +141,7 @@ struct PolicyClassQueue<T> {
 
 pub struct PolicyQueue<T> {
     classes: Vec<PolicyClassQueue<T>>,
+    sessions: SessionTable,
     next_class: usize,
     next_enqueue_seq: u64,
     pending_count: usize,
@@ -159,6 +163,7 @@ impl<T> PolicyQueue<T> {
                     deficit: 0,
                 })
                 .collect(),
+            sessions: SessionTable::default(),
             next_class: 0,
             next_enqueue_seq: 0,
             pending_count: 0,
@@ -224,18 +229,42 @@ impl<T> PolicyQueue<T> {
         strict_priority: u32,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
-        let class = &mut self.classes[class_index];
-        if let Some(rejection) = queue_rejection(class, worker_count) {
+        self.enqueue_with_score(
+            class_index,
+            worker_count,
+            snapshot,
+            arrival_offset_secs,
+            priority_jump,
+            strict_priority,
+            None,
+            payload,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_with_score(
+        &mut self,
+        class_index: usize,
+        worker_count: usize,
+        snapshot: QueueSnapshot,
+        arrival_offset_secs: f64,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_score: Option<f64>,
+        payload: T,
+    ) -> Result<(), (QueueRejection, T)> {
+        if let Some(rejection) = queue_rejection(&self.classes[class_index], worker_count) {
             return Err((rejection, payload));
         }
-
-        let policy_score = match class.config.queue_policy {
+        let class = &mut self.classes[class_index];
+        let policy_score = policy_score.unwrap_or_else(|| match class.config.queue_policy {
             RouterQueuePolicy::Fcfs => priority_jump.max(0.0) - arrival_offset_secs.max(0.0),
             RouterQueuePolicy::Wspt => {
                 (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
             }
             RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
-        };
+            RouterQueuePolicy::SessionLas => 0.0,
+        });
         let entry = PolicyQueueEntry {
             class_index,
             priority: QueuePriority {

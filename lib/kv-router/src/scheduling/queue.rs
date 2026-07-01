@@ -505,13 +505,26 @@ impl<
             });
             (class_index, Some(snapshot), should_queue)
         };
+        let class = self.profile.class(class_index);
+        let attained_service = if class.queue_policy == RouterQueuePolicy::SessionLas {
+            let Some(session_id) = request.session_id.as_deref() else {
+                let mut request = request;
+                request.respond(Err(KvSchedulerError::BookingFailed(format!(
+                    "router policy class {:?} requires a session ID",
+                    class.name
+                ))));
+                return;
+            };
+            Some(self.pending.session_attained_service(session_id))
+        } else {
+            None
+        };
         if !should_queue {
-            self.admit_one(request, decay_now);
+            self.admit_one(class_index, request, decay_now);
             return;
         }
 
         let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
-        let class = self.profile.class(class_index);
         tracing::debug!(policy_class = class.name, "queueing request");
         let arrival_offset = self.start_time.elapsed().as_secs_f64();
         let priority_jump = request.priority_jump;
@@ -522,15 +535,28 @@ impl<
             block_hashes,
         };
         let worker_count = self.workers_with_configs.borrow().len();
-        if let Err((rejection, queued)) = self.pending.enqueue(
-            class_index,
-            worker_count,
-            snapshot,
-            arrival_offset,
-            priority_jump,
-            strict_priority,
-            queued,
-        ) {
+        let enqueue = match attained_service {
+            Some(attained_service) => self.pending.enqueue_with_attained_service(
+                class_index,
+                worker_count,
+                snapshot,
+                arrival_offset,
+                priority_jump,
+                strict_priority,
+                attained_service,
+                queued,
+            ),
+            None => self.pending.enqueue(
+                class_index,
+                worker_count,
+                snapshot,
+                arrival_offset,
+                priority_jump,
+                strict_priority,
+                queued,
+            ),
+        };
+        if let Err((rejection, queued)) = enqueue {
             let mut request = queued.request;
             request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
             return;
@@ -555,6 +581,15 @@ impl<
     fn snapshot_for(&self, request: &SchedulingRequest) -> QueueSnapshot {
         let workers = self.workers_with_configs.borrow();
         Self::snapshot_for_with(request, &workers)
+    }
+
+    fn session_service_tokens(request: &SchedulingRequest) -> usize {
+        if !request.mode.is_tracked() {
+            return 0;
+        }
+        request.isl_tokens.saturating_add(
+            (request.expected_output_tokens.unwrap_or_default() as usize).saturating_mul(2),
+        )
     }
 
     fn snapshot_for_with(
@@ -641,13 +676,18 @@ impl<
                 policy_class = class.name,
                 "scheduling request from pending queue"
             );
-            self.admit_one(request, admit_now);
+            self.admit_one(class_index, request, admit_now);
         }
     }
 
     /// Run the full scheduling pipeline for a single request:
     /// compute projected load -> select worker -> book tracked state -> respond.
-    fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
+    fn admit_one(
+        &mut self,
+        class_index: usize,
+        mut request: SchedulingRequest,
+        decay_now: Instant,
+    ) {
         request.worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
@@ -693,6 +733,18 @@ impl<
             return;
         }
 
+        let session_dispatch = (self.profile.class(class_index).queue_policy
+            == RouterQueuePolicy::SessionLas)
+            .then(|| {
+                (
+                    request
+                        .session_id
+                        .take()
+                        .expect("session_las request validated before admission"),
+                    Self::session_service_tokens(&request),
+                )
+            });
+
         let request_id = request
             .mode
             .tracked_request_id()
@@ -714,7 +766,11 @@ impl<
             worker: selection.worker,
             lora_name: request.lora_name.take(),
         };
-        self.book_and_respond(request, sequence_request, response);
+        if self.book_and_respond(request, sequence_request, response)
+            && let Some((session_id, service)) = session_dispatch
+        {
+            self.pending.record_session_dispatch(&session_id, service);
+        }
     }
 
     /// Completes the tracked-admission ownership handoff.
@@ -729,30 +785,31 @@ impl<
         mut request: SchedulingRequest,
         sequence_request: SequenceRequest,
         response: SchedulingResponse,
-    ) {
+    ) -> bool {
         if request.response_is_closed() {
             tracing::debug!(
                 request_id = %sequence_request.request_id,
                 "Skipping scheduler booking for cancelled request"
             );
-            return;
+            return false;
         }
 
         let request_id = sequence_request.request_id.clone();
         if let Err(error) = self.slots.add_request(sequence_request, Instant::now()) {
             tracing::warn!(%request_id, %error, "Failed to book scheduler state");
             request.respond(Err(KvSchedulerError::BookingFailed(error.to_string())));
-            return;
+            return false;
         }
 
         if request.respond(Ok(response)) {
-            return;
+            return true;
         }
 
         tracing::debug!(%request_id, "Rolling back undelivered scheduler booking");
         if let Err(error) = self.slots.free(&request_id, Instant::now()) {
             tracing::error!(%request_id, %error, "Failed to roll back scheduler booking");
         }
+        false
     }
 
     fn prefill_load_hint_for(
