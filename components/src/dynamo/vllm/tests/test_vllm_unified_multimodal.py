@@ -7,10 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from dynamo.common.constants import DisaggregationMode
-from dynamo.vllm import llm_engine as mod
-from dynamo.vllm.multimodal_utils.request_processor import (
-    PreparedMultimodalPrompt,
-)
+from dynamo.vllm.multimodal_utils.request_processor import PreparedMultimodalPrompt
 
 pytestmark = [
     pytest.mark.unit,
@@ -48,6 +45,8 @@ class _EngineClient:
 
 
 def _engine(mode=DisaggregationMode.AGGREGATED, responses=()):
+    from dynamo.vllm import llm_engine as mod
+
     engine = mod.VllmLLMEngine(
         SimpleNamespace(model="Qwen/Qwen3-VL-2B-Instruct"),
         mode,
@@ -68,6 +67,8 @@ def _sampling_params():
 
 @pytest.mark.asyncio
 async def test_generate_submits_prepared_multimodal_prompt(monkeypatch):
+    from dynamo.vllm import llm_engine as mod
+
     engine = _engine()
     prompt = {
         "prompt_token_ids": [1, 2, 3],
@@ -101,6 +102,8 @@ async def test_generate_submits_prepared_multimodal_prompt(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prefill_terminal_adds_embedding_handoff(monkeypatch):
+    from dynamo.vllm import llm_engine as mod
+
     output = SimpleNamespace(
         index=0,
         token_ids=[42],
@@ -173,6 +176,8 @@ async def test_prefill_terminal_adds_embedding_handoff(monkeypatch):
 async def test_from_args_rejects_unsupported_multimodal_topologies(
     monkeypatch, mode, route_to_encoder, message
 ):
+    from dynamo.vllm import llm_engine as mod
+
     config = SimpleNamespace(
         disaggregation_mode=mode,
         route_to_encoder=route_to_encoder,
@@ -185,6 +190,8 @@ async def test_from_args_rejects_unsupported_multimodal_topologies(
 
 @pytest.mark.asyncio
 async def test_from_args_retains_multimodal_runtime_configuration(monkeypatch):
+    from dynamo.vllm import llm_engine as mod
+
     config = SimpleNamespace(
         disaggregation_mode=DisaggregationMode.AGGREGATED,
         route_to_encoder=False,

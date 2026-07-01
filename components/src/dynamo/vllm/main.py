@@ -62,9 +62,7 @@ from .capacity import (
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
-from .multimodal_utils.cache_config import (
-    configure_multimodal_embedding_cache,
-)
+from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
 

@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from dynamo.vllm.multimodal_utils import multimodal_embedding_cache_connector as mod
 from dynamo.vllm.multimodal_utils import cache_config as cache_config_mod
+from dynamo.vllm.multimodal_utils import multimodal_embedding_cache_connector as mod
 
 pytestmark = [
     pytest.mark.pre_merge,

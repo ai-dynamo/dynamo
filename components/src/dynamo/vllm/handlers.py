@@ -7,7 +7,6 @@ import inspect
 import logging
 import math
 import os
-
 import struct
 import tempfile
 import threading

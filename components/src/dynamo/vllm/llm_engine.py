@@ -79,9 +79,7 @@ from .logits_processing import (
     activate_logits_processors,
     register_dynamo_logits_processor,
 )
-from .multimodal_utils.cache_config import (
-    configure_multimodal_embedding_cache,
-)
+from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.request_processor import VllmMultimodalRequestProcessor
 
 if TYPE_CHECKING:
@@ -571,9 +569,9 @@ class VllmLLMEngine(LLMEngine):
                         kv_transfer_params = getattr(res, "kv_transfer_params", None)
                         disaggregated_params: dict[str, Any] = {}
                         if kv_transfer_params is not None:
-                            disaggregated_params["kv_transfer_params"] = (
-                                kv_transfer_params
-                            )
+                            disaggregated_params[
+                                "kv_transfer_params"
+                            ] = kv_transfer_params
                         embedding_params = multimodal_processor.build_prefill_handoff(
                             multi_modal_data=prepared_prompt.multi_modal_data,
                             prompt_token_ids=list(res.prompt_token_ids or []),
