@@ -82,14 +82,12 @@ func TestApplyVersionMatrix(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			merger, err := New()
-			require.NoError(t, err)
 			blueprint := mustObject(t, test.blueprint)
 			override := mustObject(t, test.override)
 			blueprintBefore := blueprint.DeepCopy()
 			overrideBefore := override.DeepCopy()
 
-			result, warnings, err := merger.Apply(blueprint, override)
+			result, warnings, err := Apply(blueprint, override)
 			require.NoError(t, err)
 			assert.Empty(t, warnings)
 			assert.Equal(t, test.wantAPIVersion, result.GetAPIVersion())
@@ -112,9 +110,7 @@ func TestApplyVersionMatrix(t *testing.T) {
 func TestApplyUsesStructuralListSemantics(t *testing.T) {
 	t.Parallel()
 
-	merger, err := New()
-	require.NoError(t, err)
-	result, warnings, err := merger.Apply(
+	result, warnings, err := Apply(
 		mustObject(t, betaBlueprintYAML),
 		mustObject(t, betaOverrideYAML),
 	)
@@ -167,9 +163,7 @@ func TestApplyUsesStructuralSetSemantics(t *testing.T) {
 		))
 	})
 
-	merger, err := New()
-	require.NoError(t, err)
-	result, warnings, err := merger.Apply(blueprint, override)
+	result, warnings, err := Apply(blueprint, override)
 	require.NoError(t, err)
 	assert.Empty(t, warnings)
 
@@ -182,6 +176,36 @@ func TestApplyUsesStructuralSetSemantics(t *testing.T) {
 		"extraClientContainers",
 	)
 	assert.ElementsMatch(t, []string{"sidecar", "shared", "metrics"}, clients)
+}
+
+func TestApplyAllowsNullInPreservedUnknownFields(t *testing.T) {
+	t.Parallel()
+
+	result, warnings, err := Apply(mustObject(t, betaBlueprintYAML), mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: Worker
+    eppConfig:
+      config:
+        customPluginConfig:
+          optionalValue: null
+`))
+	require.NoError(t, err)
+	assert.Empty(t, warnings)
+
+	worker := mustBetaWorker(t, result)
+	value, found, err := unstructured.NestedFieldNoCopy(
+		worker,
+		"eppConfig",
+		"config",
+		"customPluginConfig",
+		"optionalValue",
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Nil(t, value)
 }
 
 func TestApplySanitizesMetadataAndUnknownTopology(t *testing.T) {
@@ -251,11 +275,9 @@ spec:
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			merger, err := New()
-			require.NoError(t, err)
 			override := mustObject(t, test.override)
 			overrideBefore := override.DeepCopy()
-			result, warnings, err := merger.Apply(
+			result, warnings, err := Apply(
 				mustObject(t, test.blueprint),
 				override,
 			)
@@ -291,9 +313,7 @@ func TestApplyProtectsConversionAnnotations(t *testing.T) {
 		"annotations",
 	))
 
-	merger, err := New()
-	require.NoError(t, err)
-	result, warnings, err := merger.Apply(mustObject(t, betaBlueprintYAML), override)
+	result, warnings, err := Apply(mustObject(t, betaBlueprintYAML), override)
 	require.NoError(t, err)
 	require.Len(t, warnings, 1)
 	assert.Equal(
@@ -317,18 +337,10 @@ func TestApplyRejectsInvalidInput(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		merger    func(*testing.T) *Merger
 		blueprint func(*testing.T) *unstructured.Unstructured
 		override  func(*testing.T) *unstructured.Unstructured
 		wantError string
 	}{
-		{
-			name:      "uninitialized merger",
-			merger:    func(*testing.T) *Merger { return &Merger{} },
-			blueprint: func(*testing.T) *unstructured.Unstructured { return validBlueprint.DeepCopy() },
-			override:  func(*testing.T) *unstructured.Unstructured { return validOverride.DeepCopy() },
-			wantError: "not initialized",
-		},
 		{
 			name:      "nil blueprint",
 			blueprint: func(*testing.T) *unstructured.Unstructured { return nil },
@@ -377,6 +389,23 @@ spec:
 `)
 			},
 			wantError: "override spec.backendFramework must not be null",
+		},
+		{
+			name:      "explicit null in typed field below preserve unknown object",
+			blueprint: func(*testing.T) *unstructured.Unstructured { return validBlueprint.DeepCopy() },
+			override: func(t *testing.T) *unstructured.Unstructured {
+				return mustObject(t, `
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+spec:
+  components:
+  - name: Worker
+    eppConfig:
+      config:
+        apiVersion: null
+`)
+			},
+			wantError: "override spec.components[0].eppConfig.config.apiVersion must not be null",
 		},
 		{
 			name:      "status override",
@@ -458,16 +487,7 @@ spec:
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			merger := test.merger
-			var instance *Merger
-			if merger != nil {
-				instance = merger(t)
-			} else {
-				var err error
-				instance, err = New()
-				require.NoError(t, err)
-			}
-			_, _, err := instance.Apply(test.blueprint(t), test.override(t))
+			_, _, err := Apply(test.blueprint(t), test.override(t))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), test.wantError)
 		})
@@ -477,10 +497,8 @@ spec:
 func TestApplyEmptyOverrideIsNoOp(t *testing.T) {
 	t.Parallel()
 
-	merger, err := New()
-	require.NoError(t, err)
 	blueprint := mustObject(t, betaBlueprintYAML)
-	result, warnings, err := merger.Apply(blueprint, mustObject(t, `
+	result, warnings, err := Apply(blueprint, mustObject(t, `
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 `))

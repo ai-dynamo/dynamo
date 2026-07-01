@@ -14,10 +14,10 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	apixv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/managedfields"
 )
 
 const dgdKind = "DynamoGraphDeployment"
@@ -41,21 +41,6 @@ func (w Warning) String() string {
 	return w.Path + ": " + w.Message
 }
 
-// Merger applies DGD overrides using the structural schema generated from the
-// same CRD served by the operator.
-type Merger struct {
-	typeConverter managedfields.TypeConverter
-}
-
-// New creates a DGD override merger for the supported alpha and beta APIs.
-func New() (*Merger, error) {
-	typeConverter, err := newTypeConverter()
-	if err != nil {
-		return nil, err
-	}
-	return &Merger{typeConverter: typeConverter}, nil
-}
-
 // Apply overlays a partial DGD override onto a complete DGD blueprint.
 //
 // The merge happens in the override's API version. If the versions differ,
@@ -64,14 +49,10 @@ func New() (*Merger, error) {
 // the same GVK as blueprint. Neither input is mutated. Structural schema
 // validation runs here; admission defaults and CEL validation remain the API
 // server's responsibility when the resulting DGD is submitted.
-func (m *Merger) Apply(
+func Apply(
 	blueprint *unstructured.Unstructured,
 	override *unstructured.Unstructured,
 ) (*unstructured.Unstructured, []Warning, error) {
-	if m == nil || m.typeConverter == nil {
-		return nil, nil, fmt.Errorf("DGD override merger is not initialized")
-	}
-
 	blueprintGVK, err := validateDGD(blueprint, "blueprint")
 	if err != nil {
 		return nil, nil, err
@@ -80,12 +61,20 @@ func (m *Merger) Apply(
 	if err != nil {
 		return nil, nil, err
 	}
-	if _, err := m.typeConverter.ObjectToTyped(blueprint); err != nil {
-		return nil, nil, fmt.Errorf("validate %s blueprint: %w", blueprintGVK.GroupVersion(), err)
+	schemas, err := loadDGDSchemas()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	crossVersion := blueprintGVK != overrideGVK
+	if crossVersion {
+		if _, err := schemas.typeConverter.ObjectToTyped(blueprint); err != nil {
+			return nil, nil, fmt.Errorf("validate %s blueprint before conversion: %w", blueprintGVK.GroupVersion(), err)
+		}
 	}
 
 	working := blueprint.DeepCopy()
-	if blueprintGVK != overrideGVK {
+	if crossVersion {
 		working, err = convertDGD(working, overrideGVK)
 		if err != nil {
 			return nil, nil, fmt.Errorf(
@@ -97,16 +86,21 @@ func (m *Merger) Apply(
 		}
 	}
 
-	partial, warnings, err := prepareOverride(working, override, overrideGVK)
+	partial, warnings, err := prepareOverride(
+		working,
+		override,
+		overrideGVK,
+		schemas.rootByAPIVersion[overrideGVK.Version],
+	)
 	if err != nil {
 		return nil, warnings, err
 	}
 
-	baseTyped, err := m.typeConverter.ObjectToTyped(working)
+	baseTyped, err := schemas.typeConverter.ObjectToTyped(working)
 	if err != nil {
-		return nil, warnings, fmt.Errorf("validate converted %s blueprint: %w", overrideGVK.GroupVersion(), err)
+		return nil, warnings, fmt.Errorf("validate %s blueprint for merge: %w", overrideGVK.GroupVersion(), err)
 	}
-	partialTyped, err := m.typeConverter.ObjectToTyped(partial)
+	partialTyped, err := schemas.typeConverter.ObjectToTyped(partial)
 	if err != nil {
 		return nil, warnings, fmt.Errorf("validate %s override: %w", overrideGVK.GroupVersion(), err)
 	}
@@ -114,7 +108,7 @@ func (m *Merger) Apply(
 	if err != nil {
 		return nil, warnings, fmt.Errorf("merge %s override: %w", overrideGVK.GroupVersion(), err)
 	}
-	mergedObject, err := m.typeConverter.TypedToObject(mergedTyped)
+	mergedObject, err := schemas.typeConverter.TypedToObject(mergedTyped)
 	if err != nil {
 		return nil, warnings, fmt.Errorf("materialize merged %s DGD: %w", overrideGVK.GroupVersion(), err)
 	}
@@ -124,7 +118,7 @@ func (m *Merger) Apply(
 	}
 	merged.SetGroupVersionKind(overrideGVK)
 
-	if blueprintGVK != overrideGVK {
+	if crossVersion {
 		merged, err = convertDGD(merged, blueprintGVK)
 		if err != nil {
 			return nil, warnings, fmt.Errorf(
@@ -134,10 +128,10 @@ func (m *Merger) Apply(
 				err,
 			)
 		}
-	}
-	merged.SetGroupVersionKind(blueprintGVK)
-	if _, err := m.typeConverter.ObjectToTyped(merged); err != nil {
-		return nil, warnings, fmt.Errorf("validate final %s DGD: %w", blueprintGVK.GroupVersion(), err)
+		merged.SetGroupVersionKind(blueprintGVK)
+		if _, err := schemas.typeConverter.ObjectToTyped(merged); err != nil {
+			return nil, warnings, fmt.Errorf("validate final %s DGD: %w", blueprintGVK.GroupVersion(), err)
+		}
 	}
 	return merged, warnings, nil
 }
@@ -162,10 +156,6 @@ func validateDGD(object *unstructured.Unstructured, role string) (schema.GroupVe
 
 func convertDGD(object *unstructured.Unstructured, target schema.GroupVersionKind) (*unstructured.Unstructured, error) {
 	source := object.GroupVersionKind()
-	if source == target {
-		return object.DeepCopy(), nil
-	}
-
 	var converted runtime.Object
 	switch {
 	case source == alphaGVK && target == betaGVK:
@@ -205,6 +195,7 @@ func prepareOverride(
 	blueprint *unstructured.Unstructured,
 	override *unstructured.Unstructured,
 	gvk schema.GroupVersionKind,
+	rootSchema *apixv1.JSONSchemaProps,
 ) (*unstructured.Unstructured, []Warning, error) {
 	partial := override.DeepCopy()
 	if _, found := partial.Object["status"]; found {
@@ -214,7 +205,7 @@ func prepareOverride(
 	if err != nil {
 		return nil, warnings, err
 	}
-	if err := rejectNullValues(partial.Object, ""); err != nil {
+	if err := rejectNullValues(partial.Object, "", rootSchema); err != nil {
 		return nil, warnings, err
 	}
 
@@ -301,7 +292,14 @@ func sanitizeMetadata(override *unstructured.Unstructured) ([]Warning, error) {
 	return warnings, nil
 }
 
-func rejectNullValues(value interface{}, path string) error {
+func rejectNullValues(value interface{}, path string, openAPISchema *apixv1.JSONSchemaProps) error {
+	if value == nil {
+		if openAPISchema == nil || isUntypedPreservedSchema(openAPISchema) {
+			return nil
+		}
+		return fmt.Errorf("override %s must not be null; field deletion is not supported", path)
+	}
+
 	switch typed := value.(type) {
 	case map[string]interface{}:
 		keys := make([]string, 0, len(typed))
@@ -314,25 +312,57 @@ func rejectNullValues(value interface{}, path string) error {
 			if path != "" {
 				childPath = path + "." + key
 			}
-			if typed[key] == nil {
-				return fmt.Errorf("override %s must not be null; field deletion is not supported", childPath)
+			childSchema, opaque := schemaForMapKey(openAPISchema, key)
+			if opaque {
+				continue
 			}
-			if err := rejectNullValues(typed[key], childPath); err != nil {
+			if err := rejectNullValues(typed[key], childPath, childSchema); err != nil {
 				return err
 			}
 		}
 	case []interface{}:
+		var itemSchema *apixv1.JSONSchemaProps
+		if openAPISchema != nil && openAPISchema.Items != nil {
+			itemSchema = openAPISchema.Items.Schema
+		}
 		for i, item := range typed {
 			childPath := fmt.Sprintf("%s[%d]", path, i)
-			if item == nil {
-				return fmt.Errorf("override %s must not be null; field deletion is not supported", childPath)
-			}
-			if err := rejectNullValues(item, childPath); err != nil {
+			if err := rejectNullValues(item, childPath, itemSchema); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func schemaForMapKey(
+	openAPISchema *apixv1.JSONSchemaProps,
+	key string,
+) (*apixv1.JSONSchemaProps, bool) {
+	if openAPISchema == nil {
+		return nil, false
+	}
+	if property, found := openAPISchema.Properties[key]; found {
+		return &property, false
+	}
+	if openAPISchema.AdditionalProperties != nil {
+		if openAPISchema.AdditionalProperties.Schema != nil {
+			return openAPISchema.AdditionalProperties.Schema, false
+		}
+		if openAPISchema.AdditionalProperties.Allows {
+			return nil, true
+		}
+	}
+	if openAPISchema.XPreserveUnknownFields != nil && *openAPISchema.XPreserveUnknownFields {
+		return nil, true
+	}
+	return nil, false
+}
+
+func isUntypedPreservedSchema(openAPISchema *apixv1.JSONSchemaProps) bool {
+	return openAPISchema.XPreserveUnknownFields != nil &&
+		*openAPISchema.XPreserveUnknownFields &&
+		openAPISchema.Type == ""
 }
 
 func prepareAlphaServices(

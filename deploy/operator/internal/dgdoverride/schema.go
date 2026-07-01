@@ -18,23 +18,34 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-var (
-	typeConverterOnce sync.Once
-	typeConverter     managedfields.TypeConverter
-	typeConverterErr  error
-)
-
-func newTypeConverter() (managedfields.TypeConverter, error) {
-	typeConverterOnce.Do(func() {
-		typeConverter, typeConverterErr = buildTypeConverter()
-	})
-	return typeConverter, typeConverterErr
+type dgdSchemas struct {
+	typeConverter    managedfields.TypeConverter
+	rootByAPIVersion map[string]*apixv1.JSONSchemaProps
 }
 
-func buildTypeConverter() (managedfields.TypeConverter, error) {
+var loadDGDSchemas = sync.OnceValues(buildDGDSchemas)
+
+func buildDGDSchemas() (*dgdSchemas, error) {
 	definition := &apixv1.CustomResourceDefinition{}
 	if err := yaml.Unmarshal([]byte(operatorcrd.DynamoGraphDeploymentDefinition()), definition); err != nil {
 		return nil, fmt.Errorf("decode embedded DGD CRD: %w", err)
+	}
+
+	rootByAPIVersion := make(map[string]*apixv1.JSONSchemaProps, 2)
+	for _, apiVersion := range []string{
+		nvidiacomv1alpha1.GroupVersion.Version,
+		nvidiacomv1beta1.GroupVersion.Version,
+	} {
+		for i := range definition.Spec.Versions {
+			version := &definition.Spec.Versions[i]
+			if version.Name == apiVersion && version.Schema != nil && version.Schema.OpenAPIV3Schema != nil {
+				rootByAPIVersion[apiVersion] = version.Schema.OpenAPIV3Schema
+				break
+			}
+		}
+		if rootByAPIVersion[apiVersion] == nil {
+			return nil, fmt.Errorf("embedded DGD CRD has no schema for %s", apiVersion)
+		}
 	}
 
 	alphaDocument, err := builder.BuildOpenAPIV3(
@@ -69,5 +80,8 @@ func buildTypeConverter() (managedfields.TypeConverter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create DGD structural type converter: %w", err)
 	}
-	return converter, nil
+	return &dgdSchemas{
+		typeConverter:    converter,
+		rootByAPIVersion: rootByAPIVersion,
+	}, nil
 }
