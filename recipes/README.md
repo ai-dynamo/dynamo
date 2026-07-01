@@ -62,6 +62,7 @@ These recipes demonstrate functional deployments with Dynamo features, but have 
 
 | Model | Framework | Mode | GPUs | Deployment | Notes |
 |-------|-----------|-------|------|------------|-------|
+| **[Qwen3-32B](qwen3-32b/vllm/cloud-providers/)** | vLLM | Disagg 1P1D Provider Overlays | 8x A100/H100/H200/B200/GB200 | ✅ | Kustomize overlays for AWS EFA, GKE RoCE, AKS/Nebius/Nscale IB |
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | TP=4, KV-aware routing |
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/sglang/agg/)** | SGLang | Aggregated | 4x H100/H200 | ✅ | TP=4, KV-aware routing, 1.0+ |
 | **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 4x H100/H200 | ✅ | TP=2 prefill/decode split, UCX KV transfer |
