@@ -322,12 +322,16 @@ impl KvPushRouter {
         let context_for_monitoring = stream_context.clone();
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut guard = guard;
+            // Keep one cancellation future alive for the whole response stream. Calling
+            // `stopped()` for every item repeatedly clones and polls a watch receiver.
+            let stopped = context_for_monitoring.stopped();
+            tokio::pin!(stopped);
 
             loop {
                 tokio::select! {
                     biased;
 
-                    _ = context_for_monitoring.stopped() => {
+                    _ = &mut stopped => {
                         tracing::debug!("Request {context_id} cancelled, ending stream");
                         break;
                     }

@@ -737,16 +737,22 @@ async fn tcp_listener(
         mut request_rx: mpsc::Receiver<TwoPartMessage>,
         context: Arc<dyn AsyncEngineContext>,
     ) {
+        // Construct the cancellation futures once. Recreating them for every frame clones
+        // the context's watch receivers and repeatedly registers/drops Tokio notifications.
+        let killed = context.killed();
+        let stopped = context.stopped();
+        tokio::pin!(killed, stopped);
+
         let closing_msg: Option<ControlMessage> = loop {
             tokio::select! {
                 biased;
 
-                _ = context.killed() => {
+                _ = &mut killed => {
                     tracing::trace!("context kill received in request-stream send handler");
                     break Some(ControlMessage::Kill);
                 }
 
-                _ = context.stopped() => {
+                _ = &mut stopped => {
                     tracing::trace!("context stop received in request-stream send handler");
                     break Some(ControlMessage::Stop);
                 }
@@ -888,25 +894,32 @@ async fn tcp_listener(
         control_tx: mpsc::Sender<ControlMessage>,
         context: Arc<dyn AsyncEngineContext>,
     ) {
+        // These futures stay pending across frames. Constructing them inside the loop clones
+        // watch receivers and registers/drops notifications for every streamed token.
+        let response_closed = response_tx.closed();
+        let killed = context.killed();
+        let stopped = context.stopped();
+        tokio::pin!(response_closed, killed, stopped);
+
         // loop over reading the tcp stream and checking if the writer is closed
         let mut can_stop = true;
         loop {
             tokio::select! {
                 biased;
 
-                _ = response_tx.closed() => {
+                _ = &mut response_closed => {
                     tracing::trace!("response channel closed before the client finished writing data");
                     let _ = control_tx.send(ControlMessage::Kill).await;
                     break;
                 }
 
-                _ = context.killed() => {
+                _ = &mut killed => {
                     tracing::trace!("context kill signal received; shutting down");
                     let _ = control_tx.send(ControlMessage::Kill).await;
                     break;
                 }
 
-                _ = context.stopped(), if can_stop => {
+                _ = &mut stopped, if can_stop => {
                     tracing::trace!("context stop signal received; shutting down");
                     can_stop = false;
                     let _ = control_tx.send(ControlMessage::Stop).await;

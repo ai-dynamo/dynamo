@@ -249,18 +249,28 @@ async fn handle_request_reader(
     context: Arc<dyn AsyncEngineContext>,
     cancellation_counter: Option<IntCounter>,
 ) {
+    // Keep cancellation and receiver-close notifications alive across frames instead of
+    // rebuilding their watch/Notify state for every request-stream message.
+    let killed = context.killed();
+    let stopped = context.stopped();
+    // The function explicitly drops `bytes_tx` after the loop, so let the persistent
+    // `closed()` future borrow a stream-lifetime clone instead.
+    let bytes_closed_tx = bytes_tx.clone();
+    let bytes_closed = bytes_closed_tx.closed();
+    tokio::pin!(killed, stopped, bytes_closed);
+
     // Only mark cancellation on fatal errors or explicit upstream cancellation.
     let mut cancellation_seen = false;
     loop {
         tokio::select! {
             biased;
 
-            _ = context.killed() => {
+            _ = &mut killed => {
                 tracing::trace!("context kill signal received on request stream; shutting down");
                 break;
             }
 
-            _ = context.stopped() => {
+            _ = &mut stopped => {
                 tracing::trace!("context stop signal received on request stream; shutting down");
                 break;
             }
@@ -269,7 +279,7 @@ async fn handle_request_reader(
             // instead of staying parked on `framed_reader.next()` until the
             // socket closes — the data has nowhere to go. This is the consumer's
             // own choice, so it is not a cancellation (no kill, no count).
-            _ = bytes_tx.closed() => {
+            _ = &mut bytes_closed => {
                 tracing::debug!("downstream consumer dropped; exiting request-stream reader");
                 break;
             }
@@ -536,6 +546,12 @@ async fn handle_writer(
     alive_rx: tokio::sync::oneshot::Receiver<()>,
     context: Arc<dyn AsyncEngineContext>,
 ) -> Result<FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>> {
+    // Keep one cancellation future per stream. Recreating these futures for every queued
+    // frame repeatedly clones the context's watch receivers and churns Notify state.
+    let killed = context.killed();
+    let stopped = context.stopped();
+    tokio::pin!(killed, stopped);
+
     // Only send sentinel for normal channel closure
     let mut send_sentinel = true;
 
@@ -543,13 +559,13 @@ async fn handle_writer(
         let msg = tokio::select! {
             biased;
 
-            _ = context.killed() => {
+            _ = &mut killed => {
                 tracing::trace!("context kill signal received; shutting down");
                 send_sentinel = false;
                 break;
             }
 
-            _ = context.stopped() => {
+            _ = &mut stopped => {
                 tracing::trace!("context stop signal received; shutting down");
                 send_sentinel = false;
                 break;
