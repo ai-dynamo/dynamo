@@ -207,7 +207,8 @@ async def _initiate_shutdown(self, error: Exception):
 
 ### Recommended Configuration
 
-For production deployments, configure adequate termination grace period:
+For production deployments, set the termination grace period based on your workloads and utilization. The following
+example uses 180 seconds:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -216,7 +217,7 @@ spec:
   services:
     VllmWorker:
       extraPodSpec:
-        terminationGracePeriodSeconds: 60  # Allow time for request draining
+        terminationGracePeriodSeconds: 180  # Allow time for request draining
 ```
 
 ### Health Check Integration
@@ -231,9 +232,9 @@ Kubernetes uses health endpoints to determine pod readiness:
 
 ### 1. Set Appropriate Grace Periods
 
-Match `terminationGracePeriodSeconds` to your expected request completion time:
+Match `terminationGracePeriodSeconds` to your expected request completion time and utilization:
 - Short requests (\< 10s): 30s grace period
-- Long generation (> 30s): 120s+ grace period
+- Long generation (> 30s) or high utilization: 120s+ grace period
 
 ### 2. Enable Request Migration
 
