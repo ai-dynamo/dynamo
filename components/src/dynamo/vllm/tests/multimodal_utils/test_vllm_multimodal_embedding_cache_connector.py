@@ -3,12 +3,14 @@
 
 """Unit tests for DynamoMultimodalEmbeddingCacheConnector."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
 from dynamo.vllm.multimodal_utils import multimodal_embedding_cache_connector as mod
+from dynamo.vllm.multimodal_utils import cache_config as cache_config_mod
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -26,6 +28,60 @@ def _make_vllm_config(capacity_gb: float = 1.0) -> MagicMock:
     config.model_config.get_hidden_size.return_value = 4096
     config.model_config.dtype = torch.float16
     return config
+
+
+class TestCacheConfiguration:
+    def test_disabled_capacity_leaves_engine_args_unchanged(self):
+        engine_args = SimpleNamespace()
+
+        cache_config_mod.configure_multimodal_embedding_cache(
+            engine_args,
+            route_to_encoder=False,
+            capacity_gb=0,
+            namespace="dynamo",
+            component="backend",
+        )
+
+        assert not hasattr(engine_args, "ec_transfer_config")
+
+    def test_encoder_routing_leaves_engine_args_unchanged(self):
+        engine_args = SimpleNamespace()
+
+        cache_config_mod.configure_multimodal_embedding_cache(
+            engine_args,
+            route_to_encoder=True,
+            capacity_gb=1,
+            namespace="dynamo",
+            component="backend",
+        )
+
+        assert not hasattr(engine_args, "ec_transfer_config")
+
+    def test_enabled_capacity_configures_dynamo_connector(self):
+        engine_args = SimpleNamespace()
+        transfer_config = object()
+
+        with patch("vllm.config.ECTransferConfig", return_value=transfer_config) as cls:
+            cache_config_mod.configure_multimodal_embedding_cache(
+                engine_args,
+                route_to_encoder=False,
+                capacity_gb=2.5,
+                namespace="deployment",
+                component="prefill",
+            )
+
+        assert engine_args.ec_transfer_config is transfer_config
+        cls.assert_called_once_with(
+            engine_id="deployment.prefill.backend.0",
+            ec_role="ec_both",
+            ec_connector="DynamoMultimodalEmbeddingCacheConnector",
+            ec_connector_module_path=(
+                "dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector"
+            ),
+            ec_connector_extra_config={
+                "multimodal_embedding_cache_capacity_gb": 2.5,
+            },
+        )
 
 
 class TestVersionCheck:

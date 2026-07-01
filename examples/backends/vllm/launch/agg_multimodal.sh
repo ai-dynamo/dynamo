@@ -12,11 +12,13 @@
 # see agg_multimodal_epd.sh
 
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
+
+pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
+set -- "${REMAINING_ARGS[@]}"
 
 # Default values
 MODEL_NAME="${DYN_MODEL_NAME:-Qwen/Qwen3-VL-30B-A3B-Instruct-FP8}"
@@ -34,6 +36,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS] [-- EXTRA_VLLM_ARGS]"
             echo "Options:"
             echo "  --model <model_name>   Specify the VLM model to use (default: $MODEL_NAME)"
+            echo "  --unified             Use the unified vLLM backend"
             echo "  -h, --help             Show this help message"
             echo ""
             echo "Any additional arguments are passed through to the vLLM worker."
@@ -47,6 +50,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+trap 'echo Cleaning up...; kill 0' EXIT
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 
 # Use TCP transport (instead of default NATS)
@@ -55,7 +60,7 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 export DYN_REQUEST_PLANE=tcp
 
 print_launch_banner --no-curl "Launching Aggregated Multimodal Serving" "$MODEL_NAME" "$HTTP_PORT" \
-    "Backend:     dynamo.vllm --enable-multimodal" \
+    "Backend:     $WORKER_MODULE --enable-multimodal" \
     "Media:       image_url and video_url (model support dependent)"
 
 print_curl_footer <<CURL
@@ -85,7 +90,11 @@ CURL
 
 # Start frontend with Rust OpenAIPreprocessor
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python -m dynamo.frontend &
+FRONTEND_ARGS=()
+if [[ -n "${DYN_CHAT_PROCESSOR:-}" ]]; then
+    FRONTEND_ARGS+=(--dyn-chat-processor "$DYN_CHAT_PROCESSOR")
+fi
+python -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 
 # ---- Per-model defaults ----
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
@@ -107,7 +116,7 @@ GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
 # Extra args from command line come last to allow overrides
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME \
+    python -m "$WORKER_MODULE" --enable-multimodal --model "$MODEL_NAME" \
     --max-model-len "$MAX_MODEL_LEN" \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     $GPU_MEM_ARGS \

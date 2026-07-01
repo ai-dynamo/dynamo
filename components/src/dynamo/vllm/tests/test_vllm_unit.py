@@ -345,6 +345,11 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         model="Qwen/Qwen3-0.6B",
         disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
         component="backend",
+        namespace="dynamo",
+        route_to_encoder=False,
+        enable_multimodal=False,
+        frontend_decoding=False,
+        multimodal_embedding_cache_capacity_gb=0.0,
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
     )
@@ -396,6 +401,10 @@ def test_unified_generate_passes_enable_rl_to_sampling_params(monkeypatch):
     engine.engine_client = SimpleNamespace(generate=fake_generate)
     engine._default_sampling_params = {}
     engine._model_max_len = 4096
+    engine._multimodal_request_processor = llm_engine.VllmMultimodalRequestProcessor(
+        model="test-model",
+        enable_multimodal=False,
+    )
 
     monkeypatch.setattr(llm_engine, "build_sampling_params", fake_build_sampling_params)
 
@@ -574,6 +583,7 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
 
     config = SimpleNamespace(
         component="backend",
+        namespace="dynamo",
         engine_args=FakeEngineArgs(),
         gms_shadow_mode=False,
         multimodal_embedding_cache_capacity_gb=0,

@@ -10,7 +10,6 @@
 import asyncio
 import base64
 import json
-from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,6 +24,10 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 from dynamo.vllm.multimodal_utils.protocol import (
     PatchedTokensPrompt,
     vLLMMultimodalRequest,
+)
+from dynamo.vllm.multimodal_utils.request_processor import (
+    PreparedMultimodalInput,
+    VllmMultimodalRequestProcessor,
 )
 
 pytestmark = [
@@ -90,6 +93,11 @@ def _make_handler(
             encode_worker_client=encode_worker_client,
         )
     handler.model_config = model_config
+    handler._multimodal_request_processor = VllmMultimodalRequestProcessor(
+        model=config.model,
+        enable_multimodal=config.enable_multimodal,
+        use_unified_vision_chunk=False,
+    )
     # BaseWorkerHandler.__init__ is bypassed above; the decode generate path
     # registers per-request deferred-abort guards here.
     handler._deferred_aborts = {}
@@ -522,57 +530,6 @@ class TestParseFrontendRequest:
 
 
 @pytest.mark.skip(reason="Need to revisit tests, see comment at top of the file")
-class TestLoadMultimodalData:
-    @pytest.mark.asyncio
-    async def test_no_encode_client_returns_empty(self):
-        """Without encode client -> returns empty dict."""
-        handler = _make_handler(encode_worker_client=None)
-        mm_data = await handler._load_multimodal_data(["http://img.png"], "req-1")
-        assert len(mm_data) == 0
-
-    @pytest.mark.asyncio
-    async def test_no_images_returns_empty(self):
-        """With encode client but no images -> returns empty dict."""
-        handler = _make_handler(encode_worker_client=MagicMock())
-        mm_data = await handler._load_multimodal_data([], "req-1")
-        assert len(mm_data) == 0
-
-    @pytest.mark.asyncio
-    async def test_delegates_to_load_multimodal_embeddings(self):
-        """With encode client -> delegates to load_multimodal_embeddings."""
-        mock_client = MagicMock()
-        handler = _make_handler(encode_worker_client=mock_client)
-
-        fake_mm_data = defaultdict(list, {"image": torch.randn(1, 10)})  # type: ignore
-        with patch.object(
-            handler.embedding_loader,
-            "load_multimodal_embeddings",
-            new_callable=AsyncMock,
-            return_value=fake_mm_data,
-        ) as mock_load:
-            result = await handler._load_multimodal_data(["http://img.png"], "req-1")
-
-        mock_load.assert_awaited_once()
-        assert result is fake_mm_data
-
-    @pytest.mark.asyncio
-    async def test_passes_model(self):
-        """Model name is forwarded."""
-        mock_client = MagicMock()
-        handler = _make_handler(encode_worker_client=mock_client)
-
-        with patch.object(
-            handler.embedding_loader,
-            "load_multimodal_embeddings",
-            new_callable=AsyncMock,
-            return_value=defaultdict(list),
-        ) as mock_load:
-            await handler._load_multimodal_data(["http://img.png"], "req-1")
-
-        assert mock_load.call_args.kwargs["model"] == handler.config.model
-
-
-@pytest.mark.skip(reason="Need to revisit tests, see comment at top of the file")
 class TestGenerateAgg:
     @pytest.mark.asyncio
     async def test_streams_serialized_responses(self):
@@ -682,15 +639,17 @@ def _make_decode_handler(
         )
     handler.config = config
     handler.model_config = model_config
-    handler.enable_multimodal = True
-    handler.image_loader = MagicMock()
-    handler.embedding_loader = None
     handler.model_max_len = 4096
     handler.default_sampling_params = {}
     handler.kv_event_publisher = None
     handler.otel_tracing_enabled = False
     handler.input_param_manager = MagicMock()
     handler.input_param_manager.get_extra_params.return_value = {}
+    handler._multimodal_request_processor = VllmMultimodalRequestProcessor(
+        model=model,
+        enable_multimodal=True,
+        use_unified_vision_chunk=False,
+    )
     handler._deferred_aborts = {}
     return handler
 
@@ -698,6 +657,24 @@ def _make_decode_handler(
 @pytest.mark.asyncio(loop_scope="function")
 class TestDecodeWorkerMultimodalBranching:
     """Tests for the mode-aware multimodal branching in _generate_token_mode."""
+
+    @pytest.mark.parametrize(
+        "request_payload",
+        [
+            {"multi_modal_data": {"image_url": [{"Url": "http://img.png"}]}},
+            {"extra_args": {"mm_kwargs_shm": {"modality": "image"}}},
+        ],
+    )
+    async def test_text_mode_rejects_multimodal_input_when_disabled(
+        self, request_payload
+    ):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        handler.use_vllm_tokenizer = True
+        handler._multimodal_request_processor.enable_multimodal = False
+
+        with pytest.raises(ValueError, match="--enable-multimodal"):
+            async for _ in handler.generate(request_payload, MagicMock()):
+                pass
 
     async def test_decode_only_qwen_with_mm_data_no_prefill_result_errors(self):
         """Decode-only Qwen worker receiving mm request without prefill_result -> error."""
@@ -784,9 +761,11 @@ class TestDecodeWorkerMultimodalBranching:
         assert chunks[0]["message"] == "test stop"
 
     async def test_aggregated_mode_calls_extract_multimodal_data(self):
-        """Aggregated mode handler calls _extract_multimodal_data normally."""
+        """Aggregated mode delegates media loading to the shared processor."""
         handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
-        handler._extract_multimodal_data = AsyncMock(return_value=None)
+        handler._multimodal_request_processor.extract_multimodal_data = AsyncMock(
+            return_value=None
+        )
 
         # Return an error from _build_prompt_from_request so _generate_token_mode
         # yields it and returns early — no need to mock the engine.
@@ -807,127 +786,79 @@ class TestDecodeWorkerMultimodalBranching:
         async for chunk in handler._generate_token_mode(request, context, "req-1"):
             chunks.append(chunk)
 
-        handler._extract_multimodal_data.assert_awaited_once()
+        handler._multimodal_request_processor.extract_multimodal_data.assert_awaited_once()
         assert len(chunks) == 1
         assert chunks[0]["status"] == "error"
 
-
-# ── Prefill _build_embedding_params tests ──────────────────────────
-
-
-def _make_prefill_handler(model: str = "test-model") -> mod.PrefillWorkerHandler:
-    """Construct a PrefillWorkerHandler with mocked internals."""
-    config = _make_config(
-        model=model, is_prefill_worker=True, disaggregation_mode="PREFILL"
+    @pytest.mark.parametrize(
+        "mm_processor_kwargs",
+        [None, {"use_audio_in_video": True}],
     )
-    model_config = MagicMock(enable_prompt_embeds=True)
-    with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
-        handler = mod.PrefillWorkerHandler(
-            runtime=MagicMock(),
-            config=config,
-            engine=MagicMock(),
-            default_sampling_params={},
-            model_config=model_config,
-        )
-    handler.config = config
-    handler.model_config = model_config
-    return handler
+    async def test_handler_prompt_builder_delegates_processor_kwargs(
+        self, mm_processor_kwargs
+    ):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
 
-
-class TestBuildEmbeddingParams:
-    """Tests for PrefillWorkerHandler._build_embedding_params."""
-
-    def test_dict_image_data_produces_embedding_params(self):
-        """Dict-style image data with image_embeds + image_grid_thw -> valid params."""
-        handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
-        mm_data = {
-            "image": {
-                "image_embeds": torch.randn(1, 256, 1024),
-                "image_grid_thw": torch.tensor([[1, 16, 16]]),
-            }
-        }
-        result = handler._build_embedding_params(mm_data, [1, 2, 3])
-
-        assert result is not None
-        assert "image_grid_thw" in result
-        assert "embeddings_shape" in result
-        assert result["embeddings_shape"] == [1, 256, 1024]
-
-    def test_pil_image_qwen_computes_grid(self):
-        """PIL image for Qwen VL with grid params -> computes valid embedding_params."""
-        from PIL import Image
-
-        from dynamo.vllm.multimodal_utils.models.qwen import QwenGridParams
-
-        handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
-        # Qwen3-VL: patch=16, merge=2, factor=32
-        handler._qwen_grid_params = QwenGridParams(
-            patch_size=16,
-            merge_size=2,
-            factor=32,
-            min_pixels=65536,
-            max_pixels=16777216,
-            vision_hidden_dim=2048,
+        prompt, _, error = handler._build_prompt_from_request(
+            {"token_ids": [1, 2, 3]},
+            "request-prompt",
+            multi_modal_data=None,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
-        img = Image.new("RGB", (640, 480))
-        result = handler._build_embedding_params({"image": img}, [1, 2, 3])
+        assert error is None
+        if mm_processor_kwargs is None:
+            assert "mm_processor_kwargs" not in prompt
+        else:
+            assert prompt["mm_processor_kwargs"] is mm_processor_kwargs
 
-        assert result is not None
-        assert result["image_grid_thw"] == [[1, 30, 40]]
-        # total_tokens = 1*30*40 // 4 = 300
-        assert result["embeddings_shape"] == [300, 2048]
 
-    def test_pil_multi_image_qwen_computes_grid(self):
-        """Multiple PIL images for Qwen VL -> computes combined embedding_params."""
-        from PIL import Image
-
-        from dynamo.vllm.multimodal_utils.models.qwen import QwenGridParams
-
-        handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
-        handler._qwen_grid_params = QwenGridParams(
-            patch_size=16,
-            merge_size=2,
-            factor=32,
-            min_pixels=65536,
-            max_pixels=16777216,
-            vision_hidden_dim=2048,
+@pytest.mark.asyncio
+async def test_prefill_delegates_mode_policy_to_shared_processor():
+    handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
+    prepared_request = {"token_ids": [9, 10]}
+    multi_modal_data = {"image": object()}
+    mm_processor_kwargs = {"max_pixels": 4096}
+    processor = SimpleNamespace(
+        prepare_input=AsyncMock(
+            return_value=PreparedMultimodalInput(
+                request=prepared_request,
+                multi_modal_data=multi_modal_data,
+                mm_processor_kwargs=mm_processor_kwargs,
+            )
         )
+    )
+    handler._multimodal_request_processor = processor
+    handler._build_prompt_from_request = MagicMock(
+        return_value=(None, None, {"status": "error", "message": "stop"})
+    )
+    context = MagicMock()
 
-        imgs = [Image.new("RGB", (640, 480)), Image.new("RGB", (320, 320))]
-        result = handler._build_embedding_params({"image": imgs}, [1, 2, 3])
+    chunks = [
+        chunk
+        async for chunk in handler._generate_token_mode(
+            {"token_ids": [1, 2]},
+            context,
+            "request-prefill",
+        )
+    ]
 
-        assert result is not None
-        assert len(result["image_grid_thw"]) == 2
-        assert result["image_grid_thw"][0] == [1, 30, 40]
-        assert result["embeddings_shape"][1] == 2048
-
-    def test_pil_image_qwen_params_unavailable_returns_none(self):
-        """Qwen VL with no grid params -> returns None (fallback)."""
-        from PIL import Image
-
-        handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
-        handler._qwen_grid_params = None
-
-        img = Image.new("RGB", (640, 480))
-        result = handler._build_embedding_params({"image": img}, [1, 2, 3])
-        assert result is None
-
-    def test_pil_image_list_llava_returns_expanded_prompt_token_ids(self):
-        """PIL image list for LLaVA model -> returns expanded prompt token ids."""
-        handler = _make_prefill_handler(model="llava-hf/llava-1.5-7b-hf")
-        mm_data = {"image": [MagicMock()]}
-
-        result = handler._build_embedding_params(mm_data, [1, 2, 3])
-        assert result["expanded_prompt_token_ids"] == [1, 2, 3]
-
-    def test_no_image_data_returns_none(self):
-        """No image data -> returns None."""
-        handler = _make_prefill_handler(model="Qwen/Qwen3-VL-2B-Instruct")
-        mm_data = {}
-
-        result = handler._build_embedding_params(mm_data, [1, 2, 3])
-        assert result is None
+    assert chunks == [
+        {"status": "error", "message": "stop", "disaggregated_params": None}
+    ]
+    processor.prepare_input.assert_awaited_once_with(
+        {"token_ids": [1, 2]},
+        "request-prefill",
+        context,
+        mod.DisaggregationMode.PREFILL,
+    )
+    handler._build_prompt_from_request.assert_called_once_with(
+        prepared_request,
+        "request-prefill",
+        multi_modal_data,
+        log_prefix="Prefill ",
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
 
 
 # ── Deferred abort (disagg decode KV-transfer safety) tests ────────
@@ -1169,7 +1100,6 @@ class TestDeferredAbort:
         handler.input_param_manager = MagicMock()
         handler.input_param_manager.get_input_param.return_value = [1, 2, 3]
         handler._resolve_lora_request = MagicMock(return_value=None)
-        handler._get_mm_processor_kwargs = MagicMock(return_value={})
         handler._build_prompt_from_request = MagicMock(
             return_value=(MagicMock(), None, None)
         )
@@ -1511,26 +1441,6 @@ class TestEmbeddingWorkerHandlerCancellation:
         with pytest.raises(ValueError, match="exceeds model embedding dimension"):
             async for _ in handler.generate(request, context):
                 pass
-
-
-class TestPadMmHashesTo64:
-    """The frontend forwards canonical 16-char hex mm_hashes; vLLM must pad
-    them to the 64-char BlockStored form the router's
-    parse_mm_hash_from_extra_key keys on."""
-
-    def test_pads_16_char_to_64(self):
-        out = mod._pad_mm_hashes_to_64(["0123456789abcdef"])
-        assert out == ["0123456789abcdef" + "0" * 48]
-        assert len(out[0]) == 64
-
-    def test_already_64_char_unchanged(self):
-        h64 = "0123456789abcdef" + "0" * 48
-        assert mod._pad_mm_hashes_to_64([h64]) == [h64]
-
-    def test_mixed_and_empty(self):
-        h64 = "f" * 64
-        assert mod._pad_mm_hashes_to_64([]) == []
-        assert mod._pad_mm_hashes_to_64(["abc", h64]) == ["abc" + "0" * 61, h64]
 
 
 class TestRLAdminRouteHardening:
