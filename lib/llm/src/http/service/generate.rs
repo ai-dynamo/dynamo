@@ -202,13 +202,15 @@ async fn handler_generate(
     let (engine, _parsing) = match state.manager().get_generate_engine_with_parsing(&model) {
         Ok(pair) => pair,
         Err(e) => {
-            let code = match e {
+            // Select status and error type together so a 503 (model-removal
+            // race) never carries a "not_found" type, and vice versa.
+            let (code, error_type) = match e {
                 crate::discovery::ModelManagerError::ModelUnavailable(_) => {
-                    StatusCode::SERVICE_UNAVAILABLE
+                    (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable")
                 }
-                _ => StatusCode::NOT_FOUND,
+                _ => (StatusCode::NOT_FOUND, "not_found"),
             };
-            return generate_error_response(code, "not_found", e.to_string());
+            return generate_error_response(code, error_type, e.to_string());
         }
     };
 

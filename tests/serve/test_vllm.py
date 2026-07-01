@@ -166,7 +166,17 @@ vllm_configs = {
                         "temperature": 0,
                         "max_tokens": 4,
                         "ignore_eos": True,
+                        # Pinned-profile params: seed=-1 (vLLM normalizes to None)
+                        # and an unknown NESTED key that must be ignored (it rides
+                        # the opaque envelope to the worker's model_validate; a
+                        # SamplingParams(**dict) reconstruction would crash on it).
+                        "seed": -1,
+                        "future_nested_field": "ignored",
                     },
+                    # Unknown TOP-level key: the Rust frontend must ignore it
+                    # (serde drops unknown fields; no 400), matching vLLM's
+                    # non-strict GenerateRequest.
+                    "future_top_field": "ignored",
                 },
                 expected_response=[],
                 expected_log=[],

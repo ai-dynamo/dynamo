@@ -29,6 +29,7 @@ from typing import (
     TypeVar,
 )
 
+import msgspec
 import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig, VllmConfig
@@ -3448,12 +3449,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         parsed = VllmGenerateRequest.model_validate(envelope)
         sampling_params = parsed.sampling_params
         if isinstance(sampling_params, dict):
-            # vLLM's pydantic GenerateRequest does not always coerce the nested
-            # msgspec `SamplingParams` Struct in the worker process (pydantic
-            # schema-resolution timing differs from an isolated import), so
-            # `parsed.sampling_params` can arrive as a raw dict. Construct the
-            # vLLM SamplingParams from it so __post_init__ validation still runs.
-            sampling_params = SamplingParams(**sampling_params)
+            # In the worker process, `GenerateRequest.model_validate` does not
+            # always coerce the nested msgspec `SamplingParams` (pydantic
+            # schema-resolution timing in the worker differs from an isolated
+            # import), so `parsed.sampling_params` can arrive as a raw dict.
+            # Convert via msgspec so vLLM's non-strict wire semantics hold:
+            # unknown keys are DROPPED and `__post_init__` runs (e.g. seed=-1 ->
+            # None). Do NOT use `SamplingParams(**dict)` — its constructor raises
+            # `TypeError` on unknown keys and would break unknown-field-ignore
+            # parity with the pinned vLLM profile.
+            sampling_params = msgspec.convert(sampling_params, type=SamplingParams)
 
         # Prefer core token_ids (authoritative); warn if the envelope disagrees.
         core_token_ids = list(request.get("token_ids", []))
