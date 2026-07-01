@@ -713,6 +713,7 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         self.assertIn(
             "packages+=(build-essential curl libibverbs-dev unzip)", installer
         )
+        self.assertIn('packages+=("cuda-libraries-dev-${cuda_minor_dash}")', installer)
         self.assertIn(
             'if [ -f "${NCCL_CHECKPOINT_SHIM}" ]; then',
             dockerfile,

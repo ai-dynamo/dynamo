@@ -526,6 +526,9 @@ if [[ -n "${VLLM_GIT_URL:-}" || -n "${FLASHINFER_GIT_URL:-}" ]]; then
             exit 1
         fi
         cuda_minor_dash="${CUDA_VERSION%%.*}-${cuda_version_rest%%.*}"
+        if [[ "${VLLM_INSTALL_MODE}" == "full-source" ]]; then
+            packages+=("cuda-libraries-dev-${cuda_minor_dash}")
+        fi
         packages+=("cuda-nvrtc-dev-${cuda_minor_dash}")
     fi
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
