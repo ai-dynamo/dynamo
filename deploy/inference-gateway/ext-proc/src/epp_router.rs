@@ -18,13 +18,14 @@
 //! worker constrained to the currently-Ready pods, and tells Envoy where to send
 //! the request via routing headers. Aggregated serving only.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, request_cache_salt};
+use tokio::sync::Mutex;
 
 use crate::epp_standalone_config::EppStandaloneConfig;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
@@ -46,6 +47,12 @@ pub struct EppRouter {
     _adapter: TopologyAdapter,
     reflector_ready: Arc<AtomicBool>,
     model_name: String,
+    /// `gateway request id -> EPP-minted reservation id` for in-flight bookings.
+    /// The lifecycle callbacks only receive the request id, so this maps it back
+    /// to the reservation the selector booked. Populated in `pick` (before the
+    /// reserve call, so a lost response is still cleaned up on completion) and
+    /// drained in `on_request_complete`.
+    reservations: Mutex<HashMap<String, String>>,
 }
 
 impl EppRouter {
@@ -78,6 +85,7 @@ impl EppRouter {
             _adapter: adapter,
             reflector_ready,
             model_name: cfg.model_name,
+            reservations: Mutex::new(HashMap::new()),
         })
     }
 
@@ -225,9 +233,23 @@ impl EndpointPicker for EppRouter {
         // body's `cache_salt`, matching the frontend's header-routing precedence.
         let cache_salt = tenant_id_header(&req.headers).or(body_salt);
 
+        // Selection and booking are one operation. Book under an EPP-minted
+        // reservation id (not the gateway request id): it decouples the booking
+        // key from client-supplied headers (a reused `x-request-id` can't collide
+        // or 409) and stays EPP-known, so it can be released even if the reserve
+        // response is lost. Recorded before the call; a failed reserve is cleaned
+        // up in the error arm below (a failed pick never triggers
+        // `on_request_complete`).
+        let reservation_id = uuid::Uuid::new_v4().to_string();
+        self.reservations
+            .lock()
+            .await
+            .insert(req.request_id.clone(), reservation_id.clone());
+
         let select_req = SelectRequest {
             model_name: self.model_name.clone(),
             selection_id: Some(req.request_id.clone()),
+            reservation_id: Some(reservation_id.clone()),
             token_ids: tokens,
             allowed_worker_ids: Some(allowed),
             priority_jump: (priority_jump > 0.0).then_some(priority_jump),
@@ -235,14 +257,19 @@ impl EndpointPicker for EppRouter {
             cache_salt,
         };
 
-        // Atomic select-and-reserve: books the request's load on the chosen
-        // worker. Releasing the booking over the request lifecycle
-        // (`on_request_complete` / `on_prefill_complete`) is wired in a follow-up.
-        let resp = self
-            .selector
-            .select_and_reserve(select_req)
-            .await
-            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+        let resp = match self.selector.select_and_reserve(select_req).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                // Drop the local mapping and best-effort release any booking the
+                // selector may have created before the response was lost, so
+                // neither the map entry nor a remote reservation leaks.
+                self.reservations.lock().await.remove(&req.request_id);
+                if let Err(cleanup) = self.selector.free_reservation(&reservation_id).await {
+                    tracing::debug!(request_id = %req.request_id, %reservation_id, error = %cleanup, "reservation cleanup after failed reserve");
+                }
+                return Err(PickError::RoutingFailed(e.to_string()));
+            }
+        };
 
         // The reflector is the source of truth for both the routable address and
         // readiness. If it can no longer resolve the selected worker, the pod left
@@ -254,6 +281,13 @@ impl EndpointPicker for EppRouter {
                 worker_id = resp.worker_id,
                 "Selected worker no longer resolvable in reflector; treating selection as stale"
             );
+            // The booking succeeded but we are not routing it: release it so the
+            // stale selection does not leak load (a failed pick never triggers
+            // `on_request_complete`).
+            self.reservations.lock().await.remove(&req.request_id);
+            if let Err(cleanup) = self.selector.free_reservation(&reservation_id).await {
+                tracing::debug!(request_id = %req.request_id, %reservation_id, error = %cleanup, "reservation cleanup after stale selection");
+            }
             return Err(PickError::NoEndpoints);
         };
 
@@ -275,6 +309,34 @@ impl EndpointPicker for EppRouter {
             token_ids: None,
             ..Default::default()
         })
+    }
+
+    /// The gateway signalled the response is complete: release the booking made
+    /// in `pick`. Looks the reservation up by request id and drops the mapping.
+    /// Idempotent for requests that never booked (e.g. body-less routing).
+    async fn on_request_complete(&self, request_id: &str) {
+        let Some(reservation_id) = self.reservations.lock().await.remove(request_id) else {
+            return;
+        };
+        if let Err(e) = self.selector.free_reservation(&reservation_id).await {
+            tracing::warn!(request_id, %reservation_id, error = %e, "Failed to free reservation");
+        }
+    }
+
+    /// The gateway signalled the first token was generated: prefill is done, so
+    /// release this request's prefill load (`prefill_complete`) while leaving its
+    /// decode load booked until `on_request_complete`. This applies in aggregated
+    /// serving too — prefill and decode share a worker, but the prefill
+    /// contribution is transient and should drop at first token to keep the
+    /// worker's load model accurate through decode. The reservation stays mapped
+    /// (it is still live).
+    async fn on_prefill_complete(&self, request_id: &str) {
+        let Some(reservation_id) = self.reservations.lock().await.get(request_id).cloned() else {
+            return;
+        };
+        if let Err(e) = self.selector.prefill_complete(&reservation_id).await {
+            tracing::warn!(request_id, %reservation_id, error = %e, "Failed to mark prefill complete");
+        }
     }
 }
 
