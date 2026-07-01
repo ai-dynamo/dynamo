@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod model;
-pub use model::Model;
+pub use model::{Model, WorkerServingState, WorkerStatus};
 
 mod model_manager;
 pub use model_manager::{ModelManager, ModelManagerError, UNKNOWN_METRIC_MODEL};

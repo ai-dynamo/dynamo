@@ -996,10 +996,11 @@ impl HttpServiceConfigBuilder {
                 state.clone(),
                 None,
             ));
+            system_routes.push(super::worker_admin::worker_admin_router(state.clone()));
         } else {
             tracing::info!(
                 env = env_llm::DYN_ENABLE_FRONTEND_ADMIN_API,
-                "frontend admin API disabled — busy_threshold routes not registered"
+                "frontend admin API disabled — admin routes not registered"
             );
         }
         let mut system_router = axum::Router::new();

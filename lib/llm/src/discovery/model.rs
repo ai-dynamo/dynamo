@@ -11,6 +11,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rand::Rng;
 use serde::Serialize;
+use std::collections::HashSet;
 
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
@@ -27,6 +28,30 @@ use crate::types::{
         images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
     },
 };
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerServingState {
+    Serving,
+    Draining,
+    Overloaded,
+    Unavailable,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerStatus {
+    pub worker_id: u64,
+    pub model: String,
+    pub namespace: String,
+    pub worker_type: Option<String>,
+    pub discovered: bool,
+    pub routable: bool,
+    pub serving: bool,
+    pub state: WorkerServingState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
 
 /// Emit a one-time deprecation warning when serving-readiness falls back to
 /// the legacy path because a namespace still contains a legacy card (a
@@ -604,6 +629,112 @@ impl Model {
             }
         }
         result
+    }
+
+    pub fn worker_statuses(&self) -> Vec<WorkerStatus> {
+        let mut statuses = Vec::new();
+        for entry in self.worker_sets.iter() {
+            let worker_set = entry.value();
+            let Some(client) = worker_set.routing_client() else {
+                continue;
+            };
+            let snapshot = client.routing_instance_snapshot();
+            let worker_ids: HashSet<u64> = snapshot
+                .discovered_ids
+                .iter()
+                .chain(snapshot.routable_ids.iter())
+                .chain(snapshot.overloaded_ids.iter())
+                .chain(snapshot.drained_ids.iter())
+                .chain(snapshot.free_ids.iter())
+                .copied()
+                .collect();
+            let discovered = snapshot
+                .discovered_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            let routable = snapshot
+                .routable_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            let free = snapshot.free_ids.iter().copied().collect::<HashSet<_>>();
+
+            for worker_id in worker_ids {
+                let is_discovered = discovered.contains(&worker_id);
+                let is_routable = routable.contains(&worker_id);
+                let is_drained = snapshot.drained_ids.contains(&worker_id);
+                let is_overloaded = snapshot.overloaded_ids.contains(&worker_id);
+                let is_serving = free.contains(&worker_id);
+                let (state, reason) = if is_drained {
+                    (WorkerServingState::Draining, Some("manual".to_string()))
+                } else if is_overloaded {
+                    (
+                        WorkerServingState::Overloaded,
+                        Some("busy_threshold".to_string()),
+                    )
+                } else if !is_discovered || !is_routable {
+                    (WorkerServingState::Unavailable, None)
+                } else if is_serving {
+                    (WorkerServingState::Serving, None)
+                } else {
+                    (WorkerServingState::Unknown, None)
+                };
+                statuses.push(WorkerStatus {
+                    worker_id,
+                    model: self.name.clone(),
+                    namespace: worker_set.namespace().to_string(),
+                    worker_type: worker_set.card().worker_type.map(|ty| ty.to_string()),
+                    discovered: is_discovered,
+                    routable: is_routable,
+                    serving: is_serving,
+                    state,
+                    reason,
+                });
+            }
+        }
+        statuses.sort_by(|a, b| {
+            a.model
+                .cmp(&b.model)
+                .then_with(|| a.namespace.cmp(&b.namespace))
+                .then_with(|| a.worker_type.cmp(&b.worker_type))
+                .then_with(|| a.worker_id.cmp(&b.worker_id))
+        });
+        statuses
+    }
+
+    pub fn set_worker_drained(
+        &self,
+        worker_id: u64,
+        drained: bool,
+    ) -> Result<(), ModelManagerError> {
+        let mut matched = false;
+        for entry in self.worker_sets.iter() {
+            let worker_set = entry.value();
+            let Some(client) = worker_set.routing_client() else {
+                continue;
+            };
+            let snapshot = client.routing_instance_snapshot();
+            if snapshot.discovered_ids.contains(&worker_id)
+                || snapshot.routable_ids.contains(&worker_id)
+                || snapshot.drained_ids.contains(&worker_id)
+            {
+                if drained {
+                    client.drain_instance(worker_id);
+                } else {
+                    client.resume_instance(worker_id);
+                }
+                matched = true;
+            }
+        }
+        if matched {
+            Ok(())
+        } else {
+            Err(ModelManagerError::ModelUnavailable(format!(
+                "worker {worker_id} not found for model {}",
+                self.name
+            )))
+        }
     }
 
     /// Total worker count across all WorkerSets.

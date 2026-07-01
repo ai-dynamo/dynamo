@@ -25,6 +25,7 @@ use crate::{
         },
     },
 };
+use dynamo_runtime::component::Client;
 
 /// A set of workers from the same namespace/configuration with their own pipeline.
 pub struct WorkerSet {
@@ -49,6 +50,9 @@ pub struct WorkerSet {
 
     /// KV router for this set's workers (if KV mode)
     pub(crate) kv_router: Option<Arc<KvRouter>>,
+
+    /// Routing client shared by this WorkerSet's serving engines.
+    pub(crate) routing_client: Option<Client>,
 
     /// Worker monitor for load-based rejection
     pub(crate) worker_monitor: Option<KvWorkerMonitor>,
@@ -77,6 +81,7 @@ impl WorkerSet {
             tensor_engine: None,
             realtime_engine: None,
             kv_router: None,
+            routing_client: None,
             worker_monitor: None,
             prefill_router: None,
             instance_count_rx: None,
@@ -196,6 +201,10 @@ impl WorkerSet {
     /// Must be called before the WorkerSet is wrapped in Arc.
     pub fn set_instance_watcher(&mut self, rx: watch::Receiver<Vec<u64>>) {
         self.instance_count_rx = Some(rx);
+    }
+
+    pub fn routing_client(&self) -> Option<&Client> {
+        self.routing_client.as_ref()
     }
 
     /// Whether this WorkerSet can serve requests. Delegates to the prefill router
