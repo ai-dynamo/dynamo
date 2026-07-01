@@ -421,17 +421,31 @@ impl Client {
             let mut first_connect = true;
             let mut reconnect = true;
             while reconnect {
-                if !first_connect
-                    && let Err(err) =
+                if !first_connect {
+                    while let Err(err) =
                         Self::resync_watch_prefix(&connector, &prefix_str, &mut start_revision, &tx)
                             .await
-                {
-                    tracing::error!(
-                        error = %err,
-                        prefix = %prefix_str,
-                        "failed to resync etcd watch prefix after reconnect"
-                    );
-                    return;
+                    {
+                        if tx.is_closed() {
+                            return;
+                        }
+
+                        tracing::warn!(
+                            error = %err,
+                            prefix = %prefix_str,
+                            "failed to resync etcd watch prefix after reconnect; retrying"
+                        );
+
+                        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                        if let Err(err) = connector.reconnect(deadline).await {
+                            tracing::error!(
+                                error = %err,
+                                prefix = %prefix_str,
+                                "failed to reconnect to ETCD before watch resync"
+                            );
+                            return;
+                        }
+                    }
                 }
 
                 // Start a new watch stream
