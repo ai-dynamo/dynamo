@@ -131,7 +131,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.controllerManager.leaderElection.id | string | `""` | Leader election ID for cluster-wide coordination. WARNING: All cluster-wide operators must use the SAME ID to prevent split-brain. Different IDs would allow multiple leaders simultaneously. |
 | dynamo-operator.controllerManager.leaderElection.namespace | string | `""` | Namespace for leader election leases (only used in cluster-wide mode). If empty, defaults to kube-system for cluster-wide coordination. All cluster-wide operators should use the SAME namespace for proper leader election. |
 | dynamo-operator.controllerManager.manager.image.repository | string | `"nvcr.io/nvidia/ai-dynamo/kubernetes-operator"` | Official NVIDIA Dynamo operator image repository |
-| dynamo-operator.controllerManager.manager.image.tag | string | `""` | Image tag (leave empty to use chart default) |
+| dynamo-operator.controllerManager.manager.image.tag | string | `"1.3.0"` | Image tag (leave empty to use chart default) |
 | dynamo-operator.controllerManager.manager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy - when to pull the image |
 | dynamo-operator.controllerManager.manager.args[0] | string | `"--health-probe-bind-address=:8081"` | Health probe endpoint for Kubernetes health checks |
 | dynamo-operator.controllerManager.manager.args[1] | string | `"--metrics-bind-address=127.0.0.1:8080"` | Metrics endpoint for Prometheus scraping (localhost only for security) |
