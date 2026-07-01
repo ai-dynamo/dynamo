@@ -29,7 +29,7 @@ import (
 // configurations. Modeled after the CAAPH helm_test.go pattern: each It block calls
 // DGDRLifecycleSpec with a different input, and multiple specs can be composed
 // sequentially within a single It to test multi-step workflows.
-var _ = Describe("DGDR Lifecycle Scenarios", Label("nightly", "integration", "k8s"), func() {
+var _ = Describe("DGDR Lifecycle Scenarios", Label("nightly", "e2e", "integration", "k8s"), func() {
 
 	// -----------------------------------------------------------------------
 	// Backend variations — rapid profiling with each supported backend

@@ -25,7 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var _ = Describe("DGDR Lifecycle", Label("nightly", "integration", "k8s"), func() {
+var _ = Describe("DGDR Lifecycle", Label("nightly", "e2e", "integration", "k8s"), func() {
 
 	Context("Rapid profiling", Label("rapid"), func() {
 

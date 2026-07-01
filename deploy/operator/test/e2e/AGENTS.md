@@ -9,9 +9,10 @@ SPDX-License-Identifier: Apache-2.0
 
 | Label | Meaning |
 | --- | --- |
-| `gpu_0` | Runs without schedulable Kubernetes `nvidia.com/gpu` capacity. |
+| `gpu_0` | Does not require schedulable Kubernetes `nvidia.com/gpu` capacity. |
 | `gpu_1`, `gpu_2`, `gpu_4`, `gpu_8` | Requires at least that many schedulable Kubernetes GPUs. |
 | `h100` | Requires H100; combine with `gpu_N`. |
+| `e2e` | End-to-end test against a Kubernetes cluster. |
 | `validation` | Webhook, CRD metadata, API discovery, or conversion checks only. |
 | `rapid` | DGDR rapid profiling strategy. |
 | `thorough` | DGDR thorough profiling strategy; usually combine with non-zero `gpu_N`. |

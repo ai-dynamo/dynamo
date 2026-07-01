@@ -28,7 +28,7 @@ import (
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
-var _ = Describe("DGDR Profiling", Label("nightly", "integration", "k8s"), func() {
+var _ = Describe("DGDR Profiling", Label("nightly", "e2e", "integration", "k8s"), func() {
 
 	Context("Rapid search strategy", Label("rapid", "gpu_0"), func() {
 

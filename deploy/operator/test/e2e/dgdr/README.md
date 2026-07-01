@@ -72,9 +72,9 @@ Specs are tagged with labels you can filter on via `-ginkgo.label-filter`:
 | `validation` | `validation_test.go` | Webhook, CRD metadata, API discovery, and conversion checks. |
 | `rapid` | rapid DGDR profiling specs | Rapid profiling strategy. |
 | `thorough` | thorough DGDR profiling specs | Thorough profiling strategy. |
-| `gpu_0` | validation and rapid mocker specs | Requires no schedulable Kubernetes GPUs. |
+| `gpu_0` | validation and rapid mocker specs | Does not require schedulable Kubernetes GPUs. |
 | `gpu_1` | thorough or non-mocker deployment specs | Requires at least one schedulable Kubernetes GPU. |
-| `integration`, `k8s`, `nightly` | full DGDR e2e suite | Categorical tags used by CI scheduling. |
+| `e2e`, `integration`, `k8s`, `nightly` | full DGDR e2e suite | Categorical tags used by CI scheduling. |
 
 Use `validation` when you only want webhook/metadata/conversion checks. Use
 `rapid && gpu_0` for the GPU-free profiling path.
