@@ -233,9 +233,8 @@ impl KVStoreDiscovery {
                     break;
                 };
 
-                if let kv::WatchEvent::Delete(key) = event {
-                    let key = Self::strip_bucket_prefix(key.as_ref(), CLAIMS_BUCKET).to_string();
-                    let _ = claim_events.send(ClaimEvent::Delete(key));
+                if let Some(event) = Self::claim_event_from_watch_event(event) {
+                    let _ = claim_events.send(event);
                 }
             }
 
@@ -249,6 +248,17 @@ impl KVStoreDiscovery {
         tokio::select! {
             _ = cancel_token.cancelled() => true,
             _ = tokio::time::sleep(CLAIM_WATCH_RECONNECT_BACKOFF) => false,
+        }
+    }
+
+    fn claim_event_from_watch_event(event: kv::WatchEvent) -> Option<ClaimEvent> {
+        match event {
+            kv::WatchEvent::Delete(key) => {
+                let key = Self::strip_bucket_prefix(key.as_ref(), CLAIMS_BUCKET).to_string();
+                Some(ClaimEvent::Delete(key))
+            }
+            kv::WatchEvent::Resync(_) => Some(ClaimEvent::Reset),
+            kv::WatchEvent::Put(_) => None,
         }
     }
 
@@ -399,8 +409,10 @@ impl KVStoreDiscovery {
             return true;
         }
 
-        // Check if the relative key starts with the relative prefix
-        relative_key.starts_with(relative_prefix)
+        relative_key == relative_prefix
+            || relative_key
+                .strip_prefix(relative_prefix)
+                .is_some_and(|suffix| suffix.starts_with('/'))
     }
 
     /// Parse and deserialize a discovery instance from KV store entry
@@ -997,6 +1009,41 @@ mod tests {
         assert!(events.contains(&DiscoveryEvent::Removed(endpoint_instance(1).id())));
         assert_eq!(known_instances.len(), 1);
         assert!(known_instances.contains_key(&endpoint_instance(2).id()));
+    }
+
+    #[test]
+    fn test_matches_prefix_requires_path_boundary() {
+        let prefix = format!("{}/{}/{}", INSTANCES_BUCKET, "ns", "component");
+
+        assert!(KVStoreDiscovery::matches_prefix(
+            "ns/component/endpoint/1",
+            &prefix,
+            INSTANCES_BUCKET
+        ));
+        assert!(KVStoreDiscovery::matches_prefix(
+            "ns/component",
+            &prefix,
+            INSTANCES_BUCKET
+        ));
+        assert!(!KVStoreDiscovery::matches_prefix(
+            "ns/component2/endpoint/1",
+            &prefix,
+            INSTANCES_BUCKET
+        ));
+    }
+
+    #[test]
+    fn test_claim_resync_resets_claim_caches() {
+        let mut snapshot = HashMap::new();
+        snapshot.insert(
+            kv::Key::new("scope/session".to_string()),
+            serde_json::to_vec(&payload(1)).unwrap().into(),
+        );
+
+        assert_eq!(
+            KVStoreDiscovery::claim_event_from_watch_event(kv::WatchEvent::Resync(snapshot)),
+            Some(ClaimEvent::Reset)
+        );
     }
 
     fn payload(worker_id: u64) -> ClaimPayload {
