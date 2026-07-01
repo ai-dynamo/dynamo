@@ -331,12 +331,13 @@ func addCompletionPrompt(requestBody map[string]any, prompt fwkrh.Prompt) {
 		return
 	}
 
-	if prompt.Strings != nil {
-		requestBody["prompt"] = prompt.PlainText()
-		return
+	// Keep non-token completions on the legacy chat-shaped scorer path.
+	requestBody["messages"] = []map[string]any{
+		{
+			"role":    "user",
+			"content": prompt.PlainText(),
+		},
 	}
-
-	requestBody["prompt"] = prompt.Raw
 }
 
 // extractNvext returns the caller-supplied nvext object from the PayloadMap,

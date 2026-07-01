@@ -90,7 +90,7 @@ func TestBuildOpenAIRequest_CompletionsTokenPromptUsesPromptIDs(t *testing.T) {
 	}
 }
 
-func TestBuildOpenAIRequest_CompletionsTextPromptUsesPromptField(t *testing.T) {
+func TestBuildOpenAIRequest_CompletionsTextPromptKeepsLegacyMessageShape(t *testing.T) {
 	req := &schedtypes.InferenceRequest{
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
@@ -105,15 +105,19 @@ func TestBuildOpenAIRequest_CompletionsTextPromptUsesPromptField(t *testing.T) {
 		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
 	}
 
-	if _, ok := body["messages"]; ok {
-		t.Fatalf("did not expect text completions to synthesize messages: %v", body["messages"])
+	if _, ok := body["prompt"]; ok {
+		t.Fatalf("did not expect text completions to change to prompt field: %v", body["prompt"])
 	}
-	if got := body["prompt"]; got != "hello" {
-		t.Fatalf("expected prompt=hello, got %#v", got)
+	messages, ok := body["messages"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected legacy messages shape, got %#v", body["messages"])
+	}
+	if len(messages) != 1 || messages[0]["role"] != "user" || messages[0]["content"] != "hello" {
+		t.Fatalf("expected single user message with content=hello, got %#v", messages)
 	}
 }
 
-func TestBuildOpenAIRequest_CompletionsStringArrayPromptCollapsesToSinglePrompt(t *testing.T) {
+func TestBuildOpenAIRequest_CompletionsStringArrayPromptKeepsLegacyMessageShape(t *testing.T) {
 	req := &schedtypes.InferenceRequest{
 		TargetModel: "test-model",
 		Body: &fwkrh.InferenceRequestBody{
@@ -128,10 +132,14 @@ func TestBuildOpenAIRequest_CompletionsStringArrayPromptCollapsesToSinglePrompt(
 		t.Fatalf("BuildOpenAIRequest returned error: %v", err)
 	}
 
-	if _, ok := body["messages"]; ok {
-		t.Fatalf("did not expect string-array completions to synthesize messages: %v", body["messages"])
+	if _, ok := body["prompt"]; ok {
+		t.Fatalf("did not expect string-array completions to change to prompt field: %v", body["prompt"])
 	}
-	if got := body["prompt"]; got != "hello world" {
-		t.Fatalf("expected collapsed prompt=hello world, got %#v", got)
+	messages, ok := body["messages"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected legacy messages shape, got %#v", body["messages"])
+	}
+	if len(messages) != 1 || messages[0]["role"] != "user" || messages[0]["content"] != "hello world" {
+		t.Fatalf("expected single user message with content='hello world', got %#v", messages)
 	}
 }
