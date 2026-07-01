@@ -33,7 +33,6 @@ class _FakeBackend(VisionEncoderBackend):
     """A CPU-only fake backend; records its threads."""
 
     max_batch_cost = 8
-    buckets = None
     image_token_id = 151655
     # This fake overrides preprocess, so opt into the off-loop pool (the default
     # is 0 ⇒ no pool); the passthrough path is covered by its own test below.

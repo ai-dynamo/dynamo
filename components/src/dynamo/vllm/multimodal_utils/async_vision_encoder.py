@@ -29,7 +29,6 @@ first request.
 from __future__ import annotations
 
 import asyncio
-import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import Generic, List
 
@@ -42,8 +41,6 @@ from dynamo.vllm.multimodal_utils.vision_encoder_backend import (
     RawT,
     VisionEncoderBackend,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class AsyncVisionEncoder(Generic[RawT, ItemT]):

@@ -139,9 +139,10 @@ class ThreadedMicroBatcher(Generic[T, R]):
         self._join_timeout_s = join_timeout_s
 
         self._queue: queue.Queue = queue.Queue()
-        self._ready = threading.Event()
-        self._terminated = threading.Event()
-        self._start_error: Optional[BaseException] = None
+        # Completed by the worker once on_start settles: result(None) on success,
+        # set_exception(exc) on failure. start() blocks on it and re-raises —
+        # one primitive in place of a ready-Event + a start-error field.
+        self._started: "concurrent.futures.Future[None]" = concurrent.futures.Future()
         self._terminal_error: Optional[BaseException] = None
         # Guards _state, _live, every _Request transition, and the queue-commit so
         # a state change and its work enqueue happen atomically. Bookkeeping only
@@ -156,17 +157,20 @@ class ThreadedMicroBatcher(Generic[T, R]):
     def start(self) -> None:
         """Start the worker thread, run ``on_start`` on it, and re-raise its error.
 
-        Single-shot: a second ``start()`` raises rather than spawning a second
-        consumer / orphaning the first thread."""
+        Single-shot: once ``start()`` has been called — even if the thread failed
+        to spawn — a second call raises rather than spawning a second consumer /
+        orphaning the first thread."""
         with self._lock:
-            if self._thread is not None:
+            # Guard on state, not `_thread`: a failed spawn moves to FAILED with
+            # `_thread` still None, and rejecting any non-NEW state here stops a
+            # retry from spawning a second (orphaned) worker.
+            if self._state is not _State.NEW:
                 raise RuntimeError("ThreadedMicroBatcher.start() called twice")
             # Non-daemon: a clean stop is via shutdown(); a daemon worker could be
             # torn down mid-fn at interpreter exit. Pin daemon=False explicitly so
             # it never inherits a daemon creator thread. Start under the lock and
-            # publish _thread only after a successful start(), so (a) a racing
-            # shutdown() can never join() an unstarted thread and (b) a failed
-            # thread creation leaves no stale unstarted thread behind.
+            # publish _thread only after a successful start(), so a racing
+            # shutdown() can never join() an unstarted thread.
             thread = threading.Thread(target=self._run, name=self._name, daemon=False)
             try:
                 thread.start()
@@ -174,12 +178,13 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 self._state = _State.FAILED
                 raise
             self._thread = thread
-        self._ready.wait()
-        if self._start_error is not None:
+        try:
+            self._started.result()  # blocks until on_start settles; re-raises it
+        except BaseException:
             # on_start ran on the thread, which then exited — mark closed so a
             # later submit() raises instead of queueing to a dead consumer.
             self.shutdown()
-            raise self._start_error
+            raise
         with self._lock:
             if self._state is _State.NEW:
                 self._state = _State.RUNNING
@@ -256,11 +261,12 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 self._state = _State.CLOSED
                 to_fail = self._drain_queue_locked()  # fail queued, then signal stop
                 self._queue.put(_SHUTDOWN)
-        self._consume_all(to_fail, RuntimeError("ThreadedMicroBatcher shut down"))
+        # Admission is now closed and the queue drained under the lock, so no new
+        # work can arrive; failing the drained set covers everything not already
+        # in-flight on the worker. No post-join re-drain is needed.
+        for work in to_fail:
+            self._consume(work, error=RuntimeError("ThreadedMicroBatcher shut down"))
         self._thread.join(timeout=self._join_timeout_s)
-        with self._lock:
-            leftover = self._drain_queue_locked()  # belt-and-suspenders
-        self._consume_all(leftover, RuntimeError("ThreadedMicroBatcher shut down"))
         if self._thread.is_alive():
             logger.warning(
                 "ThreadedMicroBatcher(%s): worker still finishing an in-flight fn "
@@ -276,11 +282,9 @@ class ThreadedMicroBatcher(Generic[T, R]):
             if self._on_start is not None:
                 self._on_start()  # build / warmup / CUDA-graph capture HERE
         except BaseException as exc:  # noqa: BLE001 — surface to start()
-            self._start_error = exc
-            self._ready.set()
-            self._terminated.set()
+            self._started.set_exception(exc)
             return
-        self._ready.set()
+        self._started.set_result(None)
         try:
             while True:
                 works = self._collect()
@@ -303,7 +307,6 @@ class ThreadedMicroBatcher(Generic[T, R]):
             # on_stop runs on the actor thread (so CUDA teardown is same-thread),
             # only after on_start succeeded (this finally is unreachable otherwise).
             self._run_on_stop()
-            self._terminated.set()
 
     def _run_on_stop(self) -> None:
         if self._on_stop is None:
@@ -472,7 +475,3 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 self._queue.put(_SHUTDOWN)
                 return drained
             drained.append(item)
-
-    def _consume_all(self, works: List[_Work], exc: BaseException) -> None:
-        for work in works:
-            self._consume(work, error=exc)
