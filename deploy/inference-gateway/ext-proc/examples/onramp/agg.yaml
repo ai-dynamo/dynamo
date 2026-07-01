@@ -1,0 +1,254 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Router-only (selector) on-ramp: aggregated serving, single-image EMBEDDED mode.
+#
+# Puts the Dynamo EPP in front of an existing vanilla `vllm serve` fleet behind
+# a GAIE gateway, with NO Dynamo operator, NO etcd/NATS, and NO Dynamo runtime.
+# In embedded mode the EPP and the runtime-free selection core run in ONE
+# process, so there is NO separate selection-service Deployment. The EPP
+# discovers raw vLLM pods from the InferencePool it backs, registers them with
+# its in-process selector, and on each request asks the selector for a worker,
+# then tells Envoy where to send the request.
+#
+# Embedded mode is single-replica only (no cross-replica index/load sync). For a
+# replicated/production deployment use http mode with a separate
+# dynamo.select_service Deployment (see README).
+#
+# Embedded vs http is a runtime choice (DYN_EPP_SELECTOR_MODE); the default EPP
+# image supports both, so no special build is required.
+#
+# Prerequisites:
+#   - A GAIE-compatible Gateway named `inference-gateway` in this namespace.
+#   - A secret `hf-token-secret` with key `HF_TOKEN`.
+# Apply with: kubectl apply -n <ns> -f agg.yaml
+# Test:
+#   GW=$(kubectl get gateway inference-gateway -o jsonpath='{.status.addresses[0].value}')
+#   curl http://$GW/v1/chat/completions -H 'content-type: application/json' -d '{
+#     "model": "Qwen/Qwen3-0.6B",   # MUST match DYN_MODEL_NAME below
+#     "messages": [{"role":"user","content":"hello"}]
+#   }'
+---
+# Raw vLLM aggregated worker pool. Vanilla image; prefix caching + native
+# KV-cache events on a ZMQ PUB socket the embedded selector subscribes to.
+# --block-size MUST match the EPP's DYN_KV_CACHE_BLOCK_SIZE.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen
+  labels:
+    app: vllm-qwen
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - "--model"
+            - "Qwen/Qwen3-0.6B"
+            - "--served-model-name"
+            - "Qwen/Qwen3-0.6B"
+            - "--port"
+            - "8000"
+            - "--enable-prefix-caching"
+            - "--block-size"
+            - "16"
+            - "--kv-events-config"
+            - '{"enable_kv_cache_events":true,"endpoint":"tcp://*:5557"}'
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: kv-events
+              containerPort: 5557
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+---
+# RBAC: the EPP reads the InferencePool (read-only) and lists/watches its pods.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dynamo-epp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dynamo-epp
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["inference.networking.k8s.io"]
+    resources: ["inferencepools"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dynamo-epp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dynamo-epp
+subjects:
+  - kind: ServiceAccount
+    name: dynamo-epp
+---
+# The Dynamo EPP in router-only mode with the selector EMBEDDED in-process.
+# Single replica: embedded mode has no cross-replica synchronization.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamo-epp
+  labels:
+    app: dynamo-epp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dynamo-epp
+  template:
+    metadata:
+      labels:
+        app: dynamo-epp
+    spec:
+      serviceAccountName: dynamo-epp
+      containers:
+        - name: epp
+          # Selector mode is chosen at runtime via DYN_EPP_SELECTOR_MODE below;
+          # the default image supports both http and embedded.
+          image: nvcr.io/nvidia/ai-dynamo/ext-proc:latest
+          env:
+            # Router-only mode, selector embedded in-process (no separate service).
+            - name: DYN_EPP_MODE
+              value: "router-only"
+            - name: DYN_EPP_SELECTOR_MODE
+              value: "embedded"
+            # Pod discovery: read the InferencePool this EPP backs. Its selector
+            # and target port are the single source of truth (same object the
+            # gateway routes to). Pool namespace defaults to POD_NAMESPACE.
+            - name: DYN_EPP_POOL_NAME
+              value: "vllm-qwen-pool"
+            # KV-event port can't live in the InferencePool, so it stays here.
+            - name: DYN_EPP_KV_EVENT_PORT
+              value: "5557"
+            # Model / tokenization (no model card in router-only mode).
+            - name: DYN_MODEL_NAME
+              value: "Qwen/Qwen3-0.6B"
+            - name: DYN_KV_CACHE_BLOCK_SIZE
+              value: "16"
+            # Plaintext h2c for this demo gateway.
+            - name: DYN_SECURE_SERVING
+              value: "false"
+            # The reflector watches pods in the EPP's own namespace.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+            # Writable HF cache for the offline tokenizer (non-root EPP).
+            - name: HF_HOME
+              value: "/tmp/hf"
+          ports:
+            - name: grpc
+              containerPort: 9002
+            - name: grpc-health
+              containerPort: 9003
+          readinessProbe:
+            grpc:
+              port: 9003
+              service: inference-extension
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /tmp/hf
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: hf-cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamo-epp
+spec:
+  selector:
+    app: dynamo-epp
+  ports:
+    - name: grpc
+      appProtocol: http2
+      port: 9002
+      targetPort: 9002
+---
+# InferencePool selects the raw vLLM pods and delegates endpoint selection to
+# the EPP. The EPP reads this object (read-only) to learn the pod selector and
+# target port — the same object the gateway routes to.
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: vllm-qwen-pool
+spec:
+  selector:
+    matchLabels:
+      app: vllm-qwen
+  targetPorts:
+    - number: 8000
+  endpointPickerRef:
+    name: dynamo-epp
+    port:
+      number: 9002
+---
+# Route gateway traffic to the pool.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: vllm-qwen-route
+spec:
+  parentRefs:
+    - name: inference-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: vllm-qwen-pool
+      timeouts:
+        request: "300s"
