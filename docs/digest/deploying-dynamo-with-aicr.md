@@ -146,47 +146,68 @@ plane. In the Kubernetes AICR path, that event plane is NATS.
 
 ## Two Routing Paths
 
-AICR's Dynamo recipe covers both Dynamo 1.2 Kubernetes routing paths because they solve different
-operational problems.
+AICR's Dynamo recipe covers two Kubernetes routing paths. Both use Dynamo's token-aware KV router,
+the NATS-backed KV event plane, and the same worker runtime. The choice is not KV-aware versus
+load-aware routing. It is whether the Dynamo frontend or the Kubernetes Gateway layer owns ingress
+and delivers the request to the selected worker.
 
-### Path 1: Direct Dynamo Frontend
+### Path 1: Dynamo Router
 
-The default path is the **Dynamo frontend router**. A `Frontend` component runs with
-`DYN_ROUTER_MODE=kv`, receives OpenAI-compatible requests, tokenizes prompts, subscribes to worker KV
-events, and chooses a worker based on cache overlap and load. This path keeps the user-facing service
-inside the Dynamo graph and is the shortest route for validating Dynamo itself.
+The default path exposes a Dynamo `Frontend` component behind a Kubernetes Service. It runs with
+`DYN_ROUTER_MODE=kv`, receives OpenAI-compatible requests, tokenizes prompts, consumes worker KV
+events, and chooses a worker from cache overlap and load. It then sends the request to that worker on
+the Dynamo request plane, which defaults to TCP.
+
+Choose this path when an application team owns a model-specific endpoint, or when an existing edge
+proxy only needs to forward traffic to the Dynamo frontend Service. It is the smallest topology for
+bringing up and validating a Dynamo graph, and remains a production serving option. It does not need
+Gateway API inference resources, an EPP, or per-worker frontend sidecars.
 
 ```mermaid
 flowchart LR
     Client["Client\nOpenAI-compatible HTTP"] --> Service["Kubernetes Service\nvllm-agg-frontend"]
     Service --> Frontend["Dynamo Frontend\nDYN_ROUTER_MODE=kv"]
-    Frontend -->|"tokenize + score\nKV overlap / load"| Router["Dynamo router\ncache-aware placement"]
-    Router -->|"request plane\nTCP by default"| Worker["vLLM worker"]
+    Frontend -->|"tokenize + KV score\nrequest plane: TCP by default"| Worker["vLLM worker"]
 
     Worker -.->|"local ZMQ\nraw KV events"| Publisher["Dynamo worker\nKV publisher"]
     Publisher -.->|"NATS-backed\nKV event plane"| Frontend
 ```
 
-### Path 2: Gateway / EPP
+### Path 2: GAIE / EPP
 
-The Kubernetes-native ingress path is **Gateway / EPP**. In that mode, traffic flows through
-[agentgateway](https://github.com/agentgateway/agentgateway), the Kubernetes
-[Gateway API](https://github.com/kubernetes-sigs/gateway-api), an `HTTPRoute`, and a
-[GAIE](https://github.com/kubernetes-sigs/gateway-api-inference-extension) `InferencePool`. Dynamo
-natively integrates with that path: the Dynamo operator reconciles a `DynamoGraphDeployment`
-component of type `epp`, generates the matching `InferencePool`, and runs the EPP that performs
-endpoint selection with Dynamo's KV-aware scoring. Worker frontend sidecars run in
-`--router-mode direct`, so they honor the worker chosen by the EPP instead of making another
-placement decision. This path matters when the platform team wants model-aware routing at the
-Kubernetes Gateway layer while keeping Dynamo's cache-aware selection logic.
+The Kubernetes-native ingress path uses the [Gateway API](https://github.com/kubernetes-sigs/gateway-api)
+and [Gateway API Inference Extension (GAIE)](https://github.com/kubernetes-sigs/gateway-api-inference-extension).
+In the AICR example, [agentgateway](https://github.com/agentgateway/agentgateway) resolves an
+`HTTPRoute` to an `InferencePool`. The Dynamo operator reconciles an `epp` component in the
+`DynamoGraphDeployment` and generates that `InferencePool`, which identifies the worker pods and
+the EPP service.
+
+The Gateway calls the EPP through the GAIE endpoint-picker protocol. The EPP tokenizes the request,
+uses Dynamo's KV router and the same live KV events to select a worker, then returns the selected
+endpoint and worker identifiers to the Gateway. The Gateway sends the model request directly to the
+selected worker frontend sidecar. The EPP does not proxy request or response traffic. That sidecar
+runs with `--router-mode direct`, so it honors the EPP selection instead of making a second routing
+decision.
+
+Choose this path when the platform team owns a shared Kubernetes ingress and needs model endpoints
+to participate in its Gateway and `HTTPRoute` workflow. The trade-off is a larger operational
+surface: a GAIE-compatible Gateway implementation, Gateway API and GAIE resources, an EPP, and
+worker frontend sidecars.
+
+> [!NOTE]
+> This article uses GAIE's supported operator-managed `DynamoGraphDeployment` path. It is not the
+> experimental vanilla vLLM on-ramp, where the EPP subscribes directly to per-pod ZMQ events and
+> rebuilds an empty cache index after restart. The AICR path retains the Dynamo NATS/JetStream event
+> plane, so the EPP receives routing-state snapshots and subsequent worker updates.
 
 ```mermaid
 flowchart LR
     Client["Client\nOpenAI-compatible HTTP"] --> Gateway["agentgateway\nGateway API data plane"]
     Gateway --> Route["HTTPRoute"]
-    Route --> Pool["InferencePool\nGAIE"]
-    Pool --> EPP["Dynamo EPP\nKV-aware endpoint picker"]
-    EPP -->|"selected endpoint"| Sidecar["Worker frontend sidecar\n--router-mode direct"]
+    Route --> Pool["InferencePool\nworker eligibility + EPP reference"]
+    Gateway -.->|"GAIE endpoint-picker call"| EPP["Dynamo EPP\ntoken-aware KV selection"]
+    EPP -.->|"selected endpoint +\nworker IDs"| Gateway
+    Gateway --> Sidecar["Worker frontend sidecar\n--router-mode direct"]
     Sidecar -->|"request plane\nTCP by default"| Worker["vLLM worker"]
 
     Worker -.->|"local ZMQ\nraw KV events"| Publisher["Dynamo worker\nKV publisher"]
@@ -197,9 +218,18 @@ flowchart LR
     Operator -.->|"runs"| EPP
 ```
 
-Both paths depend on the same principle: workers must publish live KV cache events. Without live
-events, Dynamo can fall back to approximate routing, but that is not the validated AICR path for
-cache-aware placement.
+### Choosing a Path
+
+| Decision | Dynamo Router | GAIE / EPP |
+| --- | --- | --- |
+| **Ingress owner** | Dynamo frontend Service | Gateway and `HTTPRoute` |
+| **Worker selection** | Frontend selects and dispatches to a worker | Gateway asks the EPP; the EPP returns the selected endpoint and worker identifiers |
+| **Best fit** | A model-specific Dynamo endpoint with the smallest serving topology | A shared Kubernetes ingress expressed through Gateway and `HTTPRoute` resources |
+| **Additional infrastructure** | None beyond the Dynamo frontend and workers | GAIE-compatible Gateway, `InferencePool`, EPP, and worker frontend sidecars |
+| **KV-cache behavior** | Token-aware KV scoring from live worker events | The same token-aware KV scoring from the same live worker events |
+
+Both paths require workers to publish live KV cache events. Without them, Dynamo can fall back to
+approximate routing, but that is not the validated AICR path for cache-aware placement.
 
 ## Recipe Flow
 
