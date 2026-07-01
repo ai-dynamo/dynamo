@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Eight-rank FlashInfer checkpoint lifecycle and no-NCCL preflight."""
+"""Eight-rank FlashInfer checkpoint lifecycle with an idle PyNCCL communicator."""
 
 from __future__ import annotations
 
@@ -14,16 +14,22 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("VLLM_DISABLE_NCCL", "1")
-os.environ.setdefault("VLLM_DISTRIBUTED_USE_SPLIT_GROUP", "0")
-
 import torch
 import torch.distributed as dist
 
-EXPECTED_VLLM_SHA = "cf0efdeee02d1345cb0b10cbbb691fa4eda782c5"
+EXPECTED_VLLM_SHA = "2f039319016c0fbd60bbfacc8a998746a7b75561"
 EXPECTED_FLASHINFER_SHA = "330cc8e1a09f59c1241084459f3df3204b9b8327"
 EXPECTED_FLASHINFER_VERSION = "0.6.14"
 EXPECTED_WORLD_SIZE = 8
+EXPECTED_NCCL_ENV = {
+    "NCCL_P2P_DISABLE": "1",
+    "NCCL_SHM_DISABLE": "0",
+    "NCCL_IB_DISABLE": "1",
+    "NCCL_NVLS_ENABLE": "0",
+    "NCCL_CUMEM_ENABLE": "0",
+    "NCCL_RAS_ENABLE": "0",
+    "NCCL_DEBUG": "INFO",
+}
 
 
 def _read_provenance() -> dict[str, str]:
@@ -108,7 +114,7 @@ def _validate_runtime() -> dict[str, Any]:
     if versions != expected_versions:
         raise RuntimeError(f"Unexpected package versions: {versions!r}")
 
-    import vllm.envs  # noqa: F401
+    import vllm.envs as vllm_envs
 
     if importlib.util.find_spec("nccl_checkpoint") is not None:
         raise RuntimeError("NCCL checkpoint Python package must not be installed")
@@ -117,29 +123,47 @@ def _validate_runtime() -> dict[str, Any]:
     preload = Path("/etc/ld.so.preload")
     if preload.is_file() and "nccl-checkpoint" in preload.read_text(encoding="utf-8"):
         raise RuntimeError("NCCL checkpoint shim must not be preloaded")
+    if "nccl-checkpoint" in os.environ.get("LD_PRELOAD", ""):
+        raise RuntimeError("NCCL checkpoint shim must not be in LD_PRELOAD")
     nccl_env = {
         name: value
         for name, value in os.environ.items()
         if name.startswith(("NCCL_", "TORCH_NCCL_"))
         or name == "DYN_SNAPSHOT_NCCL_KVS_ENDPOINT"
     }
-    if nccl_env:
-        raise RuntimeError(f"NCCL runtime environment is present: {nccl_env}")
+    for name, expected in EXPECTED_NCCL_ENV.items():
+        actual = nccl_env.get(name)
+        if actual != expected:
+            raise RuntimeError(f"{name}={actual!r}, expected {expected!r}")
+    if "NCCL_NET" in nccl_env:
+        raise RuntimeError("NCCL_NET must remain unset so SHM transport is available")
+    if "DYN_SNAPSHOT_NCCL_KVS_ENDPOINT" in nccl_env:
+        raise RuntimeError("NCCL checkpoint KVS must not be configured")
+    if any(name.startswith("NCCL_CHECKPOINT_") for name in nccl_env):
+        raise RuntimeError(f"NCCL checkpoint environment is present: {nccl_env}")
+    if os.environ.get("VLLM_DISABLE_NCCL"):
+        raise RuntimeError("VLLM_DISABLE_NCCL must remain unset")
+    if vllm_envs.VLLM_DISABLE_PYNCCL:
+        raise RuntimeError("PyNCCL must remain enabled")
+    if not vllm_envs.VLLM_ALLREDUCE_USE_FLASHINFER:
+        raise RuntimeError("FlashInfer all-reduce selection is disabled")
+    if not vllm_envs.VLLM_ALLGATHER_USE_FLASHINFER:
+        raise RuntimeError("FlashInfer symmetric all-gather selection is disabled")
 
     from flashinfer.comm import SymmetricAllGatherWorkspace
     from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackendFactory
     from vllm.plugins import load_general_plugins
-    from vllm.utils.import_utils import has_deep_ep_v2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
+    if not callable(PyNcclCommunicator):
+        raise RuntimeError("PyNCCL communicator is unavailable")
     if not callable(SymmetricAllGatherWorkspace.checkpoint_prepare):
         raise RuntimeError("Symmetric all-gather checkpoint API is missing")
     if not callable(MoeAlltoAll.checkpoint_restore):
         raise RuntimeError("One-sided MoE checkpoint API is missing")
-    if has_deep_ep_v2():
-        raise RuntimeError("DeepEPv2 must be disabled without probing NCCL")
     if hasattr(Worker, "checkpoint_prepare") or hasattr(Worker, "checkpoint_restore"):
         raise RuntimeError("GPU worker must not contain snapshot lifecycle overrides")
     wake_source = inspect.getsource(GPUModelRunner.init_fp8_kv_scales)
@@ -175,6 +199,8 @@ def _validate_runtime() -> dict[str, Any]:
         "dynamo_commit_sha": actual_dynamo_sha,
         "provenance": provenance,
         "versions": versions,
+        "nccl_env": nccl_env,
+        "ld_preload": os.environ.get("LD_PRELOAD", ""),
         "native_modules": native_modules,
         "elf_nccl_dependencies": _elf_nccl_dependencies(native_modules),
     }
@@ -206,68 +232,85 @@ def _expected_all_gather(
 
 
 def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
-    import flashinfer.comm as comm
     from flashinfer.comm import MoeAlltoAll, SymmetricAllGatherWorkspace
     from flashinfer.comm.mapping import Mapping
-    from flashinfer.comm.mnnvl import MnnvlConfig, TorchDistBackend
+    from flashinfer.comm.mnnvl import MnnvlConfig
+    from vllm.distributed import parallel_state
+    from vllm.distributed.device_communicators.cuda_communicator import (
+        CudaCommunicator,
+    )
+    from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+        checkpoint_prepare_fi_ar_workspaces,
+        checkpoint_restore_fi_ar_workspaces,
+    )
     from vllm.distributed.device_communicators.mnnvl_compat import (
         CustomCommunicator,
     )
 
     control_group = dist.group.WORLD
-    ar_token_num = max(4, world_size * 2)
-    ar_workspace = comm.create_allreduce_fusion_workspace(
-        backend="trtllm",
-        world_size=world_size,
-        rank=rank,
-        max_token_num=ar_token_num,
-        hidden_dim=4096,
-        dtype=torch.bfloat16,
-        comm_backend=TorchDistBackend(group=control_group),
+    parallel_state._ENABLE_CUSTOM_ALL_REDUCE = False
+    parallel_state._NODE_COUNT = 1
+    communicator = CudaCommunicator(
+        cpu_group=control_group,
+        device=torch.device("cuda", rank),
+        device_group=control_group,
+        unique_name="tp:flashinfer-pynccl-shm-preflight",
     )
+    pynccl = communicator.pynccl_comm
+    if pynccl is None or not pynccl.available or pynccl.disabled:
+        raise RuntimeError("PyNCCL communicator was not initialized")
+    pynccl_handle_before = int(pynccl.comm.value or 0)
+    if pynccl_handle_before == 0:
+        raise RuntimeError("PyNCCL communicator has an empty NCCL handle")
+
+    pynccl_model_fallbacks = {"all_reduce": 0, "all_gather": 0}
+    pynccl_all_reduce = pynccl.all_reduce
+    pynccl_all_gather = pynccl.all_gather
+
+    def unexpected_pynccl_all_reduce(*args, **kwargs):
+        pynccl_model_fallbacks["all_reduce"] += 1
+        raise RuntimeError("Model all-reduce unexpectedly fell through to PyNCCL")
+
+    def unexpected_pynccl_all_gather(*args, **kwargs):
+        pynccl_model_fallbacks["all_gather"] += 1
+        raise RuntimeError("Model all-gather unexpectedly fell through to PyNCCL")
+
+    pynccl.all_reduce = unexpected_pynccl_all_reduce
+    pynccl.all_gather = unexpected_pynccl_all_gather
+
+    ar_token_num = max(4, world_size * 2)
     ar_input = torch.full(
         (ar_token_num, 4096),
         rank + 1,
         dtype=torch.bfloat16,
         device="cuda",
     )
-    ar_output = torch.empty_like(ar_input)
 
-    def all_reduce() -> None:
-        comm.allreduce_fusion(
-            input=ar_input,
-            workspace=ar_workspace,
-            output=ar_output,
-            pattern=comm.AllReduceFusionPattern.kAllReduce,
-            use_oneshot=False,
-        )
+    def all_reduce() -> torch.Tensor:
+        return communicator.all_reduce(ar_input)
 
-    all_reduce()
+    ar_output = all_reduce()
     torch.cuda.synchronize()
     initial_sum = world_size * (world_size + 1) // 2
     torch.testing.assert_close(ar_output, torch.full_like(ar_output, initial_sum))
     ar_graph = torch.cuda.CUDAGraph()
     dist.barrier()
     with torch.cuda.graph(ar_graph):
-        all_reduce()
+        ar_graph_output = all_reduce()
 
     ag_shape = (8, 64)
-    ag_workspace = SymmetricAllGatherWorkspace(
-        max_elems=ag_shape[0] * ag_shape[1],
-        world_size=world_size,
-        rank=rank,
-        comm_backend=TorchDistBackend(group=control_group),
-        dtype=torch.bfloat16,
-    )
     ag_input = torch.full(ag_shape, rank + 1, dtype=torch.bfloat16, device="cuda")
-    ag_output = torch.empty(
-        (ag_shape[0] * world_size, ag_shape[1]),
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    ag_workspace.all_gather(ag_input, ag_output)
+    ag_output = communicator.all_gather(ag_input, dim=0)
     torch.cuda.synchronize()
     torch.testing.assert_close(ag_output, _expected_all_gather(world_size, ag_shape, 1))
+    if len(communicator.fi_ag_workspaces) != 1:
+        raise RuntimeError(
+            "Expected one FlashInfer symmetric all-gather workspace, got "
+            f"{len(communicator.fi_ag_workspaces)}"
+        )
+    ag_workspace: SymmetricAllGatherWorkspace = next(
+        iter(communicator.fi_ag_workspaces.values())
+    )
     ag_graph = torch.cuda.CUDAGraph()
     dist.barrier()
     with torch.cuda.graph(ag_graph):
@@ -342,26 +385,24 @@ def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
     torch.testing.assert_close(moe_output, moe_input)
 
     dist.barrier()
-    for workspace in (ar_workspace, ag_workspace, moe_workspace):
-        workspace.checkpoint_prepare()
-        workspace.checkpoint_prepare()
+    torch.cuda.synchronize()
+    communicator.checkpoint_prepare()
+    checkpoint_prepare_fi_ar_workspaces()
+    moe_workspace.checkpoint_prepare()
+    torch.cuda.synchronize()
     _assert_raises_detached(all_reduce, "all-reduce")
     _assert_raises_detached(
-        lambda: ag_workspace.all_gather(ag_input, ag_output),
+        lambda: communicator.all_gather(ag_input, dim=0),
         "all-gather",
     )
     _assert_raises_detached(moe_round_trip, "one-sided MoE")
 
     dist.barrier()
-    ar_backend = TorchDistBackend(group=control_group)
-    ag_backend = TorchDistBackend(group=control_group)
-    moe_backend = CustomCommunicator(control_group)
-    ar_workspace.checkpoint_restore(ar_backend)
-    ar_workspace.checkpoint_restore(ar_backend)
-    ag_workspace.checkpoint_restore(ag_backend)
-    ag_workspace.checkpoint_restore(ag_backend)
-    moe_workspace.checkpoint_restore(moe_backend)
-    moe_workspace.checkpoint_restore(moe_backend)
+    torch.cuda.synchronize()
+    checkpoint_restore_fi_ar_workspaces()
+    communicator.checkpoint_restore()
+    moe_workspace.checkpoint_restore(CustomCommunicator(control_group))
+    torch.cuda.synchronize()
     dist.barrier()
 
     ar_input.fill_(rank + 2)
@@ -374,18 +415,51 @@ def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
     torch.cuda.synchronize()
 
     restored_sum = world_size * (world_size + 3) // 2
-    torch.testing.assert_close(ar_output, torch.full_like(ar_output, restored_sum))
+    torch.testing.assert_close(
+        ar_graph_output, torch.full_like(ar_graph_output, restored_sum)
+    )
     torch.testing.assert_close(ag_output, _expected_all_gather(world_size, ag_shape, 8))
     torch.testing.assert_close(moe_output, moe_input)
 
+    pynccl.all_reduce = pynccl_all_reduce
+    pynccl.all_gather = pynccl_all_gather
+    pynccl_diagnostic_input = torch.full(
+        (1,), rank + 1, dtype=torch.float32, device="cuda"
+    )
+    pynccl_diagnostic_output = pynccl.all_reduce(pynccl_diagnostic_input)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(
+        pynccl_diagnostic_output,
+        torch.full_like(pynccl_diagnostic_output, initial_sum),
+    )
+    pynccl_handle_after = int(pynccl.comm.value or 0)
+    if pynccl_handle_after != pynccl_handle_before:
+        raise RuntimeError(
+            "PyNCCL communicator handle changed during FlashInfer restore"
+        )
+    if any(pynccl_model_fallbacks.values()):
+        raise RuntimeError(
+            f"Unexpected PyNCCL model fallback: {pynccl_model_fallbacks}"
+        )
+
     dist.barrier()
-    ar_workspace.destroy()
-    ag_workspace.destroy()
-    return {
-        "all_reduce": "eager+graph+post-restore-graph",
-        "symmetric_all_gather": "eager+graph+post-restore-graph",
-        "one_sided_moe": "remote-dispatch+combine+post-restore-graph",
+    result = {
+        "model_collectives": {
+            "all_reduce": "vllm-flashinfer-eager+graph+post-restore-graph",
+            "symmetric_all_gather": ("vllm-flashinfer-eager+graph+post-restore-graph"),
+            "one_sided_moe": "remote-dispatch+combine+post-restore-graph",
+            "pynccl_fallbacks": pynccl_model_fallbacks,
+        },
+        "pynccl": {
+            "class": type(pynccl).__name__,
+            "nccl_version": pynccl.nccl_version,
+            "handle_stable": pynccl_handle_after == pynccl_handle_before,
+            "constructor_warmup": "completed",
+            "post_restore_diagnostic_all_reduce": "passed",
+        },
     }
+    communicator.destroy()
+    return result
 
 
 def main() -> None:
@@ -401,22 +475,12 @@ def main() -> None:
         runtime = _validate_runtime()
         collectives = _run_collectives(rank, world_size)
 
-        from vllm.distributed.nccl_audit import (
-            assert_no_nccl_communicators,
-            get_nccl_audit_events,
-        )
-
-        backends = assert_no_nccl_communicators()
-        audit_events = get_nccl_audit_events()
-        if audit_events:
-            raise RuntimeError(f"NCCL creation events were recorded: {audit_events}")
         report = {
             "rank": rank,
             "local_rank": local_rank,
             "pid": os.getpid(),
             "device": torch.cuda.get_device_name(local_rank),
-            "process_groups": backends,
-            "nccl_creation_events": audit_events,
+            "torch_process_group": str(dist.get_backend(dist.group.WORLD)),
             "mapped_nccl_dsos": _mapped_nccl_dsos(),
             "collectives": collectives,
             **runtime,
@@ -427,10 +491,11 @@ def main() -> None:
             if any(item is None for item in reports):
                 raise RuntimeError(f"Missing rank reports: {reports!r}")
             print(
-                "FLASHINFER_NO_NCCL_PREFLIGHT=" + json.dumps(reports, sort_keys=True),
+                "FLASHINFER_PYNCCL_SHM_PREFLIGHT="
+                + json.dumps(reports, sort_keys=True),
                 flush=True,
             )
-            print("FLASHINFER_NO_NCCL_PREFLIGHT_PASS", flush=True)
+            print("FLASHINFER_PYNCCL_SHM_PREFLIGHT_PASS", flush=True)
     finally:
         dist.destroy_process_group()
 

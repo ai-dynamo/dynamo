@@ -1,17 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# nscale validation for the FlashInfer-only checkpoint-aware vLLM stack.
+# nscale validation for FlashInfer collectives with idle PyNCCL over host SHM.
 # The namespace must already contain shared-model-cache, hf-token-secret,
 # acr-token-secret, the Dynamo operator, and the snapshot agent.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: fi-nemotron-fa-nonccl-28515733745
+  name: fi-nemotron-fa-pynccl-shm-build-run
   labels:
     app.kubernetes.io/created-by: pi-relay
     app.kubernetes.io/name: dynamo-snapshot-e2e
-    e2e.ai-dynamo.io/run: fi-no-nccl-28515733745
+    e2e.ai-dynamo.io/run: fi-pynccl-shm-build-run
   annotations:
     nvidia.com/enable-grove: "false"
 spec:
@@ -29,7 +29,7 @@ spec:
           mountPoint: /home/dynamo/.cache/huggingface
       extraPodSpec:
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:a641a3d5d50b342a7a73c72d211a98e2e309f239c34502f140d9bf7701766bf9
+          image: RUNTIME_IMAGE_TO_BE_PINNED_AFTER_BUILD
           imagePullPolicy: Always
           command:
             - python3
@@ -89,7 +89,7 @@ spec:
           nvidia.com/gpu.present: "true"
           nvidia.com/gpu.product: NVIDIA-B200
         runtimeClassName: nvidia
-        serviceAccountName: fi-nemotron-fa-nonccl-28515733745-k8s-service-discovery
+        serviceAccountName: fi-nemotron-fa-pynccl-shm-build-run-k8s-service-discovery
         securityContext:
           fsGroup: 1000
           fsGroupChangePolicy: OnRootMismatch
@@ -106,7 +106,7 @@ spec:
             emptyDir: {}
         mainContainer:
           name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:129c2467548ae554a66d38d64d5b7e058d512b8faf6f2eec393775b17da8d068
+          image: PLACEHOLDER_IMAGE_TO_BE_PINNED_AFTER_BUILD
           imagePullPolicy: Always
           workingDir: /workspace/
           command:
@@ -162,8 +162,12 @@ spec:
               value: "1"
             - name: DO_NOT_TRACK
               value: "1"
-            - name: VLLM_DISABLE_NCCL
+            - name: VLLM_ALLREDUCE_USE_FLASHINFER
               value: "1"
+            - name: VLLM_ALLGATHER_USE_FLASHINFER
+              value: "1"
+            - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+              value: trtllm
             - name: GLOO_SOCKET_IFNAME
               value: eth0
             - name: VLLM_LOGGING_LEVEL
@@ -176,6 +180,22 @@ spec:
               value: "0"
             - name: VLLM_DISTRIBUTED_USE_SPLIT_GROUP
               value: "0"
+            - name: NCCL_P2P_DISABLE
+              value: "1"
+            - name: NCCL_SHM_DISABLE
+              value: "0"
+            - name: NCCL_IB_DISABLE
+              value: "1"
+            - name: NCCL_NVLS_ENABLE
+              value: "0"
+            - name: NCCL_CUMEM_ENABLE
+              value: "0"
+            - name: NCCL_RAS_ENABLE
+              value: "0"
+            - name: NCCL_DEBUG
+              value: INFO
+            - name: NCCL_DEBUG_SUBSYS
+              value: INIT,ENV,GRAPH,P2P,SHM,NET,COLL
             - name: NIXL_TELEMETRY_ENABLE
               value: "n"
           ports:
