@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+sortOptions:
+  order: fifo
+resources:
+  - ../../base
+patches:
+  - target:
+      group: nvidia.com
+      version: v1alpha1
+      kind: DynamoGraphDeployment
+      name: q32b-1p1d-cloud-provider
+    path: patch-dgd.yaml

@@ -1,0 +1,149 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d-cloud-provider
+spec:
+  services:
+    Frontend:
+      extraPodSpec:
+        imagePullSecrets:
+          - name: nvcr-pull-secret
+    VllmPrefillWorker:
+      extraPodMetadata:
+        annotations: &gkeNetworkAnnotations
+          networking.gke.io/default-interface: eth0
+          networking.gke.io/interfaces: |
+            [{"interfaceName":"eth0","network":"default"},
+             {"interfaceName":"eth2","network":"rdma-0"},
+             {"interfaceName":"eth3","network":"rdma-1"},
+             {"interfaceName":"eth4","network":"rdma-2"},
+             {"interfaceName":"eth5","network":"rdma-3"}]
+      extraPodSpec:
+        imagePullSecrets:
+          - name: nvcr-pull-secret
+        tolerations: &gkeTolerations
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+          - key: kubernetes.io/arch
+            operator: Equal
+            value: arm64
+            effect: NoSchedule
+        mainContainer:
+          env:
+            - name: KV_TRANSFER_CONFIG
+              value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: NCCL_CROSS_NIC
+              value: "0"
+            - name: MODEL_NAME
+              value: Qwen/Qwen3-32B
+            - name: SERVED_MODEL_NAME
+              value: Qwen/Qwen3-32B
+            - name: TENSOR_PARALLEL_SIZE
+              value: "4"
+            - name: GPU_MEMORY_UTILIZATION
+              value: "0.90"
+            - name: BLOCK_SIZE
+              value: "64"
+            - name: HF_OVERRIDES
+              value: '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+            - name: MAX_MODEL_LEN
+              value: "131072"
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "y"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: HF_HOME
+              value: /model-cache
+            - name: VLLM_LOGGING_LEVEL
+              value: INFO
+            - name: NCCL_DEBUG
+              value: WARN
+          volumeMounts: &gkeVolumeMounts
+            - name: gib
+              mountPath: /usr/local/gib
+            - name: nvidia
+              mountPath: /usr/local/nvidia
+            - name: model-cache
+              mountPath: /model-cache
+        volumes: &gkeVolumes
+          - name: gib
+            hostPath:
+              path: /home/kubernetes/bin/gib
+          - name: nvidia
+            hostPath:
+              path: /home/kubernetes/bin/nvidia
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+      resources:
+        limits:
+          custom: &gkeRdmaResources
+            networking.gke.io.networks/rdma-0: "1"
+            networking.gke.io.networks/rdma-1: "1"
+            networking.gke.io.networks/rdma-2: "1"
+            networking.gke.io.networks/rdma-3: "1"
+            networking.gke.io.networks/rdma-0.IP: "1"
+            networking.gke.io.networks/rdma-1.IP: "1"
+            networking.gke.io.networks/rdma-2.IP: "1"
+            networking.gke.io.networks/rdma-3.IP: "1"
+        requests:
+          custom: *gkeRdmaResources
+    VllmDecodeWorker:
+      extraPodMetadata:
+        annotations: *gkeNetworkAnnotations
+      extraPodSpec:
+        imagePullSecrets:
+          - name: nvcr-pull-secret
+        tolerations: *gkeTolerations
+        mainContainer:
+          env:
+            - name: KV_TRANSFER_CONFIG
+              value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: NCCL_CROSS_NIC
+              value: "0"
+            - name: MODEL_NAME
+              value: Qwen/Qwen3-32B
+            - name: SERVED_MODEL_NAME
+              value: Qwen/Qwen3-32B
+            - name: TENSOR_PARALLEL_SIZE
+              value: "4"
+            - name: GPU_MEMORY_UTILIZATION
+              value: "0.90"
+            - name: BLOCK_SIZE
+              value: "64"
+            - name: HF_OVERRIDES
+              value: '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+            - name: MAX_MODEL_LEN
+              value: "131072"
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "y"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: HF_HOME
+              value: /model-cache
+            - name: VLLM_LOGGING_LEVEL
+              value: INFO
+            - name: NCCL_DEBUG
+              value: WARN
+          volumeMounts: *gkeVolumeMounts
+        volumes: *gkeVolumes
+      resources:
+        limits:
+          custom: *gkeRdmaResources
+        requests:
+          custom: *gkeRdmaResources
