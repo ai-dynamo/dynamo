@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Navigation structure for Dynamo docs
-# Tab-based navigation: Home, User Guide, Developer Guide, Recipes, Reference, Blog, Community.
+# Tab-based navigation: Home, User Guide, Well-Lit Paths, Recipes, Developer Guide, Blog, Community.
 # Each content tab sets skip-slug: true so page URLs derive from the file path and stay
 # independent of which tab a page lives in. The recipes tab keeps its recipes/ URL prefix.
 
@@ -26,6 +26,10 @@ tabs:
   user-guide:
     display-name: User Guide
     icon: book-open
+    skip-slug: true
+  well-lit-paths:
+    display-name: Well-Lit Paths
+    icon: road
     skip-slug: true
   recipes:
     display-name: Recipes
@@ -62,6 +66,8 @@ navigation:
           #   path: getting-started/quickstart.mdx
           - page: Compatibility
             path: getting-started/compatibility.md
+          - page: Release Artifacts
+            path: reference/release-artifacts.md
 
       - section: Installation
         contents:
@@ -125,25 +131,49 @@ navigation:
           #   path: kubernetes/model-deployment-guide.md
           # - page: DGDR Reference
           #   path: kubernetes/dgdr.md
-          - page: Set up KV aware routing
-            path: components/router/router-guide.md
-          - section: Set up Disaggregated Serving
+          - page: Model Caching
+            path: kubernetes/model-caching.md
+          - page: Multinode Deployments
+            path: kubernetes/deployment/multinode-deployment.md
+          - page: KV Aware Routing
+            path: kubernetes/dgd-kv-routing.md
+          - page: KV Cache Offloading
+            path: kubernetes/dgd-kv-offloading.md
+          - page: Disaggregated Serving
+            path: features/disaggregated-serving/README.md
+          - section: Expose and Operate
+            collapsed: true
             contents:
-              - page: Overview
-                path: features/disaggregated-serving/README.md
-              - page: Sizing with AIConfigurator
-                path: features/disaggregated-serving/aiconfigurator.md
-          - section: Set up KV Cache Offloading
+              - page: Expose the Frontend
+                path: kubernetes/dgd-expose-frontend.md
+              - page: Customize Health Probes
+                path: kubernetes/dgd-probes.md
+          - section: Observability
+            collapsed: true
             contents:
-              - page: LMCache Integration
-                path: integrations/lmcache-integration.md
-              - page: Hicache Integration
-                path: backends/sglang/sglang-hicache.md
-              - page: FlexKV Integration
-                path: integrations/flexkv-integration.md
-              - page: Custom KV Events
-                path: integrations/kv-events-custom-engines.md
-          - section: Set up Observability
+              - page: Metrics
+                path: kubernetes/observability/metrics.md
+              - page: Logging
+                path: kubernetes/observability/logging.md
+              - page: Operator Metrics
+                path: kubernetes/observability/operator-metrics.md
+
+      - section: Local Deployment
+        collapsed: true
+        contents:
+          - page: Quickstart
+            path: getting-started/local-installation.md
+          - page: Building from Source
+            path: getting-started/building-from-source.md
+          - page: Minikube Setup
+            path: kubernetes/deployment/minikube.md
+          - page: vLLM Deployments
+            path: backends/vllm/vllm-examples.md
+          - page: SGLang Deployments
+            path: backends/sglang/sglang-examples.md
+          - page: TRT-LLM Deployments
+            path: backends/trtllm/trtllm-examples.md
+          - section: Observability Setup
             collapsed: true
             contents:
               - page: Overview
@@ -158,12 +188,24 @@ navigation:
                 path: observability/tracing.md
               - page: Logging
                 path: observability/logging.md 
-          - section: Applications
+          - section: KV Cache Offloading
             contents:
-              - page: Agents
-                path: agents/README.md
-              - page: Multimodal Serving
-                path: features/multimodal/README.md
+              - page: LMCache Integration
+                path: integrations/lmcache-integration.md
+              - page: Hicache Integration
+                path: backends/sglang/sglang-hicache.md
+              - page: FlexKV Integration
+                path: integrations/flexkv-integration.md
+              - page: Custom KV Events
+                path: integrations/kv-events-custom-engines.md
+
+  - tab: well-lit-paths
+    layout:
+      # ==================== Well-Lit Paths ====================
+      - section: Well-Lit Paths
+        contents:
+          - page: Overview
+            path: well-lit-paths/README.md
 
   - tab: recipes
     layout:
@@ -204,28 +246,95 @@ navigation:
 
   - tab: developer-guide
     layout:
-    # ==================== Local Deployment ====================
-      - section: Local Deployment
-        collapsed: true
+      # ==================== Deep Dive by Use Case ====================
+      - section: Deep Dive by Use Case
         contents:
-          - page: Quickstart
-            path: getting-started/local-installation.md
-          - page: Building from Source
-            path: getting-started/building-from-source.md
-          - page: vLLM Deployments
-            path: backends/vllm/vllm-examples.md
-          - page: SGLang Deployments
-            path: backends/sglang/sglang-examples.md
-          - page: TRT-LLM Deployments
-            path: backends/trtllm/trtllm-examples.md
-          # - section: Observability Setup
-          #   collapsed: true
-          #   contents:
-          #     - page: Overview
-          #       path: observability/README.md
-          #     - page: Prometheus + Grafana
-          #       path: observability/prometheus-grafana.md
-        
+          - section: Tool Calling & Reasoning
+            slug: parsing
+            path: tool-calling/parsing.md
+            contents:
+              - page: Tool Call Parsing
+                path: tool-calling/README.md
+              - page: Reasoning Parsing
+                path: reasoning/README.md
+              - page: Parser Engine Fallback
+                path: tool-calling/engine-fallback.md
+              - page: Parser Configuration
+                path: tool-calling/parser-configuration.md
+              - page: Tool Calling Probe Snapshot (1.2)
+                path: tool-calling/release-1.2-probe-snapshot.md
+              - page: Troubleshooting Tool Calls
+                path: tool-calling/troubleshooting.md
+          - page: Fastokens Tokenizer
+            path: features/tokenizer/README.md
+          - page: LoRA Adapters
+            path: features/lora/README.md
+          - section: Fault Tolerance
+            contents:
+              - page: Overview
+                path: fault-tolerance/README.md
+              - page: Request Migration
+                path: fault-tolerance/request-migration.md
+              - page: Request Cancellation
+                path: fault-tolerance/request-cancellation.md
+              - page: Request Rejection
+                path: fault-tolerance/request-rejection.md
+              - page: Graceful Shutdown
+                path: fault-tolerance/graceful-shutdown.md
+              - page: Testing
+                path: fault-tolerance/testing.md
+          - section: Inference Simulation (DynoSim)
+            slug: dynosim
+            path: dynosim/README.md
+            contents:
+              - page: Live Simulation with Mocker
+                path: dynosim/mocker.md
+              - page: Simulation Runs
+                path: dynosim/runs.md
+              - page: Simulation Sweeps
+                path: dynosim/sweeps.md
+              - page: Planner Simulation Benchmarking
+                path: dynosim/planner-benchmarking.md
+          - section: Agents
+            slug: agents
+            path: agents/README.md
+            contents:
+              - page: SGLang for Agentic Workloads
+                path: backends/sglang/agents.md
+              - page: Agent Tracing
+                path: agents/agent-tracing.md
+              - page: Agent Hints
+                path: agents/agent-hints.md
+              - page: Use Pi-Mono with Dynamo
+                path: agents/pi-mono.md
+              - page: ThunderAgent Program Scheduler
+                path: agents/thunderagent-router.md
+          - section: Multimodal
+            contents:
+              - page: Overview
+                path: features/multimodal/README.md
+              - page: Embedding Cache
+                path: features/multimodal/embedding-cache.md
+              - page: Encoder Disaggregation
+                path: features/multimodal/encoder-disaggregation.md
+              - page: Multimodal KV Routing
+                path: features/multimodal/multimodal-kv-routing.md
+          - section: Diffusion (Preview)
+            slug: diffusion
+            contents:
+              - page: Overview
+                path: features/diffusion/README.md
+              - page: FastVideo
+                slug: fastvideo
+                path: features/diffusion/fastvideo.md
+              - page: vLLM-Omni
+                path: backends/vllm/vllm-omni.md
+              - page: SGLang Diffusion
+                path: backends/sglang/sglang-diffusion.md
+              - page: TRT-LLM Diffusion
+                path: backends/trtllm/trtllm-diffusion.md
+          # TODO: add Reinforcement Learning (RL) use-case docs here when available.
+
       # ==================== Knowledge Base ====================
       - section: Knowledge Base
         contents:
@@ -382,15 +491,6 @@ navigation:
                     path: kubernetes/shadow-engine-failover.md
                   - page: Disagg Communication
                     path: kubernetes/disagg-communication-guide.md
-              - section: Observability
-                collapsed: true
-                contents:
-                  - page: Metrics
-                    path: kubernetes/observability/metrics.md
-                  - page: Logging
-                    path: kubernetes/observability/logging.md
-                  - page: Operator Metrics
-                    path: kubernetes/observability/operator-metrics.md
               - section: Multinode
                 collapsed: true
                 contents:
@@ -404,38 +504,6 @@ navigation:
                     path: kubernetes/topology-aware-kv-transfer.md
                   - page: LWS
                     path: kubernetes/lws.md
-              - section: Cloud Providers
-                collapsed: true
-                contents:
-                  - section: AWS
-                    collapsed: true
-                    contents:
-                      - page: EKS Setup
-                        path: kubernetes/cloud-providers/eks/eks.md
-                      - page: EFA (RDMA over AWS Fabric)
-                        path: kubernetes/cloud-providers/eks/efa.md
-                      - page: EFS
-                        path: kubernetes/cloud-providers/eks/efs.md
-                      - page: ECS
-                        path: kubernetes/cloud-providers/ecs/ecs.md
-                  - section: Azure
-                    collapsed: true
-                    contents:
-                      - page: AKS Setup
-                        path: kubernetes/cloud-providers/aks/aks.md
-                      - page: RDMA / InfiniBand
-                        path: kubernetes/cloud-providers/aks/rdma-infiniband.md
-                      - page: AKS Storage
-                        path: kubernetes/cloud-providers/aks/storage.md
-                      - page: Azure Lustre CSI Driver
-                        path: kubernetes/cloud-providers/aks/azure-lustre-csi.md
-                      - page: Spot VMs
-                        path: kubernetes/cloud-providers/aks/spot-vms.md
-                  - section: GCP
-                    collapsed: true
-                    contents:
-                      - page: GKE Setup
-                        path: kubernetes/cloud-providers/gke/gke.md
           - section: Design Documents
             collapsed: true
             contents:
@@ -454,95 +522,6 @@ navigation:
                     path: design-docs/request-plane.md
                   - page: Event Plane
                     path: design-docs/event-plane.md
-      # ==================== Use Cases ====================
-      - section: Features
-        contents:
-          # - page: "Overview"
-          #   path: features/README.md
-          - section: Agents
-            slug: agents
-            path: agents/README.md
-            contents:
-              - page: SGLang for Agentic Workloads
-                path: backends/sglang/agents.md
-              - page: Agent Tracing
-                path: agents/agent-tracing.md
-              - page: Agent Hints
-                path: agents/agent-hints.md
-              - page: Use Pi-Mono with Dynamo
-                path: agents/pi-mono.md
-              - page: ThunderAgent Program Scheduler
-                path: agents/thunderagent-router.md
-          - section: Tool Calling & Reasoning
-            slug: parsing
-            path: tool-calling/parsing.md
-            contents:
-              - page: Tool Call Parsing
-                path: tool-calling/README.md
-              - page: Reasoning Parsing
-                path: reasoning/README.md
-              - page: Parser Engine Fallback
-                path: tool-calling/engine-fallback.md
-              - page: Parser Configuration
-                path: tool-calling/parser-configuration.md
-              - page: Tool Calling Probe Snapshot (1.2)
-                path: tool-calling/release-1.2-probe-snapshot.md
-              - page: Troubleshooting Tool Calls
-                path: tool-calling/troubleshooting.md
-          - page: Fastokens Tokenizer
-            path: features/tokenizer/README.md
-          - page: LoRA Adapters
-            path: features/lora/README.md
-          - section: Fault Tolerance
-            contents:
-              - page: Overview
-                path: fault-tolerance/README.md
-              - page: Request Migration
-                path: fault-tolerance/request-migration.md
-              - page: Request Cancellation
-                path: fault-tolerance/request-cancellation.md
-              - page: Request Rejection
-                path: fault-tolerance/request-rejection.md
-              - page: Graceful Shutdown
-                path: fault-tolerance/graceful-shutdown.md
-              - page: Testing
-                path: fault-tolerance/testing.md
-          - section: Inference Simulation (DynoSim)
-            slug: dynosim
-            path: dynosim/README.md
-            contents:
-              - page: Live Simulation with Mocker
-                path: dynosim/mocker.md
-              - page: Simulation Runs
-                path: dynosim/runs.md
-              - page: Simulation Sweeps
-                path: dynosim/sweeps.md
-              - page: Planner Simulation Benchmarking
-                path: dynosim/planner-benchmarking.md
-          - section: Multimodal
-            contents:
-              - page: Overview
-                path: features/multimodal/README.md
-              - page: Embedding Cache
-                path: features/multimodal/embedding-cache.md
-              - page: Encoder Disaggregation
-                path: features/multimodal/encoder-disaggregation.md
-              - page: Multimodal KV Routing
-                path: features/multimodal/multimodal-kv-routing.md
-          - section: Diffusion (Preview)
-            slug: diffusion
-            contents:
-              - page: Overview
-                path: features/diffusion/README.md
-              - page: FastVideo
-                slug: fastvideo
-                path: features/diffusion/fastvideo.md
-              - page: vLLM-Omni
-                path: backends/vllm/vllm-omni.md
-              - page: SGLang Diffusion
-                path: backends/sglang/sglang-diffusion.md
-              - page: TRT-LLM Diffusion
-                path: backends/trtllm/trtllm-diffusion.md
       - section: Advanced Customizations
         contents:
           - page: Building from Source
@@ -559,8 +538,6 @@ navigation:
                 path: development/custom-containers.md
           - page: Metrics Developer Guide
             path: observability/metrics-developer-guide.md
-          - page: Minikube Setup
-            path: kubernetes/deployment/minikube.md
           - page: Developing with Tilt
             path: kubernetes/tilt-dev-setup.md
       # # ==================== Integrations ====================
@@ -614,6 +591,32 @@ navigation:
                 path: features/speculative-decoding/README.md
               - page: Speculative Decoding with vLLM
                 path: features/speculative-decoding/speculative-decoding-vllm.md
+
+  - tab: blog
+    layout:
+      # ==================== Blog ====================
+      - section: Blog
+        path: digest/index.mdx
+        slug: digest
+        contents:
+          - page: "Flash Indexer: Inter-Galactic KV Routing"
+            path: digest/flash-indexer/flash-indexer.md
+            slug: flash-indexer
+          - page: "Full-Stack Optimizations for Agentic Inference"
+            path: digest/agentic-inference/agentic-inference.md
+            slug: agentic-inference
+          - page: "Multi-Turn Agentic Harnesses"
+            path: digest/agentic-inference/agentic-harnesses.md
+            slug: agentic-harnesses
+          - page: "DynoSim: Simulating the Pareto Frontier"
+            path: digest/dynosim/dynosim-pareto-frontier.md
+            slug: dynosim-pareto-frontier
+          - page: "NVIDIA Dynamo Snapshot: Fast Startup for Inference Workloads on Kubernetes"
+            path: digest/snapshot/dynamo-snapshot-fast-startup.md
+            slug: dynamo-snapshot-fast-startup
+          - page: "Dynamo Day 0 support for TokenSpeed"
+            path: digest/tokenspeed/tokenspeed-day-0.md
+            slug: tokenspeed-day-0
 
   - tab: community
     layout:
