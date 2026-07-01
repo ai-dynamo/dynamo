@@ -3139,6 +3139,91 @@ mod strip_tests {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "mm-routing")]
+    fn multimodal_test_model() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/TinyLlama_v1.1");
+        for filename in ["config.json", "tokenizer.json", "tokenizer_config.json"] {
+            std::fs::copy(fixture.join(filename), directory.path().join(filename)).unwrap();
+        }
+
+        let config_path = directory.path().join("config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        config["model_type"] = serde_json::json!("llava");
+        config["image_token_index"] = serde_json::json!(99);
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+        let tokenizer_config_path = directory.path().join("tokenizer_config.json");
+        let mut tokenizer_config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&tokenizer_config_path).unwrap()).unwrap();
+        tokenizer_config["chat_template"] =
+            serde_json::json!("{% for message in messages %}{{ message['content'] }}{% endfor %}");
+        std::fs::write(
+            tokenizer_config_path,
+            serde_json::to_vec(&tokenizer_config).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("preprocessor_config.json"), "{}").unwrap();
+        directory
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[tokio::test]
+    async fn gather_multimodal_data_installs_routing_and_hashes_atomically() {
+        const IMAGE_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+        let model_dir = multimodal_test_model();
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_dir.path(), None).unwrap();
+        mdc.kv_cache_block_size = 4;
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "llava-test",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {"url": IMAGE_DATA_URL}
+                }]
+            }]
+        }))
+        .unwrap();
+
+        let mut success = preprocessor.builder(&request).unwrap();
+        success.token_ids(vec![99]);
+        preprocessor
+            .gather_multi_modal_data(&request, &mut success, None, &[99])
+            .await
+            .unwrap();
+        let success = success.build().unwrap();
+        assert!(success.mm_routing_info.is_some());
+        assert_eq!(
+            success
+                .extra_args
+                .as_ref()
+                .and_then(|args| args.get("mm_hashes"))
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let mut fallback = preprocessor.builder(&request).unwrap();
+        fallback.token_ids(vec![42]);
+        preprocessor
+            .gather_multi_modal_data(&request, &mut fallback, None, &[42])
+            .await
+            .unwrap();
+        let fallback = fallback.build().unwrap();
+        assert!(fallback.mm_routing_info.is_none());
+        assert!(
+            fallback
+                .extra_args
+                .as_ref()
+                .is_none_or(|args| args.get("mm_hashes").is_none())
+        );
+    }
+
     #[test]
     fn routing_priorities_keep_strict_tier_independent() {
         let hints = crate::protocols::common::extensions::AgentHints {
