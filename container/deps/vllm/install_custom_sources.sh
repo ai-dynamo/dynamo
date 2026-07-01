@@ -517,7 +517,7 @@ if [[ -n "${VLLM_GIT_URL:-}" || -n "${FLASHINFER_GIT_URL:-}" ]]; then
     apt-get update
     packages=(ca-certificates git)
     if [[ "${VLLM_INSTALL_MODE}" == "full-source" ]]; then
-        packages+=(build-essential curl libibverbs-dev)
+        packages+=(build-essential curl libibverbs-dev unzip)
     fi
     if [[ -n "${FLASHINFER_GIT_URL:-}" ]]; then
         cuda_version_rest="${CUDA_VERSION#*.}"

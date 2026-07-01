@@ -711,6 +711,9 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         )
         self.assertIn("VLLM_NCCL_VERSION=2.29.7", installer)
         self.assertIn(
+            "packages+=(build-essential curl libibverbs-dev unzip)", installer
+        )
+        self.assertIn(
             'if [ -f "${NCCL_CHECKPOINT_SHIM}" ]; then',
             dockerfile,
         )
