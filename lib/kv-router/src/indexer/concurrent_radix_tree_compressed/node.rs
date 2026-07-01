@@ -34,6 +34,8 @@ fn record_last_matched_hash(
 #[derive(Debug)]
 pub(super) struct Node {
     shape_gate: RwLock<()>,
+    /// NOTE(concurrency): This is a post-commit validation token, not a seqlock.
+    /// Node state and children do not share one immutable publication boundary.
     shape_version: AtomicU64,
     /// Sticky logical-internal marker. Once true, this node is treated as
     /// internal even if cleanup removes all physical children later.
@@ -103,6 +105,9 @@ impl Node {
         children: FxHashMap<LocalBlockHash, SharedNode>,
     ) -> Self {
         let internal = !children.is_empty();
+        // NOTE(perf): Reducing child-map sharding substantially lowered memory
+        // usage but regressed throughput. Treat custom sharding as an explicit
+        // memory tradeoff rather than a throughput optimization.
         let children_map = DashMap::with_hasher(FxBuildHasher);
         for (key, child) in children {
             children_map.insert(key, child);
@@ -121,6 +126,9 @@ impl Node {
         &self,
         plan: impl FnOnce(&NodeState, &NodeChildren, u64) -> R,
     ) -> Option<R> {
+        // NOTE(perf): Replacing these shape-gated reads with state-only snapshots
+        // was neutral or regressive, and profiling did not identify the RwLock
+        // as a hotspot. Re-profile before removing this shape read.
         let _gate = self.shape_gate.read();
         let shape_version = self.shape_version.load(Ordering::Acquire);
         let state = self.state.read();
@@ -404,6 +412,8 @@ impl Node {
         blocks: &[KvCacheStoredBlockData],
     ) -> ParentEdgeAction {
         match plan.action {
+            // NOTE(perf): Removing this validation did not produce a repeatable
+            // benefit and regressed scaled cumulative workloads.
             ParentEdgePlanAction::InsertFromParent => self
                 .validate_shape_read(plan.shape_version, || {
                     ParentEdgeAction::InsertFromParent(None)
@@ -416,6 +426,9 @@ impl Node {
                     }
                 })
                 .unwrap_or(ParentEdgeAction::Stale),
+            // NOTE(perf): An additional sticky-internal rejection before this
+            // commit did not improve throughput. The check inside the gate
+            // closes the split race.
             ParentEdgePlanAction::ReuseSuffixAndExtendLeaf { append_start } => self
                 .apply_edge_shape_update(plan.shape_version, |state, _children| {
                     if !self.internal.load(Ordering::Acquire) {
