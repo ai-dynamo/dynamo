@@ -194,7 +194,9 @@ def crate_exists(raw_base: str, name: str, version: str, token: str) -> bool:
         return False
 
 
-def publish(manifest: str, alias: str, env: dict) -> None:
+def publish(manifest: str, alias: str, env: dict) -> str:
+    # Returns 'published' / 'already' (both => on the registry, i.e. staged) or
+    # 'skipped' (dep not yet indexed => NOT staged).
     for attempt in range(1, 4):
         r = subprocess.run(
             ["cargo", "publish", "--allow-dirty", "--no-verify",
@@ -205,10 +207,13 @@ def publish(manifest: str, alias: str, env: dict) -> None:
         sys.stderr.write(r.stderr)
         out = r.stdout + r.stderr
         if r.returncode == 0:
-            return
-        if ALREADY.search(out) or "no matching package named" in out:
-            print(f"  -> {manifest}: skip ({'already present' if ALREADY.search(out) else 'dep not yet indexed'})")
-            return
+            return "published"
+        if ALREADY.search(out):
+            print(f"  -> {manifest}: skip (already present)")
+            return "already"
+        if "no matching package named" in out:
+            print(f"  -> {manifest}: skip (dep not yet indexed)")
+            return "skipped"
         if RETRYABLE.search(out) and attempt < 3:
             print(f"  -> transient error, retry in 10s ({attempt}/3)")
             time.sleep(10)
@@ -264,9 +269,17 @@ def main() -> int:
     only = args.only.strip()
     if only and only != "all":
         selected = {c.strip() for c in only.split(",") if c.strip()}
+        # The --only list is a curated wishlist that may name crates absent on the
+        # branch being staged (the workspace graph differs across release branches).
+        # Drop those with a warning rather than failing the whole run; closure is then
+        # checked on what actually exists here.
         unknown = selected - set(pkgs)
         if unknown:
-            print(f"::error::unknown crate(s) {sorted(unknown)}; publishable: {sorted(pkgs)}", file=sys.stderr)
+            print(f"::warning::skipping requested crate(s) not publishable on this branch: "
+                  f"{sorted(unknown)} (branch publishable set: {sorted(pkgs)})", file=sys.stderr)
+            selected -= unknown
+        if not selected:
+            print("::error::none of the requested crates are publishable on this branch", file=sys.stderr)
             return 1
         gaps = {n: sorted({d["name"] for d in pkgs[n]["dependencies"]
                            if d["name"] in pkgs and d["name"] != n and d.get("kind") != "dev"} - selected)
@@ -326,6 +339,7 @@ def main() -> int:
     subprocess.run(["cargo", "update", "tokio", "--precise", "1.43.0"], cwd=root, env=env)
 
     published = skipped = 0
+    staged: list[str] = []
     for name in order:
         p = pkgs[name]
         manifest, version = p["manifest_path"], p["version"]
@@ -333,14 +347,22 @@ def main() -> int:
         if crate_exists(raw_base, name, version, token):
             print(f"  -> {name} {version} already on the registry (skip)")
             skipped += 1
+            staged.append(name)
+            print(f"STAGED_CRATE={name}", flush=True)  # captured by the staging job
             continue
         if subprocess.run(["cargo", "check", "--manifest-path", manifest], cwd=root, env=env).returncode != 0:
             print(f"::error::cargo check failed for {manifest}", file=sys.stderr)
             return 1
-        publish(manifest, args.registry, env)
-        published += 1
+        status = publish(manifest, args.registry, env)
+        if status in ("published", "already"):
+            published += 1
+            staged.append(name)
+            print(f"STAGED_CRATE={name}", flush=True)  # captured by the staging job
+        else:
+            print(f"::warning::{name} {version} not staged ({status})", file=sys.stderr)
 
-    print(f"Done: {len(order)} crates ({published} published, {skipped} already present).")
+    print(f"Done: {len(order)} crates ({published} published, {skipped} already present, {len(staged)} staged).")
+    print(f"STAGED_CRATES={','.join(staged)}")
     return 0
 
 

@@ -33,6 +33,16 @@ on:
         required: false
         type: string
         default: ''
+      rc_round:
+        description: 'Internal staging RC round (the rc suffix on the NGC/helm/crate staging versions + wheel subpath, so re-stages do not collide on the immutable registries). NO GitHub tag is created. Default 2.'
+        required: false
+        type: string
+        default: '2'
+      rc_sub:
+        description: 'Sub-increment within the RC round (0 = none). >0 appends a second dotted level, e.g. round 2 + sub 1 -> rc.2.1 (a numerically-ordered SemVer pre-release). Default 0.'
+        required: false
+        type: string
+        default: '0'
       containers:
         description: 'Containers to release: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner,snapshot.'
         required: false
@@ -124,15 +134,15 @@ jobs:
           SELECTION: ${{ inputs.selection }}
           CONTAINERS: ${{ inputs.containers || 'all' }}
           WHEELS: ${{ inputs.wheels || 'all' }}
-          # MAX publishable set = the full dependency closure of the intended public
-          # crates (runtime, memory, tokens, kv-router, protocols, parsers, llm, mocker),
-          # all at 1.3.0. Includes the transitive deps (rl, kv-hashing, data-gen, renderer,
-          # tokenizers, kvbm-*) since --only is strict/dependency-closed. dynamo-mocker's
-          # aiconfigurator-core git dep is stripped at publish by stage_crates.py
-          # (strip_git_deps). Excludes kvbm-consolidator (still 1.2.0 -> would trip the
-          # expect-version gate) and the non-public bench/ext-proc/backend-common crates.
-          # 'dynamo-configs' is not a workspace crate (no such package).
-          CRATES: ${{ inputs.crates || 'dynamo-runtime,dynamo-memory,dynamo-tokens,dynamo-protocols,dynamo-parsers,dynamo-tokenizers,dynamo-renderer,dynamo-kv-hashing,dynamo-kv-router,dynamo-rl,dynamo-data-gen,kvbm-common,kvbm-config,kvbm-kernels,kvbm-logical,kvbm-physical,kvbm-engine,dynamo-mocker,dynamo-llm' }}
+          # Stage ALL publishable workspace crates ('all' = the max). A hardcoded
+          # "public-only" list is infeasible: dynamo-llm depends on dynamo-bench
+          # (lib/llm/Cargo.toml), so excluding bench breaks the dependency closure, and
+          # the publishable graph differs across release branches (e.g. release/1.3.0 has
+          # no dynamo-parsers/protocols/renderer/tokenizers). stage_crates.py publishes
+          # the full publishable set for whichever branch it runs on, topo-ordered, with
+          # dynamo-mocker's aiconfigurator-core git dep stripped at publish (strip_git_deps);
+          # the expect-version gate guards against any crate not at the release version.
+          CRATES: ${{ inputs.crates || 'all' }}
           HELM: ${{ inputs.helm || 'all' }}
         run: |
           set -euo pipefail
@@ -334,36 +344,33 @@ jobs:
           echo "is_test=${IS_TEST}" >> "$GITHUB_OUTPUT"
           echo "Prepared ${BRANCH} @ $(git rev-parse HEAD) (is_test=${IS_TEST}, existed=${EXISTED})"
 
-      - name: Compute and tag internal staging rc
+      - name: Resolve internal staging rc
         id: rc
-        # A dry run sets up the branch/bump only — don't consume an rc or push a tag.
+        # A dry run sets up the branch/bump only — don't consume an rc.
         if: ${{ !inputs.dry_run }}
         env:
-          RELEASE_VERSION: ${{ inputs.release_version || '1.3.0' }}
-          BUMP_SHA: ${{ steps.bump.outputs.bump_sha }}
+          RC_ROUND: ${{ inputs.rc_round || '2' }}
+          RC_SUB: ${{ inputs.rc_sub || '0' }}
         run: |
           set -euo pipefail
           # Internal staging registries (crates/helm/wheels) are immutable, so each
-          # (re-)stage of the same version needs a distinct rc. Count existing
-          # v<version>-rc<N> tags, take the next N, and tag THIS bump commit so the
-          # next stage increments. GA promotion (GitLab) still uses the clean version.
-          # The 'origin' remote is already authed with the app token from checkout.
-          git fetch --tags --quiet origin || true
-          EXISTING=$(git tag -l "v${RELEASE_VERSION}-rc*" | grep -E "^v${RELEASE_VERSION}-rc[0-9]+$" | sort -V || true)
-          if [ -z "${EXISTING}" ]; then
-            NEXT_RC=0
-          else
-            LAST="$(echo "${EXISTING}" | tail -1)"
-            NEXT_RC=$(( ${LAST##*-rc} + 1 ))
-          fi
-          TAG="v${RELEASE_VERSION}-rc${NEXT_RC}"
-          git tag "${TAG}" "${BUMP_SHA}"
-          if ! git push origin "${TAG}"; then
-            echo "::error::failed to push tag ${TAG} (the release branch was already pushed). The release App may lack permission to create v* tags — check tag protection / rulesets."
+          # (re-)stage of the same version needs a distinct rc. We take the rc as an
+          # INPUT (no GitHub tag is created): a round plus an optional sub-increment.
+          # Downstream builds X.Y.Z-rc.<round>[.<sub>] — a SemVer pre-release whose
+          # dot-separated numeric identifiers order correctly (rc.2.9 < rc.2.10 <
+          # rc.10.0). GA promotion (GitLab) still uses the clean version.
+          if ! [[ "${RC_ROUND}" =~ ^[0-9]+$ ]]; then
+            echo "::error::rc_round must be a non-negative integer (got '${RC_ROUND}')"
             exit 1
           fi
-          echo "rc_number=${NEXT_RC}" >> "$GITHUB_OUTPUT"
-          echo "Internal staging rc=${NEXT_RC} (tagged ${TAG} -> ${BUMP_SHA})"
+          if ! [[ "${RC_SUB}" =~ ^[0-9]+$ ]]; then
+            echo "::error::rc_sub must be a non-negative integer (got '${RC_SUB}')"
+            exit 1
+          fi
+          # sub 0 = no sub-increment (RC = "<round>"); sub >0 => RC = "<round>.<sub>".
+          if [ "${RC_SUB}" -eq 0 ]; then RC="${RC_ROUND}"; else RC="${RC_ROUND}.${RC_SUB}"; fi
+          echo "rc_number=${RC}" >> "$GITHUB_OUTPUT"
+          echo "Internal staging rc=${RC} (no GitHub tag created)"
 
   # ============================================================================
   # WAIT FOR POST-MERGE BUILDS (not tests)

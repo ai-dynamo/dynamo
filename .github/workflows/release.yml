@@ -240,30 +240,34 @@ jobs:
           fi
 
           if [[ "${ON_DEMAND}" == "true" ]]; then
-            # Internal staging carries an auto-incrementing rc disambiguator: the
-            # crate/helm registries are immutable, so each re-stage of the same
-            # version needs a distinct internal version. GA stays clean — the GitLab
-            # trigger forwards RELEASE_VERSION=${VERSION} + RC_NUMBER and promotes the
-            # rc-staged artifacts to the clean version.
+            # Internal staging carries an rc disambiguator: the crate/helm registries
+            # are immutable, so each re-stage of the same version needs a distinct
+            # internal version. GA stays clean — the GitLab trigger forwards
+            # RELEASE_VERSION=${VERSION} + RC_NUMBER and promotes the rc-staged
+            # artifacts to the clean version.
             #   NGC tag (docker string): ${VERSION}-rcN     (e.g. 0.1.0-rc0, 0.1.0.dev3-rc0)
             #   helm + crate (SemVer):   ${SEMVER_BASE}-rcN  where .devN/.postN become a
             #                            -devN/-postN pre-release (e.g. 0.1.0-rc0, 0.1.0-post3-rc0)
             #   wheel: clean version, disambiguated by the rcN upload subpath.
-            # Computed by on-demand-release.yml from the v<version>-rc* tags. Require
-            # it (don't default to 0) so a broken hand-off fails loud instead of
-            # silently colliding on rc0.
+            # Passed through from on-demand-release.yml's rc_number INPUT (default rc2;
+            # NO GitHub tag is created). Require it (don't default to 0) so a broken
+            # hand-off fails loud instead of silently colliding on rc0.
             RC_NUM="${INPUT_RC_NUMBER}"
-            if ! [[ "${RC_NUM}" =~ ^[0-9]+$ ]]; then
-              echo "Error: on_demand requires a non-negative integer rc_number (got '${RC_NUM}')"
+            # RC_NUM is <round> or <round>.<sub> (dotted sub-increment). Both form a
+            # valid, numerically-ordered SemVer pre-release when emitted as ...-rc.<RC_NUM>
+            # (e.g. 1.3.0-rc.2 or 1.3.0-rc.2.1). The wheel subpath uses the glued rc<RC_NUM>
+            # (a path segment, not a version) — no SemVer/PEP440 constraint there.
+            if ! [[ "${RC_NUM}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+              echo "Error: on_demand requires rc_number as <round> or <round>.<sub> (got '${RC_NUM}')"
               exit 1
             fi
             SEMVER_BASE=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)\.(.+)/\1-\2/')
             echo "rc_number=${RC_NUM}" >> $GITHUB_OUTPUT
-            echo "ngc_version_tag=${VERSION}-rc${RC_NUM}" >> $GITHUB_OUTPUT
-            echo "helm_chart_version=${SEMVER_BASE}-rc${RC_NUM}" >> $GITHUB_OUTPUT
+            echo "ngc_version_tag=${VERSION}-rc.${RC_NUM}" >> $GITHUB_OUTPUT
+            echo "helm_chart_version=${SEMVER_BASE}-rc.${RC_NUM}" >> $GITHUB_OUTPUT
             echo "wheel_version=${BASE_VERSION}" >> $GITHUB_OUTPUT
-            echo "crate_version=${SEMVER_BASE}-rc${RC_NUM}" >> $GITHUB_OUTPUT
-            echo "On-demand internal staging (rc${RC_NUM}): NGC ${VERSION}-rc${RC_NUM}, helm ${SEMVER_BASE}-rc${RC_NUM}, wheel ${BASE_VERSION} @ rc${RC_NUM}, crate ${SEMVER_BASE}-rc${RC_NUM}"
+            echo "crate_version=${SEMVER_BASE}-rc.${RC_NUM}" >> $GITHUB_OUTPUT
+            echo "On-demand internal staging (rc.${RC_NUM}): NGC ${VERSION}-rc.${RC_NUM}, helm ${SEMVER_BASE}-rc.${RC_NUM}, wheel ${BASE_VERSION} @ rc${RC_NUM}, crate ${SEMVER_BASE}-rc.${RC_NUM}"
             exit 0
           fi
 
@@ -319,6 +323,12 @@ jobs:
     if: ${{ needs.prepare-release.result == 'success' && !(needs.prepare-release.outputs.on_demand == 'true' && inputs.containers == 'none' && inputs.helm == 'none') }}
     runs-on: prod-builder-amd-v1 # TODO: needs to identify the correct runner here, definitely should not be prod-builder-amd-v1
     environment: automated-release
+    outputs:
+      # Comma-separated NGC image refs (repo:tag, no registry prefix) actually copied
+      # to NGC — primary version tags + -efa variants only (the -cuda13 digest aliases
+      # and floating :nightly tags are dropped: same image, not worth a second scan).
+      # Forwarded to GitLab as STAGED_CONTAINERS for nspect registration.
+      staged_containers: ${{ steps.copy_images.outputs.staged_containers }}
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
@@ -613,6 +623,23 @@ jobs:
           echo "successful_count=${#SUCCESSFUL_COPIES[@]}" >> $GITHUB_OUTPUT
           echo "failed_count=${#FAILED_COPIES[@]}" >> $GITHUB_OUTPUT
 
+          # Staged container refs for nspect: repo:tag labels only (NO registry/org —
+          # that's a secret; GitLab prefixes with its own NGC base). Keep primary version
+          # tags + -efa; drop -cuda13 digest aliases and floating :nightly* (same image).
+          STAGED_CTRS=""
+          for L in "${SUCCESSFUL_COPIES[@]:-}"; do
+            [ -z "${L}" ] && continue
+            case "${L}" in *-cuda13|*:nightly) continue ;; esac
+            [ -n "${STAGED_CTRS}" ] && STAGED_CTRS="${STAGED_CTRS},"
+            STAGED_CTRS="${STAGED_CTRS}${L}"
+          done
+          echo "staged_containers=${STAGED_CTRS}" >> $GITHUB_OUTPUT
+          {
+            echo "### Staged containers (repo:tag)"
+            echo ""
+            echo "\`${STAGED_CTRS:-<none>}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
           printf '%s\n' "${SUCCESSFUL_COPIES[@]}" > /tmp/successful_copies.txt
           printf '%s\n' "${FAILED_COPIES[@]}" > /tmp/failed_copies.txt 2>/dev/null || true
 
@@ -796,6 +823,10 @@ jobs:
     if: ${{ needs.prepare-release.result == 'success' && !(needs.prepare-release.outputs.on_demand == 'true' && inputs.wheels == 'none') }}
     runs-on: prod-tester-amd-v1
     environment: automated-release
+    outputs:
+      # Comma-separated wheel FILENAMES actually uploaded (NO Artifactory URL — that's a
+      # secret; GitLab prefixes with its own WHEEL_URL_PREFIX). For nspect registration.
+      staged_wheels: ${{ steps.upload_wheels.outputs.staged_wheels }}
     env:
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
       NIGHTLY: ${{ needs.prepare-release.outputs.nightly }}
@@ -981,6 +1012,7 @@ jobs:
           fi
 
       - name: Upload wheels to Artifactory
+        id: upload_wheels
         env:
           ARTIFACTORY_URL: ${{ secrets.ARTIFACTORY_URL }}
           ARTIFACTORY_USER: ${{ secrets.ARTIFACTORY_USER }}
@@ -1018,6 +1050,7 @@ jobs:
             exit 1
           fi
 
+          STAGED_WHEELS=""  # filenames actually uploaded (for nspect; URL stays secret)
           for WHEEL in "${WHEELS[@]}"; do
             WHEEL_FILENAME=$(basename "${WHEEL}")
             # On-demand wheel subset filter (nightly/rc keep all: WHEEL_SUBSET=all).
@@ -1045,8 +1078,12 @@ jobs:
             fi
             echo "Uploaded: ${WHEEL_FILENAME} -> ${TARGET_URL}"
             echo "| \`${WHEEL_FILENAME}\` | ${TARGET_URL} |" >> $GITHUB_STEP_SUMMARY
+            [ -n "${STAGED_WHEELS}" ] && STAGED_WHEELS="${STAGED_WHEELS},"
+            STAGED_WHEELS="${STAGED_WHEELS}${WHEEL_FILENAME}"
             rm -f "${BODY_FILE}"
           done
+
+          echo "staged_wheels=${STAGED_WHEELS}" >> "$GITHUB_OUTPUT"
 
   # ARTIFACTORY STAGING: publish workspace crates to the Artifactory cargo registry
   # (from ARTIFACTORY_CARGO_INDEX), dependency-ordered. Artifactory only, never crates.io.
@@ -1060,6 +1097,10 @@ jobs:
     if: ${{ needs.prepare-release.result == 'success' && needs.prepare-release.outputs.on_demand == 'true' && inputs.crates != 'none' && inputs.crates != '' }}
     runs-on: prod-builder-amd-v1
     environment: automated-release
+    outputs:
+      # Comma-separated crate names actually staged to the cargo registry (set even on
+      # partial failure). Forwarded to GitLab as STAGED_CRATES for nspect registration.
+      staged_crates: ${{ steps.publish_crates.outputs.staged_crates }}
     env:
       COMMIT_SHA: ${{ needs.prepare-release.outputs.commit_sha }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -1112,6 +1153,7 @@ jobs:
           fi
 
       - name: Publish crates to Artifactory cargo registry (inside build image)
+        id: publish_crates
         env:
           ARTIFACTORY_TOKEN: ${{ secrets.ARTIFACTORY_TOKEN }}
           ARTIFACTORY_CARGO_INDEX: ${{ secrets.ARTIFACTORY_CARGO_INDEX }}
@@ -1122,7 +1164,9 @@ jobs:
           STAGE_VERSION: ${{ needs.prepare-release.outputs.crate_version }}
           CRATE_SUBSET: ${{ inputs.crates }}
         run: |
-          set -euo pipefail
+          # NOTE: no `set -e` — we must capture the staged-crate list and set the job
+          # output even when the publish fails partway, then exit with docker's real code.
+          set -uo pipefail
           # Run stage_crates.py inside the ECR build image: repo mounted at /work, cargo uses
           # the image toolchain, root so it can write Cargo.lock/.cargo and the target dir.
           docker run --rm --user 0:0 \
@@ -1138,7 +1182,21 @@ jobs:
             -e STAGE_VERSION \
             -e CRATE_SUBSET \
             "${ECR_IMAGE}" \
-            bash -lc 'python3 .ondemand-tools/.github/scripts/stage_crates.py --registry artifactory --only "${CRATE_SUBSET}"'
+            bash -lc 'python3 .ondemand-tools/.github/scripts/stage_crates.py --registry artifactory --only "${CRATE_SUBSET}"' \
+            2>&1 | tee /tmp/stage_crates.log
+          rc="${PIPESTATUS[0]}"
+
+          # stage_crates.py prints one `STAGED_CRATE=<name>` line per crate actually on the
+          # registry (incl. partial runs). Collect them into a comma-separated job output.
+          STAGED="$(sed -n 's/^STAGED_CRATE=//p' /tmp/stage_crates.log | paste -sd, - || true)"
+          echo "staged_crates=${STAGED}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Staged crates"
+            echo ""
+            echo "\`${STAGED:-<none>}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          echo "Staged crates: ${STAGED:-<none>}"
+          exit "${rc}"
 
   # Combined NGC + Artifactory staging reply on the nightly thread.
   notify-slack-staging:
@@ -1235,8 +1293,13 @@ jobs:
 
   trigger-gitlab-release-pipeline:
     name: Trigger GitLab Release Pipeline
+    # Wait for staging (incl. stage-crates) to FINISH, but fire even if a staging job
+    # FAILED — the GitLab pipeline + the manual approval gate are the real publish gates.
+    # !cancelled() overrides the implicit needs-success() so a failed/skipped stage-crates
+    # (or release-publish/stage-wheels) doesn't block the trigger; prepare-release must
+    # still succeed (it supplies the version/tag the trigger forwards).
     needs: [prepare-release, release-publish, stage-wheels-artifactory, stage-crates-artifactory]
-    if: ${{ inputs.skip_gitlab_pipeline != true }}
+    if: ${{ !cancelled() && needs.prepare-release.result == 'success' && inputs.skip_gitlab_pipeline != true }}
     runs-on:
       group: gitlab_ci_runners
     environment: automated-release
@@ -1265,6 +1328,13 @@ jobs:
           WHEEL_SUBSET:         ${{ inputs.wheels }}
           CRATE_SUBSET:         ${{ inputs.crates }}
           HELM_SUBSET:          ${{ inputs.helm }}
+          # Artifacts ACTUALLY staged (names/filenames only — URLs/registry/org are secrets,
+          # GitLab re-prefixes with its own bases). Forwarded so GitLab's nspect step
+          # registers exactly what landed, not what was requested. Empty if a stage was
+          # skipped or failed wholesale.
+          STAGED_CRATES:        ${{ needs.stage-crates-artifactory.outputs.staged_crates }}
+          STAGED_CONTAINERS:    ${{ needs.release-publish.outputs.staged_containers }}
+          STAGED_WHEELS:        ${{ needs.stage-wheels-artifactory.outputs.staged_wheels }}
           # Forwarded so the GitLab pipeline can reply on the same thread.
           SLACK_THREAD_TS:      ${{ inputs.slack_thread_ts }}
           SLACK_CHANNEL_ID:     ${{ secrets.SLACK_RELEASE_CHANNEL_ID }}
@@ -1341,6 +1411,9 @@ jobs:
             --form "variables[WHEEL_SUBSET]=${WHEEL_SUBSET}" \
             --form "variables[CRATE_SUBSET]=${CRATE_SUBSET}" \
             --form "variables[HELM_SUBSET]=${HELM_SUBSET}" \
+            --form "variables[STAGED_CRATES]=${STAGED_CRATES}" \
+            --form "variables[STAGED_CONTAINERS]=${STAGED_CONTAINERS}" \
+            --form "variables[STAGED_WHEELS]=${STAGED_WHEELS}" \
             --form "variables[ENABLE_PULSE_SCAN]=true" \
             --form "variables[ENABLE_WHEEL_SCAN]=true" \
             --form "variables[ENABLE_CRATE_SCAN]=${ENABLE_CRATE_SCAN}" \
