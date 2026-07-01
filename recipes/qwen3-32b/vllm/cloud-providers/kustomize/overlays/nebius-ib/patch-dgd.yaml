@@ -16,34 +16,6 @@ spec:
             - &nebiusSocket
               name: NCCL_SOCKET_IFNAME
               value: eth0
-            - name: MODEL_NAME
-              value: Qwen/Qwen3-32B
-            - name: SERVED_MODEL_NAME
-              value: Qwen/Qwen3-32B
-            - name: TENSOR_PARALLEL_SIZE
-              value: "4"
-            - name: GPU_MEMORY_UTILIZATION
-              value: "0.90"
-            - name: BLOCK_SIZE
-              value: "64"
-            - name: HF_OVERRIDES
-              value: '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
-            - name: MAX_MODEL_LEN
-              value: "131072"
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "y"
-            - name: NIXL_TELEMETRY_EXPORTER
-              value: prometheus
-            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-              value: "19090"
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
-            - name: HF_HOME
-              value: /model-cache
-            - name: VLLM_LOGGING_LEVEL
-              value: INFO
-            - name: NCCL_DEBUG
-              value: WARN
           volumeMounts: &ibVolumeMounts
             - name: model-cache
               mountPath: /model-cache
@@ -77,34 +49,6 @@ spec:
             - *nebiusSocket
             - name: UCX_RNDV_THRESH
               value: "8192"
-            - name: MODEL_NAME
-              value: Qwen/Qwen3-32B
-            - name: SERVED_MODEL_NAME
-              value: Qwen/Qwen3-32B
-            - name: TENSOR_PARALLEL_SIZE
-              value: "4"
-            - name: GPU_MEMORY_UTILIZATION
-              value: "0.90"
-            - name: BLOCK_SIZE
-              value: "64"
-            - name: HF_OVERRIDES
-              value: '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
-            - name: MAX_MODEL_LEN
-              value: "131072"
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "y"
-            - name: NIXL_TELEMETRY_EXPORTER
-              value: prometheus
-            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-              value: "19090"
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
-            - name: HF_HOME
-              value: /model-cache
-            - name: VLLM_LOGGING_LEVEL
-              value: INFO
-            - name: NCCL_DEBUG
-              value: WARN
           volumeMounts: *ibVolumeMounts
         volumes: *ibVolumes
       resources:
