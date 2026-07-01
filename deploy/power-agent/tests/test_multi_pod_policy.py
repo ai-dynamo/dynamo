@@ -129,7 +129,7 @@ class TestMultiPodPolicy(unittest.TestCase):
         self.assertEqual(self.m.multi_pod_agree, 1)
 
     def test_multipod_missing_annotation_on_one_pod_is_conflict(self):
-        """Per PR9790 Codex adversarial review (finding #2).
+        """A pod missing the annotation makes the GPU a conflict.
 
         Pre-fix the resolver filtered None values BEFORE computing the
         agree-set, so a GPU shared by pod A (cap 480) and pod B (no

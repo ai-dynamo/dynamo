@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the v1.6 actuator wiring in `PowerAgent._reconcile_gpu`.
+"""Unit tests for the actuator wiring in `PowerAgent._reconcile_gpu`.
 
-Pre-v1.6 the reconcile loop hard-coded `pynvml.nvmlDeviceGetHandleByIndex`
+An earlier reconcile loop hard-coded `pynvml.nvmlDeviceGetHandleByIndex`
 and the module-level `_apply_cap(handle, ...)` — so `agent.actuator=dcgm`
 only affected cold-start orphan recovery; steady-state cap writes silently
 used NVML regardless of actuator selection. That was the load-bearing bug
-in review comment #4.
+these tests guard against.
 
-v1.6 routes `_reconcile_gpu` through `self._actuator.list_running_pids`
+`_reconcile_gpu` routes through `self._actuator.list_running_pids`
 and `self._actuator.apply_cap`. This file pins that contract:
 
   - PID enumeration goes through the actuator (so DcgmActuator's UUID-
@@ -30,6 +30,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import power_agent
+from actuator import _GpuIdentityMismatch
 from power_agent import PowerAgent
 
 
@@ -44,7 +45,7 @@ def _make_agent_with_actuator(actuator):
 
 
 class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
-    """The four wiring guarantees from v1.6."""
+    """The four actuator-wiring guarantees."""
 
     def setUp(self):
         power_agent._managed_gpu_indices.clear()
@@ -59,9 +60,11 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
         with patch.object(power_agent, "pynvml", mock_nvml):
             agent._reconcile_gpu(3, {})
 
-        actuator.list_running_pids.assert_called_once_with(3)
+        actuator.list_running_pids.assert_called_once_with(
+            3, expected_uuid=actuator.get_uuid.return_value
+        )
         # CRITICAL: raw NVML must NOT be touched for PID enumeration.
-        # Pre-v1.6 the inline path called nvmlDeviceGetHandleByIndex +
+        # An earlier inline path called nvmlDeviceGetHandleByIndex +
         # nvmlDeviceGetComputeRunningProcesses; if either re-appears the
         # actuator's UUID-keyed identity map is bypassed and PID reads
         # land on the wrong physical GPU.
@@ -80,7 +83,7 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
 
     def test_non_k8s_pids_skip_apply_cap(self):
         """PIDs that don't resolve to a pod UID (e.g. host daemons) don't
-        trigger an apply_cap. Same behaviour as pre-v1.6."""
+        trigger an apply_cap."""
         actuator = MagicMock()
         actuator.list_running_pids.return_value = [9999]
         agent = _make_agent_with_actuator(actuator)
@@ -92,12 +95,12 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
         actuator.apply_cap.assert_not_called()
 
     def test_apply_cap_goes_through_actuator_with_resolved_watts(self):
-        """The load-bearing test for review comment #4.
+        """The load-bearing test for actuator-routed cap writes.
 
-        Pre-v1.6 the cap write was `_apply_cap(handle, gpu_idx, cap_w, metrics)`
+        An earlier cap write was `_apply_cap(handle, gpu_idx, cap_w, metrics)`
         — module-level NVML, ignoring `self._actuator`. Setting
         `agent.actuator=dcgm` was therefore a no-op for the steady-state
-        cap path. This test pins the v1.6 contract: the actuator
+        cap path. This test pins the contract: the actuator
         receives the apply_cap call directly.
         """
         actuator = MagicMock()
@@ -111,12 +114,14 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
             ):
                 agent._reconcile_gpu(2, {"pod-uid-1": "350"})
 
-        actuator.apply_cap.assert_called_once_with(2, 350)
+        actuator.apply_cap.assert_called_once_with(
+            2, 350, expected_uuid=actuator.get_uuid.return_value
+        )
         # No module-level _apply_cap, no raw NVML write.
         # (We can't easily assert _apply_cap wasn't called because it's
         # a module function, but the actuator.apply_cap call is the
-        # positive proof — if _apply_cap had run too, the test for
-        # comment #8 (double clamp) would catch the doubling.)
+        # positive proof — if _apply_cap had run too, the double-clamp
+        # test would catch the doubling.)
 
     def test_safe_default_used_when_annotation_is_none(self):
         """Pod has no annotation → safe_default_watts via actuator."""
@@ -132,7 +137,88 @@ class TestReconcileGpuRoutesViaActuator(unittest.TestCase):
             ):
                 agent._reconcile_gpu(0, {"pod-uid-1": None})
 
-        actuator.apply_cap.assert_called_once_with(0, 450)
+        actuator.apply_cap.assert_called_once_with(
+            0, 450, expected_uuid=actuator.get_uuid.return_value
+        )
+
+    def test_identity_captured_before_pid_snapshot_and_threaded_to_apply_cap(self):
+        """The GPU identity that anchors the policy decision
+        must be read BEFORE the PID snapshot that produces the cap, and passed
+        into apply_cap so the actuator can re-verify it at write time. This
+        pins the call ORDER (get_uuid → list_running_pids) and the threading
+        (apply_cap receives that exact UUID), closing the window where a DCGM
+        reconnect between attribution and apply_cap's own capture could apply
+        one GPU's workload-derived cap to another."""
+        actuator = MagicMock()
+        actuator.get_uuid.return_value = "GPU-A-uuid"
+        actuator.list_running_pids.return_value = [1234]
+        agent = _make_agent_with_actuator(actuator)
+
+        call_order: list[str] = []
+        actuator.get_uuid.side_effect = lambda idx: (
+            call_order.append("get_uuid") or "GPU-A-uuid"
+        )
+        actuator.list_running_pids.side_effect = lambda idx, expected_uuid=None: (
+            call_order.append("list_running_pids") or [1234]
+        )
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with patch(
+                "power_agent._extract_pod_uid_from_cgroup",
+                return_value="pod-uid-1",
+            ):
+                agent._reconcile_gpu(0, {"pod-uid-1": "350"})
+
+        # Identity read strictly precedes the PID snapshot.
+        self.assertEqual(call_order[:2], ["get_uuid", "list_running_pids"])
+        # …and that same identity is threaded into the cap write.
+        actuator.apply_cap.assert_called_once_with(0, 350, expected_uuid="GPU-A-uuid")
+
+    def test_unreadable_identity_skips_reconcile_fail_closed(self):
+        """If the anchoring identity cannot be read, we can
+        neither attribute PIDs nor a cap to this index safely, so the whole
+        GPU is skipped this cycle — no PID snapshot, no cap write — and retried
+        next reconcile. Fail closed rather than attribute against an unknown
+        GPU."""
+        actuator = MagicMock()
+        actuator.get_uuid.side_effect = RuntimeError("hostengine reconnecting")
+        actuator.list_running_pids.return_value = [1234]
+        agent = _make_agent_with_actuator(actuator)
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with patch(
+                "power_agent._extract_pod_uid_from_cgroup",
+                return_value="pod-uid-1",
+            ):
+                agent._reconcile_gpu(0, {"pod-uid-1": "350"})
+
+        actuator.list_running_pids.assert_not_called()
+        actuator.apply_cap.assert_not_called()
+
+    def test_pid_snapshot_identity_mismatch_skips_reconcile_fail_closed(self):
+        """The PID snapshot is bound to the anchored
+        identity. If the actuator cannot attribute PIDs to that GPU (a DCGM
+        re-enumeration moved the index / the anchored GPU vanished), it raises
+        `_GpuIdentityMismatch`; the reconcile must then skip the GPU this cycle
+        — no cap derived from another GPU's workload is written."""
+        actuator = MagicMock()
+        actuator.get_uuid.return_value = "GPU-A-uuid"
+        actuator.list_running_pids.side_effect = _GpuIdentityMismatch(
+            "anchored UUID no longer resolvable"
+        )
+        agent = _make_agent_with_actuator(actuator)
+
+        with patch.object(power_agent, "pynvml", MagicMock()):
+            with patch(
+                "power_agent._extract_pod_uid_from_cgroup",
+                return_value="pod-uid-1",
+            ):
+                agent._reconcile_gpu(0, {"pod-uid-1": "350"})
+
+        actuator.list_running_pids.assert_called_once_with(
+            0, expected_uuid="GPU-A-uuid"
+        )
+        actuator.apply_cap.assert_not_called()
 
 
 class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
@@ -203,7 +289,9 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
             f"Expected dedup to one pod entry; got {pod_annotations!r}",
         )
         self.assertEqual(pod_annotations[0], ("pod-tp3", "400"))
-        actuator.apply_cap.assert_called_once_with(0, 400)
+        actuator.apply_cap.assert_called_once_with(
+            0, 400, expected_uuid=actuator.get_uuid.return_value
+        )
 
     def test_one_pod_multi_pid_does_not_bump_multi_pod_counter(self):
         """End-to-end through the real resolver: a single pod with
@@ -229,7 +317,9 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
         # Single-pod path → agree counter STAYS at zero.
         self.assertEqual(agent.metrics.multi_pod_agree, 0)
         self.assertEqual(agent.metrics.multi_pod_conflict, 0)
-        actuator.apply_cap.assert_called_once_with(0, 350)
+        actuator.apply_cap.assert_called_once_with(
+            0, 350, expected_uuid=actuator.get_uuid.return_value
+        )
 
     def test_two_pods_with_multiple_pids_each_counts_as_two(self):
         """Genuine multi-pod-per-GPU topology: two pods, each with
@@ -253,7 +343,9 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
 
         # Genuine multi-pod-agree → counter ticks once (not twice).
         self.assertEqual(agent.metrics.multi_pod_agree, 1)
-        actuator.apply_cap.assert_called_once_with(0, 400)
+        actuator.apply_cap.assert_called_once_with(
+            0, 400, expected_uuid=actuator.get_uuid.return_value
+        )
 
     def test_two_disagreeing_pods_each_multi_pid_still_resolves_to_safe_default(
         self,
@@ -277,14 +369,16 @@ class TestReconcileGpuDedupesByPodUid(unittest.TestCase):
             with patch("power_agent._extract_pod_uid_from_cgroup", side_effect=cgroup):
                 agent._reconcile_gpu(0, {"pod-A": "300", "pod-B": "600"})
 
-        actuator.apply_cap.assert_called_once_with(0, 500)
+        actuator.apply_cap.assert_called_once_with(
+            0, 500, expected_uuid=actuator.get_uuid.return_value
+        )
         self.assertEqual(agent.metrics.multi_pod_conflict, 1)
         # Critical: conflict tick ONCE, not once-per-PID.
         self.assertEqual(agent.metrics.safe_default_applied, 1)
 
 
 class TestListPodsOnNodeReturnsNoneOnError(unittest.TestCase):
-    """Per PR9790 Codex adversarial review (finding #3), unified with the
+    """Regression guard, unified with the
     PR #9682-reviewed contract.
 
     Pre-fix `_list_pods_on_node` swallowed every API error with
@@ -342,6 +436,8 @@ class TestReconcileOnceK8sListFailure(unittest.TestCase):
     def _make_agent(self):
         agent = object.__new__(PowerAgent)
         agent._actuator = MagicMock()
+        # reconcile_once re-snapshots the count from the actuator each cycle.
+        agent._actuator.device_count.return_value = 4
         agent.metrics = MagicMock()
         agent.safe_default_watts = 500
         agent.device_count = 4
@@ -389,7 +485,7 @@ class TestReconcileOnceK8sListFailure(unittest.TestCase):
 
 
 class TestReconcileGpuPolicyResolution(unittest.TestCase):
-    """The v1.6 wiring must preserve the multi-pod-per-GPU resolution
+    """The actuator wiring must preserve the multi-pod-per-GPU resolution
     contract (`_resolve_cap_for_gpu`). Two pods that agree → use that
     value; two pods that disagree → safe default."""
 
@@ -408,7 +504,9 @@ class TestReconcileGpuPolicyResolution(unittest.TestCase):
             with patch("power_agent._extract_pod_uid_from_cgroup", side_effect=cgroup):
                 agent._reconcile_gpu(0, {"pod-A": "400", "pod-B": "400"})
 
-        actuator.apply_cap.assert_called_once_with(0, 400)
+        actuator.apply_cap.assert_called_once_with(
+            0, 400, expected_uuid=actuator.get_uuid.return_value
+        )
 
     def test_two_pods_disagree_uses_safe_default(self):
         actuator = MagicMock()
@@ -423,7 +521,9 @@ class TestReconcileGpuPolicyResolution(unittest.TestCase):
             with patch("power_agent._extract_pod_uid_from_cgroup", side_effect=cgroup):
                 agent._reconcile_gpu(0, {"pod-A": "300", "pod-B": "600"})
 
-        actuator.apply_cap.assert_called_once_with(0, 500)
+        actuator.apply_cap.assert_called_once_with(
+            0, 500, expected_uuid=actuator.get_uuid.return_value
+        )
 
 
 if __name__ == "__main__":

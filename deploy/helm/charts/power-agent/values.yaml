@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Power Agent — per-node NVML power-cap enforcement DaemonSet.
+# Power Agent — per-node GPU power-cap enforcement DaemonSet (NVML or DCGM
+# actuator; see agent.actuator below).
 
 image:
   repository: nvcr.io/nvidia/ai-dynamo/power-agent
@@ -30,11 +31,15 @@ imagePullSecrets: []
 #   - name: ngc-secret
 
 agent:
-  # Per-SKU safety floor. The agent falls back to this when:
-  #   - A multi-pod-per-GPU conflict cannot agree on a single cap.
-  #   - A pod is missing the dynamo.nvidia.com/gpu-power-limit annotation
-  #     but is running on a GPU the agent previously managed.
-  # Recommended: ~70% of the SKU's TDP.
+  # Per-SKU safety floor. The agent applies this cap to an opted-in GPU (one
+  # whose pod carries dynamo.nvidia.com/gpu-power-limit) when the annotated
+  # value cannot be used:
+  #   - A single opted-in pod whose annotation value is empty or non-integer.
+  #   - A multi-pod-per-GPU conflict that cannot agree on one parseable cap.
+  # A GPU running ONLY pods without the annotation is out of scope: if this
+  # agent previously capped it, the cap is released back to the GPU's factory
+  # default (not this floor); otherwise the GPU is left untouched.
+  # Recommended: ~70% of the SKU's default TGP.
   #   H200 SXM → 500    H100 SXM → 490    A100 SXM (80GB) → 280
   safeDefaultWatts: 500
   # NOTE: the agent's reconcile interval is currently a hardcoded module
@@ -48,10 +53,13 @@ agent:
   # per chart install.
   #
   #   nvml (default) — Power Agent calls nvmlDeviceSetPowerManagementLimit
-  #                    directly. Use on clusters where the GPU Operator
+  #                    directly and never loads or connects to DCGM at
+  #                    runtime. Use on clusters where the GPU Operator
   #                    runs with dcgm.enabled=false (the upstream
-  #                    default). No DCGM dependency, smaller image,
-  #                    PR #9682 behaviour exactly.
+  #                    default). Same image as dcgm mode — the DCGM
+  #                    bindings + libdcgm.so are always baked in (see
+  #                    deploy/power-agent/Dockerfile); they simply stay
+  #                    unused on this path. PR #9682 behaviour exactly.
   #
   #   dcgm — Power Agent connects standalone-TCP to the
   #          operator-managed nvidia-dcgm hostengine and routes cap
@@ -60,6 +68,11 @@ agent:
   #          already running). DO NOT install this chart in actuator:
   #          dcgm mode on a cluster without nvidia-dcgm — agent.init()
   #          will fail fast at startup.
+  #          REQUIRES a DCGM 4.x hostengine: the image bakes DCGM 4.x
+  #          Python bindings and DcgmActuator uses c_dcgmDeviceConfig_v2,
+  #          which has no 3.x fallback. Match the operator's nvidia-dcgm
+  #          major version to the bundled bindings (DCGM guarantees compat
+  #          within a major, not across); a 3.x hostengine is unsupported.
   #
   # Operator warning: any secondary writer to nvmlDeviceSetPowerManagementLimit
   # or dcgmConfigSet (regardless of which library it uses) will cause
@@ -80,23 +93,19 @@ agent:
     # no NetworkPolicy blocking egress to gpu-operator/*).
     host: nvidia-dcgm.gpu-operator.svc.cluster.local
     port: 5555
-    # When true, call dcgmConfigEnforce after every dcgmConfigSet.
-    # Registers the cap as DCGM's "target configuration" so the
-    # hostengine re-applies it automatically after a GPU reset or
-    # reinit (DcgmConfigManager.h:113-117). This is the ONLY
-    # automatic re-enforcement DCGM provides — there is no
-    # tick-driven re-enforce loop in DCGM source. Specifically:
-    #   - The cap does NOT survive Power Agent restart on either
-    #     enforce setting (SIGTERM restores default regardless).
-    #   - External `nvidia-smi -pl` clobbering is repaired only on
-    #     the Power Agent's next 15-s reconcile, same as NVML.
-    # Default false (set-and-forget; matches NVML's semantics) so
-    # operators moving from NVML to DCGM see identical observable
-    # behaviour by default. Set true on sites that see frequent GPU
-    # resets (XID-driven recovery, partition rebuilds, manual
-    # `nvidia-smi --gpu-reset`). Cost: one extra DCGM RPC per agent
-    # reconcile per GPU.
-    enforce: false
+    # NOTE: The Power Agent issues ONLY dcgmConfigSet — never the
+    # dcgmConfigEnforce manual re-assert. dcgmConfigSet already records the
+    # cap as DCGM's "target configuration", and DCGM automatically re-applies
+    # that target after a GPU reset or reinitialization on its own (per the
+    # DCGM Configuration API). dcgmConfigEnforce is only a MANUAL re-assert of
+    # that already-set target; issued right after Set it re-applies a value
+    # that is already current, so it is redundant. An earlier revision exposed
+    # it behind an `enforce` flag; that flag was removed as dead config. Notes:
+    #   - The cap does NOT survive Power Agent restart (SIGTERM restores
+    #     default regardless).
+    #   - External `nvidia-smi -pl` clobbering is repaired on the Power
+    #     Agent's next 15-s reconcile (which re-issues dcgmConfigSet),
+    #     same as NVML.
 
 # NVIDIA container toolkit needs both runtimeClassName: nvidia AND
 # NVIDIA_VISIBLE_DEVICES=all to inject libnvidia-ml.so AND expose every GPU
@@ -156,7 +165,8 @@ rbac:
   #         so power_agent.py uses `list_namespaced_pod` instead of its
   #         default `list_pod_for_all_namespaces`. Without that flag the
   #         agent would 403 on every reconcile against the namespace-only
-  #         token. See templates/daemonset.yaml and power_agent.py:438-446.
+  #         token. See templates/daemonset.yaml and power_agent.py
+  #         `_list_pods_on_node`.
   # false → ClusterRole + ClusterRoleBinding; agent sees all pods on its
   #         node across every namespace. `--namespace` is NOT passed.
   # Default matches today's raw-YAML behaviour (cluster-scoped). Dev mode
@@ -168,7 +178,7 @@ daemonset:
   enabled: true
 
   # Conservative default by design: when a Power Agent restarts, the GPUs
-  # on its node have no NVML cap enforcement until it comes back. If the
+  # on its node have no power-cap enforcement until it comes back. If the
   # planner just emitted new annotations expecting them to apply, that
   # propagation stalls. `maxUnavailable: 1` ensures only one node's worth
   # of GPUs ever loses enforcement at a time.

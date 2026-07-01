@@ -238,38 +238,12 @@ Pod objects (no leftover ImagePullBackOff, no leftover RBAC).
 {{- end -}}
 
 {{/*
-Validate agent.dcgm.enforce. Catches boolean typos (e.g.
---set agent.dcgm.enforce=treu) at `helm install` / `helm template`
-time, so an operator doesn't lose an image-pull + container-start
-round-trip discovering it via argparse's exit-with-error path.
-
-The allowlist mirrors `power_agent._parse_bool_strict` so the chart
-and the CLI agree on what's accepted. Comparison is case-insensitive
-because Helm preserves user casing when stringifying YAML values
-(`enforce: True` → "True", `--set …=TRUE` → "TRUE"); both are
-expected to work.
-
-Only validates when actuator=dcgm — the flag is only rendered onto
-the pod command line in that case, so a stray value when
-actuator=nvml is harmless (won't reach argparse).
-*/}}
-{{- define "power-agent.validateEnforce" -}}
-{{- if eq (.Values.agent.actuator | default "") "dcgm" -}}
-{{- $e := .Values.agent.dcgm.enforce | toString | lower | trim -}}
-{{- $allowed := list "true" "1" "yes" "on" "false" "0" "no" "off" -}}
-{{- if not (has $e $allowed) -}}
-{{- fail (printf "agent.dcgm.enforce must be one of %v (case-insensitive); got %q. The Power Agent's --dcgm-enforce CLI flag uses the same allowlist (power_agent._parse_bool_strict)." $allowed .Values.agent.dcgm.enforce) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
 Effective RBAC scope.
 
 Dev mode pins to one node and one namespace, so cluster-wide pod-listing
 RBAC would be excessive. The agent's --namespace CLI flag
-(power_agent.py:541-546) already constrains its pod queries to a single
-namespace when set; the dev-pod template passes --namespace=$(POD_NAMESPACE)
+(power_agent.py `_list_pods_on_node`) already constrains its pod queries to a
+single namespace when set; the dev-pod template passes --namespace=$(POD_NAMESPACE)
 via the downward API. This helper makes the RBAC default match the agent's
 actual reach in dev mode.
 

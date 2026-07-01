@@ -4,7 +4,7 @@
 
 """E2E parity harness: NvmlActuator vs DcgmActuator on real hardware.
 
-Verifies the v1.4 design's central claim: that against real GPUs,
+Verifies the actuator abstraction's central claim: that against real GPUs,
 both actuator paths produce observably identical results. Specifically:
 
   1. device_count returns the same number of GPUs.
@@ -24,9 +24,6 @@ operational tests):
 
   * Multi-pod conflict resolution / annotation parsing — needs a K8s
     API, out of scope for actuator-only parity.
-  * dcgmConfigEnforce re-assertion semantics — needs a clobbering
-    test (e.g. `nvidia-smi -pl` mid-test) plus a wait loop; left for
-    a follow-up live-node test.
   * Stale-handle recovery — restarting the hostengine mid-test is a
     multi-pod orchestration concern, covered by unit tests.
 
@@ -354,11 +351,6 @@ def main():
         default=5555,
     )
     parser.add_argument(
-        "--enforce",
-        action="store_true",
-        help="Pass enforce=True to DcgmActuator (test the dcgmConfigEnforce path).",
-    )
-    parser.add_argument(
         "--tolerance-watts",
         type=float,
         default=2.0,
@@ -420,11 +412,11 @@ def main():
         return 2
 
     # Import the actuators only after sys.path is set up (above).
-    # Initialize NVML once. NvmlActuator.init() is a no-op by design
-    # (PR A contract: PowerAgent.__init__ owns the nvmlInit call); when
-    # we drive the actuator directly here, we have to do it ourselves.
-    # nvmlInit is idempotent, so even if DcgmActuator also touches NVML
-    # under the hood (via list_running_pids), this stays safe.
+    # This probe drives the actuators directly (via probe()) rather than
+    # through their init()/shutdown() lifecycle, and probe() needs NVML for
+    # list_running_pids on BOTH paths, so we init NVML once here ourselves.
+    # nvmlInit is idempotent, so this stays safe even though NvmlActuator.init()
+    # / DcgmActuator.init() would also init NVML if they were called.
     import pynvml
     from actuator import DcgmActuator, NvmlActuator
 
@@ -450,13 +442,11 @@ def main():
         if not args.skip_dcgm:
             print(
                 f"\nRunning DcgmActuator probe ("
-                f"hostengine={args.hostengine_host}:{args.hostengine_port}, "
-                f"enforce={args.enforce})..."
+                f"hostengine={args.hostengine_host}:{args.hostengine_port})..."
             )
             dcgm = DcgmActuator(
                 host=args.hostengine_host,
                 port=args.hostengine_port,
-                enforce=args.enforce,
                 metrics=metrics,
             )
             try:

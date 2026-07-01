@@ -57,16 +57,12 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].command
           content: --dcgm-port=5555
-      - contains:
-          path: spec.template.spec.containers[0].command
-          content: --dcgm-enforce=false
 
-  - it: should plumb custom dcgm.host / dcgm.port / dcgm.enforce when overridden
+  - it: should plumb custom dcgm.host / dcgm.port when overridden
     set:
       agent.actuator: dcgm
       agent.dcgm.host: dcgm-custom.example.svc.cluster.local
       agent.dcgm.port: 9999
-      agent.dcgm.enforce: true
     asserts:
       - contains:
           path: spec.template.spec.containers[0].command
@@ -74,9 +70,6 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].command
           content: --dcgm-port=9999
-      - contains:
-          path: spec.template.spec.containers[0].command
-          content: --dcgm-enforce=true
 
   - it: should NOT emit dcgm flags when actuator=nvml (no dead args)
     set:
@@ -92,9 +85,6 @@ tests:
       - notContains:
           path: spec.template.spec.containers[0].command
           content: --dcgm-port=5555
-      - notContains:
-          path: spec.template.spec.containers[0].command
-          content: --dcgm-enforce=false
 
   # --- Validation failures: typos must surface at template time ---
 

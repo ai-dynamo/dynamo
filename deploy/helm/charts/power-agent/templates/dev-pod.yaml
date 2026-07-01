@@ -1,7 +1,6 @@
 {{- include "power-agent.validateDevImageTag" . -}}
 {{- include "power-agent.validateMutex" . -}}
 {{- include "power-agent.validateActuator" . -}}
-{{- include "power-agent.validateEnforce" . -}}
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -10,8 +9,10 @@
 # externally-created ConfigMap, pinned to one GPU node (dev.nodeName)
 # and one namespace (Release.Namespace).
 #
-# PREREQUISITE (verified by validateMutex; failure mode is a Pending Pod
-# with `MountVolume.SetUp failed`):
+# PREREQUISITE (NOT validated by Helm — validateMutex only checks
+# daemonset/dev exclusivity, not this ConfigMap's existence. If it is
+# missing, Kubernetes surfaces it later as a Pending Pod with
+# `MountVolume.SetUp failed` for volume "script"):
 #
 #   kubectl create configmap {{ .Values.dev.scriptConfigMap }} \
 #     --from-file=power_agent.py=deploy/power-agent/power_agent.py \
@@ -42,7 +43,7 @@ spec:
   serviceAccountName: {{ include "power-agent.serviceAccountName" . }}
   hostPID: true                          # /proc/{pid}/cgroup readback
   restartPolicy: Never                   # let it stay Failed if it crashes so we can read logs
-  terminationGracePeriodSeconds: 30      # SIGTERM handler restores TGP
+  terminationGracePeriodSeconds: 30      # graceful shutdown restores TGP
   runtimeClassName: {{ .Values.runtimeClassName | quote }}
   nodeName: {{ .Values.dev.nodeName | quote }}
   {{- with .Values.tolerations }}
@@ -73,8 +74,7 @@ spec:
             --prometheus-port={{ .Values.agent.prometheusPort }} \
             --actuator={{ .Values.agent.actuator }}{{- if eq .Values.agent.actuator "dcgm" }} \
             --dcgm-host={{ .Values.agent.dcgm.host }} \
-            --dcgm-port={{ .Values.agent.dcgm.port }} \
-            --dcgm-enforce={{ .Values.agent.dcgm.enforce }}{{- end }}
+            --dcgm-port={{ .Values.agent.dcgm.port }}{{- end }}
       env:
         - name: NODE_NAME
           valueFrom:

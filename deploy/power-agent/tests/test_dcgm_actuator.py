@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""PR B — DcgmActuator tests.
+"""DcgmActuator tests.
 
 Asserts the DCGM path's hostengine interactions, deliberately
 asymmetric reads (NVML for PIDs, DCGM for caps), and stale-handle
@@ -14,11 +14,12 @@ recovery against a fully-mocked pydcgm surface. Test scope:
     (reads MIN=161 + MAX=162), list_running_pids (uses NVML, NOT DCGM
     — the most load-bearing test in this file).
   * Write surface: apply_cap clamps the request, writes the
-    `c_dcgmDeviceConfig_v2.mPowerLimit.val`, optionally calls
-    Enforce(), updates module-level managed-state, and bumps
-    apply_failures_total on hostengine errors.
+    `c_dcgmDeviceConfig_v2.mPowerLimit.val` via dcgmConfigSet ONLY (the
+    agent never issues the redundant dcgmConfigEnforce re-assert), updates
+    module-level managed-state, and bumps apply_failures_total on
+    hostengine errors.
   * restore_default reads DCGM_FI_DEV_POWER_MGMT_LIMIT_DEF (field 163,
-    not MAX=162) — guards against the v1.3-era latent bug.
+    not MAX=162) — guards against reading the wrong power-limit field.
   * Stale-handle recovery: CONNECTION_NOT_VALID triggers single retry
     after rebuilding handle + flushing group cache. Other DCGMErrors
     propagate without retry.
@@ -36,7 +37,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import power_agent
-from actuator import Actuator, DcgmActuator
+from actuator import Actuator, DcgmActuator, _GpuIdentityMismatch
 
 # ---------------------------------------------------------------------------
 # Mock factories. Centralised so individual tests stay short and the shape of
@@ -107,7 +108,7 @@ def _make_dcgm_modules():
     # the upstream pydcgm bindings — see
     # /shared/pydcgm/dcgmvalue.py:17 in the DCGM 4.5.3 release.
     # apply_cap reaches for `dcgmvalue.DCGM_INT32_BLANK` exactly the way
-    # the production code does after the v1.10 fix.
+    # the production code does.
     dcgmvalue = MagicMock()
     dcgmvalue.DCGM_INT32_BLANK = 0x7FFFFFF0
     dcgmvalue.DCGM_INT64_BLANK = 0x7FFFFFFFFFFFFFF0
@@ -136,7 +137,7 @@ def _make_gpu_attrs(
         `_ensure_identity_map`.
       - `.powerLimits.{cur,default,enforced,min,max}PowerLimit` —
         used by `constraints_w`, `current_w`, `default_w`
-        (the v1.10 fix consolidates all three onto this struct).
+        (all three read from this one struct).
 
     The fields are integers (watts) in the real struct
     (`c_dcgmDevicePowerLimits_v1`). Mock defaults match the values
@@ -163,8 +164,8 @@ def _wire_handle(pydcgm_mock, gpu_ids=(0, 1), uuid_by_gpu_id=None):
     `DcgmActuator.init` calls to populate `_discovered_gpu_ids`.
     `handle.GetSystem().discovery.GetGpuAttributes(gpu_id)` is the
     single device-info API used by `get_uuid`, `constraints_w`,
-    `current_w`, `default_w`, and `_ensure_identity_map` — the v1.10
-    consolidation (see `actuator.DcgmActuator._power_limits` and
+    `current_w`, `default_w`, and `_ensure_identity_map` — the
+    static-read consolidation (see `actuator.DcgmActuator._power_limits` and
     `get_uuid` docstrings for why all static reads go through this
     one struct, not through `dcgmEntityGetLatestValues`).
 
@@ -201,7 +202,7 @@ def _make_value(*, str_val=None, dbl_val=None):
 
 
 def _make_initialized_actuator(
-    modules=None, gpu_ids=(0, 1), enforce=False, metrics=None, uuid_by_gpu_id=None
+    modules=None, gpu_ids=(0, 1), metrics=None, uuid_by_gpu_id=None
 ):
     """Build + init() a DcgmActuator with a fully-wired set of mocks.
 
@@ -214,7 +215,7 @@ def _make_initialized_actuator(
     """
     modules = modules or _make_dcgm_modules()
     metrics = metrics or MagicMock()
-    actuator = DcgmActuator(host="test", port=5555, enforce=enforce, metrics=metrics)
+    actuator = DcgmActuator(host="test", port=5555, metrics=metrics)
     handle = _wire_handle(
         modules["pydcgm"], gpu_ids=gpu_ids, uuid_by_gpu_id=uuid_by_gpu_id
     )
@@ -337,6 +338,37 @@ class TestInit(unittest.TestCase):
         # dangling. DcgmHandle is the first pydcgm-touching call.
         modules["pydcgm"].DcgmHandle.assert_not_called()
 
+    def test_nvml_init_runs_once_across_reconnects(self):
+        """init() runs on EVERY `_with_reconnect` recovery, but nvmlInit is
+        refcounted and shutdown() runs once — so nvmlInit must fire at most
+        once per actuator lifetime, else each reconnect leaks an NVML refcount
+        past our single nvmlShutdown. Calling init()
+        repeatedly stands in for the reconnect-driven rebuilds."""
+        modules = _make_dcgm_modules()
+        _wire_handle(modules["pydcgm"], gpu_ids=(0, 1))
+        nvml = MagicMock()
+        actuator = DcgmActuator(host="h", port=5555, metrics=MagicMock())
+        with patch.dict("sys.modules", {**modules, "pynvml": nvml}):
+            actuator.init()
+            actuator.init()  # simulate a _with_reconnect rebuild
+            actuator.init()
+        nvml.nvmlInit.assert_called_once_with()
+
+    def test_nvml_reinitializes_after_full_shutdown(self):
+        """A paired shutdown() calls nvmlShutdown and clears the guard, so a
+        subsequent init() (a fresh lifetime) must nvmlInit again — the guard
+        prevents leaks, it must not prevent legitimate re-initialization."""
+        modules = _make_dcgm_modules()
+        _wire_handle(modules["pydcgm"], gpu_ids=(0,))
+        nvml = MagicMock()
+        actuator = DcgmActuator(host="h", port=5555, metrics=MagicMock())
+        with patch.dict("sys.modules", {**modules, "pynvml": nvml}):
+            actuator.init()
+            actuator.shutdown()
+            actuator.init()
+        self.assertEqual(nvml.nvmlInit.call_count, 2)
+        nvml.nvmlShutdown.assert_called_once()
+
 
 class TestShutdown(unittest.TestCase):
     def test_shutdown_releases_groups_handle_and_nvml(self):
@@ -441,15 +473,15 @@ class TestDeviceCount(unittest.TestCase):
 class TestGetUuid(unittest.TestCase):
     """get_uuid MUST use the synchronous device-info API.
 
-    The v1.8 implementation read UUID via `dcgmEntityGetLatestValues`
+    An earlier implementation read UUID via `dcgmEntityGetLatestValues`
     with field 54 (DCGM_FI_DEV_UUID). That pulls from DCGM's field cache,
     which only populates when *some* DCGM consumer has previously
     subscribed via `dcgmWatchFields`. On a fresh hostengine with no
     companion watcher (standalone `nv-hostengine`, or a production
     cluster whose `nvidia-dcgm-exporter` doesn't watch UUID), the
     cache returns the string-blank sentinel `<<<NULL>>>` and
-    cross-library identity mapping silently breaks. The v1.10 fix
-    routes UUID reads through `DcgmSystem.discovery.GetGpuAttributes`
+    cross-library identity mapping silently breaks. The current
+    implementation routes UUID reads through `DcgmSystem.discovery.GetGpuAttributes`
     (which wraps `dcgmGetDeviceAttributes`) — the documented
     synchronous device-info API for static descriptors.
     """
@@ -466,7 +498,7 @@ class TestGetUuid(unittest.TestCase):
         discovery.GetGpuAttributes.assert_called_with(0)
 
     def test_get_uuid_does_not_use_field_cache(self):
-        """Regression guard for the v1.10 fix.
+        """Regression guard for the field-cache-avoidance contract.
 
         Even if a future refactor adds `dcgmEntityGetLatestValues`
         calls to other DCGM methods, `get_uuid` must never request
@@ -545,7 +577,7 @@ def _wire_identity_map(modules, nvml, handle, dcgm_uuids, nvml_uuids):
 
     `handle` is the DcgmHandle mock returned by `_wire_handle` — we
     overwrite its `GetSystem().discovery.GetGpuAttributes.side_effect`
-    so the v1.10 device-info API returns the right UUID per gpu_id.
+    so the device-info API returns the right UUID per gpu_id.
     """
     # DCGM side: GetGpuAttributes(gpu_id).identifiers.uuid per discovered GPU.
     gpu_ids = handle.GetSystem.return_value.discovery.GetAllGpuIds.return_value
@@ -571,8 +603,8 @@ class TestListRunningPidsUsesNvml(unittest.TestCase):
     on the DCGM path. These tests guard that contract.
 
     Identity-map note: `list_running_pids` first builds (lazily) a
-    UUID-keyed map between DCGM gpuIds and NVML indices. As of the
-    v1.10 fix, UUID reads on the DCGM side go through
+    UUID-keyed map between DCGM gpuIds and NVML indices. UUID reads on
+    the DCGM side go through
     `DcgmSystem.discovery.GetGpuAttributes` (synchronous device-info
     API) rather than `dcgmEntityGetLatestValues` (field cache). The
     "no DCGM time-series read" guarantee is therefore: zero
@@ -607,7 +639,7 @@ class TestListRunningPidsUsesNvml(unittest.TestCase):
         # The DCGM-side UUID read goes through GetGpuAttributes (device-
         # info API), NOT dcgmEntityGetLatestValues (field cache). If any
         # call lands on the field-cache API, we've regressed either onto
-        # the v1.8 UUID-via-field-cache bug or — worse — onto the
+        # the field-cache UUID-read bug or — worse — onto the
         # time-series PID-read path this actuator deliberately avoids.
         modules["dcgm_agent"].dcgmEntityGetLatestValues.assert_not_called()
 
@@ -633,7 +665,7 @@ class TestListRunningPidsUsesNvml(unittest.TestCase):
         (index 0 → 'GPU-b', index 1 → 'GPU-a'). list_running_pids(0)
         must route the NVML handle lookup by UUID, hitting NVML
         index 1, not index 0. This is the load-bearing correctness
-        test for the v1.5 cross-library identity fix.
+        test for the cross-library identity mapping.
         """
         actuator, modules, handle, _ = _make_initialized_actuator(gpu_ids=(10, 20))
         nvml = MagicMock()
@@ -657,6 +689,53 @@ class TestListRunningPidsUsesNvml(unittest.TestCase):
         nvml.nvmlDeviceGetComputeRunningProcesses.assert_called_once_with(
             "nvml_handle_1"
         )
+
+    def test_list_running_pids_binds_to_expected_uuid(self):
+        """With `expected_uuid`, the PID snapshot is
+        attributed to THAT GPU's NVML index, not to whatever `gpu_idx`
+        currently maps to. Here gpu_idx 0 is 'GPU-a', but the caller anchored
+        'GPU-b', so the read must route to GPU-b's NVML index — otherwise a
+        re-enumeration could feed GPU-a's workload into a cap the identity
+        guard then writes onto GPU-b.
+        """
+        actuator, modules, handle, _ = _make_initialized_actuator(gpu_ids=(10, 20))
+        nvml = MagicMock()
+        _wire_identity_map(
+            modules,
+            nvml,
+            handle,
+            dcgm_uuids=[b"GPU-a", b"GPU-b"],
+            nvml_uuids=[b"GPU-a", b"GPU-b"],  # aligned
+        )
+        proc = MagicMock(pid=777)
+        nvml.nvmlDeviceGetComputeRunningProcesses.return_value = [proc]
+
+        with patch.dict("sys.modules", {**modules, "pynvml": nvml}):
+            pids = actuator.list_running_pids(0, expected_uuid="GPU-b")
+
+        self.assertEqual(pids, [777])
+        # Bound to GPU-b (NVML index 1), NOT gpu_idx 0 (GPU-a, NVML index 0).
+        nvml.nvmlDeviceGetComputeRunningProcesses.assert_called_once_with(
+            "nvml_handle_1"
+        )
+
+    def test_list_running_pids_raises_on_unresolvable_expected_uuid(self):
+        """If the anchored UUID is no longer visible to NVML (re-enumeration or
+        hot-unplug), fail closed with `_GpuIdentityMismatch` so the caller skips
+        this cycle instead of attributing a different GPU's PIDs."""
+        actuator, modules, handle, _ = _make_initialized_actuator(gpu_ids=(10, 20))
+        nvml = MagicMock()
+        _wire_identity_map(
+            modules,
+            nvml,
+            handle,
+            dcgm_uuids=[b"GPU-a", b"GPU-b"],
+            nvml_uuids=[b"GPU-a", b"GPU-b"],
+        )
+
+        with patch.dict("sys.modules", {**modules, "pynvml": nvml}):
+            with self.assertRaises(_GpuIdentityMismatch):
+                actuator.list_running_pids(0, expected_uuid="GPU-ghost")
 
     def test_identity_map_is_lazy_and_cached(self):
         """Build once, reuse on subsequent calls.
@@ -844,11 +923,11 @@ class TestListRunningPidsUsesNvml(unittest.TestCase):
 
 
 class TestConstraintsW(unittest.TestCase):
-    """As of v1.10, constraints_w reads `powerLimits.{min,max}PowerLimit`
+    """constraints_w reads `powerLimits.{min,max}PowerLimit`
     via the synchronous device-info API (GetGpuAttributes), NOT
     `dcgmEntityGetLatestValues + DCGM_FI_DEV_POWER_MGMT_LIMIT_MIN/MAX`.
 
-    The v1.8 implementation read field 161/162 from the field cache,
+    An earlier implementation read field 161/162 from the field cache,
     which returned `DCGM_FP64_BLANK = 140737488355328.0` on a fresh
     hostengine with no companion watcher. The cap-clamp math then
     clamped every request up to 2^47 W and apply_cap exploded.
@@ -867,7 +946,7 @@ class TestConstraintsW(unittest.TestCase):
             min_w, max_w = actuator.constraints_w(0)
         self.assertEqual((min_w, max_w), (100, 700))
         # The settable range came from the device-info API, not the
-        # field cache. Regression guard for the v1.10 fix.
+        # field cache. Regression guard for the field-cache-avoidance contract.
         discovery.GetGpuAttributes.assert_called_with(0)
         modules["dcgm_agent"].dcgmEntityGetLatestValues.assert_not_called()
 
@@ -890,7 +969,7 @@ class TestConstraintsW(unittest.TestCase):
 
 class TestCurrentWAndDefaultW(unittest.TestCase):
     """current_w / default_w read `powerLimits.curPowerLimit` /
-    `defaultPowerLimit` via GetGpuAttributes — the v1.10 consolidation
+    `defaultPowerLimit` via GetGpuAttributes — the consolidation
     onto the synchronous device-info API. The orphan-recovery guard
     depends on these returning the real values (not the field-cache
     blank sentinel), otherwise every cap-restore would no-op or write
@@ -1009,11 +1088,11 @@ class TestApplyCap(unittest.TestCase):
     def _seed_constraints_and_uuid(
         self, modules, handle, min_w=100, max_w=700, uuid=b"GPU-x"
     ):
-        """Wire constraints + UUID via GetGpuAttributes (single API, v1.10).
+        """Wire constraints + UUID via GetGpuAttributes (single API).
 
-        Before v1.10 these two reads went through two different DCGM
+        An earlier implementation split these two reads across two DCGM
         APIs (field cache for constraints, GetGpuAttributes for UUID).
-        After the v1.10 consolidation, both come from the same
+        Now both come from the same
         `GetGpuAttributes(gid)` call — constraints from
         `.powerLimits.{min,max}PowerLimit`, UUID from
         `.identifiers.uuid`. No `dcgmEntityGetLatestValues` calls are
@@ -1092,7 +1171,7 @@ class TestApplyCap(unittest.TestCase):
         self.assertEqual(actuator.managed_uuids(), {"GPU-A", "GPU-B"})
 
     def test_apply_cap_skips_write_on_reenumeration_during_write(self):
-        """Finding 2 (PR9790 review): identity-stable cap write.
+        """Identity-stable cap write.
 
         If `gpu_idx` re-enumerates onto a DIFFERENT physical GPU between the
         identity captured at `apply_cap` entry and the pre-`Set` re-check
@@ -1126,16 +1205,26 @@ class TestApplyCap(unittest.TestCase):
         self.assertEqual(actuator.managed_uuids(), set())
         self.assertNotIn(0, power_agent._managed_gpu_indices)
 
-    def test_apply_cap_proceeds_when_entry_identity_unreadable(self):
-        """Best-effort: if the identity can't be read at entry the mismatch
-        is NOT proven, so the write proceeds (and the reconnect/retry path
-        still protects the actual Set). Guards against the guard turning a
-        transient identity-read blip into a dropped cap."""
+    def test_apply_cap_refuses_when_entry_identity_unreadable(self):
+        """Entry-identity policy: if the entry-time identity
+        lookup fails, the apply must FAIL CLOSED even if the identity would be
+        readable in-transaction.
+
+        `watts` is derived from the workload on THIS index. Transaction-local
+        identity fixes ownership bookkeeping, but without an entry identity to
+        compare against it cannot establish that the current GPU is the one
+        whose workload produced the cap — a reconnect could have re-enumerated
+        the index onto a different GPU, and we would apply GPU-A's cap to GPU-B
+        (recorded, wrongly for policy, as GPU-B's). So refuse at entry: no Set,
+        an apply-failure tick, nothing tracked; the next reconcile retries.
+        """
         metrics = MagicMock()
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
-        self._seed_constraints_and_uuid(modules, handle, min_w=100, max_w=700)
+        # Identity IS readable in-transaction (GetGpuAttributes → GPU-A); the
+        # refusal is driven purely by the entry-time failure, proving the
+        # entry identity is required regardless of transaction readability.
+        self._seed_constraints_and_uuid(modules, handle, uuid="GPU-A")
 
-        # get_uuid raises everywhere → expected_uuid is None → guard skipped.
         with patch.object(
             actuator, "get_uuid", side_effect=RuntimeError("transient identity blip")
         ):
@@ -1144,20 +1233,142 @@ class TestApplyCap(unittest.TestCase):
             ):
                 result = actuator.apply_cap(0, 300)
 
+        # Effective watts still returned (Actuator Protocol), but NO write and
+        # NO tracking of any kind.
+        self.assertEqual(result, 300)
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+        metrics.apply_failures_total.inc.assert_called_once()
+        self.assertEqual(actuator.managed_uuids(), set())
+        self.assertNotIn(0, actuator._managed_uuid_by_idx)
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
+
+    def test_apply_cap_rejects_constraints_read_from_reenumerated_gpu(self):
+        """Wattage provenance: the SKU constraints the
+        cap is clamped against must come from the SAME physical GPU the cap is
+        anchored to.
+
+        The expected UUID is captured (GPU-A) BEFORE the constraints read;
+        `_power_limits_with_uuid` reads the min/max AND the identity they
+        belong to from one snapshot. If a reconnect re-enumerates the index
+        onto GPU-B during that read, the snapshot's UUID (GPU-B) no longer
+        matches the anchor (GPU-A), so apply_cap fails closed rather than
+        writing a value clamped to another GPU's SKU range. This closes the
+        ABA hole a plain in-transaction destination check would miss.
+        """
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        self._seed_constraints_and_uuid(
+            modules, handle, uuid="GPU-A", min_w=100, max_w=700
+        )
+
+        # `state` models which physical GPU currently occupies index 0. The
+        # identity-bound constraints read flips it GPU-A -> GPU-B, simulating a
+        # reconnect / re-enumeration DURING the constraints read, and reports
+        # the new occupant's identity alongside its limits.
+        state = {"uuid": "GPU-A"}
+
+        def flip_during_power_read(_idx):
+            state["uuid"] = "GPU-B"
+            pl = MagicMock()
+            pl.minPowerLimit = 100
+            pl.maxPowerLimit = 700
+            return pl, "GPU-B"
+
+        with patch.object(
+            actuator, "get_uuid", side_effect=lambda _idx: state["uuid"]
+        ), patch.object(
+            actuator, "_power_limits_with_uuid", side_effect=flip_during_power_read
+        ):
+            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+                "power_agent._persist_managed_gpus"
+            ):
+                result = actuator.apply_cap(0, 300)
+
+        # Entry captured GPU-A before the constraints read flipped the index to
+        # GPU-B; the constraints-provenance check sees GPU-B -> mismatch ->
+        # refuse. Effective watts still returned per the Protocol; no Set, no
+        # tracking.
+        self.assertEqual(result, 300)
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+        metrics.apply_failures_total.inc.assert_called_once()
+        self.assertEqual(actuator.managed_uuids(), set())
+        self.assertNotIn(0, actuator._managed_uuid_by_idx)
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
+
+    def test_apply_cap_uses_caller_supplied_identity_without_recapture(self):
+        """PID-snapshot anchor: when the caller supplies
+        `expected_uuid` (the reconcile loop captures it BEFORE the PID snapshot
+        that produced `watts`), apply_cap must use it verbatim and must NOT
+        re-capture via `get_uuid` — re-capturing here would reopen the
+        attribution-to-write window the anchor exists to close. The
+        in-transaction recheck verifies the supplied UUID; on a match the Set
+        fires and the GPU is recorded under that UUID.
+        """
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        self._seed_constraints_and_uuid(
+            modules, handle, uuid="GPU-A", min_w=100, max_w=700
+        )
+
+        with patch.object(
+            actuator,
+            "get_uuid",
+            side_effect=AssertionError(
+                "get_uuid must not be called when expected_uuid is supplied"
+            ),
+        ), patch.object(actuator, "_read_uuid_raw", return_value="GPU-A"):
+            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+                "power_agent._persist_managed_gpus"
+            ):
+                result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
+
         self.assertEqual(result, 300)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_called_once()
         metrics.apply_failures_total.inc.assert_not_called()
+        self.assertEqual(actuator.managed_uuids(), {"GPU-A"})
+        self.assertEqual(actuator._managed_uuid_by_idx.get(0), "GPU-A")
+
+    def test_apply_cap_caller_supplied_identity_mismatch_fails_closed(self):
+        """PID-snapshot anchor: if the caller-supplied
+        `expected_uuid` no longer matches the GPU on the index at write time —
+        a re-enumeration ANYWHERE between the pre-snapshot capture and the Set,
+        including the window between PID attribution and this call — refuse:
+        no Set, an apply-failure tick, nothing tracked. The next reconcile
+        re-captures against the fresh enumeration and retries.
+        """
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        self._seed_constraints_and_uuid(modules, handle, min_w=100, max_w=700)
+
+        with patch.object(
+            actuator,
+            "get_uuid",
+            side_effect=AssertionError(
+                "get_uuid must not be called when expected_uuid is supplied"
+            ),
+        ), patch.object(actuator, "_read_uuid_raw", return_value="GPU-B"):
+            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+                "power_agent._persist_managed_gpus"
+            ):
+                result = actuator.apply_cap(0, 300, expected_uuid="GPU-A")
+
+        self.assertEqual(result, 300)
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+        metrics.apply_failures_total.inc.assert_called_once()
+        self.assertEqual(actuator.managed_uuids(), set())
+        self.assertNotIn(0, actuator._managed_uuid_by_idx)
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
 
     def test_apply_cap_skips_write_when_recheck_identity_unverifiable(self):
-        """Finding 2 follow-up (PR9790 review): once an identity IS captured
+        """Once an identity IS captured
         at entry, a pre-`Set` recheck that cannot read the UUID must NOT
         fall through and write. Enumeration may have changed and we can't
         prove otherwise, so refuse (apply failure + retry next cycle) rather
         than risk writing this GPU's cap onto a re-enumerated occupant.
 
-        Contrast with `test_apply_cap_proceeds_when_entry_identity_unreadable`:
-        if NO identity could be captured at entry there is nothing to
-        protect, so the write proceeds best-effort.
+        Contrast with `test_apply_cap_refuses_when_entry_identity_unreadable`,
+        which refuses at ENTRY; this one refuses at the in-transaction recheck
+        after a successful entry capture.
         """
         metrics = MagicMock()
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
@@ -1179,6 +1390,40 @@ class TestApplyCap(unittest.TestCase):
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
         metrics.apply_failures_total.inc.assert_called_once()
         self.assertNotIn(0, power_agent._managed_gpu_indices)
+
+    def test_apply_cap_records_transaction_verified_uuid_not_reconnect_reread(self):
+        """Bookkeeping persists the identity verified INSIDE
+        the write transaction, not a fresh reconnect-capable re-read.
+
+        A hostengine restart in the window between the successful `Set` and
+        `_record_managed_state` can re-enumerate `get_uuid(gpu_idx)` onto a
+        DIFFERENT physical GPU. Trusting that re-read would persist the wrong
+        UUID and leak the cap we just applied. The recorded UUID must be the
+        one `_write_set` confirmed at Set time (GPU-A), so `_record_managed_state`
+        must NOT call `get_uuid` again on the guarded path.
+        """
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        # Constraints + the in-transaction identity recheck (`_read_uuid_raw`,
+        # via GetGpuAttributes) both resolve to GPU-A, so the guarded Set
+        # succeeds against GPU-A.
+        self._seed_constraints_and_uuid(modules, handle, uuid="GPU-A")
+
+        # get_uuid yields GPU-A at apply entry (→ expected_uuid) then GPU-B on
+        # any later call (the simulated post-Set re-enumeration). The fix must
+        # NOT consume that second value for bookkeeping.
+        with patch.object(actuator, "get_uuid", side_effect=["GPU-A", "GPU-B"]):
+            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+                "power_agent._persist_managed_gpus"
+            ):
+                result = actuator.apply_cap(0, 300)
+
+        self.assertEqual(result, 300)
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_called_once()
+        # Bookkeeping recorded the transaction-verified GPU-A, not the
+        # re-enumerated GPU-B a post-Set get_uuid re-read would have returned.
+        self.assertEqual(actuator.managed_uuids(), {"GPU-A"})
+        self.assertEqual(actuator._managed_uuid_by_idx[0], "GPU-A")
 
     def test_apply_cap_clamps_above_max(self):
         metrics = MagicMock()
@@ -1208,24 +1453,15 @@ class TestApplyCap(unittest.TestCase):
         self.assertEqual(result, 100)
         metrics.cap_clamped_total.labels.assert_called_with(direction="min")
 
-    def test_apply_cap_enforce_true_calls_enforce(self):
-        actuator, modules, handle, _ = _make_initialized_actuator(
-            metrics=MagicMock(), enforce=True
-        )
-        self._seed_constraints_and_uuid(modules, handle)
+    def test_apply_cap_never_calls_enforce(self):
+        """The agent issues ONLY dcgmConfigSet, never dcgmConfigEnforce.
 
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
-        ):
-            actuator.apply_cap(0, 300)
-
-        modules["pydcgm"].DcgmGroup.return_value.config.Enforce.assert_called_once()
-
-    def test_apply_cap_enforce_false_skips_enforce(self):
-        """The default — opt-in re-assertion. Set-and-forget like NVML."""
-        actuator, modules, handle, _ = _make_initialized_actuator(
-            metrics=MagicMock(), enforce=False
-        )
+        dcgmConfigSet already records the cap as DCGM's target config
+        (auto-reapplied after reset), so the dcgmConfigEnforce manual
+        re-assert is redundant. It was removed as dead config; this locks that in so a refactor can't reintroduce
+        the extra RPC.
+        """
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
         self._seed_constraints_and_uuid(modules, handle)
 
         with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
@@ -1235,97 +1471,12 @@ class TestApplyCap(unittest.TestCase):
 
         modules["pydcgm"].DcgmGroup.return_value.config.Enforce.assert_not_called()
 
-    def test_enforce_failure_after_successful_set_still_tracks_managed_state(self):
-        """Set OK + Enforce raise → cap MUST still be tracked.
-
-        dcgmConfigSet invokes nvmlDeviceSetPowerManagementLimit inside
-        the hostengine, so once Set returns the cap is LIVE on the GPU
-        regardless of what Enforce does. Regression-guards the
-        Set-OK-Enforce-fail partial-success path: without this test,
-        a refactor that re-coupled bookkeeping to Enforce would leave
-        a custom cap live with no managed-state tracking — SIGTERM
-        wouldn't restore it, orphan recovery
-        wouldn't find it.
-
-        Asserts: cap returned, _managed_gpu_indices populated,
-        applied_limit_watts set, dcgm_enforce_failures_total
-        incremented, apply_failures_total NOT incremented (the cap
-        IS live — that metric would mislead operators), no exception
-        propagated.
-        """
-        metrics = MagicMock()
-        actuator, modules, handle, _ = _make_initialized_actuator(
-            metrics=metrics, enforce=True
-        )
-        self._seed_constraints_and_uuid(modules, handle)
-        group = modules["pydcgm"].DcgmGroup.return_value
-        # Set succeeds; Enforce raises a non-CONNECTION_NOT_VALID error
-        # (CONNECTION_NOT_VALID would trigger _with_reconnect recovery
-        # which is a different code path, exercised by the stale-handle
-        # tests).
-        group.config.Enforce.side_effect = modules["dcgm_structs"].DCGMError(
-            modules["dcgm_structs"].DCGM_ST_GENERIC_ERROR
-        )
-
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
-        ):
-            result = actuator.apply_cap(0, 300)
-
-        # Cap is live → return value is the post-clamp watts.
-        self.assertEqual(result, 300)
-        # The GPU IS tracked — the load-bearing assertion: a successful
-        # Set means the cap is live on the hardware, so SIGTERM and
-        # orphan recovery must find it via _managed_gpu_indices.
-        self.assertIn(0, power_agent._managed_gpu_indices)
-        # Enforce was attempted (and failed) exactly once.
-        group.config.Enforce.assert_called_once()
-        # Dedicated metric for "Enforce-only failure" got the tick.
-        metrics.dcgm_enforce_failures_total.inc.assert_called_once()
-        # apply_failures_total MUST NOT tick — that metric means the
-        # cap is NOT live; here the cap IS live (Set succeeded).
-        metrics.apply_failures_total.inc.assert_not_called()
-        # The applied_limit_watts gauge was set (cap was applied).
-        metrics.applied_limit_watts.labels.assert_called_with(gpu="0")
-        metrics.applied_limit_watts.labels.return_value.set.assert_called_with(300)
-
-    def test_repeated_enforce_failures_do_not_block_later_set(self):
-        """Repeated Enforce failures are recoverable per reconcile tick.
-
-        Set succeeds both times, so both cap writes are live and tracked;
-        only the dedicated Enforce-failure metric increments.
-        """
-        metrics = MagicMock()
-        actuator, modules, handle, _ = _make_initialized_actuator(
-            metrics=metrics, enforce=True
-        )
-        self._seed_constraints_and_uuid(modules, handle)
-        group = modules["pydcgm"].DcgmGroup.return_value
-        DCGMError = modules["dcgm_structs"].DCGMError
-        group.config.Enforce.side_effect = [
-            DCGMError(modules["dcgm_structs"].DCGM_ST_GENERIC_ERROR),
-            DCGMError(modules["dcgm_structs"].DCGM_ST_GENERIC_ERROR),
-        ]
-
-        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
-            "power_agent._persist_managed_gpus"
-        ):
-            self.assertEqual(actuator.apply_cap(0, 300), 300)
-            self.assertEqual(actuator.apply_cap(0, 400), 400)
-
-        self.assertEqual(group.config.Set.call_count, 2)
-        self.assertEqual(group.config.Enforce.call_count, 2)
-        self.assertEqual(metrics.dcgm_enforce_failures_total.inc.call_count, 2)
-        metrics.apply_failures_total.inc.assert_not_called()
-        self.assertIn(0, power_agent._managed_gpu_indices)
-        metrics.applied_limit_watts.labels.return_value.set.assert_called_with(400)
-
     def test_apply_cap_dcgm_generic_error_bumps_failure_metric_and_returns(self):
         """Non-CONNECTION_NOT_VALID DCGMErrors are non-fatal — the
         reconcile loop logs + continues on to the next GPU."""
         metrics = MagicMock()
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
-        # Constraints come from GetGpuAttributes.powerLimits as of v1.10 —
+        # Constraints come from GetGpuAttributes.powerLimits —
         # default handle wiring (min=100, max=700) is fine for this test.
         self._seed_constraints_and_uuid(modules, handle, min_w=100, max_w=700)
         group = modules["pydcgm"].DcgmGroup.return_value
@@ -1348,9 +1499,9 @@ class TestApplyCap(unittest.TestCase):
     def test_apply_cap_propagates_non_dcgm_exception(self):
         """Non-DCGMError exceptions MUST propagate out of apply_cap.
 
-        Regression guard for the PR9790 review: the original
+        Regression guard: the original
         ``except Exception`` masked programming/binding defects
-        (e.g. the v1.10 ``dcgmvalue.DCGM_INT32_BLANK`` AttributeError,
+        (e.g. the ``dcgmvalue.DCGM_INT32_BLANK`` AttributeError,
         documented in ``_apply_cap_inner``'s docstring) as normal
         apply failures, which both silenced the bug AND incorrectly
         ticked ``apply_failures_total`` — a metric reserved for
@@ -1405,8 +1556,8 @@ class TestApplyCap(unittest.TestCase):
 
         cfg = modules["pydcgm"].DcgmGroup.return_value.config.Set.call_args.args[0]
         # DCGM_INT32_BLANK lives in dcgmvalue (NOT dcgm_structs) per the
-        # upstream pydcgm bindings — the v1.10 fix moved the production
-        # import to match. See _make_dcgm_modules for the mock setup.
+        # upstream pydcgm bindings — the production import matches this.
+        # See _make_dcgm_modules for the mock setup.
         blank = modules["dcgmvalue"].DCGM_INT32_BLANK
         size = modules["dcgm_structs"].DCGM_WORKLOAD_POWER_PROFILE_ARRAY_SIZE
 
@@ -1428,8 +1579,8 @@ class TestApplyCap(unittest.TestCase):
         """Per-GPU DcgmGroup is created once, reused on subsequent
         applies. Saves the DcgmGroup create + AddGpu RPCs per reconcile.
 
-        Post-v1.10, constraints + UUID both come from GetGpuAttributes
-        — a single lambda satisfies any number of apply_cap calls.
+        Constraints + UUID both come from GetGpuAttributes — a single
+        lambda satisfies any number of apply_cap calls.
         """
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
         self._seed_constraints_and_uuid(modules, handle)
@@ -1453,8 +1604,8 @@ class TestApplyCap(unittest.TestCase):
 class TestRestoreDefault(unittest.TestCase):
     """restore_default MUST read field 163 (DEF), not 162 (MAX).
 
-    This is the v1.4 review fix — DCGM lacks a "reset to default" verb,
-    so we read the factory default explicitly. Field 162 is the
+    DCGM lacks a "reset to default" verb, so we read the factory
+    default explicitly. Field 162 is the
     *maximum settable* power limit; on shipped data-center SKUs they're
     numerically equal, but reading 163 ensures correctness on
     hypothetical future SKUs where default < max.
@@ -1484,9 +1635,9 @@ class TestRestoreDefault(unittest.TestCase):
             actuator.restore_default(0)
 
         # The cap write was issued at the FACTORY DEFAULT (400 W), not
-        # the SKU max (500 W). The v1.10 fix consolidates all power-
-        # limit reads through GetGpuAttributes, so this also guards
-        # that no field-cache read leaked into the path.
+        # the SKU max (500 W). All power-limit reads go through
+        # GetGpuAttributes, so this also guards that no field-cache read
+        # leaked into the path.
         cfg = modules["pydcgm"].DcgmGroup.return_value.config.Set.call_args.args[0]
         self.assertEqual(cfg.mPowerLimit.val, 400)
         modules["dcgm_agent"].dcgmEntityGetLatestValues.assert_not_called()
@@ -1600,13 +1751,13 @@ class TestRestoreDefault(unittest.TestCase):
 
         Without this contract, a refactor that re-routed restore_default
         through apply_cap (which absorbs failures into
-        apply_failures_total) would let _handle_sigterm log a false-
+        apply_failures_total) would let shutdown cleanup log a false-
         positive "restored" message when dcgmConfigSet(default) failed.
         Asserts: DCGMError raised, no bookkeeping side-effects.
         """
         metrics = MagicMock()
         actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
-        # Default value via GetGpuAttributes (v1.10 consolidation).
+        # Default value via GetGpuAttributes.
         discovery = handle.GetSystem.return_value.discovery
         discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(b"GPU-x")
         group = modules["pydcgm"].DcgmGroup.return_value
@@ -1619,16 +1770,85 @@ class TestRestoreDefault(unittest.TestCase):
             with self.assertRaises(DCGMError):
                 actuator.restore_default(0)
 
-        # The exception path must NOT update managed-state — pre-v1.7
+        # The exception path must NOT update managed-state — an earlier
         # restore_default would have left _managed_gpu_indices intact
-        # via apply_cap's success-path bookkeeping; the new path skips
+        # via apply_cap's success-path bookkeeping; the current path skips
         # bookkeeping because _apply_cap_inner raises before it runs.
         self.assertNotIn(0, power_agent._managed_gpu_indices)
         metrics.applied_limit_watts.labels.assert_not_called()
 
+    def test_restore_default_returns_false_on_midwrite_reenumeration(self):
+        """A reconnect BETWEEN index resolution and the Set re-enumerates the
+        resolved index onto a different physical GPU.
+
+        `_resolve_managed_idx` only proves identity at resolution time, so the
+        write itself must re-verify. On a proven mid-write mismatch
+        `restore_default` must NOT write the default to the wrong GPU and must
+        return False — a True return makes `_shutdown_cleanup` prune the still-
+        live cap, leaking it.
+        """
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
+        discovery = handle.GetSystem.return_value.discovery
+        actuator._managed_uuid_by_idx[0] = "GPU-A"
+        actuator._discovered_gpu_ids = [10]
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            "GPU-A", default_w=410
+        )
+
+        # Resolution sees idx 0 still hosting GPU-A; the in-transaction recheck
+        # then sees GPU-B (re-enumerated mid-write) → proven mismatch.
+        with patch.object(actuator, "get_uuid", return_value="GPU-A"), patch.object(
+            actuator, "_read_uuid_raw", return_value="GPU-B"
+        ):
+            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+                "power_agent._persist_managed_gpus"
+            ):
+                with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
+                    result = actuator.restore_default(0)
+
+        self.assertFalse(result)
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+        self.assertIn("could not confirm the target GPU", "\n".join(cm.output))
+
+    def test_restore_default_fails_closed_when_recheck_identity_unreadable(self):
+        """A restore that cannot READ the target identity
+        at write time must FAIL CLOSED, not best-effort write.
+
+        Writing the factory "default" is NOT harmless when the index may have
+        re-enumerated onto a GPU-B that another workflow capped below default:
+        the write would clobber GPU-B, and returning success would make the
+        caller prune the still-capped GPU-A (leak). An unverifiable identity is
+        therefore treated like a proven mismatch — no write, return False, keep
+        the UUID for orphan recovery. (DCGM connection errors still surface to
+        `_with_reconnect` for a retry; this covers the non-DCGM unreadable
+        case, which the earlier best-effort behaviour silently swallowed.)
+        """
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
+        discovery = handle.GetSystem.return_value.discovery
+        actuator._managed_uuid_by_idx[0] = "GPU-A"
+        actuator._discovered_gpu_ids = [10]
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            "GPU-A", default_w=410
+        )
+
+        with patch.object(actuator, "get_uuid", return_value="GPU-A"), patch.object(
+            actuator,
+            "_read_uuid_raw",
+            side_effect=RuntimeError("identity unreadable at recheck"),
+        ):
+            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+                "power_agent._persist_managed_gpus"
+            ):
+                with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
+                    result = actuator.restore_default(0)
+
+        self.assertFalse(result)
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+        self.assertIn("could not confirm the target GPU", "\n".join(cm.output))
+
 
 # ---------------------------------------------------------------------------
-# Write surface — restore_default_by_uuid (SIGTERM UUID sweep, PR9790 review)
+# Write surface — restore_default_by_uuid (SIGTERM UUID sweep)
 # ---------------------------------------------------------------------------
 
 
@@ -1714,6 +1934,210 @@ class TestRestoreDefaultByUuid(unittest.TestCase):
 
         self.assertFalse(result)
         modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+
+    def test_returns_false_on_midwrite_reenumeration(self):
+        """A reconnect BETWEEN `_resolve_idx_for_uuid` (plus the current/default
+        reads) and the Set re-enumerates the resolved index onto a different
+        GPU. The sweep must return False (NOT True) so `_shutdown_cleanup`
+        keeps the UUID — a True return would prune a still-live cap — and must
+        not write the default to the wrong GPU.
+        """
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
+        discovery = handle.GetSystem.return_value.discovery
+        actuator._discovered_gpu_ids = [10]
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            "GPU-A", default_w=410, current_w=300
+        )
+
+        # `_resolve_idx_for_uuid` now reads via `_read_uuid_raw` too, so the
+        # first read (resolution) must see GPU-A (match at idx 0) and the second
+        # (`_write_set`'s in-transaction recheck) must see GPU-B — the index
+        # re-enumerated mid-write. The identity-bound power read in between goes
+        # through `_power_limits_with_uuid` (GetGpuAttributes -> GPU-A), so it is
+        # unaffected by this patch.
+        with patch.object(actuator, "_read_uuid_raw", side_effect=["GPU-A", "GPU-B"]):
+            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+                "power_agent._persist_managed_gpus"
+            ):
+                with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
+                    result = actuator.restore_default_by_uuid("GPU-A")
+
+        self.assertFalse(result)
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+        self.assertIn("could not confirm index", "\n".join(cm.output))
+
+    def test_returns_false_on_reenumeration_before_power_read(self):
+        """On the NO-write path a reconnect BETWEEN
+        `_resolve_idx_for_uuid` and the identity-bound power read can park a
+        DIFFERENT GPU (already at/above default) on the resolved index while
+        the GPU we own moved elsewhere with its cap still live. Because the
+        limits AND their owning UUID now come from ONE snapshot, the sweep sees
+        the mismatch (GPU-B, not the resolved GPU-A) and returns False (retain
+        ownership), issuing no write, rather than pruning on None and leaking
+        the still-live cap that moved elsewhere."""
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
+        discovery = handle.GetSystem.return_value.discovery
+        actuator._discovered_gpu_ids = [10]
+        # Resolution sees GPU-A at idx 0 ...
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            "GPU-A", default_w=410, current_w=410
+        )
+        # ... but the identity-bound power read returns GPU-B (the index
+        # re-enumerated onto a different GPU already at default).
+        pl = MagicMock()
+        pl.curPowerLimit = 410
+        pl.defaultPowerLimit = 410
+        with patch.object(
+            actuator, "_power_limits_with_uuid", return_value=(pl, "GPU-B")
+        ):
+            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+                "power_agent._persist_managed_gpus"
+            ):
+                with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
+                    result = actuator.restore_default_by_uuid("GPU-A")
+
+        self.assertFalse(result)
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+        self.assertIn("re-enumerated between UUID", "\n".join(cm.output))
+
+    def test_returns_false_when_power_read_unreadable(self):
+        """No-write path, the identity-bound power read raises (transient DCGM
+        outage): the sweep cannot prove the resolved index still hosts the UUID,
+        so it fails closed (False, retain ownership) rather than pruning on
+        None."""
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
+        discovery = handle.GetSystem.return_value.discovery
+        actuator._discovered_gpu_ids = [10]
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            "GPU-A", default_w=410, current_w=410
+        )
+
+        with patch.object(
+            actuator, "_power_limits_with_uuid", side_effect=RuntimeError("blip")
+        ):
+            with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+                "power_agent._persist_managed_gpus"
+            ):
+                with self.assertLogs("power_agent.actuator", level="WARNING") as cm:
+                    result = actuator.restore_default_by_uuid("GPU-A")
+
+        self.assertFalse(result)
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+        self.assertIn("could not read power limits/identity", "\n".join(cm.output))
+
+
+# ---------------------------------------------------------------------------
+# Ownership retirement on release
+# ---------------------------------------------------------------------------
+
+
+class TestOwnershipRetirement(unittest.TestCase):
+    """A cap that is APPLIED claims ownership (`_capped_uuids`); a cap that is
+    RELEASED/RESTORED must NOT re-claim it, and an explicit release must retire
+    it — otherwise the SIGTERM sweep would reset a cap another workflow
+    installed on that GPU after our release."""
+
+    def setUp(self):
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
+    def tearDown(self):
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
+    def test_retire_managed_uuid_drops_capped_uuid_and_index_projection(self):
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        discovery = handle.GetSystem.return_value.discovery
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            b"GPU-x", min_w=100, max_w=700
+        )
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+            "power_agent._persist_managed_gpus"
+        ):
+            actuator.apply_cap(0, 300)
+
+        # Applying a cap claims ownership.
+        self.assertEqual(actuator.managed_uuids(), {"GPU-x"})
+        self.assertEqual(actuator._managed_uuid_by_idx.get(0), "GPU-x")
+
+        # Retiring drops the UUID from the ownership set AND any stale index
+        # projection pointing at it — from both the index→UUID map and the
+        # shared managed-index set — so a later sweep no longer treats it as
+        # ours.
+        actuator.retire_managed_uuid("GPU-x")
+        self.assertEqual(actuator.managed_uuids(), set())
+        self.assertNotIn(0, actuator._managed_uuid_by_idx)
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
+
+    def test_retire_managed_uuid_drops_all_projection_indices(self):
+        """Regression for the multi-projection leak: a UUID re-capped across a
+        re-enumeration is projected at more than one index. Retiring it must
+        clear EVERY projection index from both maps — leaving one behind keeps
+        that index falsely managed, so its later unrelated occupant could be
+        released on stale integer membership alone."""
+        actuator, _, _, _ = _make_initialized_actuator(metrics=MagicMock())
+        # GPU-A capped at idx 0, then re-enumerated onto idx 1 and re-capped:
+        # both indices project to GPU-A and both are in the managed set.
+        actuator._capped_uuids.add("GPU-A")
+        actuator._managed_uuid_by_idx[0] = "GPU-A"
+        actuator._managed_uuid_by_idx[1] = "GPU-A"
+        power_agent._managed_gpu_indices.update({0, 1})
+
+        actuator.retire_managed_uuid("GPU-A")
+
+        self.assertEqual(actuator.managed_uuids(), set())
+        self.assertNotIn(0, actuator._managed_uuid_by_idx)
+        self.assertNotIn(1, actuator._managed_uuid_by_idx)
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
+        self.assertNotIn(1, power_agent._managed_gpu_indices)
+
+    def test_restore_default_does_not_reclaim_ownership(self):
+        """A runtime release restores default through `restore_default`. That
+        write must NOT re-record ownership (record_ownership=False): if it did,
+        the just-released UUID would sit back in `_capped_uuids` for the next
+        sweep to act on."""
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        discovery = handle.GetSystem.return_value.discovery
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            "GPU-A", min_w=100, max_w=700, default_w=410
+        )
+        actuator._managed_uuid_by_idx[0] = "GPU-A"
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+            "power_agent._persist_managed_gpus"
+        ):
+            result = actuator.restore_default(0)
+
+        self.assertTrue(result)
+        # The default was written, but ownership was NOT (re-)claimed.
+        self.assertEqual(actuator.managed_uuids(), set())
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
+
+    def test_restore_default_by_uuid_does_not_reclaim_ownership(self):
+        """Cold-start orphan recovery restores by UUID on a fresh process whose
+        ownership set is empty. Restoring must not populate `_capped_uuids` —
+        the GPU is being handed BACK to default, not adopted."""
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=MagicMock())
+        discovery = handle.GetSystem.return_value.discovery
+        actuator._discovered_gpu_ids = [10]
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            "GPU-A", default_w=410, current_w=300
+        )
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+            "power_agent._persist_managed_gpus"
+        ):
+            result = actuator.restore_default_by_uuid("GPU-A")
+
+        self.assertTrue(result)
+        cfg = modules["pydcgm"].DcgmGroup.return_value.config.Set.call_args.args[0]
+        self.assertEqual(cfg.mPowerLimit.val, 410)
+        # Fresh process: the restore must not adopt the GPU into ownership.
+        self.assertEqual(actuator.managed_uuids(), set())
+        self.assertNotIn(0, power_agent._managed_gpu_indices)
 
 
 # ---------------------------------------------------------------------------
@@ -1848,6 +2272,100 @@ class TestStaleHandleRecovery(unittest.TestCase):
                 actuator._with_reconnect(
                     lambda: (_ for _ in ()).throw(ValueError("nope"))
                 )
+
+
+class TestResolveIdxTopologyGrowth(unittest.TestCase):
+    """`_resolve_idx_for_uuid` must not falsely report a UUID
+    "gone" when a reconnect GROWS the topology mid-scan. The whole scan runs in
+    ONE `_with_reconnect` reading via `_read_uuid_raw`; a CONNECTION_NOT_VALID
+    rebuilds discovery and restarts the scan against the new (larger) GPU set,
+    so a UUID that moved to a newly discovered index is found, not pruned."""
+
+    def test_resolve_idx_rescans_grown_topology_after_reconnect(self):
+        actuator, modules, _, _ = _make_initialized_actuator(metrics=MagicMock())
+        DCGMError = modules["dcgm_structs"].DCGMError
+        CONNECTION_NOT_VALID = modules["dcgm_structs"].DCGM_ST_CONNECTION_NOT_VALID
+
+        # Pre-reconnect the actuator sees ONE GPU that is not the target.
+        actuator._discovered_gpu_ids = [10]
+        state = {"reconnected": False}
+
+        def fake_init():
+            # A hostengine restart re-enumerated MORE GPUs; the target UUID now
+            # lives at the newly discovered index 1.
+            actuator._discovered_gpu_ids = [10, 20]
+            state["reconnected"] = True
+
+        def read_uuid(idx):
+            gid = actuator._discovered_gpu_ids[idx]
+            if not state["reconnected"] and gid == 10:
+                # The stale handle raises on the first probe, before growth.
+                raise DCGMError(CONNECTION_NOT_VALID)
+            return {10: "GPU-B", 20: "GPU-A"}[gid]
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            with patch.object(actuator, "init", side_effect=fake_init), patch.object(
+                actuator, "_read_uuid_raw", side_effect=read_uuid
+            ):
+                idx, scan_complete = actuator._resolve_idx_for_uuid("GPU-A")
+
+        self.assertTrue(state["reconnected"])
+        # Found at the GROWN index (1), NOT falsely reported gone (None).
+        self.assertEqual(idx, 1)
+        self.assertTrue(scan_complete)
+
+
+class TestRestoreUpdatesAppliedGauge(unittest.TestCase):
+    """Stale-gauge guard: a restore to factory default
+    writes with record_ownership=False, but the applied-limit gauge tracks what
+    is LIVE on the GPU, so it must still tick — otherwise Prometheus keeps
+    reporting the released cap forever."""
+
+    def setUp(self):
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
+    def tearDown(self):
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
+    def test_restore_default_updates_applied_limit_gauge(self):
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        discovery = handle.GetSystem.return_value.discovery
+        actuator._managed_uuid_by_idx[0] = "GPU-A"
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            "GPU-A", default_w=410
+        )
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}), patch(
+            "power_agent._persist_managed_gpus"
+        ):
+            actuator.restore_default(0)
+
+        metrics.applied_limit_watts.labels.assert_called_with(gpu="0")
+        metrics.applied_limit_watts.labels.return_value.set.assert_called_with(410)
+
+    def test_restore_default_by_uuid_already_at_default_syncs_gauge(self):
+        """When `restore_default_by_uuid` finds the GPU already at default it
+        writes nothing (returns None) but must still sync the gauge to the LIVE
+        value, so a GPU restored to default externally stops reporting our old
+        cap."""
+        metrics = MagicMock()
+        actuator, modules, handle, _ = _make_initialized_actuator(metrics=metrics)
+        discovery = handle.GetSystem.return_value.discovery
+        actuator._discovered_gpu_ids = [10]
+        discovery.GetGpuAttributes.side_effect = lambda gid: _make_gpu_attrs(
+            "GPU-A", default_w=700, current_w=700
+        )
+
+        with patch.dict("sys.modules", {**modules, "pynvml": MagicMock()}):
+            result = actuator.restore_default_by_uuid("GPU-A")
+
+        self.assertIsNone(result)
+        modules["pydcgm"].DcgmGroup.return_value.config.Set.assert_not_called()
+        metrics.applied_limit_watts.labels.assert_called_with(gpu="0")
+        metrics.applied_limit_watts.labels.return_value.set.assert_called_with(700)
 
 
 if __name__ == "__main__":

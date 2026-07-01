@@ -1,7 +1,6 @@
 {{- include "power-agent.validateImageTag" . -}}
 {{- include "power-agent.validateMutex" . -}}
 {{- include "power-agent.validateActuator" . -}}
-{{- include "power-agent.validateEnforce" . -}}
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -37,7 +36,9 @@ spec:
       # returned by nvmlDeviceGetComputeRunningProcesses. See power_agent.py
       # _extract_pod_uid_from_cgroup.
       hostPID: true
-      # SIGTERM handler restores default TGP on managed GPUs before exit.
+      # Graceful shutdown restores default TGP on managed GPUs before exit
+      # (the reconcile loop runs the restore after SIGTERM, not the signal
+      # handler itself). Give it headroom to finish within the grace period.
       terminationGracePeriodSeconds: 30
       # NVIDIA Container Toolkit injects libnvidia-ml.so via the `nvidia`
       # runtime class. Pairing with NVIDIA_VISIBLE_DEVICES=all in the
@@ -73,10 +74,11 @@ spec:
             {{- if eq (include "power-agent.effectiveNamespaceRestricted" .) "true" }}
             # Namespace-scoped RBAC is in effect (Role + RoleBinding instead of
             # ClusterRole + ClusterRoleBinding — see role.yaml). The agent's
-            # default pod listing (`list_pod_for_all_namespaces`, power_agent.py:444)
-            # would 403 against the namespace-only token; pass --namespace so it
-            # uses `list_namespaced_pod` (:439) instead. Mirrors the dev-pod
-            # template's wiring (dev-pod.yaml:57).
+            # default pod listing (`list_pod_for_all_namespaces` in
+            # power_agent.py `_list_pods_on_node`) would 403 against the
+            # namespace-only token; pass --namespace so it uses
+            # `list_namespaced_pod` instead. Mirrors the dev-pod template's
+            # wiring (dev-pod.yaml).
             - --namespace=$(POD_NAMESPACE)
             {{- end }}
             - --prometheus-port={{ .Values.agent.prometheusPort }}
@@ -84,7 +86,6 @@ spec:
             {{- if eq .Values.agent.actuator "dcgm" }}
             - --dcgm-host={{ .Values.agent.dcgm.host }}
             - --dcgm-port={{ .Values.agent.dcgm.port }}
-            - --dcgm-enforce={{ .Values.agent.dcgm.enforce }}
             {{- end }}
           env:
             - name: NODE_NAME

@@ -16,11 +16,12 @@ Tail logs:
 
 Check Prometheus metrics (port {{ .Values.agent.prometheusPort }} on each pod):
 
-  - dynamo_power_agent_applied_limit_watts{gpu="N"}             # cap applied per GPU
+  - dynamo_power_agent_applied_limit_watts{gpu="N"}             # current live power limit per GPU (watts)
   - dynamo_power_agent_multi_pod_gpu_total{disposition=...}      # multi-pod conflict counts
   - dynamo_power_agent_safe_default_applied_total                # safe-default fallbacks
-  - dynamo_power_agent_apply_failures_total                      # apply failures (cap NOT live)
-  - dynamo_power_agent_dcgm_enforce_failures_total               # DCGM Enforce-only failures (cap IS live)
+  - dynamo_power_agent_apply_failures_total                      # actuator write failures (cap NOT live)
+  - dynamo_power_agent_cap_clamped_total{direction=...}          # caps clamped to per-SKU limits
+  - dynamo_power_agent_k8s_list_failures_total                   # pod-list API failures (reconcile cycle skipped)
 
 RBAC scope: {{ if eq (include "power-agent.effectiveNamespaceRestricted" .) "true" }}namespace-scoped (Role + RoleBinding in {{ .Release.Namespace }}){{ else }}cluster-wide (ClusterRole + ClusterRoleBinding){{ end }}.
 

@@ -14,9 +14,10 @@ description: |
       the operator-managed nvidia-dcgm hostengine. Used on clusters where
       the operator set dcgm.enabled=true.
   Hardware action is byte-equivalent across actuators; selection affects
-  the write path (single-writer routing, audit logging) and, with
-  agent.dcgm.enforce=true, registers the cap as DCGM's "target
-  configuration" so it is auto-reapplied after GPU reset/reinit.
+  the write path (single-writer routing, audit logging). On the DCGM
+  path dcgmConfigSet records the cap as DCGM's "target configuration",
+  which DCGM auto-reapplies after GPU reset/reinit on its own; the agent
+  never issues the redundant dcgmConfigEnforce manual re-assert.
 
   Replaces the previous raw DaemonSet, RBAC, and dev-pod manifests.
 type: application

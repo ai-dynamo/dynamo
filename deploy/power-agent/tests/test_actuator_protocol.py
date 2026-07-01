@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""PR A — Actuator Protocol tests.
+"""Actuator Protocol tests.
 
 Asserts:
   - NvmlActuator structurally satisfies the Actuator Protocol.
@@ -14,10 +14,11 @@ Asserts:
     apply_cap is called without one — protects future callers from a
     silent metrics-not-recorded bug.
 
-Out of scope for PR A: behaviour-level tests of apply/restore — those
+Behaviour-level tests of apply/restore are out of scope here — those
 are covered byte-for-byte by the existing test_apply_cap.py and
-test_shutdown.py through the module-level `_apply_cap` /
-`_handle_sigterm` paths that NvmlActuator delegates to.
+test_shutdown.py. NvmlActuator.apply_cap delegates to the module-level
+`_apply_cap`; the restore/shutdown path runs the other way — `_shutdown_cleanup`
+drives the actuator's `restore_default` / `shutdown`.
 """
 
 import unittest
@@ -60,20 +61,34 @@ class TestProtocolSatisfaction(unittest.TestCase):
 
 
 class TestInitAndShutdown(unittest.TestCase):
-    """init/shutdown are no-ops in PR A (PR B will move NVML init here)."""
+    """NvmlActuator OWNS the NVML lifecycle: init()
+    runs nvmlInit, shutdown() runs nvmlShutdown, each exactly once. This
+    replaces the prior unconditional nvmlInit in PowerAgent.__init__ that
+    left one leaked NVML reference in DCGM mode."""
 
-    def test_init_is_noop(self):
-        # No NVML import needed; this must not call pynvml.
-        with patch.object(power_agent, "pynvml", MagicMock()) as mock_nvml:
+    def test_init_calls_nvml_init(self):
+        mock_nvml = MagicMock()
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}):
             NvmlActuator().init()
-        mock_nvml.nvmlInit.assert_not_called()
+        mock_nvml.nvmlInit.assert_called_once_with()
         mock_nvml.nvmlShutdown.assert_not_called()
 
-    def test_shutdown_is_noop(self):
-        with patch.object(power_agent, "pynvml", MagicMock()) as mock_nvml:
+    def test_shutdown_calls_nvml_shutdown(self):
+        mock_nvml = MagicMock()
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}):
             NvmlActuator().shutdown()
+        mock_nvml.nvmlShutdown.assert_called_once_with()
         mock_nvml.nvmlInit.assert_not_called()
-        mock_nvml.nvmlShutdown.assert_not_called()
+
+    def test_shutdown_swallows_nvml_error(self):
+        """shutdown() is best-effort: a teardown fault is logged, not raised,
+        so shutdown cleanup can still complete the rest of teardown."""
+        mock_nvml = MagicMock()
+        mock_nvml.nvmlShutdown.side_effect = RuntimeError("nvml teardown failed")
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}):
+            with self.assertLogs("power_agent.actuator", level="ERROR") as cm:
+                NvmlActuator().shutdown()  # must not raise
+        self.assertIn("nvml teardown failed", "\n".join(cm.output))
 
 
 class TestDeviceCount(unittest.TestCase):
@@ -149,10 +164,10 @@ class TestConstraintsW(unittest.TestCase):
 
 
 class TestCurrentWAndDefaultW(unittest.TestCase):
-    """v1.5 Protocol additions — lift `current` / `default` reads onto
+    """Protocol additions — lift `current` / `default` reads onto
     the actuator surface so orphan recovery's `current<default` guard
     works through the abstraction. NVML side wraps the same two NVML
-    calls the inline pre-v1.5 code used."""
+    calls the earlier inline code used."""
 
     def test_current_w_returns_watts_not_milliwatts(self):
         mock_nvml = MagicMock()
@@ -177,7 +192,7 @@ class TestCurrentWAndDefaultW(unittest.TestCase):
 
     def test_current_w_and_default_w_use_different_nvml_calls(self):
         """Regression guard — they MUST call different NVML APIs.
-        Pre-v1.5 inline code used GetPowerManagementLimit (current)
+        The earlier inline code used GetPowerManagementLimit (current)
         and GetPowerManagementDefaultLimit (default); confusing them
         breaks the orphan-recovery guard."""
         mock_nvml = MagicMock()
@@ -265,7 +280,7 @@ class TestApplyCap(unittest.TestCase):
         self.assertIn(2, power_agent._managed_gpu_indices)
 
     def test_apply_cap_clamp_fires_exactly_once_on_out_of_range(self):
-        """Regression for v1.6 review comment #8.
+        """Regression for the double-clamp bug.
 
         Pre-fix `NvmlActuator.apply_cap` called `_clamp_to_constraints`
         directly AND then delegated to `_apply_cap` which also calls
@@ -303,7 +318,7 @@ class TestApplyCap(unittest.TestCase):
             1,
             f"Expected exactly 1 cap_clamped_total{{direction=max}} "
             f"increment; got {len(max_clamp_increments)}. "
-            "The double-clamp bug from the v1.6 review is back.",
+            "The double-clamp bug is back.",
         )
 
 
@@ -322,9 +337,23 @@ class TestRestoreDefault(unittest.TestCase):
             "handle_1", 700_000
         )
 
+    def test_restore_default_updates_applied_limit_gauge(self):
+        """The applied-limit gauge tracks what is LIVE on the GPU, so an NVML
+        restore to factory default must tick it too — apply ticks it via
+        `_apply_cap`, and without this Prometheus would keep reporting the
+        released cap."""
+        metrics = MagicMock()
+        mock_nvml = MagicMock()
+        mock_nvml.nvmlDeviceGetHandleByIndex.return_value = "handle_2"
+        mock_nvml.nvmlDeviceGetPowerManagementDefaultLimit.return_value = 410_000
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}):
+            NvmlActuator(metrics=metrics).restore_default(2)
+        metrics.applied_limit_watts.labels.assert_called_with(gpu="2")
+        metrics.applied_limit_watts.labels.return_value.set.assert_called_with(410)
+
 
 class TestRestoreDefaultByUuid(unittest.TestCase):
-    """Identity-stable restore (PR9790 review). The target index is resolved
+    """Identity-stable restore. The target index is resolved
     from the UUID at write time, and the `current_w < default_w` guard is
     applied at the resolved index — mirroring DcgmActuator's contract so
     orphan recovery and the SIGTERM sweep behave the same on both paths."""
@@ -371,6 +400,24 @@ class TestRestoreDefaultByUuid(unittest.TestCase):
         self.assertIsNone(result)
         mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_not_called()
 
+    def test_already_at_default_syncs_applied_limit_gauge(self):
+        """Even when nothing is written (GPU already at default → None), the
+        gauge must sync to the LIVE value so a GPU restored to default externally
+        stops reporting our old cap."""
+        metrics = MagicMock()
+        mock_nvml = self._nvml(
+            uuids={0: "GPU-a"},
+            current_mw={0: 700_000},
+            default_mw={0: 700_000},
+        )
+        with patch.dict("sys.modules", {"pynvml": mock_nvml}):
+            with patch.object(power_agent, "pynvml", mock_nvml):
+                result = NvmlActuator(metrics=metrics).restore_default_by_uuid("GPU-a")
+        self.assertIsNone(result)
+        mock_nvml.nvmlDeviceSetPowerManagementLimit.assert_not_called()
+        metrics.applied_limit_watts.labels.assert_called_with(gpu="0")
+        metrics.applied_limit_watts.labels.return_value.set.assert_called_with(700)
+
     def test_returns_none_when_uuid_absent_on_clean_scan(self):
         mock_nvml = self._nvml(
             uuids={0: "GPU-a"},
@@ -404,7 +451,7 @@ class TestRestoreDefaultByUuid(unittest.TestCase):
 
 
 class TestPowerAgentBindsNvmlActuatorByDefault(unittest.TestCase):
-    """PowerAgent.__init__ default actuator is NvmlActuator (PR A contract)."""
+    """PowerAgent.__init__ default actuator is NvmlActuator."""
 
     def test_default_actuator_is_nvml(self):
         # Bypass __init__ but exercise the contract by reading the default

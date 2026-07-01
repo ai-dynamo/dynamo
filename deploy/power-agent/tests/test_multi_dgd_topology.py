@@ -125,7 +125,7 @@ def _make_eight_gpu_agent(metrics) -> PowerAgent:
     """
     actuator = MagicMock()
 
-    def _pids(gpu_idx: int) -> list[int]:
+    def _pids(gpu_idx: int, expected_uuid=None) -> list[int]:
         return PIDS_PER_GPU.get(gpu_idx, [])
 
     actuator.list_running_pids.side_effect = _pids
@@ -292,7 +292,7 @@ class TestMultiFrameworkReconcileMisconfigBlastRadius(unittest.TestCase):
         custom_pid_to_uid[STRAY_PID] = UID_T_PREFILL
 
         self.agent._actuator.list_running_pids.side_effect = (
-            lambda gpu_idx: custom_pids_per_gpu.get(gpu_idx, [])
+            lambda gpu_idx, expected_uuid=None: custom_pids_per_gpu.get(gpu_idx, [])
         )
 
         uid_to_annotation = dict(ANNOTATIONS)

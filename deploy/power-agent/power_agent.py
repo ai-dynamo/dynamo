@@ -6,10 +6,12 @@
 
 Runs as a privileged DaemonSet (hostPID: true) on each GPU node. Every 15s:
   1. Lists pods on this node via the K8s API.
-  2. For each physical GPU: nvmlDeviceGetComputeRunningProcesses() → PID list.
+  2. For each physical GPU: nvmlDeviceGetComputeRunningProcesses() → PID list
+     (PID discovery always uses NVML, under both actuator modes).
   3. For each PID: reads /proc/{pid}/cgroup → extracts pod UID.
   4. Looks up the pod's dynamo.nvidia.com/gpu-power-limit annotation.
-  5. Calls nvmlDeviceSetPowerManagementLimit(handle, watts × 1000).
+  5. Writes the cap through the selected actuator — NVML
+     (nvmlDeviceSetPowerManagementLimit) or DCGM (dcgmConfigSet).
 
 Scope is opt-in: the agent only ever caps a GPU whose pod carries the
 dynamo.nvidia.com/gpu-power-limit annotation (set by the planner on
@@ -21,7 +23,11 @@ workload reuses it, or the planner removed the annotation), the cap is
 released back to default so it does not strand on the new tenant. See
 ``_build_uid_to_annotation`` and ``_release_managed_gpu``.
 
-SIGTERM handler: restores default TDP on all managed GPUs before shutdown.
+Graceful shutdown: the SIGTERM/SIGINT handler only sets a shutdown flag; the
+reconcile loop (``run()``) then restores default TGP on all managed GPUs via
+``_shutdown_cleanup`` before exit — heavy NVML/DCGM work never runs inside the
+signal handler. A cap is also restored mid-run by ``_release_managed_gpu`` when
+a previously-capped GPU is handed to a non-managed tenant.
 Cold-start orphan recovery: UUID-gated (persisted to /var/lib/dynamo-power-agent/).
 """
 
@@ -35,7 +41,7 @@ import threading
 from typing import Callable, Optional
 
 import managed_state
-from actuator import Actuator, DcgmActuator, NvmlActuator
+from actuator import Actuator, DcgmActuator, NvmlActuator, _GpuIdentityMismatch
 
 # Kubernetes and NVML — imported lazily with clear error messages
 try:
@@ -71,6 +77,13 @@ logger = logging.getLogger("power_agent")
 
 POWER_ANNOTATION_KEY = "dynamo.nvidia.com/gpu-power-limit"
 RECONCILE_INTERVAL_S = 15
+# Upper bound (seconds) on each Kubernetes pod-list request. Shutdown cleanup
+# runs from run()'s finally only AFTER the in-flight reconcile returns, so an
+# unbounded list against a hung apiserver could stall the whole cycle past the
+# pod's terminationGracePeriodSeconds (30s in the chart) and be SIGKILLed before
+# caps are restored. Bounding well under the grace period keeps a stuck request
+# from stranding live caps; the failed list just skips the cycle (fail-safe).
+K8S_LIST_TIMEOUT_S = 10
 # Sourced from `managed_state` so every launch path (and the actuator's
 # separate `import power_agent` module copy) agrees on one location.
 _MANAGED_STATE_PATH = managed_state.MANAGED_STATE_PATH
@@ -187,7 +200,7 @@ def _load_previously_managed_gpus() -> set[str]:
         return set()
 
     # Count invalid entries directly rather than from len(set) vs
-    # len(list) (PR9790 review): the set comprehension deduplicates,
+    # len(list): the set comprehension deduplicates,
     # so duplicate-but-valid UUIDs would inflate the false-positive
     # "non-string entries" count. E.g. uuids=["a","a","b"] would
     # wrongly log "1 non-string entry" when there are zero.
@@ -232,7 +245,7 @@ def _record_managed_gpu_by_uuid(uuid: str) -> None:
     Called by both actuator paths after a successful cap write. The UUID
     is the hardware-level identifier, identical whether obtained from
     NVML (`nvmlDeviceGetUUID`) or DCGM (`DCGM_FI_DEV_UUID`). Separating
-    the persistence from the UUID source means DcgmActuator (PR B) can
+    the persistence from the UUID source means DcgmActuator can
     record state without reaching into the NVML helpers.
     """
     if uuid not in _previously_managed:
@@ -266,7 +279,9 @@ class PowerAgentMetrics:
         if _PROMETHEUS_AVAILABLE and prometheus_port > 0:
             self.applied_limit_watts = Gauge(
                 "dynamo_power_agent_applied_limit_watts",
-                "Power cap currently applied per physical GPU (watts).",
+                "Current live power limit per physical GPU (watts). Tracks the "
+                "cap we apply and is re-synced to the live value on restore / "
+                "no-write paths, so it never strands on a stale cap.",
                 labelnames=("gpu",),
             )
             self.multi_pod_gpu_total = Counter(
@@ -290,19 +305,7 @@ class PowerAgentMetrics:
                 "Times a requested cap was clamped to per-SKU constraints.",
                 labelnames=("direction",),
             )
-            # DCGM-only. Distinct from apply_failures_total because the
-            # underlying dcgmConfigSet succeeded (cap IS live on the GPU)
-            # — only the optional dcgmConfigEnforce that registers it as
-            # DCGM's target configuration for auto-reapply-after-reset
-            # failed. Stays at 0 on actuator=nvml and on
-            # actuator=dcgm + agent.dcgm.enforce=false.
-            self.dcgm_enforce_failures_total = Counter(
-                "dynamo_power_agent_dcgm_enforce_failures_total",
-                "Times dcgmConfigEnforce failed AFTER a successful dcgmConfigSet "
-                "(cap is live and tracked; auto-reapply-after-GPU-reset is not).",
-            )
-            # Per PR9790 Codex adversarial review (finding #3). Pre-fix
-            # `_list_pods_on_node` swallowed every API error and returned
+            # Pre-fix `_list_pods_on_node` swallowed every API error and returned
             # [], making a transient apiserver outage indistinguishable
             # from a genuinely empty node. Now reconcile_once skips its
             # cycle on list failure and increments this counter so
@@ -327,7 +330,6 @@ class PowerAgentMetrics:
             self.apply_failures_total = noop
             self.safe_default_applied_total = noop
             self.cap_clamped_total = noop
-            self.dcgm_enforce_failures_total = noop
             self.k8s_list_failures_total = noop
 
 
@@ -367,8 +369,18 @@ def _clamp_to_constraints(
 
 
 # Alias to `managed_state` (see `_previously_managed` above for why). Mutate in
-# place only; the SIGTERM handler and the actuator must see the same set.
+# place only; shutdown cleanup and the actuator must see the same set.
 _managed_gpu_indices: set[int] = managed_state.managed_gpu_indices
+
+# UUIDs whose runtime release COMPLETED in memory (hardware restored to default,
+# actuator + index ownership retired, `_previously_managed` pruned) but whose
+# DURABLE prune to `managed_gpus.json` has not yet landed (state-volume write
+# failure). Process-local and deliberately NOT shared with the actuator or
+# persisted: it exists only to retry the pending `_persist_managed_gpus` write —
+# NEVER the hardware restore — on the next reconcile, so a cap another workflow
+# installs on the released GPU in the interim is never clobbered by a repeated
+# restore.
+_pending_retirement: set[str] = set()
 
 
 def _apply_cap(
@@ -391,10 +403,101 @@ def _apply_cap(
         metrics.apply_failures_total.inc()
 
 
-def _release_managed_gpu(actuator: Actuator, gpu_idx: int) -> None:
+def _retire_actuator_ownership(actuator: Actuator, uuid: str) -> None:
+    """Drop `uuid` from the actuator's in-memory ownership set on release, so a
+    later shutdown sweep no longer treats a cap we relinquished as ours.
+
+    This MUST run — and complete — before persistent/index ownership is pruned.
+    If it were skipped or its failure swallowed, `_capped_uuids` would still
+    hold the released UUID while the persisted record was dropped, so a shutdown
+    sweep could reset a cap another workflow later installed on that GPU — the
+    exact leak this retirement prevents. It is a set operation that does not
+    fail in normal use; we deliberately do NOT swallow an exception here — let
+    it propagate so `reconcile_once`'s per-GPU guard logs it and retries with
+    ownership intact, rather than pruning inconsistently. Only the DCGM actuator
+    tracks per-UUID ownership; on others there is nothing to retire (no-op)."""
+    retire = getattr(type(actuator), "retire_managed_uuid", None)
+    if retire is not None:
+        actuator.retire_managed_uuid(uuid)
+
+
+def _commit_release(actuator: Actuator, gpu_idx: int, release_uuid: str) -> None:
+    """Retire ownership of a GPU whose cap was just released to default.
+
+    Ordering and failure handling:
+
+      1. Retire the actuator's in-memory ownership (drops `release_uuid` from
+         `_capped_uuids` and every index that projected to it, including the
+         shared `_managed_gpu_indices` entries). Pure set ops; a failure is NOT
+         swallowed — if it raises, nothing below runs, so no persistent state is
+         pruned while `_capped_uuids` still owns the UUID (that would let a
+         shutdown sweep clobber a later, unrelated cap).
+      2. Drop this call's index (retire already removed any DCGM projections;
+         a non-DCGM actuator has none, so this covers the NVML path).
+      3. Commit the in-memory retirement (`_previously_managed`) UNCONDITIONALLY.
+         The release is already done in hardware, so the GPU must NOT look
+         managed again — otherwise the next reconcile would REPEAT the hardware
+         restore and, if another workflow capped the GPU after our release,
+         erase that new cap. Then persist the reduced set. If persistence fails
+         (state-volume outage), record a *pending retirement* and retry ONLY the
+         persistence next cycle (`_flush_pending_retirements`) — never the
+         hardware restore. Durable ownership and hardware state can't be made
+         atomic with the JSON schema, so the residual gap is a crash BEFORE the
+         retry lands: on restart disk still owns the UUID and orphan recovery
+         reconciles it (idempotent when the GPU is at/above default).
+    """
+    _retire_actuator_ownership(actuator, release_uuid)
+    _managed_gpu_indices.discard(gpu_idx)
+    if release_uuid not in _previously_managed:
+        return
+    _previously_managed.discard(release_uuid)
+    try:
+        _persist_managed_gpus(_previously_managed)
+    except Exception as e:
+        _pending_retirement.add(release_uuid)
+        logger.warning(
+            "Released cap on UUID %s and retired ownership, but persisting the "
+            "durable set failed; the hardware restore will NOT be repeated — "
+            "only the persistence is retried next cycle: %s",
+            release_uuid,
+            e,
+        )
+
+
+def _flush_pending_retirements() -> None:
+    """Retry the durable prune for releases whose hardware restore + in-memory
+    retirement completed but whose `_persist_managed_gpus` write failed.
+
+    Retries ONLY the persistence (writes the authoritative in-memory
+    `_previously_managed`), never the hardware restore, so a cap another workflow
+    installed on a released GPU after our release is never clobbered. Called at
+    the top of every reconcile cycle so it flushes independently of Kubernetes
+    API health."""
+    if not _pending_retirement:
+        return
+    try:
+        _persist_managed_gpus(_previously_managed)
+    except Exception as e:
+        logger.warning(
+            "Deferred retirement persistence retry failed (%d pending); will "
+            "retry next cycle: %s",
+            len(_pending_retirement),
+            e,
+        )
+        return
+    logger.info(
+        "Flushed %d deferred cap retirement(s) to durable state.",
+        len(_pending_retirement),
+    )
+    _pending_retirement.clear()
+
+
+def _release_managed_gpu(
+    actuator: Actuator, gpu_idx: int, expected_uuid: Optional[str] = None
+) -> None:
     """Restore default TGP on a GPU we previously capped, and unmanage it.
 
-    Runtime counterpart to ``_handle_sigterm`` / ``_restore_orphaned_gpus_on_startup``.
+    Runtime counterpart to ``_shutdown_cleanup`` / ``_restore_orphaned_gpus_on_startup``.
     Invoked from steady-state reconcile when a GPU we previously capped is now
     running only unannotated / non-K8s processes — i.e. the opted-in pod is gone
     and a non-managed workload owns the GPU (or the planner removed the
@@ -408,8 +511,8 @@ def _release_managed_gpu(actuator: Actuator, gpu_idx: int) -> None:
     write flows through the same library that applied the cap. On
     ``actuator: dcgm`` this means the restore runs ``dcgmConfigSet(default)``,
     keeping the hostengine's target-config record consistent with the
-    driver-level cap — the same reason ``_handle_sigterm`` was lifted onto the
-    actuator surface in v1.6. Routing it through raw NVML here would desync the
+    driver-level cap — the same reason shutdown cleanup writes through the
+    actuator surface. Routing it through raw NVML here would desync the
     DCGM target config on the dcgm path.
 
     Eligibility is UUID-gated so caps set by other tooling are never touched.
@@ -424,6 +527,20 @@ def _release_managed_gpu(actuator: Actuator, gpu_idx: int) -> None:
     The idle case (no processes at all) is intentionally NOT handled here;
     ``_reconcile_gpu``'s ``not pids`` branch keeps the cap for a briefly-exited
     worker that will return to the same GPU.
+
+    Release acts ONLY on the physical GPU currently occupying ``gpu_idx``, and
+    only when that occupant is the GPU we historically capped at this index.
+    ``expected_uuid`` is the identity captured BEFORE the PID snapshot that
+    routed us here (the "no annotated pod" evidence describes THAT GPU); we
+    reverify the occupant still matches it. On the ``dcgm`` path a hostengine
+    re-enumeration can move a DIFFERENT physical GPU onto ``gpu_idx`` while the
+    GPU we capped moves elsewhere — in that case the observed unannotated
+    workload belongs to the new occupant, NOT to the GPU we capped, so we must
+    NOT relocate a restore onto the displaced GPU (it may still be running its
+    annotated workload at its new index). We skip the stale index→UUID
+    projection without pruning; the displaced GPU is evaluated when reconcile
+    reaches its current index (or by the UUID-keyed SIGTERM / startup orphan
+    recovery), so its cap is never stranded.
     """
     try:
         uuid = actuator.get_uuid(gpu_idx)
@@ -432,79 +549,161 @@ def _release_managed_gpu(actuator: Actuator, gpu_idx: int) -> None:
             "Failed to read UUID for GPU %d during release check: %s", gpu_idx, e
         )
         return
+
+    # Reverify against the pre-snapshot identity that routed us here. The "no
+    # annotated pod owns this GPU" evidence was gathered on whatever GPU
+    # occupied gpu_idx at snapshot time; if a dcgm re-enumeration swapped the
+    # occupant between the snapshot and this check, that evidence no longer
+    # describes the current occupant. Bail and let the next reconcile
+    # re-evaluate with a fresh, self-consistent snapshot rather than release on
+    # stale evidence.
+    if expected_uuid is not None and uuid != expected_uuid:
+        logger.warning(
+            "Skipping cap release for GPU %d: index re-enumerated between the "
+            "workload snapshot (%s) and the release check (%s); deferring to "
+            "the next reconcile.",
+            gpu_idx,
+            expected_uuid,
+            uuid,
+        )
+        return
+
     if gpu_idx not in _managed_gpu_indices and uuid not in _previously_managed:
         return  # not a GPU this agent capped — leave it alone (UUID-gating)
 
-    # UUID to prune from the persisted set once the release succeeds. On the
-    # ``dcgm`` path a hostengine re-enumeration can move the originally-capped
-    # GPU to a different index, and ``restore_default`` relocates the write by
-    # the recorded UUID (``actuator._resolve_managed_idx``). Pruning by ``uuid``
-    # above — the CURRENT occupant of ``gpu_idx`` — would then drop the wrong
-    # entry and strand the GPU we actually restored in ``managed_gpus.json``.
-    # Mirror ``_handle_sigterm``: prune the originally-managed UUID via
-    # ``managed_uuid_for_idx``. NVML indices are stable within a process, so the
-    # current UUID already matches and the helper is absent there.
+    # Identity we historically capped at this index. On the ``dcgm`` path this
+    # can differ from the current occupant after a hostengine re-enumeration
+    # (``managed_uuid_for_idx`` returns the UUID recorded at cap time). NVML
+    # indices are stable within a process, so the current UUID already matches
+    # and the helper is absent there.
     managed_uuid = uuid
     if hasattr(type(actuator), "managed_uuid_for_idx"):
         try:
             managed_uuid = getattr(actuator, "managed_uuid_for_idx")(gpu_idx)
         except Exception as e:
+            # DCGM-specific managed-identity lookup failed. We must NOT fall
+            # back to the current occupant (uuid): on a re-enumerated index
+            # that fallback would make managed_uuid == uuid, silently pass the
+            # stale-projection guard below, and release/prune on stale integer
+            # membership alone — restoring the wrong GPU and discarding the real
+            # managed GPU's ownership. Fail closed: retain ownership and retry
+            # next cycle. The current-UUID fallback is sound ONLY for actuators
+            # WITHOUT managed_uuid_for_idx (NVML), which never enter this branch
+            # .
             logger.warning(
-                "Could not resolve managed UUID for GPU %d during release; "
-                "falling back to current UUID for state pruning: %s",
+                "Skipping cap release for GPU %d: could not resolve the managed "
+                "UUID (retaining ownership, retrying next cycle): %s",
                 gpu_idx,
                 e,
             )
+            return
 
-    try:
-        default_w = actuator.default_w(gpu_idx)
-        current_w = actuator.current_w(gpu_idx)
-        # Attempt the restore when EITHER the current index still shows a live
-        # cap (``current_w < default_w``) OR a dcgm re-enumeration relocated the
-        # GPU we capped to a different index (``managed_uuid != uuid``). The
-        # ``current_w``/``default_w`` probe reads the CURRENT occupant of
-        # ``gpu_idx``; in the relocation case that occupant (``uuid``) can sit
-        # "already at default" while the GPU we actually manage (``managed_uuid``)
-        # is still capped at its new index. Gating solely on
-        # ``current_w < default_w`` would then skip the restore yet still prune
-        # ``managed_uuid`` below, stranding that live cap permanently.
-        # ``restore_default`` relocates by the recorded UUID
-        # (``_resolve_managed_idx``) and is idempotent, so a redundant call when
-        # the managed GPU is already at default is a harmless no-op write.
-        if managed_uuid != uuid or current_w < default_w:
-            # ``restore_default`` returns False when it could not conclusively
-            # locate the managed GPU (e.g. a dcgm re-enumeration it cannot
-            # resolve → ``_resolve_managed_idx`` returns None). The cap is then
-            # still LIVE, so keep our ownership state and let a later reconcile
-            # or the next startup's orphan recovery retry — never prune here, or
-            # we lose the only record that the GPU still needs restoring. This
-            # mirrors ``_handle_sigterm``'s ``is False`` guard.
-            if actuator.restore_default(gpu_idx) is False:
+    # A dcgm re-enumeration can make the index's recorded identity
+    # (managed_uuid) differ from the current occupant (uuid). The "unannotated
+    # workload" evidence we gathered belongs to the CURRENT occupant, so the
+    # release decision is about `uuid`, never about the stale index projection.
+    if managed_uuid != uuid:
+        # Is the CURRENT occupant itself a GPU we manage? _previously_managed is
+        # UUID-keyed and authoritative across re-enumeration. If so, release IT
+        # by UUID — this handles the index-SWAP case where two managed GPUs
+        # traded indices: each index's recorded map points at the other, so the
+        # old index-based skip would block BOTH releases until shutdown. The
+        # UUID-addressed restore resolves the occupant's live index and guards
+        # the write, so it is re-enumeration safe.
+        if uuid in _previously_managed and hasattr(
+            type(actuator), "restore_default_by_uuid"
+        ):
+            result = getattr(actuator, "restore_default_by_uuid")(uuid)
+            if result is False:
+                # Could not conclusively locate/restore the occupant's cap; keep
+                # ownership so a later reconcile or startup orphan recovery
+                # retries. Never prune a possibly-live cap.
                 logger.warning(
-                    "Skipped cap release for GPU %d via %s actuator (managed "
-                    "GPU not conclusively located); leaving it managed so a "
-                    "later cycle retries.",
+                    "Skipped cap release for GPU %d (occupant %s) via %s "
+                    "actuator by UUID (not conclusively located); leaving it "
+                    "managed so a later cycle retries.",
                     gpu_idx,
+                    uuid,
                     actuator.name,
                 )
                 return
             logger.info(
-                "Released cap on GPU %d (managed UUID %s, index observed %d W / "
-                "default %d W): previously managed, now running only "
-                "unannotated/non-K8s processes.",
+                "Released cap on the current occupant of GPU %d (UUID %s) by "
+                "UUID: previously managed, now running only unannotated/non-K8s "
+                "processes (index re-enumeration; recorded map here was %s).",
                 gpu_idx,
+                uuid,
                 managed_uuid,
-                current_w,
-                default_w,
             )
+            _commit_release(actuator, gpu_idx, uuid)
+            return
+
+        # The current occupant is NOT a GPU we manage (a re-enumeration dropped
+        # an unrelated GPU onto this index, or the actuator has no UUID-addressed
+        # restore). Skip the stale projection WITHOUT restoring or pruning: the
+        # GPU we capped is evaluated when reconcile reaches ITS current index
+        # (its own snapshot decides keep-vs-release), and meanwhile its cap is
+        # held in _previously_managed for the UUID-keyed SIGTERM / startup
+        # orphan recovery, so it is never stranded. NVML has no
+        # managed_uuid_for_idx (managed_uuid == uuid there), so this whole
+        # branch is a no-op on that path.
+        logger.info(
+            "Skipping cap release for GPU %d: index now hosts %s (not managed by "
+            "us) but we capped %s here (dcgm re-enumeration). Deferring the "
+            "managed GPU's keep-vs-release decision to its current index.",
+            gpu_idx,
+            uuid,
+            managed_uuid,
+        )
+        return
+
+    # managed_uuid == uuid: the current occupant IS the GPU we capped here.
+    # Delegate the below-default / at-default / restore decision to the
+    # actuator's atomic, identity-bound restore. Doing those reads here as
+    # SEPARATE default_w()/current_w()/get_uuid() calls left an A->B->A hole:
+    # each is a reconnect-capable read, so a re-enumeration mid-sequence could
+    # pair GPU-A's default with GPU-B's "already at default" current, skip the
+    # restore, and prune GPU-A while its cap stayed live at its new index. The
+    # final identity recheck did not close it because A->B->A ends back on A.
+    # `restore_default_by_uuid` reads the limits AND their owning UUID from ONE
+    # snapshot and guards the write by UUID, so the decision and any write both
+    # provably concern `managed_uuid` (same fix already applied to apply,
+    # orphan recovery, and the SIGTERM sweep).
+    try:
+        result = actuator.restore_default_by_uuid(managed_uuid)
     except Exception as e:
         # Leave the GPU in the managed set so a later cycle retries the release.
-        logger.warning("Failed to release cap on GPU %d: %s", gpu_idx, e)
+        logger.warning(
+            "Failed to release cap on GPU %d (UUID %s): %s",
+            gpu_idx,
+            managed_uuid,
+            e,
+        )
         return
-    _managed_gpu_indices.discard(gpu_idx)
-    if managed_uuid in _previously_managed:
-        _previously_managed.discard(managed_uuid)
-        _persist_managed_gpus(_previously_managed)
+    if result is False:
+        # Not conclusively located/restored (a probe raised, or a proven
+        # mid-write re-enumeration): the cap may still be LIVE, so keep our
+        # ownership state and let a later reconcile or the next startup's orphan
+        # recovery retry — never prune a possibly-live cap.
+        logger.warning(
+            "Skipped cap release for GPU %d (UUID %s) via %s actuator: not "
+            "conclusively located; leaving it managed so a later cycle retries.",
+            gpu_idx,
+            managed_uuid,
+            actuator.name,
+        )
+        return
+    # True (restored a live below-default cap) or None (reconfirmed at/above
+    # default, or a clean scan proved the GPU gone): either way it is CONCLUSIVE
+    # that no cap of ours remains, so retire ownership durably.
+    logger.info(
+        "Released cap on GPU %d (UUID %s) via %s actuator by UUID: previously "
+        "managed, now running only unannotated/non-K8s processes.",
+        gpu_idx,
+        managed_uuid,
+        actuator.name,
+    )
+    _commit_release(actuator, gpu_idx, managed_uuid)
 
 
 # ---------------------------------------------------------------------------
@@ -513,204 +712,148 @@ def _release_managed_gpu(actuator: Actuator, gpu_idx: int) -> None:
 
 _shutdown = threading.Event()
 
-# Module-level reference to the active actuator. Populated by
-# `PowerAgent.__init__` (line ~478, immediately after `self._actuator.init()`),
-# read by the module-level `_handle_sigterm` because Python's `signal.signal`
-# hands the handler a `(signum, frame)` tuple with no other context. v1.6
-# wiring per review comment #6 (SIGTERM previously bypassed the actuator and
-# went straight to `pynvml`, leaving DCGM's target-config record stale on the
-# `actuator: dcgm` path).
-_active_actuator: Optional[Actuator] = None
-
 
 def _handle_sigterm(signum, frame):
-    """Restore default TGP on managed GPUs via the active actuator, then shut down.
+    """SIGTERM/SIGINT handler — request shutdown ONLY; do no heavy work here.
 
-    Dispatches through `_active_actuator` so that:
-      - On `actuator: nvml`, `NvmlActuator.restore_default` runs the same
-        `nvmlDeviceSetPowerManagementLimit(default)` call the pre-v1.6 inline
-        handler did. Externally observable behaviour is unchanged on the NVML
-        path (`test_shutdown.py` covers this).
-      - On `actuator: dcgm`, `DcgmActuator.restore_default` runs
-        `dcgmConfigSet(mPowerLimit.val=default)` so the hostengine's
-        "target configuration" record stays consistent with the driver-level
-        cap. Pre-v1.6 the raw-NVML write would have desynced them: the driver
-        cap returns to default, but DCGM still holds the old cap as target
-        config, and DCGM would re-apply the *old* cap after the next GPU
-        reset/reinit. With `enforce: true` that mismatch was particularly
-        nasty because the auto-reapply specifically uses the (now-stale)
-        target config.
-
-    Defensive fallback: if `_active_actuator` is None (SIGTERM fires before
-    `PowerAgent.__init__` finished registering), we go through raw NVML so the
-    GPU isn't left at a custom cap — better to ungracefully restore via the
-    wrong library than to abandon a cap'd GPU.
+    Python delivers signals on the main thread between bytecodes, so this
+    handler can interrupt an in-flight reconcile. If it performed the cap
+    restores itself, a SIGTERM landing after a `dcgmConfigSet` succeeds but
+    before `_record_managed_state` records ownership would sweep, shut down,
+    and exit while the interrupted reconcile then records a still-live cap that
+    nothing restores — a leak. So we just set
+    the event; `run()` runs the one-shot `_shutdown_cleanup` from its `finally`
+    once the current reconcile returns, with the in-flight write fully
+    recorded.
     """
-    logger.info(
-        "SIGTERM received — restoring default TGP on managed GPUs and shutting down."
-    )
-    actuator = _active_actuator
+    logger.info("SIGTERM received — requesting graceful shutdown.")
+    _shutdown.set()
+
+
+def _shutdown_cleanup(actuator: Actuator) -> None:
+    """Restore default TGP on every managed GPU, then shut the actuator down.
+
+    Called once from `run()`'s `finally` after the reconcile loop exits — NOT
+    from the signal handler — so it never races an in-flight cap write. The
+    actuator is always the live one (`run()` passes `self._actuator`), which is
+    why there is no None/raw-NVML fallback: cleanup can only run after
+    `PowerAgent.__init__` bound and initialised an actuator.
+
+    Dispatches through the actuator so a `dcgm` deployment restores via
+    `dcgmConfigSet(default)`, keeping the hostengine's target-config record in
+    sync with the driver-level cap (a raw-NVML write would desync them and let
+    DCGM re-apply the stale cap after the next GPU reset/reinit).
+    """
     for gpu_idx in list(_managed_gpu_indices):
-        # Record the UUID of GPUs we successfully restore so we can prune
-        # them from `_previously_managed` after the loop. Without this,
-        # `managed_gpus.json` retains the stale UUID across restarts and
-        # startup orphan recovery would later "restore" a GPU this agent
-        # no longer owns — clobbering a cap applied by another workflow
-        # (different DGD, manual `nvidia-smi -pl`, vendor defaults).
+        # Capture the UUID of each GPU we restore so we can prune it from
+        # `_previously_managed`; otherwise the next startup's orphan recovery
+        # would "restore" a GPU we no longer own, clobbering another workflow's
+        # cap (different DGD, manual `nvidia-smi -pl`, vendor default).
         restored_uuid: Optional[str] = None
         try:
-            if actuator is not None:
-                restore_result = actuator.restore_default(gpu_idx)
-                if restore_result is False:
-                    logger.warning(
-                        "Skipped default TGP restore for GPU %d via %s actuator "
-                        "(managed GPU no longer visible)",
-                        gpu_idx,
-                        actuator.name,
-                    )
-                    continue
-                logger.info(
-                    "Restored GPU %d to default TGP via %s actuator",
+            restore_result = actuator.restore_default(gpu_idx)
+            if restore_result is False:
+                logger.warning(
+                    "Skipped default TGP restore for GPU %d via %s actuator "
+                    "(managed GPU no longer visible)",
                     gpu_idx,
                     actuator.name,
                 )
-                try:
-                    if hasattr(type(actuator), "managed_uuid_for_idx"):
-                        restored_uuid = getattr(actuator, "managed_uuid_for_idx")(
-                            gpu_idx
-                        )
-                    else:
-                        restored_uuid = actuator.get_uuid(gpu_idx)
-                except Exception as e:
-                    # UUID lookup failure post-restore is benign: the GPU
-                    # is already at default, so a stale entry in
-                    # managed_gpus.json just means the next startup's
-                    # orphan recovery sees `current_w >= default_w` and
-                    # skips the redundant write. Log so it's visible.
-                    logger.warning(
-                        "Could not resolve UUID for restored GPU %d "
-                        "(state file may retain stale entry): %s",
-                        gpu_idx,
-                        e,
-                    )
-            else:
-                # Fallback: actuator not yet registered. Should be rare —
-                # only happens if SIGTERM fires during PowerAgent.__init__
-                # before the `_active_actuator = self._actuator` line runs.
-                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_idx)
-                default_mw = pynvml.nvmlDeviceGetPowerManagementDefaultLimit(handle)
-                pynvml.nvmlDeviceSetPowerManagementLimit(handle, default_mw)
+                continue
+            logger.info(
+                "Restored GPU %d to default TGP via %s actuator",
+                gpu_idx,
+                actuator.name,
+            )
+            try:
+                if hasattr(type(actuator), "managed_uuid_for_idx"):
+                    restored_uuid = getattr(actuator, "managed_uuid_for_idx")(gpu_idx)
+                else:
+                    restored_uuid = actuator.get_uuid(gpu_idx)
+            except Exception as e:
+                # Benign: the GPU is already at default, so a stale entry just
+                # makes the next startup see current_w >= default_w and skip.
                 logger.warning(
-                    "Restored GPU %d via raw NVML (actuator not registered "
-                    "yet at SIGTERM time)",
+                    "Could not resolve UUID for restored GPU %d "
+                    "(state file may retain stale entry): %s",
                     gpu_idx,
+                    e,
                 )
-                try:
-                    restored_uuid = _nvml_uuid(handle)
-                except Exception as e:
-                    logger.warning(
-                        "Could not resolve UUID for restored GPU %d via "
-                        "raw NVML (state file may retain stale entry): %s",
-                        gpu_idx,
-                        e,
-                    )
         except Exception as e:
             logger.exception("Failed to restore TGP on GPU %d: %s", gpu_idx, e)
-            # Do NOT prune `_previously_managed` on failure — the cap may
-            # still be live, and the next startup's orphan recovery is
-            # our only chance to reset it.
+            # Do NOT prune on failure — the cap may still be live and the next
+            # startup's orphan recovery is our only chance to reset it.
             continue
         if restored_uuid is not None:
             _previously_managed.discard(restored_uuid)
+            # Retire the per-process ownership too, so the UUID sweep below does
+            # not redundantly re-restore this already-defaulted GPU — and, more
+            # importantly, cannot ERASE a fresh cap an external writer installs
+            # on it between this indexed restore and the sweep (the stale
+            # `_capped_uuids` entry would otherwise make the sweep reset it).
+            # Best-effort: a failure here only forfeits that optimisation (the
+            # sweep falls back to reprocessing), so it must not abort shutdown.
+            try:
+                _retire_actuator_ownership(actuator, restored_uuid)
+            except Exception as e:
+                logger.warning(
+                    "Could not retire ownership for restored UUID %s at "
+                    "shutdown (sweep will reprocess it): %s",
+                    restored_uuid,
+                    e,
+                )
 
-    # UUID-complete safety net (PR9790 review follow-up). The index-keyed
-    # loop above can MISS a still-capped GPU when DCGM re-enumerated and a
-    # later reconcile re-capped that GPU's old index onto a *different*
-    # physical GPU: `_managed_uuid_by_idx[old_idx]` gets overwritten and the
-    # displaced GPU drops out of the index-keyed `_managed_gpu_indices`, so
-    # the loop never visits it. Resolve each UUID we capped to its CURRENT
-    # index instead. Without this, the displaced cap leaks whenever the agent
-    # is removed without a restart (no future orphan recovery runs).
-    #
-    # Scope the sweep to `actuator.managed_uuids()` — the UUIDs THIS process
-    # actually capped — NOT the persisted `_previously_managed` set. The
-    # latter is cross-incarnation and can hold UUIDs that startup orphan
-    # recovery KEPT but this process never capped (e.g. a GPU with a running
-    # workload, skipped at `_restore_orphaned_gpus_on_startup`'s
-    # `list_running_pids` guard). Sweeping those would reset a cap owned by
-    # another workflow on shutdown; `current_w < default_w` prevents a
-    # redundant write but is not an ownership guard.
-    #
-    # Only the DCGM actuator can relocate by UUID; NVML indices are stable
-    # within a process so its index loop is already complete. Gate on the
-    # FULL sweep surface — both `managed_uuids()` (the per-process ownership
-    # set the sweep iterates) and `restore_default_by_uuid()` (the relocating
-    # restore). `restore_default_by_uuid` alone is NOT a sufficient gate:
-    # NvmlActuator gained it (for identity-stable orphan recovery) but
-    # deliberately does NOT track capped UUIDs, so gating on it alone would
-    # enter the sweep on NVML and then `AttributeError` on the missing
-    # `managed_uuids()`, skipping persist/shutdown/_shutdown.set() (PR9790
-    # review follow-up).
-    if (
-        actuator is not None
-        and hasattr(type(actuator), "managed_uuids")
-        and hasattr(type(actuator), "restore_default_by_uuid")
+    # UUID-complete safety net: the index-keyed loop above misses a still-capped
+    # GPU when DCGM re-enumerated and a later reconcile re-capped its old index
+    # onto a different physical GPU (the displaced GPU drops out of
+    # `_managed_gpu_indices`). Resolve each UUID this process capped to its
+    # CURRENT index instead. Scope to `actuator.managed_uuids()` — NOT the
+    # cross-incarnation `_previously_managed` set, which can hold UUIDs startup
+    # recovery kept but we never capped; sweeping those would reset another
+    # workflow's cap. Only DcgmActuator can relocate by UUID and track capped
+    # UUIDs, so gate on BOTH methods (NvmlActuator has `restore_default_by_uuid`
+    # but no `managed_uuids`, and must not enter the sweep).
+    if hasattr(type(actuator), "managed_uuids") and hasattr(
+        type(actuator), "restore_default_by_uuid"
     ):
         for uuid in getattr(actuator, "managed_uuids")():
             try:
                 sweep_result = getattr(actuator, "restore_default_by_uuid")(uuid)
             except Exception as e:
                 # Keep the UUID: a write/relocation failure means the cap may
-                # still be live, and the next startup's orphan recovery is our
-                # only remaining chance to reset it.
+                # still be live; the next startup's orphan recovery retries.
                 logger.exception(
                     "SIGTERM UUID sweep failed to restore managed UUID %s: %s",
                     uuid,
                     e,
                 )
                 continue
-            # Prune ONLY when we actively restored a live below-default cap
-            # (True), mirroring the index loop's invariant: "discard a UUID
-            # only after restoring its GPU to default." A stale persisted
-            # UUID that resolves to an already-at-default GPU, a GPU that
-            # left the node, or one we could not locate conclusively
-            # (None / False) is left in place — exactly as orphan recovery
-            # leaves at-default UUIDs (`_restore_orphaned_gpus_on_startup`
-            # only discards when `current_w < default_w`). This keeps the
-            # sweep from aggressively dropping persisted UUIDs it did not
-            # just act on, which `_previously_managed` legitimately holds
-            # across incarnations.
-            if sweep_result is True:
+            # Retire ownership on any CONCLUSIVE result (True = restored a live
+            # cap; None = reconfirmed at/above default or proved gone), retain
+            # only on the inconclusive False. Leaving a proven-gone UUID would
+            # let a future startup clobber a later unrelated cap on the same
+            # GPU.
+            if sweep_result is not False:
                 _previously_managed.discard(uuid)
 
-    # Persist the pruned state so the next startup's orphan recovery
-    # only touches GPUs we still own. Failure to write is non-fatal:
-    # log and proceed to shutdown.
+    # Persist the pruned state so the next startup only touches GPUs we still
+    # own. A write failure is non-fatal — log and proceed to shutdown.
     try:
         _persist_managed_gpus(_previously_managed)
     except Exception as e:
         logger.warning(
-            "Failed to persist pruned managed_gpus state at SIGTERM: %s "
+            "Failed to persist pruned managed_gpus state at shutdown: %s "
             "(next startup may briefly re-restore already-default GPUs).",
             e,
         )
     try:
-        if actuator is not None:
-            actuator.shutdown()
-        else:
-            pynvml.nvmlShutdown()
+        actuator.shutdown()
     except Exception:
-        # We MUST proceed to `_shutdown.set()` so the run loop unblocks
-        # and the container exits cleanly — re-raising here would leave
-        # the agent hung on SIGTERM. But silently dropping the failure
-        # made shutdown-time NVML/DCGM faults impossible to diagnose
-        # from pod logs (PR #9682 CodeRabbit review on power_agent.py:355).
-        # `logger.exception` writes the full traceback at ERROR level so
-        # operators can correlate with hostengine / driver events.
+        # Log (with traceback) but never re-raise: shutdown must complete so
+        # the container exits cleanly (PR #9682 CodeRabbit review).
         logger.exception(
-            "Actuator/NVML shutdown raised; proceeding with agent exit anyway.",
+            "Actuator shutdown raised; proceeding with agent exit anyway.",
         )
-    _shutdown.set()
 
 
 # ---------------------------------------------------------------------------
@@ -719,16 +862,16 @@ def _handle_sigterm(signum, frame):
 
 
 def _restore_orphaned_gpus_on_startup(actuator: Actuator) -> None:
-    """Restore default TDP only on GPUs this agent previously capped AND that are now idle.
+    """Restore default TGP only on GPUs this agent previously capped AND that are now idle.
 
-    Migrated from inline NVML to the actuator surface in v1.5 (Fix #5):
-    on the DCGM path, orphan recovery must write through `nvidia-dcgm`
+    Runs through the actuator surface rather than inline NVML: on the
+    DCGM path, orphan recovery must write through `nvidia-dcgm`
     too, not bypass it via raw NVML — otherwise the hostengine's
     target-configuration record (and its reset/reinit auto-reapply
     behaviour) drifts from the driver-level reality. Going through
     `actuator.restore_default` keeps a single write path per actuator.
 
-    Two guards are preserved verbatim from the pre-v1.5 NVML-only
+    Two guards are preserved verbatim from the earlier NVML-only
     implementation:
 
       1. UUID-gating — only touch GPUs whose UUID is in the persisted
@@ -756,40 +899,48 @@ def _restore_orphaned_gpus_on_startup(actuator: Actuator) -> None:
             uuid = actuator.get_uuid(gpu_idx)
             if uuid not in _previously_managed:
                 continue
-            if actuator.list_running_pids(gpu_idx):
+            # Bind the idle check to `uuid` (same reason as the reconcile
+            # path): resolving PIDs by bare `gpu_idx` on the DCGM path could
+            # read a re-enumerated GPU's workload and let us restore/retire the
+            # wrong GPU. A mismatch raises `_GpuIdentityMismatch`, caught by the
+            # per-GPU handler below, which keeps the UUID for a later startup —
+            # fail closed.
+            if actuator.list_running_pids(gpu_idx, expected_uuid=uuid):
                 continue  # workload running — let normal reconcile handle it
-            current_w = actuator.current_w(gpu_idx)
-            default_w = actuator.default_w(gpu_idx)
-            if current_w < default_w:
-                # UUID-stable restore. The cheap guards above (managed,
-                # idle, below-default) are read at `gpu_idx`, but the WRITE
-                # must resolve identity from the UUID we just confirmed: a
-                # DCGM hostengine reconnect/re-enumeration inside the restore
-                # write can move `gpu_idx` onto a different physical GPU, and
-                # `_managed_uuid_by_idx` is empty at cold start so the index-
-                # keyed `restore_default` cannot self-verify here. Writing by
-                # index would then restore (and the discard below would prune)
-                # the wrong GPU, clobbering an unrelated cap and leaking ours.
-                # `restore_default_by_uuid` re-resolves the index at write time
-                # so both land on the GPU that actually carries `uuid`.
-                restore_result = actuator.restore_default_by_uuid(uuid)
-                if not restore_result:
-                    # None  -> nothing of ours to restore (already at/above
-                    #          default, or the GPU is gone on a clean scan).
-                    # False -> location inconclusive (a probe raised, e.g. a
-                    #          transient outage); the GPU may still carry our
-                    #          cap. Either way keep the UUID and retry on the
-                    #          next startup rather than prematurely pruning it.
-                    continue
+            # Delegate the ENTIRE below-default / at-default / gone decision to
+            # `restore_default_by_uuid`, which resolves `uuid` to its current
+            # index and reads the power limits + identity from ONE snapshot.
+            # Doing the current_w/default_w/identity checks here at the caller
+            # would reintroduce an A->B->A re-enumeration hole: current_w from
+            # GPU-A, default_w from GPU-B, final identity back on A could
+            # falsely conclude "at default" and retire ownership while A's cap
+            # is still live. `restore_default_by_uuid`
+            # also re-resolves the index (never trusts `gpu_idx`), so a DCGM
+            # re-enumeration between the probe above and the write lands on the
+            # GPU that actually carries `uuid`. The identity-bound
+            # `list_running_pids` above stays a cheap idle pre-filter only.
+            restore_result = actuator.restore_default_by_uuid(uuid)
+            if restore_result is False:
+                # Inconclusive: a relocation-scan probe raised / the resolved
+                # index's identity could not be confirmed at write time / a mid
+                # re-enumeration. The GPU may still carry our cap, so keep the
+                # UUID and retry on the next startup rather than prematurely
+                # pruning it.
+                continue
+            if restore_result is True:
                 logger.info(
-                    "Restored orphaned cap for idle managed GPU "
-                    "(index %d at probe time, UUID %s, %d W → %d W).",
-                    gpu_idx,
+                    "Restored orphaned cap for idle managed GPU (UUID %s).",
                     uuid,
-                    current_w,
-                    default_w,
                 )
-                _previously_managed.discard(uuid)
+            # True -> we restored a live below-default cap.
+            # None -> restore_default_by_uuid confirmed (in one snapshot) the
+            #         GPU is already at/above default, or proved it gone on a
+            #         clean scan. Either outcome is CONCLUSIVE that no cap of
+            #         ours remains, so retire ownership: retaining a UUID whose
+            #         cap is proven gone would let a LATER unrelated cap on the
+            #         same physical GPU be clobbered by a future startup's
+            #         orphan recovery.
+            _previously_managed.discard(uuid)
         except Exception as e:
             logger.warning("orphan-restore failed for GPU %d: %s", gpu_idx, e)
     _persist_managed_gpus(_previously_managed)
@@ -814,7 +965,7 @@ def _resolve_cap_for_gpu(
       - 2+ pods, ALL parseable AND all agree      → agreed value, WARNING.
       - 2+ pods, any missing/invalid/disagreement → safe_default_watts, ERROR.
 
-    Per PR9790 Codex adversarial review (finding #2): a multi-pod GPU
+    A multi-pod GPU
     where pod A has cap 480 and pod B has no annotation must NOT inherit
     pod A's cap. The pre-fix code filtered None before computing the
     agree-set, so the "all agree" branch fired whenever the surviving
@@ -918,11 +1069,12 @@ class PowerAgent:
         if k8s_client is None:
             raise RuntimeError("kubernetes Python SDK is required — install kubernetes")
 
-        # NVML init still happens here for the NVML path because
-        # PR #9682's reconcile loop calls pynvml directly. The DCGM
-        # path runs `pynvml.nvmlInit()` again inside `DcgmActuator.init()`
-        # — `nvmlInit` is idempotent so the double call is harmless.
-        pynvml.nvmlInit()
+        # NVML init is owned by the actuator now:
+        # `NvmlActuator.init()` runs `nvmlInit()`, `DcgmActuator.init()` runs
+        # its own guarded `nvmlInit()`, and each pairs it with a single
+        # `nvmlShutdown()` in `shutdown()`. Calling `nvmlInit()` here as well
+        # would re-introduce the process-wide init/shutdown imbalance in DCGM
+        # mode (two inits, one shutdown). `_actuator.init()` below does it.
 
         # Bind the actuator. Resolution order: explicit instance >
         # factory(metrics) > default NvmlActuator(metrics). The factory
@@ -937,15 +1089,6 @@ class PowerAgent:
         else:
             self._actuator = NvmlActuator(self.metrics)
         self._actuator.init()
-
-        # Register the actuator for the module-level SIGTERM handler
-        # (v1.6, per review comment #6). signal.signal-registered callbacks
-        # receive only (signum, frame) — they need a module-level handle to
-        # reach this actuator, and we set it as soon as init() succeeds so
-        # the window between actuator-ready and SIGTERM-handler-ready is as
-        # short as possible. Tests may overwrite this to inject a mock.
-        global _active_actuator
-        _active_actuator = self._actuator
 
         self.device_count = self._actuator.device_count()
         logger.info(
@@ -1008,11 +1151,13 @@ class PowerAgent:
                     namespace=self.k8s_namespace,
                     field_selector=field_selector,
                     resource_version="0",
+                    _request_timeout=K8S_LIST_TIMEOUT_S,
                 )
             else:
                 result = self._core_v1.list_pod_for_all_namespaces(
                     field_selector=field_selector,
                     resource_version="0",
+                    _request_timeout=K8S_LIST_TIMEOUT_S,
                 )
             return result.items
         except Exception as e:
@@ -1061,9 +1206,13 @@ class PowerAgent:
         the outage). Previously-applied caps remain live; a NEW pod
         arriving during the outage runs at whatever cap was last set on
         its GPU. Operators should alert on
-        `k8s_list_failures_total > 0 over 5m`. Per PR9790 Codex
-        adversarial review (finding #3).
+        `k8s_list_failures_total > 0 over 5m`.
         """
+        # Flush any release whose durable prune failed on a previous cycle
+        # BEFORE listing pods, so it retries even during a Kubernetes API outage
+        # (the retry touches only the state volume, not the apiserver).
+        _flush_pending_retirements()
+
         pods = self._list_pods_on_node()
         if pods is None:
             # Fail-safe: the pod listing failed (API error), so we have no
@@ -1084,7 +1233,36 @@ class PowerAgent:
             return
         uid_to_annotation = self._build_uid_to_annotation(pods)
 
+        # Re-snapshot the device count every cycle rather than trusting the
+        # value cached at startup. A DCGM hostengine reconnect rebuilds the
+        # discovered-GPU set, so the count can change at runtime: if it GREW,
+        # a startup-frozen count would never reconcile the new GPUs; if it
+        # SHRANK, iterating the stale (larger) range raises per-index errors.
+        # Best-effort — on a transient read failure keep the last-known count
+        # for this cycle rather than skipping enforcement entirely.
+        try:
+            self.device_count = self._actuator.device_count()
+        except Exception as e:
+            logger.warning(
+                "Could not refresh GPU count this cycle; using last-known %d: %s",
+                self.device_count,
+                e,
+            )
+
         for gpu_idx in range(self.device_count):
+            # Stop enforcing the moment shutdown is requested: cleanup runs from
+            # run()'s finally only after this cycle returns, so continuing
+            # through the remaining GPUs' (possibly slow) DCGM/NVML calls could
+            # eat the pod's termination grace period before any cap is restored.
+            # Breaking hands control back to the finally after the current GPU.
+            if _shutdown.is_set():
+                logger.info(
+                    "Shutdown requested mid-reconcile; stopping the GPU loop "
+                    "before GPU %d (and any later) so cleanup can restore caps "
+                    "within the grace period.",
+                    gpu_idx,
+                )
+                break
             try:
                 self._reconcile_gpu(gpu_idx, uid_to_annotation)
             except Exception as e:
@@ -1097,18 +1275,18 @@ class PowerAgent:
     ) -> None:
         """Apply the policy-resolved cap for one GPU via the active actuator.
 
-        v1.6 wiring per review comment #4: routes through
-        `self._actuator.list_running_pids` and `self._actuator.apply_cap`
-        instead of inline `pynvml`. On `actuator: dcgm` this means the
-        cap write actually flows through `nvidia-dcgm` via `dcgmConfigSet`,
-        which is the entire point of selecting that actuator. Pre-v1.6
-        the reconcile loop hard-coded `pynvml.nvmlDeviceGetHandleByIndex`
-        + module-level `_apply_cap`, so `agent.actuator=dcgm` only changed
+        Routes through `self._actuator.list_running_pids` and
+        `self._actuator.apply_cap` instead of inline `pynvml`. On
+        `actuator: dcgm` this means the cap write actually flows through
+        `nvidia-dcgm` via `dcgmConfigSet`, which is the entire point of
+        selecting that actuator. An earlier revision hard-coded
+        `pynvml.nvmlDeviceGetHandleByIndex` + module-level `_apply_cap`
+        in the reconcile loop, so `agent.actuator=dcgm` only changed
         cold-start orphan recovery — the steady-state cap-write path
         silently used NVML regardless.
 
         The PID read still happens through the actuator because
-        `DcgmActuator.list_running_pids` performs the v1.5 UUID-keyed
+        `DcgmActuator.list_running_pids` performs the UUID-keyed
         cross-library identity lookup (DCGM gpuId -> UUID -> NVML index)
         before calling `pynvml.nvmlDeviceGetComputeRunningProcesses`.
         Bypassing the actuator here would skip that lookup and read PIDs
@@ -1116,17 +1294,69 @@ class PowerAgent:
         disagree on enumeration order — see actuator.py
         `_ensure_identity_map`.
 
-        Caps are persistent by design: when a GPU has no K8s workload this
-        cycle we deliberately DO NOT restore default TDP here. A managed
-        worker may exit briefly (OOM, reschedule) and return to the same
-        GPU; restoring during that gap would violate the planner's power
-        budget, and the planner owns cap lifecycle via annotation
-        removal/update. The cap is only restored to default by
-        ``_handle_sigterm`` (agent shutdown) and
-        ``_restore_orphaned_gpus_on_startup`` (previously-managed +
-        now-idle GPUs at agent start). Per PR #9682 @sttts review.
+        Caps are persistent by design: when a managed GPU is merely idle this
+        cycle (no processes at all) we deliberately DO NOT restore default TGP
+        here. A managed worker may exit briefly (OOM, reschedule) and return to
+        the same GPU; restoring during that gap would violate the planner's
+        power budget, and the planner owns cap lifecycle via annotation
+        removal/update.
+
+        A cap IS restored to default in three places:
+          - ``_release_managed_gpu`` during ordinary reconcile, when a GPU we
+            previously capped now runs only unannotated / non-K8s processes
+            (the opted-in pod is gone and a non-managed tenant owns the GPU,
+            or the planner removed the annotation);
+          - ``_shutdown_cleanup`` at agent shutdown (invoked from ``run()``
+            after SIGTERM); and
+          - ``_restore_orphaned_gpus_on_startup`` (previously-managed +
+            now-idle GPUs at agent start).
+        Per PR #9682 @sttts review.
         """
-        pids = self._actuator.list_running_pids(gpu_idx)
+        # Anchor the whole policy decision to one physical GPU. Capture the
+        # identity BEFORE the PID snapshot that feeds the cap, then pass it to
+        # `apply_cap`, which re-verifies it in-transaction immediately before
+        # the Set. Without this anchor, a DCGM reconnect between PID
+        # attribution here and the identity capture inside `apply_cap` could
+        # re-enumerate the index and apply GPU-A's workload-derived cap to
+        # GPU-B (both reads self-consistently see GPU-B). If the identity is
+        # unreadable now we cannot safely attribute PIDs or a cap to this
+        # index at all, so skip the GPU this cycle and retry next reconcile —
+        # fail closed. The actuator re-verification turns a
+        # mid-sequence re-enumeration into a skipped write rather than a
+        # misapplied cap.
+        try:
+            expected_uuid = self._actuator.get_uuid(gpu_idx)
+        except Exception as e:
+            logger.warning(
+                "Skipping reconcile for GPU %d this cycle: could not read its "
+                "identity to anchor the cap decision (retrying next cycle): %s",
+                gpu_idx,
+                e,
+            )
+            return
+
+        # Bind the PID snapshot to the anchored identity: on the DCGM path a
+        # re-enumeration could otherwise attribute a different GPU's workload to
+        # this cap, which the identity-guarded `apply_cap` would then write onto
+        # the anchored GPU (its guard only checks the write destination). Bound
+        # here so the whole attribution -> cap -> write sequence refers to ONE
+        # physical GPU. A mismatch means the anchored GPU is no longer
+        # resolvable, so skip this cycle and retry next reconcile — fail closed
+        # .
+        try:
+            pids = self._actuator.list_running_pids(
+                gpu_idx, expected_uuid=expected_uuid
+            )
+        except _GpuIdentityMismatch as e:
+            logger.warning(
+                "Skipping reconcile for GPU %d this cycle: the PID snapshot "
+                "could not be bound to the anchored identity %s "
+                "(re-enumeration or hot-unplug); retrying next cycle: %s",
+                gpu_idx,
+                expected_uuid,
+                e,
+            )
+            return
         if not pids:
             return  # no K8s workload on this GPU
 
@@ -1165,16 +1395,29 @@ class PowerAgent:
             #     than strand it on the new tenant until shutdown.
             # The idle case (no processes) is handled by the `not pids` branch
             # above, which keeps the cap for a briefly-exited worker.
-            _release_managed_gpu(self._actuator, gpu_idx)
+            # Pass the pre-snapshot identity so the release only acts on the
+            # GPU whose (absent) annotated workload we actually observed — a
+            # re-enumeration that swapped this index's occupant is detected and
+            # the stale projection skipped.
+            _release_managed_gpu(self._actuator, gpu_idx, expected_uuid=expected_uuid)
             return
 
         cap_w = _resolve_cap_for_gpu(
             gpu_idx, pod_annotations, self.safe_default_watts, self.metrics
         )
-        self._actuator.apply_cap(gpu_idx, cap_w)
+        # Pass the pre-snapshot identity so the actuator re-verifies it is
+        # still the GPU on this index before writing; a re-enumeration
+        # anywhere across attribution → resolve → write is detected and the
+        # write skipped.
+        self._actuator.apply_cap(gpu_idx, cap_w, expected_uuid=expected_uuid)
 
     def run(self) -> None:
-        """Main reconcile loop. Blocks until SIGTERM."""
+        """Main reconcile loop. Blocks until SIGTERM, then cleans up once.
+
+        The signal handler only sets `_shutdown`; the shutdown restore + sweep
+        run here from the `finally`, after the in-flight reconcile has fully
+        returned, so cleanup never races an in-flight cap write.
+        """
         signal.signal(signal.SIGTERM, _handle_sigterm)
         signal.signal(signal.SIGINT, _handle_sigterm)
 
@@ -1185,12 +1428,15 @@ class PowerAgent:
             RECONCILE_INTERVAL_S,
         )
 
-        while not _shutdown.is_set():
-            try:
-                self.reconcile_once()
-            except Exception as e:
-                logger.exception("Unexpected error in reconcile loop: %s", e)
-            _shutdown.wait(timeout=RECONCILE_INTERVAL_S)
+        try:
+            while not _shutdown.is_set():
+                try:
+                    self.reconcile_once()
+                except Exception as e:
+                    logger.exception("Unexpected error in reconcile loop: %s", e)
+                _shutdown.wait(timeout=RECONCILE_INTERVAL_S)
+        finally:
+            _shutdown_cleanup(self._actuator)
 
         logger.info("Power Agent shut down.")
 
@@ -1217,7 +1463,6 @@ def _make_actuator(args, metrics) -> Actuator:
         return DcgmActuator(
             host=args.dcgm_host,
             port=args.dcgm_port,
-            enforce=args.dcgm_enforce,
             metrics=metrics,
         )
     raise ValueError(f"Unknown actuator {args.actuator!r}; expected 'nvml' or 'dcgm'.")
@@ -1285,45 +1530,6 @@ def main() -> None:
         ),
     )
 
-    def _parse_bool_strict(x: str) -> bool:
-        """Strict bool parser — `treu` (typo) errors out, doesn't silently → False.
-
-        Pre-v1.6 used `str(x).lower() in ("true","1","yes")` which mapped any
-        unknown string to False, so `--dcgm-enforce treu` silently produced
-        enforce=False and the operator got no feedback on the typo. argparse
-        propagates the ArgumentTypeError as a parser exit-with-error, which is
-        what we want at chart-install / `kubectl describe pod` time.
-        """
-        s = str(x).strip().lower()
-        truthy = {"true", "1", "yes", "on"}
-        falsy = {"false", "0", "no", "off"}
-        if s in truthy:
-            return True
-        if s in falsy:
-            return False
-        raise argparse.ArgumentTypeError(
-            f"--dcgm-enforce expects one of " f"{sorted(truthy | falsy)!r}; got {x!r}"
-        )
-
-    parser.add_argument(
-        "--dcgm-enforce",
-        type=_parse_bool_strict,
-        default=False,
-        help=(
-            "Call dcgmConfigEnforce after each dcgmConfigSet. Default false "
-            "(set-and-forget, matches NVML's semantics). Set true to "
-            "register the cap as DCGM's target configuration so the "
-            "hostengine re-applies it automatically after a GPU reset or "
-            "reinit (DcgmConfigManager.h:113-117). This is the only "
-            "automatic re-enforcement DCGM provides; it is NOT a "
-            "tick-driven loop and does NOT make the cap survive Power "
-            "Agent restart (the agent's SIGTERM handler restores default "
-            "on every managed GPU regardless of --dcgm-enforce). Cost: "
-            "one extra DCGM RPC per agent reconcile per GPU. Recommended "
-            "for sites that see frequent GPU resets (XID-driven recovery, "
-            "partition rebuilds, manual nvidia-smi --gpu-reset)."
-        ),
-    )
     args = parser.parse_args()
 
     agent = PowerAgent(

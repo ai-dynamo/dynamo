@@ -1,24 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for `_restore_orphaned_gpus_on_startup` after the v1.5 migration.
+"""Unit tests for `_restore_orphaned_gpus_on_startup`.
 
-Pre-v1.5 the function used inline `pynvml` calls and was structurally
+An earlier version used inline `pynvml` calls and was structurally
 untested (the agent's startup path executes it but no unit test
-exercised the branches). v1.5 lifted it onto the `Actuator` surface so
+exercised the branches). It now sits on the `Actuator` surface so
 it works on both NVML and DCGM paths; this file covers the branches
 that the migration had to preserve:
 
   1. UUID-gating  — touch only GPUs whose UUID is in `_previously_managed`.
   2. Workload-busy skip — if `list_running_pids` returns anything,
      defer to the normal reconcile.
-  3. The current_w < default_w GUARD — only write if the cap is
-     actually below default. The Protocol gained `current_w` and
-     `default_w` expressly so this guard survives the migration.
+  3. Delegation to `restore_default_by_uuid` — the below-default /
+     at-default / gone decision (and the identity-stable, atomic
+     limits+UUID read behind it) lives in the actuator. The caller must
+     NOT re-do the current_w/default_w/identity checks itself: doing so
+     reintroduced an A->B->A re-enumeration hole where current_w came
+     from GPU-A, default_w from GPU-B, and the identity recheck landed
+     back on A — falsely concluding "at default" and retiring ownership
+     of a still-capped GPU. The caller now just
+     interprets the return: True/None -> retire, False -> retain.
   4. Per-GPU exception isolation — one GPU failing doesn't abort the
      loop for the others.
-  5. Successful restore removes the UUID from `_previously_managed`
-     (so the next startup doesn't re-attempt it).
+  5. Conclusive results (True/None) remove the UUID from
+     `_previously_managed`; the inconclusive False keeps it.
 
 All tests use a MagicMock that satisfies `Actuator`, sidestepping the
 NVML/DCGM split — orphan recovery is now actuator-agnostic by design.
@@ -50,7 +56,9 @@ def _make_actuator(uuids, current_w, default_w, pids=None):
     actuator.get_uuid.side_effect = lambda idx: uuids[idx]
     actuator.current_w.side_effect = lambda idx: current_w[idx]
     actuator.default_w.side_effect = lambda idx: default_w[idx]
-    actuator.list_running_pids.side_effect = lambda idx: pids.get(idx, [])
+    actuator.list_running_pids.side_effect = lambda idx, expected_uuid=None: pids.get(
+        idx, []
+    )
     return actuator
 
 
@@ -87,9 +95,9 @@ class TestUuidGating(_OrphanTestBase):
 
         Critical guard against stepping on caps applied by other
         workflows (different DGD, manual nvidia-smi -pl, vendor
-        firmware defaults). Pre-v1.5 the inline NVML version did this
+        firmware defaults). An earlier inline NVML version did this
         via `if uuid not in _previously_managed: continue`; the
-        migrated version preserves the same branch via
+        current version preserves the same branch via
         `actuator.get_uuid(gpu_idx)`.
         """
         # We previously managed only GPU-a; GPU-b is foreign.
@@ -158,25 +166,23 @@ class TestWorkloadBusySkip(_OrphanTestBase):
 
 
 # ---------------------------------------------------------------------------
-# The current_w < default_w GUARD
+# Delegation to restore_default_by_uuid
 # ---------------------------------------------------------------------------
 
 
-class TestCurrentVsDefaultGuard(_OrphanTestBase):
-    """The load-bearing v1.5 Protocol-extension test.
-
-    Pre-v1.5 NVML implementation had this guard inline; if the
-    migration to actuator.restore_default had been done without
-    extending the Protocol, the guard would have silently disappeared
-    and orphan recovery would issue a redundant privileged write on
-    every startup for every previously-managed GPU.
+class TestDelegatesToRestoreByUuid(_OrphanTestBase):
+    """The caller must delegate the whole decision to
+    `restore_default_by_uuid` and NOT re-do current_w/default_w/identity
+    checks itself (those non-atomic reads reopened an
+    A->B->A re-enumeration hole). The below-default / at-default / gone
+    decision and its identity-stable, one-snapshot read live in the actuator.
     """
 
-    def test_current_below_default_triggers_restore(self):
+    def test_idle_managed_gpu_delegates_to_restore_by_uuid(self):
         self._managed_uuids = {"GPU-a"}
         actuator = _make_actuator(
             uuids={0: "GPU-a"},
-            current_w={0: 400},  # well below
+            current_w={0: 400},
             default_w={0: 700},
         )
 
@@ -184,39 +190,27 @@ class TestCurrentVsDefaultGuard(_OrphanTestBase):
 
         # UUID-stable: resolved from the confirmed UUID, not the loop index.
         actuator.restore_default_by_uuid.assert_called_once_with("GPU-a")
+        # The index-keyed restore_default must NOT be used by cold-start
+        # orphan recovery (it can't self-verify before apply_cap runs).
         actuator.restore_default.assert_not_called()
 
-    def test_current_equal_to_default_skips_restore(self):
-        """Cap already at default → no write, no audit-log churn."""
+    def test_caller_does_not_read_current_or_default(self):
+        """The caller must not perform its own current_w/default_w reads —
+        that non-atomic precheck is exactly the ABA hole the delegation
+        closes. The actuator reads limits + identity in one snapshot."""
         self._managed_uuids = {"GPU-a"}
         actuator = _make_actuator(
             uuids={0: "GPU-a"},
             current_w={0: 700},
             default_w={0: 700},
         )
+        actuator.restore_default_by_uuid.return_value = None
 
         _restore_orphaned_gpus_on_startup(actuator)
 
-        actuator.restore_default_by_uuid.assert_not_called()
-        actuator.restore_default.assert_not_called()
-
-    def test_current_above_default_skips_restore(self):
-        """Defensive — `current > default` shouldn't be physically
-        possible, but if it ever happens (firmware bug, vendor
-        override), the guard still skips the write rather than
-        clobbering with a smaller value the operator may have set
-        deliberately."""
-        self._managed_uuids = {"GPU-a"}
-        actuator = _make_actuator(
-            uuids={0: "GPU-a"},
-            current_w={0: 800},
-            default_w={0: 700},
-        )
-
-        _restore_orphaned_gpus_on_startup(actuator)
-
-        actuator.restore_default_by_uuid.assert_not_called()
-        actuator.restore_default.assert_not_called()
+        actuator.current_w.assert_not_called()
+        actuator.default_w.assert_not_called()
+        actuator.restore_default_by_uuid.assert_called_once_with("GPU-a")
 
 
 # ---------------------------------------------------------------------------
@@ -226,8 +220,8 @@ class TestCurrentVsDefaultGuard(_OrphanTestBase):
 
 class TestPerGpuExceptionIsolation(_OrphanTestBase):
     def test_one_gpu_failure_does_not_abort_others(self):
-        """A NVMLError / DCGMError on GPU 0 must not prevent GPU 1
-        from being recovered. Pre-v1.5 implementation had a per-GPU
+        """A NVMLError / DCGMError while handling GPU 0 must not prevent
+        GPU 1 from being recovered. The implementation has a per-GPU
         try/except; preserve that.
         """
         self._managed_uuids = {"GPU-a", "GPU-b"}
@@ -237,20 +231,24 @@ class TestPerGpuExceptionIsolation(_OrphanTestBase):
         actuator.get_uuid.side_effect = lambda idx: {0: "GPU-a", 1: "GPU-b"}[idx]
         actuator.list_running_pids.return_value = []
 
-        # GPU 0: current_w raises → caught + warning. GPU 1: clean restore.
-        def current_w(idx):
-            if idx == 0:
-                raise RuntimeError("simulated DCGM read failure on GPU 0")
-            return 400
+        # GPU 0's restore raises → caught + warning. GPU 1: clean restore.
+        def restore(uuid):
+            if uuid == "GPU-a":
+                raise RuntimeError("simulated DCGM failure on GPU 0")
+            return True
 
-        actuator.current_w.side_effect = current_w
-        actuator.default_w.side_effect = lambda idx: 700
+        actuator.restore_default_by_uuid.side_effect = restore
 
         _restore_orphaned_gpus_on_startup(actuator)
 
-        # GPU 0 never reached the restore (exception aborted its iteration).
-        # GPU 1 was handled normally — restored by its UUID.
-        actuator.restore_default_by_uuid.assert_called_once_with("GPU-b")
+        # Both were attempted; GPU-a raised (isolated), GPU-b restored.
+        self.assertEqual(
+            sorted(c.args[0] for c in actuator.restore_default_by_uuid.call_args_list),
+            ["GPU-a", "GPU-b"],
+        )
+        # GPU-b's conclusive True retired it; GPU-a stayed (its iteration raised).
+        self.assertNotIn("GPU-b", power_agent._previously_managed)
+        self.assertIn("GPU-a", power_agent._previously_managed)
 
 
 # ---------------------------------------------------------------------------
@@ -275,10 +273,17 @@ class TestManagedSetPruning(_OrphanTestBase):
         # _previously_managed must have GPU-a removed.
         self.assertNotIn("GPU-a", power_agent._previously_managed)
 
-    def test_skipped_gpu_retains_managed_uuid(self):
-        """If we didn't actually restore (e.g. current==default),
-        the UUID stays in _previously_managed so the next startup
-        can re-check.
+    def test_at_default_gpu_retires_ownership(self):
+        """Idle + managed + already at default → ownership is RETIRED
+        (UUID discarded), not retained.
+
+        Retaining a UUID whose cap is conclusively gone re-arms the
+        clobber the UUID-ownership guard exists to prevent: a later
+        unrelated workflow could cap this same physical GPU, and a future
+        startup would then "restore" (clobber) that foreign cap because
+        the stale UUID still marks the GPU as ours. `restore_default_by_uuid`
+        returns None for the at/above-default case (reconfirmed in one
+        snapshot), and the caller retires ownership on that conclusive None.
         """
         self._managed_uuids = {"GPU-a"}
         actuator = _make_actuator(
@@ -286,10 +291,54 @@ class TestManagedSetPruning(_OrphanTestBase):
             current_w={0: 700},
             default_w={0: 700},
         )
+        # At/above default is reported by the actuator as a conclusive None.
+        actuator.restore_default_by_uuid.return_value = None
 
         _restore_orphaned_gpus_on_startup(actuator)
 
-        self.assertIn("GPU-a", power_agent._previously_managed)
+        actuator.restore_default_by_uuid.assert_called_once_with("GPU-a")
+        actuator.restore_default.assert_not_called()
+        # Conclusive None → ownership retired.
+        self.assertNotIn("GPU-a", power_agent._previously_managed)
+
+    def test_retired_uuid_is_not_clobbered_on_next_startup(self):
+        """End-to-end of the stale-UUID exploit.
+
+        Startup 1: our GPU is idle + at default → ownership retired.
+        Between startups: an UNRELATED workflow caps that same physical GPU
+        below default (e.g. a different DGD, a manual `nvidia-smi -pl`).
+        Startup 2: because the UUID was retired, the GPU is no longer "ours",
+        so orphan recovery must NOT restore/clobber that foreign cap.
+
+        Before the fix the at-default UUID was retained, so startup 2 would see
+        a managed UUID + below-default + idle and reset the foreign cap.
+        """
+        # --- Startup 1: idle + at default → retire ownership. The actuator
+        # reports at/above default as a conclusive None. ---
+        self._managed_uuids = {"GPU-a"}
+        actuator1 = _make_actuator(
+            uuids={0: "GPU-a"},
+            current_w={0: 700},
+            default_w={0: 700},
+        )
+        actuator1.restore_default_by_uuid.return_value = None
+        _restore_orphaned_gpus_on_startup(actuator1)
+        self.assertNotIn("GPU-a", power_agent._previously_managed)
+
+        # --- Startup 2: a foreign workflow has since capped GPU-a below
+        # default. The persisted set no longer lists GPU-a, so the UUID gate
+        # skips it entirely (no read of its power state, no restore). ---
+        self._managed_uuids = set()  # persisted state after startup 1's retire
+        actuator2 = _make_actuator(
+            uuids={0: "GPU-a"},
+            current_w={0: 300},  # foreign cap, below default
+            default_w={0: 700},
+        )
+        _restore_orphaned_gpus_on_startup(actuator2)
+
+        actuator2.restore_default_by_uuid.assert_not_called()
+        actuator2.restore_default.assert_not_called()
+        actuator2.current_w.assert_not_called()  # UUID gate short-circuits
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +347,7 @@ class TestManagedSetPruning(_OrphanTestBase):
 
 
 class TestUuidStableRestoreReturn(_OrphanTestBase):
-    """The PR9790-review fix: the write resolves identity from the UUID at
+    """The write resolves identity from the UUID at
     write time (so a DCGM reconnect/re-enumeration between probe and write
     can't restore/prune the wrong GPU), and the prune decision keys off the
     by-UUID return value, not the loop index.
@@ -324,17 +373,19 @@ class TestUuidStableRestoreReturn(_OrphanTestBase):
         actuator.restore_default_by_uuid.assert_called_once_with("GPU-a")
         self.assertNotIn("GPU-a", power_agent._previously_managed)
 
-    def test_none_return_retains_uuid(self):
-        """None = nothing of ours to restore (already at default, or the GPU
-        moved/left on a clean scan). Do NOT prune — leave it for the next
-        boot to re-check rather than dropping a UUID we might still own."""
+    def test_none_return_retires_ownership(self):
+        """None = CONCLUSIVE nothing-of-ours: restore_default_by_uuid
+        reconfirmed the GPU is already at/above default, or proved it gone
+        on a clean scan. Retire ownership —
+        a stale UUID whose cap is proven gone would let a future startup
+        clobber a later unrelated cap on the same physical GPU."""
         actuator = self._capped_actuator()
         actuator.restore_default_by_uuid.return_value = None
 
         _restore_orphaned_gpus_on_startup(actuator)
 
         actuator.restore_default_by_uuid.assert_called_once_with("GPU-a")
-        self.assertIn("GPU-a", power_agent._previously_managed)
+        self.assertNotIn("GPU-a", power_agent._previously_managed)
 
     def test_false_return_retains_uuid(self):
         """False = the UUID could not be located conclusively (a probe raised,

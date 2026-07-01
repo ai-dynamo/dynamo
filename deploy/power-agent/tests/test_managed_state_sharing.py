@@ -51,23 +51,20 @@ class TestSharedStateIdentity(unittest.TestCase):
 class TestActuatorWritesVisibleToShutdown(unittest.TestCase):
     """A managed GPU recorded into ``managed_state`` (the way the actuator's
     own ``import power_agent`` copy records it) must be restored by the
-    module-level SIGTERM handler. This is the exact path that silently broke
-    before the state was hoisted into ``managed_state``."""
+    shutdown cleanup. This is the exact path that silently broke before the
+    state was hoisted into ``managed_state``."""
 
     def setUp(self):
         managed_state.managed_gpu_indices.clear()
         managed_state.previously_managed.clear()
-        self._saved_actuator = power_agent._active_actuator
-        power_agent._active_actuator = None
         power_agent._shutdown.clear()
 
     def tearDown(self):
         managed_state.managed_gpu_indices.clear()
         managed_state.previously_managed.clear()
-        power_agent._active_actuator = self._saved_actuator
         power_agent._shutdown.clear()
 
-    def test_index_recorded_in_managed_state_is_restored_on_sigterm(self):
+    def test_index_recorded_in_managed_state_is_restored_on_cleanup(self):
         # Simulate the actuator recording a cap by mutating the canonical
         # shared set directly (its `power_agent._managed_gpu_indices` is the
         # same object as `managed_state.managed_gpu_indices`).
@@ -76,13 +73,12 @@ class TestActuatorWritesVisibleToShutdown(unittest.TestCase):
         actuator = MagicMock()
         actuator.name = "nvml"
         actuator.get_uuid.return_value = "GPU-3"
-        power_agent._active_actuator = actuator
 
         with patch.object(power_agent, "_persist_managed_gpus"):
-            power_agent._handle_sigterm(15, None)
+            power_agent._shutdown_cleanup(actuator)
 
         actuator.restore_default.assert_called_once_with(3)
-        self.assertTrue(power_agent._shutdown.is_set())
+        actuator.shutdown.assert_called_once()
 
 
 class TestOrphanReloadKeepsAlias(unittest.TestCase):

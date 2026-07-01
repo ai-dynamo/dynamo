@@ -23,7 +23,7 @@ module-level globals.
 
 If the managed-GPU sets lived in ``power_agent.py`` they would therefore
 exist as two independent copies: the actuator would record freshly-capped
-GPUs into the ``power_agent`` copy while the SIGTERM handler (running in
+GPUs into the ``power_agent`` copy while shutdown cleanup (running in
 ``__main__``) restored from the ``__main__`` copy — which would always be
 empty. The failure is silent and total: every cap leaks past graceful
 shutdown because the restore loop never sees a single managed GPU.
@@ -52,8 +52,9 @@ MANAGED_STATE_PATH = "/var/lib/dynamo-power-agent/managed_gpus.json"
 
 # In-process set of physical GPU indices this running agent has capped.
 # Populated by every successful cap write (NVML via ``power_agent._apply_cap``,
-# DCGM via ``DcgmActuator._record_managed_state``) and drained by the SIGTERM
-# handler, which restores each one to default TGP before exit.
+# DCGM via ``DcgmActuator._record_managed_state``) and drained by shutdown
+# cleanup (``power_agent._shutdown_cleanup``, invoked from the reconcile loop
+# after SIGTERM), which restores each one to default TGP before exit.
 managed_gpu_indices: set[int] = set()
 
 # Persisted across restarts (``MANAGED_STATE_PATH``): the UUIDs this agent has
