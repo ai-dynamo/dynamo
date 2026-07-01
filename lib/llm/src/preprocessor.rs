@@ -69,9 +69,7 @@ use crate::protocols::{
     },
     openai::{
         DeltaGeneratorExt,
-        chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse, jail::JailedStream,
-        },
+        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     },
@@ -2422,7 +2420,20 @@ impl OpenAIPreprocessor {
         }
     }
 
-    /// Apply tool calling jail to the stream if needed
+    /// Apply tool calling jail to the stream if needed.
+    ///
+    /// The jail itself now lives in `dynamo-parsers`
+    /// (`dynamo_parsers::tool_calling::jail`), where it operates on the shared
+    /// `CreateChatCompletionStreamResponse` — dynamo-parsers cannot depend on
+    /// dynamo-runtime, so it does not know about `Annotated` or the `Nv`
+    /// newtype. This method is the boundary adapter: it unwraps the dynamo
+    /// `Annotated<Nv{inner, nvext}>` stream into the jail's
+    /// `Annotated<CreateChatCompletionStreamResponse>`, runs the moved jail, and
+    /// re-wraps the result.
+    ///
+    /// `nvext` is not populated on the streaming tool-call path (only the unary
+    /// aggregator/anthropic paths set it), so the jail never needs to preserve
+    /// it and re-wrapped chunks carry `nvext: None`.
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
@@ -2433,63 +2444,38 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        use dynamo_protocols::types::ChatCompletionToolChoiceOption;
+        use dynamo_parsers::tool_calling::jail::{
+            Annotated as JailAnnotated, apply_tool_calling_jail as jail_apply,
+        };
 
-        let mut builder = JailedStream::builder();
+        // dynamo `Annotated<Nv>` -> jail `Annotated<Create>`
+        let jail_input = stream.map(|a| JailAnnotated {
+            data: a.data.map(|nv| nv.inner),
+            id: a.id,
+            event: a.event,
+            comment: a.comment,
+            error: a.error.map(|e| e.to_string()),
+        });
 
-        // Set tool definitions if provided
-        if let Some(tool_definitions) = tool_definitions
-            && !tool_definitions.is_empty()
-        {
-            builder = builder.tool_definitions(tool_definitions);
-        }
-
-        // When structural_tag is active, the model output is already constrained by
-        // guided decoding into a model-specific format. Always use the marker-based
-        // parser to extract tool calls from that format.
-        if uses_tool_call_structural_tag {
-            if let Some(parser) = tool_call_parser {
-                builder = builder.tool_call_parser(parser);
-            }
-        } else {
-            // Configure jail based on tool_choice
-            //
-            // For tool_choice=required or named we mirror SGLang / vLLM: assume the
-            // backend applied guided decoding and emit a bare JSON shape, so parse
-            // via the JSON array parser (base_json_parser) rather than the model's
-            // native-format parser.  If a parser is also configured we still carry
-            // it so the Immediate branch can fall back to marker-based parsing for
-            // backends that do not honor guided decoding (e.g. XML-native models
-            // like qwen3_coder — see regression test_tool_choice_required_with_
-            // qwen3_coder_parser).
-            match tool_choice {
-                Some(ChatCompletionToolChoiceOption::Named(named)) => {
-                    builder = builder
-                        .tool_choice_named(named.function.name.clone())
-                        .named_tool_filter(named.function.name.clone());
-                    if let Some(parser) = tool_call_parser {
-                        builder = builder.tool_call_parser(parser);
-                    }
-                }
-                Some(ChatCompletionToolChoiceOption::Required) => {
-                    builder = builder.tool_choice_required();
-                    if let Some(parser) = tool_call_parser {
-                        builder = builder.tool_call_parser(parser);
-                    }
-                }
-                Some(ChatCompletionToolChoiceOption::Auto)
-                | Some(ChatCompletionToolChoiceOption::None)
-                | None => {
-                    // Traditional marker-based jail for auto/none/unspecified
-                    if let Some(parser) = tool_call_parser {
-                        builder = builder.tool_call_parser(parser);
-                    }
-                }
-            }
-        }
-
-        let jail = builder.build();
-        jail.apply_with_finish_reason(stream)
+        // jail `Annotated<Create>` -> dynamo `Annotated<Nv>`
+        jail_apply(
+            tool_call_parser,
+            tool_choice,
+            tool_definitions,
+            uses_tool_call_structural_tag,
+            jail_input,
+        )
+        .map(|a| Annotated {
+            data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                inner,
+                nvext: None,
+                llm_metrics: None,
+            }),
+            id: a.id,
+            event: a.event,
+            comment: a.comment,
+            error: a.error.map(DynamoError::msg),
+        })
     }
 
     /// Whether the selected tool-call or reasoning parser depends on the
