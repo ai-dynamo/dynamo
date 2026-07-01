@@ -132,7 +132,7 @@ def _validate_runtime() -> dict[str, Any]:
     from vllm.plugins import load_general_plugins
     from vllm.utils.import_utils import has_deep_ep_v2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-    from vllm.v1.worker.gpu_worker import GPUWorker
+    from vllm.v1.worker.gpu_worker import Worker
 
     if not callable(SymmetricAllGatherWorkspace.checkpoint_prepare):
         raise RuntimeError("Symmetric all-gather checkpoint API is missing")
@@ -140,10 +140,8 @@ def _validate_runtime() -> dict[str, Any]:
         raise RuntimeError("One-sided MoE checkpoint API is missing")
     if has_deep_ep_v2():
         raise RuntimeError("DeepEPv2 must be disabled without probing NCCL")
-    if hasattr(GPUWorker, "checkpoint_prepare") or hasattr(
-        GPUWorker, "checkpoint_restore"
-    ):
-        raise RuntimeError("GPUWorker must not contain snapshot lifecycle overrides")
+    if hasattr(Worker, "checkpoint_prepare") or hasattr(Worker, "checkpoint_restore"):
+        raise RuntimeError("GPU worker must not contain snapshot lifecycle overrides")
     wake_source = inspect.getsource(GPUModelRunner.init_fp8_kv_scales)
     if "isinstance(cache_entry, list)" not in wake_source:
         raise RuntimeError("Hybrid FP8 KV wake fix is missing")
@@ -240,7 +238,8 @@ def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
 
     all_reduce()
     torch.cuda.synchronize()
-    torch.testing.assert_close(ar_output, torch.full_like(ar_output, 36))
+    initial_sum = world_size * (world_size + 1) // 2
+    torch.testing.assert_close(ar_output, torch.full_like(ar_output, initial_sum))
     ar_graph = torch.cuda.CUDAGraph()
     dist.barrier()
     with torch.cuda.graph(ar_graph):
@@ -332,6 +331,7 @@ def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
     dist.barrier()
     with torch.cuda.graph(moe_graph):
         moe_output = moe_round_trip()
+    moe_graph.replay()
     torch.cuda.synchronize()
     torch.testing.assert_close(moe_output, moe_input)
 
@@ -367,7 +367,8 @@ def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
     moe_graph.replay()
     torch.cuda.synchronize()
 
-    torch.testing.assert_close(ar_output, torch.full_like(ar_output, 44))
+    restored_sum = world_size * (world_size + 3) // 2
+    torch.testing.assert_close(ar_output, torch.full_like(ar_output, restored_sum))
     torch.testing.assert_close(ag_output, _expected_all_gather(world_size, ag_shape, 8))
     torch.testing.assert_close(moe_output, moe_input)
 

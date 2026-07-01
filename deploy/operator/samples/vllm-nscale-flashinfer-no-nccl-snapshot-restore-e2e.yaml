@@ -1,0 +1,216 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# nscale validation for the FlashInfer-only checkpoint-aware vLLM stack.
+# The namespace must already contain shared-model-cache, hf-token-secret,
+# acr-token-secret, the Dynamo operator, and the snapshot agent.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: fi-nemotron-fa-nonccl-28515733745
+  labels:
+    app.kubernetes.io/created-by: pi-relay
+    app.kubernetes.io/name: dynamo-snapshot-e2e
+    e2e.ai-dynamo.io/run: fi-no-nccl-28515733745
+  annotations:
+    nvidia.com/enable-grove: "false"
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: shared-model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: shared-model-cache
+          mountPoint: /home/dynamo/.cache/huggingface
+      extraPodSpec:
+        mainContainer:
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:a641a3d5d50b342a7a73c72d211a98e2e309f239c34502f140d9bf7701766bf9
+          imagePullPolicy: Always
+          command:
+            - python3
+            - -m
+            - dynamo.frontend
+          args:
+            - --router-mode
+            - round-robin
+            - --http-port
+            - "8000"
+          env:
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: DO_NOT_TRACK
+              value: "1"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            timeoutSeconds: 5
+    VllmDecodeWorker:
+      componentType: worker
+      replicas: 1
+      envFromSecret: hf-token-secret
+      resources:
+        requests:
+          memory: 128Gi
+          gpu: "8"
+          custom:
+            ephemeral-storage: 20Gi
+        limits:
+          memory: 1536Gi
+          gpu: "8"
+      sharedMemory:
+        size: 64Gi
+      checkpoint:
+        enabled: true
+        startupPolicy: WaitForCheckpoint
+        deletionPolicy: Retain
+        targetContainerName: main
+      extraPodSpec:
+        nodeSelector:
+          kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-z2rzf
+          nvidia.com/gpu.count: "8"
+          nvidia.com/gpu.present: "true"
+          nvidia.com/gpu.product: NVIDIA-B200
+        runtimeClassName: nvidia
+        serviceAccountName: fi-nemotron-fa-nonccl-28515733745-k8s-service-discovery
+        securityContext:
+          fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
+        terminationGracePeriodSeconds: 60
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        volumes:
+          - name: hf-cache
+            persistentVolumeClaim:
+              claimName: shared-model-cache
+          - name: criu-work
+            emptyDir: {}
+        mainContainer:
+          name: main
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:129c2467548ae554a66d38d64d5b7e058d512b8faf6f2eec393775b17da8d068
+          imagePullPolicy: Always
+          workingDir: /workspace/
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+            - --served-model-name
+            - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+            - --trust-remote-code
+            - --tensor-parallel-size
+            - "1"
+            - --pipeline-parallel-size
+            - "1"
+            - --data-parallel-size
+            - "8"
+            - --data-parallel-size-local
+            - "8"
+            - --data-parallel-backend
+            - mp
+            - --distributed-executor-backend
+            - mp
+            - --data-parallel-rpc-port
+            - "29500"
+            - --enable-expert-parallel
+            - --moe-backend
+            - flashinfer_trtllm
+            - --all2all-backend
+            - flashinfer_nvlink_one_sided
+            - --enable-flashinfer-autotune
+            - --disable-custom-all-reduce
+            - --disable-nccl-for-dp-synchronization
+            - --max-model-len
+            - "4096"
+            - --max-num-seqs
+            - "16"
+            - --max-num-batched-tokens
+            - "4096"
+            - --gpu-memory-utilization
+            - "0.80"
+            - --kv-cache-dtype
+            - fp8
+          env:
+            - name: HF_HOME
+              value: /home/dynamo/.cache/huggingface
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
+            - name: HF_HUB_DISABLE_TELEMETRY
+              value: "1"
+            - name: DO_NOT_TRACK
+              value: "1"
+            - name: VLLM_DISABLE_NCCL
+              value: "1"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+            - name: VLLM_LOGGING_LEVEL
+              value: INFO
+            - name: VLLM_ENGINE_READY_TIMEOUT_S
+              value: "7200"
+            - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+              value: "0"
+            - name: VLLM_USE_NCCL_SYMM_MEM
+              value: "0"
+            - name: VLLM_DISTRIBUTED_USE_SPLIT_GROUP
+              value: "0"
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "n"
+          ports:
+            - name: system
+              containerPort: 9090
+            - name: nixl
+              containerPort: 19090
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 720
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 1
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+                - SYS_PTRACE
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /home/dynamo/.cache/huggingface
+            - name: criu-work
+              mountPath: /var/criu-work

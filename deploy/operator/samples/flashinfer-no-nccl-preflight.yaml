@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The companion script is mounted from a ConfigMap created from
+# flashinfer-no-nccl-preflight.py.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fi-no-nccl-preflight-28515733745
+  labels:
+    app.kubernetes.io/created-by: pi-relay
+    app.kubernetes.io/name: flashinfer-no-nccl-preflight
+    e2e.ai-dynamo.io/run: fi-no-nccl-28515733745
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: flashinfer-no-nccl-preflight
+        e2e.ai-dynamo.io/run: fi-no-nccl-28515733745
+    spec:
+      restartPolicy: Never
+      runtimeClassName: nvidia
+      imagePullSecrets:
+        - name: acr-token-secret
+      securityContext:
+        seccompProfile:
+          type: Localhost
+          localhostProfile: profiles/block-iouring.json
+      nodeSelector:
+        nvidia.com/gpu.count: "8"
+        nvidia.com/gpu.present: "true"
+        nvidia.com/gpu.product: NVIDIA-B200
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: preflight
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:a641a3d5d50b342a7a73c72d211a98e2e309f239c34502f140d9bf7701766bf9
+          imagePullPolicy: Always
+          command:
+            - torchrun
+            - --standalone
+            - --nproc-per-node=8
+            - /preflight/preflight.py
+          env:
+            - name: EXPECTED_DYNAMO_SHA
+              value: 0569b75fecd9c1ce612c9fa61d81c49930e49e07
+            - name: VLLM_DISABLE_NCCL
+              value: "1"
+            - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+              value: "0"
+            - name: VLLM_USE_NCCL_SYMM_MEM
+              value: "0"
+            - name: VLLM_DISTRIBUTED_USE_SPLIT_GROUP
+              value: "0"
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+          resources:
+            requests:
+              memory: 64Gi
+              nvidia.com/gpu: "8"
+            limits:
+              memory: 256Gi
+              nvidia.com/gpu: "8"
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+                - SYS_PTRACE
+          volumeMounts:
+            - name: preflight
+              mountPath: /preflight
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: preflight
+          configMap:
+            name: fi-no-nccl-preflight-28515733745
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
