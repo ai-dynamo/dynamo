@@ -2955,20 +2955,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             for item in image_items
             if isinstance(item, dict) and "Url" in item
         ]
-        if image_items and not image_urls:
-            # Image data is present but no usable URL could be extracted.
+        if len(image_urls) != len(image_items):
+            # At least one image item was malformed — not a dict with a 'Url'
+            # key (e.g. a pre-'Decoded' variant the CustomEncoder can't take).
+            # Reject the whole request instead of silently dropping images.
             msg = (
-                "CustomEncoder received image multimodal data but could not "
-                f"extract any URLs from {len(image_items)} item(s); each item "
-                "must be a dict with a 'Url' key"
+                "CustomEncoder received image multimodal data but only "
+                f"{len(image_urls)} of {len(image_items)} item(s) had a usable "
+                "'Url'; each item must be a dict with a 'Url' key"
             )
             logger.error("Request %s: %s", request_id, msg)
             return None, None, {"finish_reason": f"error: {msg}", "token_ids": []}
 
         if not image_urls:
-            # No usable image URLs, and non-image modalities were already
-            # rejected above, so there is nothing for the CustomEncoder to
-            # assemble and nothing to extract → text-only request.
+            # No image items at all — and non-image modalities were already
+            # rejected above — so there is nothing to assemble → text-only.
             return None, None, None
 
         token_ids: list[int] = request.get("token_ids") or []
