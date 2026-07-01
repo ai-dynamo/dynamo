@@ -437,6 +437,7 @@ mod tests {
                 "top_k": 50,
                 "seed": 12345,
                 "stop_token_ids": [151643],
+                "stop": ["<|endoftext|>"],
                 "presence_penalty": 0.5,
                 "min_tokens": 2,
                 "max_tokens": 8,
@@ -491,6 +492,7 @@ mod tests {
         assert_eq!(sp["top_k"], serde_json::json!(50));
         assert_eq!(sp["seed"], serde_json::json!(12345));
         assert_eq!(sp["stop_token_ids"], serde_json::json!([151643]));
+        assert_eq!(sp["stop"], serde_json::json!(["<|endoftext|>"]));
         assert_eq!(sp["presence_penalty"], serde_json::json!(0.5));
         assert_eq!(sp["future_nested_field"], serde_json::json!("ignored"));
         // Engine priority rides the envelope, separate from Dynamo routing priority.
