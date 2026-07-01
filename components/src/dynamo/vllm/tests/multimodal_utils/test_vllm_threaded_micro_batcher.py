@@ -15,6 +15,7 @@ caller, and the shutdown lifecycle behaves.
 
 import asyncio
 import threading
+import time
 
 import pytest
 
@@ -402,53 +403,64 @@ def test_double_start_raises():
         b.shutdown()
 
 
-def _run_double_start_race() -> tuple[list[str], int]:
-    """Fire two threads into start() at once; return (outcomes, on_start_runs)."""
+def test_concurrent_start_starts_one_worker():
+    """Two threads race start(); the winner parks inside on_start while the loser
+    must already be rejected — one worker only.
+
+    Deterministic regression guard for the double-start race: the winner blocks in
+    on_start, so `_state` is still NEW when the loser races in. A state-only guard
+    would let the loser through *here* (state == NEW), spawn a second worker, and
+    run on_start twice; the fix also keys on `_thread` (published under the lock),
+    so the loser is rejected while the winner is still parked. Blocking on_start
+    forces the window every run (no reliance on scheduler timing).
+    """
+    entered = threading.Event()
+    release = threading.Event()
     ran = {"n": 0}
-    counter_lock = threading.Lock()
+    ran_lock = threading.Lock()
 
     def on_start():
-        with counter_lock:
+        with ran_lock:
             ran["n"] += 1
+        entered.set()
+        release.wait(timeout=5.0)
 
     b = ThreadedMicroBatcher(_echo, on_start=on_start)
     outcomes: list[str] = []
     out_lock = threading.Lock()
+    gate = threading.Barrier(2)
 
     def do_start():
+        gate.wait()  # both threads reach start() together
         try:
             b.start()
-            with out_lock:
-                outcomes.append("ok")
+            tag = "ok"
         except RuntimeError:
-            with out_lock:
-                outcomes.append("rejected")
+            tag = "rejected"
+        with out_lock:
+            outcomes.append(tag)
 
     t1 = threading.Thread(target=do_start)
     t2 = threading.Thread(target=do_start)
     t1.start()
     t2.start()
-    t1.join()
-    t2.join()
     try:
-        return outcomes, ran["n"]
+        assert entered.wait(timeout=5.0), "winner never reached on_start"
+        # Winner is parked in on_start (state still NEW, _thread published). The
+        # loser must already be rejected — the window a state-only guard misses.
+        deadline = time.monotonic() + 5.0
+        while not outcomes and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert outcomes == [
+            "rejected"
+        ], f"loser not rejected while winner parked: {outcomes}"
     finally:
-        b.shutdown()
-
-
-def test_concurrent_start_starts_one_worker():
-    """Two threads racing start(): exactly one wins and on_start runs once.
-
-    Regression guard: `_state` stays NEW while the first start() blocks on
-    on_start, so a state-only guard would let a second concurrent start() spawn a
-    second (orphaned) worker and run on_start twice. The guard also keys on
-    `_thread` (published under the lock) to close that window. Repeated to
-    exercise the race window; the invariants hold every run regardless of timing.
-    """
-    for _ in range(40):
-        outcomes, on_start_runs = _run_double_start_race()
-        assert outcomes.count("ok") == 1, outcomes
-        assert on_start_runs == 1  # one worker only — no second spawn
+        release.set()
+        t1.join()
+        t2.join()
+    assert sorted(outcomes) == ["ok", "rejected"], outcomes
+    assert ran["n"] == 1  # one worker only — on_start never ran twice
+    b.shutdown()
 
 
 def test_worker_thread_is_not_daemon():
