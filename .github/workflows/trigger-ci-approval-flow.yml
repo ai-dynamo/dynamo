@@ -92,6 +92,9 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
           TRIGGERING_ACTOR: ${{ github.actor }}
         run: |
+          # This checks effective repository permission, not organization membership. GitHub's
+          # collaborator-permission endpoint supports the repository-scoped GitHub App installation
+          # token provided by github.token and requires only repository Metadata read access.
           if ! actor_permission=$(gh api \
             "repos/$REPO_OWNER/$REPO_NAME/collaborators/$TRIGGERING_ACTOR/permission" \
             --jq '.permission'); then
@@ -130,7 +133,9 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          commit_shas=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER/commits" --jq '.[].sha')
+          commit_shas=$(gh api --paginate \
+            "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER/commits?per_page=100" \
+            --jq '.[].sha')
 
           if [[ -z "$commit_shas" ]]; then
             echo "Warning: No commits found in PR." >&2
