@@ -249,18 +249,23 @@ class GeneratePayload(BasePayload):
         sampling = self.body.get("sampling_params", {})
         expected_max = sampling.get("max_tokens")
         if expected_max is not None:
-            if sampling.get("ignore_eos"):
-                # ignore_eos disables early stopping, so the count is exactly
-                # max_tokens regardless of which tokens are sampled (robust to
-                # token values shifting across vLLM builds).
+            # ignore_eos suppresses only the EOS token, not explicit stop
+            # conditions, so the count is exactly max_tokens only when there is
+            # also no stop / stop_token_ids.
+            has_stop = bool(sampling.get("stop_token_ids") or sampling.get("stop"))
+            min_tokens = max(1, sampling.get("min_tokens") or 0)
+            if sampling.get("ignore_eos") and not has_stop:
+                # Deterministic count regardless of which tokens are sampled
+                # (robust to token values shifting across vLLM builds).
                 assert len(token_ids) == expected_max, (
                     f"Expected exactly {expected_max} tokens (max_tokens + "
-                    f"ignore_eos), got {len(token_ids)}: {choice}"
+                    f"ignore_eos, no stop), got {len(token_ids)}: {choice}"
                 )
             else:
-                # May stop early on EOS / stop_token_ids.
-                assert 0 < len(token_ids) <= expected_max, (
-                    f"Expected 1..={expected_max} tokens, got "
+                # May stop early on EOS / stop / stop_token_ids, but must still
+                # honor min_tokens as the lower bound.
+                assert min_tokens <= len(token_ids) <= expected_max, (
+                    f"Expected {min_tokens}..={expected_max} tokens, got "
                     f"{len(token_ids)}: {choice}"
                 )
 

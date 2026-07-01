@@ -462,6 +462,16 @@ mod tests {
             Some(8)
         );
 
+        // Drift-containment (negative): sampling knobs must NOT be lowered into
+        // core — they live only in the envelope. If a future change lowered any
+        // of these, this fails.
+        assert_eq!(pre.sampling_options.temperature, None);
+        assert_eq!(pre.sampling_options.top_p, None);
+        assert_eq!(pre.sampling_options.top_k, None);
+        assert_eq!(pre.sampling_options.presence_penalty, None);
+        assert_eq!(pre.stop_conditions.stop, None);
+        assert_eq!(pre.stop_conditions.stop_token_ids, None);
+
         // Envelope fidelity: every sampling knob — including ones NOT shadowed
         // into core (top_p/top_k/seed/stop_token_ids/penalties) — and the
         // unknown nested field survive verbatim for the worker to reconstruct.
@@ -481,5 +491,11 @@ mod tests {
         // Engine priority rides the envelope, separate from Dynamo routing priority.
         assert_eq!(envelope["priority"], serde_json::json!(3));
         assert_eq!(envelope["token_ids"], serde_json::json!([1, 2, 3]));
+
+        // Strongest fidelity check: the whole envelope equals the raw request
+        // serialized verbatim — covers every field (incl. min_tokens/max_tokens/
+        // ignore_eos), not just the sampled keys above.
+        let expected_envelope = serde_json::to_value(&req).expect("serialize req");
+        assert_eq!(envelope, &expected_envelope);
     }
 }
