@@ -356,6 +356,18 @@ pub mod llm {
     /// Set to `0` or leave unset to disable the timeout (default: disabled).
     pub const DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS: &str = "DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS";
 
+    /// Hysteresis duration in milliseconds for the decode overload deadline mechanism.
+    ///
+    /// When a decode worker's KV utilization or active decode block count exceeds the
+    /// configured threshold, an overload deadline is set `DYN_DECODE_OVERLOAD_HYSTERESIS_MS`
+    /// milliseconds in the future. The worker is considered overloaded until either
+    /// the deadline expires OR the next arriving signal still exceeds the threshold
+    /// (which refreshes the deadline). This prevents the overload flag from clearing
+    /// immediately on a single below-threshold reading after a spike.
+    ///
+    /// Default: 5000 ms.
+    pub const DYN_DECODE_OVERLOAD_HYSTERESIS_MS: &str = "DYN_DECODE_OVERLOAD_HYSTERESIS_MS";
+
     /// Enable the LoRA allocation controller (set to "true" to enable)
     pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
 
@@ -716,6 +728,7 @@ mod tests {
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
+            llm::DYN_DECODE_OVERLOAD_HYSTERESIS_MS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
