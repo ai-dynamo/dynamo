@@ -10,3 +10,8 @@ FROM ${BASE_IMAGE}
 
 COPY requirements.txt /tmp/riva-requirements.txt
 RUN python3 -m pip install --no-cache-dir -r /tmp/riva-requirements.txt
+
+# Bake the worker package in (on PYTHONPATH) so `python -m riva_nim.<worker>`
+# runs without bind-mounting the source. A mounted checkout still overrides it.
+COPY riva_nim/ /opt/riva-cascaded-pipeline/riva_nim/
+ENV PYTHONPATH=/opt/riva-cascaded-pipeline

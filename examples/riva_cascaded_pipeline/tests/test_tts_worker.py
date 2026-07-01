@@ -12,6 +12,8 @@ from unittest.mock import MagicMock
 import pytest
 from riva_nim import config, tts_worker
 
+pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
 
 @pytest.fixture
 def backend():

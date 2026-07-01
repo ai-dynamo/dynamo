@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import binascii
 import logging
 import uuid
 from typing import AsyncIterator
@@ -40,6 +41,14 @@ DEFAULT_LLM_MODEL = ""
 
 def _event_id() -> str:
     return f"event_{uuid.uuid4().hex}"
+
+
+def _error_event(error_type: str, code: str, message: str) -> dict:
+    return {
+        "type": "error",
+        "event_id": _event_id(),
+        "error": {"type": error_type, "code": code, "message": message},
+    }
 
 
 def _response_payload(response_id: str, status: str) -> dict:
@@ -170,10 +179,23 @@ class CascadedPipeline:
             elif event_type == "input_audio_buffer.append":
                 audio_chunks.append(event.get("audio", ""))
             elif event_type == "input_audio_buffer.commit":
-                # Concatenate the raw PCM bytes (not the base64 strings) before
-                # handing the full utterance to ASR, then reset for the next turn.
-                audio = b"".join(base64.b64decode(chunk) for chunk in audio_chunks)
+                chunks = audio_chunks
                 audio_chunks = []
+                if not chunks:
+                    # Commit with no buffered audio: nothing to respond to.
+                    continue
+                # Concatenate the raw PCM bytes (not the base64 strings). Malformed
+                # client audio is a client error, so report it rather than letting
+                # the decode exception tear down the realtime stream.
+                try:
+                    audio = b"".join(
+                        base64.b64decode(chunk, validate=True) for chunk in chunks
+                    )
+                except (binascii.Error, ValueError) as exc:
+                    yield _error_event(
+                        "invalid_request_error", "invalid_audio", str(exc)
+                    )
+                    continue
                 # A downstream worker failure should surface to the realtime
                 # client as an error event, not tear down the whole session.
                 try:
@@ -183,25 +205,13 @@ class CascadedPipeline:
                         yield output
                 except Exception as exc:
                     logger.exception("Cascaded pipeline turn failed")
-                    yield {
-                        "type": "error",
-                        "event_id": _event_id(),
-                        "error": {
-                            "type": "server_error",
-                            "code": "pipeline_error",
-                            "message": str(exc),
-                        },
-                    }
+                    yield _error_event("server_error", "pipeline_error", str(exc))
             else:
-                yield {
-                    "type": "error",
-                    "event_id": _event_id(),
-                    "error": {
-                        "type": "invalid_request_error",
-                        "code": "unsupported_client_event",
-                        "message": f"orchestrator does not support {event_type}",
-                    },
-                }
+                yield _error_event(
+                    "invalid_request_error",
+                    "unsupported_client_event",
+                    f"orchestrator does not support {event_type}",
+                )
 
 
 def _parse_args() -> argparse.Namespace:

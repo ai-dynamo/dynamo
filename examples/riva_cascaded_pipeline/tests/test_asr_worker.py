@@ -13,6 +13,8 @@ import pytest
 from riva.client import AudioEncoding
 from riva_nim import asr_worker, config
 
+pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
 
 @pytest.fixture
 def backend():

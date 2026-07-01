@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from riva_nim import orchestrator
 
+pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
 
 class _FakeResponse:
     def __init__(self, data):
@@ -160,6 +162,36 @@ async def test_downstream_failure_emits_error_event(context):
     assert [e["type"] for e in out] == ["error"]
     llm_client.round_robin.assert_not_called()
     tts_client.round_robin.assert_not_called()
+
+
+async def test_empty_commit_emits_nothing(context):
+    asr_client, llm_client, tts_client = _client([]), _client([]), _client([])
+    pipeline = orchestrator.CascadedPipeline(
+        asr_client, llm_client, tts_client, llm_model="my-llm"
+    )
+
+    events = [{"type": "input_audio_buffer.commit"}]
+    out = [e async for e in pipeline.handle(_events(events), context)]
+
+    assert out == []  # nothing buffered → no chain run, no events
+    asr_client.round_robin.assert_not_called()
+
+
+async def test_malformed_audio_emits_invalid_request_error(context):
+    asr_client, llm_client, tts_client = _client([]), _client([]), _client([])
+    pipeline = orchestrator.CascadedPipeline(
+        asr_client, llm_client, tts_client, llm_model="my-llm"
+    )
+
+    events = [
+        {"type": "input_audio_buffer.append", "audio": "!!!not-base64!!!"},
+        {"type": "input_audio_buffer.commit"},
+    ]
+    out = [e async for e in pipeline.handle(_events(events), context)]
+
+    assert [e["type"] for e in out] == ["error"]
+    assert out[0]["error"]["type"] == "invalid_request_error"
+    asr_client.round_robin.assert_not_called()  # never reaches the chain
 
 
 async def test_buffer_resets_between_turns(context):
