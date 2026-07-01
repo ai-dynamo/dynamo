@@ -20,7 +20,9 @@ The main TRT-LLM recipe entrypoints are:
 - [Qwen3-235B-A22B-FP8 aggregated, Hopper](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml)
 - [Qwen3-235B-A22B-FP8 aggregated, Blackwell](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml)
 - [Qwen3-235B-A22B-FP8 disaggregated, Hopper](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml)
-- [Qwen3-235B-A22B-FP8 disaggregated, Blackwell](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml)
+- [Qwen3-235B-A22B-FP8 disaggregated, Blackwell, AWS EFA](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-aws-efa.yaml)
+- [Qwen3-235B-A22B-FP8 disaggregated, Blackwell, GKE RoCE](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-gcp-roce.yaml)
+- [Qwen3-235B-A22B-FP8 disaggregated, Blackwell, Nscale InfiniBand](../../../../recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-nscale-ib.yaml)
 - [Qwen3-32B-FP8 aggregated](../../../../recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml)
 - [Qwen3-32B-FP8 disaggregated](../../../../recipes/qwen3-32b-fp8/trtllm/disagg/deploy.yaml)
 - [GPT-OSS-120B aggregated](../../../../recipes/gpt-oss-120b/trtllm/agg/deploy.yaml)
@@ -45,7 +47,7 @@ At a high level, the Kubernetes workflow is:
 2. Create a namespace and any required secrets such as a Hugging Face token.
 3. Apply the recipe's model cache and model download manifests when the recipe
    includes them.
-4. Apply the recipe's `deploy.yaml`.
+4. Apply the recipe's deploy manifest.
 5. Port-forward the frontend service and send test requests to `/v1/models` or
    `/v1/chat/completions`.
 

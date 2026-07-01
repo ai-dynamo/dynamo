@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Qwen3-235B-A22B-FP8 Recipes
 
 Production-ready deployments for **Qwen3-235B-A22B** (MoE model with 22B active parameters) using TensorRT-LLM.
@@ -37,7 +42,34 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 kubectl apply -f trtllm/agg/hopper/deploy.yaml -n ${NAMESPACE}       # H100/H200
 # OR: kubectl apply -f trtllm/agg/blackwell/deploy.yaml -n ${NAMESPACE}   # B100/B200
 # OR: kubectl apply -f trtllm/disagg/hopper/deploy.yaml -n ${NAMESPACE}   # H100/H200
-# OR: kubectl apply -f trtllm/disagg/blackwell/deploy.yaml -n ${NAMESPACE} # B100/B200
+
+# For Blackwell disaggregated, choose the provider-specific manifest matching your cluster interconnect:
+# OR: kubectl apply -f trtllm/disagg/blackwell/deploy-aws-efa.yaml -n ${NAMESPACE}
+# OR: kubectl apply -f trtllm/disagg/blackwell/deploy-gcp-roce.yaml -n ${NAMESPACE}
+# OR: kubectl apply -f trtllm/disagg/blackwell/deploy-nscale-ib.yaml -n ${NAMESPACE}
+```
+
+## Cloud Provider Overlays
+
+The Blackwell disaggregated recipe keeps the shared deployment in `trtllm/disagg/blackwell/kustomize/base/deploy.yaml`.
+Provider-specific deltas live in Kustomize merge patches under `trtllm/disagg/blackwell/kustomize/overlays/`.
+Overlay directories starting with `_` are intermediate and are not rendered. Shared Kustomize building blocks belong under
+`trtllm/disagg/blackwell/kustomize/components/`.
+The checked-in `deploy-*.yaml` files are rendered artifacts so you can review and apply the final manifests from GitHub.
+Kustomize drops comments while rendering Kubernetes objects, so the renderer re-inserts non-SPDX comments from the base and
+overlay YAML before matching rendered fields. Comments inside literal block scalars already render in place.
+
+| Rendered manifest | Provider fabric | Patch source |
+|-------------------|-----------------|--------------|
+| `trtllm/disagg/blackwell/deploy-generic.yaml` | Provider-neutral baseline | `trtllm/disagg/blackwell/kustomize/overlays/generic/` |
+| `trtllm/disagg/blackwell/deploy-aws-efa.yaml` | AWS EFA | `trtllm/disagg/blackwell/kustomize/overlays/aws-efa/patch-dgd.yaml` |
+| `trtllm/disagg/blackwell/deploy-gcp-roce.yaml` | GKE RoCE | `trtllm/disagg/blackwell/kustomize/overlays/gcp-roce/patch-dgd.yaml` |
+| `trtllm/disagg/blackwell/deploy-nscale-ib.yaml` | Nscale InfiniBand | `trtllm/disagg/blackwell/kustomize/overlays/nscale-ib/patch-dgd.yaml` |
+
+After editing the base or overlays, render the apply-able manifests from the repo root:
+
+```bash
+python3 scripts/render_recipe_kustomize.py
 ```
 
 ## Test the Deployment

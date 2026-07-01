@@ -114,8 +114,14 @@ kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml -n
 
 <div data-sku="blackwell" data-variant="disagg">
 
+Choose the manifest matching your cluster interconnect:
+
 ```bash
-kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-aws-efa.yaml -n ${NAMESPACE}
+# OR
+kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-gcp-roce.yaml -n ${NAMESPACE}
+# OR
+kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-nscale-ib.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -263,7 +269,7 @@ All four targets serve `Qwen/Qwen3-235B-A22B-FP8` on TensorRT-LLM (PyTorch backe
 
 - Source README: [recipes/qwen3-235b-a22b-fp8/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/README.md)
 - Aggregated Blackwell: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/perf.yaml)
-- Disaggregated Blackwell: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/perf.yaml)
+- Disaggregated Blackwell: [AWS EFA](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-aws-efa.yaml), [GKE RoCE](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-gcp-roce.yaml), [Nscale InfiniBand](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-nscale-ib.yaml), and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/perf.yaml)
 - Aggregated Hopper: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/perf.yaml)
 - Disaggregated Hopper: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/perf.yaml)
 - Setup assets: [model-cache/model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/model-cache/model-cache.yaml) and [model-cache/model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/model-cache/model-download.yaml)
