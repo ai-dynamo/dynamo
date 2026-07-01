@@ -77,6 +77,9 @@ pub enum SessionEnqueueError {
         policy_class: String,
         session_id: String,
     },
+
+    #[error("router policy class {policy_class:?} requires a session ID")]
+    MissingSessionId { policy_class: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -151,6 +154,11 @@ enum PendingQueue<T> {
     Session(SessionQueue<T>),
 }
 
+enum PendingQueuePushError<T> {
+    MissingSessionId(PolicyQueueEntry<T>),
+    DuplicateSession(String, PolicyQueueEntry<T>),
+}
+
 impl<T> PendingQueue<T> {
     fn new(policy: RouterQueuePolicy) -> Self {
         match policy {
@@ -177,13 +185,22 @@ impl<T> PendingQueue<T> {
         &mut self,
         session_id: Option<String>,
         entry: PolicyQueueEntry<T>,
-    ) -> Result<(), (String, PolicyQueueEntry<T>)> {
+    ) -> Result<(), PendingQueuePushError<T>> {
         match self {
             Self::Request(pending) => {
                 pending.push(entry);
                 Ok(())
             }
-            Self::Session(pending) => pending.push(session_id, entry),
+            Self::Session(pending) => {
+                let Some(session_id) = session_id else {
+                    return Err(PendingQueuePushError::MissingSessionId(entry));
+                };
+                pending
+                    .push(session_id, entry)
+                    .map_err(|(session_id, entry)| {
+                        PendingQueuePushError::DuplicateSession(session_id, entry)
+                    })
+            }
         }
     }
 
@@ -324,8 +341,12 @@ impl<T> PolicyQueue<T> {
             Err((SessionEnqueueError::QueueRejected(rejection), payload)) => {
                 Err((rejection, payload))
             }
-            Err((SessionEnqueueError::DuplicatePending { .. }, _)) => {
-                unreachable!("request queue enqueue cannot have a duplicate session")
+            Err((
+                SessionEnqueueError::DuplicatePending { .. }
+                | SessionEnqueueError::MissingSessionId { .. },
+                _,
+            )) => {
+                unreachable!("request queue enqueue cannot return a session error")
             }
         }
     }
@@ -367,14 +388,23 @@ impl<T> PolicyQueue<T> {
             snapshot,
             payload,
         };
-        if let Err((session_id, entry)) = class.pending.push(session_id, entry) {
-            return Err((
-                SessionEnqueueError::DuplicatePending {
-                    policy_class: class.config.name.clone(),
-                    session_id,
-                },
-                entry.into_payload(),
-            ));
+        if let Err(error) = class.pending.push(session_id, entry) {
+            let (error, entry) = match error {
+                PendingQueuePushError::MissingSessionId(entry) => (
+                    SessionEnqueueError::MissingSessionId {
+                        policy_class: class.config.name.clone(),
+                    },
+                    entry,
+                ),
+                PendingQueuePushError::DuplicateSession(session_id, entry) => (
+                    SessionEnqueueError::DuplicatePending {
+                        policy_class: class.config.name.clone(),
+                        session_id,
+                    },
+                    entry,
+                ),
+            };
+            return Err((error, entry.into_payload()));
         }
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
@@ -896,20 +926,20 @@ policy_classes:
     }
 
     #[test]
-    fn agent_round_robin_keeps_anonymous_requests_independent() {
+    fn agent_round_robin_requires_a_session_id() {
         let mut queue = PolicyQueue::new(agent_round_robin_profile());
-        for payload in ["one", "two"] {
-            queue
-                .enqueue_for_session(0, 1, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, None, payload)
-                .unwrap();
-        }
+        let (error, payload) = queue
+            .enqueue_for_session(0, 1, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, None, "missing")
+            .unwrap_err();
 
         assert_eq!(
-            (0..2)
-                .map(|_| queue.pop_next(|_, _, _| true).unwrap().into_payload())
-                .collect::<Vec<_>>(),
-            ["one", "two"]
+            error,
+            SessionEnqueueError::MissingSessionId {
+                policy_class: "agent".to_string(),
+            }
         );
+        assert_eq!(payload, "missing");
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[test]

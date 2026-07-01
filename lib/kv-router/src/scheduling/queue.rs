@@ -538,8 +538,9 @@ impl<
                 SessionEnqueueError::QueueRejected(rejection) => {
                     KvSchedulerError::QueueRejected(rejection)
                 }
-                duplicate @ SessionEnqueueError::DuplicatePending { .. } => {
-                    KvSchedulerError::BookingFailed(duplicate.to_string())
+                session_error @ (SessionEnqueueError::DuplicatePending { .. }
+                | SessionEnqueueError::MissingSessionId { .. }) => {
+                    KvSchedulerError::BookingFailed(session_error.to_string())
                 }
             };
             request.respond(Err(error));

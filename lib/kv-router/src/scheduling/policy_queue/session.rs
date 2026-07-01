@@ -6,14 +6,8 @@ use std::collections::{HashMap, VecDeque, hash_map::Entry};
 use super::PolicyQueueEntry;
 
 pub(super) struct SessionQueue<T> {
-    pending: HashMap<SessionKey, PolicyQueueEntry<T>>,
-    order: VecDeque<SessionKey>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum SessionKey {
-    Id(String),
-    Anonymous(u64),
+    pending: HashMap<String, PolicyQueueEntry<T>>,
+    order: VecDeque<String>,
 }
 
 impl<T> SessionQueue<T> {
@@ -30,25 +24,16 @@ impl<T> SessionQueue<T> {
 
     pub(super) fn push(
         &mut self,
-        session_id: Option<String>,
+        session_id: String,
         entry: PolicyQueueEntry<T>,
     ) -> Result<(), (String, PolicyQueueEntry<T>)> {
-        let key = match session_id {
-            Some(session_id) => SessionKey::Id(session_id),
-            None => SessionKey::Anonymous(entry.enqueue_seq),
-        };
-        match self.pending.entry(key.clone()) {
+        match self.pending.entry(session_id.clone()) {
             Entry::Vacant(pending) => {
                 pending.insert(entry);
-                self.order.push_back(key);
+                self.order.push_back(session_id);
                 Ok(())
             }
-            Entry::Occupied(_) => {
-                let SessionKey::Id(session_id) = key else {
-                    unreachable!("anonymous session keys use unique enqueue sequences")
-                };
-                Err((session_id, entry))
-            }
+            Entry::Occupied(_) => Err((session_id, entry)),
         }
     }
 

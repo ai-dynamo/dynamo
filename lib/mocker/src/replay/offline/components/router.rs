@@ -294,8 +294,9 @@ impl OfflineReplayRouter {
                 )
                 .map_err(|(error, _)| match error {
                     SessionEnqueueError::QueueRejected(rejection) => anyhow::Error::new(rejection),
-                    duplicate @ SessionEnqueueError::DuplicatePending { .. } => {
-                        anyhow::Error::new(duplicate)
+                    session_error @ (SessionEnqueueError::DuplicatePending { .. }
+                    | SessionEnqueueError::MissingSessionId { .. }) => {
+                        anyhow::Error::new(session_error)
                     }
                 })?;
             return Ok(RouterEffects::default());
