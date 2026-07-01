@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "vllm_reference_commit": "91df0fad4dc98a67c7659d9dbd915245d5c43d96",
+  "route": "/inference/v1/generate",
+  "request": {
+    "top_level": [
+      "request_id", "model", "token_ids", "features", "sampling_params",
+      "stream", "stream_options", "cache_salt", "priority", "kv_transfer_params"
+    ],
+    "sampling": [
+      "n", "presence_penalty", "frequency_penalty", "repetition_penalty",
+      "temperature", "top_p", "top_k", "min_p", "seed", "stop",
+      "stop_token_ids", "ignore_eos", "max_tokens", "min_tokens", "logprobs",
+      "prompt_logprobs", "logprob_token_ids", "flat_logprobs", "detokenize",
+      "skip_special_tokens", "spaces_between_special_tokens",
+      "include_stop_str_in_output", "structured_outputs", "logit_bias",
+      "allowed_token_ids", "bad_words",
+      "skip_reading_prefix_cache", "thinking_token_budget", "repetition_detection",
+      "routed_experts_prompt_start", "extra_args", "vllm_xargs"
+    ]
+  },
+  "response": {
+    "unary": ["request_id", "choices", "prompt_logprobs", "kv_transfer_params"],
+    "choice": ["index", "logprobs", "finish_reason", "token_ids", "routed_experts"],
+    "stream": ["request_id", "choices", "usage"]
+  }
+}
