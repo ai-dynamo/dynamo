@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 title: "From Kubernetes to Datacenter-Scale Inference with NVIDIA Dynamo and AICR"
 sidebar-title: Deploying Dynamo with AICR
-subtitle: "Stefan Schimanski and Yuan Chen - June 2026"
+subtitle: "How NVIDIA AI Cluster Runtime turns GPU Kubernetes into a validated, production-ready inference platform for Dynamo."
 description: "How NVIDIA AI Cluster Runtime turns an existing GPU Kubernetes cluster into a validated Dynamo inference stack."
 keywords: Dynamo, NVIDIA AI Cluster Runtime, AICR, Kubernetes, GPU Operator, EPP, NATS, KV cache routing, vLLM
 last-updated: June 11, 2026
