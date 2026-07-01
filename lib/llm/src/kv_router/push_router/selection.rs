@@ -140,9 +140,12 @@ impl KvPushRouter {
             .and_then(|routing| routing.routing_constraints.clone())
             .unwrap_or_default();
         let explicit_pin = pinned_worker_hint(phase, routing);
-        let affinity_pin = options
-            .affinity_worker
-            .map(|worker| (worker.worker_id, Some(worker.dp_rank)));
+        let SelectionOptions {
+            affinity_worker,
+            policy_class,
+            session_id,
+        } = options;
+        let affinity_pin = affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
         let Some((pinned_worker_id, requested_dp_rank)) = affinity_pin.or(explicit_pin) else {
             let _nvtx_kv = dynamo_nvtx_range!("route.kv_match");
             let selection = self
@@ -155,8 +158,8 @@ impl KvPushRouter {
                     lora_name,
                     priority_jump,
                     strict_priority,
-                    policy_class: options.policy_class.clone(),
-                    session_id: options.session_id.clone(),
+                    policy_class,
+                    session_id,
                     expected_output_tokens,
                     pinned_worker: None,
                     allowed_worker_ids,
@@ -226,8 +229,8 @@ impl KvPushRouter {
             lora_name,
             priority_jump,
             strict_priority,
-            policy_class: options.policy_class,
-            session_id: options.session_id,
+            policy_class,
+            session_id,
             expected_output_tokens,
             pinned_worker: Some(pinned_worker),
             allowed_worker_ids,
