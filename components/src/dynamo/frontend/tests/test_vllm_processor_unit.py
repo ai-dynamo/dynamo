@@ -503,6 +503,86 @@ class TestChatTemplateKwargsForwarding:
         assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
 
 
+class TestReasoningTokenCount:  # FRONTEND.9 — usage.completion_tokens_details.reasoning_tokens
+    """reasoning_token_count() re-encodes the accumulated reasoning span.
+
+    This is the per-request source for usage.completion_tokens_details.reasoning_tokens:
+    the Dynamo bare-engine path does not attribute reasoning tokens in
+    completion_usage, so the count must come from the frontend parser. Mirrors
+    the SGLang processor's TestReasoningTokenCount.
+    """
+
+    @staticmethod
+    def _make_post(tokenizer, reasoning_parser_class):
+        from dynamo.frontend.prepost import StreamingPostProcessor
+
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=SimpleNamespace(
+                tool_choice="auto", include_reasoning=True
+            ),
+            sampling_params=SimpleNamespace(n=1),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=reasoning_parser_class,
+            chat_template_kwargs={},
+            stream_response=True,
+        )
+
+    @staticmethod
+    def _stream(post, tokenizer, text, *, batch=5):
+        """Feed `text` to the post-processor in token batches; return the
+        reasoning_content the parser surfaced across all chunks."""
+        token_ids = tokenizer.encode(text, add_special_tokens=False)
+        prev_text = ""
+        seen: list[int] = []
+        reasoning_parts: list[str] = []
+        for i in range(0, len(token_ids), batch):
+            chunk = token_ids[i : i + batch]
+            seen.extend(chunk)
+            cur_text = tokenizer.decode(seen)
+            delta_text = cur_text[len(prev_text) :]
+            prev_text = cur_text
+            is_last = i + batch >= len(token_ids)
+            output = SimpleNamespace(
+                index=0,
+                text=delta_text,
+                token_ids=chunk,
+                finish_reason="stop" if is_last else None,
+                logprobs=None,
+            )
+            choice = post.process_output(output)
+            if choice:
+                reasoning_parts.append(
+                    choice.get("delta", {}).get("reasoning_content", "") or ""
+                )
+        return "".join(reasoning_parts)
+
+    def test_zero_without_reasoning_parser(self, tokenizer):
+        """No reasoning parser → no reasoning span → 0."""
+        post = self._make_post(tokenizer, None)
+        self._stream(post, tokenizer, "Hello, world.")
+        assert post.reasoning_token_count() == 0
+
+    def test_counts_accumulated_reasoning(self, tokenizer):
+        """<think>...</think> tokens are reported, and match a re-encode of the span."""
+        from vllm.reasoning import ReasoningParserManager
+
+        parser_class = ReasoningParserManager.get_reasoning_parser("qwen3")
+        post = self._make_post(tokenizer, parser_class)
+        text = (
+            "<think>\nLet me think about this carefully.\n</think>\n\nThe answer is 42."
+        )
+        reasoning = self._stream(post, tokenizer, text)
+
+        count = post.reasoning_token_count()
+        assert count > 0
+        # Equals a re-encode of exactly the reasoning text the parser surfaced.
+        assert count == len(tokenizer.encode(reasoning, add_special_tokens=False))
+        # And it's strictly less than the whole completion (content excluded).
+        assert count < len(tokenizer.encode(text, add_special_tokens=False))
+
+
 @pytest.mark.parametrize(
     ("runtime_config", "expected"),
     [

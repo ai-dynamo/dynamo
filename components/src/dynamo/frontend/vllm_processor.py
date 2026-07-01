@@ -717,6 +717,30 @@ class VllmProcessor:
                         "object": "chat.completion.chunk",
                     }
                     if usage := engine_response.get("completion_usage"):
+                        # Report reasoning tokens per-request. The vLLM worker's
+                        # completion_usage carries no completion_tokens_details
+                        # (the bare-engine path cannot attribute reasoning), and
+                        # the per-request reasoning parser here is the only
+                        # correct source. Mirrors the SGLang processor path.
+                        # Emit only when a reasoning parser is active for this
+                        # request; reasoning_tokens=0 is still correct for a
+                        # request that reasoned nothing.
+                        reasoning_posts = [
+                            p
+                            for p in post_processors.values()
+                            if p.reasoning_parser is not None
+                        ]
+                        if reasoning_posts:
+                            completion_details = dict(
+                                usage.get("completion_tokens_details") or {}
+                            )
+                            completion_details["reasoning_tokens"] = sum(
+                                p.reasoning_token_count() for p in reasoning_posts
+                            )
+                            usage = {
+                                **usage,
+                                "completion_tokens_details": completion_details,
+                            }
                         dynamo_out["usage"] = usage
                     envelope["data"] = dynamo_out
 

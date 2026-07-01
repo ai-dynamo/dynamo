@@ -272,6 +272,11 @@ class StreamingPostProcessor:
         # this correctly, so we accumulate text here and fall back to the
         # non-streaming extract_tool_calls() once the buffer is complete.
         self._tool_text_buffer: str | None = None
+        # Reasoning text emitted so usage can report reasoning_tokens.
+        # Counting here (not in the worker) is the only per-request-correct
+        # place: the Dynamo bare-engine path does not attribute reasoning in
+        # completion_usage. See reasoning_token_count().
+        self._reasoning_text_parts: list[str] = []
 
     def _should_buffer_for_non_streaming_tool_parse(self) -> bool:
         return (
@@ -466,12 +471,34 @@ class StreamingPostProcessor:
             delta["content"] = delta_message.content
         if delta_message.reasoning:
             delta["reasoning_content"] = delta_message.reasoning
+            self._reasoning_text_parts.append(delta_message.reasoning)
         if self.in_progress_tool_calls:
             delta["tool_calls"] = self._dump_in_progress_tool_calls()
             self.in_progress_tool_calls.clear()
         if len(delta) == 1:
             delta = {}
         return self._build_choice(output, delta)
+
+    def reasoning_token_count(self) -> int:
+        """Token count of the reasoning span for usage.completion_tokens_details.
+
+        Re-encodes the accumulated reasoning text emitted as reasoning_content.
+        This is approximate vs the exact generated count (it excludes the think
+        markers and relies on BPE re-tokenization being faithful), but it is
+        per-request and version-stable -- and it is the only viable source
+        here, because the Dynamo bare-engine path does not attribute reasoning
+        tokens in completion_usage. We re-encode the full text rather than
+        tallying per-chunk token_ids because the streaming reasoning parser
+        buffers across chunks, so token_ids do not align to the
+        reasoning/normal split per chunk.
+        """
+        if not self._reasoning_text_parts:
+            return 0
+        return len(
+            self.tokenizer.encode(
+                "".join(self._reasoning_text_parts), add_special_tokens=False
+            )
+        )
 
     def process_output(self, output: Any) -> dict[str, Any] | None:
         if self._should_buffer_for_non_streaming_tool_parse():
@@ -630,6 +657,7 @@ class StreamingPostProcessor:
                 delta["content"] = content
             if delta_message.reasoning:
                 delta["reasoning_content"] = delta_message.reasoning
+                self._reasoning_text_parts.append(delta_message.reasoning)
             if self.in_progress_tool_calls:
                 delta["tool_calls"] = self._dump_in_progress_tool_calls()
                 self.in_progress_tool_calls.clear()
