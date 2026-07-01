@@ -808,7 +808,7 @@ class TestRefreshWorkerInfoFromConnector:
             controller = Mock()
             controller.get_worker_info.return_value = WorkerInfo()
             controller.get_gpu_counts.return_value = (1, 1)
-            controller.get_actual_worker_counts.return_value = (0, 0, True)
+            controller.get_actual_worker_counts = AsyncMock(return_value=(0, 0, True))
             controller.get_model_name.return_value = "test-model"
             environment = PlannerEnvironmentImpl(
                 config=config,
@@ -829,7 +829,7 @@ class TestRefreshWorkerInfoFromConnector:
         mock_connector = Mock()
         mock_connector.get_worker_info.return_value = fresh
         mock_connector.get_gpu_counts.return_value = (1, 1)
-        mock_connector.get_actual_worker_counts.return_value = (0, 0, True)
+        mock_connector.get_actual_worker_counts = AsyncMock(return_value=(0, 0, True))
         mock_connector.get_model_name.return_value = "test-model"
         planner.environment.controller = mock_connector
         return mock_connector

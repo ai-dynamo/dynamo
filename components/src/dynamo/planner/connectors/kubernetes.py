@@ -93,7 +93,7 @@ class KubernetesConnector(PlannerConnector):
         self.raise_not_ready = raise_not_ready
 
     async def async_init(self):
-        """Async initialization - creates RemotePlannerClient"""
+        """No-op asynchronous lifecycle hook."""
         return
 
     def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
@@ -244,6 +244,8 @@ class KubernetesConnector(PlannerConnector):
         try:
             self.get_model_name(
                 deployment,
+                prefill_component_name=prefill_component_name,
+                decode_component_name=decode_component_name,
                 require_prefill=require_prefill,
                 require_decode=require_decode,
             )
@@ -259,6 +261,8 @@ class KubernetesConnector(PlannerConnector):
         deployment: Optional[dict] = None,
         require_prefill: bool = True,
         require_decode: bool = True,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
     ) -> str:
         """Get the model name from the deployment"""
         try:
@@ -275,12 +279,14 @@ class KubernetesConnector(PlannerConnector):
                 prefill_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.PREFILL,
+                    component_name=prefill_component_name,
                 )
                 prefill_model_name = prefill_service.get_model_name()
             if require_decode:
                 decode_service = get_component_from_type_or_name(
                     deployment,
                     SubComponentType.DECODE,
+                    component_name=decode_component_name,
                 )
                 decode_model_name = decode_service.get_model_name()
 
@@ -572,7 +578,7 @@ class KubernetesConnector(PlannerConnector):
         return info
 
     # todo -> how are we handling 3 active 2 more new workers pending?
-    def get_actual_worker_counts(
+    async def get_actual_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,

@@ -149,6 +149,7 @@ class NativePlannerBase:
     def _ensure_engine(self) -> EngineProtocol:
         if self._engine is not None:
             return self._engine
+        # Deliberately lazy: importing planner core should not load the plugin stack.
         from dynamo.planner.plugins.orchestrator.engine_adapter import (
             OrchestratorEngineAdapter,
         )
@@ -172,6 +173,7 @@ class NativePlannerBase:
         decode_fpms=None,
         agg_fpms=None,
     ) -> None:
+        # Keep the orchestrator dependency aligned with lazy engine construction.
         from dynamo.planner.plugins.orchestrator.engine_adapter import (
             OrchestratorEngineAdapter,
         )
@@ -209,6 +211,7 @@ class NativePlannerBase:
             return None
 
     async def _bootstrap_engine_plugins_if_needed(self) -> None:
+        # Keep the orchestrator dependency aligned with lazy engine construction.
         from dynamo.planner.plugins.orchestrator.engine_adapter import (
             OrchestratorEngineAdapter,
         )

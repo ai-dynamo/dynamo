@@ -129,6 +129,7 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
             self._decode_fpm_sub = await self._init_fpm_subscriber("decode")
 
     async def _init_fpm_subscriber(self, component: str):
+        # Avoid loading binding-heavy dynamo.llm until runtime FPM is configured.
         from dynamo.llm import FpmEventSubscriber
 
         if self.state_source is None or self.namespace_source is None:
@@ -177,6 +178,7 @@ class RuntimeFpmProvider(FpmMetricsProvider, WorkerInfoProvider):
     def _decode_fpm_bytes(
         self, subscriber
     ) -> dict[tuple[str, int], ForwardPassMetrics]:
+        # Match the subscriber's lazy binding path; decoding is optional at startup.
         from dynamo.common.forward_pass_metrics import decode as decode_fpm
 
         if subscriber is None:

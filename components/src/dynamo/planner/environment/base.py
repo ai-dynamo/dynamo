@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from dynamo.planner.config.backend_components import WORKER_COMPONENT_NAMES
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.base import PlannerConnector
@@ -19,6 +20,7 @@ from dynamo.planner.environment.metrics_provider.interface import (
     TrafficMetricsProvider,
 )
 from dynamo.planner.environment.state import DeploymentState
+from dynamo.planner.errors import DeploymentValidationError
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 
 logger = logging.getLogger(__name__)
@@ -88,11 +90,24 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
 
     async def initialize(self) -> None:
         await self.controller.async_init()
+        defaults = WORKER_COMPONENT_NAMES.get(self.config.backend)
         await self.controller.validate_deployment(
+            prefill_component_name=(
+                defaults.prefill_worker_k8s_name
+                if self.require_prefill and defaults
+                else None
+            ),
+            decode_component_name=(
+                defaults.decode_worker_k8s_name
+                if self.require_decode and defaults
+                else None
+            ),
             require_prefill=self.require_prefill,
             require_decode=self.require_decode,
         )
         await self.controller.wait_for_deployment_ready(include_planner=False)
+        if self.runtime_namespace_source is not None:
+            await self.runtime_namespace_source.refresh_runtime_namespace()
         await self._refresh_deployment_state()
         await self.fpm_provider.async_init(self._runtime_namespace_or_none())
         await self._refresh_deployment_state()
@@ -145,7 +160,7 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     async def _refresh_deployment_state(self) -> None:
         self._refresh_worker_info()
         self._refresh_gpu_counts()
-        self._refresh_replica_counts()
+        await self._refresh_replica_counts()
         self._refresh_model_name()
 
     def _refresh_worker_info(self) -> None:
@@ -197,20 +212,44 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
                 setattr(component_state.info, field_name, fresh_val)
 
     def _refresh_gpu_counts(self) -> None:
-        prefill_gpus, decode_gpus = self.controller.get_gpu_counts(
-            require_prefill=self.require_prefill,
-            require_decode=self.require_decode,
-        )
+        state = self.deployment_state()
+        try:
+            prefill_gpus, decode_gpus = self.controller.get_gpu_counts(
+                require_prefill=self.require_prefill,
+                require_decode=self.require_decode,
+            )
+        except DeploymentValidationError as exc:
+            logger.warning(
+                "Could not read GPU counts from deployment (%s), "
+                "falling back to last observed or configured values",
+                exc,
+            )
+            prefill_gpus = state.prefill.num_gpus
+            decode_gpus = state.decode.num_gpus
+
+        if prefill_gpus is None:
+            prefill_gpus = state.prefill.num_gpus
         if prefill_gpus is None:
             prefill_gpus = self.config.prefill_engine_num_gpu
         if decode_gpus is None:
+            decode_gpus = state.decode.num_gpus
+        if decode_gpus is None:
             decode_gpus = self.config.decode_engine_num_gpu
-        if self.require_prefill:
-            self._state.prefill.num_gpus = prefill_gpus
-        if self.require_decode:
-            self._state.decode.num_gpus = decode_gpus
 
-    def _refresh_replica_counts(self) -> None:
+        errors = []
+        if self.require_prefill and prefill_gpus is None:
+            errors.append("Missing prefill_engine_num_gpu in config")
+        if self.require_decode and decode_gpus is None:
+            errors.append("Missing decode_engine_num_gpu in config")
+        if errors:
+            raise DeploymentValidationError(errors)
+
+        if self.require_prefill:
+            state.prefill.num_gpus = prefill_gpus
+        if self.require_decode:
+            state.decode.num_gpus = decode_gpus
+
+    async def _refresh_replica_counts(self) -> None:
         prefill_name = (
             self._state.prefill.info.k8s_name
             if self.require_prefill and self._state.prefill.info is not None
@@ -221,15 +260,21 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
             if self.require_decode and self._state.decode.info is not None
             else None
         )
-        prefill_count, decode_count, stable = self.controller.get_actual_worker_counts(
+        (
+            prefill_count,
+            decode_count,
+            stable,
+        ) = await self.controller.get_actual_worker_counts(
             prefill_component_name=prefill_name,
             decode_component_name=decode_name,
         )
         if self.require_prefill:
             self._state.prefill.replicas.active = prefill_count
+            self._state.prefill.replicas.expected = prefill_count if stable else None
             self._state.prefill.replicas.scaling = not stable
         if self.require_decode:
             self._state.decode.replicas.active = decode_count
+            self._state.decode.replicas.expected = decode_count if stable else None
             self._state.decode.replicas.scaling = not stable
 
     def _refresh_model_name(self) -> None:

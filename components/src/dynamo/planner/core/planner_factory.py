@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.base import PlannerConnector, WorkerInfoProvider
@@ -21,6 +21,9 @@ from dynamo.planner.environment.metrics_provider.runtime_provider import (
 from dynamo.planner.environment.runtime import RuntimeNamespaceBinding
 from dynamo.runtime import DistributedRuntime
 
+if TYPE_CHECKING:
+    from dynamo.planner.core.base import NativePlannerBase
+
 
 def construct_connector(
     config: PlannerConfig,
@@ -30,7 +33,10 @@ def construct_connector(
     if config.environment == "global-planner":
         if runtime is None:
             raise ValueError("runtime is required for environment='global-planner'")
-        assert config.global_planner_namespace is not None
+        if not config.global_planner_namespace:
+            raise ValueError(
+                "global_planner_namespace is required for environment='global-planner'"
+            )
         return GlobalPlannerConnector(
             runtime=runtime,
             dynamo_namespace=config.namespace,
@@ -92,12 +98,7 @@ def construct_environment(
         require_decode=require_decode,
     )
 
-    environment.traffic_provider = PrometheusTrafficProvider(
-        config=config,
-        state_source=environment,
-        metrics_state=environment.metrics_state(),
-    )
-
+    namespace_binding: Optional[RuntimeNamespaceBinding] = None
     if runtime is not None and hasattr(connector, "get_worker_runtime_namespace"):
         namespace_binding = RuntimeNamespaceBinding(
             namespace=config.namespace,
@@ -122,6 +123,13 @@ def construct_environment(
             )
         environment.fpm_provider = fpm_provider
 
+    environment.traffic_provider = PrometheusTrafficProvider(
+        config=config,
+        state_source=environment,
+        metrics_state=environment.metrics_state(),
+        namespace_source=namespace_binding,
+    )
+
     return environment
 
 
@@ -129,7 +137,8 @@ def construct_planner(
     *,
     runtime: DistributedRuntime,
     config: PlannerConfig,
-) -> object:
+) -> NativePlannerBase:
+    # Connector/environment-only callers should not import the planner/plugin graph.
     from dynamo.planner.core.adapters import (
         AggPlanner,
         DecodePlanner,

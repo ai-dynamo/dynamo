@@ -55,7 +55,7 @@ class PlannerConnector(WorkerInfoProvider, Protocol):
     ) -> tuple[Optional[int], Optional[int]]:
         pass
 
-    def get_actual_worker_counts(
+    async def get_actual_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,

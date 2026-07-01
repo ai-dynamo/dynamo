@@ -127,7 +127,7 @@ class GlobalPlannerConnector(PlannerConnector):
 
         if self.remote_client is None:
             raise RuntimeError(
-                "GlobalPlannerConnector not initialized. Call _async_init() first."
+                "GlobalPlannerConnector not initialized. Call async_init() first."
             )
 
         # Get DGD info from environment variables
@@ -278,7 +278,7 @@ class GlobalPlannerConnector(PlannerConnector):
             )
         return self._local_k8s_connector
 
-    def get_actual_worker_counts(
+    async def get_actual_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
@@ -301,7 +301,7 @@ class GlobalPlannerConnector(PlannerConnector):
                 "reporting (0, 0, stable=True) for out-of-cluster usage."
             )
             return 0, 0, True
-        return local.get_actual_worker_counts(
+        return await local.get_actual_worker_counts(
             prefill_component_name=prefill_component_name,
             decode_component_name=decode_component_name,
         )

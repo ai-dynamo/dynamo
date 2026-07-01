@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from dynamo._core import VirtualConnectorCoordinator
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
@@ -40,7 +41,6 @@ class VirtualConnector(PlannerConnector):
         worker_info_provider: WorkerInfoProvider,
         model_name: Optional[str] = None,
     ):
-        super().__init__(model_name)
         self.coord = VirtualConnectorCoordinator(
             runtime,
             dynamo_namespace,
@@ -54,15 +54,22 @@ class VirtualConnector(PlannerConnector):
 
         self.model_name = model_name.lower()  # normalize model name to lowercase (MDC)
 
+        self.runtime = runtime
         self.dynamo_namespace = dynamo_namespace
         self.worker_info_provider = worker_info_provider
+        self._worker_info: dict[SubComponentType, WorkerInfo] = {}
+        self._worker_clients: dict[SubComponentType, tuple[str, Any]] = {}
 
     def get_worker_info(
         self,
         sub_component_type: SubComponentType,
         backend: str = "vllm",
     ) -> WorkerInfo:
-        return self.worker_info_provider.get_worker_info(sub_component_type, backend)
+        worker_info = self.worker_info_provider.get_worker_info(
+            sub_component_type, backend
+        )
+        self._worker_info[sub_component_type] = worker_info
+        return worker_info
 
     async def async_init(self):
         """Async initialization that must be called after __init__"""
@@ -85,11 +92,15 @@ class VirtualConnector(PlannerConnector):
         state = self.coord.read_state()
 
         if sub_component_type == SubComponentType.PREFILL:
-            await self._update_scaling_decision(
-                num_prefill=state.num_prefill_workers + 1
-            )
+            current = state.num_prefill_workers
+            if current < 0:
+                current = await self._get_actual_worker_count(sub_component_type)
+            await self._update_scaling_decision(num_prefill=current + 1)
         elif sub_component_type == SubComponentType.DECODE:
-            await self._update_scaling_decision(num_decode=state.num_decode_workers + 1)
+            current = state.num_decode_workers
+            if current < 0:
+                current = await self._get_actual_worker_count(sub_component_type)
+            await self._update_scaling_decision(num_decode=current + 1)
 
         if blocking:
             await self._wait_for_scaling_completion()
@@ -101,10 +112,16 @@ class VirtualConnector(PlannerConnector):
         state = self.coord.read_state()
 
         if sub_component_type == SubComponentType.PREFILL:
-            new_count = max(0, state.num_prefill_workers - 1)
+            current = state.num_prefill_workers
+            if current < 0:
+                current = await self._get_actual_worker_count(sub_component_type)
+            new_count = max(0, current - 1)
             await self._update_scaling_decision(num_prefill=new_count)
         elif sub_component_type == SubComponentType.DECODE:
-            new_count = max(0, state.num_decode_workers - 1)
+            current = state.num_decode_workers
+            if current < 0:
+                current = await self._get_actual_worker_count(sub_component_type)
+            new_count = max(0, current - 1)
             await self._update_scaling_decision(num_decode=new_count)
 
         if blocking:
@@ -155,15 +172,62 @@ class VirtualConnector(PlannerConnector):
     def get_worker_runtime_namespace(self, base_dynamo_namespace: str) -> str:
         return base_dynamo_namespace
 
-    def get_actual_worker_counts(
+    async def get_actual_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
         decode_component_name: Optional[str] = None,
     ) -> tuple[int, int, bool]:
-        """Read worker counts reported by the virtual connector client."""
-        del prefill_component_name, decode_component_name
+        """Read active workers from discovery and scaling status from the client ack.
+
+        Coordinator worker counts are desired targets, not observations. Runtime
+        endpoint discovery is the source of truth for active workers, while the
+        coordinator's decision acknowledgement indicates whether scaling is still
+        in progress.
+        """
+        prefill_count = 0
+        decode_count = 0
+        if prefill_component_name is not None:
+            prefill_count = await self._get_actual_worker_count(
+                SubComponentType.PREFILL
+            )
+        if decode_component_name is not None:
+            decode_count = await self._get_actual_worker_count(SubComponentType.DECODE)
         state = self.coord.read_state()
-        return state.num_prefill_workers, state.num_decode_workers, True
+        stable = await self.coord.is_scaling_ready()
+        if prefill_component_name is not None and state.num_prefill_workers >= 0:
+            stable = stable and prefill_count == state.num_prefill_workers
+        if decode_component_name is not None and state.num_decode_workers >= 0:
+            stable = stable and decode_count == state.num_decode_workers
+        return prefill_count, decode_count, stable
+
+    async def _get_actual_worker_count(
+        self, sub_component_type: SubComponentType
+    ) -> int:
+        worker_info = self._worker_info.get(sub_component_type)
+        if worker_info is None:
+            worker_info = self.get_worker_info(sub_component_type)
+        if not worker_info.component_name or not worker_info.endpoint:
+            logger.warning(
+                "WorkerInfo missing component or endpoint for %s; reporting zero workers",
+                sub_component_type.value,
+            )
+            return 0
+
+        endpoint_name = (
+            f"{self.dynamo_namespace}.{worker_info.component_name}."
+            f"{worker_info.endpoint}"
+        )
+        cached = self._worker_clients.get(sub_component_type)
+        if cached is None or cached[0] != endpoint_name:
+            client = await self.runtime.endpoint(endpoint_name).client()
+            self._worker_clients[sub_component_type] = (endpoint_name, client)
+            # Runtime discovery populates a new client's initial instance snapshot
+            # asynchronously. Preserve the pre-refactor settling window before the
+            # first read so existing workers are not transiently reported as zero.
+            await asyncio.sleep(0.1)
+        else:
+            client = cached[1]
+        return len(client.instance_ids())
 
     def get_model_name(
         self, require_prefill: bool = True, require_decode: bool = True

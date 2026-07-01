@@ -3165,6 +3165,10 @@ class VirtualConnectorCoordinator:
     async def wait_for_scaling_completion(self) -> None:
         ...
 
+    async def is_scaling_ready(self) -> bool:
+        """Return whether the client acknowledged the current scaling decision."""
+        ...
+
 class VirtualConnectorClient:
     """How a client discovers planner requests and marks them complete"""
 

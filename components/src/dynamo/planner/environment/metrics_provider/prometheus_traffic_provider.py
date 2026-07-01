@@ -8,7 +8,10 @@ from typing import Optional
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import TrafficObservation
-from dynamo.planner.environment.interface import DeploymentStateSource
+from dynamo.planner.environment.interface import (
+    DeploymentStateSource,
+    RuntimeNamespaceSource,
+)
 from dynamo.planner.environment.metrics_provider.interface import TrafficMetricsProvider
 from dynamo.planner.monitoring.traffic_metrics import Metrics, PrometheusAPIClient
 
@@ -22,10 +25,12 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
         config: PlannerConfig,
         state_source: DeploymentStateSource,
         metrics_state: Metrics,
+        namespace_source: Optional[RuntimeNamespaceSource] = None,
     ) -> None:
         self.config = config
         self.state_source = state_source
         self.metrics_state = metrics_state
+        self.namespace_source = namespace_source
         self.prometheus_traffic_client = PrometheusAPIClient(
             config.metric_pulling_prometheus_endpoint,
             config.namespace,
@@ -47,18 +52,14 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
 
         interval_str = f"{self.config.throughput_adjustment_interval_seconds}s"
         m = self.metrics_state
-        m.ttft = (
-            self.prometheus_traffic_client.get_avg_time_to_first_token(
-                interval_str, model_name
-            )
-            * 1000
+        ttft = self.prometheus_traffic_client.get_avg_time_to_first_token(
+            interval_str, model_name
         )
-        m.itl = (
-            self.prometheus_traffic_client.get_avg_inter_token_latency(
-                interval_str, model_name
-            )
-            * 1000
+        m.ttft = ttft * 1000 if ttft is not None else None
+        itl = self.prometheus_traffic_client.get_avg_inter_token_latency(
+            interval_str, model_name
         )
+        m.itl = itl * 1000 if itl is not None else None
         m.num_req = self.prometheus_traffic_client.get_avg_request_count(
             interval_str, model_name
         )
@@ -83,6 +84,10 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
                 ", ".join(normalized_idle_metrics),
             )
 
+        if not m.is_valid():
+            logger.info("Metrics contain None or NaN values, skipping")
+            return None
+
         hit_rate_str = f"{m.kv_hit_rate:.3f}" if m.kv_hit_rate is not None else "n/a"
         accept_length_str = (
             f"{m.accept_length:.3f}" if m.accept_length is not None else "n/a"
@@ -97,9 +102,6 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
             accept_length_str,
         )
 
-        if not m.is_valid():
-            logger.info("Metrics contain None or NaN values, skipping")
-            return None
         return TrafficObservation(
             duration_s=self.config.throughput_adjustment_interval_seconds,
             num_req=m.num_req,
@@ -124,7 +126,7 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
             self.config.backend,
             decode_info.component_name,
             model_name,
-            namespace=self.config.namespace,
+            namespace=self._runtime_namespace(),
             endpoint_name=decode_info.endpoint,
         )
 
@@ -170,3 +172,8 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
         if state.prefill.info is not None and state.prefill.info.model_name:
             return state.prefill.info.model_name
         return None
+
+    def _runtime_namespace(self) -> str:
+        if self.namespace_source is None:
+            return self.config.namespace
+        return self.namespace_source.runtime_namespace() or self.config.namespace
