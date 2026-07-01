@@ -10,6 +10,9 @@ video frames to MP4 format.
 import io
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
 from typing import Tuple
 
 import numpy as np
@@ -240,3 +243,275 @@ def encode_to_video_bytes(
     except Exception as e:
         logger.error(f"Failed to encode video to bytes: {e}")
         raise RuntimeError(f"Video encoding to bytes failed: {e}") from e
+
+
+# ---------------------------------------------------------------------------
+# Unified video encoding
+#
+# A single shared entry point (``encode_video``) that all backends can call.
+# It absorbs the three different backend output shapes via a thin conversion
+# layer, then dispatches to one of two encode paths (see design doc
+# docs/design/unified_video_encoder.md):
+#
+#   * imageio -> ffmpeg (NVENC)  -- preserves the existing NVIDIA behavior.
+#   * ffmpeg CLI (raw pipe)      -- new hardware (XPU) / codecs that imageio's
+#                                   ffmpeg plugin cannot reach.
+#
+# Encoding controls are read from DYN_VIDEO_* environment variables for now.
+# ---------------------------------------------------------------------------
+
+
+# Logical codec name -> ffmpeg encoder, per hardware path.
+_FFMPEG_ENCODERS = {
+    "nvenc": {"h264": "h264_nvenc", "hevc": "hevc_nvenc", "vp9": "libvpx-vp9"},
+    "xpu": {"h264": "h264_vaapi", "hevc": "hevc_vaapi", "vp9": "vp9_vaapi"},
+    "cpu": {"h264": "libx264", "hevc": "libx265", "vp9": "libvpx-vp9"},
+}
+
+# Default logical codec per container.
+_DEFAULT_CODEC = {"mp4": "h264", "webm": "vp9"}
+
+
+def _video_codec() -> str | None:
+    """Codec override from ``DYN_VIDEO_CODEC`` (e.g. ``h264`` / ``hevc`` / ``vp9``)."""
+    val = os.environ.get("DYN_VIDEO_CODEC")
+    return val.strip().lower() if val else None
+
+
+def _video_container() -> str:
+    """Container from ``DYN_VIDEO_CONTAINER`` (default ``mp4``)."""
+    return os.environ.get("DYN_VIDEO_CONTAINER", "mp4").strip().lower()
+
+
+def _video_hw_accel() -> str:
+    """HW accelerator from ``DYN_VIDEO_HW_ACCEL`` (``auto``/``nvenc``/``xpu``/``cpu``)."""
+    return os.environ.get("DYN_VIDEO_HW_ACCEL", "auto").strip().lower()
+
+
+def _video_device() -> str:
+    """DRM render node / device for HW encoding.
+
+    Read from ``DYN_VIDEO_DEVICE``, falling back to the legacy
+    ``DYNAMO_VAAPI_DEVICE`` and finally ``/dev/dri/renderD128``.
+    """
+    return (
+        os.environ.get("DYN_VIDEO_DEVICE")
+        or os.environ.get("DYNAMO_VAAPI_DEVICE")
+        or "/dev/dri/renderD128"
+    )
+
+
+def _running_on_xpu() -> bool:
+    """Return True when torch reports an available XPU backend."""
+    try:
+        import torch
+
+        return bool(hasattr(torch, "xpu") and torch.xpu.is_available())
+    except Exception:
+        return False
+
+
+def _resolve_ffmpeg_encoder(
+    container: str, codec: str | None, hw_accel: str
+) -> str:
+    """Map (container, logical codec, hw path) to an ffmpeg encoder name.
+
+    A codec value that is already an ffmpeg encoder name passes through.
+    """
+    codec = codec or _DEFAULT_CODEC.get(container, "h264")
+    table = _FFMPEG_ENCODERS.get(hw_accel, _FFMPEG_ENCODERS["nvenc"])
+    return table.get(codec, codec)
+
+
+def to_canonical_frames(frames) -> np.ndarray:
+    """Thin conversion layer: normalize any backend's raw video output.
+
+    Accepts the three shapes that the backends produce and returns a canonical
+    array of shape ``(num_frames, height, width, 3)``, dtype ``uint8``, RGB:
+
+      * ``torch.Tensor`` ``(1, T, H, W, C)`` or ``(T, H, W, C)`` (TRT-LLM)
+      * ``np.ndarray`` ``(1, T, H, W, C)`` / ``(T, H, W, C)``
+      * ``list`` holding a single 5-D / 4-D array (vLLM ``stage_output.images``)
+      * ``list[PIL.Image | np.ndarray]`` (SGLang)
+    """
+    # torch.Tensor -> numpy (duck-typed to avoid importing torch here).
+    if hasattr(frames, "detach") and hasattr(frames, "cpu"):
+        frames = frames.detach().cpu().numpy()
+
+    # Unwrap a single-element list that holds a full-video array/tensor.
+    if isinstance(frames, (list, tuple)) and len(frames) == 1:
+        inner = frames[0]
+        if hasattr(inner, "detach") and hasattr(inner, "cpu"):
+            inner = inner.detach().cpu().numpy()
+        if isinstance(inner, np.ndarray) and inner.ndim >= 4:
+            frames = inner
+
+    if isinstance(frames, np.ndarray):
+        arr = frames[0] if frames.ndim == 5 else frames
+    else:
+        per_frame = []
+        for frame in frames:
+            if isinstance(frame, np.ndarray):
+                per_frame.append(frame)
+            else:
+                # PIL Image (or anything convertible via numpy).
+                per_frame.append(np.array(frame.convert("RGB")))
+        arr = np.stack(per_frame, axis=0)
+
+    # Drop an alpha channel if present.
+    if arr.shape[-1] == 4:
+        arr = arr[..., :3]
+
+    if np.issubdtype(arr.dtype, np.floating):
+        arr = np.clip(arr * 255.0, 0, 255).round()
+
+    return np.ascontiguousarray(arr, dtype=np.uint8)
+
+
+def _encode_video_imageio(
+    frames: np.ndarray, fps: int, container: str, codec: str | None
+) -> bytes:
+    """Encode via imageio -> ffmpeg (NVENC path). Preserves existing behavior."""
+    try:
+        import imageio.v3 as iio
+    except ImportError:
+        try:
+            import imageio as iio  # type: ignore[no-redef]
+        except ImportError:
+            raise ImportError(
+                "imageio is required for video encoding. "
+                "Install with: pip install imageio[ffmpeg]"
+            )
+
+    encoder = _resolve_ffmpeg_encoder(container, codec, "nvenc")
+    buffer = io.BytesIO()
+    if hasattr(iio, "imwrite"):
+        iio.imwrite(buffer, frames, extension=f".{container}", fps=fps, codec=encoder)
+    else:
+        writer = iio.get_writer(  # type: ignore[attr-defined]
+            buffer, format="FFMPEG", mode="I", fps=fps, codec=encoder
+        )
+        try:
+            for frame in frames:
+                writer.append_data(frame)
+        finally:
+            writer.close()
+    return buffer.getvalue()
+
+
+def _encode_video_ffmpeg_cli(
+    frames: np.ndarray,
+    fps: int,
+    container: str,
+    codec: str | None,
+    hw_accel: str,
+    device: str,
+) -> bytes:
+    """Encode by piping raw RGB frames to the ffmpeg CLI (XPU / new codecs).
+
+    mp4 needs a seekable output for the moov atom, so we encode to a temp file
+    and read the bytes back.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found in PATH; required for video encoding")
+
+    num_frames, height, width, _ = frames.shape
+    encoder = _resolve_ffmpeg_encoder(container, codec, hw_accel)
+
+    with tempfile.NamedTemporaryFile(suffix=f".{container}", delete=False) as tmp:
+        output_path = tmp.name
+    try:
+        cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+        if hw_accel == "xpu":
+            cmd += ["-vaapi_device", device]
+        cmd += [
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-s", f"{width}x{height}",
+            "-r", str(fps),
+            "-i", "-",
+        ]
+        if hw_accel == "xpu":
+            cmd += ["-vf", "format=nv12,hwupload"]
+        cmd += ["-c:v", encoder]
+        if container == "mp4":
+            cmd += ["-movflags", "+faststart"]
+        cmd += ["-f", container, output_path]
+
+        logger.info(
+            "Encoding %d frames (%dx%d @ %d fps) via %s on %s",
+            num_frames,
+            width,
+            height,
+            fps,
+            encoder,
+            device if hw_accel == "xpu" else hw_accel,
+        )
+        proc = subprocess.run(
+            cmd,
+            input=frames.tobytes(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"ffmpeg {encoder} encode failed (exit {proc.returncode}): {stderr}"
+            )
+        with open(output_path, "rb") as fh:
+            return fh.read()
+    finally:
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+
+
+def encode_video(
+    frames,
+    fps: int = DEFAULT_VIDEO_FPS,
+    *,
+    container: str | None = None,
+    codec: str | None = None,
+    hw_accel: str | None = None,
+    device: str | None = None,
+) -> bytes:
+    """Unified video encoder: canonicalize frames and encode to video bytes.
+
+    Any explicit argument overrides its ``DYN_VIDEO_*`` environment variable,
+    which in turn overrides platform auto-detection. Dispatches to the imageio
+    NVENC path on NVIDIA, or the ffmpeg-CLI path for XPU / CPU.
+
+    Args:
+        frames: Raw backend output (see ``to_canonical_frames``).
+        fps: Frames per second for the output video.
+        container: ``mp4`` / ``webm`` (env: ``DYN_VIDEO_CONTAINER``).
+        codec: Logical codec ``h264`` / ``hevc`` / ``vp9`` (env: ``DYN_VIDEO_CODEC``).
+        hw_accel: ``auto`` / ``nvenc`` / ``xpu`` / ``cpu`` (env: ``DYN_VIDEO_HW_ACCEL``).
+        device: HW device / DRM render node (env: ``DYN_VIDEO_DEVICE``).
+
+    Returns:
+        Encoded video as bytes.
+    """
+    container = (container or _video_container()).lower()
+    codec = codec.lower() if codec else _video_codec()
+    hw_accel = (hw_accel or _video_hw_accel()).lower()
+    if hw_accel == "auto":
+        hw_accel = "xpu" if _running_on_xpu() else "nvenc"
+
+    canonical = to_canonical_frames(frames)
+    logger.info(
+        "Encoding %d frames -> %s (hw=%s codec=%s) at %d fps",
+        len(canonical),
+        container,
+        hw_accel,
+        codec or "default",
+        fps,
+    )
+
+    if hw_accel == "nvenc":
+        return _encode_video_imageio(canonical, fps, container, codec)
+
+    device = device or _video_device()
+    return _encode_video_ffmpeg_cli(canonical, fps, container, codec, hw_accel, device)

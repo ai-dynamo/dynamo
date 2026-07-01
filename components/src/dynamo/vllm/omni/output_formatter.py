@@ -11,7 +11,6 @@ output without creating an engine or loading model weights.
 import asyncio
 import base64
 import logging
-import tempfile
 import time
 import uuid
 from io import BytesIO
@@ -20,7 +19,6 @@ from typing import Any, Dict, Optional
 import numpy as np
 import soundfile as sf
 import torch
-from diffusers.utils.export_utils import export_to_video
 
 from dynamo.common.protocols.audio_protocol import AudioData, NvAudioSpeechResponse
 from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
@@ -28,7 +26,7 @@ from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
 from dynamo.common.storage import upload_to_fs
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType
-from dynamo.common.utils.video_utils import normalize_video_frames
+from dynamo.common.utils.video_utils import encode_video
 from dynamo.vllm.omni.utils import is_empty_payload
 
 logger = logging.getLogger(__name__)
@@ -140,12 +138,9 @@ class DiffusionFormatter:
             )
         try:
             start_time = time.time()
-            frame_list = normalize_video_frames(images)
-            with tempfile.NamedTemporaryFile(
-                suffix=f".{output_format}", delete=True
-            ) as tmp:
-                await asyncio.to_thread(export_to_video, frame_list, tmp.name, fps)
-                video_bytes = tmp.read()
+            video_bytes = await asyncio.to_thread(
+                encode_video, images, fps, container=output_format
+            )
 
             if response_format == "b64_json":
                 video_data = VideoData(
