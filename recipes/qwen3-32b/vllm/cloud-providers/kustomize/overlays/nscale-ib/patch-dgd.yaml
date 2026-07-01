@@ -21,34 +21,6 @@ spec:
               value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1
             - name: NIXL_LOG_LEVEL
               value: INFO
-            - name: MODEL_NAME
-              value: Qwen/Qwen3-32B
-            - name: SERVED_MODEL_NAME
-              value: Qwen/Qwen3-32B
-            - name: KV_TRANSFER_CONFIG
-              value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["UCX"]}}'
-            - name: TENSOR_PARALLEL_SIZE
-              value: "4"
-            - name: BLOCK_SIZE
-              value: "64"
-            - name: HF_OVERRIDES
-              value: '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
-            - name: MAX_MODEL_LEN
-              value: "131072"
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "y"
-            - name: NIXL_TELEMETRY_EXPORTER
-              value: prometheus
-            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-              value: "19090"
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
-            - name: HF_HOME
-              value: /model-cache
-            - name: VLLM_LOGGING_LEVEL
-              value: INFO
-            - name: NCCL_DEBUG
-              value: WARN
           volumeMounts: &ibVolumeMounts
             - name: model-cache
               mountPath: /model-cache
@@ -78,41 +50,7 @@ spec:
       extraPodSpec:
         tolerations: *gpuTolerations
         mainContainer:
-          env:
-            - name: GPU_MEMORY_UTILIZATION
-              value: "0.70"
-            - name: UCX_NET_DEVICES
-              value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1
-            - name: NIXL_LOG_LEVEL
-              value: INFO
-            - name: MODEL_NAME
-              value: Qwen/Qwen3-32B
-            - name: SERVED_MODEL_NAME
-              value: Qwen/Qwen3-32B
-            - name: KV_TRANSFER_CONFIG
-              value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["UCX"]}}'
-            - name: TENSOR_PARALLEL_SIZE
-              value: "4"
-            - name: BLOCK_SIZE
-              value: "64"
-            - name: HF_OVERRIDES
-              value: '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
-            - name: MAX_MODEL_LEN
-              value: "131072"
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "y"
-            - name: NIXL_TELEMETRY_EXPORTER
-              value: prometheus
-            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-              value: "19090"
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
-            - name: HF_HOME
-              value: /model-cache
-            - name: VLLM_LOGGING_LEVEL
-              value: INFO
-            - name: NCCL_DEBUG
-              value: WARN
+          env: *nscaleEnvironment
           volumeMounts: *ibVolumeMounts
         volumes: *ibVolumes
       resources:

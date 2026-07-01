@@ -9,7 +9,7 @@ spec:
     VllmPrefillWorker:
       extraPodSpec:
         mainContainer:
-          env:
+          env: &efaEnvironment
             - name: KV_TRANSFER_CONFIG
               value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
             - name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC
@@ -24,34 +24,6 @@ spec:
               value: "0"
             - name: FI_LOG_LEVEL
               value: warn
-            - name: MODEL_NAME
-              value: Qwen/Qwen3-32B
-            - name: SERVED_MODEL_NAME
-              value: Qwen/Qwen3-32B
-            - name: TENSOR_PARALLEL_SIZE
-              value: "4"
-            - name: GPU_MEMORY_UTILIZATION
-              value: "0.90"
-            - name: BLOCK_SIZE
-              value: "64"
-            - name: HF_OVERRIDES
-              value: '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
-            - name: MAX_MODEL_LEN
-              value: "131072"
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "y"
-            - name: NIXL_TELEMETRY_EXPORTER
-              value: prometheus
-            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-              value: "19090"
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
-            - name: HF_HOME
-              value: /model-cache
-            - name: VLLM_LOGGING_LEVEL
-              value: INFO
-            - name: NCCL_DEBUG
-              value: WARN
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
       resources:
         limits:
@@ -63,49 +35,7 @@ spec:
     VllmDecodeWorker:
       extraPodSpec:
         mainContainer:
-          env:
-            - name: KV_TRANSFER_CONFIG
-              value: '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"backends":["LIBFABRIC"]}}'
-            - name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC
-              value: "true"
-            - name: DYN_KVBM_NIXL_BACKEND_UCX
-              value: "false"
-            - name: FI_PROVIDER
-              value: efa
-            - name: FI_EFA_USE_DEVICE_RDMA
-              value: "1"
-            - name: FI_EFA_ENABLE_SHM_TRANSFER
-              value: "0"
-            - name: FI_LOG_LEVEL
-              value: warn
-            - name: MODEL_NAME
-              value: Qwen/Qwen3-32B
-            - name: SERVED_MODEL_NAME
-              value: Qwen/Qwen3-32B
-            - name: TENSOR_PARALLEL_SIZE
-              value: "4"
-            - name: GPU_MEMORY_UTILIZATION
-              value: "0.90"
-            - name: BLOCK_SIZE
-              value: "64"
-            - name: HF_OVERRIDES
-              value: '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
-            - name: MAX_MODEL_LEN
-              value: "131072"
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "y"
-            - name: NIXL_TELEMETRY_EXPORTER
-              value: prometheus
-            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-              value: "19090"
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
-            - name: HF_HOME
-              value: /model-cache
-            - name: VLLM_LOGGING_LEVEL
-              value: INFO
-            - name: NCCL_DEBUG
-              value: WARN
+          env: *efaEnvironment
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
       resources:
         limits:
