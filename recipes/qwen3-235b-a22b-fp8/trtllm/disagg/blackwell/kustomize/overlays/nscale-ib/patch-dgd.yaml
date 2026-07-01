@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-235b-a22b-disagg
+spec:
+  services:
+    TRTLLMPrefillWorker:
+      resources:
+        limits:
+          gpu: "2"
+          custom:
+            rdma/ib: "1"
+        requests:
+          gpu: "2"
+          custom:
+            rdma/ib: "1"
+            ephemeral-storage: 2Gi
+      extraPodSpec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        mainContainer:
+          env: &nscaleEnvironment
+            # Compute-fabric NICs only; mlx5_6..9 are side fabric on the referenced Nscale nodes.
+            - name: UCX_NET_DEVICES
+              value: "mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1"
+            - name: NIXL_LOG_LEVEL
+              value: INFO
+          volumeMounts:
+            - name: prefill-config
+              mountPath: /engine_configs
+            - name: model-cache
+              mountPath: /mnt/model-cache
+            - name: ib
+              mountPath: /dev/infiniband
+            - name: shm
+              mountPath: /dev/shm
+        volumes:
+          - name: prefill-config
+            configMap:
+              name: prefill-config
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+          - name: ib
+            hostPath:
+              path: /dev/infiniband
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi
+    TRTLLMDecodeWorker:
+      resources:
+        limits:
+          gpu: "4"
+          custom:
+            rdma/ib: "1"
+        requests:
+          gpu: "4"
+          custom:
+            rdma/ib: "1"
+            ephemeral-storage: 2Gi
+      extraPodSpec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        mainContainer:
+          env: *nscaleEnvironment
+          volumeMounts:
+            - name: decode-config
+              mountPath: /engine_configs
+            - name: model-cache
+              mountPath: /mnt/model-cache
+            - name: ib
+              mountPath: /dev/infiniband
+            - name: shm
+              mountPath: /dev/shm
+        volumes:
+          - name: decode-config
+            configMap:
+              name: decode-config
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-cache
+          - name: ib
+            hostPath:
+              path: /dev/infiniband
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi

@@ -60,6 +60,7 @@ data:
       backend: DEEPGEMM
       max_num_tokens: 8192
 ---
+# Shared Blackwell disaggregated graph; provider overlays add RDMA fabric details.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -100,6 +101,7 @@ spec:
       resources:
         limits:
           gpu: "2"
+      # TensorRT-LLM workers need a large shared-memory volume for runtime state.
       sharedMemory:
         size: 256Gi
       extraPodSpec:
@@ -156,6 +158,7 @@ spec:
       resources:
         limits:
           gpu: "4"
+      # TensorRT-LLM workers need a large shared-memory volume for runtime state.
       sharedMemory:
         size: 256Gi
       extraPodSpec:

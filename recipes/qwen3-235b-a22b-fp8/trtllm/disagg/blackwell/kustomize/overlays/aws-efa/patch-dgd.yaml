@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen3-235b-a22b-disagg
+spec:
+  services:
+    TRTLLMPrefillWorker:
+      resources:
+        limits:
+          gpu: "2"
+          custom:
+            vpc.amazonaws.com/efa: "8"
+        requests:
+          gpu: "2"
+          custom:
+            vpc.amazonaws.com/efa: "8"
+            ephemeral-storage: 2Gi
+      extraPodSpec:
+        mainContainer:
+          env: &efaEnvironment
+            - name: DYN_KVBM_NIXL_BACKEND_LIBFABRIC
+              value: "true"
+            - name: DYN_KVBM_NIXL_BACKEND_UCX
+              value: "false"
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "y"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: FI_PROVIDER
+              value: efa
+            - name: FI_EFA_USE_DEVICE_RDMA
+              value: "1"
+            - name: FI_EFA_ENABLE_SHM_TRANSFER
+              value: "0"
+            - name: FI_LOG_LEVEL
+              value: warn
+    TRTLLMDecodeWorker:
+      resources:
+        limits:
+          gpu: "4"
+          custom:
+            vpc.amazonaws.com/efa: "16"
+        requests:
+          gpu: "4"
+          custom:
+            vpc.amazonaws.com/efa: "16"
+            ephemeral-storage: 2Gi
+      extraPodSpec:
+        mainContainer:
+          env: *efaEnvironment
