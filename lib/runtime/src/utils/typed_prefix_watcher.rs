@@ -112,11 +112,11 @@ where
 
                     match event {
                         WatchEvent::Put(kv) => {
-                            if apply_put_event(&mut state, &kv, &key_extractor, &value_extractor) {
-                                if watch_tx.send(state.clone()).is_err() {
-                                    tracing::error!("Failed to send update; receiver dropped");
-                                    break;
-                                }
+                            if apply_put_event(&mut state, &kv, &key_extractor, &value_extractor)
+                                && watch_tx.send(state.clone()).is_err()
+                            {
+                                tracing::error!("Failed to send update; receiver dropped");
+                                break;
                             }
                         }
                         WatchEvent::Delete(kv) => {
