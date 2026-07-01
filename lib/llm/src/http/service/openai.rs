@@ -610,7 +610,7 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
     if nvext_present || header_present {
         tracing::warn!(
             endpoint,
-            "request carried nvext data but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
+            "request carried nvext data but the nvext extension is disabled on this frontend; dropping it"
         );
     }
 }
