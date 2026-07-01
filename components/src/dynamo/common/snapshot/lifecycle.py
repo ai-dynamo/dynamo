@@ -105,15 +105,6 @@ class SnapshotConfig:
 
 
 def configure_snapshot_capture_env() -> None:
-    if os.environ.get("VLLM_DISABLE_NCCL") == "1":
-        for name in tuple(os.environ):
-            if name.startswith(("NCCL_", "TORCH_NCCL_")) or (
-                name == "DYN_SNAPSHOT_NCCL_KVS_ENDPOINT"
-            ):
-                os.environ.pop(name)
-        _configure_snapshot_hf_env()
-        return
-
     nccl_cumem_enable = os.environ.get("NCCL_CUMEM_ENABLE")
     if nccl_cumem_enable and nccl_cumem_enable != "0":
         logger.warning(
@@ -123,14 +114,7 @@ def configure_snapshot_capture_env() -> None:
         )
     os.environ["NCCL_CUMEM_ENABLE"] = "0"
 
-    nccl_p2p_disable = os.environ.get("NCCL_P2P_DISABLE")
-    if nccl_p2p_disable and nccl_p2p_disable != "0":
-        logger.warning(
-            "Overriding NCCL_P2P_DISABLE=%r with '0' for snapshot mode "
-            "to keep NCCL on GPU P2P transport when topology allows it",
-            nccl_p2p_disable,
-        )
-    os.environ["NCCL_P2P_DISABLE"] = "0"
+    os.environ.setdefault("NCCL_P2P_DISABLE", "0")
 
     nccl_nvls_enable = os.environ.get("NCCL_NVLS_ENABLE")
     if nccl_nvls_enable and nccl_nvls_enable != "0":
@@ -169,10 +153,7 @@ def configure_snapshot_capture_env() -> None:
         )
     os.environ["TORCH_NCCL_ENABLE_MONITORING"] = "0"
     os.environ.setdefault("TORCH_NCCL_DUMP_ON_TIMEOUT", "0")
-    _configure_snapshot_hf_env()
 
-
-def _configure_snapshot_hf_env() -> None:
     hf_hub_offline = os.environ.get("HF_HUB_OFFLINE")
     if hf_hub_offline and hf_hub_offline != "1":
         logger.warning(

@@ -16,23 +16,6 @@ BACKEND_NAME = "dynamo_snapshot"
 SNAPSHOT_CONTROL_DIR = "DYN_SNAPSHOT_CONTROL_DIR"
 
 
-def _audit_no_nccl(stage: str) -> None:
-    from vllm import envs
-
-    if not envs.VLLM_DISABLE_NCCL:
-        return
-
-    from vllm.distributed.nccl_audit import assert_no_nccl_communicators
-
-    backends = assert_no_nccl_communicators()
-    logger.info(
-        "No-NCCL audit passed at %s for worker PID %d: %s",
-        stage,
-        os.getpid(),
-        backends,
-    )
-
-
 class DynamoSnapshotBackend(SleepModeBackend):
     """CuMem sleep with FlashInfer checkpoint lifecycle ordering."""
 
@@ -47,7 +30,6 @@ class DynamoSnapshotBackend(SleepModeBackend):
             checkpoint_restore_distributed_state,
         )
 
-        _audit_no_nccl("pre-suspend")
         try:
             checkpoint_prepare_distributed_state()
         except Exception:
@@ -90,7 +72,6 @@ class DynamoSnapshotBackend(SleepModeBackend):
             self._allocator.resume(None)
             self._allocator_suspended = False
         checkpoint_restore_distributed_state()
-        _audit_no_nccl("post-restore")
         self._state = "RUNNING"
 
     @classmethod

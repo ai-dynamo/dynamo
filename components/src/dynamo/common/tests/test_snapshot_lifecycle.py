@@ -63,29 +63,32 @@ async def test_snapshot_lifecycle_resumes_after_restore_sentinel(monkeypatch, tm
                 await lifecycle
 
 
-def test_no_nccl_snapshot_mode_removes_legacy_nccl_env(monkeypatch):
-    monkeypatch.setenv("VLLM_DISABLE_NCCL", "1")
-    legacy_env = {
-        "NCCL_CHECKPOINT_SHIM": "/opt/nccl-checkpoint/lib/shim.so",
-        "NCCL_CHECKPOINT_KVS_PATH": "/run/nccl-kvs",
-        "DYN_SNAPSHOT_NCCL_KVS_ENDPOINT": "redis://legacy",
+def test_snapshot_mode_preserves_explicit_nccl_transport(monkeypatch):
+    configured_env = {
         "NCCL_CUMEM_ENABLE": "1",
         "NCCL_P2P_DISABLE": "1",
+        "NCCL_SHM_DISABLE": "0",
         "NCCL_NVLS_ENABLE": "1",
-        "NCCL_IB_DISABLE": "1",
+        "NCCL_IB_DISABLE": "0",
         "NCCL_RAS_ENABLE": "1",
         "NCCL_DEBUG": "INFO",
-        "NCCL_SOCKET_IFNAME": "lo",
         "TORCH_NCCL_ENABLE_MONITORING": "1",
         "TORCH_NCCL_DUMP_ON_TIMEOUT": "1",
     }
-    for name, value in legacy_env.items():
+    for name, value in configured_env.items():
         monkeypatch.setenv(name, value)
 
     configure_snapshot_capture_env()
 
-    for name in legacy_env:
-        assert name not in os.environ
+    assert os.environ["NCCL_P2P_DISABLE"] == "1"
+    assert os.environ["NCCL_SHM_DISABLE"] == "0"
+    assert os.environ["NCCL_CUMEM_ENABLE"] == "0"
+    assert os.environ["NCCL_NVLS_ENABLE"] == "0"
+    assert os.environ["NCCL_IB_DISABLE"] == "1"
+    assert os.environ["NCCL_RAS_ENABLE"] == "0"
+    assert os.environ["NCCL_DEBUG"] == "INFO"
+    assert os.environ["TORCH_NCCL_ENABLE_MONITORING"] == "0"
+    assert os.environ["TORCH_NCCL_DUMP_ON_TIMEOUT"] == "1"
     assert os.environ["HF_HUB_OFFLINE"] == "1"
 
 
