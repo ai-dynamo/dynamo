@@ -1020,9 +1020,9 @@ mod core_behavior {
         }]);
 
         let admit = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
-        assert_eq!(admit.can_run.len(), 1);
-        assert_eq!(admit.can_run[0].materialized_tokens, 6);
-        assert_eq!(admit.can_run[0].allocated_tokens, 8);
+        assert_eq!(admit.scheduled_prefills.len(), 1);
+        assert_eq!(admit.scheduled_prefills[0].request.materialized_tokens, 6);
+        assert_eq!(admit.scheduled_prefills[0].request.allocated_tokens, 8);
     }
 
     #[test]
@@ -1052,8 +1052,8 @@ mod core_behavior {
         }]);
 
         let admit = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
-        assert_eq!(admit.can_run.len(), 1);
-        assert_eq!(admit.can_run[0].materialized_tokens, 8);
+        assert_eq!(admit.scheduled_prefills.len(), 1);
+        assert_eq!(admit.scheduled_prefills[0].request.materialized_tokens, 8);
     }
 
     #[test]
@@ -1100,8 +1100,8 @@ mod core_behavior {
         ]);
 
         let admit = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
-        assert_eq!(admit.can_run.len(), 1);
-        assert_eq!(admit.can_run[0].uuid, first_uuid);
+        assert_eq!(admit.scheduled_prefills.len(), 1);
+        assert_eq!(admit.scheduled_prefills[0].request.uuid, first_uuid);
         assert_eq!(waiting.len(), 1);
         assert_eq!(waiting[0].uuid, second_uuid);
     }
@@ -1691,13 +1691,22 @@ mod router_events {
         }]);
 
         let chunk1 = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
-        let mut req1 = chunk1.can_run.into_iter().next().unwrap();
+        let mut req1 = chunk1
+            .scheduled_prefills
+            .into_iter()
+            .next()
+            .unwrap()
+            .request;
         decode::cache_materialized_prefix(&mut req1, &mut kv_manager, &config);
         waiting.push_front(req1);
         harness.apply_events(buffer.drain()).await;
 
         let chunk2 = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
-        let mut running = chunk2.can_run;
+        let mut running = chunk2
+            .scheduled_prefills
+            .into_iter()
+            .map(|scheduled| scheduled.request)
+            .collect::<Vec<_>>();
         let decode1 = simulate_decode_step(&mut running, &mut kv_manager, &config, 0.0, false);
         assert_eq!(decode1.output_signals.len(), 1);
         harness.apply_events(buffer.drain()).await;
@@ -1717,7 +1726,11 @@ mod router_events {
         loop {
             let admit =
                 get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &running);
-            for mut req in admit.can_run {
+            for mut req in admit
+                .scheduled_prefills
+                .into_iter()
+                .map(|scheduled| scheduled.request)
+            {
                 if req.materialized_tokens < req.current_sequence_len() {
                     decode::cache_materialized_prefix(&mut req, &mut kv_manager, &config);
                     waiting.push_front(req);

@@ -13,6 +13,10 @@ mod validate;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+pub use crate::common::perf_model::{
+    PerfModel, ReplayDecodeInput, ReplayDecodeLatencyModel, ReplayLatencyModel, ReplayPrefillInput,
+    ReplayPrefillLatencyModel,
+};
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use dynamo_kv_router::PrefillLoadEstimator;
 
@@ -145,7 +149,85 @@ pub(crate) fn normalize_trace_requests(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use uuid::Uuid;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RecordedPrefillInput {
+        sequence_lengths: Vec<usize>,
+        prefix_lengths: Vec<usize>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RecordedDecodeInput {
+        sequence_lengths: Vec<usize>,
+        active_kv_tokens: usize,
+        total_kv_tokens: usize,
+        output_length: usize,
+    }
+
+    #[derive(Default)]
+    struct RecordingLatencyModel {
+        prefill_inputs: Mutex<Vec<RecordedPrefillInput>>,
+        decode_inputs: Mutex<Vec<RecordedDecodeInput>>,
+    }
+
+    impl ReplayPrefillLatencyModel for RecordingLatencyModel {
+        fn prefill_latency_ms(&self, input: ReplayPrefillInput<'_>) -> f64 {
+            self.prefill_inputs
+                .lock()
+                .unwrap()
+                .push(RecordedPrefillInput {
+                    sequence_lengths: input.sequence_lengths.to_vec(),
+                    prefix_lengths: input.prefix_lengths.to_vec(),
+                });
+            2.0
+        }
+    }
+
+    impl ReplayDecodeLatencyModel for RecordingLatencyModel {
+        fn decode_latency_ms(&self, input: ReplayDecodeInput<'_>) -> f64 {
+            self.decode_inputs
+                .lock()
+                .unwrap()
+                .push(RecordedDecodeInput {
+                    sequence_lengths: input.sequence_lengths.to_vec(),
+                    active_kv_tokens: input.active_kv_tokens,
+                    total_kv_tokens: input.total_kv_tokens,
+                    output_length: input.output_length,
+                });
+            1.0
+        }
+    }
+
+    fn replay_args(
+        engine_type: crate::common::protocols::EngineType,
+        model: Arc<RecordingLatencyModel>,
+    ) -> MockEngineArgs {
+        let mut args = MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .block_size(4)
+            .num_gpu_blocks(128)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(true)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        args.perf_model = Arc::new(PerfModel::from_replay_latency_model(model));
+        args
+    }
+
+    fn replay_request(uuid: u128, tokens: Vec<u32>, arrival_timestamp_ms: f64) -> DirectRequest {
+        DirectRequest {
+            tokens,
+            max_output_tokens: 2,
+            uuid: Some(Uuid::from_u128(uuid)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(arrival_timestamp_ms),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_replay_itl_uses_per_token_gaps() {
@@ -210,5 +292,68 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(arrivals, vec![0.0, 10.0]);
+    }
+
+    #[test]
+    fn replay_preserves_heterogeneous_request_shapes() {
+        for engine_type in [
+            crate::common::protocols::EngineType::Vllm,
+            crate::common::protocols::EngineType::Sglang,
+        ] {
+            let model = Arc::new(RecordingLatencyModel::default());
+            let report = simulate_trace_requests(
+                replay_args(engine_type, Arc::clone(&model)),
+                vec![
+                    replay_request(1, vec![1; 8], 0.0),
+                    replay_request(2, vec![2; 12], 0.0),
+                ],
+                1,
+                1.0,
+            )
+            .unwrap();
+
+            assert_eq!(report.request_counts.completed_requests, 2);
+            assert!(model.prefill_inputs.lock().unwrap().iter().any(|input| {
+                input.sequence_lengths == [8, 12] && input.prefix_lengths == [0, 0]
+            }));
+            assert!(
+                model
+                    .decode_inputs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|input| { input.sequence_lengths == [8, 12] && input.output_length == 1 })
+            );
+        }
+    }
+
+    #[test]
+    fn replay_preserves_cached_prefix_lengths() {
+        for engine_type in [
+            crate::common::protocols::EngineType::Vllm,
+            crate::common::protocols::EngineType::Sglang,
+        ] {
+            let model = Arc::new(RecordingLatencyModel::default());
+            let report = simulate_trace_requests(
+                replay_args(engine_type, Arc::clone(&model)),
+                vec![
+                    replay_request(1, vec![1, 1, 1, 1, 2, 2, 2, 2], 0.0),
+                    replay_request(2, vec![1, 1, 1, 1, 3, 3, 3, 3], 100.0),
+                ],
+                1,
+                1.0,
+            )
+            .unwrap();
+
+            assert_eq!(report.request_counts.completed_requests, 2);
+            assert!(
+                model
+                    .prefill_inputs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|input| { input.sequence_lengths == [8] && input.prefix_lengths == [4] })
+            );
+        }
     }
 }

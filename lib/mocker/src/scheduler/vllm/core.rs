@@ -11,6 +11,10 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::common::handoff::HandoffId;
+use crate::common::perf_model::{
+    ReplayDecodeInput, ReplayDecodeLatencyModel, ReplayPrefillInput, ReplayPrefillLatencyModel,
+    replay_latency_duration, scale_replay_duration,
+};
 use crate::common::protocols::{
     DirectRequest, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
     PrefillCost, WorkerType,
@@ -1319,9 +1323,6 @@ impl VllmCore {
                 .len()
                 .saturating_add(self.state.waiting.len().min(16)),
         );
-        let mut batch_count = 0usize;
-        let mut batch_total_isl = 0usize;
-        let mut batch_total_prefix = 0usize;
         let mut admissions = Vec::with_capacity(self.state.waiting.len().min(16));
         let mut preempted_any = false;
 
@@ -1334,9 +1335,6 @@ impl VllmCore {
                 None,
                 &mut token_budget,
                 &mut scheduled,
-                &mut batch_count,
-                &mut batch_total_isl,
-                &mut batch_total_prefix,
                 &mut preempted_any,
             ) {
                 ScheduleOutcome::Scheduled { admission, .. } => {
@@ -1455,9 +1453,6 @@ impl VllmCore {
                 Some(&prefill_cost),
                 &mut token_budget,
                 &mut scheduled,
-                &mut batch_count,
-                &mut batch_total_isl,
-                &mut batch_total_prefix,
                 &mut preempted_any,
             ) {
                 ScheduleOutcome::Scheduled {
@@ -1485,8 +1480,19 @@ impl VllmCore {
             }
         }
 
-        let prefill_time =
-            predict_prefill_duration(batch_count, batch_total_isl, batch_total_prefix, &self.args);
+        let (prefill_sequence_lengths, prefill_prefix_lengths): (Vec<_>, Vec<_>) = self
+            .state
+            .running
+            .iter()
+            .filter_map(|uuid| scheduled.get(uuid))
+            .filter(|work| work.prompt_tokens > 0)
+            .map(|work| (work.prefix_tokens + work.prompt_tokens, work.prefix_tokens))
+            .unzip();
+        let prefill_time = predict_prefill_duration(
+            &prefill_sequence_lengths,
+            &prefill_prefix_lengths,
+            &self.args,
+        );
         let decode_start_ms = now_ms + prefill_time.as_secs_f64() * 1000.0;
         let (decode_time, mut output_signals) = self.emit_ready_tokens(collector, decode_start_ms);
         // Emit the terminal signals for the requests the gate rejected above
@@ -1701,7 +1707,6 @@ impl VllmCore {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[cfg_attr(feature = "profile", inline(never))]
     fn schedule_request(
         &mut self,
@@ -1710,9 +1715,6 @@ impl VllmCore {
         prefill_cost: Option<&PrefillCost>,
         token_budget: &mut usize,
         scheduled: &mut FxHashMap<Uuid, ScheduledWork>,
-        batch_count: &mut usize,
-        batch_total_isl: &mut usize,
-        batch_total_prefix: &mut usize,
         preempted_any: &mut bool,
     ) -> ScheduleOutcome {
         let request = self
@@ -1834,12 +1836,6 @@ impl VllmCore {
             *preempted_any = true;
             if let Some(undone) = scheduled.remove(&preempted.uuid) {
                 *token_budget += undone.total_tokens;
-                if undone.prompt_tokens > 0 && self.args.worker_type != WorkerType::Decode {
-                    *batch_count = batch_count.saturating_sub(1);
-                    *batch_total_isl =
-                        batch_total_isl.saturating_sub(undone.prefix_tokens + undone.prompt_tokens);
-                    *batch_total_prefix = batch_total_prefix.saturating_sub(undone.prefix_tokens);
-                }
             }
             if preempted.uuid == uuid {
                 return ScheduleOutcome::CurrentPreempted;
@@ -1872,12 +1868,6 @@ impl VllmCore {
                 sequence_len,
             },
         );
-        if prompt_tokens > 0 && self.args.worker_type != WorkerType::Decode {
-            *batch_count += 1;
-            *batch_total_isl += prompt_before + prompt_tokens;
-            *batch_total_prefix += prompt_before;
-        }
-
         if from_waiting {
             self.state.transition_to_running(uuid);
         }
@@ -1904,7 +1894,7 @@ impl VllmCore {
         decode_start_ms: f64,
     ) -> (Duration, Vec<OutputSignal>) {
         let mut ready = Vec::with_capacity(self.state.running.len());
-        let mut total_length = 0usize;
+        let mut sequence_lengths = Vec::with_capacity(self.state.running.len());
         for uuid in self.state.running.iter().copied() {
             let Some(request) = self.state.requests.get(&uuid) else {
                 continue;
@@ -1915,7 +1905,7 @@ impl VllmCore {
                 continue;
             }
             ready.push(uuid);
-            total_length += request.sequence.len();
+            sequence_lengths.push(request.sequence.len());
         }
         if ready.is_empty() {
             return (Duration::ZERO, Vec::new());
@@ -1932,13 +1922,12 @@ impl VllmCore {
         } else {
             let active_kv_tokens = self.kv_manager.num_active_blocks() * self.args.block_size;
             let total_kv_tokens = self.args.num_gpu_blocks * self.args.block_size;
-            let context_length = total_length / ready.len();
-            let decode_ms = self.args.perf_model.predict_decode_time(
-                ready.len(),
+            let decode_ms = self.args.perf_model.decode_latency_ms(ReplayDecodeInput {
+                sequence_lengths: &sequence_lengths,
                 active_kv_tokens,
-                context_length,
                 total_kv_tokens,
-            );
+                output_length: 1,
+            });
             let dt = scale_decode_time(decode_ms, &self.args);
             (dt, decode_start_ms + dt.as_secs_f64() * 1000.0)
         };
@@ -2161,11 +2150,11 @@ impl VllmCore {
             }
         };
 
-        let total_length = ready
+        let sequence_lengths = ready
             .iter()
             .filter_map(|uuid| self.state.requests.get(uuid))
             .map(|request| request.sequence.len())
-            .sum::<usize>();
+            .collect::<Vec<_>>();
         let (decode_time, decode_end_ms) = if self.args.worker_type == WorkerType::Prefill {
             (Duration::ZERO, decode_start_ms)
         } else {
@@ -2175,13 +2164,12 @@ impl VllmCore {
                 .saturating_sub(reservation.len())
                 * self.args.block_size;
             let total_kv_tokens = self.args.num_gpu_blocks * self.args.block_size;
-            let context_length = total_length / ready.len();
-            let decode_ms = self.args.perf_model.predict_decode_time(
-                ready.len(),
+            let decode_ms = self.args.perf_model.decode_latency_ms(ReplayDecodeInput {
+                sequence_lengths: &sequence_lengths,
                 active_kv_tokens,
-                context_length,
                 total_kv_tokens,
-            );
+                output_length: max_burst,
+            });
             let duration = scale_decode_time(decode_ms, &self.args);
             (duration, decode_start_ms + duration.as_secs_f64() * 1000.0)
         };
@@ -2314,34 +2302,25 @@ impl VllmCore {
 }
 
 fn predict_prefill_duration(
-    batch_count: usize,
-    batch_total_isl: usize,
-    batch_total_prefix: usize,
+    sequence_lengths: &[usize],
+    prefix_lengths: &[usize],
     args: &MockEngineArgs,
 ) -> Duration {
-    if batch_count == 0 || args.worker_type == WorkerType::Decode {
+    if sequence_lengths.is_empty() || args.worker_type == WorkerType::Decode {
         return Duration::ZERO;
     }
 
-    let mean_isl = batch_total_isl / batch_count;
-    let mean_prefix = batch_total_prefix / batch_count;
-    let prefill_ms = args
-        .perf_model
-        .predict_prefill_time(batch_count, mean_isl, mean_prefix);
-    let total_time = Duration::from_secs_f64(prefill_ms / 1000.0);
-    if args.speedup_ratio <= 0.0 || total_time <= Duration::ZERO {
-        return total_time;
-    }
-    Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio)
+    let input = ReplayPrefillInput::new(sequence_lengths, prefix_lengths)
+        .expect("scheduled prefill shape must be valid");
+    let total_time =
+        replay_latency_duration(args.perf_model.prefill_latency_ms(input), 0.0, "prefill");
+    scale_replay_duration(total_time, args.speedup_ratio, "prefill")
 }
 
 fn scale_decode_time(decode_ms: f64, args: &MockEngineArgs) -> Duration {
-    let unscaled = Duration::from_secs_f64(decode_ms / 1000.0);
+    let unscaled = replay_latency_duration(decode_ms, 1.0, "decode");
     let effective_ratio = args.speedup_ratio * args.decode_speedup_ratio;
-    if effective_ratio <= 0.0 || unscaled <= Duration::ZERO {
-        return unscaled;
-    }
-    Duration::from_secs_f64(unscaled.as_secs_f64() / effective_ratio)
+    scale_replay_duration(unscaled, effective_ratio, "decode")
 }
 
 fn split_terminal_effects(signals: Vec<MoveBlock>) -> VllmTerminalEffects {
