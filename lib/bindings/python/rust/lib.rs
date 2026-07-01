@@ -27,6 +27,7 @@ use dynamo_runtime::config;
 use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use dynamo_runtime::{
     self as rs, logging,
+    slug::Slug,
     pipeline::{
         AsyncEngineContextProvider, EngineStream, ManyOut, SingleIn, context::Context as RsContext,
         network::egress::push_router::RouterMode as RsRouterMode,
@@ -529,6 +530,16 @@ fn register_model<'p>(
         if is_tensor_based || is_images || is_videos || is_realtime {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
+            // Preserve source_path for compatibility checks (LoRA vs base model).
+            card.source_path = Some(source_path.clone());
+
+            // Populate lora_info if this is a LoRA registration.
+            if let Some(lora_name) = lora_identifier.clone() {
+                card.lora = Some(llm_rs::model_card::LoraInfo {
+                    name: lora_name,
+                    max_gpu_lora_count: None,
+                });
+            }
             card.model_type = model_type_obj;
             card.model_input = model_input;
             card.worker_type = worker_type_value;
@@ -541,11 +552,15 @@ fn register_model<'p>(
 
             // Register the Model Deployment Card via discovery interface
             let discovery = endpoint.inner.drt().discovery();
-            let spec = rs::discovery::DiscoverySpec::from_model(
+            let model_suffix = lora_identifier
+                .as_ref()
+                .map(|name| Slug::slugify(name).to_string());
+            let spec = rs::discovery::DiscoverySpec::from_model_with_suffix(
                 endpoint.inner.component().namespace().name().to_string(),
                 endpoint.inner.component().name().to_string(),
                 endpoint.inner.name().to_string(),
                 &card,
+                model_suffix,
             )
             .map_err(to_pyerr)?;
             discovery.register(spec).await.map_err(to_pyerr)?;

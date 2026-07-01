@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import logging
+import os
 import random
+import threading
 from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Dict, Optional, Union, cast
 
 import PIL.Image
 from fsspec.implementations.dirfs import DirFileSystem
+from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
@@ -16,9 +19,23 @@ from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
-from dynamo.common.utils.output_modalities import RequestType, parse_request_type
+from dynamo.common.utils.output_modalities import (
+    RequestType,
+    get_output_modalities,
+    parse_request_type,
+)
 from dynamo.common.utils.video_utils import compute_num_frames, parse_size
+from dynamo.llm import (
+    ModelInput,
+    ModelRuntimeConfig,
+    ModelType,
+    WorkerType,
+    lora_name_to_id,
+    register_model,
+    unregister_model,
+)
 from dynamo.llm.exceptions import EngineShutdown
+from dynamo.vllm.handlers import LoRAInfo, get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 from dynamo.vllm.omni.output_formatter import OutputFormatter
@@ -57,6 +74,7 @@ class EngineInputs:
     speed: float = 1.0
     response_format: str | None = None
     output_format: str | None = None
+    lora_request: LoRARequest | None = None
 
 
 class OmniHandler(BaseOmniHandler):
@@ -66,6 +84,55 @@ class OmniHandler(BaseOmniHandler):
     Audio/TTS logic is delegated to AudioGenerationHandler via composition.
     """
 
+    def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
+        if model_name and (lora := self.loaded_loras.get(model_name)):
+            return LoRARequest(
+                lora_name=model_name,
+                lora_int_id=lora.id,
+                lora_path=lora.path,
+            )
+        return None
+
+    @staticmethod
+    def _extract_lora_name_from_request(request: Any) -> str | None:
+        """Best-effort LoRA name extraction for admin unload compatibility.
+
+        Accepts multiple request shapes used by compatibility aliases and
+        engine-update forwarding layers.
+        """
+        if not isinstance(request, dict):
+            return None
+
+        # Canonical body shape.
+        lora_name = request.get("lora_name")
+        if isinstance(lora_name, str) and lora_name:
+            return lora_name
+
+        # Compatibility shapes that may appear in alias forwarding.
+        for key in ("name", "adapter_name", "model"):
+            value = request.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+        return None
+
+    def _get_lora_lock(self, lora_name: str) -> asyncio.Lock:
+        lock = self._lora_load_locks.get(lora_name)
+        if lock is not None:
+            return lock
+        with self._lora_load_locks_guard:
+            lock = self._lora_load_locks.get(lora_name)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._lora_load_locks[lora_name] = lock
+            return lock
+
+    @staticmethod
+    def _local_path_from_uri(uri: str) -> str:
+        if uri.startswith("file://"):
+            return uri[len("file://") :]
+        return uri
+
     def __init__(
         self,
         runtime,
@@ -74,6 +141,7 @@ class OmniHandler(BaseOmniHandler):
         shutdown_event: asyncio.Event | None = None,
         media_output_fs: Optional[DirFileSystem] = None,
         media_output_http_url: Optional[str] = None,
+        generate_endpoint=None,
     ):
         """Initialize the unified Omni handler.
 
@@ -95,6 +163,10 @@ class OmniHandler(BaseOmniHandler):
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
         self._image_loader = ImageLoader()
+        self.generate_endpoint = generate_endpoint
+        self.loaded_loras: dict[str, LoRAInfo] = {}
+        self._lora_load_locks: dict[str, asyncio.Lock] = {}
+        self._lora_load_locks_guard = threading.Lock()
 
         self.output_formatter = OutputFormatter(
             model_name=config.served_model_name or config.model,
@@ -110,6 +182,215 @@ class OmniHandler(BaseOmniHandler):
             media_output_fs=media_output_fs,
             media_output_http_url=media_output_http_url,
         )
+
+    async def load_lora(self, request=None):
+        if request is None:
+            yield {
+                "status": "error",
+                "message": "Request is required with 'lora_name' and 'source.uri'",
+            }
+            return
+
+        lora_name = request.get("lora_name")
+        source = request.get("source")
+        lora_uri = source.get("uri") if isinstance(source, dict) else None
+
+        if not lora_name:
+            yield {"status": "error", "message": "'lora_name' is required in request"}
+            return
+        if not lora_uri:
+            yield {"status": "error", "message": "'source.uri' is required in request"}
+            return
+
+        lock = self._get_lora_lock(lora_name)
+        async with lock:
+            if lora_name in self.loaded_loras:
+                lora_id = self.loaded_loras[lora_name].id
+                yield {
+                    "status": "success",
+                    "message": f"LoRA adapter '{lora_name}' already loaded",
+                    "lora_name": lora_name,
+                    "lora_id": lora_id,
+                }
+                return
+
+            try:
+                if lora_uri.startswith("file://"):
+                    lora_path = self._local_path_from_uri(lora_uri)
+                    if not os.path.exists(lora_path):
+                        yield {
+                            "status": "error",
+                            "message": f"Local LoRA path does not exist: {lora_path}",
+                        }
+                        return
+                else:
+                    lora_manager = get_lora_manager()
+                    if lora_manager is None:
+                        yield {
+                            "status": "error",
+                            "message": "LoRAManager not initialized. Set DYN_LORA_ENABLED=true for URI-based LoRA loading.",
+                        }
+                        return
+                    download_result = await lora_manager.download_lora(lora_uri)
+                    if download_result.get("status") != "success":
+                        yield {
+                            "status": "error",
+                            "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
+                        }
+                        return
+                    lora_path = download_result["local_path"]
+
+                lora_id = lora_name_to_id(lora_name)
+                await self.engine_client.add_lora(
+                    LoRARequest(
+                        lora_name=lora_name,
+                        lora_int_id=lora_id,
+                        lora_path=lora_path,
+                    )
+                )
+                self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
+                logger.info("LoRA '%s' loaded and available for use", lora_name)
+
+                if self.generate_endpoint is not None:
+                    try:
+                        runtime_config = ModelRuntimeConfig()
+                        model_type = get_output_modalities(
+                            self.config.output_modalities,
+                            self.config.model,
+                        )
+                        if model_type is None:
+                            model_type = ModelType.Images
+
+                        await register_model(
+                            model_input=ModelInput.Text,
+                            model_type=model_type,
+                            endpoint=self.generate_endpoint,
+                            model_path=self.config.model,
+                            kv_cache_block_size=self.config.engine_args.block_size,
+                            runtime_config=runtime_config,
+                            user_data={"lora_adapter": True, "lora_id": lora_id},
+                            lora_name=lora_name,
+                            base_model_path=self.config.model,
+                            worker_type=WorkerType.Aggregated,
+                            needs=[],
+                        )
+                        logger.info(
+                            "Registered LoRA '%s' on endpoint %s",
+                            lora_name,
+                            self.generate_endpoint,
+                        )
+                    except Exception as reg_err:
+                        logger.exception(
+                            "Failed to register LoRA '%s' in discovery; rolling back",
+                            lora_name,
+                        )
+                        try:
+                            await self.engine_client.remove_lora(lora_id)
+                            self.loaded_loras.pop(lora_name, None)
+                        except Exception:
+                            logger.exception(
+                                "Failed to rollback LoRA '%s' after discovery registration failure",
+                                lora_name,
+                            )
+                        yield {
+                            "status": "error",
+                            "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {str(reg_err)}",
+                            "lora_name": lora_name,
+                        }
+                        return
+
+                yield {
+                    "status": "success",
+                    "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                    "lora_name": lora_name,
+                    "lora_id": lora_id,
+                }
+            except Exception as e:
+                logger.exception("Failed to load LoRA adapter: %s", e)
+                yield {"status": "error", "message": str(e)}
+            finally:
+                with self._lora_load_locks_guard:
+                    if lora_name not in self.loaded_loras:
+                        self._lora_load_locks.pop(lora_name, None)
+
+    async def unload_lora(self, request=None):
+        lora_name = self._extract_lora_name_from_request(request)
+        if not lora_name:
+            yield {"status": "error", "message": "'lora_name' is required in request"}
+            return
+
+        lock = self._get_lora_lock(lora_name)
+        async with lock:
+            lora = self.loaded_loras.get(lora_name)
+            if lora is None:
+                yield {
+                    "status": "error",
+                    "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.loaded_loras.keys())}",
+                }
+                return
+
+            try:
+                lora_id = lora.id
+                lora_path = lora.path
+                await self.engine_client.remove_lora(lora.id)
+                self.loaded_loras.pop(lora_name, None)
+                logger.info("LoRA '%s' unloaded", lora_name)
+
+                if self.generate_endpoint is not None:
+                    try:
+                        await unregister_model(
+                            endpoint=self.generate_endpoint,
+                            lora_name=lora_name,
+                        )
+                    except Exception as unreg_err:
+                        logger.exception(
+                            "Failed to unregister LoRA '%s' from discovery; rolling back",
+                            lora_name,
+                        )
+                        try:
+                            await self.engine_client.add_lora(
+                                LoRARequest(
+                                    lora_name=lora_name,
+                                    lora_int_id=lora_id,
+                                    lora_path=lora_path,
+                                )
+                            )
+                            self.loaded_loras[lora_name] = LoRAInfo(
+                                id=lora_id,
+                                path=lora_path,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to rollback unload for LoRA '%s'",
+                                lora_name,
+                            )
+                        yield {
+                            "status": "error",
+                            "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(unreg_err)}",
+                            "lora_name": lora_name,
+                        }
+                        return
+
+                yield {
+                    "status": "success",
+                    "message": f"LoRA adapter '{lora_name}' unloaded successfully",
+                    "lora_name": lora_name,
+                }
+            except Exception as e:
+                logger.exception("Failed to unload LoRA adapter: %s", e)
+                yield {"status": "error", "message": str(e)}
+            finally:
+                with self._lora_load_locks_guard:
+                    if lora_name not in self.loaded_loras:
+                        self._lora_load_locks.pop(lora_name, None)
+
+    async def list_loras(self, request=None):
+        _ = request
+        yield {
+            "status": "success",
+            "loras": {name: lora.id for name, lora in self.loaded_loras.items()},
+            "count": len(self.loaded_loras),
+        }
 
     async def generate(
         self, request: Dict[str, Any], context: Context
@@ -180,6 +461,8 @@ class OmniHandler(BaseOmniHandler):
         }
         if inputs.sampling_params_list is not None:
             generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
+        if inputs.lora_request is not None:
+            generate_kwargs["lora_request"] = inputs.lora_request
 
         previous_text = ""
 
@@ -281,11 +564,15 @@ class OmniHandler(BaseOmniHandler):
             prompt = OmniTextPrompt(prompt=text_prompt)
             sampling_params_list = None
 
+        model_name = request.get("model")
+        lora_request = self._resolve_lora_request(model_name)
+
         return EngineInputs(
             prompt=prompt,
             sampling_params_list=sampling_params_list,
             request_type=RequestType.CHAT_COMPLETION,
             fps=0,
+            lora_request=lora_request,
         )
 
     @staticmethod
@@ -326,8 +613,7 @@ class OmniHandler(BaseOmniHandler):
             height=height,
             width=width,
         )
-
-        # TODO: Apply LoRA Request params here and move to shared utilities for disaggregated stages to use as well.
+        lora_request = self._resolve_lora_request(req.model)
 
         self._update_if_not_none(sp, "num_outputs_per_prompt", req.n)
 
@@ -346,6 +632,7 @@ class OmniHandler(BaseOmniHandler):
             sampling_params_list=self._build_sampling_params_list(sp),
             request_type=RequestType.IMAGE_GENERATION,
             response_format=req.response_format,
+            lora_request=lora_request,
         )
 
     def _engine_inputs_from_video(
@@ -389,6 +676,7 @@ class OmniHandler(BaseOmniHandler):
             width=width,
             num_frames=num_frames,
         )
+        lora_request = self._resolve_lora_request(req.model)
         self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
         self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
         sp.seed = (
@@ -408,4 +696,5 @@ class OmniHandler(BaseOmniHandler):
             sampling_params_list=self._build_sampling_params_list(sp),
             request_type=RequestType.VIDEO_GENERATION,
             fps=fps,
+            lora_request=lora_request,
         )

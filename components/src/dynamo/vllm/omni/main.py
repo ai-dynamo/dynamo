@@ -11,6 +11,7 @@ import uvloop
 
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
+from dynamo.common.rl import first_endpoint_response
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.output_modalities import get_output_modalities
@@ -42,6 +43,26 @@ async def init_omni(
 
     shutdown_endpoints[:] = [generate_endpoint]
 
+    env_lora_enabled = os.getenv("DYN_LORA_ENABLED", "").lower() == "true"
+    engine_lora_enabled = bool(getattr(config.engine_args, "enable_lora", False))
+    lora_enabled = env_lora_enabled or engine_lora_enabled
+    load_lora_endpoint = None
+    unload_lora_endpoint = None
+    list_loras_endpoint = None
+    if lora_enabled:
+        load_lora_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.load_lora"
+        )
+        unload_lora_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.unload_lora"
+        )
+        list_loras_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.list_loras"
+        )
+        shutdown_endpoints.extend(
+            [load_lora_endpoint, unload_lora_endpoint, list_loras_endpoint]
+        )
+
     media_fs = (
         get_fs(config.media_output_fs_url) if config.media_output_fs_url else None
     )
@@ -53,9 +74,26 @@ async def init_omni(
         shutdown_event=shutdown_event,
         media_output_fs=media_fs,
         media_output_http_url=config.media_output_http_url,
+        generate_endpoint=generate_endpoint,
     )
 
     logger.info("Omni worker initialized for model: %s", config.model)
+
+    if lora_enabled:
+
+        async def _load_lora_engine_route(body: dict) -> dict:
+            return await first_endpoint_response(handler.load_lora, body)
+
+        async def _unload_lora_engine_route(body: dict) -> dict:
+            return await first_endpoint_response(handler.unload_lora, body)
+
+        async def _list_loras_engine_route(body: dict) -> dict:
+            return await first_endpoint_response(handler.list_loras, body)
+
+        runtime.register_engine_route("load_lora", _load_lora_engine_route)
+        runtime.register_engine_route("unload_lora", _unload_lora_engine_route)
+        runtime.register_engine_route("list_loras", _list_loras_engine_route)
+        logger.info("Registered LoRA engine routes: load_lora, unload_lora, list_loras")
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
@@ -92,21 +130,44 @@ async def init_omni(
             await VllmOmniHealthCheckPayload.create(handler.engine_client)
         ).to_dict()
 
-        await generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=[
-                (
-                    prometheus_names.labels.MODEL,
-                    config.served_model_name or config.model,
-                ),
-                (
-                    prometheus_names.labels.MODEL_NAME,
-                    config.served_model_name or config.model,
-                ),
-            ],
-            health_check_payload=health_check_payload,
-        )
+        model_metrics_labels = [
+            (
+                prometheus_names.labels.MODEL,
+                config.served_model_name or config.model,
+            ),
+            (
+                prometheus_names.labels.MODEL_NAME,
+                config.served_model_name or config.model,
+            ),
+        ]
+
+        serve_tasks = [
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=model_metrics_labels,
+                health_check_payload=health_check_payload,
+            )
+        ]
+        if lora_enabled:
+            serve_tasks.extend(
+                [
+                    load_lora_endpoint.serve_endpoint(
+                        handler.load_lora,
+                        metrics_labels=model_metrics_labels,
+                    ),
+                    unload_lora_endpoint.serve_endpoint(
+                        handler.unload_lora,
+                        metrics_labels=model_metrics_labels,
+                    ),
+                    list_loras_endpoint.serve_endpoint(
+                        handler.list_loras,
+                        metrics_labels=model_metrics_labels,
+                    ),
+                ]
+            )
+
+        await asyncio.gather(*serve_tasks)
     except Exception as e:
         logger.error("Omni worker failed: %s", e)
         raise
@@ -119,6 +180,10 @@ async def worker():
     config = parse_omni_args()
 
     dump_config(config.dump_config_to, config)
+
+    if getattr(config.engine_args, "enable_lora", False):
+        if "DYN_LORA_ENABLED" not in os.environ:
+            os.environ["DYN_LORA_ENABLED"] = "true"
 
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
