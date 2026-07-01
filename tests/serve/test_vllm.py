@@ -180,6 +180,28 @@ vllm_configs = {
                 },
                 expected_response=[],
                 expected_log=[],
+                expected_finish_reason="length",
+            ),
+            # TITO param-set fidelity: a broad practical sampling set
+            # (top_p/top_k/seed + temperature>0) rides the opaque envelope and
+            # still yields exactly max_tokens tokens under ignore_eos, proving
+            # the params flow through without breaking the path or the count.
+            GeneratePayload(
+                body={
+                    "token_ids": [785, 6722, 315, 9625, 374],
+                    "sampling_params": {
+                        "temperature": 0.7,
+                        "top_p": 0.9,
+                        "top_k": 50,
+                        "seed": 12345,
+                        "min_tokens": 8,
+                        "max_tokens": 8,
+                        "ignore_eos": True,
+                    },
+                },
+                expected_response=[],
+                expected_log=[],
+                expected_finish_reason="length",
             ),
             metric_payload_default(min_num_requests=6, backend="vllm"),
         ],

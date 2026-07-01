@@ -419,4 +419,67 @@ mod tests {
         assert_eq!(resp.status().as_u16(), StatusCode::NOT_FOUND.as_u16());
         handle.abort();
     }
+
+    /// Fidelity of the ★ envelope: the full practical sampling param set
+    /// (top_p / top_k / seed / stop_token_ids / penalties) plus an unknown
+    /// nested field ride the opaque `vllm_tito` envelope UNCHANGED, while only
+    /// the core scalars Dynamo needs for stop/routing are shadowed. This proves
+    /// PR3's param set flows without any core-type coercion.
+    #[test]
+    fn preprocessed_from_generate_carries_full_param_set() {
+        use crate::protocols::openai::generate::GenerateRequest;
+
+        let req: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3],
+            "sampling_params": {
+                "temperature": 0.8,
+                "top_p": 0.9,
+                "top_k": 50,
+                "seed": 12345,
+                "stop_token_ids": [151643],
+                "presence_penalty": 0.5,
+                "min_tokens": 2,
+                "max_tokens": 8,
+                "ignore_eos": true,
+                "future_nested_field": "ignored"
+            },
+            "priority": 3
+        }))
+        .expect("deserialize GenerateRequest");
+
+        let pre = super::preprocessed_from_generate(&req, "test-model").expect("build");
+
+        // Core token ids are the request token ids.
+        assert_eq!(pre.token_ids, vec![1, 2, 3]);
+
+        // Control shadow: only the scalar knobs core needs are projected.
+        assert_eq!(pre.stop_conditions.max_tokens, Some(8));
+        assert_eq!(pre.stop_conditions.min_tokens, Some(2));
+        assert_eq!(pre.stop_conditions.ignore_eos, Some(true));
+        assert_eq!(pre.sampling_options.n, Some(1));
+        assert_eq!(
+            pre.routing.as_ref().and_then(|r| r.expected_output_tokens),
+            Some(8)
+        );
+
+        // Envelope fidelity: every sampling knob — including ones NOT shadowed
+        // into core (top_p/top_k/seed/stop_token_ids/penalties) — and the
+        // unknown nested field survive verbatim for the worker to reconstruct.
+        let envelope = pre
+            .extra_args
+            .as_ref()
+            .and_then(|e| e.get("vllm_tito"))
+            .expect("vllm_tito envelope present");
+        let sp = &envelope["sampling_params"];
+        assert_eq!(sp["temperature"], serde_json::json!(0.8));
+        assert_eq!(sp["top_p"], serde_json::json!(0.9));
+        assert_eq!(sp["top_k"], serde_json::json!(50));
+        assert_eq!(sp["seed"], serde_json::json!(12345));
+        assert_eq!(sp["stop_token_ids"], serde_json::json!([151643]));
+        assert_eq!(sp["presence_penalty"], serde_json::json!(0.5));
+        assert_eq!(sp["future_nested_field"], serde_json::json!("ignored"));
+        // Engine priority rides the envelope, separate from Dynamo routing priority.
+        assert_eq!(envelope["priority"], serde_json::json!(3));
+        assert_eq!(envelope["token_ids"], serde_json::json!([1, 2, 3]));
+    }
 }

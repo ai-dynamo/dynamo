@@ -209,6 +209,9 @@ class GeneratePayload(BasePayload):
     """
 
     endpoint: str = "/inference/v1/generate"
+    # When set, assert the first choice's finish_reason equals this
+    # (e.g. "length" for a max_tokens cutoff, "stop" for an EOS/stop token).
+    expected_finish_reason: Optional[str] = None
 
     @staticmethod
     def extract_content(response):
@@ -236,13 +239,30 @@ class GeneratePayload(BasePayload):
         assert (
             isinstance(token_ids, list) and token_ids
         ), f"Empty token_ids in choice: {choice}"
-        assert choice.get("finish_reason"), f"Missing finish_reason: {choice}"
-        expected_max = self.body.get("sampling_params", {}).get("max_tokens")
-        if expected_max is not None:
-            assert len(token_ids) == expected_max, (
-                f"Expected {expected_max} tokens (max_tokens + ignore_eos), "
-                f"got {len(token_ids)}: {choice}"
+        finish_reason = choice.get("finish_reason")
+        assert finish_reason, f"Missing finish_reason: {choice}"
+        if self.expected_finish_reason is not None:
+            assert finish_reason == self.expected_finish_reason, (
+                f"Expected finish_reason={self.expected_finish_reason!r}, "
+                f"got {finish_reason!r}: {choice}"
             )
+        sampling = self.body.get("sampling_params", {})
+        expected_max = sampling.get("max_tokens")
+        if expected_max is not None:
+            if sampling.get("ignore_eos"):
+                # ignore_eos disables early stopping, so the count is exactly
+                # max_tokens regardless of which tokens are sampled (robust to
+                # token values shifting across vLLM builds).
+                assert len(token_ids) == expected_max, (
+                    f"Expected exactly {expected_max} tokens (max_tokens + "
+                    f"ignore_eos), got {len(token_ids)}: {choice}"
+                )
+            else:
+                # May stop early on EOS / stop_token_ids.
+                assert 0 < len(token_ids) <= expected_max, (
+                    f"Expected 1..={expected_max} tokens, got "
+                    f"{len(token_ids)}: {choice}"
+                )
 
 
 class RouterNvextChatPayload(ChatPayload):
