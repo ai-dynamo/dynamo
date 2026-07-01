@@ -22,6 +22,7 @@ def backend():
         voice="English-US.Female-1",
         language_code="en-US",
         sample_rate_hz=22050,
+        timeout_s=5.0,
     )
     # Replace the real RIVA service with a mock; the handler must not touch a
     # live server in unit tests.
@@ -32,17 +33,23 @@ def backend():
 async def test_generate_synthesizes_and_base64_encodes_audio(backend):
     synth_response = MagicMock()
     synth_response.audio = b"RIFF....fake-pcm-bytes"
-    backend.tts.synthesize.return_value = synth_response
+    # future=True returns a gRPC future whose result() carries the response.
+    rpc_future = MagicMock()
+    rpc_future.result.return_value = synth_response
+    backend.tts.synthesize.return_value = rpc_future
 
     resp = await backend.generate(tts_worker.TtsRequest(text="hello world"))
 
-    # Text is forwarded to RIVA with the worker's configured voice settings.
+    # Text is forwarded to RIVA with the worker's configured voice settings,
+    # submitted as a future with the configured deadline.
     backend.tts.synthesize.assert_called_once()
     args, kwargs = backend.tts.synthesize.call_args
     assert args[0] == "hello world"
     assert kwargs["voice_name"] == "English-US.Female-1"
     assert kwargs["language_code"] == "en-US"
     assert kwargs["sample_rate_hz"] == 22050
+    assert kwargs["future"] is True
+    rpc_future.result.assert_called_once_with(5.0)
 
     # The synthesized PCM is returned base64-encoded, with the sample rate echoed.
     assert base64.b64decode(resp.audio_base64) == b"RIFF....fake-pcm-bytes"

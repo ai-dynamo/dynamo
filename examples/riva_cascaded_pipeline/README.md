@@ -102,6 +102,8 @@ TTS worker (points at the TTS NIM):
 python -m riva_nim.tts_worker --riva-server localhost:50052 --voice Magpie-Multilingual.EN-US.Aria --endpoint dynamo.riva-tts.generate
 ```
 
+Both speech workers accept `--timeout-s` (default 30) — a client-side gRPC deadline that cancels the RIVA call if the backend hangs, so an unresponsive NIM can't tie up worker threads.
+
 LLM worker (text-in-text-out). `--use-vllm-tokenizer` makes the worker register as `ModelInput.Text` and accept chat `messages` directly; `chat` is in the default `--endpoint-types`. The worker serves `dynamo.backend.generate` by default. The blueprint pairs the speech NIMs with an NVIDIA Nemotron chat model; serve the corresponding Hugging Face weights with vLLM — e.g. `nvidia/Llama-3.3-Nemotron-Super-49B-v1.5` (large, multi-GPU). Swap in a smaller chat model such as `Qwen/Qwen3-0.6B` to try the pipeline on a single small GPU:
 
 ```bash

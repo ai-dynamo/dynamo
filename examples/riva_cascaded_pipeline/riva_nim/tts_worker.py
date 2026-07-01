@@ -25,7 +25,7 @@ from .config import (
     add_riva_connection_args,
     riva_connection_config_from_namespace,
 )
-from .riva_client import build_tts_service
+from .riva_client import await_riva_call, build_tts_service
 
 logger = logging.getLogger(__name__)
 configure_dynamo_logging(service_name="riva-tts")
@@ -34,6 +34,7 @@ configure_dynamo_logging(service_name="riva-tts")
 DEFAULT_VOICE = "Magpie-Multilingual.EN-US.Aria"
 DEFAULT_LANGUAGE_CODE = "en-US"
 DEFAULT_SAMPLE_RATE_HZ = 22050
+DEFAULT_TIMEOUT_S = 30.0
 
 
 class TtsRequest(BaseModel):
@@ -54,6 +55,7 @@ class TtsBackend:
         voice: RIVA voice name to synthesize with.
         language_code: BCP-47 language code passed to RIVA.
         sample_rate_hz: Output sample rate requested from RIVA.
+        timeout_s: Client-side deadline for the synthesize RPC, in seconds.
     """
 
     def __init__(
@@ -62,10 +64,12 @@ class TtsBackend:
         voice: str,
         language_code: str,
         sample_rate_hz: int,
+        timeout_s: float,
     ) -> None:
         self.voice = voice
         self.language_code = language_code
         self.sample_rate_hz = sample_rate_hz
+        self.timeout_s = timeout_s
         self.tts = build_tts_service(connection)
 
     async def generate(self, request: TtsRequest) -> TtsResponse:
@@ -78,14 +82,16 @@ class TtsBackend:
             The synthesized audio as base64-encoded ``LINEAR_PCM`` at the
             worker's configured sample rate.
         """
-        # synthesize() is a blocking gRPC call; keep it off the event loop.
-        response = await asyncio.to_thread(
-            self.tts.synthesize,
+        # future=True submits the RPC and returns a gRPC future; await_riva_call
+        # waits off the event loop with a deadline and cancels on timeout.
+        rpc_future = self.tts.synthesize(
             request.text,
             voice_name=self.voice,
             language_code=self.language_code,
             sample_rate_hz=self.sample_rate_hz,
+            future=True,
         )
+        response = await await_riva_call(rpc_future, self.timeout_s)
         return TtsResponse(
             audio_base64=base64.b64encode(response.audio).decode(),
             sample_rate_hz=self.sample_rate_hz,
@@ -112,6 +118,12 @@ def _parse_args() -> argparse.Namespace:
         help="Output sample rate in Hz.",
     )
     parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=DEFAULT_TIMEOUT_S,
+        help="Client-side deadline for the synthesize RPC, in seconds.",
+    )
+    parser.add_argument(
         "--endpoint",
         default="dynamo.riva-tts.generate",
         help="Dynamo endpoint to serve (namespace.component.endpoint).",
@@ -126,6 +138,7 @@ async def worker(runtime: DistributedRuntime, args: argparse.Namespace) -> None:
         voice=args.voice,
         language_code=args.language_code,
         sample_rate_hz=args.sample_rate_hz,
+        timeout_s=args.timeout_s,
     )
     endpoint = runtime.endpoint(args.endpoint)
     logger.info("Serving RIVA TTS endpoint %s", args.endpoint)

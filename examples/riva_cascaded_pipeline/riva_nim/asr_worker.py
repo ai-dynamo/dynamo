@@ -26,7 +26,7 @@ from .config import (
     add_riva_connection_args,
     riva_connection_config_from_namespace,
 )
-from .riva_client import build_asr_service
+from .riva_client import await_riva_call, build_asr_service
 
 logger = logging.getLogger(__name__)
 configure_dynamo_logging(service_name="riva-asr")
@@ -35,6 +35,7 @@ configure_dynamo_logging(service_name="riva-asr")
 DEFAULT_SAMPLE_RATE_HZ = 16000
 DEFAULT_LANGUAGE_CODE = "en-US"
 DEFAULT_MODEL = ""
+DEFAULT_TIMEOUT_S = 30.0
 
 
 class AsrRequest(BaseModel):
@@ -55,6 +56,7 @@ class AsrBackend:
         sample_rate_hz: Sample rate of the incoming LINEAR_PCM audio.
         language_code: BCP-47 language code passed to RIVA.
         model: RIVA ASR model name; empty lets the server choose.
+        timeout_s: Client-side deadline for the recognize RPC, in seconds.
     """
 
     def __init__(
@@ -63,10 +65,12 @@ class AsrBackend:
         sample_rate_hz: int,
         language_code: str,
         model: str,
+        timeout_s: float,
     ) -> None:
         self.sample_rate_hz = sample_rate_hz
         self.language_code = language_code
         self.model = model
+        self.timeout_s = timeout_s
         self.asr = build_asr_service(connection)
 
     async def generate(self, request: AsrRequest) -> AsrResponse:
@@ -87,10 +91,10 @@ class AsrBackend:
             max_alternatives=1,
             enable_automatic_punctuation=True,
         )
-        # offline_recognize() is a blocking gRPC call; keep it off the event loop.
-        response = await asyncio.to_thread(
-            self.asr.offline_recognize, audio, recognition_config
-        )
+        # future=True submits the RPC and returns a gRPC future; await_riva_call
+        # waits off the event loop with a deadline and cancels on timeout.
+        rpc_future = self.asr.offline_recognize(audio, recognition_config, future=True)
+        response = await await_riva_call(rpc_future, self.timeout_s)
         transcript = " ".join(
             result.alternatives[0].transcript
             for result in response.results
@@ -123,6 +127,12 @@ def _parse_args() -> argparse.Namespace:
         help="RIVA ASR model name (empty lets the server choose).",
     )
     parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=DEFAULT_TIMEOUT_S,
+        help="Client-side deadline for the recognize RPC, in seconds.",
+    )
+    parser.add_argument(
         "--endpoint",
         default="dynamo.riva-asr.generate",
         help="Dynamo endpoint to serve (namespace.component.endpoint).",
@@ -137,6 +147,7 @@ async def worker(runtime: DistributedRuntime, args: argparse.Namespace) -> None:
         sample_rate_hz=args.sample_rate_hz,
         language_code=args.language_code,
         model=args.model,
+        timeout_s=args.timeout_s,
     )
     endpoint = runtime.endpoint(args.endpoint)
     logger.info("Serving RIVA ASR endpoint %s", args.endpoint)

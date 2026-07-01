@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import grpc
 from riva.client import ASRService, Auth, SpeechSynthesisService
 
 from .config import RivaConnectionConfig
@@ -45,3 +48,29 @@ def build_tts_service(config: RivaConnectionConfig) -> SpeechSynthesisService:
 def build_asr_service(config: RivaConnectionConfig) -> ASRService:
     """Create a RIVA ``ASRService`` for the given connection config."""
     return ASRService(build_auth(config))
+
+
+async def await_riva_call(rpc_future: grpc.Future, timeout_s: float):
+    """Await a RIVA gRPC future with a client-side deadline, off the event loop.
+
+    RIVA's ``ASRService`` / ``SpeechSynthesisService`` methods accept
+    ``future=True`` to return a gRPC future. Waiting via ``future.result(timeout)``
+    bounds the wait and — unlike ``asyncio.wait_for`` around a blocking call —
+    ``future.cancel()`` on timeout actually terminates the in-flight RPC and
+    frees the worker thread, so an unresponsive backend can't tie up capacity.
+
+    Args:
+        rpc_future: A gRPC future from a ``future=True`` RIVA call.
+        timeout_s: Client-side deadline in seconds.
+
+    Returns:
+        The RPC response.
+
+    Raises:
+        grpc.FutureTimeoutError: If the deadline elapses (the RPC is cancelled).
+    """
+    try:
+        return await asyncio.to_thread(rpc_future.result, timeout_s)
+    except grpc.FutureTimeoutError:
+        rpc_future.cancel()
+        raise
