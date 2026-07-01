@@ -368,14 +368,30 @@ impl Client {
         let connector = self.connector.clone();
         let prefix_str = prefix.as_ref().to_string();
         self.rt.spawn(async move {
+            let mut first_connect = true;
             let mut reconnect = true;
             while reconnect {
+                if !first_connect
+                    && let Err(err) =
+                        Self::resync_watch_prefix(&connector, &prefix_str, &mut start_revision, &tx)
+                            .await
+                {
+                    tracing::error!(
+                        error = %err,
+                        prefix = %prefix_str,
+                        "failed to resync etcd watch prefix after reconnect"
+                    );
+                    return;
+                }
+
                 // Start a new watch stream
                 let watch_stream =
                     match Self::new_watch_stream(&connector, &prefix_str, start_revision).await {
                         Ok(stream) => stream,
                         Err(_) => return,
                     };
+
+                first_connect = false;
 
                 // Watch the stream
                 reconnect =
@@ -417,6 +433,38 @@ impl Client {
         });
 
         Ok((start_revision, existing_kvs))
+    }
+
+    /// Fetch current prefix state after reconnect and publish it as an authoritative snapshot.
+    async fn resync_watch_prefix(
+        connector: &Arc<Connector>,
+        prefix: &str,
+        start_revision: &mut i64,
+        tx: &mpsc::Sender<WatchEvent>,
+    ) -> Result<()> {
+        let mut response = connector
+            .get_client()
+            .kv_client()
+            .get(prefix, Some(GetOptions::new().with_prefix()))
+            .await
+            .with_context(|| format!("failed to fetch etcd prefix snapshot for '{prefix}'"))?;
+
+        let header = response
+            .header()
+            .ok_or_else(|| anyhow::anyhow!("missing header during watch resync for '{prefix}'"))?;
+        *start_revision = header.revision() + 1;
+
+        let kvs = response.take_kvs();
+        tracing::info!(
+            prefix,
+            kv_count = kvs.len(),
+            start_revision = *start_revision,
+            "resyncing etcd watch prefix after reconnect"
+        );
+
+        tx.send(WatchEvent::Resync(kvs))
+            .await
+            .context("failed to send WatchEvent::Resync")
     }
 
     /// Establish a new watch stream with automatic retry and reconnection.
@@ -556,6 +604,11 @@ pub struct PrefixWatcher {
 pub enum WatchEvent {
     Put(KeyValue),
     Delete(KeyValue),
+    /// Full prefix state after watch reconnection.
+    ///
+    /// Consumers that maintain local state should replace that state with this
+    /// authoritative snapshot before applying subsequent incremental events.
+    Resync(Vec<KeyValue>),
 }
 
 /// ETCD client configuration options
@@ -724,6 +777,22 @@ impl KvCache {
                             tracing::trace!("KvCache delete: {key}");
                             let mut cache_write = cache.write().await;
                             cache_write.remove(&key);
+                        }
+                        WatchEvent::Resync(kvs) => {
+                            let mut replacement = HashMap::with_capacity(kvs.len());
+                            for kv in kvs {
+                                let key = String::from_utf8_lossy(kv.key()).to_string();
+                                let value = kv.value().to_vec();
+                                replacement.insert(key, value);
+                            }
+
+                            tracing::info!(
+                                prefix,
+                                new_count = replacement.len(),
+                                "KvCache replacing state from etcd watch resync"
+                            );
+                            let mut cache_write = cache.write().await;
+                            *cache_write = replacement;
                         }
                     }
                 }

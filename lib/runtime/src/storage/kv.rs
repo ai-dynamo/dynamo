@@ -109,6 +109,7 @@ impl KeyValue {
 pub enum WatchEvent {
     Put(KeyValue),
     Delete(Key),
+    Resync(HashMap<Key, bytes::Bytes>),
 }
 
 #[async_trait]
