@@ -254,7 +254,7 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     build_nccl_checkpoint
-ENV NCCL_CHECKPOINT_SHIM=${NCCL_CHECKPOINT_VERSION:+/opt/nccl-checkpoint/lib/libnccl-checkpoint-shim.so}
+ARG NCCL_CHECKPOINT_SHIM=${NCCL_CHECKPOINT_VERSION:+/opt/nccl-checkpoint/lib/libnccl-checkpoint-shim.so}
 {% endif %}
 
 {% if device == "cuda" %}

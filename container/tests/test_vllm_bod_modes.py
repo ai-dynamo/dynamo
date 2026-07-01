@@ -502,7 +502,7 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         helper_copy = dockerfile.index("validate_pynccl_checkpoint_binding.py")
         build = dockerfile.index("build_nccl_checkpoint", helper_copy)
         checkpoint_env = dockerfile.index(
-            "ENV NCCL_CHECKPOINT_SHIM=${NCCL_CHECKPOINT_VERSION:"
+            "ARG NCCL_CHECKPOINT_SHIM=${NCCL_CHECKPOINT_VERSION:"
             "+/opt/nccl-checkpoint/lib/"
             "libnccl-checkpoint-shim.so",
             build,
@@ -714,6 +714,7 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             'if [ -f "${NCCL_CHECKPOINT_SHIM}" ]; then',
             dockerfile,
         )
+        self.assertNotIn("ENV NCCL_CHECKPOINT_SHIM=", dockerfile)
 
     def test_full_source_verification_requires_current_main_extensions(self) -> None:
         extensions = (
