@@ -469,8 +469,13 @@ mod tests {
         assert_eq!(pre.sampling_options.top_p, None);
         assert_eq!(pre.sampling_options.top_k, None);
         assert_eq!(pre.sampling_options.presence_penalty, None);
+        assert_eq!(pre.sampling_options.seed, None);
         assert_eq!(pre.stop_conditions.stop, None);
         assert_eq!(pre.stop_conditions.stop_token_ids, None);
+        // Engine priority rides the envelope; it must not lower into Dynamo's
+        // routing priority tiers.
+        assert_eq!(pre.routing.as_ref().and_then(|r| r.priority_jump), None);
+        assert_eq!(pre.routing.as_ref().and_then(|r| r.strict_priority), None);
 
         // Envelope fidelity: every sampling knob — including ones NOT shadowed
         // into core (top_p/top_k/seed/stop_token_ids/penalties) — and the
