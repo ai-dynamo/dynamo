@@ -23,7 +23,7 @@ from dynamo.common.protocols.video_protocol import (
     VideoNvExt,
 )
 from dynamo.common.storage import get_fs, upload_to_fs
-from dynamo.common.utils.video_utils import encode_to_video_bytes
+from dynamo.common.utils.video_utils import encode_video
 from dynamo.trtllm.configs.diffusion_config import DiffusionConfig
 from dynamo.trtllm.engines.diffusion_engine import DiffusionEngine
 from dynamo.trtllm.request_handlers.base_generative_handler import BaseGenerativeHandler
@@ -262,10 +262,10 @@ class VideoGenerationHandler(BaseGenerativeHandler):
                     f"(shape={frames_np.shape}) to MP4 at {fps} fps"
                 )
                 video_bytes = await asyncio.to_thread(
-                    encode_to_video_bytes,
+                    encode_video,
                     frames_np,
-                    fps=fps,
-                    output_format=output_format,
+                    fps,
+                    container=output_format,
                 )
 
             elif output.image is not None:

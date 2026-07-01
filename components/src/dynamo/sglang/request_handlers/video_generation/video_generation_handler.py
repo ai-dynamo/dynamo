@@ -3,7 +3,6 @@
 
 import asyncio
 import base64
-import io
 import logging
 import random
 import time
@@ -13,6 +12,7 @@ import torch
 
 from dynamo._core import Context
 from dynamo.common.storage import upload_to_fs
+from dynamo.common.utils.video_utils import encode_video
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     CreateVideoRequest,
@@ -254,69 +254,9 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
         if not frames:
             raise RuntimeError("DiffGenerator returned no frames")
 
-        # Convert frames to video bytes
-        video_bytes = await self._frames_to_video(frames, fps)
+        # Convert frames to video bytes via the shared unified encoder.
+        video_bytes = await asyncio.to_thread(encode_video, frames, fps)
         return video_bytes
-
-    async def _frames_to_video(
-        self, frames: list, fps: int, codec: str = "h264_nvenc"
-    ) -> bytes:
-        """Convert list of frames to video bytes.
-
-        Args:
-            frames: List of frames (PIL Images or numpy arrays).
-            fps: Frames per second.
-            codec: Video codec to use.
-
-        Returns:
-            Video bytes in mp4 format.
-        """
-        try:
-            import numpy as np
-            from PIL import Image
-
-            # Convert frames to numpy arrays if needed
-            np_frames = []
-            for frame in frames:
-                if isinstance(frame, Image.Image):
-                    np_frames.append(np.array(frame))
-                elif isinstance(frame, np.ndarray):
-                    np_frames.append(frame)
-                else:
-                    raise ValueError(f"Unsupported frame type: {type(frame)}")
-
-            import imageio
-
-            def encode_with_codec(codec_name: str) -> bytes:
-                output_buffer = io.BytesIO()
-                with imageio.get_writer(
-                    output_buffer,
-                    format="mp4",  # type: ignore
-                    fps=fps,
-                    codec=codec_name,
-                    output_params=["-pix_fmt", "yuv420p"],
-                ) as writer:
-                    for frame in np_frames:
-                        writer.append_data(frame)  # type: ignore
-
-                output_buffer.seek(0)
-                return output_buffer.read()
-
-            try:
-                return encode_with_codec(codec)
-            except OSError:
-                if codec != "h264_nvenc":
-                    raise
-                logger.warning(
-                    "h264_nvenc failed; retrying video encoding with libx264"
-                )
-                return encode_with_codec("libx264")
-
-        except ImportError as e:
-            raise RuntimeError(
-                f"Missing dependency for video encoding: {e}. "
-                "Install with: pip install imageio imageio-ffmpeg"
-            )
 
     def _parse_size(self, size_str: str) -> tuple[int, int]:
         """Parse 'WxH' -> (width, height)"""
