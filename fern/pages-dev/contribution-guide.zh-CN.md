@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: 贡献指南
 subtitle: 如何为 Dynamo 做贡献
 max-toc-depth: 3
 ---
