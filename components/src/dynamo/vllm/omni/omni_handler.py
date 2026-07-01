@@ -94,6 +94,24 @@ class OmniHandler(BaseOmniHandler):
         return None
 
     @staticmethod
+    def _apply_lora_to_sampling_params(
+        sampling_params_list: list | None,
+        lora_request: LoRARequest | None,
+    ) -> None:
+        """Attach LoRA to diffusion sampling params in-place.
+
+        AsyncOmni diffusion stages consume LoRA from OmniDiffusionSamplingParams.
+        The top-level generate(lora_request=...) argument is not sufficient for
+        diffusion-only paths.
+        """
+        if lora_request is None or sampling_params_list is None:
+            return
+
+        for sp in sampling_params_list:
+            if isinstance(sp, OmniDiffusionSamplingParams):
+                sp.lora_request = lora_request
+
+    @staticmethod
     def _extract_lora_name_from_request(request: Any) -> str | None:
         """Best-effort LoRA name extraction for admin unload compatibility.
 
@@ -241,13 +259,23 @@ class OmniHandler(BaseOmniHandler):
                     lora_path = download_result["local_path"]
 
                 lora_id = lora_name_to_id(lora_name)
-                await self.engine_client.add_lora(
+                add_ok = await self.engine_client.add_lora(
                     LoRARequest(
                         lora_name=lora_name,
                         lora_int_id=lora_id,
                         lora_path=lora_path,
                     )
                 )
+                if not add_ok:
+                    yield {
+                        "status": "error",
+                        "message": (
+                            "Engine rejected LoRA adapter. "
+                            "Adapter may be incompatible with this base model."
+                        ),
+                        "lora_name": lora_name,
+                    }
+                    return
                 self.loaded_loras[lora_name] = LoRAInfo(id=lora_id, path=lora_path)
                 logger.info("LoRA '%s' loaded and available for use", lora_name)
 
@@ -461,7 +489,8 @@ class OmniHandler(BaseOmniHandler):
         }
         if inputs.sampling_params_list is not None:
             generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
-        if inputs.lora_request is not None:
+        # Keep top-level LoRA only for paths that do not carry stage params.
+        if inputs.lora_request is not None and inputs.sampling_params_list is None:
             generate_kwargs["lora_request"] = inputs.lora_request
 
         previous_text = ""
@@ -566,6 +595,7 @@ class OmniHandler(BaseOmniHandler):
 
         model_name = request.get("model")
         lora_request = self._resolve_lora_request(model_name)
+        self._apply_lora_to_sampling_params(sampling_params_list, lora_request)
 
         return EngineInputs(
             prompt=prompt,
@@ -627,9 +657,12 @@ class OmniHandler(BaseOmniHandler):
             nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
         )
 
+        sampling_params_list = self._build_sampling_params_list(sp)
+        self._apply_lora_to_sampling_params(sampling_params_list, lora_request)
+
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=self._build_sampling_params_list(sp),
+            sampling_params_list=sampling_params_list,
             request_type=RequestType.IMAGE_GENERATION,
             response_format=req.response_format,
             lora_request=lora_request,
@@ -686,6 +719,9 @@ class OmniHandler(BaseOmniHandler):
         self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
         self._update_if_not_none(sp, "fps", fps)
 
+        sampling_params_list = self._build_sampling_params_list(sp)
+        self._apply_lora_to_sampling_params(sampling_params_list, lora_request)
+
         logger.info(
             f"Video diffusion request: prompt='{req.prompt[:50]}...', "
             f"size={width}x{height}, frames={num_frames}, fps={fps}"
@@ -693,7 +729,7 @@ class OmniHandler(BaseOmniHandler):
 
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=self._build_sampling_params_list(sp),
+            sampling_params_list=sampling_params_list,
             request_type=RequestType.VIDEO_GENERATION,
             fps=fps,
             lora_request=lora_request,

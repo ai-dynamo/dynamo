@@ -13,7 +13,7 @@ source "$SCRIPT_DIR/../../../../../common/launch_utils.sh"
 MODEL="${DYN_MODEL_NAME:-Qwen/Qwen-Image}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}"
-TP_SIZE="${DYN_TENSOR_PARALLEL_SIZE:-2}"
+TP_SIZE="${DYN_TENSOR_PARALLEL_SIZE:-1}"
 MEDIA_OUTPUT_FS_URL="${DYN_MEDIA_OUTPUT_FS_URL:-file:///tmp/dynamo_media}"
 
 EXTRA_ARGS=()
