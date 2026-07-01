@@ -30,6 +30,18 @@ use tokenizers::Tokenizer as HfTokenizer;
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
+const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
+    !matches!(value, Some("0"))
+}
+
+fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TOKENIZER_CACHE_BYTES)
+}
+
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
 
@@ -1019,10 +1031,9 @@ impl ModelDeploymentCard {
     /// Tokenizer backend controls:
     /// - `runtime_config.tokenizer_backend=fastokens` — use `fastokens` as the encoding backend
     /// - `DYN_TOKENIZER=fastokens` — fallback backend for callers without explicit runtime config
-    /// - `DYN_TOKENIZER_CACHE=1` — wrap the tokenizer in an L1 prefix cache that records
-    ///   tokenizations at special-token boundaries (massive speed-up for shared chat
-    ///   prefixes; default off, zero cost when unset)
-    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 50 MB)
+    /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
+    ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
+    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
     /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
     ///   (when the cache is enabled) a partial hit also caches the new suffix so each
     ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
@@ -1034,14 +1045,10 @@ impl ModelDeploymentCard {
             .effective_tokenizer_backend()
             .is_fastokens();
 
-        let cache_enabled = matches!(
-            std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref(),
-            Some("1")
-        );
-        let cache_bytes = std::env::var("DYN_TOKENIZER_CACHE_BYTES")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(50 * 1024 * 1024);
+        let cache_enabled =
+            tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
+        let cache_bytes =
+            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
         // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
         let cache_extend = !matches!(
             std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
@@ -2075,6 +2082,27 @@ mod tests {
     use super::{HFConfig, ModelDeploymentCard};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn tokenizer_cache_is_enabled_by_default_and_disabled_only_by_zero() {
+        assert!(super::tokenizer_cache_enabled(None));
+        assert!(super::tokenizer_cache_enabled(Some("1")));
+        assert!(!super::tokenizer_cache_enabled(Some("0")));
+        assert!(super::tokenizer_cache_enabled(Some("true")));
+    }
+
+    #[test]
+    fn tokenizer_cache_bytes_defaults_to_64_mib_and_accepts_valid_overrides() {
+        assert_eq!(
+            super::tokenizer_cache_bytes(None),
+            super::DEFAULT_TOKENIZER_CACHE_BYTES
+        );
+        assert_eq!(super::tokenizer_cache_bytes(Some("1024")), 1024);
+        assert_eq!(
+            super::tokenizer_cache_bytes(Some("invalid")),
+            super::DEFAULT_TOKENIZER_CACHE_BYTES
+        );
+    }
 
     #[test]
     pub fn test_config_json_llama3() -> anyhow::Result<()> {

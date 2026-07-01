@@ -1424,13 +1424,21 @@ impl DisaggRuntime {
         // latency — keep it out of the planner-facing traffic deltas (mirror the
         // aggregated path). It still frees its slot, advances, and is marked done.
         if !signal.rejected {
-            let state = self.state(signal.uuid)?;
-            let original = state.original_request()?;
-            let input_tokens = original.tokens.len();
-            let output_tokens = original.max_output_tokens;
+            let (input_tokens, requested_output_tokens) = {
+                let state = self.state(signal.uuid)?;
+                let original = state.original_request()?;
+                (original.tokens.len(), original.max_output_tokens)
+            };
+            let actual_output_tokens = self
+                .collector
+                .actual_output_length(signal.uuid)
+                .ok_or_else(|| {
+                    anyhow!("offline replay missing collector state for {}", signal.uuid)
+                })?;
+            debug_assert!(actual_output_tokens <= requested_output_tokens);
             let latencies = self.collector.request_latencies(signal.uuid);
             self.traffic
-                .on_request(input_tokens, output_tokens, latencies);
+                .on_request(input_tokens, actual_output_tokens, latencies);
         }
         let terminal_status = if signal.rejected {
             ReplayTerminalStatus::Rejected

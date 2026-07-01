@@ -59,7 +59,7 @@ expression: "canonicalize(serde_json::to_value(events).unwrap())"
         "stop_reason": "end_turn"
       },
       "usage": {
-        "input_tokens": 2,
+        "input_tokens": 5,
         "output_tokens": 2
       }
     }
