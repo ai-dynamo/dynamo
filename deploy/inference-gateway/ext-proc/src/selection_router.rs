@@ -51,7 +51,7 @@ pub struct SelectionRouterConfig {
     pub k8s_namespace: String,
     pub pod_selector: String,
     pub model_name: String,
-    pub model_source: String,
+    pub model_path: String,
     pub tenant_id: String,
     pub target_port: u16,
     pub kv_event_port: Option<u16>,
@@ -61,7 +61,6 @@ pub struct SelectionRouterConfig {
     pub is_eagle: bool,
     pub indexer_threads: usize,
     pub reconcile_interval: Duration,
-    pub custom_template_path: Option<PathBuf>,
     pub kv_router_config: KvRouterConfig,
 }
 
@@ -70,7 +69,7 @@ impl SelectionRouterConfig {
         let k8s_namespace = required_env("POD_NAMESPACE")?;
         let pod_selector = required_env("DYN_EPP_POD_SELECTOR")?;
         let model_name = required_env("DYN_MODEL_NAME")?;
-        let model_source = optional_env("DYN_MODEL_PATH").unwrap_or_else(|| model_name.clone());
+        let model_path = optional_env("DYN_MODEL_PATH").unwrap_or_else(|| model_name.clone());
         let tenant_id = DEFAULT_TENANT_ID.to_string();
 
         let block_size = parse_required_env("DYN_KV_CACHE_BLOCK_SIZE")?;
@@ -80,7 +79,6 @@ impl SelectionRouterConfig {
         let is_eagle = parse_optional_bool_env("DYN_EPP_IS_EAGLE")?.unwrap_or(false);
         let reconcile_interval_ms = parse_optional_env("DYN_EPP_RECONCILE_INTERVAL_MS")?
             .unwrap_or(DEFAULT_RECONCILE_INTERVAL_MS);
-        let custom_template_path = optional_env("DYN_EPP_CHAT_TEMPLATE").map(PathBuf::from);
 
         let mut kv_router_config = kv_router_config_from_dynamo_env();
         apply_kv_events_alias(&mut kv_router_config)?;
@@ -117,7 +115,7 @@ impl SelectionRouterConfig {
             k8s_namespace,
             pod_selector,
             model_name,
-            model_source,
+            model_path,
             tenant_id,
             target_port,
             kv_event_port,
@@ -649,22 +647,20 @@ fn apply_subset_filter<'a>(
 }
 
 async fn init_preprocessor(config: &SelectionRouterConfig) -> Result<Arc<OpenAIPreprocessor>> {
-    let model_source = Path::new(&config.model_source);
+    let model_source = Path::new(&config.model_path);
     let model_path = if model_source.exists() {
         model_source.to_path_buf()
     } else {
-        LocalModel::fetch(&config.model_source, true).await?
+        LocalModel::fetch(&config.model_path, true).await?
     };
 
-    let mut card =
-        ModelDeploymentCard::load_from_disk(&model_path, config.custom_template_path.as_deref())
-            .with_context(|| format!("loading model card from {}", model_path.display()))?;
+    let mut card = ModelDeploymentCard::load_from_disk(&model_path).with_context(|| format!("loading model card from {}", model_path.display()))?;
     card.set_name(&config.model_name);
     card.kv_cache_block_size = config.block_size;
 
     tracing::info!(
         model = %config.model_name,
-        source = %config.model_source,
+        source = %config.model_path,
         local_path = %model_path.display(),
         block_size = config.block_size,
         "Initialized router-only OpenAI preprocessor"
