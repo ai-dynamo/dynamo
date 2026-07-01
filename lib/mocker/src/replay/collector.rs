@@ -325,7 +325,7 @@ struct TraceRequestStats {
     first_admit_ms: Option<f64>,
     token_times_ms: Vec<f64>,
     input_length: usize,
-    output_length: usize,
+    requested_output_length: usize,
     reused_input_tokens: usize,
     first_admission_reused_input_tokens: usize,
     /// Index of the prefill worker that handled this request, if any.
@@ -397,6 +397,9 @@ pub struct PerRequestRecord {
     /// AIPerf's `inter_token_latency` field — one scalar per request.
     pub itl_ms: Option<f64>,
     pub input_length: usize,
+    /// Number of output tokens requested by the workload trace.
+    pub requested_output_length: usize,
+    /// Number of output tokens actually emitted by the mock engine.
     pub output_length: usize,
     pub reused_input_tokens: usize,
     pub prefill_worker_idx: Option<usize>,
@@ -421,6 +424,7 @@ pub(crate) struct TraceRequestStatsSnapshot {
     pub first_token_ms: Option<f64>,
     pub last_token_ms: Option<f64>,
     pub input_length: usize,
+    pub requested_output_length: usize,
     pub output_length: usize,
     pub reused_input_tokens: usize,
     pub first_admission_reused_input_tokens: usize,
@@ -512,6 +516,10 @@ impl TraceRequestStats {
         self.token_times_ms.last().copied()
     }
 
+    fn actual_output_length(&self) -> usize {
+        self.token_times_ms.len()
+    }
+
     fn mean_tpot_ms(&self) -> Option<f64> {
         let num_gaps = self.token_times_ms.len().saturating_sub(1);
         if num_gaps == 0 {
@@ -580,16 +588,16 @@ impl TraceCollector {
         uuid: Uuid,
         arrival_time_ms: f64,
         input_length: usize,
-        output_length: usize,
+        requested_output_length: usize,
     ) {
         self.requests.insert(
             uuid,
             TraceRequestStats {
                 arrival_time_ms,
                 first_admit_ms: None,
-                token_times_ms: Vec::with_capacity(output_length),
+                token_times_ms: Vec::with_capacity(requested_output_length),
                 input_length,
-                output_length,
+                requested_output_length,
                 reused_input_tokens: 0,
                 prefill_worker_idx: None,
                 decode_worker_idx: None,
@@ -757,6 +765,12 @@ impl TraceCollector {
         Some((ttft_ms, mean_itl_ms))
     }
 
+    pub(crate) fn actual_output_length(&self, uuid: Uuid) -> Option<usize> {
+        self.requests
+            .get(&uuid)
+            .map(TraceRequestStats::actual_output_length)
+    }
+
     pub(crate) fn finish(self) -> TraceSimulationReport {
         // Build per-request records before we move `self.requests` into the
         // summary aggregation below. Gated on `capture_per_request` — the
@@ -805,7 +819,8 @@ impl TraceCollector {
 
             completed_requests += 1;
             total_input_tokens += stats.input_length;
-            total_output_tokens += stats.output_length;
+            let output_length = stats.actual_output_length();
+            total_output_tokens += output_length;
             total_reused_tokens += stats.reused_input_tokens;
             total_first_admission_reused_tokens += stats.first_admission_reused_input_tokens;
             duration_ms = duration_ms.max(last_token_ms);
@@ -816,9 +831,9 @@ impl TraceCollector {
             e2e_latencies.push(e2e_ms);
 
             // Goodput classification (aiperf avg-ITL; see SlaThresholds::is_good).
-            if sla.is_set() && sla.is_good(ttft_ms, e2e_ms, stats.output_length) {
+            if sla.is_set() && sla.is_good(ttft_ms, e2e_ms, output_length) {
                 goodput_requests += 1;
-                goodput_output_tokens += stats.output_length;
+                goodput_output_tokens += output_length;
             }
 
             if let Some(ttst_ms) = stats.ttst_ms() {
@@ -937,7 +952,8 @@ impl TraceCollector {
                 e2e_latency_ms: last_token_ms.map(|time| (time - stats.arrival_time_ms).max(0.0)),
                 itl_ms: stats.mean_tpot_ms(),
                 input_length: stats.input_length,
-                output_length: stats.output_length,
+                requested_output_length: stats.requested_output_length,
+                output_length: stats.actual_output_length(),
                 reused_input_tokens: detail
                     .prefill_reused_input_tokens
                     .unwrap_or(stats.reused_input_tokens),
@@ -976,7 +992,8 @@ impl TraceCollector {
                 first_token_ms: stats.first_token_ms(),
                 last_token_ms: stats.last_token_ms(),
                 input_length: stats.input_length,
-                output_length: stats.output_length,
+                requested_output_length: stats.requested_output_length,
+                output_length: stats.actual_output_length(),
                 reused_input_tokens: stats.reused_input_tokens,
                 first_admission_reused_input_tokens: stats.first_admission_reused_input_tokens,
             })
@@ -992,7 +1009,8 @@ impl TraceCollector {
                 first_token_ms: stats.first_token_ms(),
                 last_token_ms: stats.last_token_ms(),
                 input_length: stats.input_length,
-                output_length: stats.output_length,
+                requested_output_length: stats.requested_output_length,
+                output_length: stats.actual_output_length(),
                 reused_input_tokens: stats.reused_input_tokens,
                 first_admission_reused_input_tokens: stats.first_admission_reused_input_tokens,
             })

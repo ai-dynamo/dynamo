@@ -572,10 +572,10 @@ func main() {
 		os.Exit(1)
 	}
 	if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
-		setupLog.Error(err, "initial docker secrets index refresh failed")
-		os.Exit(1)
+		setupLog.Error(err, "initial docker secrets index refresh completed with errors; continuing startup")
+	} else {
+		setupLog.Info("initial docker secrets index refreshed")
 	}
-	setupLog.Info("initial docker secrets index refreshed")
 	// launch a goroutine to refresh the docker secret indexer in any case every minute
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
@@ -585,11 +585,9 @@ func main() {
 			case <-mainCtx.Done():
 				return
 			case <-ticker.C:
-				setupLog.Info("refreshing docker secrets index...")
 				if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
-					setupLog.Error(err, "unable to refresh docker secrets index")
+					setupLog.Error(err, "failed to refresh docker secrets index")
 				}
-				setupLog.Info("docker secrets index refreshed")
 			}
 		}
 	}()
