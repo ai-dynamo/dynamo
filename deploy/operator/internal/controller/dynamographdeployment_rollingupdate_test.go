@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -94,7 +94,7 @@ func createTestReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 
 	return &DynamoGraphDeploymentReconciler{
 		Client:        builder.Build(),
-		Recorder:      record.NewFakeRecorder(10),
+		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &commonController.RuntimeConfig{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{

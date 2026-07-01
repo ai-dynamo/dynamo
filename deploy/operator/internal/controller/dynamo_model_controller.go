@@ -27,7 +27,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -69,7 +69,7 @@ const (
 // DynamoModelReconciler reconciles a DynamoModel object
 type DynamoModelReconciler struct {
 	client.Client
-	Recorder       record.EventRecorder
+	Recorder       events.EventRecorder
 	EndpointClient *modelendpoint.Client
 	Config         *configv1alpha1.OperatorConfiguration
 	RuntimeConfig  *commoncontroller.RuntimeConfig
@@ -120,7 +120,7 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if len(candidates) == 0 {
 		msg := fmt.Sprintf("No endpoint slices found for base model %s", model.Spec.BaseModelName)
 		logs.Info(msg)
-		r.Recorder.Event(model, corev1.EventTypeWarning, "NoEndpointsFound", msg)
+		r.Recorder.Eventf(model, nil, corev1.EventTypeWarning, "NoEndpointsFound", "Get", "%s", msg)
 		r.updateCondition(model, ConditionTypeServicesFound, metav1.ConditionFalse, ReasonNoServicesFound, msg)
 		r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoEndpoints, msg)
 		model.Status.Endpoints = nil
@@ -146,8 +146,8 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	if probeErr != nil {
 		logs.Error(probeErr, "Some endpoints failed during probing")
-		r.Recorder.Event(model, corev1.EventTypeWarning, "PartialEndpointFailure",
-			fmt.Sprintf("Some endpoints failed to load LoRA: %v", probeErr))
+		r.Recorder.Eventf(model, nil, corev1.EventTypeWarning, "PartialEndpointFailure", "Update",
+			"Some endpoints failed to load LoRA: %v", probeErr)
 	}
 
 	// Update service found condition based on whether we found any services
@@ -170,12 +170,12 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if model.Status.ReadyEndpoints == model.Status.TotalEndpoints && model.Status.TotalEndpoints > 0 {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionTrue, ReasonAllEndpointsReady,
 				fmt.Sprintf("All %d endpoint(s) are ready", model.Status.TotalEndpoints))
-			r.Recorder.Eventf(model, corev1.EventTypeNormal, "EndpointsReady",
+			r.Recorder.Eventf(model, nil, corev1.EventTypeNormal, "EndpointsReady", "Update",
 				"All %d endpoints ready for base model %s", model.Status.TotalEndpoints, model.Spec.BaseModelName)
 		} else if model.Status.TotalEndpoints > 0 {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNotReady,
 				fmt.Sprintf("Found %d ready endpoint(s) out of %d total", model.Status.ReadyEndpoints, model.Status.TotalEndpoints))
-			r.Recorder.Eventf(model, corev1.EventTypeWarning, "NotReady",
+			r.Recorder.Eventf(model, nil, corev1.EventTypeWarning, "NotReady", "Update",
 				"Only %d of %d endpoints ready for base model %s", model.Status.ReadyEndpoints, model.Status.TotalEndpoints, model.Spec.BaseModelName)
 		} else {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoEndpoints, "No endpoints found")
@@ -185,7 +185,7 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if model.Status.TotalEndpoints > 0 {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionTrue, ReasonEndpointsDiscovered,
 				fmt.Sprintf("Found %d endpoint(s) for base model", model.Status.TotalEndpoints))
-			r.Recorder.Eventf(model, corev1.EventTypeNormal, "EndpointsDiscovered",
+			r.Recorder.Eventf(model, nil, corev1.EventTypeNormal, "EndpointsDiscovered", "Get",
 				"Discovered %d endpoints for base model %s", model.Status.TotalEndpoints, model.Spec.BaseModelName)
 		} else {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoEndpoints, "No endpoints found")
@@ -312,7 +312,7 @@ func (r *DynamoModelReconciler) FinalizeResource(ctx context.Context, model *v1a
 		if err != nil {
 			logs.Info("Failed to get endpoints during deletion, continuing with resource deletion",
 				"error", err.Error())
-			r.Recorder.Event(model, corev1.EventTypeWarning, "CleanupFailed", err.Error())
+			r.Recorder.Eventf(model, nil, corev1.EventTypeWarning, "CleanupFailed", "Cleanup", "%s", err.Error())
 			// Continue with deletion even if we can't get endpoints
 		} else if len(candidates) > 0 {
 			logs.Info("Unloading LoRA from endpoints", "endpointCount", len(candidates))
@@ -323,13 +323,13 @@ func (r *DynamoModelReconciler) FinalizeResource(ctx context.Context, model *v1a
 				// Detailed failure information is already logged by the prober
 				logs.Info("Some endpoints failed to unload LoRA, continuing with deletion",
 					"error", err.Error())
-				r.Recorder.Event(model, corev1.EventTypeWarning, "LoRAUnloadFailed",
-					fmt.Sprintf("Failed to unload LoRA from some endpoints: %v", err))
+				r.Recorder.Eventf(model, nil, corev1.EventTypeWarning, "LoRAUnloadFailed", "Cleanup",
+					"Failed to unload LoRA from some endpoints: %v", err)
 				// Continue with deletion even if unload fails
 			} else {
 				logs.Info("Successfully unloaded LoRA from all endpoints")
-				r.Recorder.Event(model, corev1.EventTypeNormal, "LoRAUnloaded",
-					fmt.Sprintf("Unloaded LoRA from %d endpoint(s)", len(candidates)))
+				r.Recorder.Eventf(model, nil, corev1.EventTypeNormal, "LoRAUnloaded", "Cleanup",
+					"Unloaded LoRA from %d endpoint(s)", len(candidates))
 			}
 		} else {
 			logs.Info("No endpoints found for cleanup")
@@ -361,7 +361,7 @@ func (r *DynamoModelReconciler) getEndpointCandidates(
 		client.MatchingLabels{consts.KubeLabelDynamoBaseModelHash: modelHash},
 	); err != nil {
 		logs.Error(err, "Failed to list endpoint slices for model")
-		r.Recorder.Event(model, corev1.EventTypeWarning, "EndpointDiscoveryFailed", err.Error())
+		r.Recorder.Eventf(model, nil, corev1.EventTypeWarning, "EndpointDiscoveryFailed", "Get", "%s", err.Error())
 		return nil, nil, err
 	}
 

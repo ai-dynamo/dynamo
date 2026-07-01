@@ -23,7 +23,6 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	authenticationv1 "k8s.io/api/authentication/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -53,48 +52,48 @@ func GetExcludedNamespaces() ExcludedNamespacesChecker {
 	return webhookExcludedNamespaces
 }
 
-// LeaseAwareValidator wraps a CustomValidator and adds lease-based namespace exclusion logic.
+// LeaseAwareValidator wraps a Validator and adds lease-based namespace exclusion logic.
 // It checks if a namespace-restricted operator is managing the namespace (via active lease)
 // before delegating validation to the underlying validator.
 //
 // This implements the Decorator pattern to transparently add coordination logic without
 // modifying the actual validation implementations.
-type LeaseAwareValidator struct {
-	validator          admission.CustomValidator
+type LeaseAwareValidator[T client.Object] struct {
+	validator          admission.Validator[T]
 	excludedNamespaces ExcludedNamespacesChecker
 }
 
 // NewLeaseAwareValidator creates a new LeaseAwareValidator that wraps the given validator.
 // If excludedNamespaces is nil, the wrapper acts as a pass-through (no filtering).
-func NewLeaseAwareValidator(validator admission.CustomValidator, excludedNamespaces ExcludedNamespacesChecker) admission.CustomValidator {
+func NewLeaseAwareValidator[T client.Object](validator admission.Validator[T], excludedNamespaces ExcludedNamespacesChecker) admission.Validator[T] {
 	if excludedNamespaces == nil {
 		// No exclusion logic needed, return validator as-is
 		return validator
 	}
-	return &LeaseAwareValidator{
+	return &LeaseAwareValidator[T]{
 		validator:          validator,
 		excludedNamespaces: excludedNamespaces,
 	}
 }
 
-// ValidateCreate implements admission.CustomValidator
-func (v *LeaseAwareValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+// ValidateCreate implements admission.Validator.
+func (v *LeaseAwareValidator[T]) ValidateCreate(ctx context.Context, obj T) (admission.Warnings, error) {
 	if v.shouldSkipValidation(obj) {
 		return nil, nil
 	}
 	return v.validator.ValidateCreate(ctx, obj)
 }
 
-// ValidateUpdate implements admission.CustomValidator
-func (v *LeaseAwareValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+// ValidateUpdate implements admission.Validator.
+func (v *LeaseAwareValidator[T]) ValidateUpdate(ctx context.Context, oldObj, newObj T) (admission.Warnings, error) {
 	if v.shouldSkipValidation(newObj) {
 		return nil, nil
 	}
 	return v.validator.ValidateUpdate(ctx, oldObj, newObj)
 }
 
-// ValidateDelete implements admission.CustomValidator
-func (v *LeaseAwareValidator) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+// ValidateDelete implements admission.Validator.
+func (v *LeaseAwareValidator[T]) ValidateDelete(ctx context.Context, obj T) (admission.Warnings, error) {
 	if v.shouldSkipValidation(obj) {
 		return nil, nil
 	}
@@ -102,18 +101,11 @@ func (v *LeaseAwareValidator) ValidateDelete(ctx context.Context, obj runtime.Ob
 }
 
 // shouldSkipValidation checks if validation should be skipped for the given object
-func (v *LeaseAwareValidator) shouldSkipValidation(obj runtime.Object) bool {
-	// Try to extract namespace from object using client.Object interface
-	clientObj, ok := obj.(client.Object)
-	if !ok {
-		// If we can't determine the namespace, don't skip (fail-safe)
-		return false
-	}
-
-	namespace := clientObj.GetNamespace()
+func (v *LeaseAwareValidator[T]) shouldSkipValidation(obj T) bool {
+	namespace := obj.GetNamespace()
 	if v.excludedNamespaces.Contains(namespace) {
 		webhookCommonLog.Info("skipping validation - namespace has namespace-restricted operator",
-			"name", clientObj.GetName(),
+			"name", obj.GetName(),
 			"namespace", namespace,
 			"kind", obj.GetObjectKind().GroupVersionKind().Kind)
 		return true

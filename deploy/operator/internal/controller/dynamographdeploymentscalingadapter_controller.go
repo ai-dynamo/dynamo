@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,7 +47,7 @@ import (
 type DynamoGraphDeploymentScalingAdapterReconciler struct {
 	client.Client
 	Scheme        *runtime.Scheme
-	Recorder      record.EventRecorder
+	Recorder      events.EventRecorder
 	Config        *configv1alpha1.OperatorConfiguration
 	RuntimeConfig *commonController.RuntimeConfig
 }
@@ -111,7 +111,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 		if err := r.Update(ctx, dgd); err != nil {
 			logger.Error(err, "Failed to update DGD")
-			r.Recorder.Eventf(adapter, corev1.EventTypeWarning, "UpdateFailed",
+			r.Recorder.Eventf(adapter, dgd, corev1.EventTypeWarning, "UpdateFailed", "Update",
 				"Failed to update DGD %s: %v", dgd.Name, err)
 			return ctrl.Result{}, err
 		}
@@ -122,7 +122,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 			"from", currentReplicas,
 			"to", adapter.Spec.Replicas)
 
-		r.Recorder.Eventf(adapter, corev1.EventTypeNormal, "Scaled",
+		r.Recorder.Eventf(adapter, dgd, corev1.EventTypeNormal, "Scaled", "Scale",
 			"Scaled component %s from %d to %d replicas", componentName, currentReplicas, adapter.Spec.Replicas)
 
 		// Record scaling event

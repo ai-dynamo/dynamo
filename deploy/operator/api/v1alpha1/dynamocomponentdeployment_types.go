@@ -279,10 +279,6 @@ type DynamoComponentDeploymentList struct {
 	Items           []DynamoComponentDeployment `json:"items"`
 }
 
-func init() {
-	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
-}
-
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
 	if s.Status.ObservedGeneration < s.Generation {
 		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", s.Generation, s.Status.ObservedGeneration)

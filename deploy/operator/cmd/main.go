@@ -670,7 +670,7 @@ func registerControllers(
 ) error {
 	if err := (&controller.DynamoComponentDeploymentReconciler{
 		Client:                mgr.GetClient(),
-		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
+		Recorder:              mgr.GetEventRecorder("dynamocomponentdeployment"),
 		Config:                operatorCfg,
 		RuntimeConfig:         runtimeConfig,
 		DockerSecretRetriever: dockerSecretRetriever,
@@ -687,7 +687,7 @@ func registerControllers(
 
 	if err = (&controller.DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
-		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
+		Recorder:              mgr.GetEventRecorder("dynamographdeployment"),
 		Config:                operatorCfg,
 		RuntimeConfig:         runtimeConfig,
 		RestConfig:            mgr.GetConfig(),
@@ -702,7 +702,7 @@ func registerControllers(
 	if err = (&controller.DynamoGraphDeploymentScalingAdapterReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
-		Recorder:      mgr.GetEventRecorderFor("dgdscalingadapter"),
+		Recorder:      mgr.GetEventRecorder("dgdscalingadapter"),
 		Config:        operatorCfg,
 		RuntimeConfig: runtimeConfig,
 	}).SetupWithManager(mgr); err != nil {
@@ -712,7 +712,7 @@ func registerControllers(
 	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
 		Client:            mgr.GetClient(),
 		APIReader:         mgr.GetAPIReader(),
-		Recorder:          mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		Recorder:          mgr.GetEventRecorder("dynamographdeploymentrequest"),
 		Config:            operatorCfg,
 		RuntimeConfig:     runtimeConfig,
 		GPUDiscoveryCache: gpu.NewGPUDiscoveryCache(),
@@ -724,7 +724,7 @@ func registerControllers(
 
 	if err = (&controller.DynamoModelReconciler{
 		Client:         mgr.GetClient(),
-		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
+		Recorder:       mgr.GetEventRecorder("dynamomodel"),
 		EndpointClient: modelendpoint.NewClient(),
 		Config:         operatorCfg,
 		RuntimeConfig:  runtimeConfig,
@@ -736,7 +736,7 @@ func registerControllers(
 		Client:        mgr.GetClient(),
 		Config:        operatorCfg,
 		RuntimeConfig: runtimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("checkpoint"),
+		Recorder:      mgr.GetEventRecorder("checkpoint"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
 	}
@@ -745,7 +745,7 @@ func registerControllers(
 		Client:        mgr.GetClient(),
 		Config:        operatorCfg,
 		RuntimeConfig: runtimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("snapshot"),
+		Recorder:      mgr.GetEventRecorder("snapshot"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
 	}
@@ -753,7 +753,7 @@ func registerControllers(
 	if runtimeConfig.GroveEnabled {
 		if err = controller.NewFailoverCascadeReconciler(
 			mgr.GetClient(),
-			mgr.GetEventRecorderFor("gms-failover-cascade"),
+			mgr.GetEventRecorder("gms-failover-cascade"),
 		).SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("unable to create GMS FailoverCascade controller: %w", err)
 		}
@@ -764,7 +764,7 @@ func registerControllers(
 		NodeReader:    mgr.GetAPIReader(),
 		Config:        operatorCfg,
 		RuntimeConfig: runtimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("topology-label"),
+		Recorder:      mgr.GetEventRecorder("topology-label"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create TopologyLabel controller: %w", err)
 	}

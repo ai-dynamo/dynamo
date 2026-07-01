@@ -31,7 +31,7 @@ import (
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -43,11 +43,11 @@ var _ = Describe("DynamoModel Controller", func() {
 
 	var (
 		reconciler *DynamoModelReconciler
-		recorder   *record.FakeRecorder
+		recorder   *events.FakeRecorder
 	)
 
 	BeforeEach(func() {
-		recorder = record.NewFakeRecorder(100)
+		recorder = events.NewFakeRecorder(100)
 		reconciler = &DynamoModelReconciler{
 			Client:         k8sClient,
 			Recorder:       recorder,

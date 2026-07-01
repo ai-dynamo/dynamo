@@ -13,7 +13,7 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -37,7 +37,7 @@ type TopologyLabelReconciler struct {
 	NodeReader    client.Reader
 	Config        *configv1alpha1.OperatorConfiguration
 	RuntimeConfig *commonController.RuntimeConfig
-	Recorder      record.EventRecorder
+	Recorder      events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch
@@ -77,7 +77,7 @@ func (r *TopologyLabelReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				"node", pod.Spec.NodeName, "sourceLabelKey", target.sourceLabelKey,
 				"targetLabelKey", target.targetLabelKey, "pod", req.NamespacedName)
 			if r.Recorder != nil {
-				r.Recorder.Eventf(&pod, corev1.EventTypeWarning, topologyLabelMissingReason,
+				r.Recorder.Eventf(&pod, &node, corev1.EventTypeWarning, topologyLabelMissingReason, "Update",
 					"Node %q does not have required topology label %q; topology metadata for %q will remain unavailable",
 					pod.Spec.NodeName, target.sourceLabelKey, target.targetLabelKey)
 			}

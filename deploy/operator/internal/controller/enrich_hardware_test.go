@@ -31,7 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -47,7 +47,7 @@ func newFakeReconciler(objs ...client.Object) *DynamoGraphDeploymentRequestRecon
 	return &DynamoGraphDeploymentRequestReconciler{
 		Client:    fakeClient,
 		APIReader: fakeClient,
-		Recorder:  &record.FakeRecorder{},
+		Recorder:  &events.FakeRecorder{},
 		Config:    &configv1alpha1.OperatorConfiguration{},
 	}
 }
@@ -385,7 +385,7 @@ func TestCreateProfilingJobPersistsDiscoveredHardware(t *testing.T) {
 	r := &DynamoGraphDeploymentRequestReconciler{
 		Client:            fakeClient,
 		APIReader:         fakeClient,
-		Recorder:          &record.FakeRecorder{},
+		Recorder:          &events.FakeRecorder{},
 		Config:            &configv1alpha1.OperatorConfiguration{},
 		GPUDiscovery:      gpupkg.NewGPUDiscovery(nil),
 		GPUDiscoveryCache: cache,
@@ -448,7 +448,7 @@ func TestCreateProfilingJobWithManualHardwareDoesNotRequireAPIReader(t *testing.
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgdr).Build()
 	r := &DynamoGraphDeploymentRequestReconciler{
 		Client:      fakeClient,
-		Recorder:    &record.FakeRecorder{},
+		Recorder:    &events.FakeRecorder{},
 		Config:      &configv1alpha1.OperatorConfiguration{},
 		RBACManager: &MockRBACManager{},
 	}
@@ -524,7 +524,7 @@ func TestEnrichHardwareFromDiscovery_NormalizesBareModelFromDCGM(t *testing.T) {
 			r := &DynamoGraphDeploymentRequestReconciler{
 				Client:            fakeClient,
 				APIReader:         fakeClient,
-				Recorder:          &record.FakeRecorder{},
+				Recorder:          &events.FakeRecorder{},
 				GPUDiscovery:      gpupkg.NewGPUDiscovery(mockScraper),
 				GPUDiscoveryCache: gpupkg.NewGPUDiscoveryCache(),
 			}

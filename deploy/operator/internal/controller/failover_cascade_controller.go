@@ -12,7 +12,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,11 +53,11 @@ const (
 // considered; see failoverCascadePredicate().
 type FailoverCascadeReconciler struct {
 	client.Client
-	Recorder record.EventRecorder
+	Recorder events.EventRecorder
 }
 
 // NewFailoverCascadeReconciler creates a new reconciler.
-func NewFailoverCascadeReconciler(c client.Client, recorder record.EventRecorder) *FailoverCascadeReconciler {
+func NewFailoverCascadeReconciler(c client.Client, recorder events.EventRecorder) *FailoverCascadeReconciler {
 	return &FailoverCascadeReconciler{
 		Client:   c,
 		Recorder: recorder,
@@ -139,7 +139,7 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		"pcsgReplica", pcsgReplica,
 		"podIndex", podIndex,
 	)
-	r.Recorder.Eventf(&pod, corev1.EventTypeWarning, "FailoverCascade",
+	r.Recorder.Eventf(&pod, nil, corev1.EventTypeWarning, "FailoverCascade", "Delete",
 		"Pod %s terminated (phase=%s); cascade-deleted engine group (pcsg=%s, replica=%s, index=%s)",
 		pod.Name, pod.Status.Phase, pcsg, pcsgReplica, podIndex,
 	)

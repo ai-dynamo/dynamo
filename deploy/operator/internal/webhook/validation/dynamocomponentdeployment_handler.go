@@ -19,13 +19,11 @@ package validation
 
 import (
 	"context"
-	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -47,15 +45,10 @@ func NewDynamoComponentDeploymentHandler() *DynamoComponentDeploymentHandler {
 }
 
 // ValidateCreate validates a DynamoComponentDeployment create request.
-func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, deployment *nvidiacomv1alpha1.DynamoComponentDeployment) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoComponentDeploymentWebhookName)
 
 	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoComponentDeploymentGVK); err != nil {
-		return nil, err
-	}
-
-	deployment, err := castToDynamoComponentDeployment(obj)
-	if err != nil {
 		return nil, err
 	}
 
@@ -67,15 +60,10 @@ func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, o
 }
 
 // ValidateUpdate validates a DynamoComponentDeployment update request.
-func (h *DynamoComponentDeploymentHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoComponentDeploymentHandler) ValidateUpdate(ctx context.Context, oldDeployment, newDeployment *nvidiacomv1alpha1.DynamoComponentDeployment) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoComponentDeploymentWebhookName)
 
 	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoComponentDeploymentGVK); err != nil {
-		return nil, err
-	}
-
-	newDeployment, err := castToDynamoComponentDeployment(newObj)
-	if err != nil {
 		return nil, err
 	}
 
@@ -85,11 +73,6 @@ func (h *DynamoComponentDeploymentHandler) ValidateUpdate(ctx context.Context, o
 	if !newDeployment.DeletionTimestamp.IsZero() {
 		logger.Info("skipping validation for resource being deleted", "name", newDeployment.Name)
 		return nil, nil
-	}
-
-	oldDeployment, err := castToDynamoComponentDeployment(oldObj)
-	if err != nil {
-		return nil, err
 	}
 
 	// Create validator and perform validation
@@ -113,15 +96,10 @@ func (h *DynamoComponentDeploymentHandler) ValidateUpdate(ctx context.Context, o
 }
 
 // ValidateDelete validates a DynamoComponentDeployment delete request.
-func (h *DynamoComponentDeploymentHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoComponentDeploymentHandler) ValidateDelete(ctx context.Context, deployment *nvidiacomv1alpha1.DynamoComponentDeployment) (admission.Warnings, error) {
 	logger := log.FromContext(ctx).WithName(DynamoComponentDeploymentWebhookName)
 
 	if err := internalwebhook.ValidateAdmissionGVK(ctx, nvidiacomv1alpha1.DynamoComponentDeploymentGVK); err != nil {
-		return nil, err
-	}
-
-	deployment, err := castToDynamoComponentDeployment(obj)
-	if err != nil {
 		return nil, err
 	}
 
@@ -142,17 +120,8 @@ func (h *DynamoComponentDeploymentHandler) RegisterWithManager(mgr manager.Manag
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoComponentDeployment)
 
 	webhook := admission.
-		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoComponentDeployment{}, observedValidator).
+		WithValidator(mgr.GetScheme(), observedValidator).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dynamoComponentDeploymentWebhookPath, webhook)
 	return nil
-}
-
-// castToDynamoComponentDeployment attempts to cast a runtime.Object to a DynamoComponentDeployment.
-func castToDynamoComponentDeployment(obj runtime.Object) (*nvidiacomv1alpha1.DynamoComponentDeployment, error) {
-	deployment, ok := obj.(*nvidiacomv1alpha1.DynamoComponentDeployment)
-	if !ok {
-		return nil, fmt.Errorf("expected DynamoComponentDeployment but got %T", obj)
-	}
-	return deployment, nil
 }
