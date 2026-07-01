@@ -171,11 +171,11 @@ class ThreadedMicroBatcher(Generic[T, R]):
             self.shutdown()
             raise
         with self._lock:
-            if self._state is _State.NEW:
-                self._state = _State.RUNNING
-            elif self._state is not _State.RUNNING:
-                # a concurrent shutdown() closed us during startup
+            # Only this (winning) start() ever sets RUNNING, so the state is NEW
+            # unless a concurrent shutdown()/crash moved it to CLOSED/FAILED.
+            if self._state is not _State.NEW:
                 raise RuntimeError("ThreadedMicroBatcher shut down during start()")
+            self._state = _State.RUNNING
 
     async def submit(
         self,
@@ -219,13 +219,11 @@ class ThreadedMicroBatcher(Generic[T, R]):
         # State check + admission + queue-commit under one lock so a concurrent
         # shutdown() cannot strand the request and capacity cannot leak.
         with self._lock:
-            if self._state is _State.RUNNING:
-                pass
-            elif self._state is _State.FAILED:
+            if self._state is _State.FAILED:
                 raise RuntimeError(
                     "ThreadedMicroBatcher.submit() after worker failure"
                 ) from self._terminal_error
-            else:  # NEW / CLOSED
+            if self._state is not _State.RUNNING:  # NEW / CLOSED
                 raise RuntimeError(
                     "ThreadedMicroBatcher.submit() called after shutdown()"
                 )
