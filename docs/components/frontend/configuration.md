@@ -162,19 +162,19 @@ The frontend exposes the following HTTP endpoints:
 | `GET` | `/metrics` | Prometheus metrics |
 | `GET` | `/openapi.json` | OpenAPI specification |
 | `GET` | `/docs` | Swagger UI |
-| `POST` | `/busy_threshold` | Set busy thresholds (gated by `DYN_ENABLE_FRONTEND_ADMIN_API`, see below) |
-| `GET` | `/busy_threshold` | Get current busy thresholds (gated by `DYN_ENABLE_FRONTEND_ADMIN_API`, see below) |
+| `POST` | `/busy_threshold` | Set busy thresholds (gated by `DYN_DISABLE_FRONTEND_ADMIN_API`, see below) |
+| `GET` | `/busy_threshold` | Get current busy thresholds (gated by `DYN_DISABLE_FRONTEND_ADMIN_API`, see below) |
 
 ### Frontend feature switches
 
 Environment variables controlling frontend extensions. Extensions are enabled by default. When deploying, consider whether each is needed for your use case; if not, disable it to prevent accidental abuse.
 
-Set an env value of `0` / `false` / `no` / `off` (case-insensitive) to disable.
+Set an env value of `1` / `true` / `yes` / `on` (case-insensitive) to disable the extension.
 
-| Env Var | Default | Behavior when `false` |
-|---------|---------|------------------------|
-| `DYN_ENABLE_FRONTEND_NVEXT` | `true` | Frontend drops `request.nvext` at handler entry on `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/messages`; ignores routing-override headers (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`, `x-data-parallel-rank`, `x-prefill-dp-rank`, `x-dynamo-request-priority`, `x-dynamo-request-strict-priority`); silently ignores the response-side `nvext.extra_fields` opt-in. Note: disabling this breaks EPP / GAIE serving, Prime-RL-style training that uses `nvext.cache_salt`, multi-tenant agent platforms that forward `nvext.agent_hints`, and clients that opt into response disclosure via `nvext.extra_fields`. |
-| `DYN_ENABLE_FRONTEND_ADMIN_API` | `true` | `GET /busy_threshold` and `POST /busy_threshold` are not registered (404 instead of 503). Inference, metrics, models, health, and liveness routes are unaffected. |
+| Env Var | Default | Behavior when set (disabled) |
+|---------|---------|------------------------------|
+| `DYN_DISABLE_FRONTEND_NVEXT` | unset (enabled) | Frontend drops `request.nvext` at handler entry on `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/messages`; ignores Dynamo routing headers (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`, `x-dynamo-prefill-dp-rank`, `x-dynamo-request-priority`, `x-dynamo-request-strict-priority`) and their compatibility aliases; silently ignores the response-side `nvext.extra_fields` opt-in. Note: disabling this breaks EPP / GAIE serving, Prime-RL-style training that uses `nvext.cache_salt`, multi-tenant agent platforms that forward `nvext.agent_hints`, and clients that opt into response disclosure via `nvext.extra_fields`. |
+| `DYN_DISABLE_FRONTEND_ADMIN_API` | unset (enabled) | `GET /busy_threshold` and `POST /busy_threshold` are not registered (404 instead of 503). Inference, metrics, models, health, and liveness routes are unaffected. |
 
 ### Endpoint Path Customization
 

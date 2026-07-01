@@ -5,7 +5,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::pin::Pin;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 mod metadata;
@@ -23,6 +25,28 @@ pub mod utils;
 use crate::component::{DeviceType, TransportType};
 pub use utils::watch_and_extract_field;
 
+pub type ClaimPayload = serde_json::Value;
+pub type ClaimPayloadFuture<'a> = Pin<Box<dyn Future<Output = Result<ClaimPayload>> + Send + 'a>>;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaimOutcome {
+    Created(ClaimPayload),
+    Existing(ClaimPayload),
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimCloseOutcome {
+    Closed,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimEvent {
+    Delete(String),
+    Reset,
+}
+
 /// Transport kind for event plane - used for configuration and env var selection.
 ///
 /// This enum represents the *type* of transport without connection details.
@@ -31,29 +55,28 @@ pub use utils::watch_and_extract_field;
 #[serde(rename_all = "snake_case")]
 pub enum EventTransportKind {
     /// NATS Core pub/sub
-    #[default]
     Nats,
     /// ZMQ pub/sub
+    #[default]
     Zmq,
 }
 
 impl EventTransportKind {
     /// Parse from environment variable `DYN_EVENT_PLANE`.
     ///
-    /// Returns `Nats` if the variable is not set or is empty, which is the correct
-    /// default for distributed deployments (etcd/kubernetes backends). For local-only
-    /// workflows (`--discovery-backend file` or `mem`) this context-unaware default
-    /// may be incorrect — prefer [`DistributedRuntime::default_event_transport_kind`]
-    /// when you have access to a runtime, as it derives the correct default from the
-    /// configured discovery backend.
+    /// Returns `Zmq` if the variable is not set or is empty: ZMQ is the default
+    /// event plane for all backends. NATS remains available as an explicit opt-in
+    /// (`DYN_EVENT_PLANE=nats`). When you have access to a runtime, prefer
+    /// [`DistributedRuntime::default_event_transport_kind`], which resolves the same
+    /// default through the configured discovery backend.
     ///
     /// Returns an error for unrecognised values.
     pub fn from_env() -> Result<Self> {
         match std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE)
             .as_deref()
         {
-            Ok("nats") | Ok("") | Err(_) => Ok(Self::Nats),
-            Ok("zmq") => Ok(Self::Zmq),
+            Ok("nats") => Ok(Self::Nats),
+            Ok("zmq") | Ok("") | Err(_) => Ok(Self::Zmq),
             Ok(other) => anyhow::bail!(
                 "Invalid DYN_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'",
                 other
@@ -61,17 +84,11 @@ impl EventTransportKind {
         }
     }
 
-    /// Parse from environment variable, defaulting to NATS when the variable is unset.
-    ///
-    /// This default is suitable for distributed deployments. For local-only workflows
-    /// prefer [`DistributedRuntime::default_event_transport_kind`], which automatically
-    /// selects ZMQ when running with a `file` or `mem` discovery backend.
-    ///
     /// Logs a warning if an invalid value is encountered.
     pub fn from_env_or_default() -> Self {
         Self::from_env().unwrap_or_else(|e| {
-            tracing::warn!("{e}, defaulting to NATS");
-            Self::Nats
+            tracing::warn!("{e}, defaulting to ZMQ");
+            Self::Zmq
         })
     }
 
@@ -850,6 +867,34 @@ pub trait Discovery: Send + Sync {
         query: DiscoveryQuery,
         cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream>;
+
+    /// Returns an existing immutable claim or atomically creates it from a deferred proposal.
+    ///
+    /// Implementations read before polling `proposed_payload`, atomically insert only when
+    /// absent, and return the winning stored payload after an insertion race. Payloads in
+    /// [`ClaimOutcome::Created`] and [`ClaimOutcome::Existing`] are authoritative.
+    /// [`ClaimOutcome::Unsupported`] leaves coordination process-local. Storage errors must
+    /// propagate to the caller before scheduler bookkeeping or dispatch.
+    async fn create_or_get_claim(
+        &self,
+        _key: &str,
+        _proposed_payload: &mut ClaimPayloadFuture<'_>,
+    ) -> Result<ClaimOutcome> {
+        Ok(ClaimOutcome::Unsupported)
+    }
+
+    /// Idempotently closes an immutable claim.
+    ///
+    /// Close is terminal under the session-ID no-reuse contract; deleting an absent claim
+    /// succeeds.
+    async fn close_claim(&self, _key: &str) -> Result<ClaimCloseOutcome> {
+        Ok(ClaimCloseOutcome::Unsupported)
+    }
+
+    /// Subscribes to process-local claim invalidation events.
+    fn subscribe_claim_events(&self) -> Option<broadcast::Receiver<ClaimEvent>> {
+        None
+    }
 
     /// Clean up resources held by this discovery backend.
     /// For KV store backends, this deletes owned registrations immediately rather than

@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: 本地安装
 sidebar-title: 本地安装
 description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynamo
 ---

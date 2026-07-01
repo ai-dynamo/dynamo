@@ -1,0 +1,215 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""NOTICES-Rust.txt generator.
+
+Reads CycloneDX 1.5/1.6 SBOMs embedded in installed wheels under the runtime
+venv. The dynamo runtime + kvbm wheels ship these via cargo-cyclonedx (run
+through maturin); NIXL ships its own once we wire cargo-cyclonedx into the
+NIXL block in wheel_builder.
+
+First-party crates (`dynamo-*`, `kvbm-*`, `nixl-*`, `nvidia-*`) are KEPT in
+the output — auditors and customers should see every crate that's actually
+in the binary, including ours.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+
+from .. import overrides as license_overrides
+from .common import (
+    UNKNOWN,
+    Component,
+    dedupe_by_name_version,
+    read_harvested_license,
+    spdx_license_text,
+)
+
+logger = logging.getLogger(__name__)
+
+ECOSYSTEM = "rust"
+
+
+def _normalize_license(licenses_field: list[dict] | None) -> str:
+    """Render a CycloneDX `licenses[]` array to a single SPDX expression.
+
+    CycloneDX 1.5/1.6 each license entry is one of:
+      {"license": {"id": "MIT"}}
+      {"license": {"name": "Some Custom License"}}
+      {"expression": "MIT OR Apache-2.0"}
+
+    Multiple entries are joined with " AND ".
+    """
+    if not licenses_field:
+        return UNKNOWN
+
+    parts: list[str] = []
+    for entry in licenses_field:
+        if "expression" in entry:
+            parts.append(entry["expression"])
+        elif "license" in entry:
+            inner = entry["license"]
+            if "id" in inner:
+                parts.append(inner["id"])
+            elif "name" in inner:
+                # Custom license name; surface as LicenseRef-* so policy
+                # validation treats it as a deliberate non-SPDX entry.
+                parts.append(f"LicenseRef-{inner['name'].replace(' ', '-')}")
+            else:
+                continue
+        else:
+            continue
+
+    if not parts:
+        return UNKNOWN
+    if len(parts) == 1:
+        return parts[0]
+    return " AND ".join(f"({p})" if " " in p else p for p in parts)
+
+
+def _component_from_sbom_entry(
+    entry: dict, licenses_dir: Path | None = None
+) -> Component | None:
+    """Convert one CycloneDX components[] entry to a Component."""
+    name = entry.get("name")
+    version = entry.get("version")
+    if not name or not version:
+        logger.debug("Skipping component with missing name/version: %r", entry)
+        return None
+
+    spdx = _normalize_license(entry.get("licenses"))
+    if spdx == UNKNOWN:
+        # Fall back to license_overrides.yaml when the SBOM didn't carry
+        # a license field (sgl-model-gateway and other sglang-internal
+        # crates ship with no License in Cargo.toml).
+        overridden = license_overrides.lookup(ECOSYSTEM, name, str(version))
+        if overridden:
+            spdx = overridden
+
+    purl = entry.get("purl")
+    source_url: str | None = None
+    if purl and purl.startswith("pkg:cargo/"):
+        # Strip the ?download_url=file://... query that cargo-cyclonedx attaches
+        # to first-party crates (uninformative, sometimes references workspace paths).
+        if "?" in purl:
+            purl_clean = purl.split("?", 1)[0]
+        else:
+            purl_clean = purl
+        source_url = purl_clean
+
+    # Prefer the crate's real LICENSE files harvested from the cargo registry
+    # in wheel_builder (keyed "<name>-<version>"); the runtime image only has
+    # the compiled wheel, so when no harvest is available fall back to the
+    # canonical SPDX text for the identifier.
+    license_text = read_harvested_license(licenses_dir, f"{name}-{version}")
+    is_canonical = False
+    if license_text is None:
+        license_text = spdx_license_text(spdx)
+        is_canonical = license_text is not None
+
+    return Component(
+        ecosystem=ECOSYSTEM,
+        name=name,
+        version=str(version),
+        spdx=spdx,
+        source_url=source_url,
+        license_text=license_text,
+        license_text_is_canonical=is_canonical,
+    )
+
+
+def _find_wheel_sboms(search_paths: list[Path]) -> list[Path]:
+    """Locate every CycloneDX SBOM embedded in installed wheels.
+
+    Each entry in `search_paths` is treated as either:
+      - a venv root (in which case `lib/python*/site-packages` is globbed), OR
+      - a site-packages directory (searched directly for `*.dist-info/sboms/*.cyclonedx.json`).
+
+    Both shapes are checked for every entry, so the caller doesn't have to know
+    which layout applies. Used to support both:
+      - dynamo-runtime style: pip install into a uv venv at /opt/dynamo/venv
+      - upstream-image style: pip install --break-system-packages into the system
+        Python (e.g. lmsysorg/sglang base image, where there is no venv)
+    """
+    sboms: set[Path] = set()
+    for sp in search_paths:
+        # Venv layout
+        for site in sp.glob("lib/python*/site-packages"):
+            sboms.update(site.glob("*.dist-info/sboms/*.cyclonedx.json"))
+        # Direct site-packages layout
+        sboms.update(sp.glob("*.dist-info/sboms/*.cyclonedx.json"))
+    return sorted(sboms)
+
+
+def collect_components(
+    search_paths: list[Path], licenses_dir: Path | None = None
+) -> list[Component]:
+    """Read every wheel SBOM under each search path and return deduped Components.
+
+    SBOMs that are not Rust-flavored (e.g. NIXL's auditwheel.cdx.json which
+    enumerates RPM libs, not Rust crates) are skipped: we only consume
+    components whose purl starts with `pkg:cargo/`.
+    """
+    sboms = _find_wheel_sboms(search_paths)
+    if not sboms:
+        logger.warning("No wheel SBOMs found under %s", search_paths)
+        return []
+
+    components: list[Component] = []
+    for sbom_path in sboms:
+        try:
+            doc = json.loads(sbom_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            logger.warning("Skipping unreadable SBOM %s: %s", sbom_path, exc)
+            continue
+
+        cargo_count = 0
+        for entry in doc.get("components", []) or []:
+            purl = entry.get("purl") or ""
+            if not purl.startswith("pkg:cargo/"):
+                continue
+            comp = _component_from_sbom_entry(entry, licenses_dir)
+            if comp is None:
+                continue
+            components.append(comp)
+            cargo_count += 1
+        logger.info(
+            "Read %s: %d cargo components (skipped %d non-cargo)",
+            sbom_path.name,
+            cargo_count,
+            len(doc.get("components", []) or []) - cargo_count,
+        )
+
+    deduped = dedupe_by_name_version(components)
+    logger.info(
+        "Collected %d unique cargo crates after dedupe (from %d raw entries across %d SBOMs)",
+        len(deduped),
+        len(components),
+        len(sboms),
+    )
+    return deduped
+
+
+def generate(
+    search_paths: list[Path],
+    output_dir: Path,
+    subtract: set[tuple[str, str]] | None = None,
+    licenses_dir: Path | None = None,
+) -> list[Component]:
+    """Read SBOMs from each search path, write NOTICES-Rust.txt + rust-deps.csv.
+
+    When `subtract` is provided, components matching (name, version) are
+    filtered before writing — used to drop baseline-owned components.
+    When `licenses_dir` is provided, each crate's real LICENSE text is read
+    from it in preference to the canonical SPDX text.
+    """
+    from . import common
+
+    components = collect_components(search_paths, licenses_dir)
+    if subtract:
+        components = common.subtract_baseline(components, subtract)
+    common.write_notices(ECOSYSTEM, components, output_dir)
+    common.write_deps_csv(ECOSYSTEM, components, output_dir)
+    return components

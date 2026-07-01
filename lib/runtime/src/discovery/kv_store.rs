@@ -4,27 +4,126 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
+use tokio::sync::{OnceCell, broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
-    DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId,
-    ModelCardInstanceId,
+    ClaimCloseOutcome, ClaimEvent, ClaimOutcome, ClaimPayload, ClaimPayloadFuture, Discovery,
+    DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, DiscoverySpec,
+    DiscoveryStream, EndpointInstanceId, EventChannelInstanceId, ModelCardInstanceId,
 };
 use crate::storage::kv;
 
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
 const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
+const CLAIMS_BUCKET: &str = "v1/claims";
+const CLAIM_CREATE_ATTEMPTS: usize = 3;
+const CLAIM_WATCH_RECONNECT_BACKOFF: Duration = Duration::from_millis(250);
 
 /// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
     store: Arc<kv::Manager>,
     cancel_token: CancellationToken,
+    claims: ClaimState,
+}
+
+/// Process-local invalidation relay for the shared claims bucket.
+///
+/// One backend watcher serves all affinity coordinators attached to this discovery
+/// instance. `Put` events never populate caches. `Delete(key)` evicts one entry, while
+/// watcher loss, restart, or subscriber lag produces `Reset` so coordinators clear all
+/// entries rather than retain potentially stale bindings.
+///
+/// TODO: `Bucket::watch` cannot yet surface etcd reconnect/compaction or FileStore
+/// overflow errors, so those hidden backend failures cannot be converted into `Reset`.
+struct ClaimState {
+    events: broadcast::Sender<ClaimEvent>,
+    watcher_started: OnceCell<()>,
+    memory_warning_emitted: AtomicBool,
+    #[cfg(test)]
+    watcher_probe: ClaimWatcherProbe,
+}
+
+impl ClaimState {
+    fn new() -> Self {
+        let (events, _) = broadcast::channel(1024);
+        Self {
+            events,
+            watcher_started: OnceCell::new(),
+            memory_warning_emitted: AtomicBool::new(false),
+            #[cfg(test)]
+            watcher_probe: ClaimWatcherProbe::new(),
+        }
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<ClaimEvent> {
+        self.events.subscribe()
+    }
+
+    fn warn_if_memory(&self, is_memory: bool) {
+        if !is_memory || self.memory_warning_emitted.swap(true, Ordering::Relaxed) {
+            return;
+        }
+
+        tracing::warn!(
+            "session affinity claims use MemoryStore and coordinate only within this process/store"
+        );
+    }
+}
+
+#[cfg(test)]
+struct ClaimWatcherProbe {
+    start_count: Arc<std::sync::atomic::AtomicUsize>,
+    active_count: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+impl ClaimWatcherProbe {
+    fn new() -> Self {
+        Self {
+            start_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            active_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    fn record_start(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        self.start_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.active_count.clone()
+    }
+
+    fn starts(&self) -> usize {
+        self.start_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn active(&self) -> usize {
+        self.active_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+struct ClaimWatcherActiveGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(test)]
+impl ClaimWatcherActiveGuard {
+    fn new(active_count: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        active_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(active_count)
+    }
+}
+
+#[cfg(test)]
+impl Drop for ClaimWatcherActiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl KVStoreDiscovery {
@@ -32,7 +131,167 @@ impl KVStoreDiscovery {
         Self {
             store: Arc::new(store),
             cancel_token,
+            claims: ClaimState::new(),
         }
+    }
+
+    async fn ensure_claim_watcher(&self) -> Result<()> {
+        self.claims
+            .watcher_started
+            .get_or_try_init(|| async {
+                let (ready_tx, ready_rx) = oneshot::channel();
+                let store = self.store.clone();
+                let cancel_token = self.cancel_token.clone();
+                let claim_events = self.claims.events.clone();
+                #[cfg(test)]
+                let active_count = self.claims.watcher_probe.record_start();
+
+                tokio::spawn(async move {
+                    #[cfg(test)]
+                    let _active_guard = ClaimWatcherActiveGuard::new(active_count);
+                    Self::run_claim_watcher(store, cancel_token, claim_events, ready_tx).await;
+                });
+
+                ready_rx
+                    .await
+                    .context("claim watcher stopped before startup completed")?
+                    .map_err(anyhow::Error::msg)
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn run_claim_watcher(
+        store: Arc<kv::Manager>,
+        cancel_token: CancellationToken,
+        claim_events: broadcast::Sender<ClaimEvent>,
+        ready_tx: oneshot::Sender<std::result::Result<(), String>>,
+    ) {
+        let mut ready_tx = Some(ready_tx);
+
+        loop {
+            if cancel_token.is_cancelled() {
+                if let Some(ready_tx) = ready_tx.take() {
+                    let _ = ready_tx.send(Err("claim watcher startup was cancelled".to_string()));
+                }
+                let _ = claim_events.send(ClaimEvent::Reset);
+                return;
+            }
+
+            let bucket = match store.get_or_create_bucket(CLAIMS_BUCKET, None).await {
+                Ok(bucket) => bucket,
+                Err(err) => {
+                    if let Some(ready_tx) = ready_tx.take() {
+                        let _ = ready_tx.send(Err(err.to_string()));
+                        return;
+                    }
+                    tracing::error!(error = %err, "failed to reconnect session claim watcher");
+                    let _ = claim_events.send(ClaimEvent::Reset);
+                    if Self::wait_for_claim_watcher_retry(&cancel_token).await {
+                        return;
+                    }
+                    continue;
+                }
+            };
+
+            let mut stream = match bucket.watch().await {
+                Ok(stream) => stream,
+                Err(err) => {
+                    if let Some(ready_tx) = ready_tx.take() {
+                        let _ = ready_tx.send(Err(err.to_string()));
+                        return;
+                    }
+                    tracing::error!(error = %err, "failed to reconnect session claim watch stream");
+                    let _ = claim_events.send(ClaimEvent::Reset);
+                    if Self::wait_for_claim_watcher_retry(&cancel_token).await {
+                        return;
+                    }
+                    continue;
+                }
+            };
+
+            if let Some(ready_tx) = ready_tx.take() {
+                let _ = ready_tx.send(Ok(()));
+            } else {
+                let _ = claim_events.send(ClaimEvent::Reset);
+            }
+
+            loop {
+                let event = tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        let _ = claim_events.send(ClaimEvent::Reset);
+                        return;
+                    }
+                    event = stream.next() => event,
+                };
+
+                let Some(event) = event else {
+                    tracing::warn!(
+                        "session claim watch stream ended; clearing local affinity caches"
+                    );
+                    let _ = claim_events.send(ClaimEvent::Reset);
+                    break;
+                };
+
+                if let kv::WatchEvent::Delete(key) = event {
+                    let key = Self::strip_bucket_prefix(key.as_ref(), CLAIMS_BUCKET).to_string();
+                    let _ = claim_events.send(ClaimEvent::Delete(key));
+                }
+            }
+
+            if Self::wait_for_claim_watcher_retry(&cancel_token).await {
+                return;
+            }
+        }
+    }
+
+    async fn wait_for_claim_watcher_retry(cancel_token: &CancellationToken) -> bool {
+        tokio::select! {
+            _ = cancel_token.cancelled() => true,
+            _ = tokio::time::sleep(CLAIM_WATCH_RECONNECT_BACKOFF) => false,
+        }
+    }
+
+    fn warn_if_memory_claims(&self) {
+        self.claims.warn_if_memory(self.store.is_memory());
+    }
+
+    fn parse_claim(value: &[u8]) -> Result<ClaimPayload> {
+        serde_json::from_slice(value).context("failed to deserialize session affinity claim")
+    }
+
+    async fn create_or_get_in_bucket(
+        bucket: &dyn kv::Bucket,
+        key: &kv::Key,
+        proposed_payload: &mut ClaimPayloadFuture<'_>,
+    ) -> Result<ClaimOutcome> {
+        if let Some(payload) = bucket.get(key).await? {
+            return Ok(ClaimOutcome::Existing(Self::parse_claim(&payload)?));
+        }
+
+        let proposed_payload = proposed_payload.as_mut().await?;
+        let proposed_bytes = serde_json::to_vec(&proposed_payload)?;
+
+        for attempt in 0..CLAIM_CREATE_ATTEMPTS {
+            match bucket.insert(key, proposed_bytes.clone().into(), 0).await? {
+                kv::StoreOutcome::Created(_) => {
+                    return Ok(ClaimOutcome::Created(proposed_payload));
+                }
+                kv::StoreOutcome::Exists(_) => {
+                    if let Some(payload) = bucket.get(key).await? {
+                        return Ok(ClaimOutcome::Existing(Self::parse_claim(&payload)?));
+                    }
+
+                    if attempt + 1 == CLAIM_CREATE_ATTEMPTS {
+                        anyhow::bail!(
+                            "session affinity claim disappeared after {CLAIM_CREATE_ATTEMPTS} competing insert attempts"
+                        );
+                    }
+                }
+            }
+        }
+
+        unreachable!("claim creation loop always returns")
     }
 
     /// Build the key path for an endpoint (relative to bucket, not absolute)
@@ -640,6 +899,41 @@ impl Discovery for KVStoreDiscovery {
         Ok(Box::pin(stream))
     }
 
+    async fn create_or_get_claim(
+        &self,
+        key: &str,
+        proposed_payload: &mut ClaimPayloadFuture<'_>,
+    ) -> Result<ClaimOutcome> {
+        self.warn_if_memory_claims();
+        self.ensure_claim_watcher().await?;
+
+        let bucket = self.store.get_or_create_bucket(CLAIMS_BUCKET, None).await?;
+        let key = kv::Key::new(key.to_string());
+
+        Self::create_or_get_in_bucket(bucket.as_ref(), &key, proposed_payload).await
+    }
+
+    async fn close_claim(&self, key: &str) -> Result<ClaimCloseOutcome> {
+        self.warn_if_memory_claims();
+        self.ensure_claim_watcher().await?;
+
+        let Some(bucket) = self.store.get_bucket(CLAIMS_BUCKET).await? else {
+            return Ok(ClaimCloseOutcome::Closed);
+        };
+        let key = kv::Key::new(key.to_string());
+
+        match bucket.delete(&key).await {
+            Ok(()) | Err(kv::StoreError::MissingBucket(_) | kv::StoreError::MissingKey(_)) => {
+                Ok(ClaimCloseOutcome::Closed)
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn subscribe_claim_events(&self) -> Option<broadcast::Receiver<ClaimEvent>> {
+        Some(self.claims.subscribe())
+    }
+
     fn shutdown(&self) {
         self.store.shutdown();
     }
@@ -647,6 +941,9 @@ impl Discovery for KVStoreDiscovery {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     use super::*;
     use crate::component::TransportType;
 
@@ -700,6 +997,263 @@ mod tests {
         assert!(events.contains(&DiscoveryEvent::Removed(endpoint_instance(1).id())));
         assert_eq!(known_instances.len(), 1);
         assert!(known_instances.contains_key(&endpoint_instance(2).id()));
+    }
+
+    fn payload(worker_id: u64) -> ClaimPayload {
+        serde_json::json!({"worker_id": worker_id, "dp_rank": 0})
+    }
+
+    struct DisappearingBucket {
+        insert_calls: AtomicUsize,
+        create_on_call: Option<usize>,
+    }
+
+    struct InsertBarrierBucket {
+        inner: Box<dyn kv::Bucket>,
+        barrier: tokio::sync::Barrier,
+    }
+
+    #[async_trait]
+    impl kv::Bucket for InsertBarrierBucket {
+        async fn insert(
+            &self,
+            key: &kv::Key,
+            value: bytes::Bytes,
+            revision: u64,
+        ) -> std::result::Result<kv::StoreOutcome, kv::StoreError> {
+            self.barrier.wait().await;
+            self.inner.insert(key, value, revision).await
+        }
+
+        async fn get(
+            &self,
+            key: &kv::Key,
+        ) -> std::result::Result<Option<bytes::Bytes>, kv::StoreError> {
+            self.inner.get(key).await
+        }
+
+        async fn delete(&self, key: &kv::Key) -> std::result::Result<(), kv::StoreError> {
+            self.inner.delete(key).await
+        }
+
+        async fn watch(
+            &self,
+        ) -> std::result::Result<
+            Pin<Box<dyn futures::Stream<Item = kv::WatchEvent> + Send + '_>>,
+            kv::StoreError,
+        > {
+            self.inner.watch().await
+        }
+
+        async fn entries(
+            &self,
+        ) -> std::result::Result<HashMap<kv::Key, bytes::Bytes>, kv::StoreError> {
+            self.inner.entries().await
+        }
+    }
+
+    #[async_trait]
+    impl kv::Bucket for DisappearingBucket {
+        async fn insert(
+            &self,
+            _key: &kv::Key,
+            _value: bytes::Bytes,
+            _revision: u64,
+        ) -> std::result::Result<kv::StoreOutcome, kv::StoreError> {
+            let call = self.insert_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(if self.create_on_call == Some(call) {
+                kv::StoreOutcome::Created(1)
+            } else {
+                kv::StoreOutcome::Exists(1)
+            })
+        }
+
+        async fn get(
+            &self,
+            _key: &kv::Key,
+        ) -> std::result::Result<Option<bytes::Bytes>, kv::StoreError> {
+            Ok(None)
+        }
+
+        async fn delete(&self, _key: &kv::Key) -> std::result::Result<(), kv::StoreError> {
+            Ok(())
+        }
+
+        async fn watch(
+            &self,
+        ) -> std::result::Result<
+            Pin<Box<dyn futures::Stream<Item = kv::WatchEvent> + Send + '_>>,
+            kv::StoreError,
+        > {
+            Ok(Box::pin(futures::stream::pending()))
+        }
+
+        async fn entries(
+            &self,
+        ) -> std::result::Result<HashMap<kv::Key, bytes::Bytes>, kv::StoreError> {
+            Ok(HashMap::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_claim_does_not_poll_proposal() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        let mut first: ClaimPayloadFuture<'_> = Box::pin(async { Ok(payload(7)) });
+        assert_eq!(
+            client
+                .create_or_get_claim("scope/session", &mut first)
+                .await
+                .unwrap(),
+            ClaimOutcome::Created(payload(7))
+        );
+
+        let polled = Arc::new(AtomicBool::new(false));
+        let proposal_polled = polled.clone();
+        let mut second: ClaimPayloadFuture<'_> = Box::pin(async move {
+            proposal_polled.store(true, Ordering::Relaxed);
+            Ok(payload(8))
+        });
+        assert_eq!(
+            client
+                .create_or_get_claim("scope/session", &mut second)
+                .await
+                .unwrap(),
+            ClaimOutcome::Existing(payload(7))
+        );
+        assert!(!polled.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn competing_claims_return_one_created_winner() {
+        let store = kv::Manager::memory();
+        let bucket = Arc::new(InsertBarrierBucket {
+            inner: store
+                .get_or_create_bucket(CLAIMS_BUCKET, None)
+                .await
+                .unwrap(),
+            barrier: tokio::sync::Barrier::new(8),
+        });
+        let key = Arc::new(kv::Key::new("scope/race".to_string()));
+        let mut tasks = Vec::new();
+        for worker_id in 0..8 {
+            let bucket = bucket.clone();
+            let key = key.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut proposal: ClaimPayloadFuture<'_> =
+                    Box::pin(async move { Ok(payload(worker_id)) });
+                KVStoreDiscovery::create_or_get_in_bucket(
+                    bucket.as_ref(),
+                    key.as_ref(),
+                    &mut proposal,
+                )
+                .await
+                .unwrap()
+            }));
+        }
+
+        let outcomes = futures::future::join_all(tasks)
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ClaimOutcome::Created(_)))
+                .count(),
+            1
+        );
+        let winner = match outcomes
+            .iter()
+            .find(|outcome| matches!(outcome, ClaimOutcome::Created(_)))
+            .unwrap()
+        {
+            ClaimOutcome::Created(payload) => payload,
+            _ => unreachable!(),
+        };
+        assert!(outcomes.iter().all(|outcome| match outcome {
+            ClaimOutcome::Created(payload) | ClaimOutcome::Existing(payload) => payload == winner,
+            ClaimOutcome::Unsupported => false,
+        }));
+    }
+
+    #[tokio::test]
+    async fn claim_disappearance_retries_and_is_bounded() {
+        let key = kv::Key::new("scope/disappearing".to_string());
+        let recovering = DisappearingBucket {
+            insert_calls: AtomicUsize::new(0),
+            create_on_call: Some(1),
+        };
+        let mut proposal: ClaimPayloadFuture<'_> = Box::pin(async { Ok(payload(7)) });
+        assert_eq!(
+            KVStoreDiscovery::create_or_get_in_bucket(&recovering, &key, &mut proposal)
+                .await
+                .unwrap(),
+            ClaimOutcome::Created(payload(7))
+        );
+        assert_eq!(recovering.insert_calls.load(Ordering::Relaxed), 2);
+
+        let exhausting = DisappearingBucket {
+            insert_calls: AtomicUsize::new(0),
+            create_on_call: None,
+        };
+        let mut proposal: ClaimPayloadFuture<'_> = Box::pin(async { Ok(payload(8)) });
+        let error = KVStoreDiscovery::create_or_get_in_bucket(&exhausting, &key, &mut proposal)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("3 competing insert attempts"));
+        assert_eq!(exhausting.insert_calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn claim_watcher_ignores_put_emits_delete_and_close_is_idempotent() {
+        let cancel = CancellationToken::new();
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), cancel.clone());
+        let mut events = client.subscribe_claim_events().unwrap();
+        let mut proposal: ClaimPayloadFuture<'_> = Box::pin(async { Ok(payload(7)) });
+        client
+            .create_or_get_claim("scope/close", &mut proposal)
+            .await
+            .unwrap();
+
+        assert_eq!(client.claims.watcher_probe.starts(), 1);
+        assert_eq!(client.claims.watcher_probe.active(), 1);
+
+        assert_eq!(
+            client.close_claim("scope/close").await.unwrap(),
+            ClaimCloseOutcome::Closed
+        );
+        assert_eq!(
+            events.recv().await.unwrap(),
+            ClaimEvent::Delete("scope/close".to_string())
+        );
+        assert_eq!(
+            client.close_claim("scope/close").await.unwrap(),
+            ClaimCloseOutcome::Closed
+        );
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn claim_watcher_stops_on_cancellation() {
+        let store = Arc::new(kv::Manager::memory());
+        let cancel = CancellationToken::new();
+        let (events, _) = broadcast::channel(16);
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let watcher = tokio::spawn(KVStoreDiscovery::run_claim_watcher(
+            store,
+            cancel.clone(),
+            events,
+            ready_tx,
+        ));
+        ready_rx.await.unwrap().unwrap();
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), watcher)
+            .await
+            .expect("claim watcher did not stop after cancellation")
+            .unwrap();
     }
 
     #[tokio::test]

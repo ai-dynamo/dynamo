@@ -47,8 +47,8 @@ from filelock import FileLock
 
 from tests.frontend.agent_smoke_inputs import (
     LIST_DIRECTORY_PROMPT,
+    claude_subagent_definition,
     claude_subagent_prompt,
-    write_claude_subagent_config,
     write_codex_config,
     write_opencode_config,
 )
@@ -527,7 +527,8 @@ def test_frontend_api_surface_compliance(
         # agg.sh doesn't forward frontend args, but the frontend reads this
         # env var directly. Enables /v1/messages for the claude smoke step.
         "DYN_ENABLE_ANTHROPIC_API": "1",
-        "DYN_ENABLE_FRONTEND_NVEXT": "1",
+        # nvext is enabled by default; no env needed. (Set
+        # DYN_DISABLE_FRONTEND_NVEXT=1 to turn it off.)
         "DYN_REQUEST_TRACE": "1",
         "DYN_REQUEST_TRACE_SINKS": "jsonl",
         "DYN_REQUEST_TRACE_OUTPUT_PATH": str(request_trace_path),
@@ -607,7 +608,6 @@ def test_frontend_api_surface_compliance(
             _node_bin,
             claude_home,
             agent_cwd,
-            marker_filename,
             frontend_port,
             request_trace_path,
             claude_subagent_trace_start,
@@ -957,6 +957,7 @@ def _run_claude_exec_smoke(
         "HOME": str(claude_home),
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": "sk-none",
+        "ANTHROPIC_API_KEY": "sk-none",
         # Cap output so reasoning models don't blow the 180s subprocess
         # timeout. Mirrors the codex cap in `write_codex_config`.
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "4096",
@@ -967,9 +968,12 @@ def _run_claude_exec_smoke(
 
     cmd = [
         str(claude_cli),
+        "--bare",
         "--model",
         COMPLIANCE_MODEL,
         "--dangerously-skip-permissions",
+        "--tools",
+        "Bash",
         "-p",
         LIST_DIRECTORY_PROMPT,
     ]
@@ -1013,7 +1017,6 @@ def _try_run_claude_subagent_smoke(
     node_bin: Path,
     claude_home: Path,
     cwd: Path,
-    marker_filename: str,
     frontend_port: int,
     request_trace_path: Path,
     trace_start_index: int,
@@ -1025,13 +1028,11 @@ def _try_run_claude_subagent_smoke(
     so keep this as CI telemetry until it is stable enough to gate on.
     """
     try:
-        write_claude_subagent_config(cwd, CLAUDE_SUBAGENT_NAME)
         _run_claude_subagent_smoke(
             claude_cli,
             node_bin,
             claude_home,
             cwd,
-            marker_filename,
             frontend_port,
             request_trace_path,
             trace_start_index,
@@ -1045,7 +1046,6 @@ def _run_claude_subagent_smoke(
     node_bin: Path,
     claude_home: Path,
     cwd: Path,
-    marker_filename: str,
     frontend_port: int,
     request_trace_path: Path,
     trace_start_index: int,
@@ -1057,6 +1057,7 @@ def _run_claude_subagent_smoke(
         "HOME": str(claude_home),
         "ANTHROPIC_BASE_URL": base_url,
         "ANTHROPIC_AUTH_TOKEN": "sk-none",
+        "ANTHROPIC_API_KEY": "sk-none",
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "512",
     }
     env = _agent_subprocess_env(extra_env, path_prepend=[node_bin])
@@ -1066,27 +1067,53 @@ def _run_claude_subagent_smoke(
         "--model",
         COMPLIANCE_MODEL,
         "--dangerously-skip-permissions",
+        "--agents",
+        claude_subagent_definition(CLAUDE_SUBAGENT_NAME),
+        "--tools",
+        "Agent",
         "-p",
-        claude_subagent_prompt(CLAUDE_SUBAGENT_NAME, marker_filename),
+        claude_subagent_prompt(CLAUDE_SUBAGENT_NAME),
     ]
 
+    process = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    trace_seen = False
+    last_records: list[dict] = []
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=CLAUDE_SUBAGENT_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired as exc:
-        logger.warning(
-            "Optional Claude subagent smoke timed out after %.0fs; stdout=%r stderr=%r",
-            exc.timeout,
-            exc.stdout,
-            exc.stderr,
-        )
-        return
+        deadline = time.monotonic() + CLAUDE_SUBAGENT_TIMEOUT_S
+        while time.monotonic() < deadline:
+            last_records = _read_request_trace_records_since(
+                request_trace_path, trace_start_index
+            )
+            if _trace_contains_claude_subagent_context(last_records):
+                trace_seen = True
+                break
+            if process.poll() is not None:
+                break
+            time.sleep(0.2)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+        else:
+            stdout, stderr = process.communicate()
+
+    last_records = _read_request_trace_records_since(
+        request_trace_path, trace_start_index
+    )
+    trace_seen = trace_seen or _trace_contains_claude_subagent_context(last_records)
+    result = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
     _attach_subprocess_log(
         name="claude_subagent_smoke_optional.log",
@@ -1100,6 +1127,10 @@ def _run_claude_subagent_smoke(
     if result.stderr:
         logger.info("claude subagent stderr:\n%s", result.stderr)
 
+    if trace_seen:
+        logger.info("Optional Claude subagent smoke traced child agent_context")
+        return
+
     if result.returncode != 0:
         logger.warning(
             "Optional Claude subagent smoke exited with %s; stdout=%r stderr=%r",
@@ -1108,25 +1139,6 @@ def _run_claude_subagent_smoke(
             result.stderr,
         )
         return
-
-    if marker_filename not in result.stdout:
-        logger.warning(
-            "Optional Claude subagent smoke did not report marker file %r; stdout=%r",
-            marker_filename,
-            result.stdout,
-        )
-        return
-
-    deadline = time.monotonic() + 30.0
-    last_records: list[dict] = []
-    while time.monotonic() < deadline:
-        last_records = _read_request_trace_records_since(
-            request_trace_path, trace_start_index
-        )
-        if _trace_contains_claude_subagent_context(last_records):
-            logger.info("Optional Claude subagent smoke traced child agent_context")
-            return
-        time.sleep(0.2)
 
     seen = [
         record.get("agent_context")

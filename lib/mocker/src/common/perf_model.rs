@@ -84,7 +84,18 @@ pub enum PerfModel {
     },
     /// AI Configurator SDK calls via Python callback.
     /// Passes the reduced prefill inputs (batch_size, effective_isl, prefix).
-    Aiconfigurator { callback: Arc<dyn AicCallback> },
+    ///
+    /// `attention_dp_size` is the number of attention data-parallel ranks this
+    /// engine aggregates. The offline-replay aggregate engine holds the GLOBAL
+    /// batch across all ranks, but the AIC SDK expects a PER-RANK batch
+    /// (`global_bs = bs * attention_dp_size`), so the scheduled batch is divided
+    /// by this value before each perf query. It is 1 for the live path (which
+    /// replicates one scheduler per rank, so each already sees a per-rank batch)
+    /// and for non-DP configs — making the division a no-op there.
+    Aiconfigurator {
+        callback: Arc<dyn AicCallback>,
+        attention_dp_size: usize,
+    },
 }
 
 impl Clone for PerfModel {
@@ -98,8 +109,12 @@ impl Clone for PerfModel {
                 prefill_interp: Arc::clone(prefill_interp),
                 decode_interp: Arc::clone(decode_interp),
             },
-            PerfModel::Aiconfigurator { callback } => PerfModel::Aiconfigurator {
+            PerfModel::Aiconfigurator {
+                callback,
+                attention_dp_size,
+            } => PerfModel::Aiconfigurator {
                 callback: Arc::clone(callback),
+                attention_dp_size: *attention_dp_size,
             },
         }
     }
@@ -208,8 +223,36 @@ impl PerfModel {
     }
 
     /// Create an Aiconfigurator perf model from a callback.
+    ///
+    /// `attention_dp_size` defaults to 1, so the per-rank batch division is a
+    /// no-op. Use [`PerfModel::from_aic_callback_with_attention_dp`] from the
+    /// offline-replay aggregate path, which holds the global multi-rank batch.
     pub fn from_aic_callback(callback: Arc<dyn AicCallback>) -> Self {
-        PerfModel::Aiconfigurator { callback }
+        PerfModel::Aiconfigurator {
+            callback,
+            attention_dp_size: 1,
+        }
+    }
+
+    /// Like [`PerfModel::from_aic_callback`], but records the attention-DP degree
+    /// so the aggregated offline-replay engine queries the AIC SDK with the
+    /// per-rank batch (`scheduled_batch / attention_dp_size`) it expects. The
+    /// live path must NOT use this (it already replicates one scheduler per rank).
+    pub fn from_aic_callback_with_attention_dp(
+        callback: Arc<dyn AicCallback>,
+        attention_dp_size: usize,
+    ) -> Self {
+        PerfModel::Aiconfigurator {
+            callback,
+            attention_dp_size: attention_dp_size.max(1),
+        }
+    }
+
+    /// Global batch -> per-rank batch for the AIC SDK; see the
+    /// `Aiconfigurator { attention_dp_size }` doc. `div_ceil` bounds the step by
+    /// the busiest rank, and dp == 1 (live / non-DP) is a no-op.
+    fn aic_per_rank_batch(batch_size: usize, attention_dp_size: usize) -> usize {
+        batch_size.div_ceil(attention_dp_size.max(1))
     }
 
     /// Predict prefill time in milliseconds.
@@ -220,6 +263,9 @@ impl PerfModel {
     /// - Aiconfigurator: passes (batch_size, isl - prefix, prefix) to the AIC SDK
     pub fn predict_prefill_time(&self, batch_size: usize, isl: usize, prefix: usize) -> f64 {
         let new_tokens_per_req = isl.saturating_sub(prefix);
+        if batch_size == 0 || new_tokens_per_req == 0 {
+            return 0.0;
+        }
         let time = match self {
             PerfModel::Polynomial => {
                 // Total tokens across the batch — GPU processes them in parallel
@@ -230,9 +276,14 @@ impl PerfModel {
                 let tokens = (batch_size * new_tokens_per_req) as f64;
                 prefill_interp.interp(tokens).unwrap_or(0.0)
             }
-            PerfModel::Aiconfigurator { callback } => {
-                callback.predict_prefill(batch_size, new_tokens_per_req, prefix)
-            }
+            PerfModel::Aiconfigurator {
+                callback,
+                attention_dp_size,
+            } => callback.predict_prefill(
+                Self::aic_per_rank_batch(batch_size, *attention_dp_size),
+                new_tokens_per_req,
+                prefix,
+            ),
         };
         time.max(0.0)
     }
@@ -266,9 +317,14 @@ impl PerfModel {
             PerfModel::Interpolated { decode_interp, .. } => decode_interp
                 .interp(active_kv_tokens as f64, context_length as f64)
                 .unwrap_or(0.0),
-            PerfModel::Aiconfigurator { callback } => {
-                callback.predict_decode(batch_size, context_length, 2)
-            }
+            PerfModel::Aiconfigurator {
+                callback,
+                attention_dp_size,
+            } => callback.predict_decode(
+                Self::aic_per_rank_batch(batch_size, *attention_dp_size),
+                context_length,
+                2,
+            ),
         };
         // Token-emitting decode steps should not collapse onto the same timestamp.
         let result = time.max(1.0);
@@ -276,5 +332,65 @@ impl PerfModel {
             "Decode time prediction: batch_size={batch_size}, active_kv_tokens={active_kv_tokens}, context_length={context_length}, time={result:.2}ms"
         );
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AicCallback, PerfModel};
+    use std::sync::Arc;
+
+    #[test]
+    fn fully_cached_prompt_skips_prefill() {
+        assert_eq!(PerfModel::default().predict_prefill_time(1, 128, 128), 0.0);
+    }
+
+    /// Echoes back the batch_size it is called with, so tests can assert exactly
+    /// what batch reached the AIC SDK after any per-rank division.
+    struct EchoBatchCallback;
+    impl AicCallback for EchoBatchCallback {
+        fn predict_prefill(&self, batch_size: usize, _effective_isl: usize, _prefix: usize) -> f64 {
+            batch_size as f64
+        }
+        fn predict_decode(&self, batch_size: usize, _isl: usize, _osl: usize) -> f64 {
+            batch_size as f64
+        }
+    }
+
+    // The AIC SDK expects a per-rank batch (global_bs = bs * attention_dp_size).
+    // Offline replay holds the global batch in one engine, so the perf model must
+    // divide by attention_dp_size before the AIC call. attention_dp_size=1 (live /
+    // non-DP / `from_aic_callback`) must be a strict no-op.
+
+    #[test]
+    fn aic_decode_attention_dp_1_is_noop() {
+        let m = PerfModel::from_aic_callback(Arc::new(EchoBatchCallback));
+        // callback sees the full global batch unchanged
+        assert_eq!(m.predict_decode_time(128, 0, 1024, 0), 128.0);
+        assert_eq!(m.predict_decode_time(1, 0, 1024, 0), 1.0);
+    }
+
+    #[test]
+    fn aic_decode_divides_batch_by_attention_dp() {
+        let m = PerfModel::from_aic_callback_with_attention_dp(Arc::new(EchoBatchCallback), 8);
+        // 128 sequences across 8 DP ranks -> 16 per rank
+        assert_eq!(m.predict_decode_time(128, 0, 1024, 0), 16.0);
+        // div_ceil: 130/8 = 17 (the busiest rank bounds the step)
+        assert_eq!(m.predict_decode_time(130, 0, 1024, 0), 17.0);
+        // fewer sequences than ranks -> at least 1 per active rank
+        assert_eq!(m.predict_decode_time(4, 0, 1024, 0), 1.0);
+    }
+
+    #[test]
+    fn aic_prefill_attention_dp_1_is_noop() {
+        let m = PerfModel::from_aic_callback(Arc::new(EchoBatchCallback));
+        assert_eq!(m.predict_prefill_time(8, 1024, 0), 8.0);
+    }
+
+    #[test]
+    fn aic_prefill_divides_batch_by_attention_dp() {
+        let m = PerfModel::from_aic_callback_with_attention_dp(Arc::new(EchoBatchCallback), 8);
+        assert_eq!(m.predict_prefill_time(8, 1024, 0), 1.0);
+        assert_eq!(m.predict_prefill_time(128, 1024, 0), 16.0);
     }
 }

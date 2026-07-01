@@ -211,6 +211,8 @@ pub enum MoveBlockResponse {
 pub struct DirectRequest {
     pub tokens: Vec<Token>,
     pub max_output_tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_token_ids: Option<Vec<Token>>,
     pub uuid: Option<Uuid>,
     pub dp_rank: u32,
     pub arrival_timestamp_ms: Option<f64>,
@@ -269,6 +271,8 @@ impl PrefillCost {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSignal {
     pub uuid: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_id: Option<Token>,
     /// Terminal flag: the request's lifecycle has ended. Replay drivers free
     /// resources and advance/notify on this.
     pub completed: bool,
@@ -373,6 +377,31 @@ impl FromStr for WorkerType {
             "decode" => Ok(Self::Decode),
             _ => Err(format!(
                 "Invalid worker_type '{value}'. Must be 'aggregated', 'prefill', or 'decode'."
+            )),
+        }
+    }
+}
+
+/// Physical KV footprint used to model a coordinated disaggregated transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KvTransferTimingMode {
+    /// Charge the source request's full logical prompt length.
+    #[default]
+    FullPrompt,
+    /// Charge only the physical prompt footprint missing at the destination.
+    DestinationMissing,
+}
+
+impl FromStr for KvTransferTimingMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "full_prompt" => Ok(Self::FullPrompt),
+            "destination_missing" => Ok(Self::DestinationMissing),
+            _ => Err(format!(
+                "Invalid kv_transfer_timing_mode '{value}'. Must be 'full_prompt' or 'destination_missing'."
             )),
         }
     }
@@ -490,6 +519,7 @@ struct MockEngineArgsSerde {
     engine_type: OptionalConfigValue<String>,
     num_gpu_blocks: OptionalConfigValue<usize>,
     block_size: OptionalConfigValue<usize>,
+    max_model_len: OptionalConfigValue<usize>,
     max_num_seqs: OptionalConfigValue<usize>,
     max_num_batched_tokens: OptionalConfigValue<usize>,
     enable_prefix_caching: OptionalConfigValue<bool>,
@@ -510,6 +540,11 @@ struct MockEngineArgsSerde {
     aic_moe_tp_size: OptionalConfigValue<usize>,
     aic_moe_ep_size: OptionalConfigValue<usize>,
     aic_attention_dp_size: OptionalConfigValue<usize>,
+    aic_gemm_dtype: OptionalConfigValue<String>,
+    aic_moe_dtype: OptionalConfigValue<String>,
+    aic_fmha_dtype: OptionalConfigValue<String>,
+    aic_kv_cache_dtype: OptionalConfigValue<String>,
+    aic_comm_dtype: OptionalConfigValue<String>,
     aic_nextn: OptionalConfigValue<usize>,
     aic_nextn_accept_rates: OptionalConfigValue<String>,
     aic_mtp_seed: OptionalConfigValue<u64>,
@@ -518,8 +553,10 @@ struct MockEngineArgsSerde {
     free_gpu_memory_fraction: OptionalConfigValue<f64>,
     enable_local_indexer: OptionalConfigValue<bool>,
     bootstrap_port: OptionalConfigValue<u16>,
+    handoff_session_timeout_ms: OptionalConfigValue<u64>,
     kv_bytes_per_token: OptionalConfigValue<usize>,
     kv_transfer_bandwidth: OptionalConfigValue<f64>,
+    kv_transfer_timing_mode: OptionalConfigValue<String>,
     num_g2_blocks: OptionalConfigValue<usize>,
     num_g3_blocks: OptionalConfigValue<usize>,
     enable_g4_storage: OptionalConfigValue<bool>,
@@ -531,6 +568,7 @@ struct MockEngineArgsSerde {
     bandwidth_g2_to_g4_gbps: OptionalConfigValue<f64>,
     bandwidth_g4_to_g2_gbps: OptionalConfigValue<f64>,
     reasoning: OptionalConfigValue<ReasoningConfig>,
+    response_replay_trace_path: OptionalConfigValue<PathBuf>,
     zmq_kv_events_port: OptionalConfigValue<u16>,
     zmq_replay_port: OptionalConfigValue<u16>,
     preemption_mode: OptionalConfigValue<String>,
@@ -574,6 +612,12 @@ pub struct MockEngineArgs {
 
     #[builder(default = "0")]
     pub block_size: usize,
+
+    /// Optional vLLM sequence-length limit, including prompt and generated
+    /// tokens. Requests with no room to generate are rejected before admission.
+    #[builder(default = "None")]
+    #[validate(range(min = 1))]
+    pub max_model_len: Option<usize>,
 
     // This was 1024 in the past but reverted back to 256
     #[builder(default = Some(256))]
@@ -673,6 +717,31 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub aic_attention_dp_size: Option<usize>,
 
+    /// Weight dtype override for AIC latency prediction.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_gemm_dtype: Option<String>,
+
+    /// MoE kernel dtype override for AIC latency prediction.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_moe_dtype: Option<String>,
+
+    /// Activation dtype override for AIC latency prediction.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_fmha_dtype: Option<String>,
+
+    /// KV-cache dtype override for AIC latency prediction.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_kv_cache_dtype: Option<String>,
+
+    /// Communication (collective) dtype override for AIC latency prediction.
+    #[serde(skip)]
+    #[builder(default = "None")]
+    pub aic_comm_dtype: Option<String>,
+
     /// MTP/Eagle speculative-decoding draft-token count (1..=5).
     /// The mocker samples accepted drafts while AIC supplies undiscounted
     /// verification-round latency.
@@ -719,6 +788,11 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub bootstrap_port: Option<u16>,
 
+    /// Absolute live handoff session timeout, excluding modeled transfer delay.
+    #[builder(default = "300_000")]
+    #[validate(range(min = 1))]
+    pub handoff_session_timeout_ms: u64,
+
     /// KV cache bytes per token, auto-computed from model config by Python CLI.
     /// Formula: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
     #[builder(default = "None")]
@@ -730,6 +804,11 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     #[validate(range(min = 0.0))]
     pub kv_transfer_bandwidth: Option<f64>,
+
+    /// Selects whether disaggregated transfer timing charges the full prompt
+    /// or only the physical prompt footprint missing at the destination.
+    #[builder(default = "KvTransferTimingMode::FullPrompt")]
+    pub kv_transfer_timing_mode: KvTransferTimingMode,
 
     /// KVBM G2 (host DRAM) block capacity. When the `kvbm-offload`
     /// feature is enabled, setting this explicitly opts the mocker into
@@ -798,6 +877,12 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub reasoning: Option<ReasoningConfig>,
 
+    /// Optional Mooncake trace with exact output token IDs keyed by
+    /// `output_replay_id` annotations. Direct replay paths carry the same token
+    /// IDs on `DirectRequest` and do not need this lookup.
+    #[builder(default = "None")]
+    pub response_replay_trace_path: Option<PathBuf>,
+
     /// ZMQ port for publishing KV events in vLLM's native wire format.
     /// When set, the scheduler publishes to a ZMQ PUB socket instead of directly to NATS.
     /// A KvEventPublisher relay subscribes to this socket and forwards events to NATS.
@@ -847,6 +932,16 @@ fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationErro
         return Err(mock_engine_args_validation_error(
             "g3_requires_g2",
             "num_g3_blocks requires num_g2_blocks because mocker stages G3 through G2".to_string(),
+        ));
+    }
+
+    if args.max_model_len.is_some() && args.engine_type != EngineType::Vllm {
+        return Err(mock_engine_args_validation_error(
+            "max_model_len_requires_vllm",
+            format!(
+                "max_model_len is supported only for engine_type=vllm, got engine_type={:?}",
+                args.engine_type
+            ),
         ));
     }
     if args.enable_g4_storage && args.num_g2_blocks.is_none() {
@@ -936,6 +1031,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(block_size) = compat.block_size.into_non_null("block_size")? {
             builder = builder.block_size(block_size);
+        }
+        if let Some(max_model_len) = compat.max_model_len.into_nullable() {
+            builder = builder.max_model_len(max_model_len);
         }
         if let Some(max_num_seqs) = compat.max_num_seqs.into_nullable() {
             builder = builder.max_num_seqs(max_num_seqs);
@@ -1030,6 +1128,21 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(aic_attention_dp_size) = compat.aic_attention_dp_size.into_nullable() {
             builder = builder.aic_attention_dp_size(aic_attention_dp_size);
         }
+        if let Some(aic_gemm_dtype) = compat.aic_gemm_dtype.into_nullable() {
+            builder = builder.aic_gemm_dtype(aic_gemm_dtype);
+        }
+        if let Some(aic_moe_dtype) = compat.aic_moe_dtype.into_nullable() {
+            builder = builder.aic_moe_dtype(aic_moe_dtype);
+        }
+        if let Some(aic_fmha_dtype) = compat.aic_fmha_dtype.into_nullable() {
+            builder = builder.aic_fmha_dtype(aic_fmha_dtype);
+        }
+        if let Some(aic_kv_cache_dtype) = compat.aic_kv_cache_dtype.into_nullable() {
+            builder = builder.aic_kv_cache_dtype(aic_kv_cache_dtype);
+        }
+        if let Some(aic_comm_dtype) = compat.aic_comm_dtype.into_nullable() {
+            builder = builder.aic_comm_dtype(aic_comm_dtype);
+        }
         if let Some(aic_nextn) = compat.aic_nextn.into_nullable() {
             builder = builder.aic_nextn(aic_nextn);
         }
@@ -1057,11 +1170,23 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         if let Some(bootstrap_port) = compat.bootstrap_port.into_nullable() {
             builder = builder.bootstrap_port(bootstrap_port);
         }
+        if let Some(timeout_ms) = compat
+            .handoff_session_timeout_ms
+            .into_non_null("handoff_session_timeout_ms")?
+        {
+            builder = builder.handoff_session_timeout_ms(timeout_ms);
+        }
         if let Some(kv_bytes_per_token) = compat.kv_bytes_per_token.into_nullable() {
             builder = builder.kv_bytes_per_token(kv_bytes_per_token);
         }
         if let Some(kv_transfer_bandwidth) = compat.kv_transfer_bandwidth.into_nullable() {
             builder = builder.kv_transfer_bandwidth(kv_transfer_bandwidth);
+        }
+        if let Some(mode) = compat
+            .kv_transfer_timing_mode
+            .into_non_null("kv_transfer_timing_mode")?
+        {
+            builder = builder.kv_transfer_timing_mode(mode.parse()?);
         }
         if let Some(num_g2_blocks) = compat.num_g2_blocks.into_nullable() {
             builder = builder.num_g2_blocks(num_g2_blocks);
@@ -1098,6 +1223,10 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(reasoning) = compat.reasoning.into_nullable() {
             builder = builder.reasoning(reasoning);
+        }
+        if let Some(response_replay_trace_path) = compat.response_replay_trace_path.into_nullable()
+        {
+            builder = builder.response_replay_trace_path(response_replay_trace_path);
         }
         if let Some(zmq_kv_events_port) = compat.zmq_kv_events_port.into_nullable() {
             builder = builder.zmq_kv_events_port(zmq_kv_events_port);
@@ -1156,6 +1285,14 @@ impl MockEngineArgs {
     /// provisioned worker-seconds into GPU-hours.
     pub fn aic_gpus_per_worker(&self) -> usize {
         self.aic_tp_size.unwrap_or(1) * self.aic_attention_dp_size.unwrap_or(1)
+    }
+
+    /// Finite ownership bound for live handoff queues and sessions.
+    ///
+    /// An unset runnable-sequence limit is semantically unbounded, so use the
+    /// physical KV block count as the conservative process-local bound.
+    pub fn effective_handoff_capacity(&self) -> usize {
+        self.max_num_seqs.unwrap_or(self.num_gpu_blocks).max(1)
     }
 
     pub fn normalized(mut self) -> anyhow::Result<Self> {
@@ -1311,6 +1448,7 @@ mod tests {
     fn test_mock_engine_args_json_round_trip_preserves_worker_type_and_nulls() {
         let args = MockEngineArgs::builder()
             .worker_type(WorkerType::Decode)
+            .max_model_len(Some(32768))
             .max_num_seqs(None)
             .max_num_batched_tokens(None)
             .reasoning(None)
@@ -1320,7 +1458,7 @@ mod tests {
             .normalized()
             .unwrap();
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "engine_type": "vllm",
             "num_gpu_blocks": args.num_gpu_blocks,
             "block_size": args.block_size,
@@ -1341,8 +1479,10 @@ mod tests {
             "aic_model_path": args.aic_model_path,
             "enable_local_indexer": args.enable_local_indexer,
             "bootstrap_port": args.bootstrap_port,
+            "handoff_session_timeout_ms": args.handoff_session_timeout_ms,
             "kv_bytes_per_token": args.kv_bytes_per_token,
             "kv_transfer_bandwidth": args.kv_transfer_bandwidth,
+            "kv_transfer_timing_mode": "full_prompt",
             "num_g2_blocks": args.num_g2_blocks,
             "num_g3_blocks": args.num_g3_blocks,
             "enable_g4_storage": args.enable_g4_storage,
@@ -1361,12 +1501,18 @@ mod tests {
             "sglang": args.sglang,
             "has_perf_model": true,
         });
+        payload["max_model_len"] = serde_json::json!(args.max_model_len);
 
         let restored = MockEngineArgs::from_json_str(&payload.to_string()).unwrap();
 
         assert_eq!(restored.worker_type, WorkerType::Decode);
+        assert_eq!(restored.max_model_len, Some(32768));
         assert_eq!(restored.max_num_seqs, None);
         assert_eq!(restored.max_num_batched_tokens, None);
+        assert_eq!(
+            restored.kv_transfer_timing_mode,
+            KvTransferTimingMode::FullPrompt
+        );
     }
 
     #[test]
@@ -1385,6 +1531,27 @@ mod tests {
         assert_eq!(serialized["engine_type"], "vllm");
         assert_eq!(serialized["worker_type"], "aggregated");
         assert_eq!(serialized["preemption_mode"], "lifo");
+    }
+
+    #[test]
+    fn test_mock_engine_args_json_accepts_aic_quant_dtypes() {
+        let args = MockEngineArgs::from_json_str(
+            &json!({
+                "aic_gemm_dtype": "fp8_block",
+                "aic_moe_dtype": "w4a16_mxfp4",
+                "aic_fmha_dtype": "bfloat16",
+                "aic_kv_cache_dtype": "fp8",
+                "aic_comm_dtype": "fp8",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(args.aic_gemm_dtype.as_deref(), Some("fp8_block"));
+        assert_eq!(args.aic_moe_dtype.as_deref(), Some("w4a16_mxfp4"));
+        assert_eq!(args.aic_fmha_dtype.as_deref(), Some("bfloat16"));
+        assert_eq!(args.aic_kv_cache_dtype.as_deref(), Some("fp8"));
+        assert_eq!(args.aic_comm_dtype.as_deref(), Some("fp8"));
     }
 
     #[test]
@@ -1544,6 +1711,21 @@ mod tests {
             .unwrap()
             .normalized()
             .expect("in-range aic_nextn should validate");
+    }
+
+    #[test]
+    fn test_normalized_rejects_zero_max_model_len() {
+        let error = MockEngineArgs::builder()
+            .max_model_len(Some(0))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("max_model_len"),
+            "unexpected error: {error}",
+        );
     }
 
     #[test]

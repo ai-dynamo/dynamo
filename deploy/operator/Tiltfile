@@ -122,7 +122,7 @@ IMG_REF  = IMG + ':' + IMG_TAG
 # Compile the manager binary locally (much faster than building in Docker)
 # ---------------------------------------------------------------------------
 def compile_manager():
-    return 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o tilt_bin/manager ./cmd/main.go'
+    return 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOWORK=off go build -o tilt_bin/manager ./cmd/main.go'
 
 local_resource(
     'manager-build',
@@ -142,7 +142,12 @@ local_resource(
 # CRDs — regenerate & apply via server-side apply on change
 # ---------------------------------------------------------------------------
 SKIP_CODEGEN = settings['skip_codegen']
-_crd_cmd = kubectl_cmd + ' apply --server-side --force-conflicts -f ' + CRD_DIR
+_crd_cmd = (
+    'go run ./cmd/crd-apply --crds-dir=' + CRD_DIR +
+    ' --version=' + OPERATOR_VERSION +
+    ' --conversion-webhook-service-name=dynamo-dynamo-operator-webhook-service' +
+    ' --conversion-webhook-service-namespace=' + NAMESPACE
+)
 if not SKIP_CODEGEN:
     _crd_cmd = 'make generate && make manifests && ' + _crd_cmd
 
@@ -169,8 +174,9 @@ local(helm_cmd + ' repo add --force-update bitnami https://charts.bitnami.com/bi
 local(helm_cmd + ' repo update', quiet=True)
 
 # Initial sync at load time so render_helm() can succeed on a fresh checkout.
-# Keep this lock-file based; the Tilt resource below performs full updates.
-local(helm_cmd + ' dependency build ' + HELM_CHART, quiet=True)
+# Chart.lock and packaged charts are ignored local artifacts, so refresh them
+# here before rendering instead of trusting stale workspace state.
+local(helm_cmd + ' dependency update ' + HELM_CHART, quiet=True)
 
 # Re-run when the local operator subchart or dependency list changes.
 local_resource(

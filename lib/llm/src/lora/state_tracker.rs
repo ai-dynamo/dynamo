@@ -117,22 +117,21 @@ impl LoraStateTracker {
             .or_default()
             .insert(lora_name);
 
-        let capacity = lora
-            .max_gpu_lora_count
-            .unwrap_or(DEFAULT_MAX_GPU_LORA_COUNT);
-        if let Some(prev) = self.worker_capacity.get(&worker)
-            && *prev != capacity
-        {
+        let capacity = lora.max_gpu_lora_count.unwrap_or_else(|| {
             tracing::warn!(
                 worker_id = worker.worker_id,
                 dp_rank = worker.dp_rank,
                 lora_name = lora.name,
-                previous_capacity = *prev,
-                new_capacity = capacity,
-                "Worker capacity changed across MDC updates"
+                default = DEFAULT_MAX_GPU_LORA_COUNT,
+                "LoRA MDC carries no max_gpu_lora_count; using default for placement capacity. \
+                 The worker backend should publish its configured per-worker LoRA slot count \
+                 (e.g. vLLM --max-loras) so allocation reflects real capacity."
             );
-        }
-        self.worker_capacity.insert(worker, capacity);
+            DEFAULT_MAX_GPU_LORA_COUNT
+        });
+        // record_worker_capacity warns on a same-worker capacity change (shared with the
+        // base-card path in set_worker_capacity so both registration paths honor the invariant).
+        self.record_worker_capacity(worker, capacity);
 
         tracing::debug!(
             worker_id = worker.worker_id,
@@ -141,6 +140,37 @@ impl LoraStateTracker {
             capacity = capacity,
             "LoRA state tracker: MDC addition"
         );
+    }
+
+    /// Set a worker's LoRA slot capacity directly, without registering any adapter on it.
+    ///
+    /// Capacity-only counterpart to [`handle_mdc_addition`] (which records a loaded adapter AND
+    /// sets capacity). Makes the worker appear in [`list_workers`] with the given capacity and no
+    /// loaded LoRAs, so callers can establish cluster topology / per-worker `max_gpu_lora_count`
+    /// without consuming a slot with a phantom adapter.
+    pub fn set_worker_capacity(&self, worker: WorkerWithDpRank, capacity: u32) {
+        let _guard = self.lock_writes();
+        self.record_worker_capacity(worker, capacity);
+    }
+
+    /// Record a worker's LoRA slot capacity, warning if it changes a previously-recorded value.
+    /// The caller must hold the write lock. Shared by
+    /// [`handle_mdc_addition`](Self::handle_mdc_addition) (adapter cards) and
+    /// [`set_worker_capacity`](Self::set_worker_capacity) (base-card capacity seeding) so a
+    /// same-worker capacity change is logged regardless of which path set it.
+    fn record_worker_capacity(&self, worker: WorkerWithDpRank, capacity: u32) {
+        if let Some(prev) = self.worker_capacity.get(&worker)
+            && *prev != capacity
+        {
+            tracing::warn!(
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                previous_capacity = *prev,
+                new_capacity = capacity,
+                "Worker LoRA capacity changed across registrations"
+            );
+        }
+        self.worker_capacity.insert(worker, capacity);
     }
 
     /// Handle an MDC removal event: a worker unregistered a LoRA adapter.

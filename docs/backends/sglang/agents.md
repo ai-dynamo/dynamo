@@ -115,20 +115,19 @@ for chunk in response:
 
 SGLang can tag ordinary evictable radix KV with the normalized agent session ID without pinning requests to a worker or creating a separate streaming-session lifecycle.
 
-> **Availability:** This currently requires installing SGLang from source. The necessary server arguments are not available in a released SGLang package yet. Without `--enable-session-radix-cache`, Dynamo leaves this path disabled.
+> **Availability:** Session-aware radix ownership is built into SGLang 0.5.14 and later; no opt-in server argument is required.
 
 Launch the worker with:
 
 ```bash
 python -m dynamo.sglang \
   --model-path <model> \
-  --enable-session-radix-cache \
   --radix-eviction-policy priority
 ```
 
 Dynamo reads session identity from agent headers such as `X-Dynamo-Session-ID` and passes it to SGLang on every generate request. `X-Dynamo-Session-Final: true` is normalized into an internal KV eviction hint and forwarded with the agent context, but the SGLang backend does not act on that hint in this release.
 
-The radix entries remain normally evictable. Sending `X-Dynamo-Session-ID` does not enable sticky sessions, and `--enable-session-radix-cache` does not create router affinity. Configure any session-aware routing policy separately.
+The radix entries remain normally evictable. Session-aware radix ownership does not create router affinity; a configured router can independently use `X-Dynamo-Session-ID` for router-local affinity.
 
 ## Quickstart
 

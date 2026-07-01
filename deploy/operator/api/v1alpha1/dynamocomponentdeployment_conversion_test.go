@@ -77,6 +77,7 @@ func TestDCD_RoundTrip_Empty(t *testing.T) {
 
 func TestDCD_RoundTrip_Minimal(t *testing.T) {
 	replicas := int32(3)
+	minAvailable := int32(2)
 	src := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "min", Namespace: "ns"},
 		Spec: v1beta1.DynamoComponentDeploymentSpec{
@@ -85,6 +86,7 @@ func TestDCD_RoundTrip_Minimal(t *testing.T) {
 				ComponentName: "min",
 				ComponentType: v1beta1.ComponentTypeWorker,
 				Replicas:      &replicas,
+				MinAvailable:  &minAvailable,
 			},
 		},
 	}
