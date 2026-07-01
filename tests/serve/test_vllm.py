@@ -184,7 +184,20 @@ vllm_configs = {
         script_name="elastic_ep.sh",
         # Start at DP=2 on a 4-GPU node so scale-up to 4 has headroom; the Ray
         # DP backend places the new DP-worker actors on the free GPUs.
-        script_args=["--dp-size", "2"],
+        # GPTQ-Int4 quant of Qwen3-30B-A3B (~16 GiB weights) so a full replica
+        # fits one 24 GiB standard-tier GPU at TP=1; keeps the qwen3_moe arch
+        # that vLLM's EPLB requires. --model overrides elastic_ep.sh's default;
+        # --max-model-len/--gpu-memory-utilization keep KV within the 24 GiB bin.
+        script_args=[
+            "--dp-size",
+            "2",
+            "--model",
+            "Qwen/Qwen3-30B-A3B-GPTQ-Int4",
+            "--max-model-len",
+            "4096",
+            "--gpu-memory-utilization",
+            "0.9",
+        ],
         marks=[
             pytest.mark.vllm,
             pytest.mark.gpu_4,
@@ -194,16 +207,12 @@ vllm_configs = {
             # MoE weights + two live reconfigures (scale up then down); generous
             # ceiling over model download + engine-core respawn.
             pytest.mark.timeout(1800),
-            pytest.mark.model("Qwen/Qwen3-30B-A3B"),
-            # VRAM carve-out (.ai/test-model-size-guardrails.md): the 30B MoE is
-            # required to exercise real expert parallelism, and this runs on the
-            # dedicated gpu_4 nightly tier (large-VRAM, whole-node), not the
-            # 24 GiB bin-packed standard tier. profiled_vram_gib is omitted
-            # pending a profiling run; the test is not bin-packed by --max-vram-gib.
+            pytest.mark.model("Qwen/Qwen3-30B-A3B-GPTQ-Int4"),
         ],
-        # Small MoE that exercises expert parallelism; must match elastic_ep.sh's
-        # default so payload model-name injection resolves to the served model.
-        model="Qwen/Qwen3-30B-A3B",
+        # 4-bit MoE that exercises real expert parallelism while fitting the
+        # 24 GiB standard GPU tier; must match the served --model above so
+        # payload model-name injection resolves to the served model.
+        model="Qwen/Qwen3-30B-A3B-GPTQ-Int4",
         request_payloads=[
             # Serving works at the initial DP size...
             chat_payload_default(repeat_count=1),
