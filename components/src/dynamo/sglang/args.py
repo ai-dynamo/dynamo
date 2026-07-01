@@ -26,6 +26,7 @@ from dynamo.common.snapshot.lifecycle import (
     configure_snapshot_capture_env,
     is_snapshot_enabled,
 )
+from dynamo.common.utils.env import fpm_trace_enabled
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import enable_disjoint_streaming_output
@@ -526,11 +527,16 @@ async def parse_args(args: list[str]) -> Config:
     )
 
     # Enable forward pass metrics from dynamo env var if configured
-    if os.environ.get("DYN_FORWARDPASS_METRIC_PORT") and not getattr(
-        server_args, "enable_forward_pass_metrics", False
-    ):
+    explicit_fpm_port = os.environ.get("DYN_FORWARDPASS_METRIC_PORT")
+    if explicit_fpm_port:
+        fpm_source = "DYN_FORWARDPASS_METRIC_PORT"
+    elif fpm_trace_enabled():
+        fpm_source = "DYN_FPM_TRACE"
+    else:
+        fpm_source = None
+    if fpm_source and not getattr(server_args, "enable_forward_pass_metrics", False):
         server_args.enable_forward_pass_metrics = True
-        logging.info("Enabled forward_pass_metrics from DYN_FORWARDPASS_METRIC_PORT")
+        logging.info("Enabled forward_pass_metrics from %s", fpm_source)
 
     # Auto-detect diffusion worker mode if dllm_algorithm
     diffusion_worker = server_args.dllm_algorithm is not None

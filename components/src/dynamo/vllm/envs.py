@@ -12,14 +12,17 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from dynamo.common.utils.env import fpm_trace_enabled
+
 # TODO: move this to configuration system.
 
 # Port range constants
 REGISTERED_PORT_MIN = 1024
 REGISTERED_PORT_MAX = 49151
+DEFAULT_FORWARDPASS_METRIC_PORT = 20380
 
 if TYPE_CHECKING:
-    DYN_FORWARDPASS_METRIC_PORT: int = 20380
+    DYN_FORWARDPASS_METRIC_PORT: int = DEFAULT_FORWARDPASS_METRIC_PORT
 
 
 def _resolve_port(env_var: str, default_port: int) -> int:
@@ -59,9 +62,19 @@ def _resolve_port(env_var: str, default_port: int) -> int:
 # Environment variables configuration
 environment_variables: dict[str, Callable[[], Any]] = {
     "DYN_FORWARDPASS_METRIC_PORT": lambda: _resolve_port(
-        "DYN_FORWARDPASS_METRIC_PORT", 20380
+        "DYN_FORWARDPASS_METRIC_PORT", DEFAULT_FORWARDPASS_METRIC_PORT
     ),
 }
+
+
+def forward_pass_metrics_enabled() -> bool:
+    """Return whether Dynamo should enable backend FPM generation.
+
+    The explicit port remains the legacy opt-in and takes precedence when
+    present. FPM tracing also opts in, using the normal default port when the
+    explicit port is absent.
+    """
+    return is_set("DYN_FORWARDPASS_METRIC_PORT") or fpm_trace_enabled()
 
 
 def __getattr__(name: str):

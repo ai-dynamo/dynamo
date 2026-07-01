@@ -3,6 +3,7 @@
 
 """Unit tests for SGLang backend components."""
 
+import logging
 import re
 import sys
 from pathlib import Path
@@ -467,11 +468,50 @@ def test_dedicated_mm_encoder_requires_enable_multimodal():
 @pytest.mark.asyncio
 async def test_forward_pass_metrics_enabled_from_env(monkeypatch, mock_sglang_cli):
     """Dynamo should enable FPM when DYN_FORWARDPASS_METRIC_PORT is set."""
-    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "1")
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "23456")
     mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
 
     config = await parse_args(sys.argv[1:])
     assert config.server_args.enable_forward_pass_metrics is True
+
+
+@pytest.mark.asyncio
+async def test_forward_pass_metrics_enabled_from_trace(monkeypatch, mock_sglang_cli):
+    """DYN_FPM_TRACE should enable SGLang's existing FPM publisher."""
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.setenv("DYN_FPM_TRACE", "on")
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
+
+    config = await parse_args(sys.argv[1:])
+    assert config.server_args.enable_forward_pass_metrics is True
+
+
+@pytest.mark.asyncio
+async def test_false_fpm_trace_does_not_enable_metrics(monkeypatch, mock_sglang_cli):
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.setenv("DYN_FPM_TRACE", "off")
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
+
+    config = await parse_args(sys.argv[1:])
+    assert not config.server_args.enable_forward_pass_metrics
+
+
+@pytest.mark.asyncio
+async def test_invalid_fpm_trace_warns_and_does_not_enable_metrics(
+    monkeypatch, mock_sglang_cli, caplog
+):
+    import dynamo.common.utils.env as common_env
+
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+    monkeypatch.setenv("DYN_FPM_TRACE", "sometimes")
+    monkeypatch.setattr(common_env, "_fpm_trace_invalid_warning_emitted", False)
+    mock_sglang_cli("--model", "Qwen/Qwen3-0.6B")
+
+    with caplog.at_level(logging.WARNING, logger=common_env.__name__):
+        config = await parse_args(sys.argv[1:])
+
+    assert not config.server_args.enable_forward_pass_metrics
+    assert caplog.text.count("Invalid DYN_FPM_TRACE value") == 1
 
 
 @pytest.mark.asyncio

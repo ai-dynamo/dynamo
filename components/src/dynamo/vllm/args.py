@@ -267,7 +267,7 @@ def update_engine_config_with_dynamo(
         f"(use_kv_events={dynamo_config.use_kv_events})"
     )
 
-    if envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+    if envs.forward_pass_metrics_enabled():
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None:
             defaults[
@@ -278,8 +278,13 @@ def update_engine_config_with_dynamo(
                 f"(port={envs.DYN_FORWARDPASS_METRIC_PORT})"
             )
         else:
+            fpm_source = (
+                "DYN_FORWARDPASS_METRIC_PORT is set"
+                if envs.is_set("DYN_FORWARDPASS_METRIC_PORT")
+                else "DYN_FPM_TRACE is enabled"
+            )
             logger.warning(
-                f"DYN_FORWARDPASS_METRIC_PORT is set but scheduler_cls "
+                f"{fpm_source} but scheduler_cls "
                 f"is already '{existing_cls}'. InstrumentedScheduler will NOT "
                 f"be injected. To use forward pass metrics, either remove "
                 f"--scheduler-cls or subclass InstrumentedScheduler."

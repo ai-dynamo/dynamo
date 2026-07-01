@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import logging
 import re
 import socket
 import sys
@@ -16,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+from dynamo.vllm import envs
 from dynamo.vllm.args import (
     _connector_to_kv_transfer_json,
     _is_routable,
@@ -1149,6 +1151,115 @@ class TestRunnerPreservation:
         update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
         assert not hasattr(engine_cfg, "runner")
+
+
+class TestForwardPassMetricsActivation:
+    """FPM tracing should activate vLLM's existing FPM instrumentation."""
+
+    def test_trace_enables_instrumented_scheduler_with_default_port(self, monkeypatch):
+        monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+        monkeypatch.setenv("DYN_FPM_TRACE", "on")
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert (
+            engine_cfg.scheduler_cls
+            == "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+        )
+        assert envs.DYN_FORWARDPASS_METRIC_PORT == 20380
+
+    def test_explicit_port_wins_when_trace_is_enabled(self, monkeypatch):
+        monkeypatch.setenv("DYN_FPM_TRACE", "true")
+        monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "23456")
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert (
+            engine_cfg.scheduler_cls
+            == "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+        )
+        assert envs.DYN_FORWARDPASS_METRIC_PORT == 23456
+
+    def test_false_trace_does_not_enable_fpm(self, monkeypatch):
+        monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+        monkeypatch.setenv("DYN_FPM_TRACE", "off")
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.scheduler_cls is None
+
+    def test_invalid_trace_warns_once_and_does_not_enable_fpm(
+        self, monkeypatch, caplog
+    ):
+        import dynamo.common.utils.env as common_env
+        import dynamo.vllm.main as vllm_main
+
+        monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+        monkeypatch.setenv("DYN_FPM_TRACE", "sometimes")
+        monkeypatch.setattr(common_env, "_fpm_trace_invalid_warning_emitted", False)
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(scheduler_cls=None)
+
+        with caplog.at_level(logging.WARNING, logger=common_env.__name__):
+            update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+            assert (
+                vllm_main.setup_fpm_relay(SimpleNamespace(), SimpleNamespace()) is None
+            )
+
+        assert engine_cfg.scheduler_cls is None
+        assert caplog.text.count("Invalid DYN_FPM_TRACE value") == 1
+
+    def test_custom_scheduler_warns_and_serving_configuration_continues(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+        monkeypatch.setenv("DYN_FPM_TRACE", "1")
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(
+            scheduler_cls="example.CustomScheduler"
+        )
+
+        with caplog.at_level(logging.WARNING, logger="dynamo.vllm.args"):
+            update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.scheduler_cls == "example.CustomScheduler"
+        assert "InstrumentedScheduler will NOT be injected" in caplog.text
+
+    def test_trace_only_starts_relay_on_default_port(self, monkeypatch):
+        import dynamo.llm as dynamo_llm
+        import dynamo.vllm.main as vllm_main
+
+        monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+        monkeypatch.setenv("DYN_FPM_TRACE", "yes")
+        monkeypatch.setattr(
+            vllm_main, "get_dp_range_for_worker", lambda _config: (0, 1)
+        )
+
+        constructed = []
+
+        class FakeRelay:
+            def __init__(self, **kwargs):
+                constructed.append(kwargs)
+
+        monkeypatch.setattr(dynamo_llm, "FpmEventRelay", FakeRelay, raising=False)
+        endpoint = SimpleNamespace()
+
+        relays = vllm_main.setup_fpm_relay(endpoint, SimpleNamespace())
+
+        assert relays is not None
+        assert len(relays) == 1
+        assert constructed == [
+            {
+                "endpoint": endpoint,
+                "zmq_endpoint": "tcp://127.0.0.1:20380",
+            }
+        ]
 
 
 class TestEmbeddingWorkerFlag:

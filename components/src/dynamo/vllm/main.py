@@ -441,7 +441,7 @@ def setup_fpm_relay(
     Returns:
         List of FpmEventRelay instances, or None if FPM is not enabled.
     """
-    if not envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
+    if not envs.forward_pass_metrics_enabled():
         return None
 
     try:

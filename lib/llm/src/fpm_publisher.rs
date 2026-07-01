@@ -32,6 +32,56 @@ const FPM_VERSION: i32 = 1;
 /// Matches Python `_FpmPublisherThread.HEARTBEAT_INTERVAL`.
 const IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 
+fn report_fpm_trace_init(result: anyhow::Result<()>) {
+    if let Err(error) = result {
+        tracing::warn!(
+            %error,
+            "FPM trace initialization failed; continuing without local persistence"
+        );
+    }
+}
+
+async fn init_fpm_trace(component: &Component) {
+    let namespace = component.namespace().name();
+    let component_name = component.name().to_string();
+    let producer_id = component.drt().connection_id().to_string();
+    report_fpm_trace_init(
+        crate::fpm_trace::init_from_env_with_shutdown(
+            &namespace,
+            &component_name,
+            &producer_id,
+            component.drt().primary_token(),
+        )
+        .await,
+    );
+}
+
+fn tap_relay_fpm_with<F>(payload: &bytes::Bytes, tap: F)
+where
+    F: FnOnce(bytes::Bytes),
+{
+    tap(payload.clone());
+}
+
+fn tap_relay_fpm(payload: &bytes::Bytes) {
+    if crate::fpm_trace::is_active() {
+        tap_relay_fpm_with(payload, crate::fpm_trace::publish_payload);
+    }
+}
+
+fn tap_direct_fpm_with<F>(payload: &[u8], tap: F)
+where
+    F: FnOnce(bytes::Bytes),
+{
+    tap(bytes::Bytes::copy_from_slice(payload));
+}
+
+fn tap_direct_fpm(payload: &[u8]) {
+    if crate::fpm_trace::is_active() {
+        tap_direct_fpm_with(payload, crate::fpm_trace::publish_payload);
+    }
+}
+
 /// A relay that bridges ForwardPassMetrics from a local raw ZMQ PUB socket
 /// to the Dynamo event plane.
 pub struct FpmEventRelay {
@@ -48,6 +98,8 @@ impl FpmEventRelay {
         let rt = component.drt().runtime().secondary();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
+
+        rt.block_on(init_fpm_trace(&component));
 
         let publisher =
             rt.block_on(async { EventPublisher::for_component(&component, FPM_TOPIC).await })?;
@@ -92,8 +144,9 @@ impl FpmEventRelay {
                             let mut frames = multipart_message(frames);
                             // ZMQ multipart: [topic, seq, payload]
                             if frames.len() == 3 {
-                                let payload = frames.swap_remove(2);
-                                if let Err(e) = publisher.publish_bytes(payload).await {
+                                let payload = bytes::Bytes::from(frames.swap_remove(2));
+                                tap_relay_fpm(&payload);
+                                if let Err(e) = publisher.publish_bytes_ref(&payload).await {
                                     tracing::warn!("FPM relay: event plane publish failed: {e}");
                                 }
                             } else {
@@ -263,6 +316,7 @@ impl FpmDirectPublisher {
         let cancel = CancellationToken::new();
 
         let publisher = EventPublisher::for_component(&component, FPM_TOPIC).await?;
+        init_fpm_trace(&component).await;
 
         // Shared channel: per-dp_rank tasks send snapshots here. A single publisher task
         // serializes them into a reusable buffer and preserves event-plane publish ordering.
@@ -288,6 +342,7 @@ impl FpmDirectPublisher {
                                     pending.counter_id,
                                 ) {
                                     Ok(()) => {
+                                        tap_direct_fpm(&payload);
                                         if let Err(e) = publisher.publish_bytes_ref(&payload).await {
                                             tracing::warn!("FPM direct publisher: event plane publish failed: {e}");
                                         }
@@ -387,7 +442,48 @@ impl Drop for FpmDirectPublisher {
 mod tests {
     use super::*;
     use serde::Deserialize;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
+
+    #[test]
+    fn fpm_trace_initialization_errors_are_soft() {
+        // Trace persistence is auxiliary. Reporting an initialization failure
+        // must not turn it into a constructor error for either FPM publisher.
+        report_fpm_trace_init(Err(anyhow::anyhow!("unwritable trace path")));
+    }
+
+    #[test]
+    fn relay_and_direct_paths_tap_each_payload_exactly_once() {
+        let relay_calls = Cell::new(0);
+        let relay_payload = bytes::Bytes::from_static(b"relay");
+        tap_relay_fpm_with(&relay_payload, |payload| {
+            assert_eq!(payload.as_ref(), b"relay");
+            relay_calls.set(relay_calls.get() + 1);
+        });
+        assert_eq!(relay_calls.get(), 1);
+
+        let direct_calls = Cell::new(0);
+        tap_direct_fpm_with(b"direct", |payload| {
+            assert_eq!(payload.as_ref(), b"direct");
+            direct_calls.set(direct_calls.get() + 1);
+        });
+        assert_eq!(direct_calls.get(), 1);
+    }
+
+    #[test]
+    fn trace_tap_precedes_and_survives_event_plane_failure() {
+        let steps = RefCell::new(Vec::new());
+        let payload = bytes::Bytes::from_static(b"fpm");
+
+        tap_relay_fpm_with(&payload, |_| steps.borrow_mut().push("trace"));
+        let publish_result: anyhow::Result<()> = {
+            steps.borrow_mut().push("event-plane");
+            Err(anyhow::anyhow!("publish failed"))
+        };
+
+        assert!(publish_result.is_err());
+        assert_eq!(*steps.borrow(), ["trace", "event-plane"]);
+    }
 
     /// Verify that serialize_fpm produces valid msgpack that round-trips
     /// through deserialization with the exact field names and values
