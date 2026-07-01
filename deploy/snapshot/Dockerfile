@@ -15,7 +15,7 @@
 # Build Arguments
 # =============================================================================
 ARG DOCKER_PROXY
-ARG GO_VERSION=1.25
+ARG GO_VERSION=1.26.3
 # Default to upstream CRIU development branch. Custom forks can override both
 # args at build time, for example:
 #   --build-arg CRIU_REPO=<git-remote-url>
@@ -31,7 +31,7 @@ ARG BASE_IMAGE=placeholder-requires-base-image-arg
 # =============================================================================
 # Stage: Go base - Common setup for Go builds
 # =============================================================================
-FROM ${DOCKER_PROXY}golang:${GO_VERSION} AS go-base
+FROM ${DOCKER_PROXY}library/golang:${GO_VERSION} AS go-base
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
@@ -130,6 +130,13 @@ RUN git init /tmp/criu \
     && make -j$(nproc) \
     && make DESTDIR=/criu-install install-criu install-lib install-cuda_plugin
 
+COPY plugins/inet-remap/snapshot_inet_remap.c /tmp/snapshot_inet_remap.c
+RUN mkdir -p /criu-install/usr/local/lib/snapshot/criu-plugins \
+    && gcc -O2 -Wall -Wextra -fPIC -shared \
+      -idirafter /tmp/criu/criu/include \
+      -o /criu-install/usr/local/lib/snapshot/criu-plugins/snapshot_inet_remap.so \
+      /tmp/snapshot_inet_remap.c
+
 RUN git clone https://github.com/NVIDIA/cuda-checkpoint.git /tmp/cuda-checkpoint
 
 # =============================================================================
@@ -164,10 +171,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy CRIU from builder
 COPY --from=criu-builder /criu-install/usr/local /usr/local
+COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version
 
 # Copy CUDA checkpoint binaries
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
+COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
 RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
 
@@ -186,7 +195,9 @@ ENTRYPOINT ["/usr/local/bin/snapshot-agent"]
 # Stage: Placeholder - Runtime-compatible restore image (requires BASE_IMAGE arg)
 # This image is a superset of the runtime image: same default execution contract
 # (entrypoint/cmd/user), plus CRIU/cuda-checkpoint tooling for external restore.
-# The operator may still override command to "sleep infinity" for restore pods.
+# Dynamo backend entrypoints run a restore standby path when the operator
+# injects DYN_SNAPSHOT_RESTORE_STANDBY=1, then sleep while the
+# snapshot-agent restores into the container.
 # =============================================================================
 FROM ${BASE_IMAGE} AS placeholder
 
@@ -220,10 +231,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy CRIU from builder (needed by nsrestore running inside these namespaces)
 COPY --from=criu-builder /criu-install/usr/local /usr/local
+COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
 RUN criu --version && echo "CRIU installed successfully"
 
 # Copy CUDA checkpoint binaries
 COPY --from=criu-builder /tmp/cuda-checkpoint/bin/x86_64_Linux/cuda-checkpoint /usr/local/sbin/cuda-checkpoint
+COPY --from=criu-builder /tmp/cuda-checkpoint/LICENSE /legal/cuda-checkpoint/LICENSE
 COPY --from=cuda-helper-builder /cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper
 RUN chmod +x /usr/local/sbin/cuda-checkpoint /usr/local/bin/cuda-checkpoint-helper
 

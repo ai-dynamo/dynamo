@@ -24,10 +24,10 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
-    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer, WorkerTask,
+    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer,
+    WorkerLookupStats, WorkerTask,
 };
 use crate::active_set::reconcile_active_workers;
 use crate::protocols::{
@@ -35,6 +35,51 @@ use crate::protocols::{
     KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId,
     WorkerWithDpRank,
 };
+
+/// Environment variable selecting the default algorithm used by
+/// [`PositionalIndexer::find_matches`]. Values: `"strided"` (default, current behavior) or
+/// `"binary"`. Only consulted by [`PositionalIndexer::new`]; explicit constructors override it.
+pub const DYN_ROUTER_POSITIONAL_SEARCH_MODE: &str = "DYN_ROUTER_POSITIONAL_SEARCH_MODE";
+
+/// Selects which algorithm [`PositionalIndexer::find_matches`] uses.
+///
+/// `Strided` jumps by `jump_size`; `Binary` binary-searches the monotone "all active workers
+/// still match" predicate (with a linear-scan base case for tight windows). The two produce
+/// identical [`OverlapScores`] whenever the worker set matching the query is monotonically
+/// non-increasing with position — i.e. for contiguous-from-zero stores and tail removals. Both
+/// modes rely on this `count == active.len() ⟹ set equality` property (`Strided` via its
+/// per-`jump_size` count check); sparse absolute-position stores (e.g. front eviction or a
+/// partial snapshot restore that leaves a worker at a later position without its prefix) can
+/// violate it, and there `Binary`'s coarser probing can diverge from `Strided`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchMode {
+    /// Strided jump-search (the original behavior).
+    #[default]
+    Strided,
+    /// Monotone-predicate binary search with a linear-scan base case.
+    Binary,
+}
+
+impl SearchMode {
+    /// Read the default search mode from [`DYN_ROUTER_POSITIONAL_SEARCH_MODE`], falling back to
+    /// [`SearchMode::Strided`]. Follows the `DYN_ROUTER_*` pattern: parse, default, warn on bad value.
+    fn from_env() -> Self {
+        match std::env::var(DYN_ROUTER_POSITIONAL_SEARCH_MODE) {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "strided" => SearchMode::Strided,
+                "binary" => SearchMode::Binary,
+                other => {
+                    tracing::warn!(
+                        value = %other,
+                        "invalid {DYN_ROUTER_POSITIONAL_SEARCH_MODE}, expected 'strided' or 'binary'; falling back to strided"
+                    );
+                    SearchMode::Strided
+                }
+            },
+            Err(_) => SearchMode::Strided,
+        }
+    }
+}
 
 /// Entry for the innermost level of the index.
 ///
@@ -114,26 +159,44 @@ pub type LevelIndex = FxHashMap<ExternalSequenceBlockHash, (usize, LocalBlockHas
 pub struct PositionalIndexer {
     index: DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
 
-    tree_sizes: DashMap<WorkerWithDpRank, AtomicUsize, FxBuildHasher>,
-
     jump_size: usize,
+
+    search_mode: SearchMode,
 }
 
 impl PositionalIndexer {
     /// Create a new PositionalIndexer.
     ///
+    /// The search mode defaults to whatever [`DYN_ROUTER_POSITIONAL_SEARCH_MODE`] selects
+    /// (or [`SearchMode::Strided`] when unset). Use [`PositionalIndexer::new_with_mode`] or
+    /// [`PositionalIndexer::with_search_mode`] to pin a mode regardless of the environment.
+    ///
     /// # Arguments
     /// * `jump_size` - Jump size for find_matches optimization (e.g., 32).
     ///   The algorithm jumps by this many positions at a time, only scanning
-    ///   intermediate positions when workers drain (stop matching).
+    ///   intermediate positions when workers drain (stop matching). In `Binary` mode it also
+    ///   serves as the window threshold below which the search falls back to a linear scan.
     pub fn new(jump_size: usize) -> Self {
+        Self::new_with_mode(jump_size, SearchMode::from_env())
+    }
+
+    /// Create a new PositionalIndexer with an explicit [`SearchMode`].
+    ///
+    /// The explicit mode always wins over the environment variable.
+    pub fn new_with_mode(jump_size: usize, search_mode: SearchMode) -> Self {
         assert!(jump_size > 0, "jump_size must be greater than 0");
 
         Self {
             index: DashMap::with_hasher(FxBuildHasher),
-            tree_sizes: DashMap::with_hasher(FxBuildHasher),
             jump_size,
+            search_mode,
         }
+    }
+
+    /// Builder-style override of the [`SearchMode`] (chiefly for tests / benchmarks).
+    pub fn with_search_mode(mut self, search_mode: SearchMode) -> Self {
+        self.search_mode = search_mode;
+        self
     }
 }
 
@@ -174,6 +237,11 @@ impl SyncIndexer for PositionalIndexer {
                     }
                     let _ = resp.send(applied);
                 }
+                WorkerTask::Anchor { worker, anchor } => {
+                    if let Err(error) = self.apply_anchor(worker, anchor) {
+                        tracing::warn!(?error, "Failed to apply anchor");
+                    }
+                }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_or_clear_worker_blocks_impl(&mut worker_blocks, worker_id, false);
                 }
@@ -189,6 +257,14 @@ impl SyncIndexer for PositionalIndexer {
                         tracing::warn!("Failed to send events: {:?}", e);
                     }
                 }
+                WorkerTask::Stats(sender) => {
+                    let stats = WorkerLookupStats::from_worker_block_counts(
+                        worker_blocks
+                            .iter()
+                            .map(|(worker, worker_map)| (*worker, worker_map.len())),
+                    );
+                    let _ = sender.send(stats);
+                }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
                 }
@@ -203,18 +279,10 @@ impl SyncIndexer for PositionalIndexer {
     }
 
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
-        self.jump_search_matches(sequence, early_exit)
-    }
-
-    fn worker_count(&self) -> usize {
-        self.tree_sizes.len()
-    }
-
-    fn block_count(&self) -> usize {
-        self.tree_sizes
-            .iter()
-            .map(|e| e.value().load(Ordering::Relaxed))
-            .sum()
+        match self.search_mode {
+            SearchMode::Strided => self.jump_search_matches(sequence, early_exit),
+            SearchMode::Binary => self.binary_search_matches(sequence, early_exit),
+        }
     }
 }
 
@@ -295,7 +363,6 @@ impl PositionalIndexer {
 
         let worker_blocks_entry = worker_blocks.entry(worker).or_default();
 
-        let mut num_blocks_added = 0usize;
         let mut duplicate_store = !blocks.is_empty();
 
         for (i, block_data) in blocks.into_iter().enumerate() {
@@ -320,19 +387,8 @@ impl PositionalIndexer {
                 Some(existing) if existing == (position, local_hash) => {}
                 Some(_) => duplicate_store = false,
                 None => {
-                    num_blocks_added += 1;
                     duplicate_store = false;
                 }
-            }
-        }
-
-        match self.tree_sizes.get(&worker) {
-            Some(size) => {
-                size.fetch_add(num_blocks_added, Ordering::Relaxed);
-            }
-            None => {
-                self.tree_sizes
-                    .insert(worker, AtomicUsize::new(num_blocks_added));
             }
         }
 
@@ -361,8 +417,6 @@ impl PositionalIndexer {
             KvCacheEventError::BlockNotFound
         })?;
 
-        let mut num_removed_blocks = 0;
-
         for seq_hash in seq_hashes {
             let Some((position, local_hash)) = worker_map.remove(seq_hash) else {
                 tracing::warn!(
@@ -373,22 +427,12 @@ impl PositionalIndexer {
                     "Failed to find block to remove; skipping remove operation"
                 );
 
-                if let Some(size) = self.tree_sizes.get(&worker) {
-                    size.fetch_sub(num_removed_blocks, Ordering::Relaxed);
-                }
-
                 return Err(KvCacheEventError::BlockNotFound);
             };
 
             if let Some(mut entry) = self.index.get_mut(&(position, local_hash)) {
                 let _ = entry.remove(*seq_hash, worker);
             }
-
-            num_removed_blocks += 1;
-        }
-
-        if let Some(size) = self.tree_sizes.get(&worker) {
-            size.fetch_sub(num_removed_blocks, Ordering::Relaxed);
         }
 
         Ok(())
@@ -417,7 +461,6 @@ impl PositionalIndexer {
                     let _ = entry.remove(*seq_hash, key);
                 }
             }
-            self.tree_sizes.remove(&key);
         }
     }
 
@@ -448,13 +491,6 @@ impl PositionalIndexer {
             if keep_worker {
                 // Re-insert worker with empty map to keep it tracked
                 worker_blocks.insert(worker, FxHashMap::default());
-                // Reset tree size to 0 but keep the entry so scoring remains consistent.
-                if let Some(size) = self.tree_sizes.get(&worker) {
-                    size.store(0, Ordering::Relaxed);
-                }
-            } else {
-                // Fully remove the worker from tree_sizes.
-                self.tree_sizes.remove(&worker);
             }
         }
     }
@@ -506,14 +542,11 @@ impl PositionalIndexer {
 
 impl PositionalIndexer {
     /// Compute sequence hash incrementally from previous hash and current local hash.
+    /// Delegates to [`dynamo_tokens::compute_next_sequence_hash`] so the request-side
+    /// chain agrees with whatever produced the event stream.
     #[inline]
     fn compute_next_seq_hash(prev_seq_hash: u64, current_local_hash: u64) -> u64 {
-        let mut bytes = [0u8; 16];
-
-        bytes[..8].copy_from_slice(&prev_seq_hash.to_le_bytes());
-        bytes[8..].copy_from_slice(&current_local_hash.to_le_bytes());
-
-        dynamo_tokens::compute_hash_v2(&bytes, crate::protocols::XXH3_SEED)
+        dynamo_tokens::compute_next_sequence_hash(prev_seq_hash, current_local_hash)
     }
 
     /// Ensure seq_hashes is computed up to and including target_pos.
@@ -641,11 +674,10 @@ impl PositionalIndexer {
     ///      - None match: Scan range with linear_scan_drain
     ///      - Partial match: Scan range to find exact drain points
     /// 4. Record final scores for remaining active workers
-    /// 5. Populate tree_sizes from worker_blocks
     ///
     /// # Arguments
     /// * `index` - The position -> local_hash -> SeqEntry index
-    /// * `worker_blocks` - Per-worker reverse lookup for tree sizes
+    /// * `worker_blocks` - Per-worker reverse lookup for event removals
     /// * `local_hashes` - Sequence of LocalBlockHash to match
     /// * `jump_size` - Number of positions to jump at a time
     /// * `early_exit` - If true, stop after finding any match
@@ -680,14 +712,6 @@ impl PositionalIndexer {
             // For early exit, just record that these workers matched at least position 0
             for worker in &active {
                 scores.scores.insert(*worker, 1);
-            }
-            // Populate tree_sizes
-            for worker in scores.scores.keys() {
-                if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
-                    scores
-                        .tree_sizes
-                        .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
-                }
             }
             return scores;
         }
@@ -734,14 +758,244 @@ impl PositionalIndexer {
             scores.scores.insert(worker, final_score);
         }
 
-        for worker in scores.scores.keys() {
-            if let Some(worker_tree_size) = self.tree_sizes.get(worker) {
-                scores
-                    .tree_sizes
-                    .insert(*worker, worker_tree_size.load(Ordering::Relaxed));
+        scores
+    }
+
+    /// Binary-search variant of [`Self::jump_search_matches`].
+    ///
+    /// Produces output identical to the strided search for any query whose matching-worker set is
+    /// monotonically non-increasing with position (contiguous-from-zero stores and tail removals),
+    /// but the number of index probes scales with the number of distinct drain points
+    /// (`O(W · log L)`, `W` = workers at position 0) rather than `O(len / jump_size)`.
+    ///
+    /// # Preconditions
+    ///
+    /// Both this and [`Self::jump_search_matches`] use a count-only predicate
+    /// (`count_workers_at(p) == active.len()`) that assumes `workers(p) ⊆ active` for `p` past the
+    /// frontier. Sparse absolute-position stores (`start_position` writes, e.g. front eviction or a
+    /// partial snapshot restore that leaves a worker at a later position without its prefix) can
+    /// break that subset property. Because this search probes far fewer positions than the strided
+    /// scan (notably the `len - 1` fast path below), a non-active worker that only exists late in
+    /// the sequence can short-circuit it to a full match where the strided scan would still drain
+    /// an active worker earlier — so the two can diverge in that regime. The bench/test event
+    /// streams that drive [`PositionalIndexer`] today are all contiguous, so the property holds.
+    ///
+    /// # Algorithm
+    ///
+    /// The set of workers still matching the query is monotonically non-increasing as position
+    /// grows (a worker can leave the `active` set but never rejoin it), so
+    /// `P(p) := (workers matching at p) == active` is a monotone-decreasing predicate. It is
+    /// checked cheaply as `count_workers_at(p) == active.len()`, which is sound because
+    /// `workers(p) ⊆ active` for any position past the current frontier (count equality therefore
+    /// implies set equality).
+    ///
+    /// Each round binary-searches for the largest position where the whole `active` set still
+    /// matches; the next position is where one or more workers drain. Because every active worker
+    /// matched at that last-true position, every worker missing one step later drained exactly
+    /// there. Those workers are scored, the survivors become the new `active`, and the search
+    /// continues rightward from there. Each round drops at least one worker, so the loop runs at
+    /// most once per worker.
+    ///
+    /// For tight windows (`<= jump_size`) it defers to [`Self::linear_scan_drain`], which is
+    /// already proven and records the same exact drain positions, bounding the worst case while
+    /// reusing validated code.
+    fn binary_search_matches(
+        &self,
+        local_hashes: &[LocalBlockHash],
+        early_exit: bool,
+    ) -> OverlapScores {
+        let mut scores = OverlapScores::new();
+
+        if local_hashes.is_empty() {
+            return scores;
+        }
+
+        // Lazily computed sequence hashes. `ensure_seq_hash_computed` only ever extends this
+        // vector from its current length up to the requested position, so probing positions out
+        // of order (as binary search does) is safe and deterministic.
+        let mut seq_hashes: Vec<ExternalSequenceBlockHash> = Vec::with_capacity(local_hashes.len());
+
+        // Check first position to initialize active set.
+        let Some(mut active) =
+            self.get_workers_lazy(0, local_hashes[0], &mut seq_hashes, local_hashes)
+        else {
+            return scores;
+        };
+
+        if active.is_empty() {
+            return scores;
+        }
+
+        if early_exit {
+            // Mirror jump_search_matches exactly: record that these workers matched position 0.
+            for worker in &active {
+                scores.scores.insert(*worker, 1);
             }
+            return scores;
+        }
+
+        let len = local_hashes.len();
+
+        // Invariant: every worker in `active` matches all positions through `frontier`, and
+        // `active == workers(frontier)`, so `P(frontier)` is always true at the loop head.
+        let mut frontier = 0;
+
+        while frontier < len - 1 && !active.is_empty() {
+            // Fast path: do all active workers survive to the final position? If so, they all
+            // matched through the end and are scored `len` by the final loop below.
+            if self
+                .count_workers_at(
+                    len - 1,
+                    local_hashes[len - 1],
+                    &mut seq_hashes,
+                    local_hashes,
+                )
+                .unwrap_or(0)
+                == active.len()
+            {
+                break;
+            }
+
+            // P(frontier) is true and P(len - 1) is false. Find the last-true boundary.
+            let mut lo = frontier;
+            let mut hi = len - 1;
+
+            // Base case: once the window is small, defer to the proven linear scan over
+            // (lo, hi]. It records exact drain positions (matching the bisection path) and
+            // leaves the survivors in `active`. Since `hi == len - 1` here, this resolves the
+            // remaining suffix and the outer loop then terminates.
+            if hi - lo <= self.jump_size {
+                self.linear_scan_drain(
+                    local_hashes,
+                    &mut seq_hashes,
+                    &mut active,
+                    &mut scores,
+                    lo + 1,
+                    hi + 1,
+                    false,
+                );
+                frontier = hi;
+                continue;
+            }
+
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                if self
+                    .count_workers_at(mid, local_hashes[mid], &mut seq_hashes, local_hashes)
+                    .unwrap_or(0)
+                    == active.len()
+                {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+
+            // `hi` is the first position where at least one active worker drains. Because every
+            // active worker matched at `lo == hi - 1`, each worker missing at `hi` drained exactly
+            // here. Reconcile `active` against workers(hi) IN PLACE (no clone): cloning the
+            // survivor set here is a per-drain heap allocation that scales with fan-out (workers
+            // sharing the prefix) and becomes an allocator bottleneck under high concurrency.
+            // A missing index entry (or a seq_hash mismatch) means every active worker drains here.
+            let drain_pos = hi;
+            Self::ensure_seq_hash_computed(&mut seq_hashes, drain_pos, local_hashes);
+            let drain_seq_hash = seq_hashes[drain_pos];
+
+            match self
+                .index
+                .get(&(drain_pos, local_hashes[drain_pos]))
+                .as_ref()
+                .and_then(|entry| entry.get(drain_seq_hash))
+            {
+                Some(workers) => {
+                    reconcile_active_workers(&mut active, workers, |worker| {
+                        scores.scores.insert(worker, drain_pos as u32);
+                    });
+                }
+                None => {
+                    for worker in active.drain() {
+                        scores.scores.insert(worker, drain_pos as u32);
+                    }
+                }
+            }
+
+            frontier = drain_pos;
+        }
+
+        // Record final scores for remaining active workers; they matched through the end.
+        let final_score = len as u32;
+        for worker in active {
+            scores.scores.insert(worker, final_score);
         }
 
         scores
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LevelIndex, PositionalIndexer, SearchMode};
+    use crate::protocols::{LocalBlockHash, RouterEvent, WorkerWithDpRank};
+    use crate::test_utils::{assert_overlap_scores_eq, make_store_event};
+    use rustc_hash::FxHashMap;
+
+    fn local_hashes(hashes: &[u64]) -> Vec<LocalBlockHash> {
+        hashes.iter().copied().map(LocalBlockHash).collect()
+    }
+
+    /// Populate an indexer's shared index by applying events against a local `worker_blocks`
+    /// map, exactly as the worker thread does.
+    fn populate(indexer: &PositionalIndexer, events: &[RouterEvent]) {
+        let mut worker_blocks: FxHashMap<WorkerWithDpRank, LevelIndex> = FxHashMap::default();
+        for ev in events {
+            indexer
+                .apply_event(&mut worker_blocks, ev.clone(), None)
+                .expect("apply_event should succeed");
+        }
+    }
+
+    /// The strided and binary searches must produce identical results for both `early_exit`
+    /// settings. The public async surface always passes `early_exit = false`, so the
+    /// `early_exit = true` path is exercised here by calling the two methods directly.
+    #[test]
+    fn binary_matches_strided_both_early_exit_settings() {
+        // jump_size = 8 keeps sequences long enough relative to the stride to exercise both the
+        // bisection and the linear base case; the search-mode field is irrelevant because we call
+        // the two algorithms directly rather than via find_matches dispatch.
+        let indexer = PositionalIndexer::new_with_mode(8, SearchMode::Strided);
+
+        populate(
+            &indexer,
+            &[
+                make_store_event(0, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+                make_store_event(1, &[1, 2, 3, 99, 100]),
+                make_store_event(2, &[1, 2, 3, 4, 5, 6, 7, 8, 200, 201]),
+                make_store_event(3, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+            ],
+        );
+
+        let queries: &[&[u64]] = &[
+            &[],
+            &[1],
+            &[42], // miss
+            &[1, 2, 3],
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            &[1, 2, 3, 99, 100],
+            &[1, 2, 3, 4, 5, 6, 7, 8, 200, 201],
+        ];
+
+        for q in queries {
+            let seq = local_hashes(q);
+            for early_exit in [false, true] {
+                let strided = indexer.jump_search_matches(&seq, early_exit);
+                let binary = indexer.binary_search_matches(&seq, early_exit);
+                assert_overlap_scores_eq(
+                    &strided,
+                    &binary,
+                    &format!("q={q:?} early_exit={early_exit}"),
+                );
+            }
+        }
     }
 }

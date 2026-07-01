@@ -26,7 +26,7 @@ title: Integration README
 ```bash
 # Add installation and usage from existing integration docs
 # Example pattern (LMCache):
-# python -m dynamo.vllm --model <model> --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
+# python -m dynamo.vllm --model <model> --kv-transfer-config '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both"}'
 ```
 
 ## Configuration

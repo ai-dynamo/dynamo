@@ -6,7 +6,6 @@ package protocol
 import (
 	"context"
 	"fmt"
-	"math"
 	"path/filepath"
 	"strings"
 
@@ -31,6 +30,15 @@ type PodOptions struct {
 	SeccompProfile  string
 }
 
+const (
+	// RestoreStandbyModeEnv asks Dynamo backend entrypoints to capture restore
+	// context and sleep instead of cold-starting the workload. Generic
+	// images that do not honor this env must still provide their own inert
+	// restore command.
+	RestoreStandbyModeEnv          = "DYN_SNAPSHOT_RESTORE_STANDBY"
+	restoreStartupFailureThreshold = 1800 // 30 minutes at 1s cadence.
+)
+
 // NewRestorePod shapes every annotated target container for restore.
 func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 	pod = pod.DeepCopy()
@@ -50,6 +58,10 @@ func NewRestorePod(pod *corev1.Pod, opts PodOptions) (*corev1.Pod, error) {
 }
 
 // PrepareRestorePodSpec applies restore shaping to annotated target containers.
+// It does not change container command/args. Once the checkpoint is ready, it
+// sets DYN_SNAPSHOT_RESTORE_STANDBY=1 so Dynamo standby entrypoints
+// sleep before CRIU restore; generic images that do not honor the env must
+// still provide their own inert restore command.
 func PrepareRestorePodSpec(
 	podSpec *corev1.PodSpec,
 	annotations map[string]string,
@@ -80,20 +92,38 @@ func PrepareRestorePodSpec(
 			return fmt.Errorf("restore target container %q not found in pod spec (from %s annotation)", name, TargetContainersAnnotation)
 		}
 		if storage.BasePath != "" {
-			injectCheckpointVolumeMount(container, storage.BasePath)
+			InjectCheckpointVolumeMount(container, storage.BasePath)
 		}
 		EnsureControlVolume(podSpec, container)
 		if isCheckpointReady {
-			container.Command = []string{"sleep", "infinity"}
-			container.Args = nil
+			// Dynamo standby entrypoints honor this env by writing restore
+			// context and sleeping. Keep command/args intact so generic images
+			// can provide their own inert restore entrypoint when needed.
+			foundRestoreStandbyModeEnv := false
+			for i := range container.Env {
+				if container.Env[i].Name == RestoreStandbyModeEnv {
+					container.Env[i].Value = "1"
+					container.Env[i].ValueFrom = nil
+					foundRestoreStandbyModeEnv = true
+					break
+				}
+			}
+			if !foundRestoreStandbyModeEnv {
+				container.Env = append(container.Env, corev1.EnvVar{
+					Name:  RestoreStandbyModeEnv,
+					Value: "1",
+				})
+			}
 			ensureRestoreStartupProbe(container)
 		}
 	}
 	return nil
 }
 
-// ensureRestoreStartupProbe reuses the workload's probe when possible and
-// falls back to the restore-complete sentinel when the workload has no probe.
+// ensureRestoreStartupProbe installs a StartupProbe that gates Ready until
+// CRIU restore completes. It prefers the workload's existing Startup/Liveness/
+// Readiness probe (deep-copied with tightened cadence and infinite retries),
+// and falls back to a sentinel-file exec probe when none is defined.
 func ensureRestoreStartupProbe(container *corev1.Container) {
 	startup := container.StartupProbe
 	if startup == nil {
@@ -109,15 +139,18 @@ func ensureRestoreStartupProbe(container *corev1.Container) {
 					Command: []string{"cat", filepath.Join(SnapshotControlMountPath, RestoreCompleteFile)},
 				},
 			},
+			TimeoutSeconds:   1,
 			PeriodSeconds:    1,
-			FailureThreshold: math.MaxInt32,
+			FailureThreshold: restoreStartupFailureThreshold,
 			SuccessThreshold: 1,
 		}
 		return
 	}
 
 	startup = startup.DeepCopy()
-	startup.FailureThreshold = math.MaxInt32
+	startup.InitialDelaySeconds = 0
+	startup.PeriodSeconds = 1
+	startup.FailureThreshold = restoreStartupFailureThreshold
 	startup.SuccessThreshold = 1
 	container.StartupProbe = startup
 }
@@ -350,7 +383,7 @@ func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
 	})
 }
 
-func injectCheckpointVolumeMount(container *corev1.Container, basePath string) {
+func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
 	for _, mount := range container.VolumeMounts {
 		if mount.Name == CheckpointVolumeName {
 			return

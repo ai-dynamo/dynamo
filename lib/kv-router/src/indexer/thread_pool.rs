@@ -16,7 +16,8 @@ use rustc_hash::FxBuildHasher;
 use tokio::sync::oneshot;
 
 use super::{
-    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer, WorkerTask,
+    KvIndexerInterface, KvIndexerMetrics, KvRouterError, ShardSizeSnapshot, SyncIndexer,
+    WorkerLookupStats, WorkerTask, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
@@ -148,7 +149,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         let worker_assignments = Arc::new(DashMap::with_hasher(FxBuildHasher));
         let worker_assignment_count = Arc::new(AtomicUsize::new(0));
         let synthetic_event_id = Arc::new(AtomicU64::new(0));
-        for _ in 0..num_workers {
+        for worker_idx in 0..num_workers {
             let (event_sender, event_receiver) = flume::unbounded::<WorkerTask>();
             worker_event_senders.push(event_sender);
 
@@ -156,7 +157,28 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             let metrics = metrics.clone();
 
             let handle = std::thread::spawn(move || {
-                backend.worker(event_receiver, metrics).unwrap();
+                // This is observability, not recovery: if the worker panics, log
+                // through tracing and then preserve the panic for join().
+                let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Err(error) = backend.worker(event_receiver, metrics) {
+                        tracing::error!(
+                            worker_thread_index = worker_idx,
+                            ?error,
+                            "Thread pool worker exited with an error; worker thread is now dead"
+                        );
+                    }
+                }));
+
+                if let Err(panic_payload) = panic_result {
+                    let panic_msg = panic_payload_message(&*panic_payload);
+                    tracing::error!(
+                        target: "dynamo_kv_router::thread_pool_worker_panic",
+                        worker_thread_index = worker_idx,
+                        panic_message = %panic_msg,
+                        "Thread pool worker panicked; worker thread is now dead"
+                    );
+                    std::panic::resume_unwind(panic_payload);
+                }
             });
             thread_handles.push(handle);
         }
@@ -202,6 +224,59 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
     /// itself.
     pub fn backend_arc(&self) -> Arc<T> {
         Arc::clone(&self.backend)
+    }
+
+    pub(crate) async fn worker_lookup_stats(&self) -> WorkerLookupStats {
+        let mut receivers = Vec::new();
+        for channel in &self.worker_event_channels {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            if channel.send(WorkerTask::Stats(resp_tx)).is_ok() {
+                receivers.push(resp_rx);
+            }
+        }
+
+        let mut worker_blocks = BTreeMap::new();
+        for receiver in receivers {
+            if let Ok(stats) = receiver.await {
+                for (worker, block_count) in stats.worker_blocks {
+                    *worker_blocks.entry(worker).or_insert(0usize) += block_count;
+                }
+            }
+        }
+
+        WorkerLookupStats::from_worker_block_counts(worker_blocks)
+    }
+
+    pub async fn get_workers(&self) -> Vec<WorkerId> {
+        self.worker_lookup_stats()
+            .await
+            .worker_blocks
+            .into_iter()
+            .map(|(worker, _)| worker.worker_id)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// Enqueue a structural anchor on the same worker queue used by normal
+    /// events for this worker. Branch-sharded routing uses this to preserve
+    /// Anchor-before-Stored ordering for the dependent suffix on that queue.
+    pub(crate) fn enqueue_anchor(
+        &self,
+        worker: WorkerWithDpRank,
+        anchor: super::AnchorTask,
+    ) -> Result<(), KvRouterError> {
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker.worker_id,
+            self.num_workers,
+        );
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::Anchor { worker, anchor })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+        self.maybe_enqueue_cleanup(thread_idx);
+        Ok(())
     }
 
     /// Wait until all previously queued worker tasks have completed.
@@ -379,6 +454,74 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
                 e
             );
         }
+    }
+
+    async fn record_routing_decision_hashes(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: &[LocalBlockHash],
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<(), KvRouterError> {
+        if local_hashes.len() != sequence_hashes.len() {
+            tracing::warn!(
+                local_len = local_hashes.len(),
+                sequence_len = sequence_hashes.len(),
+                "Mismatched routing-decision hash lengths"
+            );
+            return Err(KvRouterError::IndexerDroppedRequest);
+        }
+
+        let Some(prune_manager) = &self.prune_manager else {
+            // Approximate routing decisions are only recorded when explicitly enabled.
+            return Ok(());
+        };
+
+        let event_id = Self::next_synthetic_event_id(&self.synthetic_event_id);
+        let event = Self::stored_event_for_hashes(worker, local_hashes, sequence_hashes, event_id);
+        let prune_entries = Self::block_entries_for_hashes(worker, sequence_hashes);
+        let thread_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker.worker_id,
+            self.num_workers,
+        );
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.worker_event_channels[thread_idx]
+            .send(WorkerTask::EventWithAck {
+                event,
+                resp: resp_tx,
+            })
+            .map_err(|_| KvRouterError::IndexerOffline)?;
+
+        let applied = resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+        if applied {
+            prune_manager.insert_worker_block_entries(worker, prune_entries);
+        }
+
+        Ok(())
+    }
+
+    pub async fn process_routing_decision_with_hashes(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        self.record_routing_decision_hashes(worker, &local_hashes, &sequence_hashes)
+            .await
+    }
+
+    pub async fn process_routing_decision_hash_slices(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: &[LocalBlockHash],
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<(), KvRouterError> {
+        self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
+            .await
     }
 }
 
@@ -585,11 +728,6 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
-        let Some(prune_manager) = &self.prune_manager else {
-            // Approximate routing decisions are only recorded when explicitly enabled.
-            return Ok(());
-        };
-
         tokens_with_hashes.get_or_compute_seq_hashes();
         let local_hashes = tokens_with_hashes
             .block_hashes()
@@ -597,32 +735,8 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         let sequence_hashes = tokens_with_hashes
             .seq_hashes()
             .expect("sequence hashes missing after computing sequence hashes");
-        let event_id = Self::next_synthetic_event_id(&self.synthetic_event_id);
-        let event = Self::stored_event_for_hashes(worker, local_hashes, sequence_hashes, event_id);
-        let prune_entries = Self::block_entries_for_hashes(worker, sequence_hashes);
-        let thread_idx = Self::get_or_assign_thread_idx(
-            &self.worker_assignments,
-            &self.worker_assignment_count,
-            worker.worker_id,
-            self.num_workers,
-        );
-
-        let (resp_tx, resp_rx) = oneshot::channel();
-        self.worker_event_channels[thread_idx]
-            .send(WorkerTask::EventWithAck {
-                event,
-                resp: resp_tx,
-            })
-            .map_err(|_| KvRouterError::IndexerOffline)?;
-
-        let applied = resp_rx
+        self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
             .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
-        if applied {
-            prune_manager.insert_worker_block_entries(worker, prune_entries);
-        }
-
-        Ok(())
     }
 
     async fn flush(&self) -> usize {
@@ -658,11 +772,16 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         curr_size
     }
 
-    fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+    fn timing_report(&self) -> String {
+        self.backend.timing_report()
+    }
+
+    async fn shard_sizes(&self) -> Vec<ShardSizeSnapshot> {
+        let stats = self.worker_lookup_stats().await;
         vec![ShardSizeSnapshot {
             shard_idx: 0,
-            worker_count: self.backend.worker_count(),
-            block_count: self.backend.block_count(),
+            worker_count: stats.worker_count(),
+            block_count: stats.block_count(),
             node_count: self.backend.node_count(),
         }]
     }

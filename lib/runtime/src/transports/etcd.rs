@@ -19,7 +19,7 @@ use etcd_client::{
     WatchStream, Watcher,
 };
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
-use tokio::time::{Duration, interval};
+use tokio::time::{Duration, Instant, interval};
 use tokio_util::sync::CancellationToken;
 
 mod connector;
@@ -32,6 +32,10 @@ pub use lock::*;
 
 use super::utils::build_in_runtime;
 use crate::config::environment_names::etcd as env_etcd;
+
+const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+const STARTUP_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// ETCD Client
 #[derive(Clone)]
@@ -68,35 +72,7 @@ impl Client {
         let token = runtime.primary_token();
 
         let ((connector, lease_id), rt) = build_in_runtime(
-            async move {
-                let etcd_urls = config.etcd_url.clone();
-                let connect_options = config.etcd_connect_options.clone();
-
-                // Create the connector
-                let connector = Connector::new(etcd_urls, connect_options)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "Unable to connect to etcd server at {}. Check etcd server status",
-                            config.etcd_url.join(", ")
-                        )
-                    })?;
-
-                let lease_id = if config.attach_lease {
-                    create_lease(connector.clone(), 10, token)
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "Unable to create lease. Check etcd server status at {}",
-                                config.etcd_url.join(", ")
-                            )
-                        })?
-                } else {
-                    0
-                };
-
-                Ok((connector, lease_id))
-            },
+            async move { Self::connect_with_startup_retry(&config, token).await },
             1,
         )
         .await?;
@@ -107,6 +83,80 @@ impl Client {
             rt,
             runtime,
         })
+    }
+
+    /// Connect to etcd during startup, retrying with exponential backoff for up to 2 minutes.
+    async fn connect_with_startup_retry(
+        config: &ClientOptions,
+        token: CancellationToken,
+    ) -> Result<(Arc<Connector>, u64)> {
+        let deadline = Instant::now() + STARTUP_CONNECT_TIMEOUT;
+        let mut backoff = STARTUP_CONNECT_INITIAL_BACKOFF;
+
+        loop {
+            if token.is_cancelled() {
+                anyhow::bail!("etcd startup connection cancelled");
+            }
+
+            let attempt = Self::connect_startup_attempt(config, &token).await;
+
+            match attempt {
+                Ok(connection) => return Ok(connection),
+                Err(err) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(err);
+                    }
+
+                    let sleep_duration = backoff.min(deadline.saturating_duration_since(now));
+
+                    tracing::warn!(
+                        error = %err,
+                        retry_in = ?sleep_duration,
+                        remaining = ?deadline.saturating_duration_since(now),
+                        "etcd not reachable yet; retrying startup connection"
+                    );
+
+                    tokio::select! {
+                        biased;
+
+                        _ = token.cancelled() => {
+                            anyhow::bail!("etcd startup connection cancelled");
+                        }
+
+                        _ = tokio::time::sleep(sleep_duration) => {}
+                    }
+                    backoff = backoff.saturating_mul(2).min(STARTUP_CONNECT_MAX_BACKOFF);
+                }
+            }
+        }
+    }
+
+    async fn connect_startup_attempt(
+        config: &ClientOptions,
+        token: &CancellationToken,
+    ) -> Result<(Arc<Connector>, u64)> {
+        let connector =
+            Connector::new(config.etcd_url.clone(), config.etcd_connect_options.clone()).await?;
+
+        let lease_id = if config.attach_lease {
+            create_lease(connector.clone(), config.lease_ttl, token.clone())
+                .await
+                .with_context(|| {
+                    format!(
+                        "Unable to create lease. Check etcd server status at {}",
+                        config.etcd_url.join(", ")
+                    )
+                })?
+        } else {
+            0
+        };
+
+        if token.is_cancelled() {
+            anyhow::bail!("etcd startup connection cancelled");
+        }
+
+        Ok((connector, lease_id))
     }
 
     /// Get a clone of the underlying [`etcd_client::Client`] instance.
@@ -570,6 +620,10 @@ pub struct ClientOptions {
     /// If true, the client will attach a lease to the primary [`CancellationToken`].
     #[builder(default = "true")]
     pub attach_lease: bool,
+
+    /// Lease TTL in seconds
+    #[builder(default = "default_lease_ttl()")]
+    pub lease_ttl: u64,
 }
 
 impl Default for ClientOptions {
@@ -601,6 +655,7 @@ impl Default for ClientOptions {
             etcd_url: default_servers(),
             etcd_connect_options: connect_options,
             attach_lease: true,
+            lease_ttl: default_lease_ttl(),
         }
     }
 }
@@ -612,6 +667,30 @@ fn default_servers() -> Vec<String> {
             .map(|s| s.to_string())
             .collect(),
         Err(_) => vec!["http://localhost:2379".to_string()],
+    }
+}
+
+fn default_lease_ttl() -> u64 {
+    match std::env::var(env_etcd::ETCD_LEASE_TTL) {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(ttl) if ttl > 0 => ttl,
+            Ok(_) => {
+                tracing::warn!(
+                    "{} must be >= 1; got 0. Falling back to 10.",
+                    env_etcd::ETCD_LEASE_TTL
+                );
+                10
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Invalid {}='{}' ({err}). Falling back to 10.",
+                    env_etcd::ETCD_LEASE_TTL,
+                    raw
+                );
+                10
+            }
+        },
+        Err(_) => 10,
     }
 }
 
@@ -759,7 +838,7 @@ mod tests {
 
     #[test]
     fn test_ectd_client() {
-        let rt = Runtime::from_settings().unwrap();
+        let rt = Runtime::single_threaded().unwrap();
         let rt_clone = rt.clone();
         let config = DistributedConfig::from_settings();
 
@@ -812,7 +891,7 @@ mod tests {
 
     #[test]
     fn test_kv_cache() {
-        let rt = Runtime::from_settings().unwrap();
+        let rt = Runtime::single_threaded().unwrap();
         let rt_clone = rt.clone();
         let config = DistributedConfig::from_settings();
 

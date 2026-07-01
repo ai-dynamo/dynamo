@@ -30,6 +30,11 @@
 //!   - Standalone router (`python -m dynamo.router`): available on `DYN_SYSTEM_PORT`
 //!     when set (default is `-1`, disabled), populated per-request
 //!
+//! - [`KvPublisherMetrics`]: Worker-local KV event publisher and ZMQ relay counters.
+//!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
+//!   Populated by `KvEventPublisher` and the ZMQ listener when engines publish KV
+//!   events.
+//!
 //! The standalone router does not create `WorkerLoadMetrics` or
 //! `RoutingOverheadMetrics` (those are frontend-only). It only exposes
 //! `RouterRequestMetrics` and standard DRT transport metrics
@@ -44,7 +49,7 @@ use std::time::Duration;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::metrics::prometheus_names::{
-    frontend_service, labels, name_prefix, router, router_request, routing_overhead,
+    frontend_service, kv_publisher, labels, name_prefix, router, router_request, routing_overhead,
 };
 
 /// Build a router metric name: `"router_" + frontend_service_suffix`.
@@ -52,9 +57,11 @@ fn router_metric(suffix: &str) -> String {
     format!("{}{}", router_request::METRIC_PREFIX, suffix)
 }
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use prometheus::{HistogramOpts, IntGaugeVec, Opts};
+use prometheus::{HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts};
 
 use crate::http::service::metrics::generate_log_buckets;
+
+pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -64,6 +71,172 @@ fn compute_overhead_buckets() -> Vec<f64> {
 /// Buckets for async phases (indexer find_matches, scheduling, total).
 fn async_overhead_buckets() -> Vec<f64> {
     prometheus::exponential_buckets(0.01, 3.0, 17).unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// KV publisher metrics
+// ---------------------------------------------------------------------------
+
+/// Metrics for the KV publisher, created via the MetricsHierarchy API.
+/// This provides automatic `dynamo_namespace`, `dynamo_component`, and other
+/// hierarchy labels for free.
+pub(crate) struct KvPublisherMetrics {
+    /// Total number of raw events dropped by engines before reaching publisher.
+    pub engines_dropped_events_total: IntCounter,
+    /// Total number of decoded ZMQ KV events by relay stage and event type.
+    pub zmq_events_total: IntCounterVec,
+    /// Total number of ZMQ KV events filtered before conversion.
+    pub zmq_filtered_events_total: IntCounterVec,
+    /// Total number of ZMQ KV events dropped due to conversion issues.
+    pub zmq_conversion_issues_total: IntCounterVec,
+    /// Total number of suspicious-but-forwarded ZMQ KV events.
+    pub zmq_suspicious_events_total: IntCounterVec,
+}
+
+static KV_PUBLISHER_METRICS: OnceLock<Arc<KvPublisherMetrics>> = OnceLock::new();
+
+impl KvPublisherMetrics {
+    /// Create from a Component, memoized in a static OnceLock.
+    /// Uses the MetricsHierarchy API which auto-prepends `dynamo_component_`,
+    /// injects hierarchy labels (including `worker_id`), and registers with the
+    /// DRT `MetricsRegistry`.
+    pub fn from_component(component: &Component) -> Arc<Self> {
+        KV_PUBLISHER_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let engines_dropped_events_total = metrics
+                    .create_intcounter(
+                        kv_publisher::ENGINES_DROPPED_EVENTS_TOTAL,
+                        "Total number of raw events dropped by engines before reaching publisher (detected via event_id gaps)",
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_engines_dropped_events_total");
+                let zmq_events_total = metrics
+                    .create_intcountervec(
+                        kv_publisher::ZMQ_EVENTS_TOTAL,
+                        "Total number of ZMQ KV events seen by the relay",
+                        &["stage", "event_type"],
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_zmq_events_total");
+                let zmq_filtered_events_total = metrics
+                    .create_intcountervec(
+                        kv_publisher::ZMQ_FILTERED_EVENTS_TOTAL,
+                        "Total number of ZMQ KV events filtered before conversion",
+                        &["event_type", "reason"],
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_zmq_filtered_events_total");
+                let zmq_conversion_issues_total = metrics
+                    .create_intcountervec(
+                        kv_publisher::ZMQ_CONVERSION_ISSUES_TOTAL,
+                        "Total number of ZMQ KV events dropped due to conversion issues",
+                        &["event_type", "reason"],
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_zmq_conversion_issues_total");
+                let zmq_suspicious_events_total = metrics
+                    .create_intcountervec(
+                        kv_publisher::ZMQ_SUSPICIOUS_EVENTS_TOTAL,
+                        "Total number of suspicious-but-forwarded ZMQ KV events",
+                        &["event_type", "reason"],
+                        &[],
+                    )
+                    .expect("failed to create kv_publisher_zmq_suspicious_events_total");
+
+                Arc::new(Self {
+                    engines_dropped_events_total,
+                    zmq_events_total,
+                    zmq_filtered_events_total,
+                    zmq_conversion_issues_total,
+                    zmq_suspicious_events_total,
+                })
+            })
+            .clone()
+    }
+
+    /// Increment the engines dropped events counter by the given amount.
+    pub fn increment_engines_dropped_events(&self, count: u64) {
+        self.engines_dropped_events_total.inc_by(count);
+    }
+
+    pub fn increment_zmq_event(&self, stage: &'static str, event_type: &'static str) {
+        self.zmq_events_total
+            .with_label_values(&[stage, event_type])
+            .inc();
+    }
+
+    pub fn increment_zmq_filtered_event(&self, event_type: &'static str, reason: &'static str) {
+        self.zmq_filtered_events_total
+            .with_label_values(&[event_type, reason])
+            .inc();
+    }
+
+    pub fn increment_zmq_conversion_issue(&self, event_type: &'static str, reason: &'static str) {
+        self.zmq_conversion_issues_total
+            .with_label_values(&[event_type, reason])
+            .inc();
+    }
+
+    pub fn increment_zmq_suspicious_event(&self, event_type: &'static str, reason: &'static str) {
+        self.zmq_suspicious_events_total
+            .with_label_values(&[event_type, reason])
+            .inc();
+    }
+}
+
+pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
+    KV_PUBLISHER_METRICS.get().cloned()
+}
+
+// ---------------------------------------------------------------------------
+// Router worker status metrics (component-scoped gauges)
+// ---------------------------------------------------------------------------
+
+/// Component-scoped router gauges for worker discovery.
+pub(crate) struct RouterWorkerStatusMetrics {
+    pub registered: IntGaugeVec,
+}
+
+static ROUTER_WORKER_STATUS_METRICS: OnceLock<Arc<RouterWorkerStatusMetrics>> = OnceLock::new();
+
+impl RouterWorkerStatusMetrics {
+    /// Create component-scoped gauges for standalone router observability.
+    ///
+    /// The `MetricsHierarchy` injects labels such as `dynamo_namespace` and
+    /// `dynamo_component`. It reserves `worker_id` for the metric producer, so
+    /// the backend worker ID discovered by the router uses `router_worker_id`.
+    pub fn from_component(component: &Component) -> Arc<Self> {
+        ROUTER_WORKER_STATUS_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let registered = metrics
+                    .create_intgaugevec(
+                        router::WORKER_REGISTERED,
+                        "Whether the router currently has this worker/dp_rank registered (1 = registered)",
+                        &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
+                        &[],
+                    )
+                    .expect("failed to create router_worker_registered gauge");
+
+                Arc::new(Self { registered })
+            })
+            .clone()
+    }
+
+    pub fn set_registered(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
+        let worker_id = worker_id.to_string();
+        let dp_rank = dp_rank.to_string();
+        let labels = &[worker_id.as_str(), dp_rank.as_str(), worker_type];
+        self.registered.with_label_values(labels).set(1);
+    }
+
+    pub fn remove_worker(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
+        let worker_id = worker_id.to_string();
+        let dp_rank = dp_rank.to_string();
+        let labels = &[worker_id.as_str(), dp_rank.as_str(), worker_type];
+        let _ = self.registered.remove_label_values(labels);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +319,18 @@ pub fn register_worker_load_metrics(
 pub struct RouterQueueMetrics {
     pub pending_requests: IntGaugeVec,
     pub pending_isl_tokens: IntGaugeVec,
+    pub pending_cached_tokens: IntGaugeVec,
+    pub backpressure_total: IntCounterVec,
+}
+
+#[derive(Clone)]
+pub struct RouterQueueMetricHandles {
+    pub pending_requests: IntGauge,
+    pub pending_isl_tokens: IntGauge,
+    pub pending_cached_tokens: IntGauge,
+    pub request_limit_rejections: IntCounter,
+    pub raw_isl_limit_rejections: IntCounter,
+    pub cached_token_limit_rejections: IntCounter,
 }
 
 pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
@@ -159,7 +344,7 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
                 ),
                 "Number of requests pending in the router scheduler queue",
             ),
-            &[labels::WORKER_TYPE],
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
         )
         .expect("Failed to create router_queue_pending_requests gauge"),
         pending_isl_tokens: IntGaugeVec::new(
@@ -167,22 +352,50 @@ pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
                 format!("{}_router_queue_pending_isl_tokens", name_prefix::FRONTEND),
                 "Sum of isl_tokens for requests pending in the router scheduler queue",
             ),
-            &[labels::WORKER_TYPE],
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
         )
         .expect("Failed to create router_queue_pending_isl_tokens gauge"),
+        pending_cached_tokens: IntGaugeVec::new(
+            Opts::new(
+                format!(
+                    "{}_router_queue_pending_cached_tokens",
+                    name_prefix::FRONTEND
+                ),
+                "Estimated cached tokens for requests pending in the router scheduler queue",
+            ),
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
+        )
+        .expect("Failed to create router_queue_pending_cached_tokens gauge"),
+        backpressure_total: IntCounterVec::new(
+            Opts::new(
+                format!("{}_router_queue_backpressure_total", name_prefix::FRONTEND),
+                "Total number of router scheduler queue backpressure rejections",
+            ),
+            &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
+        )
+        .expect("Failed to create router_queue_backpressure_total counter"),
     });
 
 impl RouterQueueMetrics {
-    pub fn set_pending(&self, worker_type: &str, count: usize) {
-        self.pending_requests
-            .with_label_values(&[worker_type])
-            .set(count as i64);
-    }
-
-    pub fn set_pending_isl_tokens(&self, worker_type: &str, tokens: usize) {
-        self.pending_isl_tokens
-            .with_label_values(&[worker_type])
-            .set(tokens as i64);
+    pub fn handles(
+        &self,
+        model: &str,
+        worker_type: &str,
+        policy_class: &str,
+    ) -> RouterQueueMetricHandles {
+        let queue_labels = [model, worker_type, policy_class];
+        let rejection = |reason| {
+            self.backpressure_total
+                .with_label_values(&[model, worker_type, policy_class, reason])
+        };
+        RouterQueueMetricHandles {
+            pending_requests: self.pending_requests.with_label_values(&queue_labels),
+            pending_isl_tokens: self.pending_isl_tokens.with_label_values(&queue_labels),
+            pending_cached_tokens: self.pending_cached_tokens.with_label_values(&queue_labels),
+            request_limit_rejections: rejection("request_limit"),
+            raw_isl_limit_rejections: rejection("raw_isl_token_limit"),
+            cached_token_limit_rejections: rejection("cached_token_limit"),
+        }
     }
 }
 
@@ -194,6 +407,8 @@ pub fn register_router_queue_metrics(
     let m = &*ROUTER_QUEUE_METRICS;
     registry.register(Box::new(m.pending_requests.clone()))?;
     registry.register(Box::new(m.pending_isl_tokens.clone()))?;
+    registry.register(Box::new(m.pending_cached_tokens.clone()))?;
+    registry.register(Box::new(m.backpressure_total.clone()))?;
     Ok(())
 }
 
@@ -616,6 +831,45 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
     }
 
     #[test]
+    fn test_router_worker_status_metrics_pef() {
+        let registry = prometheus::Registry::new();
+        let metrics = RouterWorkerStatusMetrics {
+            registered: IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_{}",
+                        name_prefix::COMPONENT,
+                        router::WORKER_REGISTERED
+                    ),
+                    "Whether the router currently has this worker/dp_rank registered (1 = registered)",
+                ),
+                &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
+            )
+            .unwrap(),
+        };
+        registry
+            .register(Box::new(metrics.registered.clone()))
+            .unwrap();
+
+        metrics.set_registered(123, 0, "decode");
+
+        let output = gather_pef(&registry);
+        assert!(
+            output.contains(
+                "dynamo_component_router_worker_registered{dp_rank=\"0\",router_worker_id=\"123\",worker_type=\"decode\"} 1"
+            ),
+            "\nActual PEF:\n{output}"
+        );
+
+        metrics.remove_worker(123, 0, "decode");
+        let output = gather_pef(&registry);
+        assert!(
+            !output.contains("router_worker_id=\"123\""),
+            "\nActual PEF after remove:\n{output}"
+        );
+    }
+
+    #[test]
     fn test_router_queue_metrics_pef() {
         let registry = prometheus::Registry::new();
         let metrics = RouterQueueMetrics {
@@ -628,7 +882,7 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                     ),
                     "Number of requests pending in the router scheduler queue",
                 ),
-                &[labels::WORKER_TYPE],
+                &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
             )
             .unwrap(),
             pending_isl_tokens: IntGaugeVec::new(
@@ -636,7 +890,26 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
                     format!("{}_router_queue_pending_isl_tokens", name_prefix::FRONTEND),
                     "Sum of isl_tokens for requests pending in the router scheduler queue",
                 ),
-                &[labels::WORKER_TYPE],
+                &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
+            )
+            .unwrap(),
+            pending_cached_tokens: IntGaugeVec::new(
+                Opts::new(
+                    format!(
+                        "{}_router_queue_pending_cached_tokens",
+                        name_prefix::FRONTEND
+                    ),
+                    "Estimated cached tokens for requests pending in the router scheduler queue",
+                ),
+                &[labels::MODEL, labels::WORKER_TYPE, "policy_class"],
+            )
+            .unwrap(),
+            backpressure_total: IntCounterVec::new(
+                Opts::new(
+                    format!("{}_router_queue_backpressure_total", name_prefix::FRONTEND),
+                    "Total number of router scheduler queue backpressure rejections",
+                ),
+                &[labels::MODEL, labels::WORKER_TYPE, "policy_class", "reason"],
             )
             .unwrap(),
         };
@@ -646,18 +919,34 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
         registry
             .register(Box::new(metrics.pending_isl_tokens.clone()))
             .unwrap();
+        registry
+            .register(Box::new(metrics.pending_cached_tokens.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(metrics.backpressure_total.clone()))
+            .unwrap();
 
-        metrics.set_pending("decode", 5);
-        metrics.set_pending_isl_tokens("decode", 1024);
+        let handles = metrics.handles("model", "decode", "default");
+        handles.pending_requests.set(5);
+        handles.pending_isl_tokens.set(1024);
+        handles.pending_cached_tokens.set(512);
 
         let output = gather_pef(&registry);
         let expected = "\
+# HELP dynamo_frontend_router_queue_backpressure_total Total number of router scheduler queue backpressure rejections
+# TYPE dynamo_frontend_router_queue_backpressure_total counter
+dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"cached_token_limit\",worker_type=\"decode\"} 0
+dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"raw_isl_token_limit\",worker_type=\"decode\"} 0
+dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"request_limit\",worker_type=\"decode\"} 0
+# HELP dynamo_frontend_router_queue_pending_cached_tokens Estimated cached tokens for requests pending in the router scheduler queue
+# TYPE dynamo_frontend_router_queue_pending_cached_tokens gauge
+dynamo_frontend_router_queue_pending_cached_tokens{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 512
 # HELP dynamo_frontend_router_queue_pending_isl_tokens Sum of isl_tokens for requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_isl_tokens gauge
-dynamo_frontend_router_queue_pending_isl_tokens{worker_type=\"decode\"} 1024
+dynamo_frontend_router_queue_pending_isl_tokens{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 1024
 # HELP dynamo_frontend_router_queue_pending_requests Number of requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_requests gauge
-dynamo_frontend_router_queue_pending_requests{worker_type=\"decode\"} 5
+dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 5
 ";
         assert_eq!(
             output, expected,

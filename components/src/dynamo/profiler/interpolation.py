@@ -27,10 +27,8 @@ import os
 
 import yaml
 
-from deploy.utils.dynamo_deployment import DynamoDeploymentClient
-from dynamo.planner.config.defaults import SubComponentType
+from deploy.utils.dynamo_deployment import DeploymentFailedError, DynamoDeploymentClient
 from dynamo.planner.config.planner_config import PlannerPreDeploymentSweepMode
-from dynamo.profiler.utils.config import Config, get_service_name_by_type
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
@@ -40,6 +38,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentReques
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     inject_tolerations_into_dgd,
+    pick_decode_component,
 )
 from dynamo.profiler.utils.profile_decode import profile_decode
 from dynamo.profiler.utils.profile_prefill import profile_prefill
@@ -82,12 +81,17 @@ async def run_interpolation(
 
     config_modifier = CONFIG_MODIFIERS[backend]
     model_name, model_path = config_modifier.get_model_name(disagg_config)
+    convert_kwargs = {}
+    if backend == "vllm":
+        convert_kwargs["model_name_or_path"] = model_path or model_name
 
     best_prefill_gpus = best_prefill_config.num_gpus
     best_decode_gpus = best_decode_config.num_gpus
 
     # --- Prefill interpolation ---
-    prefill_config = config_modifier.convert_config(disagg_config, EngineType.PREFILL)
+    prefill_config = config_modifier.convert_config(
+        disagg_config, EngineType.PREFILL, **convert_kwargs
+    )
     if job_tolerations:
         prefill_config = inject_tolerations_into_dgd(prefill_config, job_tolerations)
 
@@ -116,6 +120,15 @@ async def run_interpolation(
         await client.delete_deployment()
         deployment_clients.remove(client)
         return
+    except DeploymentFailedError as e:
+        logger.error(
+            "Prefill interpolation deployment entered a terminal failure state, "
+            "skipping: %s",
+            e,
+        )
+        await client.delete_deployment()
+        deployment_clients.remove(client)
+        return
 
     await client.get_deployment_logs()
     base_url = client.get_service_url()
@@ -135,7 +148,9 @@ async def run_interpolation(
     deployment_clients.remove(client)
 
     # --- Decode interpolation ---
-    decode_config = config_modifier.convert_config(disagg_config, EngineType.DECODE)
+    decode_config = config_modifier.convert_config(
+        disagg_config, EngineType.DECODE, **convert_kwargs
+    )
     if job_tolerations:
         decode_config = inject_tolerations_into_dgd(decode_config, job_tolerations)
 
@@ -164,14 +179,24 @@ async def run_interpolation(
         await client.delete_deployment()
         deployment_clients.remove(client)
         return
+    except DeploymentFailedError as e:
+        logger.error(
+            "Decode interpolation deployment entered a terminal failure state, "
+            "skipping: %s",
+            e,
+        )
+        await client.delete_deployment()
+        deployment_clients.remove(client)
+        return
 
     await client.get_deployment_logs()
 
     attention_dp_size = best_decode_config.dp
-    decode_cfg = Config.model_validate(decode_config)
-    decode_service_name = get_service_name_by_type(
-        decode_cfg, backend, SubComponentType.DECODE
-    ).lower()
+    # Log paths are stored under {work_dir}/{deployment_name}/{component}/0.log
+    # where component names are the lowercase versions of the DGD service names.
+    # client.components is populated by create_deployment() based on the actual
+    # deployment spec.
+    decode_service_name = pick_decode_component(client)
     max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
         f"{work_dir}/{client.deployment_name}/{decode_service_name}/0.log",
         attention_dp_size=attention_dp_size,

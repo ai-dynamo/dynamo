@@ -9,7 +9,8 @@ Order (highest → lowest):
     3. File fallback (NPZ / JSON under ``profile_results_dir``)
 """
 
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -46,18 +47,31 @@ def _fpm():
     return object()
 
 
+class _OneItemStream:
+    def __init__(self, item):
+        self._item = item
+        self._sent = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._sent:
+            raise StopAsyncIteration
+        self._sent = True
+        return self._item
+
+
 class TestPriorityChain:
     @pytest.mark.asyncio
     async def test_endpoint_wins(self):
         """When the endpoint returns FPMs, AIC and files are never consulted."""
         endpoint_fpms = [_fpm(), _fpm()]
-        with patch.object(
-            pm, "_try_endpoint", return_value=endpoint_fpms
-        ) as mock_ep, patch.object(
-            pm, "_try_aic_interpolation"
-        ) as mock_aic, patch.object(
-            pm, "_convert_profiling_data_to_fpms"
-        ) as mock_files:
+        with (
+            patch.object(pm, "_try_endpoint", return_value=endpoint_fpms) as mock_ep,
+            patch.object(pm, "_try_aic_interpolation") as mock_aic,
+            patch.object(pm, "_convert_profiling_data_to_fpms") as mock_files,
+        ):
             got = await pm.fetch_pre_deployment_metrics(
                 runtime=MagicMock(),
                 namespace="dynamo",
@@ -75,11 +89,13 @@ class TestPriorityChain:
     async def test_aic_fallback_when_endpoint_empty(self):
         """Endpoint returns [] → AIC runs. Files never consulted."""
         aic_fpms = [_fpm()]
-        with patch.object(pm, "_try_endpoint", return_value=[]), patch.object(
-            pm, "_try_aic_interpolation", return_value=aic_fpms
-        ) as mock_aic, patch.object(
-            pm, "_convert_profiling_data_to_fpms"
-        ) as mock_files:
+        with (
+            patch.object(pm, "_try_endpoint", return_value=[]),
+            patch.object(
+                pm, "_try_aic_interpolation", return_value=aic_fpms
+            ) as mock_aic,
+            patch.object(pm, "_convert_profiling_data_to_fpms") as mock_files,
+        ):
             got = await pm.fetch_pre_deployment_metrics(
                 runtime=MagicMock(),
                 namespace="dynamo",
@@ -96,11 +112,13 @@ class TestPriorityChain:
     async def test_file_fallback_when_no_spec(self):
         """Endpoint returns [] and aic_spec is None → files load."""
         file_fpms = [_fpm()]
-        with patch.object(pm, "_try_endpoint", return_value=[]), patch.object(
-            pm, "_try_aic_interpolation"
-        ) as mock_aic, patch.object(
-            pm, "_convert_profiling_data_to_fpms", return_value=file_fpms
-        ) as mock_files:
+        with (
+            patch.object(pm, "_try_endpoint", return_value=[]),
+            patch.object(pm, "_try_aic_interpolation") as mock_aic,
+            patch.object(
+                pm, "_convert_profiling_data_to_fpms", return_value=file_fpms
+            ) as mock_files,
+        ):
             got = await pm.fetch_pre_deployment_metrics(
                 runtime=MagicMock(),
                 namespace="dynamo",
@@ -117,11 +135,15 @@ class TestPriorityChain:
     async def test_file_fallback_when_aic_fails(self):
         """Endpoint empty, AIC raises at runtime → files are consulted."""
         file_fpms = [_fpm()]
-        with patch.object(pm, "_try_endpoint", return_value=[]), patch.object(
-            pm, "_try_aic_interpolation", side_effect=RuntimeError("aic boom")
-        ), patch.object(
-            pm, "_convert_profiling_data_to_fpms", return_value=file_fpms
-        ) as mock_files:
+        with (
+            patch.object(pm, "_try_endpoint", return_value=[]),
+            patch.object(
+                pm, "_try_aic_interpolation", side_effect=RuntimeError("aic boom")
+            ),
+            patch.object(
+                pm, "_convert_profiling_data_to_fpms", return_value=file_fpms
+            ) as mock_files,
+        ):
             got = await pm.fetch_pre_deployment_metrics(
                 runtime=MagicMock(),
                 namespace="dynamo",
@@ -137,13 +159,17 @@ class TestPriorityChain:
     async def test_aic_missing_package_falls_through_to_files(self):
         """aiconfigurator not installed → ImportError is caught, files run."""
         file_fpms = [_fpm()]
-        with patch.object(pm, "_try_endpoint", return_value=[]), patch.object(
-            pm,
-            "_try_aic_interpolation",
-            side_effect=ImportError("no module named aiconfigurator"),
-        ), patch.object(
-            pm, "_convert_profiling_data_to_fpms", return_value=file_fpms
-        ) as mock_files:
+        with (
+            patch.object(pm, "_try_endpoint", return_value=[]),
+            patch.object(
+                pm,
+                "_try_aic_interpolation",
+                side_effect=ImportError("no module named aiconfigurator"),
+            ),
+            patch.object(
+                pm, "_convert_profiling_data_to_fpms", return_value=file_fpms
+            ) as mock_files,
+        ):
             got = await pm.fetch_pre_deployment_metrics(
                 runtime=MagicMock(),
                 namespace="dynamo",
@@ -158,12 +184,14 @@ class TestPriorityChain:
     @pytest.mark.asyncio
     async def test_all_fail_raises(self):
         """No endpoint, no spec, no files → RuntimeError."""
-        with patch.object(pm, "_try_endpoint", return_value=[]), patch.object(
-            pm, "_try_aic_interpolation"
-        ) as mock_aic, patch.object(
-            pm,
-            "_convert_profiling_data_to_fpms",
-            side_effect=FileNotFoundError("no npz"),
+        with (
+            patch.object(pm, "_try_endpoint", return_value=[]),
+            patch.object(pm, "_try_aic_interpolation") as mock_aic,
+            patch.object(
+                pm,
+                "_convert_profiling_data_to_fpms",
+                side_effect=FileNotFoundError("no npz"),
+            ),
         ):
             with pytest.raises(RuntimeError, match="Failed to obtain"):
                 await pm.fetch_pre_deployment_metrics(
@@ -175,3 +203,51 @@ class TestPriorityChain:
                     aic_spec=None,
                 )
         mock_aic.assert_not_called()
+
+
+class TestEndpointDiscoveryWait:
+    @pytest.mark.asyncio
+    async def test_waits_for_endpoint_instance_before_round_robin(self):
+        endpoint_fpms = [_fpm()]
+        response = MagicMock()
+        response.data.return_value = {"results": []}
+
+        client = MagicMock()
+        client.instance_ids.return_value = []
+        client.wait_for_instances = AsyncMock(return_value=[123])
+        client.round_robin = AsyncMock(return_value=_OneItemStream(response))
+
+        endpoint = MagicMock()
+        endpoint.client = AsyncMock(return_value=client)
+        runtime = MagicMock()
+        runtime.endpoint.return_value = endpoint
+
+        with patch.object(
+            pm, "_extract_fpms_from_benchmark", return_value=endpoint_fpms
+        ):
+            got = await pm._try_endpoint(
+                runtime=runtime,
+                namespace="dynamo",
+                worker_info=MagicMock(component_name="backend"),
+                component_type=SubComponentType.DECODE,
+            )
+
+        assert got is endpoint_fpms
+        client.wait_for_instances.assert_awaited_once()
+        client.round_robin.assert_awaited_once_with(None)
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_endpoint_wait_timeout_returns_empty(self):
+        class NeverReadyClient:
+            def instance_ids(self):
+                return []
+
+            async def wait_for_instances(self):
+                await asyncio.sleep(1)
+
+        got = await pm._wait_for_endpoint_instances(
+            NeverReadyClient(), "dynamo.backend.get_perf_metrics", timeout_s=0.001
+        )
+
+        assert got is False

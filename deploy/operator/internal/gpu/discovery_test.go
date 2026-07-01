@@ -318,6 +318,56 @@ func TestDiscoverGPUsFiltered_HomogeneousCountsAllNodes(t *testing.T) {
 	assert.Equal(t, 2, info.NodesWithGPUs)
 }
 
+func TestDiscoverGPUsFiltered_DetectsRDMAAvailableLabel(t *testing.T) {
+	ctx := context.Background()
+
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "h100-node-rdma",
+			Labels: map[string]string{
+				LabelGPUCount:         "8",
+				LabelGPUProduct:       "H100-SXM5-80GB",
+				LabelGPUMemory:        "81920",
+				LabelNFDRDMAAvailable: "true",
+			},
+		},
+	}
+	k8sClient := newFakeClient(node)
+
+	info, err := DiscoverGPUsFiltered(ctx, k8sClient, "")
+	require.NoError(t, err)
+	assert.True(t, info.RDMAEnabled)
+	assert.Equal(t, "rdma", info.RDMAType)
+}
+
+func TestDiscoverGPUsFiltered_IBPodsOverrideGenericRDMAType(t *testing.T) {
+	ctx := context.Background()
+
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "h100-node-rdma",
+			Labels: map[string]string{
+				LabelGPUCount:          "8",
+				LabelGPUProduct:        "H100-SXM5-80GB",
+				LabelGPUMemory:         "81920",
+				LabelNVIDIARDMAPresent: "true",
+			},
+		},
+	}
+	ibPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rdma-shared-device-plugin",
+			Namespace: LabelValueNvidiaNetworkOperator,
+		},
+	}
+	k8sClient := newFakeClient(node, ibPod)
+
+	info, err := DiscoverGPUsFiltered(ctx, k8sClient, "")
+	require.NoError(t, err)
+	assert.True(t, info.RDMAEnabled)
+	assert.Equal(t, "infiniband", info.RDMAType)
+}
+
 func TestDiscoverGPUs_NoGPUNodes(t *testing.T) {
 	ctx := context.Background()
 
@@ -438,6 +488,16 @@ func TestInferHardwareSystem(t *testing.T) {
 			expected: nvidiacomv1beta1.GPUSKUTypeGB200SXM,
 		},
 		{
+			name:     "GB10 bare",
+			input:    "GB10",
+			expected: nvidiacomv1beta1.GPUSKUTypeGB10,
+		},
+		{
+			name:     "NVIDIA GB10 (DCGM format)",
+			input:    "NVIDIA GB10",
+			expected: nvidiacomv1beta1.GPUSKUTypeGB10,
+		},
+		{
 			name:     "B200 SXM",
 			input:    "B200 SXM",
 			expected: nvidiacomv1beta1.GPUSKUTypeB200SXM,
@@ -460,6 +520,11 @@ func TestInferHardwareSystem(t *testing.T) {
 			expected: nvidiacomv1beta1.GPUSKUTypeH100PCIe,
 		},
 		{
+			name:     "H100 HBM3 implies SXM",
+			input:    "NVIDIA-H100-80GB-HBM3",
+			expected: nvidiacomv1beta1.GPUSKUTypeH100SXM,
+		},
+		{
 			name:     "H200 SXM",
 			input:    "H200 SXM",
 			expected: nvidiacomv1beta1.GPUSKUTypeH200SXM,
@@ -480,6 +545,21 @@ func TestInferHardwareSystem(t *testing.T) {
 			name:     "A100 default PCIe",
 			input:    "A100",
 			expected: nvidiacomv1beta1.GPUSKUTypeA100PCIe,
+		},
+		{
+			name:     "A30",
+			input:    "NVIDIA A30",
+			expected: nvidiacomv1beta1.GPUSKUTypeA30,
+		},
+		{
+			name:     "A30 with capacity suffix",
+			input:    "NVIDIA A30-24GB",
+			expected: nvidiacomv1beta1.GPUSKUTypeA30,
+		},
+		{
+			name:     "RTX A3000 should not match A30",
+			input:    "NVIDIA RTX A3000",
+			expected: "",
 		},
 
 		// --- Ada ---
@@ -1087,6 +1167,46 @@ func TestDiscoverGPUsFromDCGMFiltered_MixedSKU(t *testing.T) {
 	})
 }
 
+func TestDiscoverGPUsFromDCGMFiltered_DetectsRDMAAvailableLabel(t *testing.T) {
+	ctx := context.Background()
+
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-h100",
+			Labels: map[string]string{
+				LabelNFDRDMAAvailable: "true",
+			},
+		},
+	}
+	dcgmPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dcgm-h100",
+			Namespace: "gpu-operator",
+			Labels:    map[string]string{LabelApp: LabelValueNvidiaDCGMExporter},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-h100"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			PodIP: "10.0.0.1",
+		},
+	}
+
+	k8sClient := newFakeClient(node, dcgmPod)
+	discovery := NewGPUDiscovery(func(_ context.Context, _ string) (*GPUInfo, error) {
+		return &GPUInfo{
+			NodeName:    "node-h100",
+			GPUsPerNode: 8,
+			Model:       "H100-SXM5-80GB",
+			VRAMPerGPU:  81920,
+		}, nil
+	})
+
+	info, err := discovery.DiscoverGPUsFromDCGMFiltered(ctx, k8sClient, nil, "")
+	require.NoError(t, err)
+	assert.True(t, info.RDMAEnabled)
+	assert.Equal(t, "rdma", info.RDMAType)
+}
+
 func TestDiscoverGPUsFromDCGM_GPUOperatorInstalled_DCgmNotEnabled(t *testing.T) {
 	ctx := context.Background()
 
@@ -1417,11 +1537,25 @@ func TestDetectRDMAFromNode(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "node-rdma",
 					Labels: map[string]string{
-						"nvidia.com/rdma.present": "true",
+						LabelNVIDIARDMAPresent: "true",
 					},
 				},
 			},
 			nodeName:    "node-rdma",
+			expectedOK:  true,
+			expectedTyp: "rdma",
+		},
+		{
+			name: "nfd rdma available detected",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "node-nfd-rdma",
+					Labels: map[string]string{
+						LabelNFDRDMAAvailable: "true",
+					},
+				},
+			},
+			nodeName:    "node-nfd-rdma",
 			expectedOK:  true,
 			expectedTyp: "rdma",
 		},
@@ -1431,7 +1565,7 @@ func TestDetectRDMAFromNode(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "node-sriov",
 					Labels: map[string]string{
-						"feature.node.kubernetes.io/network-sriov.capable": "true",
+						LabelNFDNetworkSRIOVCapable: "true",
 					},
 				},
 			},
@@ -1445,8 +1579,8 @@ func TestDetectRDMAFromNode(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "node-both",
 					Labels: map[string]string{
-						"nvidia.com/rdma.present":                          "true",
-						"feature.node.kubernetes.io/network-sriov.capable": "true",
+						LabelNVIDIARDMAPresent:      "true",
+						LabelNFDNetworkSRIOVCapable: "true",
 					},
 				},
 			},
@@ -1472,8 +1606,9 @@ func TestDetectRDMAFromNode(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "node-false",
 					Labels: map[string]string{
-						"nvidia.com/rdma.present":                          "false",
-						"feature.node.kubernetes.io/network-sriov.capable": "false",
+						LabelNVIDIARDMAPresent:      "false",
+						LabelNFDRDMAAvailable:       "false",
+						LabelNFDNetworkSRIOVCapable: "false",
 					},
 				},
 			},

@@ -119,6 +119,11 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = str(system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
+        # Forward-pass metrics: SGLang publishes FPM over a per-worker ipc://
+        # path, so the env var only enables the feature (the value is never
+        # bound). Allocate one per worker for cleanup symmetry with system_port.
+        self.fpm_port = allocate_port(20380)
+        env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         # Set GPU assignment for disaggregated mode (like disagg.sh)
         if mode == "decode":
@@ -163,6 +168,7 @@ class DynamoWorkerProcess(ManagedProcess):
         try:
             # system_port is a required parameter, always set in __init__
             deallocate_port(self.system_port)
+            deallocate_port(self.fpm_port)
         except Exception as e:
             logging.warning(f"Failed to release SGLang worker port: {e}")
 
@@ -287,7 +293,7 @@ def test_request_cancellation_sglang_aggregated(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                     log_offset=frontend_log_offset,
                 )
 
@@ -403,7 +409,7 @@ def test_request_cancellation_sglang_decode_cancel(
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
-                    pattern="issued control message Kill to sender",
+                    pattern="issued control message control_msg=Kill",
                 )
 
                 logger.info(

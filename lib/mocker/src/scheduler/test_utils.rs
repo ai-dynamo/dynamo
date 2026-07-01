@@ -10,7 +10,8 @@ use dynamo_kv_router::indexer::{
     METRIC_STATUS_OK, METRIC_STATUS_PARENT_NOT_FOUND, METRIC_WARNING_DUPLICATE_STORE,
 };
 use dynamo_kv_router::protocols::{
-    KvCacheEvent, KvCacheEventData, LocalBlockHash, RouterEvent, WorkerId, WorkerWithDpRank,
+    KvCacheEvent, KvCacheEventData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
+    WorkerWithDpRank,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -190,6 +191,20 @@ impl KvCacheEventSink for TestKvEventSink {
             .send(RouterEvent::new(self.worker_id, event))
             .map_err(|_| anyhow!("router test event channel closed"))
     }
+
+    fn publish_with_storage_tier(
+        &self,
+        event: KvCacheEvent,
+        storage_tier: StorageTier,
+    ) -> anyhow::Result<()> {
+        self.event_tx
+            .send(RouterEvent::with_storage_tier(
+                self.worker_id,
+                event,
+                storage_tier,
+            ))
+            .map_err(|_| anyhow!("router test event channel closed"))
+    }
 }
 
 pub(crate) fn metric_value(
@@ -257,11 +272,13 @@ pub(crate) fn removed_event_count(events: &[RouterEvent]) -> usize {
 #[derive(Default)]
 pub(crate) struct CapturingFpmSink {
     snapshots: Mutex<Vec<ForwardPassSnapshot>>,
+    published: tokio::sync::Notify,
 }
 
 impl FpmSink for CapturingFpmSink {
     fn publish(&self, snapshot: ForwardPassSnapshot) -> anyhow::Result<()> {
         self.snapshots.lock().unwrap().push(snapshot);
+        self.published.notify_waiters();
         Ok(())
     }
 }
@@ -269,6 +286,14 @@ impl FpmSink for CapturingFpmSink {
 impl CapturingFpmSink {
     pub(crate) fn take(&self) -> Vec<ForwardPassSnapshot> {
         std::mem::take(&mut *self.snapshots.lock().unwrap())
+    }
+
+    pub(crate) async fn wait_for_snapshot(&self) {
+        let published = self.published.notified();
+        if !self.snapshots.lock().unwrap().is_empty() {
+            return;
+        }
+        published.await;
     }
 }
 
@@ -313,6 +338,7 @@ pub(crate) async fn assert_scheduler_completes_all(
             uuid: None,
             dp_rank: 0,
             arrival_timestamp_ms: None,
+            ..Default::default()
         });
     }
 

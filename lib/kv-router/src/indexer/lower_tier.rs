@@ -20,7 +20,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
-use super::{KvIndexerMetrics, SyncIndexer, WorkerTask};
+use super::{EventKind, KvIndexerMetrics, SyncIndexer, WorkerLookupStats, WorkerTask};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheEventError, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
@@ -263,13 +263,7 @@ impl LowerTierIndexer {
                     return Err(KvCacheEventError::BlockNotFound);
                 };
 
-                let remove_edge = match self.edges.get_mut(&key) {
-                    Some(mut edge) => edge.remove(worker),
-                    None => false,
-                };
-                if remove_edge {
-                    self.edges.remove(&key);
-                }
+                self.remove_worker_from_edge(key, worker);
             }
 
             worker_map.is_empty()
@@ -304,13 +298,15 @@ impl LowerTierIndexer {
         };
 
         for (_, key) in worker_map {
-            let remove_edge = match self.edges.get_mut(&key) {
-                Some(mut edge) => edge.remove(worker),
-                None => false,
-            };
-            if remove_edge {
-                self.edges.remove(&key);
-            }
+            self.remove_worker_from_edge(key, worker);
+        }
+    }
+
+    fn remove_worker_from_edge(&self, key: TransitionKey, worker: WorkerWithDpRank) {
+        if let dashmap::mapref::entry::Entry::Occupied(mut edge) = self.edges.entry(key)
+            && edge.get_mut().remove(worker)
+        {
+            edge.remove();
         }
     }
 
@@ -503,24 +499,39 @@ impl SyncIndexer for LowerTierIndexer {
     fn worker(
         &self,
         event_receiver: flume::Receiver<WorkerTask>,
-        _metrics: Option<Arc<KvIndexerMetrics>>,
+        metrics: Option<Arc<KvIndexerMetrics>>,
     ) -> anyhow::Result<()> {
         let mut worker_blocks = WorkerBlockIndex::default();
+        let counters = metrics.as_ref().map(|m| m.prebind());
 
         while let Ok(task) = event_receiver.recv() {
             match task {
                 WorkerTask::Event(event) => {
-                    if let Err(error) = self.apply_event(&mut worker_blocks, event) {
+                    let kind = EventKind::of(&event.event.data);
+                    let result = self.apply_event(&mut worker_blocks, event);
+                    if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
+                    }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
                     }
                 }
                 WorkerTask::EventWithAck { event, resp } => {
+                    let kind = EventKind::of(&event.event.data);
                     let result = self.apply_event(&mut worker_blocks, event);
                     let applied = result.is_ok();
-                    if let Err(error) = result {
+                    if let Err(ref error) = result {
                         tracing::warn!(%error, "Failed to apply lower-tier event");
                     }
+                    if let Some(ref c) = counters {
+                        c.inc(kind, result);
+                    }
                     let _ = resp.send(applied);
+                }
+                WorkerTask::Anchor { worker, anchor } => {
+                    if let Err(error) = self.apply_anchor(worker, anchor) {
+                        tracing::warn!(?error, "Failed to apply anchor");
+                    }
                 }
                 WorkerTask::RemoveWorker(worker_id) => {
                     self.remove_worker(&mut worker_blocks, worker_id);
@@ -530,6 +541,14 @@ impl SyncIndexer for LowerTierIndexer {
                 }
                 WorkerTask::DumpEvents(sender) => {
                     let _ = sender.send(Ok(Self::dump_events(&worker_blocks)));
+                }
+                WorkerTask::Stats(sender) => {
+                    let stats = WorkerLookupStats::from_worker_block_counts(
+                        worker_blocks
+                            .iter()
+                            .map(|(worker, worker_map)| (*worker, worker_map.len())),
+                    );
+                    let _ = sender.send(stats);
                 }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
@@ -854,23 +873,6 @@ mod tests {
     }
 
     #[test]
-    fn root_query_uses_none_parent_transition() {
-        let mut index = TestLowerTierIndex::new();
-        index
-            .apply_event(store_event(7, 0, 0, None, &[11, 12, 13], &[101, 102, 103]))
-            .unwrap();
-
-        let mut continuations = FxHashMap::default();
-        continuations.insert(
-            WorkerWithDpRank::new(7, 0),
-            LowerTierContinuation::from_root(0),
-        );
-
-        let hits = index.query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
-        assert_eq!(hits.get(&WorkerWithDpRank::new(7, 0)), Some(&3));
-    }
-
-    #[test]
     fn root_workers_only_include_matching_root_edges() {
         let mut index = TestLowerTierIndex::new();
         index
@@ -883,25 +885,6 @@ mod tests {
         let workers = index.root_workers(LocalBlockHash(11));
         assert_eq!(workers.len(), 1);
         assert!(workers.contains(&WorkerWithDpRank::new(7, 0)));
-    }
-
-    #[tokio::test]
-    async fn thread_pool_backend_applies_lower_tier_events() {
-        let index = ThreadPoolIndexer::new(LowerTierIndexer::new(), 2, 1);
-        let worker = WorkerWithDpRank::new(7, 0);
-
-        index
-            .apply_event(store_event(7, 0, 0, None, &[11, 12], &[101, 102]))
-            .await;
-        let _ = index.dump_events().await.unwrap();
-
-        let mut continuations = FxHashMap::default();
-        continuations.insert(worker, LowerTierContinuation::from_root(0));
-
-        let hits = index
-            .backend()
-            .query_contiguous_hits(&local_hashes(&[11, 12]), &continuations);
-        assert_eq!(hits.get(&worker), Some(&2));
     }
 
     #[tokio::test]
@@ -1790,22 +1773,6 @@ mod tests {
         assert_eq!(details.hits.get(&WorkerWithDpRank::new(103, 0)), Some(&0),);
     }
 
-    /// Empty continuations map — should return empty results without panicking.
-    #[test]
-    fn empty_continuations_returns_empty_results() {
-        let mut index = TestLowerTierIndex::new();
-        index
-            .apply_event(store_event(110, 0, 0, None, &[1, 2], &[101, 102]))
-            .unwrap();
-
-        let continuations: FxHashMap<WorkerWithDpRank, LowerTierContinuation> =
-            FxHashMap::default();
-
-        let details = index.query_match_details(&local_hashes(&[1, 2]), &continuations);
-        assert!(details.hits.is_empty());
-        assert!(details.next_continuations.is_empty());
-    }
-
     /// Empty sequence — every worker should get 0 hits.
     #[test]
     fn empty_sequence_returns_zero_hits() {
@@ -1833,36 +1800,6 @@ mod tests {
             fresh.apply_event(event).unwrap();
         }
         fresh
-    }
-
-    #[test]
-    fn dump_empty_indexer_returns_no_events() {
-        let index = TestLowerTierIndex::new();
-        assert!(index.dump_events().is_empty());
-    }
-
-    #[test]
-    fn dump_round_trip_single_chain() {
-        let mut index = TestLowerTierIndex::new();
-        index
-            .apply_event(store_event(7, 0, 0, None, &[11, 12, 13], &[101, 102, 103]))
-            .unwrap();
-
-        let events = index.dump_events();
-        assert_eq!(events.len(), 3);
-
-        let restored = replay_dump(events);
-
-        let mut continuations = FxHashMap::default();
-        continuations.insert(
-            WorkerWithDpRank::new(7, 0),
-            LowerTierContinuation::from_root(0),
-        );
-
-        let original = index.query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
-        let replayed = restored.query_contiguous_hits(&local_hashes(&[11, 12, 13]), &continuations);
-        assert_eq!(original, replayed);
-        assert_eq!(replayed.get(&WorkerWithDpRank::new(7, 0)), Some(&3));
     }
 
     #[test]

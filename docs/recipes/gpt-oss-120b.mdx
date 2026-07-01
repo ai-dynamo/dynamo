@@ -1,0 +1,193 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "GPT-OSS-120B"
+subtitle: "Serve openai/gpt-oss-120b with Dynamo and TensorRT-LLM on Blackwell."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Two validated TensorRT-LLM targets cover the two traffic shapes this model is most deployed for: aggregated expert-parallel (EP4, attention-DP) serving for short-prompt, high-concurrency traffic, and a prefill/decode split for long-context generation. They are deployment targets for different workloads, not an agg-vs-disagg comparison. Pick your target; every command on this page updates to match.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Target</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated P/D</label>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="agg">
+<span><b>Checkpoint</b> openai/gpt-oss-120b</span>
+<span><b>GPUs</b> 4x GB200 (ARM64), TP4, EP4 + attention-DP</span>
+<span><b>Workload</b> Short prompts, long outputs, high concurrency (128 ISL / 1000 OSL)</span>
+<span><b>Runtime</b> TensorRT-LLM (tensorrtllm-runtime:1.2.1)</span>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="disagg">
+<span><b>Checkpoint</b> openai/gpt-oss-120b</span>
+<span><b>GPUs</b> 5x GB200/B200 (TP1 prefill + TP4 decode)</span>
+<span><b>Workload</b> Long-context generation (8K ISL / 1K OSL)</span>
+<span><b>Quantization</b> W4A8_MXFP4_MXFP8</span>
+<span><b>Runtime</b> TensorRT-LLM (tensorrtllm-runtime:1.2.1)</span>
+</div>
+</div>
+
+## Prerequisites
+
+<div data-variant="agg">
+
+- A Kubernetes cluster with the Dynamo platform installed and **4x GB200 available on ARM64 nodes** — the aggregated target will not run on x86 Hopper/Ampere hardware.
+- A Hugging Face token with access to `openai/gpt-oss-120b`.
+
+</div>
+
+<div data-variant="disagg">
+
+- A Kubernetes cluster with the Dynamo platform installed and **5x GB200 or B200** available (1 prefill + 4 decode GPUs).
+- A Hugging Face token with access to `openai/gpt-oss-120b`.
+
+</div>
+
+Create the namespace and token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+<Warning>
+Update `storageClassName` in `model-cache/model-cache.yaml` and the container image tag in `deploy.yaml` to match your Dynamo release before deploying. Also edit namespace, node selectors, and cluster-specific placement.
+</Warning>
+
+## Deploy
+
+Prepare the model cache (shared by both targets):
+
+```bash
+kubectl apply -f recipes/gpt-oss-120b/model-cache/ -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
+```
+
+Then deploy:
+
+<div data-variant="agg">
+
+```bash
+kubectl apply -f recipes/gpt-oss-120b/trtllm/agg/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-variant="disagg">
+
+Model loading takes roughly 15-30 minutes depending on storage speed:
+
+```bash
+kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml -n ${NAMESPACE}
+kubectl get pods -n ${NAMESPACE} -l nvidia.com/dynamo-graph-deployment-name=gpt-oss-disagg -w
+```
+
+</div>
+
+## Smoke Test
+
+Send a test request to verify the deployment serves traffic:
+
+<div data-variant="agg">
+
+```bash
+kubectl port-forward svc/gpt-oss-agg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-variant="disagg">
+
+```bash
+kubectl port-forward svc/gpt-oss-disagg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"openai/gpt-oss-120b","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+## Benchmark
+
+Each target ships a `perf.yaml` Kubernetes Job that waits for the model to come up, then runs AIPerf with the target's traffic shape and a request count of 10x total concurrency.
+
+<div data-variant="agg">
+
+Aggregated traffic shape: ISL 128 / OSL 1000 at 900 per GPU x 4 GPUs = 3,600 total concurrency. The Job wraps this AIPerf run:
+
+```bash
+aiperf profile \
+  --model openai/gpt-oss-120b \
+  --endpoint-type chat --endpoint /v1/chat/completions --streaming \
+  --url http://gpt-oss-agg-frontend:8000 \
+  --synthetic-input-tokens-mean 128 --output-tokens-mean 1000 \
+  --extra-inputs ignore_eos:true \
+  --concurrency 3600 --request-count 36000
+```
+
+```bash
+kubectl apply -f recipes/gpt-oss-120b/trtllm/agg/perf.yaml -n ${NAMESPACE}
+kubectl logs -f -l job-name=gpt-oss-120b-bench -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-variant="disagg">
+
+Disaggregated traffic shape: ISL 8192 / OSL 1024 at 1,536 total concurrency. The Job wraps this AIPerf run:
+
+```bash
+aiperf profile \
+  --model openai/gpt-oss-120b \
+  --endpoint-type chat --endpoint /v1/chat/completions --streaming \
+  --url http://gpt-oss-disagg-frontend:8000 \
+  --synthetic-input-tokens-mean 8192 --output-tokens-mean 1024 \
+  --extra-inputs ignore_eos:true \
+  --concurrency 1536 --request-count 15360
+```
+
+```bash
+kubectl apply -f recipes/gpt-oss-120b/trtllm/disagg/perf.yaml -n ${NAMESPACE}
+kubectl logs -f -l job-name=gpt-oss-120b-disagg-bench -n ${NAMESPACE}
+```
+
+</div>
+
+## Compare All Targets
+
+| | Aggregated | Disaggregated P/D |
+|---|---|---|
+| **GPUs** | 4x GB200 (ARM64 required) | 5x GB200/B200 |
+| **Topology** | TP4, EP4 + attention-DP | TP1 prefill + TP4 decode |
+| **Workload** | 128 ISL / 1000 OSL, 3,600 concurrency | 8K ISL / 1K OSL, 1,536 concurrency |
+| **Quantization** | Checkpoint default | W4A8_MXFP4_MXFP8 |
+| **KV transfer** | — | UCX cache transceiver |
+
+## Notes
+
+- The aggregated target requires ARM64 (GB200) nodes; the disaggregated target accepts GB200 or B200.
+- Do not read the two targets as an aggregated-vs-disaggregated benchmark; their traffic shapes differ by design.
+- The disaggregated deployment uses 5 GPUs (1x TP1 prefill + 1x TP4 decode), while its `perf.yaml` computes total concurrency from a 6-GPU count (256 x 6 = 1,536); adjust `DEPLOYMENT_GPU_COUNT` if you want strict per-GPU normalization.
+- Disaggregated engine configs differ per role: prefill runs TP1 with `max_batch_size=64` and the overlap scheduler disabled; decode runs TP4 with `max_batch_size=1280` and the overlap scheduler enabled. KV transfer uses the UCX-based cache transceiver (`max_tokens_in_buffer=9216`).
+- The disaggregated target uses `W4A8_MXFP4_MXFP8` quantization via the `OVERRIDE_QUANT_ALGO` environment variable.
+
+## Source
+
+- Source README: [recipes/gpt-oss-120b/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/README.md)
+- Disaggregated README: [recipes/gpt-oss-120b/trtllm/disagg/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/README.md)
+- Aggregated: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/agg/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/agg/perf.yaml)
+- Disaggregated: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/perf.yaml)

@@ -19,7 +19,8 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
         "extra_fields": ["worker_id", "timing"],
         "agent_hints": {
             "osl": 1024,
-            "priority": 5
+            "priority": 5,
+            "strict_priority": 1
         }
     }
 }
@@ -35,51 +36,55 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When provided with `backend_instance_id`, tokenization is skipped. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
-| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`. |
+| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
-| `agent_context` | object | `None` | Preprocessor | Passive workflow and program identity for agent traces. See [Agent Context](#agent-context). |
+| `dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the decode worker. Typically set by EPP routing headers. |
+| `prefill_dp_rank` | `u32` | `None` | Router/backend | Data-parallel rank for the prefill worker in disaggregated serving. Typically set by EPP routing headers. |
 | `agent_hints` | object | `None` | Router | Per-request hints for scheduling and load balancing. See [Agent Hints](#agent-hints). |
-| `session_control` | object | `None` | Router | Session lifecycle and sticky routing for subagent KV isolation. See [Session Control](#session-control). |
 
-### Header Overrides
+Related root-level Dynamo output option:
+
+| Field | Type | Default | Consumed By | Description |
+|-------|------|---------|-------------|-------------|
+| `return_tokens_as_token_ids` | `bool` | `false` | Response builder | Formats logprob token strings as `token_id:<id>` instead of decoded text. |
+
+`return_tokens_as_token_ids` only changes returned logprob token display. To stop on
+token IDs, pass integer IDs in the normal `stop` array, for example
+`"stop": [576]`. Strings such as `"token_id:576"` remain literal string stop
+sequences and are not parsed as token IDs.
+
+### Header overrides
 
 Routing fields can also be set via HTTP headers, which take priority over `nvext` values:
 
 | Header | Overrides |
 |--------|-----------|
-| `x-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
-| `x-prefill-instance-id` | `prefill_worker_id` |
+| `x-dynamo-worker-instance-id` | `backend_instance_id` and `decode_worker_id` |
+| `x-dynamo-prefill-instance-id` | `prefill_worker_id` |
+| `x-dynamo-dp-rank` | `dp_rank` |
+| `x-dynamo-prefill-dp-rank` | `prefill_dp_rank` |
 
-## Agent Context
+> [!WARNING]
+> The unprefixed forms (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,
+> `x-data-parallel-rank`, and `x-prefill-dp-rank`) are compatibility aliases planned for future
+> deprecation. Use the `x-dynamo-*` headers for new integrations.
 
-The `agent_context` sub-object carries passive workflow and program identity for
-agentic requests. Dynamo uses this metadata to emit request traces when the
-agent trace sink is enabled. It does not change routing, scheduling, or cache
-behavior.
+Session identity is header-only. Use the coding-agent headers or Dynamo
+session headers described in [Session IDs](../../agents/session-ids.md);
+`nvext` does not accept session identity fields.
 
-| Field | Type | Required | Description |
-|-------|------|:--------:|-------------|
-| `workflow_type_id` | `string` | Yes | Reusable profile or agent class label. |
-| `workflow_id` | `string` | Yes | Workflow, run, or structured stage identifier. |
-| `program_id` | `string` | Yes | One schedulable reasoning/tool trajectory. |
-| `parent_program_id` | `string` | No | Parent program that spawned this program, typically for subagents. |
-
-```json
-{
-    "nvext": {
-        "agent_context": {
-            "workflow_type_id": "deep_research",
-            "workflow_id": "research-run-42",
-            "program_id": "research-run-42:researcher",
-            "parent_program_id": "research-run-42:planner"
-        }
-    }
-}
-```
+When session affinity is enabled with `--router-session-affinity-ttl-secs`, the
+router uses `X-Dynamo-Session-ID` for immutable endpoint- and phase-scoped affinity.
+On etcd and shared FileStore, replicas coordinate through a distributed claim while
+the request hot path uses a process-local cache. Existing local or shared bindings
+override routing headers; the headers above are proposals only when no binding exists.
+Memory and Kubernetes discovery do not provide cross-process affinity. See
+[Configuration and Tuning](../router/router-configuration.md#session-affinity) for
+claim lifetime, cache TTL, terminal close, and failure behavior.
 
 For trace sink configuration and JSONL schema details, see
-[Agent Context and Tracing](../../agents/agent-context.md).
+[Agent Tracing](../../agents/agent-tracing.md).
 
 ## Agent Hints
 
@@ -87,21 +92,47 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `priority` | `i32` | `None` | Unified request priority. Higher values mean higher priority at the Dynamo API level. Used for router queue ordering and backend scheduling/eviction. |
+| `priority` | `i32` | `None` | Unified soft request priority. Used for router policy scoring and backend scheduling/eviction. |
+| `strict_priority` | `u32` | `None` | Router pending-queue tier. Higher values always precede lower values. Unset is equivalent to `0`. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
 | `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
 
 ### `priority`
 
-`priority` is the single user-facing scheduling hint. Higher values mean "more important" across Dynamo.
+`priority` is the cross-layer scheduling hint. Higher values mean "more
+important" across Dynamo.
 
 When `--router-queue-threshold` is set and the queue is active, higher-priority requests are shifted earlier in the router queue. Once dispatched, Dynamo forwards the same semantic priority to the backend engine for queue ordering, preemption, and KV cache eviction. Dynamo normalizes backend-specific polarity internally, including vLLM's lower-is-higher convention.
+
+For layer-by-layer behavior and backend requirements, see
+[Priority Scheduling](../router/priority-scheduling.md).
 
 ```json
 {
     "nvext": {
         "agent_hints": {
             "priority": 5
+        }
+    }
+}
+```
+
+### `strict_priority`
+
+`strict_priority` is an unsigned router-only tier for requests waiting in a
+router scheduler queue. The queue orders requests by
+`(strict_priority, configured_policy_key)`, so FCFS, LCFS, or WSPT still orders
+requests within the same tier.
+
+This field does not change backend engine priority, preempt running work, or
+provide ordering across router replicas. It also does not prevent an eligible
+new arrival from being admitted directly while other requests are parked.
+
+```json
+{
+    "nvext": {
+        "agent_hints": {
+            "strict_priority": 2
         }
     }
 }
@@ -147,8 +178,8 @@ How it works:
 
 Backend details:
 
-- **SGLang**: Requires `--enable-priority-scheduling` for queue ordering and `--radix-eviction-policy priority` for priority-based eviction.
-- **vLLM**: Requires `--scheduling-policy priority`.
+- **SGLang**: Requires [`--enable-priority-scheduling`](../../backends/sglang/agents.md#priority-scheduling) for queue ordering and [`--radix-eviction-policy priority`](../../backends/sglang/agents.md#priority-based-kv-cache-eviction) for priority-based eviction.
+- **vLLM**: Requires [`--scheduling-policy priority`](../../backends/vllm/vllm-reference-guide.md#priority-scheduling).
 - **TensorRT-LLM**: Does not currently support per-request priority.
 
 ```json
@@ -161,31 +192,6 @@ Backend details:
 }
 ```
 
-## Session Control
-
-`session_control` enables subagent KV isolation with sticky routing. The router uses `session_id` to keep a session on the same worker and can issue `open` / `close` lifecycle RPCs around streaming sessions.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `session_control.session_id` | `string` | — | Unique session identifier. Present on every turn. |
-| `session_control.action` | `string` | omitted | Optional lifecycle action: `"open"` or `"close"`. |
-| `session_control.timeout` | `integer` | `300` | Inactivity timeout in seconds. Only used with `action: "open"`. |
-
-```json
-{
-    "nvext": {
-        "session_control": {
-            "session_id": "subagent-1",
-            "action": "open",
-            "timeout": 300
-        }
-    }
-}
-```
-
-Requires `--router-mode=kv` on the frontend. Session control activates automatically when requests carry `nvext.session_control`. See [SGLang for Agentic Workloads](../../backends/sglang/agents.md) for backend setup details.
-
-
 ## Response Extensions
 
 When the client requests response metadata via `extra_fields`, the response includes an `nvext` object with the requested fields:
@@ -195,6 +201,8 @@ When the client requests response metadata via `extra_fields`, the response incl
 | `worker_id` | `extra_fields: ["worker_id"]` | Prefill/decode worker IDs and data parallel ranks that processed the request. |
 | `timing` | `extra_fields: ["timing"]` | Per-request timing information (TTFT, ITL, queue time, etc.). |
 | `routed_experts` | `extra_fields: ["routed_experts"]` | Routed expert capture payload returned by SGLang-backed requests. |
+| `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. |
+| `stop_reason` | `extra_fields: ["stop_reason"]` | Backend-specific matched stop condition, returned under `nvext` because it is not part of the OpenAI completions schema. Dynamo currently serves this as a response-level field for single-choice requests; supporting `n > 1` will require an indexed per-choice shape. |
 | `token_ids` | Automatic (GAIE Stage 1) | Tokenized prompt for reuse in Stage 2 query-only mode. |
 
 ### Example response `nvext`
@@ -222,5 +230,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 |----------|-------------|
 | [Frontend Guide](frontend-guide.md) | KServe gRPC configuration and integration |
 | [Configuration and Tuning](../router/router-configuration.md) | Full router configuration and CLI arguments |
-| [Agent Context and Tracing](../../agents/agent-context.md) | Passive workflow/program identity and JSONL request traces |
-| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session control |
+| [Session IDs](../../agents/session-ids.md) | Passive session identity |
+| [Agent Tracing](../../agents/agent-tracing.md) | JSONL request traces, inferred tool-call metadata, and harness tool-event ingestion |
+| [Agent Hints](../../agents/agent-hints.md) | Per-request serving hints for routing, scheduling, and cache behavior |
+| [SGLang for Agentic Workloads](../../backends/sglang/agents.md) | SGLang engine flags for priority scheduling, eviction policies, and session-aware radix tagging |

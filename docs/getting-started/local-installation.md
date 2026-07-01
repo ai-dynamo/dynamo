@@ -1,11 +1,14 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Local Installation
 sidebar-title: Local Installation
 description: Install and run Dynamo on a local machine or VM with containers or PyPI
 ---
 
-# Local Installation
+<p align="left">
+  <a href="./local-installation.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
+</p>
 
 This guide walks through installing and running Dynamo on a local machine or VM with one or more GPUs. By the end, you'll have a working OpenAI-compatible endpoint serving a model.
 
@@ -34,13 +37,13 @@ Containers have all dependencies pre-installed. No setup required.
 
 ```bash
 # SGLang
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
 # TensorRT-LLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
 
 # vLLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
 ```
 
 To run frontend and worker in the same container, either:
@@ -120,7 +123,7 @@ python3 -m dynamo.frontend --help
 If you cloned the repository, you can run additional system checks:
 
 ```bash
-python3 deploy/sanity_check.py
+python3 dev/sanity_check.py
 ```
 
 ### Start the Frontend
@@ -154,7 +157,12 @@ python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
 ```
 
 The warning `Cannot connect to ModelExpress server/transport error. Using direct download.`
-is expected in local deployments and can be safely ignored.
+is expected in this local single-machine setup (no ModelExpress server running) and can
+be safely ignored. In a Kubernetes deployment where `MODEL_EXPRESS_URL` is configured,
+this warning -- or the related `Failed to resolve local model path after server download`
+-- indicates that ModelExpress is configured but is not actually serving cached models;
+see [Model Caching in Kubernetes](../kubernetes/model-caching.md#option-2-modelexpress-p2p-distribution)
+for the correct configuration.
 
 **vLLM**
 
@@ -171,7 +179,7 @@ For dependency-free local development, disable KV event publishing (avoids NATS)
 - **SGLang:** No flag needed (KV events disabled by default)
 - **TensorRT-LLM:** No flag needed (KV events disabled by default)
 
-KV events are disabled by default for all backends. Add `--kv-events-config` explicitly only when you want KV event publishing enabled.
+KV events are disabled by default for all backends. For vLLM and SGLang, add backend-specific `--kv-events-config` only when you want KV event publishing enabled. For TensorRT-LLM, enable event publishing with `--publish-events-and-metrics`.
 
 ## Test Your Deployment
 
@@ -211,10 +219,10 @@ Ensure you passed `--gpus all` to `docker run`. Without this flag, the container
 
 ```bash
 # Correct
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
 # Wrong -- no GPU access
-docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.0.2
+docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 ```
 
 ## Next Steps

@@ -7,7 +7,7 @@ Priority chain:
   1. Call ``get_perf_metrics`` Dynamo endpoint (PR 7779 self-benchmark)
   2. Run AIConfigurator interpolation in-process if an ``AICInterpolationSpec``
      is supplied (rapid mode)
-  3. Convert legacy profiler NPZ / JSON to synthetic FPMs (thorough mode)
+  3. Convert ``profile_results_dir`` NPZ / JSON to synthetic FPMs (thorough mode)
   4. If all three fail: raise
 """
 
@@ -29,6 +29,12 @@ from dynamo.planner.monitoring.worker_info import WorkerInfo
 
 logger = logging.getLogger(__name__)
 
+_ENDPOINT_DISCOVERY_TIMEOUT_S = 10.0
+
+
+class PreDeploymentMetricsUnavailableError(RuntimeError):
+    """Raised when no pre-deployment FPM source produced usable data."""
+
 
 async def fetch_pre_deployment_metrics(
     runtime: "object",  # DistributedRuntime; typed loosely to avoid hard import
@@ -42,7 +48,7 @@ async def fetch_pre_deployment_metrics(
 
     1. Try ``get_perf_metrics`` endpoint (PR 7779 self-benchmark).
     2. If ``aic_spec`` is set, run AIC interpolation in-process (rapid mode).
-    3. Convert legacy profiler data (NPZ or JSON) to synthetic FPMs
+    3. Convert ``profile_results_dir`` data (NPZ or JSON) to synthetic FPMs
        (thorough mode).
     4. If all three fail: raise.
 
@@ -50,7 +56,7 @@ async def fetch_pre_deployment_metrics(
         runtime: DistributedRuntime instance.
         namespace: Dynamo namespace.
         worker_info: WorkerInfo for the target component.
-        profile_results_dir: Path to legacy profiler data (last-resort fallback).
+        profile_results_dir: Path to profiling data (last-resort fallback).
         component_type: PREFILL or DECODE.
         aic_spec: AIC interpolation spec from the profiler (rapid mode only).
 
@@ -87,7 +93,7 @@ async def fetch_pre_deployment_metrics(
             fpms = _convert_profiling_data_to_fpms(profile_results_dir, component_type)
             if fpms:
                 logger.info(
-                    f"Loaded {len(fpms)} FPMs from legacy profiler data at "
+                    f"Loaded {len(fpms)} FPMs from profile_results_dir at "
                     f"{profile_results_dir}"
                 )
                 return fpms
@@ -96,7 +102,7 @@ async def fetch_pre_deployment_metrics(
                 f"Failed to load profiling data from {profile_results_dir}: {e}"
             )
 
-    raise RuntimeError(
+    raise PreDeploymentMetricsUnavailableError(
         "Failed to obtain pre-deployment performance data. Either enable the "
         "get_perf_metrics endpoint on the worker, provide an aic_interpolation "
         "spec (rapid mode), or supply profiling results via profile_results_dir."
@@ -124,11 +130,11 @@ async def _try_endpoint(
         return []
 
     try:
-        endpoint = runtime.endpoint(  # type: ignore[attr-defined]
-            f"{namespace}.{worker_info.component_name}.get_perf_metrics"
-        )
+        endpoint_name = f"{namespace}.{worker_info.component_name}.get_perf_metrics"
+        endpoint = runtime.endpoint(endpoint_name)  # type: ignore[attr-defined]
         client = await endpoint.client()
-        await asyncio.sleep(0.1)
+        if not await _wait_for_endpoint_instances(client, endpoint_name):
+            return []
 
         response_stream = await client.round_robin(None)
         benchmark_data = None
@@ -161,6 +167,31 @@ async def _try_endpoint(
     except Exception as e:
         logger.warning(f"get_perf_metrics unexpected error: {e}")
         return []
+
+
+async def _wait_for_endpoint_instances(
+    client: object,
+    endpoint_name: str,
+    timeout_s: float = _ENDPOINT_DISCOVERY_TIMEOUT_S,
+) -> bool:
+    """Wait for Kubernetes discovery to surface at least one endpoint instance."""
+    instance_ids = client.instance_ids()  # type: ignore[attr-defined]
+    if instance_ids:
+        return True
+
+    try:
+        instance_ids = await asyncio.wait_for(
+            client.wait_for_instances(), timeout=timeout_s  # type: ignore[attr-defined]
+        )
+    except asyncio.TimeoutError:
+        logger.info(
+            "Timed out after %.1fs waiting for get_perf_metrics endpoint instances: %s",
+            timeout_s,
+            endpoint_name,
+        )
+        return False
+
+    return bool(instance_ids or client.instance_ids())  # type: ignore[attr-defined]
 
 
 def _extract_fpms_from_benchmark(
@@ -203,7 +234,7 @@ def _convert_profiling_data_to_fpms(
     profile_results_dir: str,
     component_type: SubComponentType,
 ) -> list[ForwardPassMetrics]:
-    """Convert legacy profiler data (npz or JSON) to synthetic ForwardPassMetrics."""
+    """Convert profile_results_dir data to synthetic ForwardPassMetrics."""
     fpms: list[ForwardPassMetrics] = []
 
     if component_type in (SubComponentType.PREFILL,):

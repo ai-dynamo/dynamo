@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::component::{
-    self, Component, ComponentBuilder, Endpoint, Instance, Namespace, RoutingOccupancyState,
+    self, Component, ComponentBuilder, Endpoint, EndpointDiscoverySource, Instance, Namespace,
+    RoutingOccupancyState,
 };
 use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
@@ -36,7 +37,7 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-type InstanceMap = HashMap<Endpoint, Weak<Receiver<Vec<Instance>>>>;
+type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
@@ -66,7 +67,7 @@ pub struct DistributedRuntime {
     // paths in etcd to a minimum.
     component_registry: component::Registry,
 
-    instance_sources: Arc<tokio::sync::Mutex<InstanceMap>>,
+    endpoint_discovery_sources: Arc<tokio::sync::Mutex<EndpointDiscoverySourceMap>>,
     routing_occupancy_states: Arc<tokio::sync::Mutex<RoutingOccupancyMap>>,
 
     // Health Status
@@ -201,7 +202,7 @@ impl DistributedRuntime {
             discovery_client,
             discovery_metadata,
             component_registry,
-            instance_sources: Arc::new(Mutex::new(HashMap::new())),
+            endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
             routing_occupancy_states: Arc::new(Mutex::new(HashMap::new())),
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
@@ -432,12 +433,10 @@ impl DistributedRuntime {
     /// Returns the event transport kind this runtime was configured with.
     ///
     /// The value is resolved once at construction time by `DiscoveryBackend::resolve_event_transport_kind`:
-    /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the discovery
-    /// backend drives the default (ZMQ for `file`/`mem`, NATS for `etcd`/`kubernetes`).
+    /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the default is ZMQ.
     ///
     /// Use this instead of [`EventTransportKind::from_env_or_default`] wherever you have
-    /// access to a `DistributedRuntime`, so that local-only workflows work without
-    /// setting `DYN_EVENT_PLANE` explicitly.
+    /// access to a `DistributedRuntime`.
     pub fn default_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
         self.event_transport_kind
     }
@@ -450,8 +449,17 @@ impl DistributedRuntime {
         self.runtime.graceful_shutdown_tracker()
     }
 
-    pub fn instance_sources(&self) -> Arc<Mutex<InstanceMap>> {
-        self.instance_sources.clone()
+    pub(crate) fn endpoint_discovery_sources(&self) -> Arc<Mutex<EndpointDiscoverySourceMap>> {
+        self.endpoint_discovery_sources.clone()
+    }
+
+    /// Register an external long-running shutdown task with this runtime's
+    /// graceful-shutdown tracker. While the returned guard is alive,
+    /// `Runtime::shutdown` will keep waiting in Phase 2 (rather than
+    /// advancing to Phase 3 / NATS+etcd teardown). Drop the guard once
+    /// the task has finished.
+    pub fn register_graceful_task(&self) -> crate::utils::GracefulTaskGuard {
+        self.runtime.graceful_shutdown_tracker().register_task()
     }
 
     pub(crate) fn routing_occupancy_states(&self) -> Arc<Mutex<RoutingOccupancyMap>> {
@@ -466,6 +474,15 @@ impl DistributedRuntime {
     pub async fn kv_router_nats_publish(
         &self,
         subject: String,
+        payload: bytes::Bytes,
+    ) -> anyhow::Result<()> {
+        self.kv_router_nats_publish_subject(subject.into(), payload)
+            .await
+    }
+
+    pub(crate) async fn kv_router_nats_publish_subject(
+        &self,
+        subject: async_nats::Subject,
         payload: bytes::Bytes,
     ) -> anyhow::Result<()> {
         let Some(nats_client) = self.nats_client.as_ref() else {
@@ -601,8 +618,6 @@ impl DiscoveryBackend {
     /// Returns true if this backend requires no external services (file or in-memory).
     ///
     /// Local backends do not need etcd, NATS, or any other infrastructure daemon.
-    /// This is used to drive smart defaults: for example, the event plane defaults to
-    /// ZMQ (not NATS) when a local backend is in use and `DYN_EVENT_PLANE` is not set.
     pub fn is_local(&self) -> bool {
         matches!(
             self,
@@ -613,10 +628,10 @@ impl DiscoveryBackend {
 
     /// Resolve the event transport kind for this backend.
     ///
-    /// This is the single authoritative mapping of `(DYN_EVENT_PLANE, backend)` →
-    /// `EventTransportKind`. When `DYN_EVENT_PLANE` is unset or empty the backend
-    /// drives the default: local backends (`file`/`mem`) → ZMQ, distributed backends
-    /// (`etcd`/`kubernetes`) → NATS.
+    /// This is the single authoritative mapping of `DYN_EVENT_PLANE` →
+    /// `EventTransportKind`. ZMQ is the default event plane for all backends
+    /// (`file`/`mem`/`etcd`/`kubernetes`); NATS is an explicit opt-in via
+    /// `DYN_EVENT_PLANE=nats`.
     ///
     /// Call this once at startup and store the result; do not call it repeatedly.
     pub fn resolve_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
@@ -625,27 +640,15 @@ impl DiscoveryBackend {
         match std::env::var(DYN_EVENT_PLANE).as_deref() {
             Ok("nats") => EventTransportKind::Nats,
             Ok("zmq") => EventTransportKind::Zmq,
-            // Unset or empty: derive from backend type.
-            Ok("") | Err(_) => {
-                if self.is_local() {
-                    EventTransportKind::Zmq
-                } else {
-                    EventTransportKind::Nats
-                }
-            }
+            // Unset or empty: ZMQ is the default for every backend.
+            Ok("") | Err(_) => EventTransportKind::Zmq,
             Ok(other) => {
-                let default_kind = if self.is_local() {
-                    EventTransportKind::Zmq
-                } else {
-                    EventTransportKind::Nats
-                };
                 tracing::warn!(
                     "Invalid DYN_EVENT_PLANE value '{}'. Valid values: 'nats', 'zmq'. \
-                     Defaulting to {:?}.",
-                    other,
-                    default_kind
+                     Defaulting to ZMQ.",
+                    other
                 );
-                default_kind
+                EventTransportKind::Zmq
             }
         }
     }
@@ -765,14 +768,11 @@ impl DistributedConfig {
 ///
 /// This determines how requests are distributed from routers to workers:
 /// - `Nats`: Use NATS for request distribution (legacy)
-/// - `Http`: Use HTTP/2 for request distribution
 /// - `Tcp`: Use raw TCP for request distribution with msgpack support (default)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RequestPlaneMode {
     /// Use NATS for request plane
     Nats,
-    /// Use HTTP/2 for request plane
-    Http,
     /// Use raw TCP for request plane with msgpack support
     #[default]
     Tcp,
@@ -782,7 +782,6 @@ impl fmt::Display for RequestPlaneMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Nats => write!(f, "nats"),
-            Self::Http => write!(f, "http"),
             Self::Tcp => write!(f, "tcp"),
         }
     }
@@ -794,10 +793,9 @@ impl std::str::FromStr for RequestPlaneMode {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "nats" => Ok(Self::Nats),
-            "http" => Ok(Self::Http),
             "tcp" => Ok(Self::Tcp),
             _ => Err(anyhow::anyhow!(
-                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'http', 'tcp'",
+                "Invalid request plane mode: '{}'. Valid options are: 'nats', 'tcp'",
                 s
             )),
         }
@@ -931,10 +929,6 @@ mod tests {
             RequestPlaneMode::Nats
         );
         assert_eq!(
-            "http".parse::<RequestPlaneMode>().unwrap(),
-            RequestPlaneMode::Http
-        );
-        assert_eq!(
             "tcp".parse::<RequestPlaneMode>().unwrap(),
             RequestPlaneMode::Tcp
         );
@@ -943,20 +937,9 @@ mod tests {
             RequestPlaneMode::Nats
         );
         assert_eq!(
-            "HTTP".parse::<RequestPlaneMode>().unwrap(),
-            RequestPlaneMode::Http
-        );
-        assert_eq!(
             "TCP".parse::<RequestPlaneMode>().unwrap(),
             RequestPlaneMode::Tcp
         );
         assert!("invalid".parse::<RequestPlaneMode>().is_err());
-    }
-
-    #[test]
-    fn test_request_plane_mode_display() {
-        assert_eq!(RequestPlaneMode::Nats.to_string(), "nats");
-        assert_eq!(RequestPlaneMode::Http.to_string(), "http");
-        assert_eq!(RequestPlaneMode::Tcp.to_string(), "tcp");
     }
 }

@@ -9,13 +9,18 @@ pub(crate) mod core;
 pub(crate) mod disagg;
 mod entrypoints;
 pub(crate) mod events;
+pub(crate) mod planner_hook;
 mod progress;
 pub(crate) mod runtime_utils;
 pub(crate) mod single;
 pub(crate) mod state;
 
+pub use entrypoints::run_offline_handoff_conformance;
 pub(crate) use entrypoints::{
-    generate_trace_worker_artifacts, simulate_concurrency, simulate_concurrency_disagg,
-    simulate_concurrency_workload, simulate_concurrency_workload_disagg, simulate_trace,
-    simulate_trace_disagg, simulate_trace_workload, simulate_trace_workload_disagg,
+    generate_trace_worker_artifacts, generate_trace_worker_artifacts_with_visibility,
+    simulate_agentic_trace_workload, simulate_concurrency, simulate_concurrency_disagg,
+    simulate_concurrency_workload, simulate_concurrency_workload_accumulating_deltas,
+    simulate_concurrency_workload_disagg, simulate_trace, simulate_trace_disagg,
+    simulate_trace_workload, simulate_trace_workload_accumulating_deltas,
+    simulate_trace_workload_disagg,
 };

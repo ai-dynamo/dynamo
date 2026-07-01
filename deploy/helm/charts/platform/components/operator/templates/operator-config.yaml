@@ -65,7 +65,7 @@ data:
     {{- $natsAddr := "" }}
     {{- if .Values.natsAddr }}
       {{- $natsAddr = .Values.natsAddr }}
-    {{- else if and .Values.nats .Values.nats.enabled }}
+    {{- else if and .Values.global .Values.global.nats .Values.global.nats.install }}
       {{- $natsAddr = printf "nats://%s-nats.%s.svc.cluster.local:4222" .Release.Name .Release.Namespace }}
     {{- end }}
     {{- $etcdAddr := "" }}
@@ -118,14 +118,36 @@ data:
       hostSuffix: {{ $ingressHostSuffix | quote }}
       {{- end }}
     {{- end }}
-    {{- if and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh .Values.dynamo.serviceMesh.enabled }}
+    {{- $serviceMesh := .Values.dynamo.serviceMesh | default dict }}
+    {{- $hasServiceMesh := and (hasKey .Values.dynamo "serviceMesh") .Values.dynamo.serviceMesh }}
+    {{- $hasServiceMeshEnabled := and $hasServiceMesh (hasKey $serviceMesh "enabled") }}
+    {{- $serviceMeshExplicitlyDisabled := and $hasServiceMeshEnabled (kindIs "bool" $serviceMesh.enabled) (not $serviceMesh.enabled) }}
+    {{- if $hasServiceMesh }}
     serviceMesh:
-      provider: {{ .Values.dynamo.serviceMesh.provider | default "istio" | quote }}
-      {{- if eq (.Values.dynamo.serviceMesh.provider | default "istio") "istio" }}
+      {{- if and $hasServiceMeshEnabled (kindIs "bool" $serviceMesh.enabled) }}
+      enabled: {{ $serviceMesh.enabled }}
+      {{- end }}
+      {{- if not $serviceMeshExplicitlyDisabled }}
+      provider: {{ $serviceMesh.provider | default "istio" | quote }}
+      {{- if eq ($serviceMesh.provider | default "istio") "istio" }}
       istio:
-        {{- $istio := .Values.dynamo.serviceMesh.istio | default dict }}
+        {{- $istio := $serviceMesh.istio | default dict }}
         tlsMode: {{ $istio.tlsMode | default "SIMPLE" | quote }}
-        insecureSkipVerify: {{ $istio.insecureSkipVerify | default true }}
+        {{- if hasKey $istio "insecureSkipVerify" }}
+        insecureSkipVerify: {{ $istio.insecureSkipVerify }}
+        {{- else }}
+        insecureSkipVerify: true
+        {{- end }}
+        {{- if $istio.clientCertificate }}
+        clientCertificate: {{ $istio.clientCertificate | quote }}
+        {{- end }}
+        {{- if $istio.privateKey }}
+        privateKey: {{ $istio.privateKey | quote }}
+        {{- end }}
+        {{- if $istio.caCertificates }}
+        caCertificates: {{ $istio.caCertificates | quote }}
+        {{- end }}
+      {{- end }}
       {{- end }}
     {{- end }}
     {{- if not .Values.namespaceRestriction.enabled }}
@@ -142,6 +164,39 @@ data:
     {{- if .Values.checkpoint.enabled }}
     checkpoint:
       enabled: true
+      cleanupImage: {{ .Values.checkpoint.cleanupImage | default "busybox:1.36" | quote }}
+      {{- if or .Values.checkpoint.seccomp.disabled .Values.checkpoint.seccomp.profile }}
+      seccomp:
+        {{- if .Values.checkpoint.seccomp.disabled }}
+        disabled: true
+        {{- else if .Values.checkpoint.seccomp.profile }}
+        profile: {{ .Values.checkpoint.seccomp.profile | quote }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.checkpoint.storage }}
+      {{- if .type }}
+      {{- $pvc := .pvc | default dict }}
+      storage:
+        type: {{ .type | quote }}
+        {{- if eq .type "pvc" }}
+        pvc:
+          pvcName: {{ required "checkpoint.storage.pvc.pvcName is required when checkpoint.storage.type=pvc" $pvc.pvcName | quote }}
+          basePath: {{ required "checkpoint.storage.pvc.basePath is required when checkpoint.storage.type=pvc" $pvc.basePath | quote }}
+          {{- if $pvc.create }}
+          create: true
+          {{- end }}
+          {{- if $pvc.size }}
+          size: {{ $pvc.size | quote }}
+          {{- end }}
+          {{- if $pvc.storageClassName }}
+          storageClassName: {{ $pvc.storageClassName | quote }}
+          {{- end }}
+          {{- if $pvc.accessMode }}
+          accessMode: {{ $pvc.accessMode | quote }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- end }}
     {{- end }}
     {{- if and .Values.discoveryBackend (ne (.Values.discoveryBackend | toString) "kubernetes") }}
     discovery:

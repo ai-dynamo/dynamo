@@ -5,15 +5,17 @@ title: Disaggregated Serving
 subtitle: Prefill and decode routing with the Dynamo router
 ---
 
-Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill`, the frontend automatically detects them and activates an internal prefill router.
+Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register prefill workers with `WorkerType.Prefill`, the frontend automatically detects them and activates an internal prefill router.
 
 For the high-level deployment matrix, see [Router Guide](router-guide.md). For the router flags used in this setup, see [Configuration and Tuning](router-configuration.md).
+
+If prefill and decode workers span topology domains such as zones or racks, use [Topology-Aware KV Transfer](topology-aware-kv-transfer.md) to constrain or bias decode routing toward workers in the selected prefill worker's transfer domain.
 
 ## Automatic Prefill Router Activation
 
 The prefill router is automatically created when:
 1. A decode model is registered, for example via `register_model()` with `ModelType.Chat | ModelType.Completions`.
-2. A prefill worker is detected with the same model name and `ModelType.Prefill`.
+2. A prefill worker is detected with the same model name and `WorkerType.Prefill`.
 
 Key characteristics of the prefill router:
 - **Always disables active block tracking** (`track_active_blocks=false`) since prefill workers do not perform decode.
@@ -21,7 +23,7 @@ Key characteristics of the prefill router:
 - **Falls back gracefully** to decode-only mode if prefill fails or no prefill workers are available.
 
 Key characteristics of the decode routing stage in disaggregated mode:
-- **Disables overlap scoring** (`overlap_score_weight=0`) because decode routing should not chase prefix reuse.
+- **Disables overlap scoring** (`overlap_score_credit=0`) because decode routing should not chase prefix reuse.
 - **Disables KV reuse assumption** (`assume_kv_reuse=false`) unless the backend can truly deduplicate transferred blocks.
 - **Disables prefill-token tracking** (`track_prefill_tokens=false`) so decode-side load reflects decode work rather than already-completed prompt work.
 
@@ -38,6 +40,8 @@ await register_model(
     model_type=ModelType.Chat | ModelType.Completions,
     endpoint=decode_endpoint,
     model_name="meta-llama/Llama-2-7b-hf",
+    worker_type=WorkerType.Decode,
+    needs=[[WorkerType.Prefill]],
     # ... other parameters
 )
 
@@ -48,9 +52,11 @@ prefill_endpoint = runtime.endpoint("dynamo.prefill.generate")
 
 await register_model(
     model_input=ModelInput.Tokens,
-    model_type=ModelType.Prefill,
+    model_type=ModelType.Empty,  # prefill workers expose no OpenAI surface
     endpoint=prefill_endpoint,
     model_name="meta-llama/Llama-2-7b-hf",
+    worker_type=WorkerType.Prefill,
+    needs=[[WorkerType.Decode]],
     # ... other parameters
 )
 
@@ -58,7 +64,7 @@ await prefill_endpoint.serve_endpoint(prefill_handler.generate)
 ```
 
 >[!Note]
-> The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang, launch a separate standalone router as the prefill router targeting the prefill endpoints. The standalone router (`python -m dynamo.router`) uses `--router-*`-prefixed flags such as `--router-block-size` and `--router-kv-events`. See the [Standalone Router README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/README.md) and [`examples/backends/sglang/launch/disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_router.sh).
+> The automatic disaggregated routing setup described here is currently supported by the integrated `dynamo.frontend` path. It is not provided as a single turnkey mode by the standalone Python router (`python -m dynamo.router`). If you build this topology with standalone routers, you must launch and connect the prefill and decode routing stages yourself and handle request handoff, including the `disaggregated_params` returned by prefill. For an advanced reference, see the [Global Router](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/global_router), which composes local prefill and decode router pools explicitly.
 
 ## Request Flow
 
@@ -88,3 +94,5 @@ graph TD
     linkStyle 0,1,2,3,4 stroke:#8b4513,stroke-width:2px
     linkStyle 5 stroke:#2196f3,stroke-width:2px
 ```
+
+When topology-aware KV transfer is enabled, the prefill router also derives decode `RoutingConstraints` from the selected prefill worker's runtime topology metadata before the request enters the decode router.

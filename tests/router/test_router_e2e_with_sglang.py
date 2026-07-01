@@ -20,18 +20,22 @@ from tests.router.e2e_harness import (
 )
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DefaultPort
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.port_utils import allocate_ports, deallocate_ports
+from tests.utils.port_utils import (
+    allocate_contiguous_ports,
+    allocate_port,
+    allocate_ports,
+    deallocate_ports,
+)
 
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "silence09/DeepSeek-R1-Small-2layers"
 
 pytestmark = [
-    pytest.mark.e2e,
     pytest.mark.router,
     pytest.mark.sglang,
-    pytest.mark.model(MODEL_NAME),
 ]
 PAGE_SIZE = 16  # SGLang uses "page_size" instead of "block_size"
 
@@ -82,8 +86,8 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 - disable_cuda_graph: Disable CUDA graphs (default: False)
             num_workers: Number of SGLang worker processes
             single_gpu: If True, all workers share GPU 0
-            data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
-            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            data_parallel_size: If set, enables this many data-parallel ranks per worker process.
+            request_plane: Request plane to use ("nats", "tcp"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
             durable_kv_events: If True, use JetStream for durable KV events. Defaults to False (NATS Core mode).
         """
@@ -99,12 +103,22 @@ class SGLangProcess(ManagedEngineProcessMixin):
         self.worker_processes = []
         self.store_backend = store_backend
 
-        # Dynamically allocate unique system and KV event ports (one per worker)
-        # to avoid conflicts in parallel test runs.
+        # Dynamically allocate unique system and KV event ports to avoid
+        # conflicts in parallel test runs.
         self._system_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
-        self._kv_event_ports = allocate_ports(num_workers, DefaultPort.SYSTEM1.value)
+        kv_event_rank_span = data_parallel_size or 1
+        self._kv_event_ports = allocate_contiguous_ports(
+            num_workers, kv_event_rank_span, DefaultPort.SYSTEM1.value
+        )
+        # Forward-pass metrics: SGLang publishes FPM over a per-worker ipc://
+        # socket (path derived from the worker's connection_id), so unlike vLLM
+        # it never binds this port -- the env var only flips the feature on. One
+        # shared value across workers is therefore sufficient (no collision).
+        self._fpm_port = allocate_port(DefaultPort.SYSTEM1.value)
         request.addfinalizer(
-            lambda: deallocate_ports(self._system_ports + self._kv_event_ports)
+            lambda: deallocate_ports(
+                self._system_ports + self._kv_event_ports + [self._fpm_port]
+            )
         )
 
         if sglang_args is None:
@@ -162,6 +176,8 @@ class SGLangProcess(ManagedEngineProcessMixin):
             if context_length is not None:
                 command.extend(["--context-length", str(context_length)])
 
+            command.extend(build_gpu_mem_args("build_sglang_gpu_mem_args"))
+
             if disaggregation_mode is not None:
                 command.extend(["--disaggregation-mode", disaggregation_mode])
                 command.extend(["--disaggregation-transfer-backend", "nixl"])
@@ -178,9 +194,10 @@ class SGLangProcess(ManagedEngineProcessMixin):
                     ]
                 )
 
-            # Add per-worker KV events config for ZMQ publishing
-            # Ports are dynamically allocated for xdist-safe parallel execution.
-            kv_events_port = self._kv_event_ports[worker_idx]
+            # Add per-worker KV events config for ZMQ publishing. SGLang DP
+            # ranks publish at base_port + dp_rank, so DP tests must reserve a
+            # contiguous port block and pass the block's base port here.
+            kv_events_port = self._kv_event_ports[worker_idx * kv_event_rank_span]
             kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
 
@@ -198,6 +215,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 "DYN_NAMESPACE": self.namespace,
                 "DYN_REQUEST_PLANE": request_plane,
                 "DYN_SYSTEM_PORT": str(system_port),
+                "DYN_FORWARDPASS_METRIC_PORT": str(self._fpm_port),
                 "PYTHONHASHSEED": "0",  # for deterministic event id's
             }
 
@@ -236,10 +254,14 @@ class SGLangProcess(ManagedEngineProcessMixin):
     cleanup_name = "SGLang worker resources"
 
 
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
+@pytest.mark.timeout(270)  # 3x ~89s (sglang gpu_1 log)
 def test_sglang_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
@@ -260,8 +282,12 @@ def test_sglang_kv_router_basic(
     )
 
 
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_sglang_multiple_workers(
@@ -286,13 +312,14 @@ def test_router_decisions_sglang_multiple_workers(
     )
 
 
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.gpu_2
-@pytest.mark.pre_merge
+@pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(3.7)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
-@pytest.mark.skip(
-    reason="DYN-2265"
-)  # Currently fails probably due to SGLang startup issues when multiple workers on same GPU; re-enable when fixed
 def test_router_decisions_sglang_dp(
     request,
     runtime_services_dynamic_ports,
@@ -324,6 +351,8 @@ def test_router_decisions_sglang_dp(
 
 
 @pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2603")
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
@@ -364,9 +393,13 @@ def test_router_decisions_sglang_disagg(
 # Passes reliably in pre_merge/post_merge runs, so scope the skip to the
 # nightly pipeline via skip_in_nightly, which nightly-ci.yml excludes from
 # its sglang single-GPU marker filter. Remove once DYN-2784 lands a real fix.
+@pytest.mark.e2e
+@pytest.mark.model(MODEL_NAME)
 @pytest.mark.skip_in_nightly
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize(
     "store_backend,durable_kv_events,request_plane",
     [
@@ -375,7 +408,7 @@ def test_router_decisions_sglang_disagg(
     ids=["nats_core"],
     indirect=["durable_kv_events", "request_plane"],
 )
-@pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
+@pytest.mark.timeout(320)  # 3x ~106s (sglang gpu_1 log)
 def test_sglang_indexers_sync(
     request,
     runtime_services_dynamic_ports,

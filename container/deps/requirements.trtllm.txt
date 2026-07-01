@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Third-party Python dependencies for the trtllm runtime image. Installed
+# with --no-deps so upstream nvcr.io/nvidia/tensorrt-llm/release's solve
+# stays intact. Sorted alphabetically per pre-commit requirements-txt-fixer.
+
+# Force a source install of imageio-ffmpeg. The PyPI wheel bundles a prebuilt,
+# GPL-encumbered ffmpeg binary that has CVE exposure; we point imageio at the
+# in-tree LGPL ffmpeg CLI via IMAGEIO_FFMPEG_EXE instead.
+--no-binary imageio-ffmpeg
+
+# Used by the trtllm video_diffusion handler to encode generated frames to MP4.
+# Upstream tensorrt-llm/release does not ship them.
+imageio>=2.37.0
+imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
+# Required by ai_dynamo_runtime + gpu_memory_service. Upstream tensorrt-llm/release
+# does not ship them; vllm/vllm-openai does (which is why DYN-2204's vllm path
+# does not need this).
+msgspec>=0.19.0
+# KVBM uses `import nixl` to load libnixl.so via DT_RPATH (matching its
+# nixl-sys ABI). Upstream's NIXL at /opt/nvidia/nvda_nixl coexists
+# unused because Dynamo's --connector kvbm bypasses TRT-LLM's native NIXL
+# transceiver. The nixl-cu13 wheel is harmless if KVBM is disabled.
+nixl==1.0.1
+nixl-cu13==1.0.1
+# Required by ai_dynamo_runtime (companion to msgspec above).
+uvloop>=0.21.0

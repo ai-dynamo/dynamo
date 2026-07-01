@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 set -e
-trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
@@ -20,28 +19,30 @@ export MODALITY=${MODALITY:-"text"}
 # If you want to use multimodal, set MODALITY to "multimodal"
 #export MODALITY=${MODALITY:-"multimodal"}
 
+# Strip --unified via the shared helper, then parse the remaining flags.
+# All of this runs BEFORE installing the kill-process-group EXIT trap so
+# an early exit (--help / unknown option) doesn't tear down the caller.
+pick_worker_module dynamo.trtllm dynamo.trtllm.unified_main "$@"
+set -- "${REMAINING_ARGS[@]}"
+
 ENABLE_OTEL=false
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --enable-otel)
-            ENABLE_OTEL=true
-            shift
-            ;;
+        --enable-otel) ENABLE_OTEL=true; shift ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  --unified            Use the unified backend entry point"
+            echo "                       (python -m dynamo.trtllm.unified_main)"
             echo "  -h, --help           Show this help message"
-            echo ""
             exit 0
             ;;
-        *)
-            echo "Unknown option: $1"
-            echo "Use --help for usage information"
-            exit 1
-            ;;
+        *) echo "Unknown option: $1"; echo "Use --help for usage information"; exit 1 ;;
     esac
 done
+
+trap 'echo Cleaning up...; kill 0' EXIT
 
 # Enable tracing if requested
 TRACE_ARGS=()
@@ -60,8 +61,18 @@ print_launch_banner "Launching Disaggregated Serving (2 GPUs)" "$MODEL_PATH" "$H
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
 
+# Prevent port collisions: prefill and decode each run their own
+# system-status-server, so DYN_SYSTEM_PORT (which would be shared) is dropped
+# in favor of DYN_SYSTEM_PORT1/DYN_SYSTEM_PORT2 below. This also drops any
+# user-set DYN_SYSTEM_PORT; override DYN_SYSTEM_PORT1/2 instead.
+unset DYN_SYSTEM_PORT
+
 # run prefill worker
-OTEL_SERVICE_NAME=dynamo-worker-prefill CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+OTEL_SERVICE_NAME=dynamo-worker-prefill \
+CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT=${DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT:-60} \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
@@ -70,7 +81,10 @@ OTEL_SERVICE_NAME=dynamo-worker-prefill CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIB
   "${TRACE_ARGS[@]}" &
 
 # run decode worker
-OTEL_SERVICE_NAME=dynamo-worker-decode CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
+OTEL_SERVICE_NAME=dynamo-worker-decode \
+CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+python3 -m "$WORKER_MODULE" \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \

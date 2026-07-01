@@ -9,6 +9,18 @@ The Dynamo KV Block Manager (KVBM) is a scalable runtime component designed to h
 
 KVBM is modular and can be used standalone via `pip install kvbm` or as the memory management component in the full Dynamo stack. This guide covers installation, configuration, and deployment of the Dynamo KV Block Manager (KVBM) and other KV cache management systems.
 
+## Quick start with the pre-built NGC container
+
+The fastest path is the published Dynamo container, which includes KVBM:
+
+```bash
+docker run --gpus all --rm -it \
+  nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1 \
+  /bin/bash
+```
+
+For installation from source or custom builds, see [Local Installation](../../getting-started/local-installation.md) and [Release Artifacts](../../reference/release-artifacts.md).
+
 ## Run KVBM Standalone
 
 KVBM can be used independently without using the rest of the Dynamo stack:
@@ -29,7 +41,7 @@ To build KVBM from source, see the detailed instructions in the [KVBM bindings R
 
 ```bash
 # Start up etcd for KVBM leader/worker registration and discovery
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 Pick one of the following to get a Dynamo vLLM container with KVBM built in. The subsequent serving commands are the same either way.
@@ -37,7 +49,7 @@ Pick one of the following to get a Dynamo vLLM container with KVBM built in. The
 **Option A: Pre-built NGC container (recommended for quick start)**
 
 ```bash
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.0.2
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
 ```
 
 See the [Local Installation Guide](../../getting-started/local-installation.md) for full setup instructions and [Release Artifacts](../../reference/release-artifacts.md#container-images) for available versions.
@@ -46,9 +58,12 @@ See the [Local Installation Guide](../../getting-started/local-installation.md) 
 
 ```bash
 # Build a dynamo vLLM container (KVBM is built in by default)
-# NOTE: render.py defaults to --platform linux/amd64. On ARM64 hosts, pass --platform linux/arm64.
-python container/render.py --framework vllm --target runtime --output-short-filename
-docker build -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
+# x86_64
+python container/render.py --framework vllm --target runtime --output-short-filename --platform linux/amd64
+docker buildx build --platform linux/amd64 -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
+# arm64 (Grace, Jetson, arm64 EC2)
+python container/render.py --framework vllm --target runtime --output-short-filename --platform linux/arm64
+docker buildx build --platform linux/arm64 -t dynamo:latest-vllm-runtime -f container/rendered.Dockerfile .
 
 # Launch the container
 container/run.sh --image dynamo:latest-vllm-runtime -it --mount-workspace --use-nixl-gds
@@ -95,7 +110,7 @@ vllm serve --kv-transfer-config '{"kv_connector":"DynamoConnector","kv_role":"kv
 
 ```bash
 # Start up etcd for KVBM leader/worker registration and discovery
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 ```
 
 Pick one of the following to get a Dynamo TensorRT-LLM container with KVBM built in. The subsequent serving commands are the same either way.
@@ -103,7 +118,7 @@ Pick one of the following to get a Dynamo TensorRT-LLM container with KVBM built
 **Option A: Pre-built NGC container (recommended for quick start)**
 
 ```bash
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.0.2
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
 ```
 
 See the [Local Installation Guide](../../getting-started/local-installation.md) for full setup instructions and [Release Artifacts](../../reference/release-artifacts.md#container-images) for available versions.
@@ -112,9 +127,12 @@ See the [Local Installation Guide](../../getting-started/local-installation.md) 
 
 ```bash
 # Build a dynamo TRTLLM container (KVBM is built in by default)
-# NOTE: render.py defaults to --platform linux/amd64. On ARM64 hosts, pass --platform linux/arm64.
-python container/render.py --framework trtllm --target runtime --output-short-filename
-docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
+# x86_64
+python container/render.py --framework trtllm --target runtime --output-short-filename --cuda-version=13.1 --platform linux/amd64
+docker buildx build --platform linux/amd64 -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
+# arm64 with NVIDIA GPUs (GH200, GB200, P6e-GB200 UltraServer — *not* generic Graviton instances, which have no GPU)
+python container/render.py --framework trtllm --target runtime --output-short-filename --cuda-version=13.1 --platform linux/arm64
+docker buildx build --platform linux/arm64 -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 
 # Launch the container
 container/run.sh --image dynamo:latest-trtllm-runtime -it --mount-workspace --use-nixl-gds
@@ -286,7 +304,7 @@ When disabled (default), each GPU loads KV blocks independently. Set `DYN_KVBM_N
 
 ```bash
 # Start basic services (etcd & natsd), along with Prometheus and Grafana
-docker compose -f deploy/docker-observability.yml up -d
+docker compose -f dev/docker-observability.yml up -d
 ```
 
 ### Enable Metrics for vLLM
@@ -438,6 +456,56 @@ Supported values for `DYN_KVBM_DISK_ALLOCATOR_TYPE`:
 ```bash
 export DYN_KVBM_DISK_DISABLE_O_DIRECT=true
 ```
+
+### Disk to Device Onboarding Hangs with cuFile/GDS Errors
+
+**Symptom:** KV cache onboarding from disk to device hangs indefinitely and requests become blocked. KVBM logs show errors similar to:
+
+```text
+GDS_MT: failed to create file handle: GDS_MT: file register error
+```
+
+And `cufile.log` contains errors like:
+
+```text
+cufio:340 cuFileHandleRegister error: internal error
+```
+
+**Cause:** NVIDIA GPUDirect Storage (GDS) fails to register the disk-cache file handle and falls back to its POSIX-compatible mode, but the fallback also fails. This typically happens in containerized environments (including Kubernetes) when cuFile cannot resolve the backing block device for the disk-cache path.
+
+See [ai-dynamo/dynamo#6032](https://github.com/ai-dynamo/dynamo/issues/6032) for the original report and discussion.
+
+**Solution:** Point the disk cache at a path backed by a real block device and, in Kubernetes, expose `/run/udev` so cuFile can query volume attributes.
+
+For a Kubernetes pod spec (e.g., on the prefill worker where `DYN_KVBM_DISK_CACHE_GB > 0`):
+
+```yaml
+extraPodSpec:
+  mainContainer:
+    env:
+      - name: DYN_KVBM_DISK_CACHE_DIR
+        value: "/cache/kvbm"
+    volumeMounts:
+      - name: kvbm-cache
+        mountPath: /cache/kvbm
+      - name: run-udev
+        mountPath: /run/udev
+        readOnly: true
+  volumes:
+    - name: kvbm-cache
+      emptyDir:
+        sizeLimit: <N>Gi
+    - name: run-udev
+      hostPath:
+        path: /run/udev
+```
+
+Key points:
+
+- `/run/udev` must be mounted as a `hostPath` volume. Without it, cuFile cannot read volume attributes and file registration fails.
+- `DYN_KVBM_DISK_CACHE_DIR` must point to a volume backed by a real block device (e.g., an `emptyDir` volume, a `hostPath` mount to a block-backed directory, or any other GDS-supported filesystem). The default `/tmp` is usually overlayfs inside a container, which cuFile cannot handle.
+
+After applying these changes, cuFile should log that it is running in compatible mode and disk-to-device onboarding should proceed.
 
 ## Developing Locally
 

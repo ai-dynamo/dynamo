@@ -37,7 +37,7 @@ use tokio_util::codec::FramedRead;
 
 #[path = "common/ports.rs"]
 mod ports;
-use ports::get_random_port;
+use ports::bind_random_port;
 
 struct CounterEngine {}
 
@@ -85,7 +85,7 @@ impl
         let stream = stream! {
             tokio::time::sleep(std::time::Duration::from_millis(max_tokens)).await;
             for i in 0..10 {
-                let output = generator.create_choice(i, Some(format!("choice {i}")), None, None, None);
+                let output = generator.create_choice(i, Some(format!("choice {i}")), None, None);
 
                 yield Annotated::from_data(output);
             }
@@ -266,7 +266,7 @@ fn inc_counter(
 #[allow(deprecated)]
 #[tokio::test]
 async fn test_http_service() {
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .port(port)
         .enable_chat_endpoints(true)
@@ -278,7 +278,8 @@ async fn test_http_service() {
 
     let token = CancellationToken::new();
     let cancel_token = token.clone();
-    let task = tokio::spawn(async move { service.run(token.clone()).await });
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
 
     // Wait for the service to be ready before proceeding
     wait_for_service_ready(port).await;
@@ -580,7 +581,7 @@ async fn wait_for_service_ready(port: u16) {
 // TODO: Rewrite these tests using the upstream async-openai client.
 #[tokio::test]
 async fn test_client_disconnect_cancellation_unary() {
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -594,7 +595,7 @@ async fn test_client_disconnect_cancellation_unary() {
     let cancel_token = token.clone();
 
     // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
 
     // Wait for service to be ready
     wait_for_service_ready(port).await;
@@ -672,7 +673,7 @@ async fn test_client_disconnect_cancellation_unary() {
 async fn test_client_disconnect_cancellation_streaming() {
     dynamo_runtime::logging::init();
 
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -686,7 +687,7 @@ async fn test_client_disconnect_cancellation_streaming() {
     let cancel_token = token.clone();
 
     // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
 
     // Wait for service to be ready
     wait_for_service_ready(port).await;
@@ -775,7 +776,7 @@ async fn test_request_id_annotation() {
     // TODO(ryan): make better fixtures, this is too much to test sometime so simple
     dynamo_runtime::logging::init();
 
-    let port = get_random_port().await;
+    let (listener, port) = bind_random_port().await;
     let service = HttpService::builder()
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
@@ -789,7 +790,7 @@ async fn test_request_id_annotation() {
     let cancel_token = token.clone();
 
     // Start the service
-    let task = tokio::spawn(async move { service.run(token).await });
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
 
     // Wait for service to be ready
     wait_for_service_ready(port).await;
@@ -902,6 +903,235 @@ async fn test_request_id_annotation() {
         "✅ Request ID annotation test passed! Sent UUID: {}, Received: {}",
         request_uuid,
         received_uuid_str
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Exercises the per-model readiness sub-resource `GET /v1/models/{model}/ready`
+/// (Mechanism 4) end-to-end through the real router, including:
+///   - the endpoint returns the structured readiness body (not the OpenAI
+///     retrieve object),
+///   - the old `/readiness` path is retired (404),
+///   - a model literally named `.../ready` shadows the sub-resource (exact
+///     model match wins), and
+///   - an unknown model with a `/ready` suffix is a 404.
+#[tokio::test]
+async fn test_model_ready_endpoint() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    // A normal, ready in-process model.
+    let card = ModelDeploymentCard::with_name_only("foo");
+    manager
+        .add_chat_completions_model("foo", card.mdcsum(), Arc::new(CounterEngine {}))
+        .unwrap();
+
+    // A model whose *name* ends in `/ready` — must never be shadowed by the
+    // readiness sub-resource (exact-match precedence in `get_model_openai`).
+    let shadow_card = ModelDeploymentCard::with_name_only("shadow/ready");
+    manager
+        .add_chat_completions_model(
+            "shadow/ready",
+            shadow_card.mdcsum(),
+            Arc::new(CounterEngine {}),
+        )
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let base = format!("http://localhost:{}/v1/models", port);
+
+    // 1. `/ready` returns the structured readiness body, not the retrieve object.
+    let resp = client
+        .get(format!("{base}/foo/ready"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "/foo/ready should be 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["model"], "foo",
+        "readiness body carries the model name"
+    );
+    assert!(
+        body.get("namespaces").is_some(),
+        "readiness body has a namespaces map, got: {body}"
+    );
+    assert!(
+        body.get("object").is_none(),
+        "readiness body must not be the OpenAI retrieve object, got: {body}"
+    );
+
+    // 2. The old `/readiness` path is retired — 404.
+    let resp = client
+        .get(format!("{base}/foo/readiness"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "old /readiness path must be gone"
+    );
+
+    // 3. A model literally named `shadow/ready` resolves to the retrieve object,
+    //    NOT the readiness sub-resource of a model named `shadow`.
+    let resp = client
+        .get(format!("{base}/shadow/ready"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "/shadow/ready should be 200");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["object"], "model",
+        "exact model match wins over the /ready sub-resource, got: {body}"
+    );
+    assert_eq!(body["id"], "shadow/ready");
+
+    // 4. Unknown model with a `/ready` suffix is a 404 (no base model to gate).
+    let resp = client
+        .get(format!("{base}/ghost/ready"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "/ready on an unknown model is 404"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Regression: exact-match precedence must hold for a *non-displayable* model
+/// whose ID ends in `/ready`. Such a model is absent from `model_display_names()`,
+/// so keying the exact-match check off the displayable set (the earlier bug)
+/// would fall through to the `/ready` sub-resource and return a sibling `foo`'s
+/// readiness — shadowing the registered `foo/ready`. Exact match must win for
+/// *any* registered model, displayable or not.
+#[tokio::test]
+async fn test_model_ready_endpoint_non_displayable_shadow() {
+    use dynamo_llm::discovery::WorkerSet;
+    use dynamo_llm::worker_type::WorkerType;
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .port(port)
+        .enable_chat_endpoints(true)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    // Base model `foo`: a normal, ready in-process model.
+    let foo = ModelDeploymentCard::with_name_only("foo");
+    manager
+        .add_chat_completions_model("foo", foo.mdcsum(), Arc::new(CounterEngine {}))
+        .unwrap();
+
+    // `foo/ready`: registered but NOT displayable (no serving engine) and NOT
+    // ready (decode worker type whose prefill peer is absent).
+    let mut card = ModelDeploymentCard::with_name_only("foo/ready");
+    card.worker_type = Some(WorkerType::Decode);
+    card.needs = vec![vec![WorkerType::Prefill]];
+    let ws = WorkerSet::new(
+        "__nd_foo_ready".to_string(),
+        card.mdcsum().to_string(),
+        card,
+    );
+    manager.add_worker_set("foo/ready", "__nd_foo_ready", ws);
+
+    // `GET /v1/models/foo/ready` must resolve to the registered `foo/ready`
+    // model (exact match wins), NOT the readiness sub-resource of `foo`. Since
+    // `foo/ready` is registered-but-not-ready, its gated retrieve returns 503 —
+    // crucially *not* a 200 readiness body for `foo` (the pre-fix behavior).
+    let resp = reqwest::Client::new()
+        .get(format!("http://localhost:{}/v1/models/foo/ready", port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "exact match on registered (non-displayable) foo/ready must hit its gated retrieve (503), not foo's readiness (200)"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body.get("namespaces").is_none(),
+        "must not be foo's readiness body, got: {body}"
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// With nvext disabled, a request asking for response `extra_fields` must not
+/// produce any `nvext` field in the response.
+#[tokio::test]
+async fn test_nvext_disabled_strips_request_and_response() {
+    dynamo_runtime::logging::init();
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder()
+        .enable_chat_endpoints(true)
+        .enable_nvext(false)
+        .port(port)
+        .build()
+        .unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run_with_listener(token, listener).await });
+    wait_for_service_ready(port).await;
+
+    let card = ModelDeploymentCard::with_name_only("test-model");
+    manager
+        .add_chat_completions_model("test-model", card.mdcsum(), Arc::new(CounterEngine {}))
+        .unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://localhost:{port}/v1/chat/completions"))
+        .header("x-dynamo-worker-instance-id", "42")
+        .json(&serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+            "max_tokens": 1,
+            "nvext": {
+                "extra_fields": ["worker_id", "timing", "engine_data"],
+                "backend_instance_id": 99
+            }
+        }))
+        .send()
+        .await
+        .expect("request should succeed");
+    assert!(response.status().is_success());
+
+    let body = response.text().await.expect("read body");
+    assert!(
+        !body.contains("\"nvext\""),
+        "nvext gate off: response must not contain an `nvext` field, got: {body}"
     );
 
     cancel_token.cancel();

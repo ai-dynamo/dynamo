@@ -21,8 +21,12 @@ on:
       - main
       - release/*.*.*
       - "pull-request/[0-9]+"
-    # Skip docs only changes
+    # Docs deployment is handled by fern-docs.yml. Docs-only changes are
+    # covered by pre-merge Fern checks, so do not wake this secrets-backed
+    # GitLab mirror/Test Lab pipeline for docs metadata/config.
     paths-ignore:
+      - 'docs/**'
+      - 'fern/**'
       - '**.md'
       - '**.rst'
 

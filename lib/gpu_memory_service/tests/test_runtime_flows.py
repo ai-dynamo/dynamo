@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """GMS runtime flow coverage.
@@ -21,8 +21,18 @@ import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
-import pynvml
 import pytest
+from _deps import HAS_GMS, HAS_PYNVML
+
+if not HAS_GMS:
+    pytest.skip(
+        "gpu_memory_service package is not available in this test image",
+        allow_module_level=True,
+    )
+
+if HAS_PYNVML:
+    import pynvml
+
 from gpu_memory_service.client import memory_manager as client_memory_manager
 from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
@@ -245,6 +255,7 @@ def running_gms(monkeypatch, tmp_path):
         server_allocations, "cumem_export_to_shareable_handle", export_fd
     )
 
+    monkeypatch.setattr(client_memory_manager, "cuda_ensure_initialized", lambda: None)
     monkeypatch.setattr(
         client_memory_manager,
         "cuda_set_current_device",
@@ -255,6 +266,11 @@ def running_gms(monkeypatch, tmp_path):
         client_memory_manager,
         "cumem_get_allocation_granularity",
         lambda device: 4096,
+    )
+    monkeypatch.setattr(
+        client_memory_manager,
+        "cumem_create_tolerate_oom",
+        lambda size, device: (True, next(client_handles)),
     )
     monkeypatch.setattr(client_memory_manager, "cuda_synchronize", lambda: None)
     monkeypatch.setattr(
@@ -703,6 +719,38 @@ def test_destroy_mapping_frees_allocation_and_metadata(running_gms):
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_prune_allocations_frees_unreferenced_mappings(running_gms):
+    _, socket_path = running_gms
+
+    from gpu_memory_service.client.torch.allocator import prune_allocations
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    try:
+        writer.connect(RequestedLockType.RW)
+        keep_va = writer.create_mapping(size=4096, tag="weights")
+        prune_va = writer.create_mapping(size=8192, tag="weights")
+
+        keep_allocation_id = writer.mappings[keep_va].allocation_id
+        prune_allocation_id = writer.mappings[prune_va].allocation_id
+
+        prune_allocations(
+            writer,
+            referenced_allocation_ids={keep_allocation_id},
+            synchronize=False,
+        )
+
+        assert keep_va in writer.mappings
+        assert prune_va not in writer.mappings
+        assert [info.allocation_id for info in writer.list_handles()] == [
+            keep_allocation_id
+        ]
+        with pytest.raises(RuntimeError, match="Unknown allocation"):
+            writer.get_handle_info(prune_allocation_id)
+    finally:
+        writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
 def test_remap_all_vas_succeeds_when_committed_layout_is_unchanged(
     running_gms,
 ):
@@ -809,6 +857,80 @@ def test_remap_all_vas_accepts_new_layout_with_same_structural_layout(
 
 
 @pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_remap_all_vas_accepts_restored_layout_after_pruned_slot_gap(
+    running_gms,
+):
+    """Pruned layouts may have sparse source slots but compact restore slots."""
+
+    _, socket_path = running_gms
+
+    from gpu_memory_service.client.torch.allocator import prune_allocations
+
+    first_writer = GMSClientMemoryManager(socket_path, device=0)
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    second_writer = GMSClientMemoryManager(socket_path, device=0)
+    try:
+        first_writer.connect(RequestedLockType.RW)
+        kept_a_va = first_writer.create_mapping(size=4096, tag="weights")
+        pruned_va = first_writer.create_mapping(size=8192, tag="weights")
+        kept_b_va = first_writer.create_mapping(
+            size=first_writer.granularity + 4096,
+            tag="weights",
+        )
+
+        kept_a = first_writer.mappings[kept_a_va]
+        kept_b = first_writer.mappings[kept_b_va]
+        assert first_writer.mappings[pruned_va].layout_slot == 1
+        assert kept_b.layout_slot == 2
+
+        prune_allocations(
+            first_writer,
+            referenced_allocation_ids={kept_a.allocation_id, kept_b.allocation_id},
+            synchronize=False,
+        )
+        first_writer.metadata_put("tensor.0", kept_a.allocation_id, 0, b"a")
+        first_writer.metadata_put("tensor.1", kept_b.allocation_id, 0, b"b")
+        assert first_writer.commit()
+
+        reader.connect(RequestedLockType.RO)
+        source_hash = reader.get_memory_layout_hash()
+        assert source_hash
+        imported_a_va = reader.create_mapping(allocation_id=kept_a.allocation_id)
+        imported_b_va = reader.create_mapping(allocation_id=kept_b.allocation_id)
+        reader.unmap_all_vas()
+        reader.abort()
+
+        second_writer.connect(RequestedLockType.RW)
+        restored_a_va = second_writer.create_mapping(size=kept_a.size, tag=kept_a.tag)
+        restored_b_va = second_writer.create_mapping(size=kept_b.size, tag=kept_b.tag)
+        restored_a = second_writer.mappings[restored_a_va]
+        restored_b = second_writer.mappings[restored_b_va]
+        assert restored_a.layout_slot == 0
+        assert restored_b.layout_slot == 1
+        second_writer.metadata_put("tensor.0", restored_a.allocation_id, 0, b"a")
+        second_writer.metadata_put("tensor.1", restored_b.allocation_id, 0, b"b")
+        assert second_writer.commit()
+
+        verifier = _GMSClientSession(socket_path, RequestedLockType.RO, None)
+        try:
+            assert verifier.get_memory_layout_hash() == source_hash
+        finally:
+            verifier.close()
+
+        reader.connect(RequestedLockType.RO)
+        reader.remap_all_vas()
+
+        assert reader.mappings[imported_a_va].allocation_id == restored_a.allocation_id
+        assert reader.mappings[imported_b_va].allocation_id == restored_b.allocation_id
+        assert reader.metadata_get("tensor.0") == (restored_a.allocation_id, 0, b"a")
+        assert reader.metadata_get("tensor.1") == (restored_b.allocation_id, 0, b"b")
+    finally:
+        second_writer.close()
+        reader.close()
+        first_writer.close()
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
 def test_reallocate_all_handles_reuses_preserved_vas_in_new_layout(
     running_gms,
 ):
@@ -833,6 +955,31 @@ def test_reallocate_all_handles_reuses_preserved_vas_in_new_layout(
     assert manager.mappings[va].handle != 0
     manager.close()
     _wait_for_server_state(server, ServerState.EMPTY)
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_scratch_reallocation_keeps_committed_allocation_on_cuda_granularity(
+    running_gms,
+):
+    _, socket_path = running_gms
+
+    scratch_size = 1 << 20
+    requested_size = 4097
+    manager = GMSClientMemoryManager(socket_path, device=0, scratch_size=scratch_size)
+    try:
+        va = manager.create_scratch_mapping(size=requested_size, tag="kv_cache")
+        manager.unmap_all_vas()
+        manager.prepare_scratch_for_reallocation()
+
+        manager.connect(RequestedLockType.RW)
+        manager.reallocate_all_handles(tag="kv_cache")
+        allocation = manager.get_handle_info(manager.mappings[va].allocation_id)
+        assert allocation.size == requested_size
+        assert allocation.aligned_size == 8192
+
+        manager.remap_all_vas()
+    finally:
+        manager.close()
 
 
 @pytest.mark.asyncio
@@ -886,6 +1033,7 @@ async def test_allocation_manager_caches_exported_fd(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(180)
+@pytest.mark.skipif(not HAS_PYNVML, reason="pynvml is not available")
 async def test_large_allocation_unblocks_after_export_fd_holder_dies(
     tmp_path,
 ):

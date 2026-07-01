@@ -5,7 +5,6 @@ package protocol
 
 import (
 	"fmt"
-	"math"
 	"strings"
 	"testing"
 
@@ -73,11 +72,11 @@ func TestNewRestorePod(t *testing.T) {
 		t.Fatalf("expected restartPolicy Never, got %#v", restorePod.Spec.RestartPolicy)
 	}
 	main := &restorePod.Spec.Containers[0]
-	if len(main.Command) != 2 || main.Command[0] != "sleep" || main.Command[1] != "infinity" {
-		t.Fatalf("expected placeholder command, got %#v", main.Command)
+	if got, want := main.Command, []string{"python3", "-m", "dynamo.vllm"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected command %#v, got %#v", want, got)
 	}
-	if main.Args != nil {
-		t.Fatalf("expected restore args to be cleared: %#v", main.Args)
+	if got, want := main.Args, []string{"--model", "Qwen"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected args %#v, got %#v", want, got)
 	}
 	if main.ReadinessProbe == nil {
 		t.Fatalf("expected readiness probe to be preserved")
@@ -118,14 +117,23 @@ func TestNewRestorePod(t *testing.T) {
 		t.Fatalf("expected %s mount, got %#v", SnapshotControlVolumeName, main.VolumeMounts)
 	}
 	foundEnv := false
+	foundStandbyEnv := false
 	for _, e := range main.Env {
 		if e.Name == SnapshotControlDirEnv {
 			foundEnv = true
-			break
+		}
+		if e.Name == RestoreStandbyModeEnv {
+			foundStandbyEnv = true
+			if e.Value != "1" {
+				t.Fatalf("expected %s=1, got %#v", RestoreStandbyModeEnv, e)
+			}
 		}
 	}
 	if !foundEnv {
 		t.Fatalf("expected %s env, got %#v", SnapshotControlDirEnv, main.Env)
+	}
+	if !foundStandbyEnv {
+		t.Fatalf("expected %s env, got %#v", RestoreStandbyModeEnv, main.Env)
 	}
 }
 
@@ -159,13 +167,25 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 
 	for _, name := range []string{"engine-0", "engine-1"} {
 		c := findRestoreContainer(t, restorePod.Spec.Containers, name)
-		if len(c.Command) != 2 || c.Command[0] != "sleep" || c.Command[1] != "infinity" {
-			t.Fatalf("expected placeholder command on %s, got %#v", name, c.Command)
+		if len(c.Command) != 1 || c.Command[0] != "python3" {
+			t.Fatalf("expected command to be preserved on %s, got %#v", name, c.Command)
 		}
-		if c.Args != nil {
-			t.Fatalf("expected args cleared on %s, got %#v", name, c.Args)
+		if len(c.Args) != 1 || c.Args[0] != "--serve" {
+			t.Fatalf("expected args to be preserved on %s, got %#v", name, c.Args)
 		}
 		assertRestoreStartupGate(t, c.StartupProbe)
+		foundStandbyEnv := false
+		for _, e := range c.Env {
+			if e.Name == RestoreStandbyModeEnv {
+				foundStandbyEnv = true
+				if e.Value != "1" {
+					t.Fatalf("expected %s=1 on %s, got %#v", RestoreStandbyModeEnv, name, e)
+				}
+			}
+		}
+		if !foundStandbyEnv {
+			t.Fatalf("expected %s env on %s, got %#v", RestoreStandbyModeEnv, name, c.Env)
+		}
 		found := false
 		for _, m := range c.VolumeMounts {
 			if m.Name == SnapshotControlVolumeName {
@@ -190,8 +210,8 @@ func TestNewRestorePodShapesMultipleTargets(t *testing.T) {
 		}
 	}
 	for _, e := range sidecar.Env {
-		if e.Name == SnapshotControlDirEnv {
-			t.Fatalf("sidecar must not get a control env: %#v", sidecar.Env)
+		if e.Name == SnapshotControlDirEnv || e.Name == RestoreStandbyModeEnv {
+			t.Fatalf("sidecar must not get a restore env: %#v", sidecar.Env)
 		}
 	}
 }
@@ -291,19 +311,29 @@ func TestPrepareRestorePodSpec(t *testing.T) {
 		t.Fatalf("expected single %s mount after repeated calls, got %#v", SnapshotControlVolumeName, container.VolumeMounts)
 	}
 	envCount := 0
+	standbyEnvCount := 0
 	for _, e := range container.Env {
 		if e.Name == SnapshotControlDirEnv {
 			envCount++
+		}
+		if e.Name == RestoreStandbyModeEnv {
+			standbyEnvCount++
+			if e.Value != "1" {
+				t.Fatalf("expected %s=1, got %#v", RestoreStandbyModeEnv, e)
+			}
 		}
 	}
 	if envCount != 1 {
 		t.Fatalf("expected single %s env after repeated calls, got %#v", SnapshotControlDirEnv, container.Env)
 	}
-	if len(container.Command) != 2 || container.Command[0] != "sleep" || container.Command[1] != "infinity" {
-		t.Fatalf("expected placeholder command, got %#v", container.Command)
+	if standbyEnvCount != 1 {
+		t.Fatalf("expected single %s env after repeated calls, got %#v", RestoreStandbyModeEnv, container.Env)
 	}
-	if container.Args != nil {
-		t.Fatalf("expected restore args to be cleared: %#v", container.Args)
+	if got, want := container.Command, []string{"python3", "-m", "dynamo.vllm"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected command %#v, got %#v", want, got)
+	}
+	if got, want := container.Args, []string{"--model", "Qwen"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected args %#v, got %#v", want, got)
 	}
 	if container.ReadinessProbe == nil {
 		t.Fatalf("expected readiness probe to be preserved")
@@ -356,12 +386,6 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromLiveness(t *testing.T) 
 	if container.StartupProbe.HTTPGet == nil || container.StartupProbe.HTTPGet.Path != "/livez" {
 		t.Fatalf("expected synthesized startup probe to inherit liveness HTTPGet handler, got %#v", container.StartupProbe)
 	}
-	if got := container.StartupProbe.PeriodSeconds; got != livenessProbe.PeriodSeconds {
-		t.Fatalf("expected startup PeriodSeconds %d (from liveness), got %d", livenessProbe.PeriodSeconds, got)
-	}
-	if got := container.StartupProbe.TimeoutSeconds; got != livenessProbe.TimeoutSeconds {
-		t.Fatalf("expected startup TimeoutSeconds %d (from liveness), got %d", livenessProbe.TimeoutSeconds, got)
-	}
 }
 
 func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T) {
@@ -401,9 +425,6 @@ func TestPrepareRestorePodSpecSynthesizesStartupProbeFromReadiness(t *testing.T)
 		container.StartupProbe.Exec.Command[0] != "cat" || container.StartupProbe.Exec.Command[1] != "/tmp/ready" {
 		t.Fatalf("expected synthesized startup probe to inherit readiness Exec command, got %#v", container.StartupProbe)
 	}
-	if got := container.StartupProbe.PeriodSeconds; got != readinessProbe.PeriodSeconds {
-		t.Fatalf("expected startup PeriodSeconds %d (from readiness), got %d", readinessProbe.PeriodSeconds, got)
-	}
 }
 
 func TestPrepareRestorePodSpecFallsBackToSentinelWhenNoProbe(t *testing.T) {
@@ -436,25 +457,20 @@ func TestPrepareRestorePodSpecFallsBackToSentinelWhenNoProbe(t *testing.T) {
 			t.Fatalf("fallback startup probe command = %#v, want %#v", container.StartupProbe.Exec.Command, want)
 		}
 	}
-	if got := container.StartupProbe.PeriodSeconds; got != 1 {
-		t.Fatalf("expected fallback startup PeriodSeconds=1, got %d", got)
-	}
 }
 
-// assertRestoreStartupGate verifies the threshold invariants every restore
-// StartupProbe must satisfy: FailureThreshold=MaxInt32 (effectively infinite
-// retries during CRIU restore) and SuccessThreshold=1. The handler shape is
-// not checked here because ensureRestoreStartupProbe synthesizes the probe
-// from whatever Startup/Liveness/Readiness handler the workload defined; only
-// when no user probe is present does it fall back to the sentinel-cat exec
-// probe (covered by assertSentinelRestoreStartupGate).
+// assertRestoreStartupGate verifies the load-bearing invariants every restore
+// StartupProbe must satisfy: 30 minutes at 1s cadence and SuccessThreshold=1.
 func assertRestoreStartupGate(t *testing.T, probe *corev1.Probe) {
 	t.Helper()
 	if probe == nil {
 		t.Fatalf("expected non-nil startup probe")
 	}
-	if got := probe.FailureThreshold; got != math.MaxInt32 {
-		t.Fatalf("expected startup failure threshold %d, got %d", math.MaxInt32, got)
+	if got := probe.FailureThreshold; got != restoreStartupFailureThreshold {
+		t.Fatalf("expected startup failure threshold %d, got %d", restoreStartupFailureThreshold, got)
+	}
+	if got := probe.PeriodSeconds; got != 1 {
+		t.Fatalf("expected startup period 1, got %d", got)
 	}
 	if got := probe.SuccessThreshold; got != 1 {
 		t.Fatalf("expected startup success threshold 1, got %d", got)
@@ -560,7 +576,7 @@ func TestValidateRestorePodSpec(t *testing.T) {
 	okSpec.Containers[0].StartupProbe = &corev1.Probe{
 		ProbeHandler:     corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/livez"}},
 		PeriodSeconds:    5,
-		FailureThreshold: math.MaxInt32,
+		FailureThreshold: restoreStartupFailureThreshold,
 		SuccessThreshold: 1,
 	}
 	if err := ValidateRestorePodSpec(okSpec, annotations, storage, DefaultSeccompLocalhostProfile); err != nil {

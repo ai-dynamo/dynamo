@@ -5,6 +5,11 @@ description: Check Dynamo Enhancement Proposal issue status, list DEPs by lifecy
 
 # Skill: Check DEP Status
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 ## Purpose
 
 List DEP issues with their current status, area, PIC, and approval

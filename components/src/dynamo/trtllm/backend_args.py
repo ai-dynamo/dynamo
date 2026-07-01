@@ -1,21 +1,37 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# TODO(DIS-2240): Remove deprecated multimodal flags across engine
+
 """Dynamo TRT-LLM backend configuration ArgGroup."""
 
 import argparse
+import logging
+import warnings
 from typing import Optional
 
 from tensorrt_llm.llmapi import BuildConfig
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
+from dynamo.common.configuration.groups.frontend_decoding_args import (
+    add_frontend_decoding_arg,
+)
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 
 from . import __version__
 from .constants import DisaggregationMode, Modality
 
 DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+CANONICAL_AGGREGATED_MODE = "agg"
+PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
+
+logger = logging.getLogger(__name__)
+
+
+def _warn_deprecated(message: str) -> None:
+    logger.warning(message)
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
 
 
 class DynamoTrtllmArgGroup(ArgGroup):
@@ -148,10 +164,19 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--publish-events-and-metrics",
-            env_var="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS",
+            flag_name="--publish-kv-events",
+            env_var="DYN_TRTLLM_PUBLISH_KV_EVENTS",
             default=False,
-            help="If set, publish events and metrics to Dynamo components.",
+            help=(
+                "If set, publish KV cache events to the KV router. The "
+                "`dynamo_component_*` gauges and `trtllm_*` vendor metrics "
+                "emit unconditionally regardless of this flag."
+            ),
+            dest="publish_events_and_metrics",
+            # `obsolete_flag` accepts the old `--publish-events-and-metrics`
+            # / `--no-publish-events-and-metrics` aliases automatically.
+            # DeprecationWarning fires in args.py:parse_args.
+            obsolete_flag="--publish-events-and-metrics",
         )
         add_argument(
             g,
@@ -174,9 +199,25 @@ class DynamoTrtllmArgGroup(ArgGroup):
             g,
             flag_name="--disaggregation-mode",
             env_var="DYN_TRTLLM_DISAGGREGATION_MODE",
-            default=DisaggregationMode.AGGREGATED.value,
-            choices=[mode.value for mode in DisaggregationMode],
-            help="Mode to use for disaggregation.",
+            default=CANONICAL_AGGREGATED_MODE,
+            choices=[
+                CANONICAL_AGGREGATED_MODE,
+                PREFILL_DECODE_DISAGGREGATION_MODE,
+                *[mode.value for mode in DisaggregationMode],
+            ],
+            help=(
+                "Worker disaggregation mode. Use 'agg' for aggregated serving, "
+                "'pd' for a combined prefill+decode worker, 'prefill', "
+                "'decode', or 'encode'. The legacy "
+                "'prefill_and_decode' value remains accepted temporarily."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-multimodal",
+            env_var="DYN_TRTLLM_ENABLE_MULTIMODAL",
+            default=False,
+            help="Enable multimodal LLM request processing.",
         )
         add_argument(
             g,
@@ -184,7 +225,10 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_MODALITY",
             default=Modality.TEXT.value,
             choices=[m.value for m in Modality],
-            help="Modality to use for the model.",
+            help=(
+                "Modality to use for the model. For multimodal LLM serving, "
+                "prefer --enable-multimodal; diffusion modalities remain here."
+            ),
         )
         add_argument(
             g,
@@ -208,17 +252,7 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="Maximum size of downloadable embedding files/Image URLs.",
         )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--frontend-decoding",
-            env_var="DYN_TRTLLM_FRONTEND_DECODING",
-            default=False,
-            help=(
-                "Enable frontend decoding of multimodal images. "
-                "When enabled, images are decoded in the Rust frontend and transferred to the backend via NIXL RDMA. "
-                "Without this flag, images are decoded in the Python backend (default behavior)."
-            ),
-        )
+        add_frontend_decoding_arg(g, env_prefix="TRTLLM")
 
         # --- Guided Decoding ---
         add_argument(
@@ -330,22 +364,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             diffusion_group,
-            flag_name="--dit-dp-size",
-            env_var="DYN_TRTLLM_DIT_DP_SIZE",
-            default=1,
-            arg_type=int,
-            help="Data parallel size for DiT.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--dit-tp-size",
-            env_var="DYN_TRTLLM_DIT_TP_SIZE",
-            default=1,
-            arg_type=int,
-            help="Tensor parallel size for DiT.",
-        )
-        add_argument(
-            diffusion_group,
             flag_name="--dit-ulysses-size",
             env_var="DYN_TRTLLM_DIT_ULYSSES_SIZE",
             default=1,
@@ -368,21 +386,6 @@ class DynamoTrtllmArgGroup(ArgGroup):
             arg_type=int,
             help="CFG parallel size for DiT.",
         )
-        add_argument(
-            diffusion_group,
-            flag_name="--dit-fsdp-size",
-            env_var="DYN_TRTLLM_DIT_FSDP_SIZE",
-            default=1,
-            arg_type=int,
-            help="FSDP size for DiT.",
-        )
-        add_negatable_bool_argument(
-            diffusion_group,
-            flag_name="--fuse-qkv",
-            env_var="DYN_TRTLLM_FUSE_QKV",
-            default=True,
-            help="Enable QKV fusion for transformer attention layers.",
-        )
         add_negatable_bool_argument(
             diffusion_group,
             flag_name="--enable-layerwise-nvtx-marker",
@@ -397,29 +400,11 @@ class DynamoTrtllmArgGroup(ArgGroup):
             default=False,
             help="Skip warmup inference during initialization.",
         )
-        add_negatable_bool_argument(
-            diffusion_group,
-            flag_name="--enable-async-cpu-offload",
-            env_var="DYN_TRTLLM_ENABLE_ASYNC_CPU_OFFLOAD",
-            default=False,
-            help="Enable async CPU offload for memory efficiency.",
-        )
-        add_argument(
-            diffusion_group,
-            flag_name="--skip-components",
-            env_var="DYN_TRTLLM_SKIP_COMPONENTS",
-            default="",
-            help=(
-                "Comma-separated list of pipeline components to skip loading. "
-                "Valid values: transformer, vae, text_encoder, tokenizer, scheduler, "
-                "image_encoder, image_processor."
-            ),
-        )
 
     def _add_diffusion_request_arguments(self, parser: argparse.ArgumentParser) -> None:
-        # Check TRTLLM's DiffusionRequest for list of fields, note that
+        # Check TRT-LLM's public VisualGenParams for the list of fields. Note that
         # we only add the fields that can be set in request, otherwise we use
-        # TRTLLM's default values by not setting them at all.
+        # TRT-LLM's default values by not setting them at all.
         diffusion_request_group = parser.add_argument_group(
             "Diffusion Request Options [Experimental]",
             "Options to set default values for video/image generation requests",
@@ -501,6 +486,7 @@ class DynamoTrtllmConfig(ConfigBase):
     guided_decoding_backend: Optional[str] = None
 
     disaggregation_mode: DisaggregationMode
+    enable_multimodal: bool
     modality: Modality
     encode_endpoint: str
     allowed_local_media_path: str
@@ -523,23 +509,41 @@ class DynamoTrtllmConfig(ConfigBase):
     quant_dynamic: bool
     disable_torch_compile: bool
     enable_fullgraph: bool
-    fuse_qkv: bool
     enable_cuda_graph: bool
     enable_layerwise_nvtx_marker: bool
     skip_warmup: bool
-    dit_dp_size: int
-    dit_tp_size: int
     dit_ulysses_size: int
     dit_ring_size: int
     dit_cfg_size: int
-    dit_fsdp_size: int
-    enable_async_cpu_offload: bool
-    skip_components: str
 
     def validate(self) -> None:
         if isinstance(self.disaggregation_mode, str):
-            self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
+            if self.disaggregation_mode in {
+                CANONICAL_AGGREGATED_MODE,
+                PREFILL_DECODE_DISAGGREGATION_MODE,
+            }:
+                self.disaggregation_mode = DisaggregationMode.AGGREGATED
+            else:
+                if self.disaggregation_mode == DisaggregationMode.AGGREGATED.value:
+                    _warn_deprecated(
+                        "--disaggregation-mode=prefill_and_decode is deprecated; "
+                        "use --disaggregation-mode=agg for aggregated serving or "
+                        "--disaggregation-mode=pd for a combined prefill+decode "
+                        "worker. This release will map the legacy value to the "
+                        "new argument."
+                    )
+                self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
         if isinstance(self.modality, str):
             self.modality = Modality(self.modality)
+        if self.enable_multimodal:
+            if Modality.is_diffusion(self.modality):
+                raise ValueError(
+                    "--enable-multimodal cannot be combined with "
+                    f"--modality {self.modality.value}. Use --modality only for "
+                    "diffusion models."
+                )
+            self.modality = Modality.MULTIMODAL
+        elif self.modality == Modality.MULTIMODAL:
+            self.enable_multimodal = True
         if not self.served_model_name:
             self.served_model_name = None

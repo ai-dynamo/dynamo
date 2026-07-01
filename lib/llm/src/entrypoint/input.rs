@@ -14,7 +14,7 @@ use std::{
 };
 
 mod common;
-pub use common::{build_routed_pipeline, build_routed_pipeline_with_preprocessor};
+pub use common::{PreprocessedRouting, build_preprocessed_routing};
 pub mod endpoint;
 pub mod grpc;
 pub mod http;
@@ -98,27 +98,22 @@ pub async fn run_input(
     in_opt: Input,
     engine_config: super::EngineConfig,
 ) -> anyhow::Result<()> {
-    if let Err(e) = crate::agents::trace::init_from_env_with_shutdown(drt.child_token()).await {
-        tracing::warn!(error = %e, "Agent trace initialization failed; continuing without trace sink");
+    if let Err(e) = crate::request_trace::init_from_env_with_shutdown(drt.child_token()).await {
+        tracing::warn!(error = %e, "Request trace initialization failed; continuing without trace sink");
     }
-    if let Err(e) = crate::agents::trace::start_tool_event_ingest_from_policy(
+    if let Err(e) = crate::request_trace::start_tool_event_ingest_from_policy(
         drt.clone(),
         engine_config.local_model(),
     )
     .await
     {
-        tracing::warn!(error = %e, "Agent tool event ingest initialization failed; continuing without tool traces");
+        tracing::warn!(error = %e, "Request trace tool event ingest initialization failed; continuing without request trace tool events");
     }
 
-    // Initialize audit bus + sink workers (off hot path; fan-out supported)
-    if crate::audit::config::policy().enabled {
-        let cap: usize = std::env::var("DYN_AUDIT_CAPACITY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1024);
-        crate::audit::bus::init(cap);
-        crate::audit::sink::spawn_workers_from_env().await?;
-        tracing::info!(cap, "Audit initialized");
+    // Initialize audit bus + sink workers (off hot path; fan-out supported).
+    // Soft-fail like trace: a failed audit sink should not bring the server down.
+    if let Err(e) = crate::audit::init_from_env_with_shutdown(drt.child_token()).await {
+        tracing::warn!(error = %e, "Audit initialization failed; continuing without audit sink");
     }
 
     match in_opt {

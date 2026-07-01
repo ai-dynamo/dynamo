@@ -49,6 +49,10 @@ inputs:
     description: 'Name for artifact naming. Defaults to {framework}_{profile}.'
     required: false
     default: ''
+  test_file:
+    description: 'Pytest file to run.'
+    required: false
+    default: 'tests/deploy/test_deploy.py'
   extra_pytest_args:
     description: 'Additional pytest arguments (e.g., --frontend-image=...)'
     required: false
@@ -95,6 +99,7 @@ runs:
         IMAGE: ${{ inputs.image }}
         DYN_TEST_OUTPUT_PATH: ${{ github.workspace }}/test-output
         TEST_NAME: ${{ inputs.test_name }}
+        TEST_FILE: ${{ inputs.test_file }}
         EXTRA_PYTEST_ARGS: ${{ inputs.extra_pytest_args }}
         DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
         DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
@@ -118,7 +123,7 @@ runs:
           TEST_NAME="${FRAMEWORK:-unknown}_${PROFILE:-unknown}"
         fi
 
-        pytest tests/deploy/test_deploy.py \
+        python -m pytest "${TEST_FILE}" \
           --namespace="${NAMESPACE}" \
           ${PYTEST_ARGS} \
           ${EXTRA_PYTEST_ARGS} \

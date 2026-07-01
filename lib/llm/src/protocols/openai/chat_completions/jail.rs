@@ -7,7 +7,8 @@ use dynamo_protocols::types::{
     ChatCompletionStreamResponseDelta, FinishReason, FunctionCallStream, FunctionType, Role,
 };
 
-use dynamo_parsers::tool_calling::config::JsonParserConfig;
+use dynamo_parsers::tool_calling::config::{JsonParserConfig, ParserConfig};
+use dynamo_parsers::tool_calling::gemma4::split_partial_call_prefix_gemma4;
 use dynamo_parsers::tool_calling::json::try_tool_call_parse_basic_json;
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
 use dynamo_parsers::tool_calling::{
@@ -22,6 +23,14 @@ use uuid::Uuid;
 use crate::utils::{MarkerMatcher, MatchResult};
 
 use super::NvCreateChatCompletionStreamResponse;
+
+fn is_harmony_parser(parser: Option<&str>) -> bool {
+    parser == Some("harmony")
+}
+
+fn contains_harmony_protocol(text: &str) -> bool {
+    text.contains("<|channel|>")
+}
 
 /// Represents what a choice wants to emit after processing content
 #[derive(Debug, Clone)]
@@ -123,7 +132,6 @@ fn create_choice_stream(
     content: &str,
     tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
     finish_reason: Option<FinishReason>,
-    stop_reason: Option<dynamo_protocols::types::StopReason>,
     logprobs: Option<ChatChoiceLogprobs>,
 ) -> ChatChoiceStream {
     #[allow(deprecated)]
@@ -140,7 +148,6 @@ fn create_choice_stream(
             reasoning_content: None,
         },
         finish_reason,
-        stop_reason,
         logprobs,
     }
 }
@@ -198,6 +205,69 @@ impl ChoiceJailState {
         std::mem::take(&mut self.accumulated_content)
     }
 
+    fn handle_trailing_content(
+        &mut self,
+        content: &str,
+        choice: &ChatChoiceStream,
+        jail_stream: &JailedStream,
+        emissions: &mut Vec<ChoiceEmission>,
+    ) {
+        if content.is_empty() {
+            return;
+        }
+
+        if let MatchResult::Partial {
+            prefix, partial, ..
+        } = jail_stream.marker_matcher.process_chunk(content, "")
+        {
+            if !prefix.is_empty() {
+                #[allow(deprecated)]
+                let trailing_choice = create_choice_stream(
+                    choice.index,
+                    choice.delta.role,
+                    &prefix,
+                    None,
+                    None,
+                    choice.logprobs.clone(),
+                );
+                emissions.push(ChoiceEmission::Trailing(trailing_choice));
+            }
+            self.partial_match_buffer = partial;
+            return;
+        }
+
+        if let Some((prefix, partial)) = jail_stream.split_partial_tool_call_start(content) {
+            if !prefix.is_empty() {
+                #[allow(deprecated)]
+                let trailing_choice = create_choice_stream(
+                    choice.index,
+                    choice.delta.role,
+                    prefix,
+                    None,
+                    None,
+                    choice.logprobs.clone(),
+                );
+                emissions.push(ChoiceEmission::Trailing(trailing_choice));
+            }
+            self.partial_match_buffer = partial.to_string();
+        } else if jail_stream.should_start_jail(content) {
+            self.is_jailed = true;
+            self.accumulated_content = content.to_string();
+            self.accumulated_logprobs = None;
+        } else {
+            #[allow(deprecated)]
+            let trailing_choice = create_choice_stream(
+                choice.index,
+                choice.delta.role,
+                content,
+                None,
+                choice.finish_reason,
+                choice.logprobs.clone(),
+            );
+            emissions.push(ChoiceEmission::Trailing(trailing_choice));
+        }
+    }
+
     /// Process incoming content and return what should be emitted (if anything)
     async fn process_content(
         &mut self,
@@ -219,8 +289,12 @@ impl ChoiceJailState {
                     suffix,
                     ..
                 } => {
+                    let prefix_has_harmony_protocol =
+                        is_harmony_parser(jail_stream.tool_call_parser.as_deref())
+                            && contains_harmony_protocol(&prefix);
+
                     // Emit prefix if any
-                    if !prefix.is_empty() {
+                    if !prefix.is_empty() && !prefix_has_harmony_protocol {
                         #[allow(deprecated)]
                         let prefix_choice = create_choice_stream(
                             choice.index,
@@ -228,17 +302,21 @@ impl ChoiceJailState {
                             &prefix,
                             None,
                             choice.finish_reason,
-                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
                     }
 
                     // Build the potential full content
-                    let full_content = format!("{}{}", marker, suffix);
+                    let full_content = if prefix_has_harmony_protocol {
+                        format!("{}{}{}", prefix, marker, suffix)
+                    } else {
+                        format!("{}{}", marker, suffix)
+                    };
 
                     // Check if this already contains the end marker
                     let (should_end, split_pos) = jail_stream.should_end_jail(&full_content).await;
+                    self.partial_match_buffer.clear();
 
                     if should_end {
                         // Complete tool call found in this chunk
@@ -265,26 +343,12 @@ impl ChoiceJailState {
                         }
 
                         // Handle trailing content if any
-                        if !trailing_part.is_empty() {
-                            if jail_stream.should_start_jail(trailing_part) {
-                                self.is_jailed = true;
-                                self.accumulated_content = trailing_part.to_string();
-                                // No logprobs to seed here — they were already emitted with the tool call
-                                self.accumulated_logprobs = None;
-                            } else {
-                                #[allow(deprecated)]
-                                let trailing_choice = create_choice_stream(
-                                    choice.index,
-                                    choice.delta.role,
-                                    trailing_part,
-                                    None,
-                                    choice.finish_reason,
-                                    None,
-                                    choice.logprobs.clone(),
-                                );
-                                emissions.push(ChoiceEmission::Trailing(trailing_choice));
-                            }
-                        }
+                        self.handle_trailing_content(
+                            trailing_part,
+                            choice,
+                            jail_stream,
+                            &mut emissions,
+                        );
                     } else {
                         // Start jailing with the marker and suffix
                         self.is_jailed = true;
@@ -292,8 +356,6 @@ impl ChoiceJailState {
                         // Seed accumulated logprobs with this chunk's logprobs
                         self.accumulated_logprobs = choice.logprobs.clone();
                     }
-
-                    self.partial_match_buffer.clear();
                 }
 
                 MatchResult::Partial {
@@ -301,6 +363,16 @@ impl ChoiceJailState {
                     partial,
                     possible_patterns,
                 } => {
+                    if is_harmony_parser(jail_stream.tool_call_parser.as_deref())
+                        && contains_harmony_protocol(&prefix)
+                    {
+                        self.is_jailed = true;
+                        self.accumulated_content = format!("{}{}", prefix, partial);
+                        self.accumulated_logprobs = choice.logprobs.clone();
+                        self.partial_match_buffer.clear();
+                        return emissions;
+                    }
+
                     // Emit the safe prefix
                     if !prefix.is_empty() {
                         #[allow(deprecated)]
@@ -310,7 +382,6 @@ impl ChoiceJailState {
                             &prefix,
                             None,
                             choice.finish_reason,
-                            None,
                             choice.logprobs.clone(),
                         );
                         emissions.push(ChoiceEmission::PassThrough(prefix_choice));
@@ -328,17 +399,26 @@ impl ChoiceJailState {
                 }
 
                 MatchResult::None { content } => {
-                    // Check if this content (combined with partial buffer) should start jailing
-                    let combined_content = if self.partial_match_buffer.is_empty() {
-                        content.clone()
-                    } else {
-                        format!("{}{}", self.partial_match_buffer, content)
-                    };
-
-                    if jail_stream.should_start_jail(&combined_content) {
+                    if let Some((prefix, partial)) =
+                        jail_stream.split_partial_tool_call_start(&content)
+                    {
+                        if !prefix.is_empty() {
+                            #[allow(deprecated)]
+                            let prefix_choice = create_choice_stream(
+                                choice.index,
+                                choice.delta.role,
+                                prefix,
+                                None,
+                                None,
+                                choice.logprobs.clone(),
+                            );
+                            emissions.push(ChoiceEmission::PassThrough(prefix_choice));
+                        }
+                        self.partial_match_buffer = partial.to_string();
+                    } else if jail_stream.should_start_jail(&content) {
                         // Start jailing with the combined content
                         self.is_jailed = true;
-                        self.accumulated_content = combined_content;
+                        self.accumulated_content = content;
                         // Seed accumulated logprobs with this chunk's logprobs
                         self.accumulated_logprobs = choice.logprobs.clone();
                         self.partial_match_buffer.clear();
@@ -352,7 +432,6 @@ impl ChoiceJailState {
                                 &content,
                                 None,
                                 choice.finish_reason,
-                                None,
                                 choice.logprobs.clone(),
                             );
                             emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
@@ -403,24 +482,7 @@ impl ChoiceJailState {
                 self.end_jail();
 
                 // Handle trailing content if any
-                if !trailing_owned.is_empty() {
-                    if jail_stream.should_start_jail(&trailing_owned) {
-                        self.is_jailed = true;
-                        self.accumulated_content = trailing_owned;
-                    } else {
-                        #[allow(deprecated)]
-                        let trailing_choice = create_choice_stream(
-                            choice.index,
-                            choice.delta.role,
-                            &trailing_owned,
-                            None,
-                            choice.finish_reason,
-                            None,
-                            choice.logprobs.clone(),
-                        );
-                        emissions.push(ChoiceEmission::Trailing(trailing_choice));
-                    }
-                }
+                self.handle_trailing_content(&trailing_owned, choice, jail_stream, &mut emissions);
             }
             // If not unjailing, don't emit anything (still accumulating)
         }
@@ -438,7 +500,6 @@ impl ChoiceJailState {
                 &self.accumulated_content,
                 None,
                 self.stream_finish_reason, // For the accumulated content, assign the original stream finish reason, otherwise it will get lost
-                None,
                 self.accumulated_logprobs.clone(),
             );
 
@@ -476,6 +537,17 @@ impl ChoiceJailState {
             } else {
                 Some(ChoiceEmission::Content(final_choice))
             }
+        } else if !self.partial_match_buffer.is_empty() {
+            let content = std::mem::take(&mut self.partial_match_buffer);
+            let choice = create_choice_stream(
+                self.index,
+                Some(Role::Assistant),
+                &content,
+                None,
+                self.stream_finish_reason,
+                None,
+            );
+            Some(ChoiceEmission::Content(choice))
         } else {
             None
         }
@@ -545,6 +617,11 @@ impl JailedStream {
         JailedStreamBuilder::new()
     }
 
+    /// Whether the jail starts already-jailed (tool_choice=required/named path).
+    fn is_immediate(&self) -> bool {
+        matches!(self.jail_mode, JailMode::Immediate { .. })
+    }
+
     /// Apply jail stream transformation with finish_reason fix
     /// This is a convenience method that applies both apply() and fix_finish_reason()
     pub fn apply_with_finish_reason<S>(
@@ -612,8 +689,8 @@ impl JailedStream {
                             };
 
                             if let Some(text) = text_content {
-                                let starts_jailed = matches!(self.jail_mode, JailMode::Immediate { .. });
-                                let choice_state = choice_states.get_or_create_state(choice.index, starts_jailed);
+                                let choice_state = choice_states
+                                    .get_or_create_state(choice.index, self.is_immediate());
 
                                 if let Some(reasoning_content) = &choice.delta.reasoning_content {
                                     let pending = choice_state
@@ -645,28 +722,41 @@ impl JailedStream {
                             }
                             // For multimodal content, pass through unchanged (no jailing)
                         } else {
-                            // Handle choices without content (e.g., final chunks with finish_reason)
-                            // Only filter out if this choice was ever jailed and lacks role
-                            // (to avoid aggregator issues with deltas missing role after unjail)
-                            let choice_state = choice_states.get_or_create_state(choice.index, false);
+                            // Handle choices without content (final chunks with finish_reason,
+                            // role-only chunks, or chunks where the upstream reasoning parser
+                            // stripped all content into `reasoning_content`).
+                            //
+                            // `starts_jailed` must reflect the configured jail_mode: if Immediate
+                            // mode is initialized via this branch (e.g., a reasoning-only first
+                            // chunk), hardcoding `false` here silently disables it for the rest
+                            // of the stream — `get_or_create_state` ignores the argument on
+                            // subsequent calls.
+                            let choice_state = choice_states
+                                .get_or_create_state(choice.index, self.is_immediate());
                             // Also track stream finish reason from content-less final chunks
                             // (e.g. finish_reason=Stop arriving in a chunk with content=None) so
                             // the Immediate-mode finalize path can emit the correct finish_reason.
                             if choice.finish_reason.is_some() {
                                 choice_state.stream_finish_reason = choice.finish_reason;
                             }
-                            let was_ever_jailed = !choice_state.accumulated_content.is_empty() || choice_state.is_jailed;
+                            let has_pending_buffered_output =
+                                !choice_state.partial_match_buffer.is_empty();
+                            let was_ever_jailed = !choice_state.accumulated_content.is_empty()
+                                || choice_state.is_jailed
+                                || has_pending_buffered_output;
 
+                            // Reasoning-only chunks must pass through even when jailed; only
+                            // `content` is subject to accumulation.
                             let should_emit = choice.delta.role.is_some()
                                 || choice.delta.tool_calls.is_some()
-                                || !was_ever_jailed; // Always pass through if never jailed
+                                || choice.delta.reasoning_content.is_some()
+                                || !was_ever_jailed;
 
                             if should_emit {
                                 let pass_through_choice = ChatChoiceStream {
                                     index: choice.index,
                                     delta: choice.delta.clone(),
                                     finish_reason: choice.finish_reason,
-                                    stop_reason: choice.stop_reason.clone(),
                                     logprobs: choice.logprobs.clone(),
                                 };
                                 all_emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
@@ -757,6 +847,7 @@ impl JailedStream {
                     system_fingerprint: None,
                     },
                     nvext: None,
+                    llm_metrics: None,
                 };
 
                 let final_metadata = (last_annotated_id, last_annotated_event, last_annotated_comment);
@@ -817,6 +908,33 @@ impl JailedStream {
     }
 
     /// Check if content matches any jail start patterns
+    fn split_partial_tool_call_start<'a>(&self, content: &'a str) -> Option<(&'a str, &'a str)> {
+        if self.tool_call_parser.as_deref() == Some("gemma4") {
+            return split_partial_call_prefix_gemma4(content);
+        }
+        None
+    }
+
+    /// Whether this parser must never surface tool-call markup to the user, so
+    /// finalize strips residual markers rather than releasing the raw buffer.
+    ///
+    /// The real source of truth is `dynamo-parsers`'
+    /// `JsonParserConfig::discard_unparseable_wrapper`, set by that crate's
+    /// `hermes()` / `qwen25()` / `jamba()` configs (ai-dynamo/frontend-crates,
+    /// `parsers/src/tool_calling/config.rs`) and already honored by the batch
+    /// parser. We allowlist by name here only because the pinned `dynamo-parsers`
+    /// version predates that exported field, so it can't be read yet; extend the
+    /// list when a new family opts into the never-leak contract.
+    // TODO: read `discard_unparseable_wrapper` from the parser config and drop
+    // this name allowlist (hermes/qwen25/jamba) once the `dynamo-parsers`
+    // dependency is bumped to a version that exports the field.
+    fn suppresses_tool_call_markup(&self) -> bool {
+        matches!(
+            self.tool_call_parser.as_deref(),
+            Some("hermes") | Some("qwen25") | Some("jamba")
+        )
+    }
+
     fn should_start_jail(&self, content: &str) -> bool {
         // Path 1: Check configured start sequences
         let sequence_match = !self.jail_start_sequences.is_empty()
@@ -830,6 +948,21 @@ impl JailedStream {
             && detect_tool_call_start(content, self.tool_call_parser.as_deref()).unwrap_or(false);
 
         sequence_match || tool_call_match
+    }
+
+    fn prefix_before_first_tool_call_marker<'a>(&self, content: &'a str) -> Option<&'a str> {
+        let mut first_marker: Option<usize> = None;
+
+        for marker in &self.jail_start_sequences {
+            if marker.is_empty() {
+                continue;
+            }
+            if let Some(pos) = content.find(marker) {
+                first_marker = Some(first_marker.map_or(pos, |current| current.min(pos)));
+            }
+        }
+
+        first_marker.map(|pos| &content[..pos])
     }
 
     /// Check if accumulated content should end jail
@@ -980,7 +1113,6 @@ impl JailedStream {
                                 normal_text.as_deref().unwrap_or(""),
                                 None,
                                 base_choice.finish_reason,
-                                base_choice.stop_reason.clone(),
                                 base_choice.logprobs.clone(),
                             );
                         }
@@ -1004,14 +1136,13 @@ impl JailedStream {
                             Some(Role::Assistant),
                             normal_text.as_deref().unwrap_or(""),
                             Some(tool_call_chunks),
-                            None,
-                            None,
+                            base_choice.finish_reason,
                             base_choice.logprobs.clone(),
                         )
                     }
                     Ok((_, normal_text)) => {
-                        // Parser succeeded but extracted no structured tool calls. The parser
-                        // signals which sub-case via normal_text:
+                        // Parser succeeded but extracted no structured tool calls. Most parsers
+                        // signal which sub-case via normal_text:
                         //   - Some(""):  parser detected markers but couldn't form a complete
                         //                call (e.g. kimi truncated mid-arg, or start token with
                         //                no valid JSON). Drop the buffer — accumulated_content
@@ -1022,18 +1153,64 @@ impl JailedStream {
                         //                accumulated_content through verbatim — it's regular text
                         //                and may carry leading/trailing whitespace the parser
                         //                would have trimmed.
-                        let content = if normal_text.as_deref() == Some("") {
-                            ""
+                        //
+                        // Harmony is different because its tool parser is also responsible for
+                        // stripping Harmony envelopes when no reasoning parser is configured.
+                        // In zero-call Harmony marker cases, emit the stripped normal_text rather
+                        // than accumulated_content, which still contains raw protocol markers.
+                        let content: String = if is_finalize
+                            && self.tool_call_parser.as_deref() == Some("minimax_m2")
+                            && self
+                                .prefix_before_first_tool_call_marker(accumulated_content)
+                                .is_some()
+                        {
+                            // MiniMax's reference parser is strict: missing paired fences means
+                            // zero recovered calls. The raw `<minimax:tool_call>` envelope is
+                            // still protocol markup, so keep only pre-call prose at stream end.
+                            self.prefix_before_first_tool_call_marker(accumulated_content)
+                                .unwrap_or("")
+                                .to_string()
+                        } else if normal_text.as_deref() == Some("") {
+                            String::new()
+                        } else if is_harmony_parser(self.tool_call_parser.as_deref())
+                            && contains_harmony_protocol(accumulated_content)
+                        {
+                            normal_text.as_deref().unwrap_or("").to_string()
+                        } else if self.suppresses_tool_call_markup() {
+                            // No call parsed out of a jailed buffer: strip the markers rather
+                            // than leak the raw text. Handled in the jail so it holds regardless
+                            // of the installed parser version.
+                            if let Some(prefix) =
+                                self.prefix_before_first_tool_call_marker(accumulated_content)
+                            {
+                                // Truncated / unparseable wrapper: keep the prose before the
+                                // opening marker, drop the rest.
+                                prefix.trim_end().to_string()
+                            } else if self.jail_end_sequences.iter().any(|seq| {
+                                !seq.is_empty() && accumulated_content.contains(seq.as_str())
+                            }) {
+                                // Orphan close marker(s) with no opener: remove every occurrence
+                                // (not just trailing) so a mid-buffer marker can't leak.
+                                let mut cleaned = accumulated_content.to_string();
+                                for seq in self.jail_end_sequences.iter().filter(|s| !s.is_empty())
+                                {
+                                    cleaned = cleaned.replace(seq.as_str(), "");
+                                }
+                                cleaned.trim().to_string()
+                            } else {
+                                // No markers: false-positive jail entry on prose, pass through.
+                                accumulated_content.to_string()
+                            }
                         } else {
-                            accumulated_content
+                            // Other parsers / generic jails: release the buffer verbatim.
+                            accumulated_content.to_string()
                         };
                         create_choice_stream(
                             choice_index,
                             Some(Role::Assistant),
-                            content,
+                            &content,
                             None,
                             base_choice.finish_reason,
-                            base_choice.stop_reason.clone(),
                             base_choice.logprobs.clone(),
                         )
                     }
@@ -1052,7 +1229,6 @@ impl JailedStream {
                             "",
                             None,
                             base_choice.finish_reason,
-                            base_choice.stop_reason.clone(),
                             base_choice.logprobs.clone(),
                         )
                     }
@@ -1171,7 +1347,6 @@ impl JailedStream {
                         "",
                         Some(tool_call_chunks),
                         base_choice.finish_reason,
-                        None,
                         base_choice.logprobs.clone(),
                     )
                 } else if filter_dropped_all {
@@ -1183,7 +1358,6 @@ impl JailedStream {
                         "",
                         None,
                         base_choice.finish_reason,
-                        base_choice.stop_reason.clone(),
                         base_choice.logprobs.clone(),
                     )
                 } else {
@@ -1194,7 +1368,6 @@ impl JailedStream {
                         accumulated_content,
                         None,
                         base_choice.finish_reason,
-                        base_choice.stop_reason.clone(),
                         base_choice.logprobs.clone(),
                     )
                 }
@@ -1491,6 +1664,15 @@ impl JailedStreamBuilder {
             if let Some(config) = parser_map.get(parser_name.as_str()) {
                 // Add start tokens from the parser config
                 all_patterns.extend(config.parser_config.tool_call_start_tokens());
+                if let ParserConfig::Glm47(glm_config) = &config.parser_config
+                    && let Some(tools) = self.tool_definitions.as_ref()
+                {
+                    for tool in tools {
+                        if !tool.name.is_empty() {
+                            all_patterns.push(format!("{}{}", tool.name, glm_config.arg_key_start));
+                        }
+                    }
+                }
             }
         }
 
@@ -1568,7 +1750,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: None,
         };
 
@@ -1585,6 +1766,7 @@ mod tests {
                     system_fingerprint: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: None,
             event: None,
@@ -1637,6 +1819,7 @@ mod tests {
     }
 
     /// Helper: build a single-choice stream chunk with text content and logprobs
+    #[allow(deprecated)]
     fn text_chunk_with_logprobs(text: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
         let logprobs = ChatChoiceLogprobs {
             content: Some(
@@ -1668,7 +1851,6 @@ mod tests {
                 reasoning_content: None,
             },
             finish_reason: None,
-            stop_reason: None,
             logprobs: Some(logprobs),
         };
 
@@ -1685,6 +1867,7 @@ mod tests {
                     system_fingerprint: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: None,
             event: None,

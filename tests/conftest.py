@@ -18,6 +18,12 @@ from tests.hf_cache import (
     _enable_offline_with_mistral_patch,
     _restore_models_dir_env,
 )
+from tests.utils.collection_env_guard import (
+    collection_env_guard_disabled,
+    diff_collection_env,
+    format_collection_env_changes,
+    snapshot_collection_env,
+)
 from tests.utils.constants import TEST_MODELS, DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
@@ -36,8 +42,73 @@ _logger = logging.getLogger(__name__)
 _gpu_parallel_gpus_key: pytest.StashKey[list[dict]] = pytest.StashKey()
 _gpu_indices_key: pytest.StashKey[list[int] | None] = pytest.StashKey()
 _gpu_slots_key: pytest.StashKey[int | None] = pytest.StashKey()
+_collection_env_snapshot_key: pytest.StashKey[dict[str, str]] = pytest.StashKey()
+# Controller-side accumulator for collection-env changes reported by xdist workers.
+_collection_env_changes_key: pytest.StashKey[dict] = pytest.StashKey()
 
 _GPU_PARALLEL_DOWNLOADS_READY_ENV = "DYNAMO_GPU_PARALLEL_DOWNLOADS_READY"
+
+
+def _is_xdist_worker(config: pytest.Config) -> bool:
+    return hasattr(config, "workerinput")
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionstart(session: pytest.Session) -> None:
+    if not collection_env_guard_disabled():
+        session.config.stash[_collection_env_snapshot_key] = snapshot_collection_env()
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_finish(session: pytest.Session) -> None:
+    # Gate solely on snapshot presence (taken at session start). Re-reading the
+    # disable flag here would let an import-time mutation switch the guard off
+    # mid-run and mask other mutations.
+    before = session.config.stash.get(_collection_env_snapshot_key, None)
+    if before is None:
+        return
+    changes = diff_collection_env(before)
+    if not changes:
+        return
+    # Under xdist the import (and therefore the mutation) happens on the worker,
+    # not the controller. Raising here crashes the worker after collection, which
+    # xdist surfaces as an opaque INTERNALERROR ("assert not crashitem") instead
+    # of our message. Report changes back to the controller via workeroutput and
+    # let it fail the session cleanly in pytest_sessionfinish.
+    if _is_xdist_worker(session.config):
+        session.config.workeroutput["collection_env_changes"] = changes
+    else:
+        raise pytest.UsageError(format_collection_env_changes(changes))
+
+
+# optionalhook: pytest_testnodedown is an xdist-provided hookspec. Mark it
+# optional so collection does not raise PluginValidationError in environments
+# without pytest-xdist installed (e.g. the pre-commit marker-report hook).
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error) -> None:
+    # Controller side: gather each xdist worker's reported collection-env changes
+    # as it shuts down (node.workeroutput is the worker's workeroutput dict).
+    changes = (getattr(node, "workeroutput", {}) or {}).get("collection_env_changes")
+    if changes:
+        node.config.stash.setdefault(_collection_env_changes_key, {}).update(changes)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    # Controller side: if any worker reported a collection-time env mutation,
+    # surface it with the readable message and fail the session.
+    if _is_xdist_worker(session.config):
+        return
+    reported = session.config.stash.get(_collection_env_changes_key, None)
+    if not reported:
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.write_line("")
+        reporter.write_line(format_collection_env_changes(reported), red=True)
+    # Don't mask a more severe outcome (e.g. real test failures = exit 1).
+    if session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.USAGE_ERROR
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -263,6 +334,34 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
     if config.getoption("skip_service_restart", default=None):
         extra_args.append("--skip-service-restart")
 
+    # Forward pytest-cov flags so orchestrator children record coverage.
+    # Without this, profiled GPU tests run under run_gpu_parallel_tests=true
+    # bypass --cov entirely and contribute no .coverage data to the nightly
+    # coverage-report merge. Per-child COVERAGE_FILE (set in run_parallel)
+    # prevents siblings from clobbering each other's session-end output.
+    if config.pluginmanager.get_plugin("_cov") is not None:
+        for src in config.getoption("cov_source", default=None) or []:
+            extra_args.append(f"--cov={src}")
+        for rpt in config.getoption("cov_report", default=None) or []:
+            extra_args.append(f"--cov-report={rpt}")
+
+    # Forward -o cache_dir= so workers don't fall back to <cwd>/.pytest_cache.
+    # In CI cwd=/workspace is read-only for the runner uid, and pyproject's
+    # filterwarnings=["error"] escalates the resulting PytestCacheWarning into
+    # a test failure. Only forward cache_dir when absolute -- pytest's default
+    # ini value is the relative ".pytest_cache", and forwarding it would
+    # needlessly pin every worker to an explicit override outside our CI
+    # scenario.
+    cache_dir = config.getini("cache_dir")
+    if cache_dir and os.path.isabs(str(cache_dir)):
+        extra_args.extend(["-o", f"cache_dir={cache_dir}"])
+    # --basetemp is racy if forwarded directly: pytest rmtrees the given
+    # basetemp at session startup, so concurrent children sharing one root
+    # would wipe each other's temp trees. The orchestrator suffixes a unique
+    # per-test subdir before passing it to each child.
+    raw_basetemp = config.getoption("basetemp", default=None)
+    parent_basetemp = str(raw_basetemp) if raw_basetemp else None
+
     old_downloads_ready = os.environ.get(_GPU_PARALLEL_DOWNLOADS_READY_ENV)
     old_hf_offline = os.environ.get("HF_HUB_OFFLINE")
     downloads_ready = False
@@ -288,6 +387,7 @@ def pytest_runtestloop(session: pytest.Session) -> bool | None:
             gpu_indices=gpu_indices,
             extra_pytest_args=extra_args or None,
             stream=is_stream,
+            parent_basetemp=parent_basetemp,
         )
     finally:
         if downloads_ready:
@@ -513,11 +613,37 @@ def _item_has_marker(item, marker_name):
     return False
 
 
+def _check_sglang_mm_hashes_present(items) -> None:
+    """Log whether the installed sglang has the mm_hashes interop hook
+    (sgl-project/sglang#25300). SGLang v0.5.13+ carries this upstream; this
+    check is just for diagnostic clarity when the strong-gate MM-routing
+    assertion later trips on an older image."""
+    if not any("test_sglang" in i.nodeid and "mm_" in i.nodeid for i in items):
+        return
+    try:
+        import sglang
+
+        io_struct = Path(sglang.__file__).parent / "srt/managers/io_struct.py"
+        present = "mm_hashes:" in io_struct.read_text()
+    except Exception as exc:
+        _logger.warning("sglang mm_hashes interop probe failed: %s", exc)
+        return
+    _logger.info(
+        "sglang mm_hashes interop: %s",
+        "present"
+        if present
+        else "MISSING — image was built without the "
+        "vendored sgl-project/sglang#25300 patch; MM-aware routing tests "
+        "will degrade to text-prefix fallback.",
+    )
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
     """
     This function is called to modify the list of tests to run.
     """
+    _check_sglang_mm_hashes_present(items)
     # Auto-skip tests marked with a framework marker when the framework is not installed
     framework_markers = {
         "trtllm": "tensorrt_llm",
@@ -617,9 +743,9 @@ def pytest_collection_modifyitems(config, items):
             getattr(m, "name", "") == "skip" for m in getattr(item, "own_markers", [])
         ):
             continue
-        model_mark = item.get_closest_marker("model")
-        if model_mark and model_mark.args:
-            models_to_download.add(model_mark.args[0])
+        for model_mark in item.iter_markers("model"):
+            for repo_id in model_mark.args:
+                models_to_download.add(repo_id)
 
     # Store models to download in pytest config for fixtures to access
     if models_to_download:
@@ -971,7 +1097,7 @@ def request_plane(request):
 
 
 @pytest.fixture
-def durable_kv_events(request):
+def durable_kv_events(request, monkeypatch):
     """
     Whether to use durable KV events via JetStream. Defaults to False (NATS Core mode).
 
@@ -988,7 +1114,13 @@ def durable_kv_events(request):
         def test_example(runtime_services_dynamic_ports):
             ...
     """
-    return getattr(request, "param", False)
+    value = getattr(request, "param", False)
+    if value:
+        # Durable/JetStream KV events only exist on the NATS event plane. ZMQ is now
+        # the default, so pin NATS here; otherwise the durable subscriber bails at
+        # startup ("--durable-kv-events requires NATS event plane").
+        monkeypatch.setenv("DYN_EVENT_PLANE", "nats")
+    return value
 
 
 @pytest.fixture()
@@ -998,6 +1130,8 @@ def runtime_services(request, discovery_backend, request_plane):
 
     - If discovery_backend != "etcd", etcd is not started (returns None)
     - If request_plane != "nats", NATS is not started (returns None)
+    - The event plane follows the runtime default (ZMQ); set DYN_EVENT_PLANE=nats
+      (or use durable_kv_events) for tests that need the NATS event plane.
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
@@ -1018,7 +1152,7 @@ def runtime_services(request, discovery_backend, request_plane):
 
 @pytest.fixture()
 def runtime_services_dynamic_ports(
-    request, discovery_backend, request_plane, durable_kv_events
+    request, discovery_backend, request_plane, durable_kv_events, monkeypatch
 ):
     """Provide NATS and Etcd servers with truly dynamic ports per test.
 
@@ -1032,41 +1166,31 @@ def runtime_services_dynamic_ports(
       leak across workers.
 
     - If discovery_backend != "etcd", etcd is not started (returns None)
-    - NATS is always started when etcd is used, because KV events require NATS
-      regardless of the request_plane (tcp/nats only affects request transport)
-    - NATS Core mode (no JetStream) is the default; JetStream is enabled when durable_kv_events=True
+    - The event plane follows the runtime default (ZMQ). NATS is still started so
+      the NATS opt-in paths stay available; durable_kv_events=True pins
+      DYN_EVENT_PLANE=nats (see the durable_kv_events fixture).
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
-    import os
-
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
-    # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
+    # Start NATS when etcd is used so the NATS opt-in paths stay available.
     # When durable_kv_events=False (default), disable JetStream for faster startup
     if discovery_backend == "etcd":
         with NatsServer(
             request, port=0, disable_jetstream=not durable_kv_events
         ) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
-                # Save original env vars (may be set by session-scoped fixture)
-                orig_nats = os.environ.get("NATS_SERVER")
-                orig_etcd = os.environ.get("ETCD_ENDPOINTS")
-
-                # Set environment variables for this test's dynamic ports
-                os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
-                os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
+                # Set environment variables for this test's dynamic ports.
+                # monkeypatch.setenv auto-restores them (including any values set by
+                # the session-scoped fixture) at test teardown.
+                monkeypatch.setenv(
+                    "NATS_SERVER", f"nats://localhost:{nats_process.port}"
+                )
+                monkeypatch.setenv(
+                    "ETCD_ENDPOINTS", f"http://localhost:{etcd_process.port}"
+                )
 
                 yield nats_process, etcd_process
-
-                # Restore original env vars (or remove if they weren't set)
-                if orig_nats is not None:
-                    os.environ["NATS_SERVER"] = orig_nats
-                else:
-                    os.environ.pop("NATS_SERVER", None)
-                if orig_etcd is not None:
-                    os.environ["ETCD_ENDPOINTS"] = orig_etcd
-                else:
-                    os.environ.pop("ETCD_ENDPOINTS", None)
     elif request_plane == "nats":
         with NatsServer(
             request, port=0, disable_jetstream=not durable_kv_events
@@ -1154,15 +1278,27 @@ def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None
     - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
     - kv_event_port: ZMQ port for vLLM KV event publishing (avoids collisions under xdist)
     """
-    frontend_port = allocate_port(DefaultPort.FRONTEND.value)
-    system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
-    kv_event_port = allocate_port(DefaultPort.SYSTEM1.value)
-    all_ports = [frontend_port, *system_port_list, kv_event_port]
+    # Track ports as they are allocated so a failure mid-sequence (e.g. NIXL
+    # allocation raising) still cleans up earlier reservations via finally,
+    # rather than leaking them until stale cleanup and exhausting the xdist pool.
+    all_ports: list[int] = []
     try:
+        frontend_port = allocate_port(DefaultPort.FRONTEND.value)
+        all_ports.append(frontend_port)
+        system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
+        all_ports.extend(system_port_list)
+        kv_event_port = allocate_port(DefaultPort.SYSTEM1.value)
+        all_ports.append(kv_event_port)
+        # One NIXL side-channel port per worker (avoids xdist collisions on shared hosts).
+        nixl_side_channel_ports = allocate_ports(
+            num_system_ports, DefaultPort.SYSTEM1.value
+        )
+        all_ports.extend(nixl_side_channel_ports)
         yield ServicePorts(
             frontend_port=frontend_port,
             system_ports=system_port_list,
             kv_event_port=kv_event_port,
+            nixl_side_channel_ports=nixl_side_channel_ports,
         )
     finally:
         deallocate_ports(all_ports)

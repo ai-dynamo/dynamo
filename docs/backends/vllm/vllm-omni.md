@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: vLLM-Omni
+subtitle: vLLM-Omni serves text-to-image, text-to-video, image-to-video, and text-to-speech models through OpenAI-compatible endpoints.
 ---
 
-Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes text-to-text, text-to-image, text-to-video, and text-to-audio (TTS) capabilities via OpenAI-compatible API endpoints.
+Dynamo supports multimodal generation through the [vLLM-Omni](https://github.com/vllm-project/vllm-omni) backend. This integration exposes text-to-image, text-to-video, image-to-video, and text-to-audio (TTS) capabilities via OpenAI-compatible API endpoints.
 
 ## Prerequisites
 
@@ -24,7 +25,6 @@ pip install git+https://github.com/vllm-project/vllm-omni.git@<version>
 
 | Modality | Endpoint(s) | `--output-modalities` |
 |---|---|---|
-| Text-to-Text | `/v1/chat/completions` | `text` (default) |
 | Text-to-Image | `/v1/chat/completions`, `/v1/images/generations` | `image` |
 | Text-to-Video | `/v1/videos` | `video` |
 | Image-to-Video | `/v1/videos` | `video` |
@@ -36,7 +36,6 @@ The `--output-modalities` flag determines which endpoint(s) the worker registers
 
 | Modality | Models |
 |---|---|
-| Text-to-Text | `Qwen/Qwen2.5-Omni-7B` |
 | Text-to-Image | `Qwen/Qwen-Image`, `AIDC-AI/Ovis-Image-7B`, `zai-org/GLM-Image` (disagg) |
 | Text-to-Video | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`, `Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
 | Image-to-Video | `Wan-AI/Wan2.2-TI2V-5B-Diffusers`, `Wan-AI/Wan2.2-I2V-A14B-Diffusers` |
@@ -48,31 +47,6 @@ To run a non-default model, pass `--model` to any launch script:
 bash examples/backends/vllm/launch/agg_omni_image.sh --model AIDC-AI/Ovis-Image-7B
 bash examples/backends/vllm/launch/agg_omni_video.sh --model Wan-AI/Wan2.2-T2V-A14B-Diffusers
 ```
-
-## Text-to-Text
-
-Launch an aggregated deployment (frontend + omni worker):
-
-```bash
-bash examples/backends/vllm/launch/agg_omni.sh
-```
-
-This starts `Qwen/Qwen2.5-Omni-7B` with a single-stage thinker config on one GPU.
-
-Verify the deployment:
-
-```bash
-curl -s http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen2.5-Omni-7B",
-    "messages": [{"role": "user", "content": "What is 2+2?"}],
-    "max_tokens": 50,
-    "stream": false
-  }'
-```
-
-This script uses a custom stage config (`stage_configs/single_stage_llm.yaml`) that configures the thinker stage for text generation. See [Stage Configuration](#stage-configuration) for details.
 
 ## Text-to-Image
 
@@ -255,7 +229,7 @@ curl -X POST http://localhost:8000/v1/audio/speech \
 
 ### Parameters
 
-The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/user_guide/examples/online_serving/qwen3_tts/) API format. All TTS-specific parameters are top-level fields:
+The `/v1/audio/speech` endpoint follows the [vLLM-Omni](https://docs.vllm.ai/projects/vllm-omni/en/latest/) API format. All TTS-specific parameters are top-level fields:
 
 | Field | Description | Default |
 |---|---|---|
@@ -318,7 +292,7 @@ For S3 credential configuration, set the standard AWS environment variables (`AW
 
 ## Stage Configuration
 
-Omni pipelines are configured via YAML stage configs. See [`examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/stage_configs/single_stage_llm.yaml) for an example. For full documentation on stage config format and multi-stage pipelines, refer to the [vLLM-Omni Stage Configs documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/configuration/stage_configs/).
+Omni pipelines are configured via YAML stage configs. By default vLLM-Omni ships built-in stage configs for supported models, so no `--stage-configs-path` is needed unless you want to override the defaults. For full documentation on stage config format and multi-stage pipelines, refer to the [vLLM-Omni Stage Configs documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/configuration/stage_configs/).
 
 ## Disaggregated Multi-Stage Serving
 
