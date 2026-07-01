@@ -54,7 +54,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu13]==1.1.0",
-    "vllm[flashinfer,runai,otel]==0.23.0",
+    "vllm[flashinfer,runai,otel]==0.24.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.
@@ -277,6 +277,7 @@ markers = [
     "e2e: marks tests as end-to-end tests",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "wheel_smoke: marks tests that validate wheels copied from runtime images",
     "stress: marks tests as stress tests",
     "performance: marks tests as performance tests",
     "benchmark: marks tests as benchmark tests",
