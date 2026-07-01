@@ -513,6 +513,53 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
         )
         self.assertLess(final_validation, cache_cleanup)
 
+    def test_no_shim_build_removes_inherited_checkpoint_install(self) -> None:
+        build_script = CONTAINER_DIR / "deps/vllm/build_nccl_checkpoint.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prefix = root / "nccl-checkpoint"
+            shim = prefix / "lib/libnccl-checkpoint-shim.so"
+            shim.parent.mkdir(parents=True)
+            shim.touch()
+            preload = root / "ld.so.preload"
+            preload.write_text(f"/unrelated/preload.so\n{shim}\n")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            uv_calls = root / "uv-calls"
+            (bin_dir / "uv").write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$*" > "$UV_CALLS"\n'
+            )
+            (bin_dir / "python3").write_text("#!/bin/sh\nexit 0\n")
+            for executable in bin_dir.iterdir():
+                executable.chmod(0o755)
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": f"{bin_dir}:{env['PATH']}",
+                    "NCCL_CHECKPOINT_VERSION": "",
+                    "NCCL_CHECKPOINT_PREFIX": str(prefix),
+                    "NCCL_CHECKPOINT_LD_PRELOAD_FILE": str(preload),
+                    "UV_CALLS": str(uv_calls),
+                }
+            )
+            result = subprocess.run(
+                ["bash", str(build_script)],
+                env=env,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(prefix.exists())
+            self.assertEqual(preload.read_text(), "/unrelated/preload.so\n")
+            self.assertEqual(
+                uv_calls.read_text().strip(),
+                "pip uninstall --system nccl_checkpoint",
+            )
+            self.assertIn("removed inherited NCCLCheckpoint shim", result.stdout)
+
     def test_nccl_checkpoint_source_is_public_immutable_and_verified(self) -> None:
         build_script = (
             CONTAINER_DIR / "deps/vllm/build_nccl_checkpoint.sh"

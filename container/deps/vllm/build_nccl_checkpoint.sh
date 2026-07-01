@@ -4,14 +4,29 @@
 
 set -euo pipefail
 
+PREFIX="${NCCL_CHECKPOINT_PREFIX:-/opt/nccl-checkpoint}"
+SHIM="${PREFIX}/lib/libnccl-checkpoint-shim.so"
+LD_PRELOAD_FILE="${NCCL_CHECKPOINT_LD_PRELOAD_FILE:-/etc/ld.so.preload}"
+
 if [ -z "${NCCL_CHECKPOINT_VERSION:-}" ]; then
-  echo "NCCL_CHECKPOINT_VERSION is empty; skipping NCCLCheckpoint shim build."
+  if [ -f "${LD_PRELOAD_FILE}" ]; then
+    preload_tmp="$(mktemp)"
+    grep -Fvx -- "${SHIM}" "${LD_PRELOAD_FILE}" > "${preload_tmp}" || true
+    if [ -s "${preload_tmp}" ]; then
+      cat "${preload_tmp}" > "${LD_PRELOAD_FILE}"
+    else
+      rm -f "${LD_PRELOAD_FILE}"
+    fi
+    rm -f "${preload_tmp}"
+  fi
+  rm -rf "${PREFIX}"
+  uv pip uninstall --system nccl_checkpoint
+  python3 -c 'import importlib.util; assert importlib.util.find_spec("nccl_checkpoint") is None'
+  echo "NCCL_CHECKPOINT_VERSION is empty; removed inherited NCCLCheckpoint shim."
   exit 0
 fi
 
-PREFIX="${NCCL_CHECKPOINT_PREFIX:-/opt/nccl-checkpoint}"
 SRC_DIR="${NCCL_CHECKPOINT_SRC_DIR:-/tmp/nccl-src}"
-SHIM="${PREFIX}/lib/libnccl-checkpoint-shim.so"
 PYNCCL_SMOKE_CHECK="${PYNCCL_SMOKE_CHECK:-/usr/local/lib/validate_pynccl_checkpoint_binding.py}"
 RUNTIME_PROVENANCE="${NCCL_CHECKPOINT_RUNTIME_PROVENANCE:-/opt/dynamo/source-provenance.txt}"
 
