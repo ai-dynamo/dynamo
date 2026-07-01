@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Launch the cascaded voice pipeline workers (ASR, TTS, vLLM LLM, orchestrator).
-# Run from a checkout / mounted worktree inside the dynamo-riva image, with
-# etcd/nats and the RIVA NIMs already reachable. The dynamo.frontend is launched
-# separately (see README.md).
+# Launch the full cascaded voice pipeline (ASR, TTS, vLLM LLM, orchestrator,
+# and the dynamo.frontend). Run from a checkout / mounted worktree inside the
+# dynamo-riva image, with etcd/nats and the RIVA NIMs already reachable.
 #
-#   LLM_MODEL        HF model the vLLM worker serves (required)
-#   ASR_RIVA_SERVER  ASR NIM gRPC host:port (default: localhost:50051)
-#   TTS_RIVA_SERVER  TTS NIM gRPC host:port (default: localhost:50052)
-#   VLLM_EXTRA_ARGS  Extra args for the vLLM worker (optional, e.g. "--tensor-parallel-size 2")
+#   LLM_MODEL           HF model the vLLM worker serves (required)
+#   ASR_RIVA_SERVER     ASR NIM gRPC host:port (default: localhost:50051)
+#   TTS_RIVA_SERVER     TTS NIM gRPC host:port (default: localhost:50052)
+#   VLLM_EXTRA_ARGS     Extra args for the vLLM worker (optional, e.g. "--tensor-parallel-size 2")
+#   FRONTEND_EXTRA_ARGS Extra args for dynamo.frontend (optional, e.g. "--http-port 8000")
 
 set -euo pipefail
 
@@ -23,6 +23,7 @@ ASR_RIVA_SERVER="${ASR_RIVA_SERVER:-localhost:50051}"
 TTS_RIVA_SERVER="${TTS_RIVA_SERVER:-localhost:50052}"
 LLM_MODEL="${LLM_MODEL:-}"
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
+FRONTEND_EXTRA_ARGS="${FRONTEND_EXTRA_ARGS:-}"
 
 if [[ -z "${LLM_MODEL}" ]]; then
   echo "LLM_MODEL is required (the HF model the vLLM worker serves)." >&2
@@ -51,5 +52,10 @@ python -m riva_nim.orchestrator \
   --tts-endpoint "${TTS_ENDPOINT}" \
   --llm-model "${LLM_MODEL}" &
 
-echo "Workers started. Launch dynamo.frontend separately. Ctrl-C to stop."
+echo "Starting dynamo.frontend (realtime WS at /v1/realtime) ..."
+# Word-splitting on FRONTEND_EXTRA_ARGS is intentional so callers can pass flags.
+# shellcheck disable=SC2086
+python -m dynamo.frontend ${FRONTEND_EXTRA_ARGS} &
+
+echo "All components started (ASR, TTS, vLLM, orchestrator, frontend). Ctrl-C to stop."
 wait_any_exit

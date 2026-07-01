@@ -88,7 +88,7 @@ Start `etcd` and `nats` (the standard Dynamo local dependencies) — the workers
 
 ## 4. Launch the workers
 
-Run each inside the `dynamo-riva:latest` image, sharing the host network with `etcd`/`nats`/the NIMs. The image bakes in the `riva_nim` package (on `PYTHONPATH`), so `python -m riva_nim.<worker>` runs without mounting the source. `launch_workers.sh` starts all of them — ASR, TTS, the vLLM LLM worker, and the orchestrator (`LLM_MODEL=nvidia/Llama-3.3-Nemotron-Super-49B-v1.5 ./launch_workers.sh`); only the frontend is launched separately. It sources the repo's `examples/common/launch_utils.sh`, so run it from a checkout / mounted worktree (the individual commands below work in the bare image too).
+Run each inside the `dynamo-riva:latest` image, sharing the host network with `etcd`/`nats`/the NIMs. The image bakes in the `riva_nim` package (on `PYTHONPATH`), so `python -m riva_nim.<worker>` runs without mounting the source. `launch_workers.sh` starts the whole stack — ASR, TTS, the vLLM LLM worker, the orchestrator, and the `dynamo.frontend` (`LLM_MODEL=nvidia/Llama-3.3-Nemotron-Super-49B-v1.5 ./launch_workers.sh`). It sources the repo's `examples/common/launch_utils.sh`, so run it from a checkout / mounted worktree (the individual commands below work in the bare image too).
 
 ASR worker (points at the ASR NIM):
 
