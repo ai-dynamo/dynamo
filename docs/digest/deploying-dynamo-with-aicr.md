@@ -272,7 +272,9 @@ aicr bundle \
 
 ### 5. Deploy the Runtime
 
-Deploy the rendered bundle with the deployer that fits your environment:
+`deploy.sh` is the fastest path to a working deployment and keeps this walkthrough approachable.
+For production environments, AICR also supports the more mature, recommended GitOps deployment
+paths through Argo CD and Flux.
 
 ```bash
 cd bundle
