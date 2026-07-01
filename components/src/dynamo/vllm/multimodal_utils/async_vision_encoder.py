@@ -113,11 +113,19 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
         """
         if self._batcher is not None:
             raise RuntimeError("AsyncVisionEncoder.load() called twice")
-        # Construct the pool + batcher INSIDE the try so a constructor failure
-        # (e.g. a backend exposing a max_batch_cost the batcher rejects) still
-        # reaps the pool via shutdown() instead of leaking it. shutdown() is
-        # None-safe on the not-yet-assigned member.
+        # Construct INSIDE the try so a later start()/build failure reaps the pool
+        # via shutdown() (None-safe on the not-yet-assigned members). The batcher
+        # is built before the pool so that a config it rejects (e.g. a backend
+        # max_batch_cost < 1) raises from its ctor before any pool is spawned —
+        # nothing to reap in that case.
         try:
+            self._batcher = ThreadedMicroBatcher(
+                self._backend.forward_batch,
+                max_batch_cost=self._backend.max_batch_cost,
+                on_start=lambda: self._backend.build(model_id),
+                on_stop=self._backend.close,
+                name=self._name,
+            )
             # No pool when concurrency is 0 — preprocess is skipped (passthrough).
             self._pool = (
                 ThreadPoolExecutor(
@@ -126,13 +134,6 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
                 )
                 if self._preprocess_concurrency > 0
                 else None
-            )
-            self._batcher = ThreadedMicroBatcher(
-                self._backend.forward_batch,
-                max_batch_cost=self._backend.max_batch_cost,
-                on_start=lambda: self._backend.build(model_id),
-                on_stop=self._backend.close,
-                name=self._name,
             )
             self._batcher.start()  # runs backend.build() on the actor thread
             self.validate()

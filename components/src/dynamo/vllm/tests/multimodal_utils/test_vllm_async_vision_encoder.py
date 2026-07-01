@@ -255,8 +255,9 @@ def test_preprocess_concurrency_rejects_negative():
         AsyncVisionEncoder(_FakeBackend(), preprocess_concurrency=-1)
 
 
-def test_load_reaps_pool_if_batcher_ctor_fails():
-    """A backend exposing a max_batch_cost the batcher rejects must not leak the pool."""
+def test_load_bad_batch_cost_fails_without_spawning_pool():
+    """A backend whose max_batch_cost the batcher rejects fails load() cleanly: the
+    batcher ctor raises before the preprocess pool is ever spawned (nothing to reap)."""
 
     class _BadBudget(_FakeBackend):
         max_batch_cost = 0  # ThreadedMicroBatcher requires >= 1 → ctor raises
@@ -264,5 +265,5 @@ def test_load_reaps_pool_if_batcher_ctor_fails():
     enc = AsyncVisionEncoder(_BadBudget())
     with pytest.raises(ValueError, match="max_batch_cost"):
         enc.load("m")
-    assert enc._pool is not None and enc._pool._shutdown is True
+    assert enc._pool is None
     assert enc._batcher is None

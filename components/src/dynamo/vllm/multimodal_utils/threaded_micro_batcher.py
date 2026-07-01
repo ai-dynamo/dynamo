@@ -63,9 +63,6 @@ R = TypeVar("R")
 
 # Sentinel pushed onto the queue to stop the worker thread.
 _SHUTDOWN = object()
-# Sentinel distinguishing "no result" (failed / tombstoned item) from a real
-# ``None`` result returned by ``fn``.
-_NO_RESULT = object()
 
 
 class _State(Enum):
@@ -364,8 +361,9 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 batch, batch_cost = [], 0
             batch.append(work)
             batch_cost += work.cost
-        if batch:
-            self._run_batch(batch)
+        # `batch` always holds at least the final work here (live is non-empty and
+        # every work is appended after any mid-loop flush), so flush unconditionally.
+        self._run_batch(batch)
 
     def _run_batch(self, batch: List[_Work]) -> None:
         # Re-filter immediately before fn: a request may have been failed by a
@@ -415,12 +413,15 @@ class ThreadedMicroBatcher(Generic[T, R]):
         """True once the request must not send further items to ``fn``."""
         return req.done or req.error is not None
 
-    def _consume(self, work: _Work, result: object = _NO_RESULT, error=None) -> None:
+    def _consume(self, work: _Work, result: object = None, error=None) -> None:
         """Account one item of a request (delivered / failed / tombstoned).
 
         Decrements ``remaining`` under the lock and finalises the request only
         when the last item is consumed — so admission release and ``completion``
-        are exactly-once even when items span batches or threads."""
+        are exactly-once even when items span batches or threads. A bare
+        ``_consume(work)`` only ever accounts an already-tombstoned item — such a
+        request has ``error`` set, so the ``result`` write below is skipped and
+        the defaulted ``None`` is never stored."""
         req = work.request
         finalize = False
         with self._lock:
@@ -428,7 +429,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
                 return
             if error is not None and req.error is None:
                 req.error = error
-            elif result is not _NO_RESULT and req.error is None:
+            elif req.error is None:
                 req.results[work.index] = result
             req.remaining -= 1
             if req.remaining == 0:
@@ -462,16 +463,17 @@ class ThreadedMicroBatcher(Generic[T, R]):
 
     def _drain_queue_locked(self) -> List[_Work]:
         """Pop all queued works (caller holds the lock); returns them to consume
-        outside the lock (``_consume`` re-takes the lock)."""
+        outside the lock (``_consume`` re-takes the lock).
+
+        Both callers own the stop signal: ``shutdown()`` drains, then enqueues a
+        fresh ``_SHUTDOWN``; the crash supervisor drains as the sole worker exits.
+        So any ``_SHUTDOWN`` seen here is stale — drop it and keep draining rather
+        than re-queueing it."""
         drained: List[_Work] = []
         while True:
             try:
                 item = self._queue.get_nowait()
             except queue.Empty:
                 return drained
-            if item is _SHUTDOWN:
-                # Preserve the stop signal so a still-running worker reads it and
-                # exits — draining must never strand the worker.
-                self._queue.put(_SHUTDOWN)
-                return drained
-            drained.append(item)
+            if item is not _SHUTDOWN:
+                drained.append(item)

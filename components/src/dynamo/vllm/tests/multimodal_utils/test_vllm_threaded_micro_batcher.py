@@ -38,7 +38,6 @@ class _Recorder:
 
     def __init__(self):
         self.threads: list[int] = []
-        self.batches: list[list] = []
         self.start_thread: int | None = None
         self.stop_thread: int | None = None
 
@@ -50,7 +49,6 @@ class _Recorder:
 
     def fn(self, items):
         self.threads.append(threading.get_ident())
-        self.batches.append(list(items))
         return [("r", x) for x in items]
 
 
