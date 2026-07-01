@@ -287,6 +287,25 @@ fn build_log_exporter(
     }
 }
 
+fn with_runtime_context<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => f(),
+        Err(_) => {
+            let return_value = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect(
+                    "Failed to create temporary Tokio runtime for OTLP exporter initialization",
+                );
+            let _guard = return_value.enter();
+            f()
+        }
+    }
+}
+
 /// Validate a given trace ID according to W3C Trace Context specifications.
 /// A valid trace ID is a 32-character hexadecimal string (lowercase).
 pub fn is_valid_trace_id(trace_id: &str) -> bool {
@@ -1293,7 +1312,8 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
                 .with_service_name(service_name.clone())
                 .build();
 
-            let span_exporter = build_span_exporter(traces_protocol, &traces_endpoint)?;
+            let span_exporter =
+                with_runtime_context(|| build_span_exporter(traces_protocol, &traces_endpoint))?;
 
             let mut tracer_provider_builder =
                 opentelemetry_sdk::trace::SdkTracerProvider::builder()
@@ -1306,7 +1326,8 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             }
             let tracer_provider = tracer_provider_builder.build();
 
-            let log_exporter = build_log_exporter(logs_protocol, &logs_endpoint)?;
+            let log_exporter =
+                with_runtime_context(|| build_log_exporter(logs_protocol, &logs_endpoint))?;
 
             let logger_provider = SdkLoggerProvider::builder()
                 .with_batch_exporter(log_exporter)
@@ -1973,6 +1994,54 @@ pub mod tests {
             result.push(val);
         }
         Ok(result)
+    }
+
+    #[test] // plain - no Tokio runtime
+    fn with_runtime_context_returns_value_without_existing_runtime() {
+        // Precondition: confirm no runtime is running
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "precondition: test must run outside a Tokio runtime"
+        );
+        let result = with_runtime_context(|| 42u32);
+        assert_eq!(result, 42);
+    }
+
+    #[tokio::test]
+    async fn with_runtime_context_returns_value_within_existing_runtime() {
+        // Precondition: runtime IS running
+        assert!(tokio::runtime::Handle::try_current().is_ok());
+        let result = with_runtime_context(|| 42u32);
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn grpc_span_exporter_builds_without_tokio_reactor() {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "precondition: test must run outside a Tokio runtime"
+        );
+        // This panics before the fix: "there is no reactor running"
+        let result = with_runtime_context(|| {
+            build_span_exporter(OtlpProtocol::Grpc, "http://localhost:4317")
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn grpc_log_exporter_builds_without_tokio_reactor() {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "precondition: test must run outside a Tokio runtime"
+        );
+        let result = with_runtime_context(|| {
+            build_log_exporter(OtlpProtocol::Grpc, "http://localhost:4317")
+        });
+        assert!(
+            result.is_ok(),
+            "log exporter must build without a pre-existing Tokio
+    reactor"
+        );
     }
 
     // Field validators (W3C Trace Context): each rule is tested directly here.
