@@ -67,6 +67,8 @@ impl ConcurrentRadixTreeCompressed {
     ) -> Result<StoreParentResolution, KvCacheEventError> {
         loop {
             let node = self.lookup_store_parent_node(lookup, worker, parent_hash, op, id)?;
+            // NOTE(perf): Combining coverage rejection and edge planning into
+            // one state snapshot regressed throughput. Keep these phases separate.
             self.reject_uncovered_store_parent(lookup, worker, &node, parent_hash, id)?;
 
             let Some(plan) = node.plan_store_parent_edge(parent_hash, &op.blocks) else {
