@@ -184,6 +184,12 @@ impl ModelType {
         if self.contains(Self::Completions) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Completion);
         }
+        // Token-in/token-out Generate endpoint is available for any
+        // generate-capable model (chat or completions), matching the
+        // default-on posture of the `/inference/v1/generate` route.
+        if self.supports_chat() || self.supports_completions() {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Generate);
+        }
         if self.contains(Self::Embedding) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Embedding);
         }

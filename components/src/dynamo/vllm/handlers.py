@@ -3170,7 +3170,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         with time_and_log_code_section(
             f"[DECODE] request: {request_id} generate"
         ) as decode_timer:
-            if self.use_vllm_tokenizer:
+            if (
+                isinstance(request, dict)
+                and request.get("extra_args")
+                and request["extra_args"].get("vllm_tito")
+            ):
+                # RL token-in/token-out mode: raw vLLM GenerateRequest envelope.
+                generator = self._generate_tito_mode(request, context, request_id)
+            elif self.use_vllm_tokenizer:
                 # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
                 generator = self._generate_text_mode(request, context, request_id)
             else:
@@ -3409,6 +3416,90 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                                 accumulated_token_ids,
                                 accumulated_log_probs,
                             )
+                        yield tok
+                except EngineDeadError as e:
+                    logger.error(f"vLLM EngineDeadError: {e}")
+                    logger.warning("Initiating Dynamo Runtime shutdown.")
+                    self.runtime.shutdown()
+                    os._exit(1)
+
+    async def _generate_tito_mode(self, request, context, request_id):
+        """Generate tokens for the RL token-in/token-out (TITO) endpoint.
+
+        The frontend forwards the raw vLLM ``GenerateRequest`` opaquely in
+        ``request["extra_args"]["vllm_tito"]``. We re-parse it against vLLM's
+        typed protocol so the caller's ``sampling_params`` are used verbatim
+        (no ``build_sampling_params`` mapping), and drive the same aggregated
+        generation loop the token-mode path uses.
+        """
+        try:
+            from vllm.entrypoints.serve.disagg.protocol import (
+                GenerateRequest as VllmGenerateRequest,
+            )
+        except ImportError as e:
+            raise RuntimeError(
+                "TITO generate requires vLLM's disagg GenerateRequest protocol "
+                "(vllm.entrypoints.serve.disagg.protocol.GenerateRequest), which "
+                "this engine's vLLM build does not provide. Upgrade the worker's "
+                "vLLM to a version that ships the disagg protocol."
+            ) from e
+
+        envelope = request["extra_args"]["vllm_tito"]
+        parsed = VllmGenerateRequest.model_validate(envelope)
+        sampling_params = parsed.sampling_params
+        if isinstance(sampling_params, dict):
+            # vLLM's pydantic GenerateRequest does not always coerce the nested
+            # msgspec `SamplingParams` Struct in the worker process (pydantic
+            # schema-resolution timing differs from an isolated import), so
+            # `parsed.sampling_params` can arrive as a raw dict. Construct the
+            # vLLM SamplingParams from it so __post_init__ validation still runs.
+            sampling_params = SamplingParams(**sampling_params)
+
+        # Prefer core token_ids (authoritative); warn if the envelope disagrees.
+        core_token_ids = list(request.get("token_ids", []))
+        if list(parsed.token_ids) != core_token_ids:
+            logger.warning(
+                "Request %s: TITO envelope token_ids differ from core token_ids; "
+                "using core token_ids for the engine prompt",
+                request_id,
+            )
+        prompt = TokensPrompt(prompt_token_ids=core_token_ids)
+
+        # DELTA output kind so token_ids stream as per-chunk deltas, matching
+        # the token-mode path and the frontend aggregator's append semantics.
+        sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
+
+        routing = request.get("routing") or {}
+        dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
+        # Engine priority rides the vLLM envelope (already vLLM's convention,
+        # lower = earlier), not Dynamo routing hints.
+        priority = int(parsed.priority or 0)
+        trace_headers = context.trace_headers()
+
+        is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
+
+        async with _deferred_abort_guard(
+            self.engine_client,
+            request_id,
+            is_decode_only,
+            self._deferred_aborts,
+            self._shutdown_on_engine_dead,
+        ) as abort_guard:
+            async with self._abort_monitor(
+                context, request_id, abort_guard=abort_guard
+            ):
+                try:
+                    async for tok in self.generate_tokens(
+                        prompt,
+                        sampling_params,
+                        request_id,
+                        data_parallel_rank=dp_rank,
+                        lora_request=None,
+                        trace_headers=trace_headers,
+                        priority=priority,
+                    ):
+                        if abort_guard is not None:
+                            abort_guard.signal_first_token()
                         yield tok
                 except EngineDeadError as e:
                     logger.error(f"vLLM EngineDeadError: {e}")

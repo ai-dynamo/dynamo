@@ -13,7 +13,14 @@
 //! (multimodal), `stream_options`, negative-`token_ids` validation-message
 //! parity with vLLM, and auto-generating a `request_id` when absent.
 
+use std::collections::HashMap;
+
+use anyhow::Result;
+use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
+
+use crate::protocols::Annotated;
+use crate::protocols::common::llm_backend::LLMEngineOutput;
 
 /// Token-in/token-out generation request.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -67,6 +74,105 @@ pub struct GenerateResponse {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_transfer_params: Option<serde_json::Value>,
+}
+
+/// Per-index accumulation state while folding a stream of
+/// [`LLMEngineOutput`] deltas into a single [`GenerateResponse`].
+struct GenerateChoiceAcc {
+    index: u32,
+    token_ids: Vec<crate::protocols::TokenIdType>,
+    finish_reason: Option<String>,
+}
+
+/// Folds a stream of [`Annotated<LLMEngineOutput>`] deltas into a single
+/// [`GenerateResponse`]. Each chunk carries a delta of newly generated
+/// `token_ids` keyed by `index` (default 0); the aggregator appends the
+/// deltas per index and records the terminal `finish_reason`.
+struct GenerateAggregator {
+    request_id: String,
+    choices: HashMap<u32, GenerateChoiceAcc>,
+    error: Option<String>,
+}
+
+impl GenerateAggregator {
+    fn new(request_id: String) -> Self {
+        Self {
+            request_id,
+            choices: HashMap::new(),
+            error: None,
+        }
+    }
+
+    async fn apply(
+        stream: impl Stream<Item = Annotated<LLMEngineOutput>>,
+        request_id: String,
+    ) -> Result<GenerateResponse> {
+        let aggregator = stream
+            .fold(
+                GenerateAggregator::new(request_id),
+                |mut agg, delta| async move {
+                    let delta = match delta.ok() {
+                        Ok(delta) => delta,
+                        Err(error) => {
+                            agg.error = Some(error);
+                            return agg;
+                        }
+                    };
+
+                    if agg.error.is_none()
+                        && let Some(output) = delta.data
+                    {
+                        let index = output.index.unwrap_or(0);
+                        let choice = agg.choices.entry(index).or_insert(GenerateChoiceAcc {
+                            index,
+                            token_ids: Vec::new(),
+                            finish_reason: None,
+                        });
+                        // token_ids are per-chunk deltas; append (never replace).
+                        choice.token_ids.extend(output.token_ids);
+                        if let Some(finish_reason) = output.finish_reason {
+                            choice.finish_reason = Some(finish_reason.to_string());
+                        }
+                    }
+                    agg
+                },
+            )
+            .await;
+
+        if let Some(error) = aggregator.error {
+            return Err(anyhow::anyhow!(error));
+        }
+
+        let mut choices: Vec<GenerateResponseChoice> = aggregator
+            .choices
+            .into_values()
+            .map(|acc| GenerateResponseChoice {
+                index: acc.index,
+                token_ids: Some(acc.token_ids),
+                logprobs: None,
+                finish_reason: acc.finish_reason,
+            })
+            .collect();
+        choices.sort_by_key(|c| c.index);
+
+        Ok(GenerateResponse {
+            request_id: aggregator.request_id,
+            choices,
+            prompt_logprobs: None,
+            kv_transfer_params: None,
+        })
+    }
+}
+
+impl GenerateResponse {
+    /// Aggregate a stream of [`Annotated<LLMEngineOutput>`] deltas into a
+    /// single [`GenerateResponse`] for the non-streaming `Generate` endpoint.
+    pub async fn from_annotated_stream(
+        stream: impl Stream<Item = Annotated<LLMEngineOutput>>,
+        request_id: String,
+    ) -> Result<GenerateResponse> {
+        GenerateAggregator::apply(stream, request_id).await
+    }
 }
 
 #[cfg(test)]
@@ -136,5 +242,47 @@ mod tests {
         assert_eq!(round.choices.len(), 1);
         assert_eq!(round.choices[0].token_ids, Some(vec![10, 11, 12]));
         assert_eq!(round.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    /// Fold a 4-chunk delta stream (each carrying one token_id) into a single
+    /// choice: assert the deltas are appended (not duplicated), the terminal
+    /// finish_reason is captured, and exactly one choice is emitted.
+    #[tokio::test]
+    async fn from_annotated_stream_appends_deltas() {
+        let chunks = vec![
+            LLMEngineOutput {
+                token_ids: vec![100],
+                index: Some(0),
+                ..Default::default()
+            },
+            LLMEngineOutput {
+                token_ids: vec![101],
+                index: Some(0),
+                ..Default::default()
+            },
+            LLMEngineOutput {
+                token_ids: vec![102],
+                index: Some(0),
+                ..Default::default()
+            },
+            LLMEngineOutput {
+                token_ids: vec![103],
+                index: Some(0),
+                finish_reason: Some(crate::protocols::common::FinishReason::Length),
+                ..Default::default()
+            },
+        ];
+        let stream = futures::stream::iter(chunks.into_iter().map(Annotated::from_data));
+
+        let resp = GenerateResponse::from_annotated_stream(stream, "req-agg".to_string())
+            .await
+            .expect("aggregate");
+
+        assert_eq!(resp.request_id, "req-agg");
+        assert_eq!(resp.choices.len(), 1);
+        let choice = &resp.choices[0];
+        assert_eq!(choice.index, 0);
+        assert_eq!(choice.token_ids, Some(vec![100, 101, 102, 103]));
+        assert_eq!(choice.finish_reason.as_deref(), Some("length"));
     }
 }

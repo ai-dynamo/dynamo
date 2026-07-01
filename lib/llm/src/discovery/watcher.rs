@@ -1189,6 +1189,20 @@ impl ModelWatcher {
                 }
             }
 
+            // Generate (token-in/token-out): raw PreprocessedRequest -> LLMEngineOutput, Backend-free.
+            if let Some(routing) = preprocessed_routing.as_ref() {
+                let generate_engine = routing
+                    .build_preprocessed_pipeline(
+                        card,
+                        self.migration_limit,
+                        self.migration_max_seq_len,
+                        self.metrics.clone(),
+                    )
+                    .context("build generate (preprocessed) pipeline")?;
+                worker_set.generate_engine = Some(generate_engine);
+                tracing::info!("Generate (token-in/token-out) is ready");
+            }
+
             // Verify we built at least one serving engine. A Tokens model that
             // ends up with no chat AND no completions engine (e.g. completions-only
             // model with no tokenizer) should fail fast rather than register an

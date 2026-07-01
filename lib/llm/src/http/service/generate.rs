@@ -6,25 +6,36 @@
 //!
 //! This is an experimental endpoint, enabled by default (matching vLLM,
 //! which mounts `/inference/v1/generate` for any generate-capable model).
-//! It registers the route with a placeholder handler that returns HTTP 501
-//! Not Implemented; the real handler (engine dispatch + `LLMEngineOutput`
-//! accumulation) lands in a follow-up. Disable via `enable_generate_endpoints`.
+//! The handler dispatches the raw `token_ids` to the model's Backend-free
+//! `PreprocessedRequest -> LLMEngineOutput` pipeline and folds the streamed
+//! deltas into a single `GenerateResponse`. Disable via
+//! `enable_generate_endpoints`. Streaming (`stream=true`) is not yet
+//! implemented and returns HTTP 501.
 
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware,
     response::{IntoResponse, Response},
     routing::post,
 };
+use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use serde::Serialize;
 
-use super::openai::{get_body_limit, smart_json_error_middleware};
+use super::disconnect::create_connection_monitor;
+use super::metrics::CancellationLabels;
+use super::openai::{
+    check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
+    get_or_create_request_id, smart_json_error_middleware,
+};
 use super::{RouteDoc, service_v2};
-use crate::protocols::openai::generate::GenerateRequest;
+use crate::protocols::common::preprocessor::PreprocessedRequest;
+use crate::protocols::common::{SamplingOptions, StopConditions};
+use crate::protocols::openai::generate::{GenerateRequest, GenerateResponse};
+use tracing::Instrument;
 
 /// vLLM-style nested error body: `{"error": {"message", "type", "code"}}`.
 #[derive(Serialize, Debug)]
@@ -56,26 +67,259 @@ pub fn generate_router(
     (vec![doc], router)
 }
 
-/// Placeholder handler for the `Generate` endpoint.
-///
-/// Accepts and validates the request body shape, then returns HTTP 501 with a
-/// vLLM-style nested-`error` body. Real dispatch is implemented in a follow-up.
-async fn handler_generate(
-    State(_state): State<Arc<service_v2::State>>,
-    Json(_request): Json<GenerateRequest>,
-) -> Response {
-    let code = StatusCode::NOT_IMPLEMENTED;
+/// Build a vLLM-style nested-`error` [`Response`] with the given status and type.
+fn generate_error_response(code: StatusCode, error_type: &str, message: String) -> Response {
     (
         code,
         Json(GenerateError {
             error: GenerateErrorBody {
-                message: "The /inference/v1/generate endpoint is not implemented yet".to_string(),
-                error_type: "not_implemented".to_string(),
+                message,
+                error_type: error_type.to_string(),
                 code: code.as_u16(),
             },
         }),
     )
         .into_response()
+}
+
+/// vLLM's default `max_tokens` when the request omits it.
+const DEFAULT_MAX_TOKENS: u64 = 16;
+
+/// Build a [`PreprocessedRequest`] from a [`GenerateRequest`].
+///
+/// The whole raw request rides opaquely in `extra_args.vllm_tito` so the
+/// backend worker can re-parse it against vLLM's typed `GenerateRequest`;
+/// the scalar sampling controls that Dynamo core needs for
+/// stop/routing decisions are shadowed into the core fields.
+fn preprocessed_from_generate(
+    req: &GenerateRequest,
+    model: &str,
+) -> anyhow::Result<PreprocessedRequest> {
+    let sampling = &req.sampling_params;
+    let max_tokens = sampling
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(DEFAULT_MAX_TOKENS);
+    let ignore_eos = sampling
+        .get("ignore_eos")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let min_tokens = sampling
+        .get("min_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let stop_conditions = StopConditions {
+        max_tokens: Some(max_tokens as u32),
+        min_tokens: Some(min_tokens as u32),
+        ignore_eos: Some(ignore_eos),
+        ..Default::default()
+    };
+
+    // PR2 is n=1; sampling knobs beyond n stay in the opaque envelope.
+    let sampling_options = SamplingOptions {
+        n: Some(1),
+        ..Default::default()
+    };
+
+    let routing = crate::protocols::common::preprocessor::RoutingHints {
+        expected_output_tokens: Some(max_tokens as u32),
+        ..Default::default()
+    };
+
+    PreprocessedRequest::builder()
+        .model(model.to_string())
+        .token_ids(req.token_ids.clone())
+        .stop_conditions(stop_conditions)
+        .sampling_options(sampling_options)
+        .output_options(Default::default())
+        .routing(Some(routing))
+        .extra_args(Some(serde_json::json!({
+            "vllm_tito": serde_json::to_value(req)?,
+        })))
+        .build()
+        .map_err(|e| anyhow::anyhow!("failed to build PreprocessedRequest: {e}"))
+}
+
+/// Handler for the token-in/token-out `Generate` endpoint.
+///
+/// Resolves the target model, dispatches the raw `token_ids` to the model's
+/// Backend-free `PreprocessedRequest -> LLMEngineOutput` pipeline, and folds
+/// the streamed deltas into a single [`GenerateResponse`]. A client disconnect
+/// kills the engine context (mirroring the OpenAI completions path).
+async fn handler_generate(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<GenerateRequest>,
+) -> Response {
+    // return a 503 if the service is not ready
+    if let Err(err_response) = check_ready(&state) {
+        return err_response.into_response();
+    }
+
+    // Streaming is a later PR.
+    if request.stream {
+        return generate_error_response(
+            StatusCode::NOT_IMPLEMENTED,
+            "not_implemented",
+            "streaming (stream=true) is not implemented for /inference/v1/generate yet".to_string(),
+        );
+    }
+
+    // Resolve the target model: use `request.model` if given, else the sole
+    // registered generate model (error if none or ambiguous).
+    let model = match &request.model {
+        Some(model) => model.clone(),
+        None => {
+            let models = state.manager().list_generate_models();
+            match models.len() {
+                1 => models.into_iter().next().unwrap(),
+                0 => {
+                    return generate_error_response(
+                        StatusCode::NOT_FOUND,
+                        "not_found",
+                        "no generate-capable model is registered".to_string(),
+                    );
+                }
+                _ => {
+                    return generate_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        "multiple models are registered; specify `model` in the request"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    };
+
+    // Gate on per-model serving readiness: an aggregated request routed to a
+    // decode-only / not-yet-ready worker set would otherwise hang on the worker.
+    if let Err(err_response) = check_model_serving_ready(&state, &model) {
+        return err_response.into_response();
+    }
+
+    let (engine, _parsing) = match state.manager().get_generate_engine_with_parsing(&model) {
+        Ok(pair) => pair,
+        Err(e) => {
+            let code = match e {
+                crate::discovery::ModelManagerError::ModelUnavailable(_) => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                _ => StatusCode::NOT_FOUND,
+            };
+            return generate_error_response(code, "not_found", e.to_string());
+        }
+    };
+
+    let preprocessed = match preprocessed_from_generate(&request, &model) {
+        Ok(preprocessed) => preprocessed,
+        Err(e) => {
+            return generate_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                e.to_string(),
+            );
+        }
+    };
+
+    // Build the request context (carrying the request id) and wire a
+    // connection monitor so a client disconnect kills the engine context.
+    let request_id = get_or_create_request_id(&headers);
+    let context: Context<PreprocessedRequest> =
+        match context_from_headers(preprocessed, request_id.clone(), &headers) {
+            Ok(context) => context,
+            Err(err_response) => {
+                return err_response.into_response();
+            }
+        };
+    let engine_context = context.context();
+    let cancellation_labels = CancellationLabels {
+        model: state.manager().metric_model_for(&model).to_string(),
+        endpoint: super::metrics::Endpoint::Generate.to_string(),
+        request_type: "unary".to_string(),
+    };
+    let (mut connection_handle, _stream_handle) = create_connection_monitor(
+        engine_context.clone(),
+        Some(state.metrics_clone()),
+        cancellation_labels,
+    )
+    .await;
+
+    // Spawn the dispatch so the generation task runs (and cleans up) out of
+    // band from the axum handler future, mirroring the OpenAI handlers.
+    let response = match tokio::spawn(
+        generate_dispatch(engine, context, request_id, model, state.clone()).in_current_span(),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(join_err) => generate_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            format!("generate task panicked: {join_err}"),
+        ),
+    };
+
+    // Long-running work completed without needing cancellation.
+    connection_handle.disarm();
+    response
+}
+
+/// Dispatch a prepared [`Context<PreprocessedRequest>`] to the generate engine
+/// and fold the streamed deltas into a single [`GenerateResponse`].
+async fn generate_dispatch(
+    engine: crate::types::openai::generate::GenerateStreamingEngine,
+    context: Context<PreprocessedRequest>,
+    request_id: String,
+    model: String,
+    state: Arc<service_v2::State>,
+) -> Response {
+    let stream = match engine.generate(context).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            if super::metrics::request_was_rejected(e.as_ref()) {
+                state
+                    .metrics_clone()
+                    .inc_rejection(&model, super::metrics::Endpoint::Generate);
+                return generate_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "service_unavailable",
+                    format!("engine rejected the request: {e:#}"),
+                );
+            }
+            return generate_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                format!("failed to generate: {e:#}"),
+            );
+        }
+    };
+
+    let engine_context = stream.context();
+
+    match GenerateResponse::from_annotated_stream(stream, request_id.clone()).await {
+        Ok(response) => {
+            // If the engine context was killed (client disconnect), the response
+            // was assembled but never delivered.
+            if engine_context.is_killed() {
+                return generate_error_response(
+                    StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
+                    "request_cancelled",
+                    "request was cancelled".to_string(),
+                );
+            }
+            Json(response).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to fold generate stream for {request_id}: {e:?}");
+            generate_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                format!("failed to fold generate stream for {request_id}"),
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -107,7 +351,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_route_returns_501_when_enabled() {
+    async fn generate_route_no_model_returns_404() {
+        // Endpoint enabled + service ready (default stage) but no model
+        // registered: the handler runs, model resolution finds zero generate
+        // models, and returns a structured 404 nested-`error` body. This proves
+        // the route is mounted AND the real handler executed (a route-not-found
+        // 404 has an empty body).
         let (port, handle) = serve(true).await;
         let resp = reqwest::Client::new()
             .post(format!("http://localhost:{}/inference/v1/generate", port))
@@ -116,7 +365,30 @@ mod tests {
             .send()
             .await
             .expect("generate request failed");
+        assert_eq!(resp.status().as_u16(), StatusCode::NOT_FOUND.as_u16());
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert!(
+            body.get("error").is_some(),
+            "expected nested-`error` body, got {body}"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_route_streaming_returns_501() {
+        // stream=true is not implemented in this PR: the handler returns a 501
+        // nested-`error` body after the readiness gate passes (default stage).
+        let (port, handle) = serve(true).await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{}/inference/v1/generate", port))
+            .header("content-type", "application/json")
+            .body(r#"{"token_ids":[1,2,3],"sampling_params":{},"stream":true}"#)
+            .send()
+            .await
+            .expect("generate request failed");
         assert_eq!(resp.status().as_u16(), StatusCode::NOT_IMPLEMENTED.as_u16());
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["error"]["type"], "not_implemented");
         handle.abort();
     }
 
