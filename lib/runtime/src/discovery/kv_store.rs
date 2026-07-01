@@ -531,7 +531,7 @@ impl KVStoreDiscovery {
                     }
                 }
 
-                tracing::info!(
+                tracing::warn!(
                     old_count = known_instances.len(),
                     new_count = next_instances.len(),
                     emitted_events = events.len(),

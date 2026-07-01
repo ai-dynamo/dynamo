@@ -519,7 +519,7 @@ impl Client {
         *start_revision = header.revision() + 1;
 
         let kvs = response.take_kvs();
-        tracing::info!(
+        tracing::warn!(
             prefix,
             kv_count = kvs.len(),
             start_revision = *start_revision,
@@ -850,7 +850,7 @@ impl KvCache {
                                 replacement.insert(key, value);
                             }
 
-                            tracing::info!(
+                            tracing::warn!(
                                 prefix,
                                 new_count = replacement.len(),
                                 "KvCache replacing state from etcd watch resync"

@@ -139,7 +139,7 @@ where
                             }
 
                             state = rebuilt;
-                            tracing::info!(
+                            tracing::warn!(
                                 prefix = %prefix_str,
                                 old_count,
                                 new_count = state.len(),
