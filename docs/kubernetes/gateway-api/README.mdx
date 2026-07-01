@@ -65,7 +65,7 @@ by this quickstart path.
 
 - A Kubernetes cluster with GPU nodes. For the baseline Gateway API environment, start with the
   upstream [Gateway API getting started guide](https://gateway-api.sigs.k8s.io/guides/getting-started/introduction/)
-  and the upstream [GAIE guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/index.md).
+  and the upstream [GAIE introduction](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/index.md).
 - `kubectl`, [Helm](https://helm.sh/docs/intro/install/), and
   [jq](https://jqlang.org/download/) configured for the cluster.
 - Gateway API and GAIE CRDs installed. The quickstart installs them explicitly from pinned upstream
@@ -175,11 +175,11 @@ result with production-like traffic.
 | `schedulingProfiles[].plugins[].weight` | Adjust how much each scorer influences endpoint selection. | Tune scorer weights deliberately; keep required filters and the picker in the profile. |
 | scorer and picker plugins | Change the routing strategy. | Treat this as advanced EPP tuning and validate with traffic. |
 
-For upstream EPP configuration semantics, see the GAIE
-[EPP YAML configuration guide](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/)
-and its
-[Scheduling Profiles](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/#scheduling-profiles)
-section for plugin weights. For label-based endpoint selection, see the upstream
+For upstream Endpoint Picker Plugin (EPP) semantics, see the GAIE
+[Implementer's Guide](https://github.com/kubernetes-sigs/gateway-api-inference-extension/blob/main/site-src/guides/implementers.md)
+and the
+[Endpoint Picker Protocol specification](https://github.com/kubernetes-sigs/gateway-api-inference-extension/tree/main/docs/proposals/004-endpoint-picker-protocol).
+For label-based endpoint selection, see the upstream
 [InferencePool configuration guide](https://gateway-api-inference-extension.sigs.k8s.io/api-types/inferencepool/#how-to-configure-an-inferencepool).
 The `label-filter` plugin shown here is Dynamo-specific; the component role label comes from the
 Dynamo [ComponentType](../api-reference.md#componenttype) field.
