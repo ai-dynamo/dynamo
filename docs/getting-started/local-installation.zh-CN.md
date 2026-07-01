@@ -10,8 +10,6 @@ description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynam
   <a href="./local-installation.md" hreflang="en">English</a> | <strong>简体中文</strong>
 </p>
 
-# 本地安装
-
 本指南介绍如何在配备一个或多个 GPU 的本地机器或 VM 上安装并运行 Dynamo。完成后，你将拥有一个可工作的 OpenAI 兼容端点，用于提供模型服务。
 
 对于生产环境的多节点集群，请参阅 [Kubernetes 部署指南](../kubernetes/README.md)。如需为开发从源码构建，请参阅[从源码构建](building-from-source.zh-CN.md)。
