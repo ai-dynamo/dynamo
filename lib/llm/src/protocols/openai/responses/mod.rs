@@ -344,7 +344,7 @@ impl OpenAIStopConditionsProvider for NvCreateResponse {
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
-        self.inner
+        self.extensions
             .stop
             .as_ref()
             .and_then(dynamo_protocols::types::Stop::strings)

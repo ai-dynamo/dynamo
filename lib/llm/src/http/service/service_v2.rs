@@ -343,24 +343,6 @@ impl StateFlags {
 }
 
 impl State {
-    fn new(
-        manager: Arc<ModelManager>,
-        discovery_client: Arc<dyn Discovery>,
-        cancel_token: CancellationToken,
-        config: StateConfig,
-    ) -> Self {
-        let responses_context_store = Arc::new(
-            ResponseContextStoreManager::from_env_with_shutdown(cancel_token.child_token()),
-        );
-        Self::new_with_responses_context_store(
-            manager,
-            discovery_client,
-            cancel_token,
-            config,
-            responses_context_store,
-        )
-    }
-
     fn new_with_responses_context_store(
         manager: Arc<ModelManager>,
         discovery_client: Arc<dyn Discovery>,
