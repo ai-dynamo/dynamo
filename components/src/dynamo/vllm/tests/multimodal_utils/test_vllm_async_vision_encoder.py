@@ -218,6 +218,9 @@ async def test_passthrough_skips_preprocess_when_no_pool():
         out = await enc.encode(["a", "bb"])
         assert len(out) == 2
         assert all(t.shape == (2, 4) for t in out)
+        # Passthrough must hand the raws themselves to forward_batch, unchanged
+        # and in order — count+shape alone would pass with substituted/reordered
+        # inputs.
         assert be.forward_calls == [["a", "bb"]]
     finally:
         enc.shutdown()

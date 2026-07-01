@@ -185,12 +185,14 @@ class AsyncVisionEncoder(Generic[RawT, ItemT]):
             for raw in raws
         ]
         settled = await asyncio.gather(*tasks, return_exceptions=True)
-        errors = [r for r in settled if isinstance(r, BaseException)]
-        if errors:
-            # Fail the whole request atomically; no item was submitted (no GPU
-            # work). Surface the first failure.
-            raise errors[0]
-        preprocessed: List[Preprocessed] = list(settled)  # type: ignore[arg-type]
+        for result in settled:
+            if isinstance(result, BaseException):
+                # Fail the whole request atomically; no item was submitted (no GPU
+                # work). Surface the first failure, in order.
+                raise result
+        # No exception above ⇒ every settled entry is a Preprocessed. Alias the
+        # list gather() already returned rather than copying it.
+        preprocessed: List[Preprocessed] = settled  # type: ignore[assignment]
         items = [p.item for p in preprocessed]
         costs = [p.cost for p in preprocessed]
         return await self._batcher.submit(items, costs)

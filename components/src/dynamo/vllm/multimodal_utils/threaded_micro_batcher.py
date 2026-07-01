@@ -1,48 +1,33 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Coalesce concurrent async calls into batched calls of a blocking fn on one thread.
+"""Run a blocking ``fn(list[item]) -> list[result]`` on one dedicated worker
+thread, coalescing items from concurrent async ``submit()`` calls into batches.
 
 ``ThreadedMicroBatcher`` is the generic execution mechanism behind
-``AsyncVisionEncoder`` — it has no model/vision knowledge and stays torch-free.
-It owns:
+``AsyncVisionEncoder`` — no model/vision knowledge, torch-free. It owns:
 
 - a **dedicated worker thread** that runs an optional ``on_start`` (e.g. build +
-  CUDA-graph capture) and then every ``fn`` call, so anything thread-affine
-  (CUDA graphs, the current device/stream) is captured and replayed on the same
-  thread; an optional ``on_stop`` runs on that same thread at teardown;
-- a **coalescing micro-batcher**: items from concurrent ``submit()`` calls are
-  pooled and split into batches whose summed ``cost`` stays within
-  ``max_batch_cost`` (a compute/token budget, not a raw count). Packing is
-  **one-dimensional** — by scalar ``cost`` alone; the batcher never inspects item
-  shape.
+  CUDA-graph capture), then every ``fn`` call, then an optional ``on_stop`` at
+  teardown — so anything thread-affine (CUDA graphs, the device/stream) is
+  captured and replayed on the same thread;
+- **eager batching by default**: whenever the worker is free it drains everything
+  queued and runs it as one ``fn`` call, then repeats (no timer) — a lone item
+  runs the next loop, and batch size auto-scales with load. Pass ``max_batch_cost``
+  to **micro-batch** instead: the drained items are split into batches whose
+  summed per-item ``cost`` stays within that budget (one-dimensional packing by
+  ``cost`` alone; item shape is never inspected).
 
-The caller speaks in opaque items plus a per-item scalar ``cost`` (int), computed
-once off-thread (see ``Preprocessed``); the batcher never interprets the items, so
-all model knowledge stays in the caller.
+The caller speaks in opaque items plus an optional per-item scalar ``cost``
+(computed off-thread, see ``Preprocessed``), so all model knowledge stays in the
+caller. A request is finalised exactly once — its ``completion`` future resolves
+only after *all* its items are delivered or failed — with every request-state
+transition under one short lock, so the worker and a concurrent ``shutdown()``
+never race. A worker crash fails every live request (no hung awaiter) via a
+supervisor.
 
-Coalescing window — **eager drain-on-completion, no timer**: whenever the worker
-is free it pulls everything queued and runs it, then repeats. A lone item runs on
-the next free iteration (liveness for free); batch size auto-scales with load
-(arrivals during ``fn`` pile up and are scooped next loop).
-
-Concurrency contract (cross-thread correctness):
-
-- The event-loop bridge is a ``concurrent.futures.Future`` adapted with
-  ``asyncio.wrap_future``, so callers on **any** event loop work.
-  TODO: cancelling an ``await submit(...)`` does not yet tombstone the request —
-  its items still run through ``fn`` (the result is discarded) and admission frees
-  only when they finish. Add cancel-aware tombstoning + retirement here.
-- A request is finalised **per item**: admission release and ``completion`` fire
-  exactly once, only after *all* of the request's items have been delivered or
-  failed — never on the first item of a multi-batch request. Every request-state
-  transition is under one short lock, so the worker and a concurrent
-  ``shutdown()`` cannot race on ``remaining``.
-- The worker runs under a **supervisor**: any unexpected crash fails every live
-  request (no hung awaiter) and moves the batcher to ``FAILED``.
-
-TODO: no admission backpressure — ``submit()`` always accepts. Add a bound on
-accepted-but-incomplete cost if a producer can outrun the encoder.
+TODO: ``submit()`` is not cancel-aware (a cancelled await still runs its items
+through ``fn``) and applies no admission backpressure (it always accepts).
 """
 
 from __future__ import annotations
@@ -158,10 +143,13 @@ class ThreadedMicroBatcher(Generic[T, R]):
         to spawn — a second call raises rather than spawning a second consumer /
         orphaning the first thread."""
         with self._lock:
-            # Guard on state, not `_thread`: a failed spawn moves to FAILED with
-            # `_thread` still None, and rejecting any non-NEW state here stops a
-            # retry from spawning a second (orphaned) worker.
-            if self._state is not _State.NEW:
+            # Reject a second start() on two axes, both read under the lock:
+            # `_thread` is already set — a first start() spawned the worker, even
+            # if it is still blocked waiting for on_start while `_state` is NEW
+            # (covers concurrent double-start); OR `_state` moved past NEW — a
+            # failed spawn set FAILED with `_thread` still None (covers a
+            # failed-spawn retry). Either alone leaves a hole; together they don't.
+            if self._thread is not None or self._state is not _State.NEW:
                 raise RuntimeError("ThreadedMicroBatcher.start() called twice")
             # Non-daemon: a clean stop is via shutdown(); a daemon worker could be
             # torn down mid-fn at interpreter exit. Pin daemon=False explicitly so
@@ -250,10 +238,13 @@ class ThreadedMicroBatcher(Generic[T, R]):
         """Stop the worker, failing not-yet-run items. Idempotent and best-effort:
         a slow in-flight ``fn`` keeps running and the worker exits on its own once
         it returns and reads the stop signal."""
-        if self._thread is None:
-            return
         to_fail: List[_Work] = []
         with self._lock:
+            # Snapshot _thread under the lock: start() publishes it under the same
+            # lock, so reading it here can't race with a concurrent spawn.
+            thread = self._thread
+            if thread is None:
+                return
             if self._state not in (_State.CLOSED, _State.FAILED):
                 self._state = _State.CLOSED
                 to_fail = self._drain_queue_locked()  # fail queued, then signal stop
@@ -263,8 +254,8 @@ class ThreadedMicroBatcher(Generic[T, R]):
         # in-flight on the worker. No post-join re-drain is needed.
         for work in to_fail:
             self._consume(work, error=RuntimeError("ThreadedMicroBatcher shut down"))
-        self._thread.join(timeout=self._join_timeout_s)
-        if self._thread.is_alive():
+        thread.join(timeout=self._join_timeout_s)
+        if thread.is_alive():
             logger.warning(
                 "ThreadedMicroBatcher(%s): worker still finishing an in-flight fn "
                 "after %gs; it will exit on its own.",
