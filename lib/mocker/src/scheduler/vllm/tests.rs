@@ -529,6 +529,7 @@ mod core_behavior {
                 status: RequestStatus::Running,
                 num_computed_tokens: 9,
                 num_preemptions: 1,
+                enqueued_wall_time: std::time::Instant::now(),
             },
         );
 

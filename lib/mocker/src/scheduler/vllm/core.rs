@@ -17,8 +17,8 @@ use uuid::Uuid;
 #[cfg(feature = "kvbm-offload")]
 use crate::common::protocols::G1;
 use crate::common::protocols::{
-    DirectRequest, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal, PreemptionMode,
-    PrefillCost, WorkerType,
+    DirectRequest, EngineType, KvEventPublishers, MockEngineArgs, MoveBlock, OutputSignal,
+    PreemptionMode, PrefillCost, WorkerType,
 };
 use crate::common::sequence::ActiveSequence;
 use crate::common::speculative::{SpeculativeDecodeSampler, normalize_conditional_accept_rates};
@@ -46,6 +46,7 @@ pub(crate) struct VllmRequestState {
     pub(crate) status: RequestStatus,
     pub(crate) num_computed_tokens: usize,
     pub(crate) num_preemptions: usize,
+    pub(crate) enqueued_wall_time: std::time::Instant,
 }
 
 impl VllmRequestState {
@@ -488,6 +489,7 @@ impl VllmCore {
                 status: RequestStatus::Waiting,
                 num_computed_tokens: 0,
                 num_preemptions: 0,
+                enqueued_wall_time: std::time::Instant::now(),
             },
         );
         self.state.push_waiting(uuid);
@@ -1193,6 +1195,32 @@ impl VllmCore {
         }
 
         if from_waiting {
+            // Mirror TRT-LLM's KV transfer timeout, which fires on both sides:
+            //   CTX (prefill): kv_transfer_sender_future_timeout_ms — sender waits for GEN
+            //     to acknowledge transfer completion after respond_and_send_async().
+            //   GEN (decode): kv_transfer_timeout_ms — receiver waits for KV blocks to
+            //     arrive after request_and_receive_async().
+            // In the mocker with instant KV (--kv-transfer-bandwidth 0), the only delay is
+            // orchestration: time from receive() to first scheduling slot. Both sides fire
+            // against the same MOCK_KV_WAIT_TIMEOUT_MS threshold.
+            if self.args.engine_type == EngineType::Trtllm {
+                if let Some(threshold_ms) = crate::common::utils::mock_kv_wait_timeout_ms() {
+                    if let Some(req) = self.state.requests.get(&uuid) {
+                        let wait_ms = req.enqueued_wall_time.elapsed().as_millis() as u64;
+                        if wait_ms >= threshold_ms {
+                            let worker_type = self.args.worker_type;
+                            tracing::warn!(
+                                target: "dynamo_stall_op",
+                                op = "mock_kv_timeout",
+                                %uuid,
+                                wait_ms,
+                                ?worker_type,
+                                "mock TRT-LLM KV transfer timeout: worker queue wait exceeded budget"
+                            );
+                        }
+                    }
+                }
+            }
             self.state.transition_to_running(uuid);
         }
         *token_budget = token_budget.saturating_sub(tokens_used);
