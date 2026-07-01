@@ -57,7 +57,7 @@ func TestApplyVersionMatrix(t *testing.T) {
 			wantAPIVersion: "nvidia.com/v1beta1",
 			wantArgs:       []string{"--base", "--override"},
 			wantPreservation: func(t *testing.T, result *unstructured.Unstructured) {
-				worker := mustBetaComponent(t, result, "Worker")
+				worker := mustBetaWorker(t, result)
 				assert.Equal(t, "sidecar", worker["frontendSidecar"])
 				containers := mustNestedSlice(t, worker, "podTemplate", "spec", "containers")
 				assert.NotNil(t, findNamedObject(t, containers, "sidecar"))
@@ -70,7 +70,7 @@ func TestApplyVersionMatrix(t *testing.T) {
 			wantAPIVersion: "nvidia.com/v1beta1",
 			wantArgs:       []string{"--override"},
 			wantPreservation: func(t *testing.T, result *unstructured.Unstructured) {
-				worker := mustBetaComponent(t, result, "Worker")
+				worker := mustBetaWorker(t, result)
 				assert.Equal(t, "sidecar", worker["frontendSidecar"])
 				containers := mustNestedSlice(t, worker, "podTemplate", "spec", "containers")
 				assert.NotNil(t, findNamedObject(t, containers, "sidecar"))
@@ -126,7 +126,7 @@ func TestApplyUsesStructuralListSemantics(t *testing.T) {
 	assert.Equal(t, "Frontend", components[0].(map[string]interface{})["name"])
 	assert.Equal(t, "Worker", components[1].(map[string]interface{})["name"])
 
-	worker := mustBetaComponent(t, result, "Worker")
+	worker := mustBetaWorker(t, result)
 	containers := mustNestedSlice(t, worker, "podTemplate", "spec", "containers")
 	require.Len(t, containers, 2, "container list should merge by name")
 	assert.NotNil(t, findNamedObject(t, containers, "sidecar"))
@@ -173,7 +173,7 @@ func TestApplyUsesStructuralSetSemantics(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, warnings)
 
-	worker := mustBetaComponent(t, result, "Worker")
+	worker := mustBetaWorker(t, result)
 	clients := mustNestedStringSlice(
 		t,
 		worker,
@@ -302,7 +302,7 @@ func TestApplyProtectsConversionAnnotations(t *testing.T) {
 		warnings[0].String(),
 	)
 
-	worker := mustBetaComponent(t, result, "Worker")
+	worker := mustBetaWorker(t, result)
 	assert.Equal(t, "sidecar", worker["frontendSidecar"], "beta-only data was corrupted during round trip")
 	assert.Equal(t, "allowed", result.GetAnnotations()["user.example/setting"])
 	assert.NotEqual(t, "malicious-preservation-value", result.GetAnnotations()["nvidia.com/dgd-spec"])
@@ -512,11 +512,11 @@ func mustNestedStringSlice(t *testing.T, object map[string]interface{}, fields .
 	return value
 }
 
-func mustBetaComponent(t *testing.T, object *unstructured.Unstructured, name string) map[string]interface{} {
+func mustBetaWorker(t *testing.T, object *unstructured.Unstructured) map[string]interface{} {
 	t.Helper()
 	components := mustNestedSlice(t, object.Object, "spec", "components")
-	component := findNamedObject(t, components, name)
-	require.NotNil(t, component, "missing component %q", name)
+	component := findNamedObject(t, components, "Worker")
+	require.NotNil(t, component, "missing Worker component")
 	return component
 }
 
@@ -562,7 +562,7 @@ func mainContainer(t *testing.T, object *unstructured.Unstructured) map[string]i
 		require.True(t, found)
 		return container
 	case "nvidia.com/v1beta1":
-		worker := mustBetaComponent(t, object, "Worker")
+		worker := mustBetaWorker(t, object)
 		containers := mustNestedSlice(t, worker, "podTemplate", "spec", "containers")
 		container := findNamedObject(t, containers, "main")
 		require.NotNil(t, container)
@@ -600,15 +600,15 @@ func mainContainerEnv(t *testing.T, object *unstructured.Unstructured) map[strin
 		service, found, err := unstructured.NestedMap(object.Object, "spec", "services", "Worker")
 		require.NoError(t, err)
 		require.True(t, found)
-		if env, found, err := unstructured.NestedSlice(service, "envs"); err != nil {
-			require.NoError(t, err)
-		} else if found {
+		env, found, err := unstructured.NestedSlice(service, "envs")
+		require.NoError(t, err)
+		if found {
 			addEnvValues(t, result, env)
 		}
 	}
-	if env, found, err := unstructured.NestedSlice(mainContainer(t, object), "env"); err != nil {
-		require.NoError(t, err)
-	} else if found {
+	env, found, err := unstructured.NestedSlice(mainContainer(t, object), "env")
+	require.NoError(t, err)
+	if found {
 		addEnvValues(t, result, env)
 	}
 	return result

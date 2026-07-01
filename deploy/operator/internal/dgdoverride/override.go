@@ -381,6 +381,9 @@ func prepareAlphaServices(
 	return warnings, nil
 }
 
+// appendAlphaWorkerArgs preserves the legacy v1alpha1 profiler contract, where
+// worker args extend the generated command line. V1beta1 intentionally follows
+// the CRD's atomic-list semantics and replaces container args instead.
 func appendAlphaWorkerArgs(baseValue, overrideValue interface{}) error {
 	base, ok := baseValue.(map[string]interface{})
 	if !ok {
