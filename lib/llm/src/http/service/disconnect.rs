@@ -393,6 +393,103 @@ mod tests {
         (metrics, guard, context, handle)
     }
 
+    /// Engine context that records whether `kill()` was invoked, so the unary
+    /// disconnect path (armed handle dropped before disarm) can be asserted.
+    #[derive(Debug, Default)]
+    struct KillTrackingContext {
+        killed: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl dynamo_runtime::engine::AsyncEngineContext for KillTrackingContext {
+        fn id(&self) -> &str {
+            "kill-tracking"
+        }
+        fn stop(&self) {}
+        fn stop_generating(&self) {}
+        fn kill(&self) {
+            self.killed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn is_stopped(&self) -> bool {
+            false
+        }
+        fn is_killed(&self) -> bool {
+            self.killed.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        async fn stopped(&self) {
+            std::future::pending::<()>().await;
+        }
+        async fn killed(&self) {
+            std::future::pending::<()>().await;
+        }
+        fn link_child(&self, _: Arc<dyn dynamo_runtime::engine::AsyncEngineContext>) {}
+    }
+
+    fn generate_cancellation_labels() -> CancellationLabels {
+        CancellationLabels {
+            model: "test-model".to_string(),
+            endpoint: Endpoint::Generate.to_string(),
+            request_type: "unary".to_string(),
+        }
+    }
+
+    async fn wait_for_kill(ctx: &Arc<KillTrackingContext>) {
+        // Let the detached monitor task observe the dropped handle.
+        for _ in 0..100 {
+            if ctx.is_killed() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Unary disconnect path (the shape the `/inference/v1/generate` handler
+    /// relies on): dropping the ARMED connection handle without disarming —
+    /// i.e. the client disconnected before the response was produced — must
+    /// kill the engine context so its router reservation is released. The
+    /// disarmed second (stream) handle's `ClosedGracefully` on drop must NOT
+    /// pre-empt the kill (the monitor reads the connection handle first).
+    #[tokio::test]
+    async fn armed_handle_drop_kills_context() {
+        let ctx: Arc<KillTrackingContext> = Arc::new(KillTrackingContext::default());
+        let dyn_ctx: Arc<dyn AsyncEngineContext> = ctx.clone();
+        let (connection_handle, stream_handle) =
+            create_connection_monitor(dyn_ctx, None, generate_cancellation_labels()).await;
+
+        // Client disconnect: the handler future is dropped, taking BOTH handles
+        // with it before `disarm()` is reached.
+        drop(connection_handle);
+        drop(stream_handle);
+
+        wait_for_kill(&ctx).await;
+        assert!(
+            ctx.is_killed(),
+            "armed handle dropped without disarm must kill the engine context"
+        );
+    }
+
+    /// Normal-completion path: disarming the connection handle (the request
+    /// finished) must NOT kill the engine context.
+    #[tokio::test]
+    async fn disarmed_handle_does_not_kill_context() {
+        let ctx: Arc<KillTrackingContext> = Arc::new(KillTrackingContext::default());
+        let dyn_ctx: Arc<dyn AsyncEngineContext> = ctx.clone();
+        let (mut connection_handle, stream_handle) =
+            create_connection_monitor(dyn_ctx, None, generate_cancellation_labels()).await;
+
+        connection_handle.disarm();
+        drop(connection_handle);
+        drop(stream_handle);
+
+        // Give the monitor a chance to (incorrectly) fire before asserting.
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !ctx.is_killed(),
+            "disarmed handle must not kill the engine context"
+        );
+    }
+
     /// Zombie backend with hanging stream is terminated by inactivity timeout.
     #[tokio::test(start_paused = true)]
     async fn test_backend_inactivity_timeout_releases_inflight_gauge() {
