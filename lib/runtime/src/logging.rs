@@ -27,7 +27,7 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 use figment::{
     Figment,
@@ -255,6 +255,25 @@ fn trace_sample_ratio_from_env() -> Option<f64> {
             .ok()
             .as_deref(),
     )
+}
+
+fn otel_runtime_handle() -> std::io::Result<tokio::runtime::Handle> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return Ok(handle);
+    }
+
+    static OTEL_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    if let Some(rt) = OTEL_RUNTIME.get() {
+        return Ok(rt.handle().clone());
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("dynamo-otel-export")
+        .enable_all()
+        .build()?;
+    let _ = OTEL_RUNTIME.set(rt);
+    Ok(OTEL_RUNTIME.get().expect("set above").handle().clone())
 }
 
 fn build_span_exporter(
@@ -1281,8 +1300,11 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         let sample_ratio = trace_sample_ratio_from_env();
 
         // Build tracer and logger providers - with or without OTLP export
-        let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_enabled {
-            // Export enabled: create OTLP exporters with batch processors
+        let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_exporter_enabled() {
+            // Building the OTLP exporters spawns a background flush task, so it needs a
+            // live, persistent reactor
+            let otel_handle = otel_runtime_handle()?;
+            let _otel_reactor_guard = otel_handle.enter();
             let protocol = otlp_protocol_from_env();
             let traces_protocol = resolve_signal_otlp_protocol(
                 protocol,
@@ -2826,6 +2848,85 @@ pub mod tests {
 
         init();
         tracing::info!("readable log with OTLP export");
+    }
+
+    #[test]
+    fn otlp_sync_init_connects_without_ambient_runtime() {
+        use std::process::Command;
+        use std::time::Duration;
+
+        // Both settings — JSONL=1 + OTEL=1 is the combo that used to panic.
+        for jsonl in ["0", "1"] {
+            // (a) Parent owns a TCP listener; the child's exporter must connect to it.
+            //     Port 0 = "OS, pick any free port", then read back which one.
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+            let addr = listener.local_addr().expect("get local addr");
+
+            // (b) Accept ONE connection on a helper thread; tell us via a channel.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let accept = std::thread::spawn(move || {
+                if listener.accept().is_ok() {
+                    let _ = tx.send(()); // signal "a connection arrived"
+                }
+            });
+
+            // (c) Re-run as a fresh subprocess, running ONLY the child test.
+            let output = Command::new("cargo")
+                .args([
+                    "test",
+                    "-p",
+                    "dynamo-runtime",
+                    "logging::tests::otlp_sync_init_connects_subprocess",
+                    "--",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env("OTEL_EXPORT_ENABLED", "1")
+                .env("DYN_LOGGING_JSONL", jsonl)
+                .env("OTEL_EXPORTER_OTLP_ENDPOINT", format!("http://{addr}"))
+                .env("OTEL_BSP_SCHEDULE_DELAY", "100") // flush fast (ms) so it connects promptly
+                .output()
+                .expect("failed to run subprocess");
+
+            // (d) it must NOT panic, for both JSONL modes.
+            assert!(
+                output.status.success(),
+                "sync init subprocess (JSONL={jsonl}) failed:\n{}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+
+            // (e) The real proof: the exporter actually connected → the persistent
+            //     runtime is alive and DRIVEN.
+            rx.recv_timeout(Duration::from_secs(10))
+                .unwrap_or_else(|_| {
+                    panic!("exporter never connected (JSONL={jsonl}); export runtime not driven")
+                });
+
+            let _ = accept.join(); // let the helper thread finish
+        }
+    }
+
+    #[test]
+    fn otlp_sync_init_connects_subprocess() {
+        // When run by a normal `cargo test`, OTEL_EXPORT_ENABLED isn't set → do nothing.
+        // The parent sets it, so only then do we run the real body.
+        if std::env::var("OTEL_EXPORT_ENABLED").is_err() {
+            return;
+        }
+
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "subprocess must run with no ambient Tokio runtime",
+        );
+
+        init(); // real global init → setup_logging → otel_runtime_handle
+
+        // Emit real span + log data so both exporters have something to flush.
+        let _span = tracing::info_span!("otlp_sync_smoke").entered();
+        tracing::info!("otlp sync-init smoke log");
+
+        // Give the batch exporter's scheduled flush time to fire and connect.
+        std::thread::sleep(std::time::Duration::from_secs(2));
     }
 
     // Test functions at different log levels for filtering tests
