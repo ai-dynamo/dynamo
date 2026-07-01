@@ -202,7 +202,7 @@ async def _initiate_shutdown(self, error: Exception):
 
 1. Kubernetes sends `SIGTERM` to the pod
 2. Dynamo initiates graceful shutdown
-3. Pod has `terminationGracePeriodSeconds` to complete (default: 30s)
+3. Dynamo operator-created pods have `terminationGracePeriodSeconds` to complete (default: 60s)
 4. If not terminated, Kubernetes sends `SIGKILL`
 
 ### Recommended Configuration
