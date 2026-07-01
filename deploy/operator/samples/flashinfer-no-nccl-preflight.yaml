@@ -6,11 +6,11 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: fi-no-nccl-preflight-28515733745
+  name: fi-no-nccl-preflight-28533818243
   labels:
     app.kubernetes.io/created-by: pi-relay
     app.kubernetes.io/name: flashinfer-no-nccl-preflight
-    e2e.ai-dynamo.io/run: fi-no-nccl-28515733745
+    e2e.ai-dynamo.io/run: fi-no-nccl-28533818243
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 3600
@@ -19,7 +19,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: flashinfer-no-nccl-preflight
-        e2e.ai-dynamo.io/run: fi-no-nccl-28515733745
+        e2e.ai-dynamo.io/run: fi-no-nccl-28533818243
     spec:
       restartPolicy: Never
       runtimeClassName: nvidia
@@ -39,7 +39,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: preflight
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:a641a3d5d50b342a7a73c72d211a98e2e309f239c34502f140d9bf7701766bf9
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:355ac912a3205f0fff5887eef3ffb0761c5437025e5df4a86de9b0c456710aa3
           imagePullPolicy: Always
           command:
             - torchrun
@@ -48,7 +48,7 @@ spec:
             - /preflight/preflight.py
           env:
             - name: EXPECTED_DYNAMO_SHA
-              value: 0569b75fecd9c1ce612c9fa61d81c49930e49e07
+              value: 7c4a226d663fa86e323128b5bdb4be99c4bcdfd1
             - name: VLLM_DISABLE_NCCL
               value: "1"
             - name: VLLM_ALLREDUCE_USE_SYMM_MEM
@@ -80,7 +80,7 @@ spec:
       volumes:
         - name: preflight
           configMap:
-            name: fi-no-nccl-preflight-28515733745
+            name: fi-no-nccl-preflight-28533818243
         - name: dshm
           emptyDir:
             medium: Memory

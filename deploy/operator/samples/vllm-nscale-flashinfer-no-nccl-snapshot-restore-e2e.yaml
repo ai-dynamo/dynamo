@@ -7,11 +7,11 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: fi-nemotron-fa-nonccl-28515733745
+  name: fi-nemotron-fa-nonccl-28533818243
   labels:
     app.kubernetes.io/created-by: pi-relay
     app.kubernetes.io/name: dynamo-snapshot-e2e
-    e2e.ai-dynamo.io/run: fi-no-nccl-28515733745
+    e2e.ai-dynamo.io/run: fi-no-nccl-28533818243
   annotations:
     nvidia.com/enable-grove: "false"
 spec:
@@ -29,7 +29,7 @@ spec:
           mountPoint: /home/dynamo/.cache/huggingface
       extraPodSpec:
         mainContainer:
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:a641a3d5d50b342a7a73c72d211a98e2e309f239c34502f140d9bf7701766bf9
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:355ac912a3205f0fff5887eef3ffb0761c5437025e5df4a86de9b0c456710aa3
           imagePullPolicy: Always
           command:
             - python3
@@ -89,7 +89,7 @@ spec:
           nvidia.com/gpu.present: "true"
           nvidia.com/gpu.product: NVIDIA-B200
         runtimeClassName: nvidia
-        serviceAccountName: fi-nemotron-fa-nonccl-28515733745-k8s-service-discovery
+        serviceAccountName: fi-nemotron-fa-nonccl-28533818243-k8s-service-discovery
         securityContext:
           fsGroup: 1000
           fsGroupChangePolicy: OnRootMismatch
@@ -106,7 +106,7 @@ spec:
             emptyDir: {}
         mainContainer:
           name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:129c2467548ae554a66d38d64d5b7e058d512b8faf6f2eec393775b17da8d068
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:1fce5ef88f38493f5bd3486134050b2ec5c3485dfe357f5433c6184b96e791d3
           imagePullPolicy: Always
           workingDir: /workspace/
           command:
