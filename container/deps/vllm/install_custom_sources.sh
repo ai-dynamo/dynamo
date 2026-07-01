@@ -20,7 +20,7 @@ PROVENANCE_FILE=/opt/dynamo/source-provenance.txt
 FLASHINFER_VERSION_FILE=/opt/dynamo/flashinfer-source-version.txt
 FLASHINFER_SHA_FILE=/opt/dynamo/flashinfer-source-sha.txt
 VLLM_CONSTRAINTS_FILE=/tmp/vllm-full-source-constraints.txt
-VLLM_RUNTIME_REQUIREMENTS_FILE=/tmp/vllm-full-source-runtime-requirements.txt
+VLLM_RUNTIME_REQUIREMENTS_FILE=requirements/.dynamo-full-source-runtime.txt
 NCCL_DSO_LINK=/opt/dynamo/nccl/libnccl.so.2
 
 clone_source() {
@@ -203,6 +203,7 @@ PY
         --torch-backend="${VLLM_TORCH_BACKEND}" \
         -r "${VLLM_RUNTIME_REQUIREMENTS_FILE}" \
         "runai-model-streamer[s3,gcs,azure]>=0.15.7"
+    rm -f "${VLLM_RUNTIME_REQUIREMENTS_FILE}"
 
     ./tools/install_protoc.sh
     VLLM_RS_TARGET_PATH=/tmp/vllm-src/vllm/vllm-rs \

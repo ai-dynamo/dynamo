@@ -602,9 +602,12 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
     def test_full_source_registry_solve_excludes_source_flashinfer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "cuda.txt"
-            destination = root / "runtime.txt"
+            requirements = root / "requirements"
+            requirements.mkdir()
+            source = requirements / "cuda.txt"
+            destination = requirements / ".dynamo-runtime.txt"
             source.write_text(
+                "-r common.txt\n"
                 "torch==2.12.0\n"
                 "flashinfer-python==0.6.14\n"
                 "flashinfer-cubin==0.6.14\n"
@@ -620,10 +623,15 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(
                 destination.read_text(),
-                "torch==2.12.0\napache-tvm-ffi==0.1.9\n",
+                "-r common.txt\ntorch==2.12.0\napache-tvm-ffi==0.1.9\n",
             )
 
         installer = self.installer.read_text()
+        self.assertIn(
+            "VLLM_RUNTIME_REQUIREMENTS_FILE="
+            "requirements/.dynamo-full-source-runtime.txt",
+            installer,
+        )
         self.assertIn(
             '-r "${VLLM_RUNTIME_REQUIREMENTS_FILE}"',
             installer,
