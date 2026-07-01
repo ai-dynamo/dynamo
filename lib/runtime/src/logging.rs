@@ -533,6 +533,7 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
         x_request_id = trace_parent.x_request_id,
         request_id = %request_id,
         model = tracing::field::Empty,
+        "request.outcome" = tracing::field::Empty,
         input_tokens = tracing::field::Empty,
         output_tokens = tracing::field::Empty,
         ttft_ms = tracing::field::Empty,

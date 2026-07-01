@@ -141,6 +141,20 @@ impl Drop for RequestMetricsGuard {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PublishFailureDisposition {
+    Cancelled,
+    Error,
+}
+
+fn classify_publish_failure(context: &dyn AsyncEngineContext) -> PublishFailureDisposition {
+    if context.is_stopped() {
+        PublishFailureDisposition::Cancelled
+    } else {
+        PublishFailureDisposition::Error
+    }
+}
+
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     /// Pump every chunk from the engine's response stream out to the
     /// upstream-side `StreamSender`, plus the terminal complete-final
@@ -179,7 +193,9 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
             }
             if (publisher.send(resp_bytes.into()).await).is_err() {
                 send_complete_final = false;
-                if context.is_stopped() {
+                if classify_publish_failure(context.as_ref())
+                    == PublishFailureDisposition::Cancelled
+                {
                     // Say there are 2 threads accessing `context`, the sequence can be either:
                     // 1. context.stop_generating (other) -> publisher.send failure (this)
                     //    -> context.is_stopped (this)
@@ -222,10 +238,16 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
             if (publisher.send(resp_bytes.into()).await).is_err() {
-                tracing::error!(
-                    "Failed to publish complete final for stream {}",
-                    context.id()
-                );
+                match classify_publish_failure(context.as_ref()) {
+                    PublishFailureDisposition::Cancelled => tracing::warn!(
+                        "Failed to publish complete final for stream {}",
+                        context.id()
+                    ),
+                    PublishFailureDisposition::Error => tracing::error!(
+                        "Failed to publish complete final for stream {}",
+                        context.id()
+                    ),
+                }
                 if let Some(m) = self.metrics() {
                     m.error_counter
                         .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
@@ -694,5 +716,34 @@ where
         request_id: Option<String>,
     ) -> Result<(), PipelineError> {
         self.handle_payload_shared(payload, request_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::context::Controller;
+
+    #[test]
+    fn publish_failure_after_stop_or_kill_is_cancellation() {
+        let live = Controller::new("live".to_string());
+        assert_eq!(
+            classify_publish_failure(&live),
+            PublishFailureDisposition::Error
+        );
+
+        let stopped = Controller::new("stopped".to_string());
+        stopped.stop();
+        assert_eq!(
+            classify_publish_failure(&stopped),
+            PublishFailureDisposition::Cancelled
+        );
+
+        let killed = Controller::new("killed".to_string());
+        killed.kill();
+        assert_eq!(
+            classify_publish_failure(&killed),
+            PublishFailureDisposition::Cancelled
+        );
     }
 }
