@@ -238,6 +238,15 @@ aicr recipe \
   --output recipe.yaml
 ```
 
+The generated recipe defaults its `inference-routing-mode` performance constraint to `dynamo-router`.
+To validate the GAIE / EPP path instead, change the existing constraint in `recipe.yaml` before running
+performance validation:
+
+```yaml
+- name: inference-routing-mode
+  value: gateway-epp
+```
+
 ### 3. Validate Before Deployment
 
 Because that recipe was selected from `snapshot.yaml`, validating the same recipe against the same
@@ -288,20 +297,21 @@ chmod +x deploy.sh
 
 ### 6. Validate the Installed Runtime
 
-After the runtime is installed, run validation against the live cluster before installing a Dynamo
-workload:
+After the runtime is installed, run deployment and conformance validation against the live cluster
+before installing a Dynamo workload:
 
 ```bash
 aicr validate \
   --recipe recipe.yaml \
   --toleration dedicated=worker-workload:NoSchedule \
   --toleration dedicated=worker-workload:NoExecute \
-  --phase all \
+  --phase deployment \
+  --phase conformance \
   --output report.json
 ```
 
-The full live validation happens after deployment, when AICR can also check that the runtime was
-installed as expected.
+Run `--phase performance` separately when you want to benchmark inference. That phase deploys a
+temporary `DynamoGraphDeployment` and AIPerf Job, consumes GPUs, and can run for up to 65 minutes.
 
 #### What Does Validate Check?
 
@@ -380,7 +390,8 @@ endpoint selection.
 The `vllm-agg` example above uses the direct frontend path. To exercise the Gateway / EPP path, apply
 the companion [vLLM aggregation EPP manifest](deploying-dynamo-with-aicr-vllm-agg-epp.yaml). It
 creates an EPP-enabled `DynamoGraphDeployment` and an `HTTPRoute` that points at the operator-created
-`InferencePool`:
+`InferencePool`. The route uses `vllm-agg-epp.example.com` so it remains distinct from other workloads
+on the shared Gateway; replace that hostname with one owned by your deployment:
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/ai-dynamo/dynamo/refs/heads/main/docs/digest/deploying-dynamo-with-aicr-vllm-agg-epp.yaml
@@ -402,9 +413,13 @@ found`.
 
 ```bash
 GATEWAY_HOST=$(kubectl get gateway inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
-curl "http://${GATEWAY_HOST}/v1/models"
+ROUTE_HOST=vllm-agg-epp.example.com
+
+curl "http://${GATEWAY_HOST}/v1/models" \
+  -H "Host: ${ROUTE_HOST}"
 
 curl "http://${GATEWAY_HOST}/v1/chat/completions" \
+  -H "Host: ${ROUTE_HOST}" \
   -H "Content-Type: application/json" \
   -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello from AICR Dynamo through Gateway / EPP"}],"max_tokens":30,"stream":false}'
 ```

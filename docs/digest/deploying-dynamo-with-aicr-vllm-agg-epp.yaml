@@ -80,7 +80,7 @@ spec:
               effect: NoExecute
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/epp-image:1.2.0
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.2.0
               env:
                 - name: DYN_KV_CACHE_BLOCK_SIZE
                   value: "128"
@@ -207,6 +207,9 @@ metadata:
   name: vllm-agg-epp
   namespace: dynamo-workload
 spec:
+  # Use a hostname unique to this workload. The AICR inference Gateway is shared.
+  hostnames:
+    - vllm-agg-epp.example.com
   parentRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
