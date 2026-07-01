@@ -20,7 +20,7 @@ os.environ.setdefault("VLLM_DISTRIBUTED_USE_SPLIT_GROUP", "0")
 import torch
 import torch.distributed as dist
 
-EXPECTED_VLLM_SHA = "e140135bd541358e2c490f7407215149ad888695"
+EXPECTED_VLLM_SHA = "cf0efdeee02d1345cb0b10cbbb691fa4eda782c5"
 EXPECTED_FLASHINFER_SHA = "330cc8e1a09f59c1241084459f3df3204b9b8327"
 EXPECTED_FLASHINFER_VERSION = "0.6.14"
 EXPECTED_WORLD_SIZE = 8
@@ -215,16 +215,22 @@ def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
     )
 
     control_group = dist.group.WORLD
+    ar_token_num = max(4, world_size * 2)
     ar_workspace = comm.create_allreduce_fusion_workspace(
         backend="trtllm",
         world_size=world_size,
         rank=rank,
-        max_token_num=4,
+        max_token_num=ar_token_num,
         hidden_dim=4096,
         dtype=torch.bfloat16,
         comm_backend=TorchDistBackend(group=control_group),
     )
-    ar_input = torch.full((4, 4096), rank + 1, dtype=torch.bfloat16, device="cuda")
+    ar_input = torch.full(
+        (ar_token_num, 4096),
+        rank + 1,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
     ar_output = torch.empty_like(ar_input)
 
     def all_reduce() -> None:
