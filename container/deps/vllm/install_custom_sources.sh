@@ -20,6 +20,7 @@ PROVENANCE_FILE=/opt/dynamo/source-provenance.txt
 FLASHINFER_VERSION_FILE=/opt/dynamo/flashinfer-source-version.txt
 FLASHINFER_SHA_FILE=/opt/dynamo/flashinfer-source-sha.txt
 VLLM_CONSTRAINTS_FILE=/tmp/vllm-full-source-constraints.txt
+VLLM_RUNTIME_REQUIREMENTS_FILE=/tmp/vllm-full-source-runtime-requirements.txt
 NCCL_DSO_LINK=/opt/dynamo/nccl/libnccl.so.2
 
 clone_source() {
@@ -135,9 +136,23 @@ EOF
     VLLM_EXPECTED_TORCH_LOCAL_VERSION="${VLLM_TORCH_BACKEND}"
 }
 
+write_full_source_runtime_requirements() {
+    local source=$1
+    local destination=$2
+
+    # FlashInfer is supplied by the immutable source checkout below. Excluding
+    # it here prevents uv from requiring a same-version package-index release.
+    sed \
+        -e '/^flashinfer-python==/d' \
+        -e '/^flashinfer-cubin==/d' \
+        "${source}" > "${destination}"
+}
+
 build_full_source_vllm() {
     if ! grep -qx 'torch==2.12.0' requirements/cuda.txt ||
        ! grep -qx 'torchvision==0.27.0 .*' requirements/cuda.txt ||
+       ! grep -qx 'flashinfer-python==0.6.14' requirements/cuda.txt ||
+       ! grep -qx 'flashinfer-cubin==0.6.14' requirements/cuda.txt ||
        grep -q '^torchaudio' requirements/cuda.txt ||
        ! grep -qx 'torch==2.12.0' requirements/build/cuda.txt ||
        ! grep -qx '    "torch == 2.12.0",' pyproject.toml ||
@@ -181,10 +196,12 @@ PY
         --constraints "${VLLM_CONSTRAINTS_FILE}" \
         --torch-backend="${VLLM_TORCH_BACKEND}" \
         -r requirements/build/cuda.txt
+    write_full_source_runtime_requirements \
+        requirements/cuda.txt "${VLLM_RUNTIME_REQUIREMENTS_FILE}"
     uv pip install --system \
         --constraints "${VLLM_CONSTRAINTS_FILE}" \
         --torch-backend="${VLLM_TORCH_BACKEND}" \
-        -r requirements/cuda.txt \
+        -r "${VLLM_RUNTIME_REQUIREMENTS_FILE}" \
         "runai-model-streamer[s3,gcs,azure]>=0.15.7"
 
     ./tools/install_protoc.sh
@@ -587,10 +604,10 @@ fi
     echo "vllm_native_wheel_variant=${native_wheel_variant}"
 } >> "${PROVENANCE_FILE}"
 
-# This override intentionally runs after the custom vLLM metadata has selected
-# the exact stock FlashInfer version. Resolve the custom checkout's requirements
-# before replacing that same-version package with checkpoint-aware source and
-# cubin builds using --no-deps.
+# Exact-native mode replaces the version selected by vLLM metadata. Full-source
+# mode excludes these source-supplied distributions from the registry solve.
+# Both modes install the checkpoint-aware Python and cubin packages with
+# --no-deps from this immutable checkout.
 if [[ -n "${FLASHINFER_GIT_URL:-}" ]]; then
     require_git_selector \
         FLASHINFER "${FLASHINFER_GIT_REF:-}" "${FLASHINFER_GIT_SHA:-}"
@@ -610,6 +627,11 @@ if [[ -n "${FLASHINFER_GIT_URL:-}" ]]; then
         echo "Custom FlashInfer source has an empty version.txt" >&2
         exit 1
     fi
+    if [[ "${VLLM_INSTALL_MODE}" == "full-source" &&
+          "${flashinfer_source_version}" != "0.6.14" ]]; then
+        echo "full-source mode requires FlashInfer 0.6.14 source" >&2
+        exit 1
+    fi
     printf '%s\n' "${flashinfer_source_version}" > "${FLASHINFER_VERSION_FILE}"
     if [[ "${VLLM_INSTALL_MODE}" == "full-source" ]]; then
         uv pip install --system \
@@ -619,10 +641,13 @@ if [[ -n "${FLASHINFER_GIT_URL:-}" ]]; then
     else
         uv pip install --system -r requirements.txt
     fi
-    uv pip install --system --force-reinstall --no-build-isolation --no-deps .
-    if [[ -d ./flashinfer-cubin ]]; then
+    BUILD_NVEP=0 BUILD_NCCL_EP=0 BUILD_NIXL_EP=0 \
         uv pip install --system --force-reinstall --no-build-isolation \
-            --no-deps ./flashinfer-cubin
+            --no-deps .
+    if [[ -d ./flashinfer-cubin ]]; then
+        BUILD_NVEP=0 BUILD_NCCL_EP=0 BUILD_NIXL_EP=0 \
+            uv pip install --system --force-reinstall --no-build-isolation \
+                --no-deps ./flashinfer-cubin
     fi
     uv pip uninstall --system flashinfer-jit-cache || true
     cd /

@@ -262,8 +262,8 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             "uv pip install --system -r requirements.txt"
         )
         flashinfer_install = installer.index(
-            "uv pip install --system --force-reinstall --no-build-isolation "
-            "--no-deps ."
+            "BUILD_NVEP=0 BUILD_NCCL_EP=0 BUILD_NIXL_EP=0",
+            flashinfer_requirements,
         )
         pip_check = installer.index("uv pip check --system")
         self.assertLess(vllm_install, flashinfer_requirements)
@@ -599,13 +599,43 @@ class VllmBuildOnDemandModeTest(unittest.TestCase):
             'LABEL ai.dynamo.vllm.base="${VLLM_RUNTIME_BASE_IMAGE}"', dockerfile
         )
 
+    def test_full_source_registry_solve_excludes_source_flashinfer(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "cuda.txt"
+            destination = root / "runtime.txt"
+            source.write_text(
+                "torch==2.12.0\n"
+                "flashinfer-python==0.6.14\n"
+                "flashinfer-cubin==0.6.14\n"
+                "apache-tvm-ffi==0.1.9\n"
+            )
+
+            result = self.run_installer_function(
+                "write_full_source_runtime_requirements",
+                str(source),
+                str(destination),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                destination.read_text(),
+                "torch==2.12.0\napache-tvm-ffi==0.1.9\n",
+            )
+
+        installer = self.installer.read_text()
+        self.assertIn(
+            '-r "${VLLM_RUNTIME_REQUIREMENTS_FILE}"',
+            installer,
+        )
+        self.assertIn("BUILD_NVEP=0 BUILD_NCCL_EP=0 BUILD_NIXL_EP=0", installer)
+
     def test_full_source_nccl_runtime_does_not_require_checkpoint_shim(self) -> None:
         installer = self.installer.read_text()
         dockerfile = self.render_runtime("amd64")
 
         self.assertIn(
-            'VLLM_NCCL_VERSION="${VLLM_NCCL_VERSION:-'
-            '${NCCL_CHECKPOINT_VERSION:-}}"',
+            'VLLM_NCCL_VERSION="${VLLM_NCCL_VERSION:-' '${NCCL_CHECKPOINT_VERSION:-}}"',
             installer,
         )
         self.assertIn("VLLM_NCCL_VERSION=2.29.7", installer)
