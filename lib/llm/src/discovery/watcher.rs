@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
 use anyhow::Context as _;
 use dashmap::{DashMap, DashSet};
@@ -120,9 +120,9 @@ fn is_registration_complete(
     manager
         .get_model_card(&mcid.to_path())
         .is_some_and(|saved| saved.name() == card.name() && saved.mdcsum() == card.mdcsum())
-        && manager
-            .get_model(card.name())
-            .is_some_and(|model| model.has_worker_set(&ws_key))
+        && manager.get_model(card.name()).is_some_and(|model| {
+            model.has_worker_set(&ws_key) && model.is_checksum_compatible(&ws_key, card.mdcsum())
+        })
 }
 
 fn uses_multimodal_cache_routing(card: &ModelDeploymentCard) -> bool {
@@ -328,6 +328,7 @@ impl ModelWatcher {
         // list_and_watch supplies the initial snapshot. Consume the immediate
         // first tick so reconciliation begins after one complete interval.
         reconciliation.tick().await;
+        let mut reconciliation_tasks = JoinSet::new();
 
         loop {
             let result = tokio::select! {
@@ -337,11 +338,24 @@ impl ModelWatcher {
                     };
                     result
                 }
-                _ = reconciliation.tick() => {
-                    if let Err(err) = self.reconcile(&namespace_filter).await {
+                _ = reconciliation.tick(), if reconciliation_tasks.is_empty() => {
+                    let watcher = Arc::clone(&self);
+                    let namespace_filter = namespace_filter.clone();
+                    reconciliation_tasks.spawn(async move {
+                        if let Err(err) = watcher.reconcile(&namespace_filter).await {
+                            tracing::warn!(
+                                error = format!("{err:#}"),
+                                "Frontend model registration reconciliation failed"
+                            );
+                        }
+                    });
+                    continue;
+                }
+                result = reconciliation_tasks.join_next(), if !reconciliation_tasks.is_empty() => {
+                    if let Some(Err(err)) = result {
                         tracing::warn!(
-                            error = format!("{err:#}"),
-                            "Frontend model registration reconciliation failed"
+                            error = %err,
+                            "Frontend model registration reconciliation task failed"
                         );
                     }
                     continue;
@@ -526,6 +540,9 @@ impl ModelWatcher {
                 }
             }
         }
+
+        reconciliation_tasks.abort_all();
+        while reconciliation_tasks.join_next().await.is_some() {}
     }
 
     /// Compare the local frontend registry with a fresh discovery snapshot.
@@ -599,15 +616,32 @@ impl ModelWatcher {
         }
         stale_keys.sort();
 
+        let mut removed_stale_count = 0usize;
         for key in &stale_keys {
-            let mcid = ModelCardInstanceId::from_path(key)?;
-            self.handle_delete(&mcid, namespace_filter).await?;
+            let mcid = match ModelCardInstanceId::from_path(key) {
+                Ok(mcid) => mcid,
+                Err(err) => {
+                    tracing::warn!(%err, key, "Ignoring malformed stale model-card key");
+                    continue;
+                }
+            };
+            match self.handle_delete(&mcid, namespace_filter).await {
+                Ok(_) => removed_stale_count += 1,
+                Err(err) => {
+                    tracing::error!(
+                        key,
+                        error = format!("{err:#}"),
+                        "Error removing stale model during reconciliation"
+                    );
+                }
+            }
         }
 
         tracing::debug!(
             expected_model_cards = desired_keys.len(),
             retried_model_cards = retry_count,
-            removed_stale_model_cards = stale_keys.len(),
+            removed_stale_model_cards = removed_stale_count,
+            failed_stale_model_cards = stale_keys.len() - removed_stale_count,
             "Completed frontend model registration reconciliation"
         );
         Ok(())
@@ -722,7 +756,7 @@ impl ModelWatcher {
                 }
             }
         }
-        let card = match self.manager.remove_model_card(&key) {
+        let card = match self.manager.get_model_card(&key) {
             Some(card) => card,
             None => {
                 // The card was never durably saved (e.g. an Added event whose handle_put failed
@@ -758,6 +792,26 @@ impl ModelWatcher {
         };
         let model_name = card.name().to_string();
 
+        // Complete the only fallible discovery query before removing local
+        // state. If discovery is temporarily unavailable, retaining the card
+        // lets the next reconciliation pass retry this stale entry instead of
+        // losing the key while leaving its WorkerSet behind.
+        let active_instances = self
+            .cards_for_model_with_endpoints(&model_name, namespace_filter)
+            .await
+            .with_context(|| model_name.clone())?;
+
+        let card = match self.manager.remove_model_card(&key) {
+            Some(card) => card,
+            None => {
+                tracing::debug!(
+                    key = %key,
+                    "ModelDeploymentCard was removed by concurrent cleanup"
+                );
+                return Ok(None);
+            }
+        };
+
         // Feed the LoRA state tracker now that any in-flight handle_put has completed and the
         // card is available (N2 — avoids the race where a Removed event outran the add). A LoRA
         // adapter card unregisters just that adapter; the base worker card means the worker
@@ -789,12 +843,6 @@ impl ModelWatcher {
         let worker_namespace = &mcid.namespace;
         let worker_component = &mcid.component;
         let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
-
-        // Query discovery for all remaining instances of this model
-        let active_instances = self
-            .cards_for_model_with_endpoints(&model_name, namespace_filter)
-            .await
-            .with_context(|| model_name.clone())?;
 
         // Check if instances of the SAME role and component remain in
         // this namespace. In disaggregated deployments, prefill and
@@ -1783,6 +1831,20 @@ mod tests {
         assert!(!is_registration_complete(&manager, &mcid, &card));
 
         let ws_key = worker_set_key(&mcid.namespace, card.model_type, card.worker_type);
+        manager.add_worker_set(
+            card.name(),
+            &ws_key,
+            WorkerSet::new(
+                mcid.namespace.clone(),
+                "stale-checksum".to_string(),
+                card.clone(),
+            ),
+        );
+        assert!(
+            !is_registration_complete(&manager, &mcid, &card),
+            "a WorkerSet from a different model-card checksum must be retried"
+        );
+
         manager.add_worker_set(
             card.name(),
             &ws_key,
