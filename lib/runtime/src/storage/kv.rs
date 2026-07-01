@@ -363,8 +363,18 @@ impl Manager {
                         None => break,
                     }
                 };
-                if let Err(err) = tx.send_timeout(event, WATCH_SEND_TIMEOUT).await {
-                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding new key to channel");
+                match event {
+                    WatchEvent::Resync(_) => {
+                        if let Err(err) = tx.send(event).await {
+                            tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding resync to channel");
+                            break;
+                        }
+                    }
+                    event => {
+                        if let Err(err) = tx.send_timeout(event, WATCH_SEND_TIMEOUT).await {
+                            tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding new key to channel");
+                        }
+                    }
                 }
             }
 
