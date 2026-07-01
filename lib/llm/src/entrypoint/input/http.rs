@@ -207,6 +207,7 @@ async fn run_watcher(
         chat_engine_factory,
         prefill_load_estimator,
         metrics.clone(),
+        http_service.state().engine_api_enabled(),
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);

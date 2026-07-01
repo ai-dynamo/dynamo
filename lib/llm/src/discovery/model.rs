@@ -20,12 +20,12 @@ use crate::protocols::openai::ParsingOptions;
 use crate::types::{
     RealtimeBidirectionalEngine,
     generic::tensor::TensorStreamingEngine,
+    inference::generate::GenerateStreamingEngine,
     openai::{
         audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
-        generate::GenerateStreamingEngine, images::OpenAIImagesStreamingEngine,
-        videos::OpenAIVideosStreamingEngine,
+        images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
     },
 };
 
@@ -185,6 +185,13 @@ impl Model {
             .any(|entry| entry.value().has_chat_engine())
     }
 
+    /// Check if any WorkerSet has an engine-native generate engine.
+    pub fn has_generate_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_generate_engine())
+    }
+
     /// Check if any WorkerSet has a completions engine.
     pub fn has_completions_engine(&self) -> bool {
         self.worker_sets
@@ -232,13 +239,6 @@ impl Model {
         self.worker_sets
             .iter()
             .any(|entry| entry.value().has_realtime_engine())
-    }
-
-    /// Check if any WorkerSet has a generate engine.
-    pub fn has_generate_engine(&self) -> bool {
-        self.worker_sets
-            .iter()
-            .any(|entry| entry.value().has_generate_engine())
     }
 
     // -- Model serving readiness --
@@ -605,17 +605,6 @@ impl Model {
                 .map(|e| (e, ws.parsing_options()))
         })
         .ok_or_else(|| self.engine_error(self.has_completions_engine()))
-    }
-
-    pub fn get_generate_engine_with_parsing(
-        &self,
-    ) -> Result<(GenerateStreamingEngine, ParsingOptions), ModelManagerError> {
-        self.select_worker_set_with(|ws| {
-            ws.generate_engine
-                .clone()
-                .map(|e| (e, ws.parsing_options()))
-        })
-        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
 
     // -- Worker monitoring (aggregated across WorkerSets) --

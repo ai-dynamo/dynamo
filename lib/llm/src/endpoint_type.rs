@@ -24,8 +24,6 @@ pub enum EndpointType {
     Responses,
     /// Anthropic Messages API
     AnthropicMessages,
-    /// Generate API (token-in/token-out)
-    Generate,
 }
 
 impl EndpointType {
@@ -40,7 +38,6 @@ impl EndpointType {
             Self::Realtime => "realtime",
             Self::Responses => "responses",
             Self::AnthropicMessages => "anthropic_messages",
-            Self::Generate => "generate",
         }
     }
 
@@ -55,7 +52,6 @@ impl EndpointType {
             Self::Realtime,
             Self::Responses,
             Self::AnthropicMessages,
-            Self::Generate,
         ]
     }
 }
@@ -72,15 +68,5 @@ mod tests {
     #[test]
     fn realtime_in_all() {
         assert!(EndpointType::all().contains(&EndpointType::Realtime));
-    }
-
-    #[test]
-    fn generate_as_str() {
-        assert_eq!(EndpointType::Generate.as_str(), "generate");
-    }
-
-    #[test]
-    fn generate_in_all() {
-        assert!(EndpointType::all().contains(&EndpointType::Generate));
     }
 }

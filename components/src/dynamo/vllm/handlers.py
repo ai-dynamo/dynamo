@@ -4,6 +4,7 @@
 import asyncio
 import base64
 import importlib
+import io
 import inspect
 import logging
 import math
@@ -29,14 +30,22 @@ from typing import (
     cast,
 )
 
+import numpy as np
 import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig, VllmConfig
-from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt, mm_input
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import (
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    PlaceholderRange,
+)
 from vllm.outputs import RequestOutput
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
 from vllm.sampling_params import (
+    RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
@@ -720,6 +729,176 @@ def _serialize_routed_experts(
     }
 
 
+def _serialize_routed_experts_vllm(routed_experts: Any) -> Optional[str]:
+    """Encode routed experts using vLLM's public base64-of-NumPy format."""
+    if routed_experts is None:
+        return None
+    try:
+        buffer = io.BytesIO()
+        np.save(buffer, routed_experts)
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
+    except Exception:
+        logger.warning("Unable to encode routed_experts for generate API", exc_info=True)
+        return None
+
+
+def _engine_generate_payload(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    payload = request.get("generate_request")
+    return payload if isinstance(payload, dict) else None
+
+
+def _engine_generate_priority(request: Dict[str, Any], routing: Dict[str, Any]) -> int:
+    priority = int(routing.get("priority", 0))
+    return priority if _engine_generate_payload(request) is not None else -priority
+
+
+def _merge_kv_transfer_params(
+    caller: Any, framework: Any
+) -> Dict[str, Any] | Any:
+    if caller is None:
+        return framework
+    if framework is None:
+        return caller
+    if not isinstance(caller, dict) or not isinstance(framework, dict):
+        raise ValueError("kv_transfer_params from both caller and framework must be objects")
+    duplicate = caller.keys() & framework.keys()
+    if duplicate:
+        raise ValueError(
+            "caller and framework kv_transfer_params collide on: "
+            + ", ".join(sorted(duplicate))
+        )
+    return {**caller, **framework}
+
+
+def _build_engine_generate_prompt(request: Dict[str, Any]) -> Any:
+    payload = _engine_generate_payload(request)
+    if payload is None:
+        raise ValueError("generate_request is missing from token-native request")
+
+    token_ids = list(request.get("token_ids") or payload.get("token_ids") or [])
+    cache_salt = payload.get("cache_salt")
+    features = payload.get("features")
+    if not isinstance(features, dict):
+        prompt = TokensPrompt(prompt_token_ids=token_ids)
+        if cache_salt is not None:
+            prompt["cache_salt"] = cache_salt
+        return prompt
+
+    mm_hashes = features.get("mm_hashes") or {}
+    placeholders = features.get("mm_placeholders") or {}
+    kwargs_data = features.get("kwargs_data")
+    mm_placeholders = {
+        modality: [
+            PlaceholderRange(offset=int(item["offset"]), length=int(item["length"]))
+            for item in ranges
+        ]
+        for modality, ranges in placeholders.items()
+    }
+    mm_kwargs: Dict[str, list[MultiModalKwargsItem | None]] = {}
+    if isinstance(kwargs_data, dict):
+        for modality, items in kwargs_data.items():
+            mm_kwargs[modality] = [
+                decode_mm_kwargs_item(item) if item is not None else None
+                for item in items
+            ]
+    else:
+        for modality, hashes in mm_hashes.items():
+            mm_kwargs[modality] = [None] * len(hashes)
+
+    return mm_input(
+        prompt_token_ids=token_ids,
+        mm_kwargs=MultiModalKwargsItems(mm_kwargs),
+        mm_hashes=mm_hashes,
+        mm_placeholders=mm_placeholders,
+        cache_salt=cache_salt,
+    )
+
+
+def _build_engine_generate_sampling_params(
+    request: Dict[str, Any],
+    default_sampling_params: Dict[str, Any],
+    model_max_len: int | None,
+) -> SamplingParams:
+    payload = _engine_generate_payload(request)
+    if payload is None:
+        raise ValueError("generate_request is missing from token-native request")
+    raw_params = payload.get("sampling_params") or {}
+    if not isinstance(raw_params, dict):
+        raise ValueError("generate_request.sampling_params must be an object")
+
+    provided = request.get("generate_sampling_fields")
+    provided_fields = set(provided if isinstance(provided, list) else raw_params.keys())
+    kwargs: Dict[str, Any] = {}
+    base = SamplingParams()
+    extension_maps: list[Dict[str, Any]] = []
+    for extension_name in ("extra_args", "vllm_xargs"):
+        extension = raw_params.get(extension_name)
+        if extension is not None:
+            if not isinstance(extension, dict):
+                raise ValueError(f"sampling_params.{extension_name} must be an object")
+            extension_maps.append(extension)
+
+    extensions: Dict[str, Any] = {}
+    for extension in extension_maps:
+        duplicate = extensions.keys() & extension.keys()
+        if duplicate:
+            raise ValueError(
+                "duplicate backend sampling extension(s): "
+                + ", ".join(sorted(duplicate))
+            )
+        extensions.update(extension)
+    caller_kv = payload.get("kv_transfer_params")
+    if caller_kv is not None:
+        if "kv_transfer_params" in extensions:
+            raise ValueError(
+                "kv_transfer_params appears in both the request and sampling extensions"
+            )
+        extensions["kv_transfer_params"] = caller_kv
+
+    for key in provided_fields:
+        if key in ("extra_args", "vllm_xargs"):
+            continue
+        if key not in raw_params:
+            continue
+        value = raw_params[key]
+        if key == "structured_outputs" and isinstance(value, dict):
+            value = StructuredOutputsParams(
+                json=value.get("json"),
+                regex=value.get("regex"),
+                choice=value.get("choice"),
+                grammar=value.get("grammar"),
+                json_object=value.get("json_object"),
+                disable_any_whitespace=value.get("disable_any_whitespace", False),
+                disable_additional_properties=value.get(
+                    "disable_additional_properties", False
+                ),
+                whitespace_pattern=value.get("whitespace_pattern"),
+                structural_tag=serialize_structural_tag(value.get("structural_tag")),
+            )
+        elif key == "repetition_detection" and isinstance(value, dict):
+            value = RepetitionDetectionParams(**value)
+        elif key == "logit_bias" and isinstance(value, dict):
+            value = {int(token_id): bias for token_id, bias in value.items()}
+        if not hasattr(base, key):
+            raise ValueError(f"unsupported sampling parameter for this vLLM: {key}")
+        kwargs[key] = value
+
+    if extensions:
+        kwargs["extra_args"] = extensions
+    sampling_params = SamplingParams(**kwargs)
+
+    if "max_tokens" not in provided_fields and model_max_len is not None:
+        input_length = len(request.get("token_ids") or [])
+        dynamic_default = max(1, model_max_len - input_length)
+        configured_default = default_sampling_params.get("max_tokens", dynamic_default)
+        sampling_params.max_tokens = min(configured_default, dynamic_default)
+
+    # Dynamo always transports disjoint token deltas internally; the HTTP layer
+    # decides whether to aggregate them or emit SSE.
+    sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
+    return sampling_params
+
+
 def build_sampling_params(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
@@ -745,6 +924,11 @@ def build_sampling_params(
     keep generation_config defaults for Gateway/backward-compatible traffic.
     Stop-token defaults from the model config are still applied later.
     """
+    if _engine_generate_payload(request) is not None:
+        return _build_engine_generate_sampling_params(
+            request, default_sampling_params, model_max_len
+        )
+
     if enable_rl and _is_token_in_request(request):
         # Use vLLM defaults without model generation_config overlays.
         sampling_params = SamplingParams()
@@ -2716,6 +2900,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         priority=0,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
+        engine_generate: bool = False,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -2746,6 +2931,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # carries None. Capture the first non-None payload and attach it to
             # the final chunk instead of reading res.prompt_logprobs there.
             prompt_logprobs_payload: Optional[list] = None
+            kv_transfer_params: Any = None
             async for res in gen:
                 # res is vllm's RequestOutput
                 if (
@@ -2755,6 +2941,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     prompt_logprobs_payload = _serialize_prompt_logprobs(
                         res.prompt_logprobs
                     )
+                if getattr(res, "kv_transfer_params", None) is not None:
+                    kv_transfer_params = res.kv_transfer_params
 
                 if not res.outputs:
                     self._log_with_lora_context(
@@ -2824,28 +3012,44 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             embedding_sequence_length=embedding_sequence_length,
                             completion_token_counts=total_output_tokens_by_index,
                         )
-                        if prompt_logprobs_payload is not None:
-                            _attach_prompt_logprobs_engine_data(
-                                out, prompt_logprobs_payload
+                        if engine_generate:
+                            metadata: Dict[str, Any] = {}
+                            if prompt_logprobs_payload is not None:
+                                metadata["prompt_logprobs"] = prompt_logprobs_payload
+                            routed_experts_vllm = _serialize_routed_experts_vllm(
+                                raw_routed_experts_by_output.get(output_idx)
                             )
-                        # Emit the EFFECTIVE trim offset: clamp the requested
-                        # routed_experts_prompt_start to the prompt length. vLLM
-                        # clamps the returned routing rows the same way, so an
-                        # out-of-range request (e.g. start=999 on a 100-token
-                        # prompt) would otherwise publish a `start` the consumer
-                        # cannot align to the (clamped) tensor.
-                        raw_start = int(
-                            getattr(sampling_params, "routed_experts_prompt_start", 0)
-                            or 0
-                        )
-                        prompt_len = len(getattr(res, "prompt_token_ids", None) or [])
-                        effective_start = min(raw_start, prompt_len)
-                        routed_experts = _serialize_routed_experts(
-                            raw_routed_experts_by_output.get(output_idx),
-                            start=effective_start,
-                        )
-                        if routed_experts is not None:
-                            _attach_routed_experts_engine_data(out, routed_experts)
+                            if routed_experts_vllm is not None:
+                                metadata["routed_experts"] = routed_experts_vllm
+                            if kv_transfer_params is not None:
+                                metadata["kv_transfer_params"] = kv_transfer_params
+                            if metadata:
+                                out["generate_metadata"] = metadata
+                        else:
+                            if prompt_logprobs_payload is not None:
+                                _attach_prompt_logprobs_engine_data(
+                                    out, prompt_logprobs_payload
+                                )
+                            # Emit the effective trim offset for the nvext
+                            # routed-expert representation.
+                            raw_start = int(
+                                getattr(
+                                    sampling_params,
+                                    "routed_experts_prompt_start",
+                                    0,
+                                )
+                                or 0
+                            )
+                            prompt_len = len(
+                                getattr(res, "prompt_token_ids", None) or []
+                            )
+                            effective_start = min(raw_start, prompt_len)
+                            routed_experts = _serialize_routed_experts(
+                                raw_routed_experts_by_output.get(output_idx),
+                                start=effective_start,
+                            )
+                            if routed_experts is not None:
+                                _attach_routed_experts_engine_data(out, routed_experts)
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
@@ -3107,6 +3311,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             yield error
             return
 
+        if _engine_generate_payload(request) is not None:
+            prompt = _build_engine_generate_prompt(request)
+            embedding_sequence_length = None
+
         _apply_nvext_cache_salt(request, prompt)
 
         budget_error = _explicit_max_tokens_budget_error(
@@ -3134,7 +3342,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if kv_params is not None:
             if sampling_params.extra_args is None:
                 sampling_params.extra_args = {}
-            sampling_params.extra_args["kv_transfer_params"] = kv_params
+            sampling_params.extra_args["kv_transfer_params"] = _merge_kv_transfer_params(
+                sampling_params.extra_args.get("kv_transfer_params"), kv_params
+            )
             logger.debug(
                 f"Using disaggregated params from prefill for request {request_id}"
             )
@@ -3155,7 +3365,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = -int(routing.get("priority", 0))
+        priority = _engine_generate_priority(request, routing)
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
@@ -3208,6 +3418,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        engine_generate=_engine_generate_payload(request) is not None,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -3449,6 +3660,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             yield error
             return
 
+        if _engine_generate_payload(request) is not None:
+            prompt = _build_engine_generate_prompt(request)
+            embedding_sequence_length = None
+
         _apply_nvext_cache_salt(request, prompt)
 
         # Build sampling params from request using shared utility
@@ -3466,9 +3681,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         )
         if sampling_params.extra_args is None:
             sampling_params.extra_args = {}
-        sampling_params.extra_args[
-            "kv_transfer_params"
-        ] = kv_protocol.prefill_request_kv_transfer_params()
+        sampling_params.extra_args["kv_transfer_params"] = _merge_kv_transfer_params(
+            sampling_params.extra_args.get("kv_transfer_params"),
+            kv_protocol.prefill_request_kv_transfer_params(),
+        )
         # Override for prefill: only generate 1 token
         sampling_params.max_tokens = 1
         sampling_params.min_tokens = 1
@@ -3488,7 +3704,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = -int(routing.get("priority", 0))
+        priority = _engine_generate_priority(request, routing)
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)

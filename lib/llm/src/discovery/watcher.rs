@@ -205,6 +205,7 @@ pub struct ModelWatcher {
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     metrics: Arc<Metrics>,
+    enable_engine_apis: bool,
     /// Guards against concurrent pipeline construction for the same (model, namespace).
     registering_worker_sets: DashSet<String>,
     /// Wakes tasks blocked in `recover_concurrent_registration` when a
@@ -335,6 +336,7 @@ impl ModelWatcher {
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
+        enable_engine_apis: bool,
     ) -> ModelWatcher {
         Self {
             manager: model_manager,
@@ -347,6 +349,7 @@ impl ModelWatcher {
             chat_engine_factory,
             prefill_load_estimator,
             metrics,
+            enable_engine_apis,
             registering_worker_sets: DashSet::new(),
             registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
@@ -1505,14 +1508,12 @@ impl ModelWatcher {
                 None
             };
 
-            // Routing is required whenever any pipeline (factory chat or local) will exist.
-            // tokenizer.is_some() implies a local chat or completions pipeline will be built.
+            // Routing is required whenever a chat/completions pipeline or the
+            // opt-in token-native generate pipeline will exist.
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
-            let needs_generate_pipeline =
-                self.generate_engine_enabled && supports_vllm_generate(card);
             let needs_preprocessed_routing =
-                needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
+                needs_factory_chat_pipeline || tokenizer.is_some() || self.enable_engine_apis;
 
             // Create the KV router whenever any routed pipeline will be built.
             // Python chat factories receive a Rust-routed engine, so they also
@@ -1633,6 +1634,25 @@ impl ModelWatcher {
             } else {
                 None
             };
+
+            if self.enable_engine_apis {
+                // Token-native generation needs no tokenizer or chat processor
+                // and shares the normal model manager, KV router, and P/D path.
+                let routing = preprocessed_routing.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("generate pipeline requires preprocessed routing")
+                })?;
+                worker_set.generate_engine = Some(
+                    routing
+                        .build_generate_pipeline(
+                            card,
+                            self.migration_limit,
+                            self.migration_max_seq_len,
+                            self.metrics.clone(),
+                        )
+                        .context("PreprocessedRouting::build_generate_pipeline")?,
+                );
+                tracing::info!("Engine-native token generation is ready");
+            }
 
             // Add chat engine only if the model supports chat
             if card.model_type.supports_chat() {
