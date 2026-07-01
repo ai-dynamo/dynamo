@@ -148,7 +148,7 @@ enum PublishFailureDisposition {
 }
 
 fn classify_publish_failure(context: &dyn AsyncEngineContext) -> PublishFailureDisposition {
-    if context.is_stopped() {
+    if context.is_stopped() || context.is_killed() {
         PublishFailureDisposition::Cancelled
     } else {
         PublishFailureDisposition::Error

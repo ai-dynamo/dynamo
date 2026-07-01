@@ -534,7 +534,6 @@ async fn handle_reader(
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");
-                        cancellation_seen = true;
                         break;
                     }
                 }
@@ -852,6 +851,54 @@ mod tests {
                 .any(|w| w == sentinel_json.as_slice()),
             "Buffer should contain sentinel message. Buffer: {:?}",
             String::from_utf8_lossy(&buffer[..n])
+        );
+    }
+
+    /// A normally completed response stream sends Sentinel, receives the
+    /// server's FIN, and leaves the cancellation metric unchanged.
+    #[tokio::test]
+    async fn test_normal_response_stream_completion_does_not_count_cancellation() {
+        let (client, server) = create_tcp_pair().await;
+        let (read_half, write_half) = tokio::io::split(client);
+        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+        let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+        let (bytes_tx, bytes_rx) = mpsc::channel(64);
+        let (alive_tx, alive_rx) = oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+        let cancellation_counter = IntCounter::new(
+            "tcp_client_normal_completion_cancellations_test",
+            "test cancellation counter",
+        )
+        .unwrap();
+
+        let reader_context = controller.clone();
+        let counter_clone = cancellation_counter.clone();
+        let reader_task = tokio::spawn(async move {
+            handle_reader(framed_reader, reader_context, alive_tx, Some(counter_clone)).await
+        });
+        let writer_context = controller.clone();
+        let writer_task = tokio::spawn(async move {
+            handle_writer(framed_writer, bytes_rx, alive_rx, writer_context).await
+        });
+
+        drop(bytes_tx);
+
+        let mut server_reader = FramedRead::new(server, TwoPartCodec::default());
+        let sentinel = recv_msg(&mut server_reader).await;
+        assert_sentinel_message(sentinel);
+        drop(server_reader);
+
+        writer_task.await.unwrap().unwrap();
+        reader_task.await.unwrap();
+
+        assert!(
+            !controller.is_stopped() && !controller.is_killed(),
+            "normal response completion must not cancel the context"
+        );
+        assert_eq!(
+            cancellation_counter.get(),
+            0,
+            "normal response completion must not increment the cancellation counter"
         );
     }
 
@@ -1348,9 +1395,10 @@ mod tests {
         );
     }
 
-    /// Test that handle_reader exits when TCP stream is closed
+    /// Response-stream EOF is the normal server FIN after a closing Sentinel.
+    /// It must not be counted as a cancellation by itself.
     #[tokio::test]
-    async fn test_handle_reader_exits_on_stream_closed() {
+    async fn test_handle_reader_eof_does_not_count_cancellation() {
         let ReaderHarness {
             mut framed_server,
             framed_reader,
@@ -1358,12 +1406,24 @@ mod tests {
             alive_rx: _alive_rx,
             controller,
         } = reader_harness().await;
+        let cancellation_counter = IntCounter::new(
+            "tcp_client_reader_clean_eof_cancellations_test",
+            "test cancellation counter",
+        )
+        .unwrap();
 
         // Spawn the reader task
-        let reader_handle =
-            tokio::spawn(
-                async move { handle_reader(framed_reader, controller, alive_tx, None).await },
-            );
+        let counter_clone = cancellation_counter.clone();
+        let controller_clone = controller.clone();
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(
+                framed_reader,
+                controller_clone,
+                alive_tx,
+                Some(counter_clone),
+            )
+            .await
+        });
 
         // Close the framed server to signal EOF to the client
         framed_server.close().await.unwrap();
@@ -1374,6 +1434,15 @@ mod tests {
         assert!(
             result.is_ok(),
             "handle_reader should exit when stream is closed"
+        );
+        assert!(
+            !controller.is_stopped() && !controller.is_killed(),
+            "response-stream EOF must not cancel the context"
+        );
+        assert_eq!(
+            cancellation_counter.get(),
+            0,
+            "response-stream EOF must not increment the cancellation counter"
         );
     }
 
