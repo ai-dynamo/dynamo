@@ -104,6 +104,9 @@ spec:
               claimName: shared-model-cache
           - name: criu-work
             emptyDir: {}
+          - name: no-allgather-evidence
+            configMap:
+              name: fi-pynccl-shm-no-allgather-build-run
         mainContainer:
           name: main
           image: PLACEHOLDER_IMAGE_TO_BE_PINNED_AFTER_BUILD
@@ -164,10 +167,10 @@ spec:
               value: "1"
             - name: VLLM_ALLREDUCE_USE_FLASHINFER
               value: "1"
-            - name: VLLM_ALLGATHER_USE_FLASHINFER
-              value: "1"
             - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
               value: trtllm
+            - name: PYTHONPATH
+              value: /no-allgather-evidence
             - name: GLOO_SOCKET_IFNAME
               value: eth0
             - name: VLLM_LOGGING_LEVEL
@@ -234,3 +237,6 @@ spec:
               mountPath: /home/dynamo/.cache/huggingface
             - name: criu-work
               mountPath: /var/criu-work
+            - name: no-allgather-evidence
+              mountPath: /no-allgather-evidence
+              readOnly: true

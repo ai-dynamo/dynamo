@@ -17,7 +17,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-EXPECTED_VLLM_SHA = "2f039319016c0fbd60bbfacc8a998746a7b75561"
+EXPECTED_VLLM_SHA = os.environ["EXPECTED_VLLM_SHA"]
 EXPECTED_FLASHINFER_SHA = "330cc8e1a09f59c1241084459f3df3204b9b8327"
 EXPECTED_FLASHINFER_VERSION = "0.6.14"
 EXPECTED_WORLD_SIZE = 8
@@ -147,10 +147,6 @@ def _validate_runtime() -> dict[str, Any]:
         raise RuntimeError("PyNCCL must remain enabled")
     if not vllm_envs.VLLM_ALLREDUCE_USE_FLASHINFER:
         raise RuntimeError("FlashInfer all-reduce selection is disabled")
-    if not vllm_envs.VLLM_ALLGATHER_USE_FLASHINFER:
-        raise RuntimeError("FlashInfer symmetric all-gather selection is disabled")
-
-    from flashinfer.comm import SymmetricAllGatherWorkspace
     from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackendFactory
@@ -160,8 +156,6 @@ def _validate_runtime() -> dict[str, Any]:
 
     if not callable(PyNcclCommunicator):
         raise RuntimeError("PyNCCL communicator is unavailable")
-    if not callable(SymmetricAllGatherWorkspace.checkpoint_prepare):
-        raise RuntimeError("Symmetric all-gather checkpoint API is missing")
     if not callable(MoeAlltoAll.checkpoint_restore):
         raise RuntimeError("One-sided MoE checkpoint API is missing")
     if hasattr(Worker, "checkpoint_prepare") or hasattr(Worker, "checkpoint_restore"):
@@ -214,25 +208,8 @@ def _assert_raises_detached(operation: Any, label: str) -> None:
     raise RuntimeError(f"{label} unexpectedly ran with detached workspace")
 
 
-def _expected_all_gather(
-    world_size: int, shape: tuple[int, ...], offset: int
-) -> torch.Tensor:
-    return torch.cat(
-        [
-            torch.full(
-                shape,
-                rank + offset,
-                dtype=torch.bfloat16,
-                device="cuda",
-            )
-            for rank in range(world_size)
-        ],
-        dim=0,
-    )
-
-
 def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
-    from flashinfer.comm import MoeAlltoAll, SymmetricAllGatherWorkspace
+    from flashinfer.comm import MoeAlltoAll
     from flashinfer.comm.mapping import Mapping
     from flashinfer.comm.mnnvl import MnnvlConfig
     from vllm.distributed import parallel_state
@@ -263,20 +240,14 @@ def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
     if pynccl_handle_before == 0:
         raise RuntimeError("PyNCCL communicator has an empty NCCL handle")
 
-    pynccl_model_fallbacks = {"all_reduce": 0, "all_gather": 0}
+    pynccl_model_fallbacks = {"all_reduce": 0}
     pynccl_all_reduce = pynccl.all_reduce
-    pynccl_all_gather = pynccl.all_gather
 
     def unexpected_pynccl_all_reduce(*args, **kwargs):
         pynccl_model_fallbacks["all_reduce"] += 1
         raise RuntimeError("Model all-reduce unexpectedly fell through to PyNCCL")
 
-    def unexpected_pynccl_all_gather(*args, **kwargs):
-        pynccl_model_fallbacks["all_gather"] += 1
-        raise RuntimeError("Model all-gather unexpectedly fell through to PyNCCL")
-
     pynccl.all_reduce = unexpected_pynccl_all_reduce
-    pynccl.all_gather = unexpected_pynccl_all_gather
 
     ar_token_num = max(4, world_size * 2)
     ar_input = torch.full(
@@ -298,23 +269,8 @@ def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
     with torch.cuda.graph(ar_graph):
         ar_graph_output = all_reduce()
 
-    ag_shape = (8, 64)
-    ag_input = torch.full(ag_shape, rank + 1, dtype=torch.bfloat16, device="cuda")
-    ag_output = communicator.all_gather(ag_input, dim=0)
-    torch.cuda.synchronize()
-    torch.testing.assert_close(ag_output, _expected_all_gather(world_size, ag_shape, 1))
-    if len(communicator.fi_ag_workspaces) != 1:
-        raise RuntimeError(
-            "Expected one FlashInfer symmetric all-gather workspace, got "
-            f"{len(communicator.fi_ag_workspaces)}"
-        )
-    ag_workspace: SymmetricAllGatherWorkspace = next(
-        iter(communicator.fi_ag_workspaces.values())
-    )
-    ag_graph = torch.cuda.CUDAGraph()
-    dist.barrier()
-    with torch.cuda.graph(ag_graph):
-        ag_workspace.all_gather(ag_input, ag_output)
+    if getattr(communicator, "fi_ag_workspaces", {}):
+        raise RuntimeError("FlashInfer all-gather workspace was unexpectedly created")
 
     max_tokens = 4
     hidden_size = 64
@@ -391,10 +347,6 @@ def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
     moe_workspace.checkpoint_prepare()
     torch.cuda.synchronize()
     _assert_raises_detached(all_reduce, "all-reduce")
-    _assert_raises_detached(
-        lambda: communicator.all_gather(ag_input, dim=0),
-        "all-gather",
-    )
     _assert_raises_detached(moe_round_trip, "one-sided MoE")
 
     dist.barrier()
@@ -406,11 +358,9 @@ def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
     dist.barrier()
 
     ar_input.fill_(rank + 2)
-    ag_input.fill_(rank + 8)
     moe_input.fill_(rank + 16)
     torch.cuda.synchronize()
     ar_graph.replay()
-    ag_graph.replay()
     moe_graph.replay()
     torch.cuda.synchronize()
 
@@ -418,11 +368,9 @@ def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
     torch.testing.assert_close(
         ar_graph_output, torch.full_like(ar_graph_output, restored_sum)
     )
-    torch.testing.assert_close(ag_output, _expected_all_gather(world_size, ag_shape, 8))
     torch.testing.assert_close(moe_output, moe_input)
 
     pynccl.all_reduce = pynccl_all_reduce
-    pynccl.all_gather = pynccl_all_gather
     pynccl_diagnostic_input = torch.full(
         (1,), rank + 1, dtype=torch.float32, device="cuda"
     )
@@ -446,9 +394,14 @@ def _run_collectives(rank: int, world_size: int) -> dict[str, Any]:
     result = {
         "model_collectives": {
             "all_reduce": "vllm-flashinfer-eager+graph+post-restore-graph",
-            "symmetric_all_gather": ("vllm-flashinfer-eager+graph+post-restore-graph"),
             "one_sided_moe": "remote-dispatch+combine+post-restore-graph",
             "pynccl_fallbacks": pynccl_model_fallbacks,
+        },
+        "topology_exclusions": {
+            "multi_rank_model_all_gather": "not exercised",
+            "flashinfer_all_gather_workspace_count": len(
+                getattr(communicator, "fi_ag_workspaces", {})
+            ),
         },
         "pynccl": {
             "class": type(pynccl).__name__,

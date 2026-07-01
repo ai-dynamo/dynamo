@@ -49,9 +49,9 @@ spec:
           env:
             - name: EXPECTED_DYNAMO_SHA
               value: BUILD_SOURCE_SHA
+            - name: EXPECTED_VLLM_SHA
+              value: VLLM_SOURCE_SHA
             - name: VLLM_ALLREDUCE_USE_FLASHINFER
-              value: "1"
-            - name: VLLM_ALLGATHER_USE_FLASHINFER
               value: "1"
             - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
               value: trtllm
