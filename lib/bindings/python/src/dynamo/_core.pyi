@@ -2347,6 +2347,10 @@ async def run_input(runtime: DistributedRuntime, input: str, engine_config: Engi
     """Start an engine, connect it to an input, and run until stopped."""
     ...
 
+async def run_input_with_system_route_extensions(runtime: DistributedRuntime, input: str, engine_config: EngineConfig, system_route_factories: list[Any]) -> None:
+    """Start an HTTP input with Python-backed system route extension factories."""
+    ...
+
 def run_mocker_trace_replay(
     trace_files: Sequence[str | os.PathLike[str]],
     extra_engine_args: Optional[MockEngineArgs] = None,

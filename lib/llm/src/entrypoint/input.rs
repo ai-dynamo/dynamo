@@ -22,6 +22,8 @@ pub mod text;
 
 use dynamo_runtime::protocols::ENDPOINT_SCHEME;
 
+use crate::http::service::SystemRouteExtension;
+
 /// The various ways of connecting prompts to an engine
 #[derive(PartialEq)]
 pub enum Input {
@@ -98,6 +100,16 @@ pub async fn run_input(
     in_opt: Input,
     engine_config: super::EngineConfig,
 ) -> anyhow::Result<()> {
+    run_input_with_system_route_extensions(drt, in_opt, engine_config, Vec::new()).await
+}
+
+/// Run the given engine connected to an input with optional HTTP system route extensions.
+pub async fn run_input_with_system_route_extensions(
+    drt: dynamo_runtime::DistributedRuntime,
+    in_opt: Input,
+    engine_config: super::EngineConfig,
+    system_route_extensions: Vec<SystemRouteExtension>,
+) -> anyhow::Result<()> {
     if let Err(e) = crate::request_trace::init_from_env_with_shutdown(drt.child_token()).await {
         tracing::warn!(error = %e, "Request trace initialization failed; continuing without trace sink");
     }
@@ -118,20 +130,33 @@ pub async fn run_input(
 
     match in_opt {
         Input::Http => {
-            http::run(drt, engine_config).await?;
+            http::run_with_system_route_extensions(drt, engine_config, system_route_extensions)
+                .await?;
         }
         Input::Grpc => {
+            if !system_route_extensions.is_empty() {
+                anyhow::bail!("system route extensions are only supported for HTTP input");
+            }
             grpc::run(drt, engine_config).await?;
         }
         Input::Text => {
+            if !system_route_extensions.is_empty() {
+                anyhow::bail!("system route extensions are only supported for HTTP input");
+            }
             text::run(drt, None, engine_config).await?;
         }
         Input::Stdin => {
+            if !system_route_extensions.is_empty() {
+                anyhow::bail!("system route extensions are only supported for HTTP input");
+            }
             let mut prompt = String::new();
             std::io::stdin().read_to_string(&mut prompt).unwrap();
             text::run(drt, Some(prompt), engine_config).await?;
         }
         Input::Endpoint(path) => {
+            if !system_route_extensions.is_empty() {
+                anyhow::bail!("system route extensions are only supported for HTTP input");
+            }
             endpoint::run(drt, path, engine_config).await?;
         }
     }

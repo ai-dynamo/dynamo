@@ -5,9 +5,9 @@ use std::fmt::Display;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use pyo3::{exceptions::PyException, exceptions::PyValueError, prelude::*};
+use pyo3::{exceptions::PyException, exceptions::PyValueError, prelude::*, types::{PyDict, PyList}};
 use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_kv_router::config::{
@@ -18,6 +18,13 @@ use dynamo_llm::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
 use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
 use dynamo_llm::entrypoint::input::Input;
+use dynamo_llm::http::service::{RouteDoc, SystemRouteContext, SystemRouteExtension, SystemRouteSet};
+use dynamo_llm::http::service::axum::{
+    http::{Method, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+    Json, Router,
+};
 use dynamo_llm::entrypoint::{ChatEngineFactoryCallback, PrefillRoutedEngine};
 use dynamo_llm::frontend_config::{FrontendApiConfig, MetricsConfig};
 use dynamo_llm::local_model::DEFAULT_HTTP_PORT;
@@ -31,6 +38,8 @@ use dynamo_mocker::common::perf_model::PerfModel;
 use super::aic_callback::{create_aic_callback, create_aic_prefill_load_estimator};
 use super::replay::MockEngineArgs as PyMockEngineArgs;
 use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
+use pythonize::{depythonize, pythonize};
+use serde_json::{json, Value};
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
@@ -931,6 +940,174 @@ pub fn run_input<'p>(
         Ok(())
     })
 }
+
+
+#[pyfunction]
+#[pyo3(signature = (distributed_runtime, input, engine_config, system_route_factories))]
+pub fn run_input_with_system_route_extensions<'p>(
+    py: Python<'p>,
+    distributed_runtime: super::DistributedRuntime,
+    input: &str,
+    engine_config: EngineConfig,
+    system_route_factories: Vec<Py<PyAny>>,
+) -> PyResult<Bound<'p, PyAny>> {
+    let input_enum: Input = input.parse().map_err(to_pyerr)?;
+    let mut extensions = Vec::with_capacity(system_route_factories.len());
+    for factory in system_route_factories {
+        let specs = load_python_system_route_specs(py, factory)?;
+        extensions.push(python_system_route_extension(specs));
+    }
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        dynamo_llm::entrypoint::input::run_input_with_system_route_extensions(
+            distributed_runtime.inner.clone(),
+            input_enum,
+            engine_config.inner,
+            extensions,
+        )
+        .await
+        .map_err(to_pyerr)?;
+        Ok(())
+    })
+}
+
+
+#[derive(Clone)]
+struct PythonSystemRouteSpec {
+    path: String,
+    method: Method,
+    handler: Arc<Mutex<Py<PyAny>>>,
+}
+
+fn load_python_system_route_specs(
+    py: Python<'_>,
+    factory: Py<PyAny>,
+) -> PyResult<Vec<PythonSystemRouteSpec>> {
+    let routes_obj = factory.bind(py).call0()?;
+    let routes = routes_obj.downcast::<PyList>()?;
+    let mut specs = Vec::with_capacity(routes.len());
+
+    for item in routes.iter() {
+        let route = item.downcast::<PyDict>()?;
+        let path = route
+            .get_item("path")?
+            .ok_or_else(|| PyValueError::new_err("system route spec is missing path"))?
+            .extract::<String>()?;
+        if !path.starts_with('/') {
+            return Err(PyValueError::new_err(format!(
+                "system route path must start with /: {path}"
+            )));
+        }
+
+        let method = route
+            .get_item("method")?
+            .map(|value| value.extract::<String>())
+            .transpose()?
+            .unwrap_or_else(|| "GET".to_string());
+        if !method.eq_ignore_ascii_case("GET") {
+            return Err(PyValueError::new_err(format!(
+                "only GET system route extensions are supported by this prototype; got {method}"
+            )));
+        }
+
+        let handler = route
+            .get_item("handler")?
+            .ok_or_else(|| PyValueError::new_err("system route spec is missing handler"))?
+            .unbind();
+        if !handler.bind(py).is_callable() {
+            return Err(PyValueError::new_err(format!(
+                "system route handler for {path} is not callable"
+            )));
+        }
+
+        specs.push(PythonSystemRouteSpec {
+            path,
+            method: Method::GET,
+            handler: Arc::new(Mutex::new(handler)),
+        });
+    }
+
+    Ok(specs)
+}
+
+fn python_system_route_extension(specs: Vec<PythonSystemRouteSpec>) -> SystemRouteExtension {
+    Arc::new(move |ctx: SystemRouteContext| {
+        let mut route_docs = Vec::with_capacity(specs.len());
+        let mut router = Router::new();
+
+        for spec in specs.iter().cloned() {
+            let path = spec.path.clone();
+            let method = spec.method.clone();
+            let handler = spec.handler.clone();
+            let route_ctx = ctx.clone();
+            route_docs.push(RouteDoc::new(method, path.clone()));
+            router = router.route(
+                &path,
+                get(move || {
+                    let handler = handler.clone();
+                    let route_ctx = route_ctx.clone();
+                    async move { call_python_system_route(handler, route_ctx).await }
+                }),
+            );
+        }
+
+        SystemRouteSet::new(route_docs, router)
+    })
+}
+
+async fn call_python_system_route(
+    handler: Arc<Mutex<Py<PyAny>>>,
+    ctx: SystemRouteContext,
+) -> Response {
+    let callback = match handler.lock() {
+        Ok(callback) => callback.clone(),
+        Err(err) => {
+            return python_route_error_response(format!("system route handler lock poisoned: {err}"));
+        }
+    };
+
+    let result = Python::with_gil(|py| -> PyResult<(u16, Value)> {
+        let snapshot = json!({
+            "ready": ctx.is_ready(),
+            "cancelled": ctx.is_cancelled(),
+        });
+        let py_snapshot = pythonize(py, &snapshot).map_err(to_pyerr)?;
+        let py_result = callback.bind(py).call1((py_snapshot,))?;
+        let result_json: Value = depythonize(&py_result).map_err(to_pyerr)?;
+        decode_python_route_result(result_json)
+    });
+
+    match result {
+        Ok((status, body)) => {
+            let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            (status_code, Json(body)).into_response()
+        }
+        Err(err) => python_route_error_response(err.to_string()),
+    }
+}
+
+fn decode_python_route_result(result: Value) -> PyResult<(u16, Value)> {
+    if let Some(object) = result.as_object() {
+        if object.contains_key("body") || object.contains_key("status") {
+            let status = object.get("status").and_then(Value::as_u64).unwrap_or(200);
+            if status > u16::MAX as u64 {
+                return Err(PyValueError::new_err(format!("invalid route status: {status}")));
+            }
+            let body = object.get("body").cloned().unwrap_or(Value::Null);
+            return Ok((status as u16, body));
+        }
+    }
+    Ok((200, result))
+}
+
+fn python_route_error_response(message: String) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": message })),
+    )
+        .into_response()
+}
+
 
 pub fn to_pyerr<E>(err: E) -> PyErr
 where

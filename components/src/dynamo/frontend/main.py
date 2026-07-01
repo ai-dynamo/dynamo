@@ -18,8 +18,10 @@
 
 import argparse
 import asyncio
+import importlib
 import logging
 import os
+import re
 import signal
 import sys
 from argparse import Namespace
@@ -37,6 +39,7 @@ from dynamo.llm import (
     RouterMode,
     make_engine,
     run_input,
+    run_input_with_system_route_extensions,
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -162,6 +165,30 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
     return config, vllm_flags, sglang_flags
 
 
+def _split_system_route_extension_paths(raw: str) -> list[str]:
+    return [part.strip() for part in re.split(r"[\s,]+", raw or "") if part.strip()]
+
+
+def _load_system_route_extension_factories(raw: str) -> list[Any]:
+    factories: list[Any] = []
+    for import_path in _split_system_route_extension_paths(raw):
+        module_name, separator, attribute_path = import_path.partition(":")
+        if not separator or not module_name or not attribute_path:
+            raise ValueError(
+                "system route extension import paths must use 'module:factory'; "
+                f"got {import_path!r}"
+            )
+        target: Any = importlib.import_module(module_name)
+        for attribute in attribute_path.split("."):
+            target = getattr(target, attribute)
+        if not callable(target):
+            raise ValueError(
+                f"system route extension factory {import_path!r} is not callable"
+            )
+        factories.append(target)
+    return factories
+
+
 async def async_main():
     """Main async entry point for the Dynamo frontend.
 
@@ -176,6 +203,13 @@ async def async_main():
     # wrong metrics endpoint.
     os.environ.pop("DYN_SYSTEM_PORT", None)
     config, vllm_flags, sglang_flags = parse_args()
+    system_route_factories = _load_system_route_extension_factories(
+        config.system_route_extensions
+    )
+    if system_route_factories and (config.interactive or config.kserve_grpc_server):
+        raise ValueError(
+            "system route extensions are only supported by the HTTP frontend"
+        )
     dump_config(config.dump_config_to, config)
     max_seq_info = (
         f", max_seq_len: {config.migration_max_seq_len}"
@@ -298,6 +332,10 @@ async def async_main():
             await run_input(runtime, "text", engine)
         elif config.kserve_grpc_server:
             await run_input(runtime, "grpc", engine)
+        elif system_route_factories:
+            await run_input_with_system_route_extensions(
+                runtime, "http", engine, system_route_factories
+            )
         else:
             await run_input(runtime, "http", engine)
     except asyncio.exceptions.CancelledError:

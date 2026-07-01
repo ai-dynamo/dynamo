@@ -72,6 +72,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     kserve_grpc_server: bool
     grpc_metrics_port: int
     dump_config_to: Optional[str]
+    system_route_extensions: str
 
     discovery_backend: str
     request_plane: str
@@ -342,6 +343,17 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_DUMP_CONFIG_TO",
             default=None,
             help="Dump config to the specified file path.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--system-route-extensions",
+            env_var="DYN_SYSTEM_ROUTE_EXTENSIONS",
+            default="",
+            help=(
+                "Comma or whitespace separated Python import paths for system route "
+                "extension factories. Prototype API: each factory returns route specs."
+            ),
         )
 
         add_argument(
