@@ -27,63 +27,63 @@ func TestWorkerHealthCheckDefaultsByBackendMode(t *testing.T) {
 			backend:   &VLLMBackend{},
 			component: workerHealthComponent(v1beta1.ComponentTypeWorker),
 			container: workerHealthBaseContainer(),
-			want:      "true",
+			want:      envValueTrue,
 		},
 		{
 			name:      "vLLM native decode worker keeps canary disabled",
 			backend:   &VLLMBackend{},
 			component: workerHealthComponent(v1beta1.ComponentTypeDecode),
 			container: workerHealthBaseContainer(),
-			want:      "false",
+			want:      envValueFalse,
 		},
 		{
 			name:      "vLLM legacy decode flag keeps canary disabled",
 			backend:   &VLLMBackend{},
 			component: workerHealthComponent(v1beta1.ComponentTypeWorker),
 			container: workerHealthContainerWithArgs("--is-decode-worker"),
-			want:      "false",
+			want:      envValueFalse,
 		},
 		{
 			name:      "vLLM disaggregation decode mode keeps canary disabled",
 			backend:   &VLLMBackend{},
 			component: workerHealthComponent(v1beta1.ComponentTypeWorker),
 			container: workerHealthContainerWithArgs("--disaggregation-mode=decode"),
-			want:      "false",
+			want:      envValueFalse,
 		},
 		{
 			name:      "TRT-LLM worker enables canary",
 			backend:   &TRTLLMBackend{},
 			component: workerHealthComponent(v1beta1.ComponentTypeWorker),
 			container: workerHealthBaseContainer(),
-			want:      "true",
+			want:      envValueTrue,
 		},
 		{
 			name:      "TRT-LLM decode mode keeps canary disabled",
 			backend:   &TRTLLMBackend{},
 			component: workerHealthComponent(v1beta1.ComponentTypeWorker),
 			container: workerHealthContainerWithArgs("--disaggregation-mode decode"),
-			want:      "false",
+			want:      envValueFalse,
 		},
 		{
 			name:      "SGLang worker enables canary",
 			backend:   &SGLangBackend{},
 			component: workerHealthComponent(v1beta1.ComponentTypeWorker),
 			container: workerHealthBaseContainer(),
-			want:      "true",
+			want:      envValueTrue,
 		},
 		{
 			name:      "SGLang tokenizer flag keeps canary disabled",
 			backend:   &SGLangBackend{},
 			component: workerHealthComponent(v1beta1.ComponentTypeWorker),
 			container: workerHealthContainerWithArgs("--use-sglang-tokenizer"),
-			want:      "false",
+			want:      envValueFalse,
 		},
 		{
 			name:      "SGLang tokenizer env keeps canary disabled",
 			backend:   &SGLangBackend{},
 			component: workerHealthComponent(v1beta1.ComponentTypeWorker),
-			container: workerHealthContainerWithEnv("DYN_SGL_USE_TOKENIZER", "true"),
-			want:      "false",
+			container: workerHealthContainerWithEnv("DYN_SGL_USE_TOKENIZER", envValueTrue),
+			want:      envValueFalse,
 		},
 		{
 			name:    "user override is preserved",
@@ -94,13 +94,13 @@ func TestWorkerHealthCheckDefaultsByBackendMode(t *testing.T) {
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{
 							Name: commonconsts.MainContainerName,
-							Env:  []corev1.EnvVar{{Name: dynHealthCheckEnabledEnv, Value: "false"}},
+							Env:  []corev1.EnvVar{{Name: dynHealthCheckEnabledEnv, Value: envValueFalse}},
 						}},
 					},
 				},
 			},
 			container: workerHealthBaseContainer(),
-			want:      "false",
+			want:      envValueFalse,
 		},
 	}
 
@@ -117,7 +117,7 @@ func TestSetWorkerHealthCheckDefaultSkipsNonWorkers(t *testing.T) {
 
 	setWorkerHealthCheckDefault(&container, workerHealthComponent(v1beta1.ComponentTypeFrontend), true)
 
-	assert.Equal(t, "false", workerHealthEnvValue(container, dynHealthCheckEnabledEnv))
+	assert.Equal(t, envValueFalse, workerHealthEnvValue(container, dynHealthCheckEnabledEnv))
 }
 
 func workerHealthComponent(componentType v1beta1.ComponentType) *v1beta1.DynamoComponentDeploymentSharedSpec {
@@ -125,7 +125,7 @@ func workerHealthComponent(componentType v1beta1.ComponentType) *v1beta1.DynamoC
 }
 
 func workerHealthBaseContainer() corev1.Container {
-	return corev1.Container{Env: []corev1.EnvVar{{Name: dynHealthCheckEnabledEnv, Value: "false"}}}
+	return corev1.Container{Env: []corev1.EnvVar{{Name: dynHealthCheckEnabledEnv, Value: envValueFalse}}}
 }
 
 func workerHealthContainerWithArgs(args ...string) corev1.Container {

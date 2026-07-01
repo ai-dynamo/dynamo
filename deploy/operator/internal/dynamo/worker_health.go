@@ -12,7 +12,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-const dynHealthCheckEnabledEnv = "DYN_HEALTH_CHECK_ENABLED"
+const (
+	dynHealthCheckEnabledEnv = "DYN_HEALTH_CHECK_ENABLED"
+	envValueFalse            = "false"
+	envValueTrue             = "true"
+)
 
 func setWorkerHealthCheckDefault(container *corev1.Container, component *v1beta1.DynamoComponentDeploymentSharedSpec, enabled bool) {
 	if container == nil || component == nil || !IsWorkerComponent(string(component.ComponentType)) {
@@ -26,9 +30,9 @@ func setWorkerHealthCheckDefault(container *corev1.Container, component *v1beta1
 
 func boolString(value bool) string {
 	if value {
-		return "true"
+		return envValueTrue
 	}
-	return "false"
+	return envValueFalse
 }
 
 func isDecodeWorkerMode(container *corev1.Container, component *v1beta1.DynamoComponentDeploymentSharedSpec, modeEnvName, legacyDecodeEnvName string) bool {
@@ -68,7 +72,7 @@ func hasTruthyEnv(envs []corev1.EnvVar, name string) bool {
 	for _, env := range envs {
 		if env.Name == name {
 			switch strings.ToLower(env.Value) {
-			case "1", "true", "yes", "y", "on":
+			case "1", envValueTrue, "yes", "y", "on":
 				return true
 			}
 		}
