@@ -59,12 +59,13 @@ class DynamoSnapshotBackend(SleepModeBackend):
                     "Failed to roll back partial FlashInfer checkpoint preparation"
                 )
             raise
+        self._allocator_suspended = True
         try:
             self._allocator.suspend(level)
-            self._allocator_suspended = True
         except Exception:
             try:
                 self._allocator.resume(None)
+                self._allocator_suspended = False
                 checkpoint_restore_distributed_state()
             except Exception:
                 self._state = "SUSPENDED"

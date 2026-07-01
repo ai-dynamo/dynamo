@@ -27,9 +27,7 @@ def test_plugin_registration_is_idempotent():
 
 
 def test_snapshot_mode_selects_backend(monkeypatch):
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(sleep_mode_backend="cumem")
-    )
+    config = SimpleNamespace(model_config=SimpleNamespace(sleep_mode_backend="cumem"))
 
     select_dynamo_snapshot_backend(config)
     assert config.model_config.sleep_mode_backend == "cumem"
@@ -129,3 +127,29 @@ def test_failed_suspend_rolls_back_before_rethrow():
         ("allocator_resume", None),
         ("checkpoint_restore", None),
     ]
+
+
+def test_failed_suspend_retries_failed_allocator_rollback():
+    backend = DynamoSnapshotBackend()
+    backend._allocator = MagicMock()
+    backend._allocator.suspend.side_effect = RuntimeError("sleep failed")
+    backend._allocator.resume.side_effect = [
+        RuntimeError("rollback failed"),
+        None,
+    ]
+
+    with (
+        patch("vllm.distributed.parallel_state.checkpoint_prepare_distributed_state"),
+        patch(
+            "vllm.distributed.parallel_state.checkpoint_restore_distributed_state"
+        ) as restore,
+        pytest.raises(RuntimeError, match="sleep failed"),
+    ):
+        backend.suspend()
+
+    assert backend.state() == "SUSPENDED"
+    backend.resume()
+
+    assert backend._allocator.resume.call_count == 2
+    restore.assert_called_once_with()
+    assert backend.state() == "RUNNING"
