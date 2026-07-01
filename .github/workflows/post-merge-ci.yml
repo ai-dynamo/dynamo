@@ -463,13 +463,11 @@ jobs:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
-      pytest_extra_args: tests/kvbm_integration
       container_workspace: /__w/dynamo/dynamo
-      hf_home: /models
       kvbm_mla_backend: FLASH_ATTN_MLA
       run_cpu_only_tests: false
       run_gpu_tests: true
-      gpu_test_markers: post_merge and h100 and kvbm and gpu_1
+      gpu_test_markers: post_merge and h100 and gpu_1 and (kvbm_consolidator or kvbm_determinism)
       # Observed runtime is about 50 minutes when run sequentially:
       # consolidator ~9m, cache reset ~13m, concurrency ~27m.
       gpu_test_timeout_minutes: 120
