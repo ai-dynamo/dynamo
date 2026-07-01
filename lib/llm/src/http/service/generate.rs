@@ -5,8 +5,8 @@
 //! (`POST /inference/v1/generate`).
 //!
 //! This is an experimental engine-native endpoint, **disabled by default**;
-//! opt in via the `enable_engine_apis` builder flag or the
-//! `DYN_VLLM_ENABLE_INFERENCE_V1_GENERATE` env var. When enabled it registers
+//! opt in via `--enable-engine-apis` or `DYN_ENABLE_ENGINE_API`. When enabled
+//! it registers
 //! a frontend-native handler that preserves the complete request in an opaque
 //! backend envelope. Streaming (`stream=true`) remains unimplemented.
 
@@ -60,16 +60,12 @@ struct GenerateErrorBody {
     code: u16,
 }
 
-/// Create an Axum [`Router`] for the token-in/token-out `Generate` endpoint.
-/// If no path is provided, the default path is `/inference/v1/generate`.
-pub fn generate_router(
-    state: Arc<service_v2::State>,
-    path: Option<String>,
-) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or("/inference/v1/generate".to_string());
-    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+/// Create an Axum [`Router`] for the canonical token-native endpoint.
+pub fn generate_router(state: Arc<service_v2::State>) -> (Vec<RouteDoc>, Router) {
+    const PATH: &str = "/inference/v1/generate";
+    let doc = RouteDoc::new(axum::http::Method::POST, PATH);
     let router = Router::new()
-        .route(&path, post(handler_generate))
+        .route(PATH, post(handler_generate))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);

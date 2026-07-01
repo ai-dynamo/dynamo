@@ -254,6 +254,7 @@ async def async_main():
         "metrics_prefix": metrics_prefix,
         "enable_anthropic_api": config.enable_anthropic_api,
         "strip_anthropic_preamble": config.strip_anthropic_preamble,
+        "enable_engine_apis": config.enable_engine_apis,
         "enable_streaming_tool_dispatch": config.enable_streaming_tool_dispatch,
         "enable_streaming_reasoning_dispatch": config.enable_streaming_reasoning_dispatch,
         "tokenizer_backend": config.tokenizer_backend,

@@ -78,6 +78,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     event_plane: Optional[str] = None
     chat_processor: str
     enable_anthropic_api: bool
+    enable_engine_apis: bool
     strip_anthropic_preamble: bool
     debug_perf: bool
     enable_streaming_tool_dispatch: bool
@@ -396,6 +397,16 @@ class FrontendArgGroup(ArgGroup):
             help=(
                 "Strip the Claude Code billing preamble (x-anthropic-billing-header) "
                 "from the system prompt. Saves tokens and improves prompt caching."
+            ),
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-engine-apis",
+            env_var="DYN_ENABLE_ENGINE_API",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] Enable engine-native HTTP APIs, including "
+                "POST /inference/v1/generate."
             ),
         )
         add_negatable_bool_argument(
