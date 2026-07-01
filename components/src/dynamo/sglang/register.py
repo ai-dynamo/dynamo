@@ -33,6 +33,7 @@ from dynamo.sglang.capacity import (
 )
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
+SGLANG_HICACHE_CAPACITY_RUNTIME_KEY = "sglang_hicache_capacity"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 
@@ -340,6 +341,15 @@ def _eagle_enabled_for(speculative_algorithm: Optional[str]) -> bool:
         return False
 
 
+def _get_hicache_capacity_runtime_data(
+    scheduler_info: dict[str, Any],
+) -> Optional[dict[str, int]]:
+    host_total_tokens = scheduler_info.get("hicache_host_total_tokens")
+    if not isinstance(host_total_tokens, (int, float)) or host_total_tokens <= 0:
+        return None
+    return {"host_total_tokens": int(host_total_tokens)}
+
+
 async def _get_runtime_config(
     engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoConfig
 ) -> Optional[ModelRuntimeConfig]:
@@ -454,6 +464,14 @@ async def _get_runtime_config(
 
     try:
         scheduler_info = engine._scheduler_init_result.scheduler_infos[0]
+        hicache_capacity_runtime_data = _get_hicache_capacity_runtime_data(
+            scheduler_info
+        )
+        if hicache_capacity_runtime_data is not None:
+            runtime_config.set_engine_specific(
+                SGLANG_HICACHE_CAPACITY_RUNTIME_KEY,
+                json.dumps(hicache_capacity_runtime_data),
+            )
         capacity = runtime_capacity(server_args, scheduler_info)
         max_total_tokens = scheduler_info.get("max_total_num_tokens")
 

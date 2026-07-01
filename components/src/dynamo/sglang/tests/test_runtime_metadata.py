@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.sglang.capacity import get_spec_decode_runtime_data
+from dynamo.sglang.register import _get_hicache_capacity_runtime_data
 
 pytestmark = [
     pytest.mark.unit,
@@ -70,3 +71,17 @@ def test_eagle_enabled_for_speculative_algorithm(speculative_algorithm, expected
     from dynamo.sglang.register import _eagle_enabled_for
 
     assert _eagle_enabled_for(speculative_algorithm) is expected
+
+
+def test_hicache_capacity_runtime_data_uses_scheduler_capacity():
+    assert _get_hicache_capacity_runtime_data({"hicache_host_total_tokens": 300}) == {
+        "host_total_tokens": 300
+    }
+
+
+@pytest.mark.parametrize("value", [None, 0, -1, "300"])
+def test_hicache_capacity_runtime_data_ignores_invalid_values(value):
+    assert (
+        _get_hicache_capacity_runtime_data({"hicache_host_total_tokens": value})
+        is None
+    )
