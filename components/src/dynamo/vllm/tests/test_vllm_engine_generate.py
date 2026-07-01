@@ -3,16 +3,19 @@
 
 import base64
 import io
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from vllm.sampling_params import (
     RepetitionDetectionParams,
     RequestOutputKind,
+    SamplingParams,
     StructuredOutputsParams,
 )
 
 from dynamo.vllm.handlers import (
+    BaseWorkerHandler,
     _build_engine_generate_prompt,
     _engine_generate_priority,
     _merge_kv_transfer_params,
@@ -172,3 +175,81 @@ def test_routed_experts_have_one_vllm_compatible_base64_numpy_encoding():
     assert encoded is not None
     decoded = np.load(io.BytesIO(base64.b64decode(encoded)))
     np.testing.assert_array_equal(decoded, expected)
+
+
+class _FakeEngineClient:
+    tokenizer = None
+
+    def __init__(self, responses):
+        self.responses = responses
+
+    def generate(self, *args, **kwargs):
+        async def _stream():
+            for response in self.responses:
+                yield response
+
+        return _stream()
+
+
+@pytest.mark.asyncio
+async def test_engine_generate_worker_emits_usage_on_every_delta():
+    responses = [
+        SimpleNamespace(
+            outputs=[
+                SimpleNamespace(
+                    index=0,
+                    token_ids=[41],
+                    finish_reason=None,
+                    stop_reason=None,
+                    logprobs=None,
+                    routed_experts=None,
+                )
+            ],
+            prompt_token_ids=[11, 22, 33],
+            prompt_logprobs=None,
+            num_cached_tokens=0,
+            kv_transfer_params=None,
+        ),
+        SimpleNamespace(
+            outputs=[
+                SimpleNamespace(
+                    index=0,
+                    token_ids=[],
+                    finish_reason="length",
+                    stop_reason=None,
+                    logprobs=None,
+                    routed_experts=None,
+                )
+            ],
+            prompt_token_ids=[11, 22, 33],
+            prompt_logprobs=None,
+            num_cached_tokens=0,
+            kv_transfer_params=None,
+        ),
+    ]
+    handler = SimpleNamespace(
+        engine_client=_FakeEngineClient(responses),
+        _extract_logprobs=BaseWorkerHandler._extract_logprobs,
+        _log_with_lora_context=lambda *args, **kwargs: None,
+    )
+
+    chunks = []
+    async for chunk in BaseWorkerHandler.generate_tokens(
+        handler,
+        prompt={"prompt_token_ids": [11, 22, 33]},
+        sampling_params=SamplingParams(max_tokens=2),
+        request_id="request-1",
+        engine_generate=True,
+    ):
+        chunks.append(chunk)
+
+    assert chunks[0]["token_ids"] == [41]
+    assert chunks[0]["completion_usage"] == {
+        "prompt_tokens": 3,
+        "completion_tokens": 1,
+        "total_tokens": 4,
+        "prompt_tokens_details": None,
+    }
+    assert chunks[1]["token_ids"] == []
+    assert chunks[1]["finish_reason"] == "length"
+    assert chunks[1]["completion_usage"]["completion_tokens"] == 1
