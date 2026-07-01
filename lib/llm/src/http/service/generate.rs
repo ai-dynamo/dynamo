@@ -311,6 +311,18 @@ async fn generate_dispatch(
                     "request was cancelled".to_string(),
                 );
             }
+            // Guard the unary n=1 profile: a completed generation must yield at
+            // least one choice, each carrying a terminal finish_reason. An empty
+            // stream or a premature (finish_reason-less) EOF would otherwise
+            // surface as a misleading HTTP 200 with empty/partial choices.
+            if !response.is_complete_unary() {
+                tracing::error!("generate stream for {request_id} ended without a complete choice");
+                return generate_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    format!("generation produced no complete choice for {request_id}"),
+                );
+            }
             Json(response).into_response()
         }
         Err(e) => {

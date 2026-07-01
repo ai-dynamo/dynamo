@@ -173,6 +173,15 @@ impl GenerateResponse {
     ) -> Result<GenerateResponse> {
         GenerateAggregator::apply(stream, request_id).await
     }
+
+    /// Whether this represents a complete unary generation: at least one
+    /// choice, and every choice carries a terminal `finish_reason`. An empty
+    /// stream (no choices) or a premature clean EOF (a choice with no
+    /// `finish_reason`) is *not* complete — the unary handler rejects these
+    /// rather than returning a misleading HTTP 200 with empty/partial choices.
+    pub fn is_complete_unary(&self) -> bool {
+        !self.choices.is_empty() && self.choices.iter().all(|c| c.finish_reason.is_some())
+    }
 }
 
 #[cfg(test)]
@@ -284,5 +293,49 @@ mod tests {
         assert_eq!(choice.index, 0);
         assert_eq!(choice.token_ids, Some(vec![100, 101, 102, 103]));
         assert_eq!(choice.finish_reason.as_deref(), Some("length"));
+        assert!(resp.is_complete_unary(), "terminal choice is complete");
+    }
+
+    /// An empty engine stream folds to a response with no choices; the unary
+    /// handler must treat this as incomplete (rejected), not a 200 with `[]`.
+    #[tokio::test]
+    async fn from_annotated_stream_empty_is_incomplete() {
+        let stream = futures::stream::iter(Vec::<Annotated<LLMEngineOutput>>::new());
+        let resp = GenerateResponse::from_annotated_stream(stream, "req-empty".to_string())
+            .await
+            .expect("aggregate");
+        assert!(resp.choices.is_empty());
+        assert!(
+            !resp.is_complete_unary(),
+            "empty stream must not be treated as a complete generation"
+        );
+    }
+
+    /// A stream that ends after emitting tokens but WITHOUT a terminal
+    /// `finish_reason` (premature clean EOF) must be treated as incomplete.
+    #[tokio::test]
+    async fn from_annotated_stream_premature_eof_is_incomplete() {
+        let chunks = vec![
+            LLMEngineOutput {
+                token_ids: vec![100],
+                index: Some(0),
+                ..Default::default()
+            },
+            LLMEngineOutput {
+                token_ids: vec![101],
+                index: Some(0),
+                ..Default::default()
+            },
+        ];
+        let stream = futures::stream::iter(chunks.into_iter().map(Annotated::from_data));
+        let resp = GenerateResponse::from_annotated_stream(stream, "req-eof".to_string())
+            .await
+            .expect("aggregate");
+        assert_eq!(resp.choices.len(), 1);
+        assert_eq!(resp.choices[0].finish_reason, None);
+        assert!(
+            !resp.is_complete_unary(),
+            "premature EOF (no finish_reason) must not be treated as complete"
+        );
     }
 }
