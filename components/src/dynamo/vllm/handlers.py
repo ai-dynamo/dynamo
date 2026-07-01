@@ -3265,8 +3265,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
-                    if finish_reason:
-                        out["finish_reason"] = normalize_finish_reason(finish_reason)
+                    if engine_generate:
                         out[
                             "completion_usage"
                         ] = BaseWorkerHandler._build_completion_usage(
@@ -3274,6 +3273,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             embedding_sequence_length=embedding_sequence_length,
                             completion_token_counts=total_output_tokens_by_index,
                         )
+
+                    if finish_reason:
+                        out["finish_reason"] = normalize_finish_reason(finish_reason)
+                        if not engine_generate:
+                            out[
+                                "completion_usage"
+                            ] = BaseWorkerHandler._build_completion_usage(
+                                request_output=res,
+                                embedding_sequence_length=embedding_sequence_length,
+                                completion_token_counts=total_output_tokens_by_index,
+                            )
                         if engine_generate:
                             metadata: Dict[str, Any] = {}
                             if prompt_logprobs_payload is not None:
