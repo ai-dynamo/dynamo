@@ -18,6 +18,7 @@
 
 import argparse
 import asyncio
+import importlib.metadata
 import logging
 import os
 import signal
@@ -35,6 +36,7 @@ from dynamo.llm import (
     KvRouterConfig,
     RouterConfig,
     RouterMode,
+    SystemRoute,
     make_engine,
     run_input,
 )
@@ -50,6 +52,7 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 MIN_INITIAL_WORKERS_ENV = "DYN_ROUTER_MIN_INITIAL_WORKERS"
+SYSTEM_ROUTE_EXTENSION_ENTRYPOINT_GROUP = "dynamo.system_route_extensions"
 
 
 def setup_engine_factory(
@@ -84,6 +87,65 @@ def setup_sglang_engine_factory(
         tool_call_parser_name=tool_call_parser,
         reasoning_parser_name=reasoning_parser,
     )
+
+
+def _system_route_extension_entry_points():
+    entry_points = importlib.metadata.entry_points()
+    if hasattr(entry_points, "select"):
+        return list(entry_points.select(group=SYSTEM_ROUTE_EXTENSION_ENTRYPOINT_GROUP))
+    return list(entry_points.get(SYSTEM_ROUTE_EXTENSION_ENTRYPOINT_GROUP, ()))
+
+
+def _normalize_system_routes(extension_name: str, provided: Any) -> list[SystemRoute]:
+    if provided is None:
+        return []
+    if isinstance(provided, SystemRoute):
+        return [provided]
+    try:
+        routes = list(provided)
+    except TypeError as exc:
+        raise TypeError(
+            f"System route extension '{extension_name}' must return a SystemRoute "
+            "or an iterable of SystemRoute objects"
+        ) from exc
+    for route in routes:
+        if not isinstance(route, SystemRoute):
+            raise TypeError(
+                f"System route extension '{extension_name}' returned unsupported route "
+                f"object {route!r}; expected dynamo.llm.SystemRoute"
+            )
+    return routes
+
+
+def load_system_route_extensions(extension_names: list[str]) -> list[SystemRoute]:
+    """Load trusted system route extensions by entry point name."""
+
+    if not extension_names:
+        return []
+
+    entry_points = _system_route_extension_entry_points()
+    routes: list[SystemRoute] = []
+    for extension_name in extension_names:
+        matches = [ep for ep in entry_points if ep.name == extension_name]
+        if not matches:
+            available = ", ".join(sorted(ep.name for ep in entry_points)) or "<none>"
+            raise ValueError(
+                f"Unknown system route extension '{extension_name}' in entry point "
+                f"group '{SYSTEM_ROUTE_EXTENSION_ENTRYPOINT_GROUP}'. Available: {available}"
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                f"Ambiguous system route extension '{extension_name}' in entry point "
+                f"group '{SYSTEM_ROUTE_EXTENSION_ENTRYPOINT_GROUP}'"
+            )
+        provider = matches[0].load()
+        if not callable(provider):
+            raise TypeError(
+                f"System route extension '{extension_name}' entry point must load a callable"
+            )
+        routes.extend(_normalize_system_routes(extension_name, provider()))
+
+    return routes
 
 
 def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespace]]:
@@ -292,6 +354,9 @@ async def async_main():
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
+    system_route_extensions = load_system_route_extensions(config.system_route_extensions)
+    if system_route_extensions and (config.interactive or config.kserve_grpc_server):
+        raise ValueError("system route extensions are only supported by HTTP frontend mode")
 
     try:
         if config.interactive:
@@ -299,7 +364,7 @@ async def async_main():
         elif config.kserve_grpc_server:
             await run_input(runtime, "grpc", engine)
         else:
-            await run_input(runtime, "http", engine)
+            await run_input(runtime, "http", engine, system_route_extensions)
     except asyncio.exceptions.CancelledError:
         pass
 
