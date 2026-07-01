@@ -394,6 +394,26 @@ pub trait NvExtProvider {
     }
 }
 
+/// Return the request's non-empty cache salt using Dynamo's public precedence rules.
+///
+/// `nvext.cache_salt` is the canonical input. The top-level `cache_salt` field remains a
+/// compatibility fallback for request types that retain unsupported OpenAI fields. Empty strings
+/// are treated as absent so an empty canonical value can still fall back to a non-empty legacy
+/// value.
+pub fn request_cache_salt<R: NvExtProvider>(request: &R) -> Option<&str> {
+    request
+        .nvext()
+        .and_then(|nvext| nvext.cache_salt.as_deref())
+        .filter(|salt| !salt.is_empty())
+        .or_else(|| {
+            request
+                .unsupported_fields()
+                .and_then(|fields| fields.get("cache_salt"))
+                .and_then(|value| value.as_str())
+                .filter(|salt| !salt.is_empty())
+        })
+}
+
 pub fn routing_constraints_to_kv(
     constraints: RoutingConstraints,
 ) -> dynamo_kv_router::protocols::RoutingConstraints {
@@ -637,6 +657,51 @@ mod tests {
         HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID,
         HEADER_OPENCODE_SESSION_ID,
     };
+
+    #[derive(Default)]
+    struct CacheSaltRequest {
+        nvext: Option<NvExt>,
+        unsupported_fields: HashMap<String, serde_json::Value>,
+    }
+
+    impl NvExtProvider for CacheSaltRequest {
+        fn nvext(&self) -> Option<&NvExt> {
+            self.nvext.as_ref()
+        }
+
+        fn raw_prompt(&self) -> Option<String> {
+            None
+        }
+
+        fn unsupported_fields(&self) -> Option<&HashMap<String, serde_json::Value>> {
+            Some(&self.unsupported_fields)
+        }
+    }
+
+    #[test]
+    fn request_cache_salt_uses_canonical_precedence_and_empty_fallbacks() {
+        let mut request = CacheSaltRequest::default();
+        assert_eq!(request_cache_salt(&request), None);
+
+        request
+            .unsupported_fields
+            .insert("cache_salt".to_string(), serde_json::json!("tenant-legacy"));
+        assert_eq!(request_cache_salt(&request), Some("tenant-legacy"));
+
+        request.nvext = Some(NvExt {
+            cache_salt: Some("tenant-nvext".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(request_cache_salt(&request), Some("tenant-nvext"));
+
+        request.nvext.as_mut().unwrap().cache_salt = Some(String::new());
+        assert_eq!(request_cache_salt(&request), Some("tenant-legacy"));
+
+        request
+            .unsupported_fields
+            .insert("cache_salt".to_string(), serde_json::json!(""));
+        assert_eq!(request_cache_salt(&request), None);
+    }
 
     #[test]
     fn shared_nvext_builder_default() {

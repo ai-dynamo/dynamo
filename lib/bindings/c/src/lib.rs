@@ -19,7 +19,7 @@ use dynamo_llm::kv_router::publisher::KvEventPublisher;
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{
-    NvExt, NvExtProvider, routing_constraints_to_kv,
+    NvExt, request_cache_salt, routing_constraints_to_kv,
 };
 use dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest;
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
@@ -623,20 +623,6 @@ fn extract_routing_constraints(nvext: Option<&NvExt>) -> RoutingConstraints {
         .map(routing_constraints_to_kv)
         .unwrap_or_default()
 }
-
-fn extract_cache_namespace<R: NvExtProvider>(request: &R) -> Option<String> {
-    request
-        .nvext()
-        .and_then(|nvext| nvext.cache_salt.clone())
-        .or_else(|| {
-            request
-                .unsupported_fields
-                .get("cache_salt")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
-        })
-}
-
 /// Opaque handle for the router pair
 pub type RouterHandlesPtr = *mut RouterHandles;
 
@@ -1016,7 +1002,7 @@ pub unsafe extern "C" fn add_request_with_cache_namespace(
                 request_id = %request_id_str,
                 worker_id = worker_id,
                 dp_rank = dp_rank,
-                cache_namespace = cache_namespace.as_deref(),
+                has_cache_namespace = cache_namespace.is_some(),
                 overlap_blocks = overlap_blocks,
                 token_count = tokens.len(),
                 "add_request completed"
@@ -1247,7 +1233,7 @@ unsafe fn preprocess_request(
         };
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
-        let cache_namespace = extract_cache_namespace(&request);
+        let cache_namespace = request_cache_salt(&request).map(str::to_owned);
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
         let (token_ids, _) = match handles
             .runtime
@@ -1288,7 +1274,7 @@ unsafe fn preprocess_request(
 
     let priority_jump = extract_priority_jump(request.nvext.as_ref());
     let strict_priority = extract_strict_priority(request.nvext.as_ref());
-    let cache_namespace = extract_cache_namespace(&request);
+    let cache_namespace = request_cache_salt(&request).map(str::to_owned);
     let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
 
     let formatted_prompt = match preprocessor.apply_template(&request) {
@@ -1800,23 +1786,6 @@ mod tests {
             )
             .expect("test request must parse as completion");
         assert_eq!(extract_priority_jump(req.nvext.as_ref()), 5.0);
-    }
-
-    #[test]
-    fn cache_namespace_supports_legacy_top_level_field() {
-        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
-                    "model": "test",
-                    "messages": [{"role": "user", "content": "hi"}],
-                    "cache_salt": "tenant-legacy"
-                }"#,
-            )
-            .expect("test request must parse as chat completion");
-        assert_eq!(
-            extract_cache_namespace(&request).as_deref(),
-            Some("tenant-legacy")
-        );
     }
 
     #[test]

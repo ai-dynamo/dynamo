@@ -36,6 +36,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When provided with `backend_instance_id`, tokenization is skipped. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
+| `cache_salt` | `string` | `None` | Router/backend | Isolates KV-cache routing and reuse to requests carrying the same non-empty salt. This is the recommended cache-isolation input. |
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
@@ -64,11 +65,42 @@ Routing fields can also be set via HTTP headers, which take priority over `nvext
 | `x-dynamo-prefill-instance-id` | `prefill_worker_id` |
 | `x-dynamo-dp-rank` | `dp_rank` |
 | `x-dynamo-prefill-dp-rank` | `prefill_dp_rank` |
+| `x-tenant-id` | `cache_salt` |
 
 > [!WARNING]
 > The unprefixed forms (`x-worker-instance-id`, `x-prefill-instance-id`, `x-dp-rank`,
 > `x-data-parallel-rank`, and `x-prefill-dp-rank`) are compatibility aliases planned for future
 > deprecation. Use the `x-dynamo-*` headers for new integrations.
+
+### Cache salt and tenant isolation
+
+Use `nvext.cache_salt` to prevent requests in different cache namespaces from matching or reusing
+each other's KV-cache blocks:
+
+```json
+{
+    "model": "my-model",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "nvext": {
+        "cache_salt": "tenant-a"
+    }
+}
+```
+
+Dynamo accepts three inputs, in descending precedence:
+
+1. The non-empty `x-tenant-id` HTTP header, intended for gateway-controlled tenant identity.
+2. The recommended `nvext.cache_salt` request field.
+3. The compatibility top-level `cache_salt` field on chat and completion requests.
+
+Empty strings are treated as absent. In particular, an empty `nvext.cache_salt` falls back to a
+non-empty top-level compatibility value. Requests without a salt retain the unsalted hashing and
+cache-reuse behavior.
+
+`DYN_ENABLE_FRONTEND_NVEXT=false` disables both the `nvext` form and routing-header overrides,
+including `x-tenant-id`. The top-level backend-compatibility field is not part of the NvExt
+protocol. Cache salt is an isolation key, not an authentication or authorization mechanism;
+gateways must still authenticate the tenant identity they place in `x-tenant-id`.
 
 Session identity is header-only. Use the coding-agent headers or Dynamo
 session headers described in [Session IDs](../../agents/session-ids.md);

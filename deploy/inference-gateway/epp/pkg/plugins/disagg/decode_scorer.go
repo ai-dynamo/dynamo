@@ -241,7 +241,7 @@ func (s *DynDecodeScorer) PreRequest(ctx context.Context, request *schedtypes.In
 		"requestID", request.RequestId,
 		"workerID", state.WorkerID,
 		"dpRank", state.DpRank,
-		"cacheNamespace", state.CacheNamespace,
+		"hasCacheNamespace", state.CacheNamespace != "",
 		"tokenCount", len(state.TokenData))
 }
 

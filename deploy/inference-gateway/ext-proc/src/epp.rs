@@ -20,6 +20,7 @@ use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::common::extensions::request_cache_salt;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, hash_pod_name};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
@@ -209,7 +210,7 @@ impl Router {
 
         let priority_jump = extract_priority_jump(&request);
         let strict_priority = extract_strict_priority(&request);
-        let cache_namespace = extract_cache_namespace(&request);
+        let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
         let formatted_prompt = self
             .preprocessor
@@ -500,22 +501,6 @@ fn extract_strict_priority(
         .and_then(|n| n.agent_hints.as_ref())
         .and_then(|h| h.strict_priority)
         .unwrap_or(0)
-}
-
-fn extract_cache_namespace(
-    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
-) -> Option<String> {
-    request
-        .nvext
-        .as_ref()
-        .and_then(|nvext| nvext.cache_salt.clone())
-        .or_else(|| {
-            request
-                .unsupported_fields
-                .get("cache_salt")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
-        })
 }
 
 struct DiscoveredModelBootstrap {
@@ -1163,46 +1148,5 @@ mod tests {
             )
             .unwrap();
         assert_eq!(extract_strict_priority(&without_nvext), 0);
-    }
-
-    #[test]
-    fn cache_namespace_lifted_from_nvext_cache_salt() {
-        let with_cache_salt: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
-                    "model": "test",
-                    "messages": [{"role": "user", "content": "hi"}],
-                    "nvext": {"cache_salt": "tenant-a"}
-                }"#,
-            )
-            .unwrap();
-        assert_eq!(
-            extract_cache_namespace(&with_cache_salt).as_deref(),
-            Some("tenant-a")
-        );
-
-        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
-                    "model": "test",
-                    "messages": [{"role": "user", "content": "hi"}]
-                }"#,
-            )
-            .unwrap();
-        assert_eq!(extract_cache_namespace(&without_nvext), None);
-
-        let legacy_top_level: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
-                    "model": "test",
-                    "messages": [{"role": "user", "content": "hi"}],
-                    "cache_salt": "tenant-legacy"
-                }"#,
-            )
-            .unwrap();
-        assert_eq!(
-            extract_cache_namespace(&legacy_top_level).as_deref(),
-            Some("tenant-legacy")
-        );
     }
 }

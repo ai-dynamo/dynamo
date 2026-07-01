@@ -138,8 +138,8 @@ pub struct QueryByHashRequest {
     pub model_name: String,
     #[serde(default = "default_tenant")]
     pub tenant_id: String,
-    /// Optional per-request cache salt (Mooncake RFC #1403). For `/query_by_hash`, callers
-    /// must precompute `block_hashes` with the same salt.
+    /// Invalid for `/query_by_hash`. Callers must precompute `block_hashes` with the intended
+    /// cache salt and omit this field; a non-null value is rejected.
     #[serde(default)]
     pub cache_salt: Option<String>,
 }
@@ -353,6 +353,18 @@ async fn query_by_hash(
     Json(req): Json<QueryByHashRequest>,
 ) -> Response {
     let model = req.model_name.clone();
+    if req.cache_salt.is_some() {
+        let mut resp = (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "cache_salt is not accepted by /query_by_hash; block_hashes must already include the intended cache salt"
+            })),
+        )
+            .into_response();
+        resp.extensions_mut().insert(AccessLogModel(model));
+        return resp;
+    }
+
     let key = IndexerKey {
         model_name: req.model_name,
         tenant_id: req.tenant_id,
