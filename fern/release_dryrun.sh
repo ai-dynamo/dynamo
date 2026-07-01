@@ -20,9 +20,9 @@
 # It stops before the workflow's commit, push, and publish steps.
 #
 # Usage:
-#   scripts/fern_release_dryrun.sh [TAG]          # default: v1.2.1
-#   scripts/fern_release_dryrun.sh v1.2.1
-#   KEEP=1 scripts/fern_release_dryrun.sh v1.2.1  # keep worktrees
+#   fern/release_dryrun.sh [TAG]          # default: v1.2.1
+#   fern/release_dryrun.sh v1.2.1
+#   KEEP=1 fern/release_dryrun.sh v1.2.1  # keep worktrees
 #
 # Requires: git, fern, yq, jq, rsync, and Python 3.10 or newer. Set PYTHON to
 # choose a non-default interpreter, for example PYTHON=.venv/bin/python.

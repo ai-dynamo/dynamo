@@ -393,7 +393,7 @@ Build a tagged snapshot in temporary worktrees and run the release validation
 without committing, pushing, or publishing:
 
 ```bash
-scripts/fern_release_dryrun.sh v1.2.1
+fern/release_dryrun.sh v1.2.1
 ```
 
 The script requires `git`, `fern`, `yq`, `jq`, `rsync`, and Python 3.10 or
