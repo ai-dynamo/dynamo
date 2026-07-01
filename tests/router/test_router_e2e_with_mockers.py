@@ -23,6 +23,7 @@ from tests.router.common import (
     _test_disagg_direct_mode,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
+    _test_distributed_session_affinity,
     _test_python_router_bindings,
     _test_remote_indexer_decisions,
     _test_router_decisions_disagg_round_robin_prefill_dp_rank,
@@ -487,6 +488,44 @@ def test_mocker_two_kv_router(
             num_requests=NUM_REQUESTS,
             store_backend=store_backend,
             skip_consumer_verification=not durable_kv_events,  # Skip JetStream checks in NATS Core mode
+        )
+
+
+@pytest.mark.parametrize("store_backend", ["etcd", "file"])
+@pytest.mark.timeout(180)
+def test_mocker_distributed_session_affinity(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    file_storage_backend,
+    store_backend,
+    monkeypatch,
+):
+    """Shared claims override conflicting KV-prefix routing on another frontend."""
+    current_log = os.environ.get("DYN_LOG", "info")
+    monkeypatch.setenv(
+        "DYN_LOG",
+        f"{current_log},dynamo_llm::session_affinity::coordinator=debug",
+    )
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "durable_kv_events": False,
+    }
+
+    with MockerProcess(
+        request,
+        mocker_args=mocker_args,
+        num_mockers=NUM_MOCKERS,
+        store_backend=store_backend,
+    ) as mockers:
+        _test_distributed_session_affinity(
+            engine_workers=mockers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            router_ports=allocate_frontend_ports(request, 2),
+            test_payload=TEST_PAYLOAD,
+            store_backend=store_backend,
         )
 
 

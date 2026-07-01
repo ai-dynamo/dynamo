@@ -30,6 +30,18 @@ use tokenizers::Tokenizer as HfTokenizer;
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
+const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
+    !matches!(value, Some("0"))
+}
+
+fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_TOKENIZER_CACHE_BYTES)
+}
+
 /// Identify model deployment cards in the key-value store
 pub const ROOT_PATH: &str = "v1/mdc";
 
@@ -48,6 +60,60 @@ fn extract_hf_special_tokens(hf: &HfTokenizer) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Resolve the static architectural context limit from local HF metadata.
+///
+/// `config.json` is authoritative when it declares `max_position_embeddings`;
+/// multimodal configs may instead nest it under `text_config`; tokenizer
+/// `model_max_length` is only a last resort. Missing fields fall through to the
+/// next source, but malformed present fields return an error so bad model
+/// metadata cannot silently resize request validation and planner limits.
+///
+/// This was added for the MiniMax-M3-VL : its multimodal
+/// Hugging Face config keeps the language model context under
+/// `config.json.text_config.max_position_embeddings`
+fn architectural_max_context_length_from_repo(local_path: &Path) -> anyhow::Result<Option<u32>> {
+    let tokenizer_context_length = || {
+        crate::file_json_field(
+            &local_path.join("tokenizer_config.json"),
+            "model_max_length",
+        )
+        .ok()
+    };
+
+    let config_path = local_path.join("config.json");
+    let config_json = match std::fs::read_to_string(&config_path) {
+        Ok(config_json) => Some(config_json),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => {
+            return Err(err).with_context(|| format!("Failed to read {}", config_path.display()));
+        }
+    };
+    let Some(config_json) = config_json else {
+        return Ok(tokenizer_context_length().filter(|context_length| *context_length > 0));
+    };
+    let config: serde_json::Value = serde_json::from_str(&config_json)
+        .with_context(|| format!("Failed to parse JSON from file: {}", config_path.display()))?;
+
+    let context_length = match config.get("max_position_embeddings") {
+        Some(value) => Some(
+            serde_json::from_value(value.clone())
+                .context("Failed to deserialize max_position_embeddings")?,
+        ),
+        None => match config
+            .get("text_config")
+            .and_then(|text_config| text_config.get("max_position_embeddings"))
+        {
+            Some(value) => Some(
+                serde_json::from_value(value.clone())
+                    .context("Failed to deserialize text_config.max_position_embeddings")?,
+            ),
+            None => tokenizer_context_length(),
+        },
+    };
+
+    Ok(context_length.filter(|context_length| *context_length > 0))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -965,10 +1031,9 @@ impl ModelDeploymentCard {
     /// Tokenizer backend controls:
     /// - `runtime_config.tokenizer_backend=fastokens` — use `fastokens` as the encoding backend
     /// - `DYN_TOKENIZER=fastokens` — fallback backend for callers without explicit runtime config
-    /// - `DYN_TOKENIZER_CACHE=1` — wrap the tokenizer in an L1 prefix cache that records
-    ///   tokenizations at special-token boundaries (massive speed-up for shared chat
-    ///   prefixes; default off, zero cost when unset)
-    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 50 MB)
+    /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
+    ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
+    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
     /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
     ///   (when the cache is enabled) a partial hit also caches the new suffix so each
     ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
@@ -980,14 +1045,10 @@ impl ModelDeploymentCard {
             .effective_tokenizer_backend()
             .is_fastokens();
 
-        let cache_enabled = matches!(
-            std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref(),
-            Some("1")
-        );
-        let cache_bytes = std::env::var("DYN_TOKENIZER_CACHE_BYTES")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(50 * 1024 * 1024);
+        let cache_enabled =
+            tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
+        let cache_bytes =
+            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
         // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
         let cache_extend = !matches!(
             std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
@@ -1431,18 +1492,12 @@ impl ModelDeploymentCard {
     ) -> anyhow::Result<Self> {
         let local_path = local_path.as_ref();
 
-        // This is usually the right choice
+        // Prefer the model config's architectural context length. Some
+        // multimodal HF configs, including MiniMax-M3-VL, store the language
+        // model config under `text_config`; tokenizer `model_max_length` can
+        // be a much larger sentinel/default and must be a last resort.
         let architectural_max_context_length =
-            crate::file_json_field(&local_path.join("config.json"), "max_position_embeddings")
-                // But sometimes this is
-                .or_else(|_| {
-                    crate::file_json_field(
-                        &local_path.join("tokenizer_config.json"),
-                        "model_max_length",
-                    )
-                })
-                .ok()
-                .filter(|context_length| *context_length > 0);
+            architectural_max_context_length_from_repo(local_path)?;
 
         let is_mistral_model = is_exclusively_mistral_model(local_path);
 
@@ -2029,6 +2084,27 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     #[test]
+    fn tokenizer_cache_is_enabled_by_default_and_disabled_only_by_zero() {
+        assert!(super::tokenizer_cache_enabled(None));
+        assert!(super::tokenizer_cache_enabled(Some("1")));
+        assert!(!super::tokenizer_cache_enabled(Some("0")));
+        assert!(super::tokenizer_cache_enabled(Some("true")));
+    }
+
+    #[test]
+    fn tokenizer_cache_bytes_defaults_to_64_mib_and_accepts_valid_overrides() {
+        assert_eq!(
+            super::tokenizer_cache_bytes(None),
+            super::DEFAULT_TOKENIZER_CACHE_BYTES
+        );
+        assert_eq!(super::tokenizer_cache_bytes(Some("1024")), 1024);
+        assert_eq!(
+            super::tokenizer_cache_bytes(Some("invalid")),
+            super::DEFAULT_TOKENIZER_CACHE_BYTES
+        );
+    }
+
+    #[test]
     pub fn test_config_json_llama3() -> anyhow::Result<()> {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
@@ -2554,6 +2630,87 @@ mod tests {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+
+    #[test]
+    fn architectural_context_prefers_config_then_text_config_then_tokenizer() -> anyhow::Result<()>
+    {
+        let dir = tempfile::tempdir()?;
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": 4096}"#,
+        )?;
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"model_max_length": 131072}"#,
+        )?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(4096)
+        );
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": 8192}}"#,
+        )?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(8192)
+        );
+
+        std::fs::write(dir.path().join("config.json"), r#"{"model_type": "mock"}"#)?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        std::fs::write(dir.path().join("config.json"), r#"{"text_config": {}}"#)?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        std::fs::remove_file(dir.path().join("config.json"))?;
+        assert_eq!(
+            architectural_max_context_length_from_repo(dir.path())?,
+            Some(131072)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn architectural_context_errors_on_malformed_present_fields() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"model_max_length": 131072}"#,
+        )?;
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"max_position_embeddings": "not-a-number"}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize max_position_embeddings"),
+            "{err:?}"
+        );
+
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"text_config": {"max_position_embeddings": "not-a-number"}}"#,
+        )?;
+        let err = architectural_max_context_length_from_repo(dir.path()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Failed to deserialize text_config.max_position_embeddings"),
+            "{err:?}"
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn effective_context_prefers_runtime_then_architecture_then_unknown() {
