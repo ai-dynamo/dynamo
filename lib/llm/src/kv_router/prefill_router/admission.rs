@@ -20,7 +20,7 @@ use crate::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::RequestTracker,
     },
-    session_affinity::SessionAffinityPushRouter,
+    session_affinity::{AffinityTarget, SessionAffinityPushRouter},
 };
 
 pub(super) enum InnerPrefillRouter {
@@ -35,7 +35,7 @@ impl InnerPrefillRouter {
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>)>
     where
-        F: FnOnce(&mut PreprocessedRequest, u64, Option<u32>) -> Result<M>,
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M>,
     {
         match self {
             InnerPrefillRouter::KvRouter(router) => {
