@@ -1300,57 +1300,6 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn test_trace_workload_agent_round_robin_rotates_queued_sessions() {
-        let turn = |hash_id, max_output_tokens| TurnTrace {
-            input_length: 64,
-            max_output_tokens,
-            hash_ids: vec![hash_id],
-            ..Default::default()
-        };
-        let session = |session_id: &str, timestamp, hash_id, max_output_tokens| SessionTrace {
-            session_id: session_id.to_string(),
-            first_arrival_timestamp_ms: Some(timestamp),
-            turns: vec![turn(hash_id, max_output_tokens)],
-        };
-        let trace = Trace {
-            block_size: 64,
-            sessions: vec![
-                session("blocker", 0.0, 1, 8),
-                SessionTrace {
-                    session_id: "a".to_string(),
-                    first_arrival_timestamp_ms: Some(0.1),
-                    turns: vec![turn(2, 1), turn(3, 1)],
-                },
-                session("b", 0.3, 4, 1),
-            ],
-        };
-        let driver = trace.into_trace_driver_with_block_size(64).unwrap();
-        let (collector, stats) = AggRuntime::new_workload(
-            &queueing_router_args(RouterQueuePolicy::AgentRoundRobin),
-            Some(queueing_router_config(RouterQueuePolicy::AgentRoundRobin)),
-            None,
-            driver,
-            1,
-            ReplayMode::Trace,
-            ReplayRouterMode::KvRouter,
-        )
-        .unwrap()
-        .with_per_request_records(true)
-        .run()
-        .unwrap();
-
-        assert!(stats.max_router_pending_count >= 2);
-        assert_eq!(
-            stats
-                .dispatch_order
-                .iter()
-                .map(|uuid| collector.session_id(*uuid))
-                .collect::<Vec<_>>(),
-            [Some("blocker"), Some("a"), Some("b"), Some("a")]
-        );
-    }
-
     fn planner_router_config() -> KvRouterConfig {
         KvRouterConfig {
             router_queue_threshold: Some(0.5),

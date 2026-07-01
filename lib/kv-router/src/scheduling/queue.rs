@@ -16,7 +16,7 @@ use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
 };
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::policy_queue::{PolicyQueue, QueueSnapshot, SessionEnqueueError};
+use super::policy_queue::{PolicyQueue, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
@@ -516,34 +516,23 @@ impl<
         let arrival_offset = self.start_time.elapsed().as_secs_f64();
         let priority_jump = request.priority_jump;
         let strict_priority = request.strict_priority;
-        let session_id = request.session_id.clone();
         let queued = QueuedRequest {
             request,
             enqueue_at: decay_now,
             block_hashes,
         };
         let worker_count = self.workers_with_configs.borrow().len();
-        if let Err((error, queued)) = self.pending.enqueue_for_session(
+        if let Err((rejection, queued)) = self.pending.enqueue(
             class_index,
             worker_count,
             snapshot,
             arrival_offset,
             priority_jump,
             strict_priority,
-            session_id,
             queued,
         ) {
             let mut request = queued.request;
-            let error = match error {
-                SessionEnqueueError::QueueRejected(rejection) => {
-                    KvSchedulerError::QueueRejected(rejection)
-                }
-                session_error @ (SessionEnqueueError::DuplicatePending { .. }
-                | SessionEnqueueError::MissingSessionId { .. }) => {
-                    KvSchedulerError::BookingFailed(session_error.to_string())
-                }
-            };
-            request.respond(Err(error));
+            request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
             return;
         }
         self.pending_count.fetch_add(1, AtomicOrdering::Relaxed);

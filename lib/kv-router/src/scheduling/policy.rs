@@ -127,9 +127,6 @@ impl RouterSchedulingPolicy {
             RouterQueuePolicy::Fcfs => Self::Fcfs(FcfsPolicy),
             RouterQueuePolicy::Lcfs => Self::Lcfs(LcfsPolicy),
             RouterQueuePolicy::Wspt => Self::Wspt(WsptPolicy),
-            // Session arbitration lives in PolicyQueue; each session contributes
-            // at most one pending request.
-            RouterQueuePolicy::AgentRoundRobin => Self::Fcfs(FcfsPolicy),
         }
     }
 }

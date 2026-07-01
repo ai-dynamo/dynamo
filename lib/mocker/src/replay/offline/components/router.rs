@@ -15,7 +15,6 @@ use dynamo_kv_router::protocols::{
 use dynamo_kv_router::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
     OverlapSignals, PolicyClassConfig, PolicyProfile, PolicyQueue, QueueSnapshot, ScheduleMode,
-    SessionEnqueueError,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
@@ -280,25 +279,17 @@ impl OfflineReplayRouter {
             let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&pending));
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
-            let session_id = pending.session_id.clone();
             self.pending
-                .enqueue_for_session(
+                .enqueue(
                     class_index,
                     self.workers_with_configs.len(),
                     snapshot,
                     now_ms.max(0.0) / 1000.0,
                     priority_jump,
                     strict_priority,
-                    session_id,
                     pending,
                 )
-                .map_err(|(error, _)| match error {
-                    SessionEnqueueError::QueueRejected(rejection) => anyhow::Error::new(rejection),
-                    session_error @ (SessionEnqueueError::DuplicatePending { .. }
-                    | SessionEnqueueError::MissingSessionId { .. }) => {
-                        anyhow::Error::new(session_error)
-                    }
-                })?;
+                .map_err(|(rejection, _)| anyhow::Error::new(rejection))?;
             return Ok(RouterEffects::default());
         }
 
@@ -699,6 +690,7 @@ mod tests {
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
         KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerId,
     };
+    use rustc_hash::FxHashMap;
     use uuid::Uuid;
 
     use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
@@ -807,6 +799,17 @@ mod tests {
             },
             storage_tier,
         )
+    }
+
+    #[test]
+    fn session_identity_reaches_scheduling_request() {
+        let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let pending = router
+            .build_pending_request(&request(1, 7), None, Some("session-a".to_string()))
+            .unwrap();
+        let scheduling_request = pending.scheduling_request(64, FxHashMap::default());
+
+        assert_eq!(scheduling_request.session_id.as_deref(), Some("session-a"));
     }
 
     #[test]

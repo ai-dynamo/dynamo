@@ -983,11 +983,6 @@ impl TraceCollector {
     }
 
     #[cfg(test)]
-    pub(crate) fn session_id(&self, uuid: Uuid) -> Option<&str> {
-        self.requests.get(&uuid)?.session_id.as_deref()
-    }
-
-    #[cfg(test)]
     pub(crate) fn snapshots(&self) -> Vec<TraceRequestStatsSnapshot> {
         self.requests
             .values()

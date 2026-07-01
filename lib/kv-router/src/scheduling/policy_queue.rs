@@ -10,9 +10,6 @@ use serde::{Deserialize, Serialize};
 use super::config::RouterQueuePolicy;
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
 
-mod session;
-use session::SessionQueue;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueSnapshot {
     pub raw_isl_tokens: usize,
@@ -63,23 +60,6 @@ pub struct QueueRejection {
     pub limit_kind: QueueLimitKind,
     pub current: usize,
     pub limit: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum SessionEnqueueError {
-    #[error(transparent)]
-    QueueRejected(#[from] QueueRejection),
-
-    #[error(
-        "router policy class {policy_class:?} already has a pending request for session {session_id:?}"
-    )]
-    DuplicatePending {
-        policy_class: String,
-        session_id: String,
-    },
-
-    #[error("router policy class {policy_class:?} requires a session ID")]
-    MissingSessionId { policy_class: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -149,93 +129,9 @@ impl<T> PartialOrd for PolicyQueueEntry<T> {
     }
 }
 
-enum PendingQueue<T> {
-    Request(BinaryHeap<PolicyQueueEntry<T>>),
-    Session(SessionQueue<T>),
-}
-
-enum PendingQueuePushError<T> {
-    MissingSessionId(PolicyQueueEntry<T>),
-    DuplicateSession(String, PolicyQueueEntry<T>),
-}
-
-impl<T> PendingQueue<T> {
-    fn new(policy: RouterQueuePolicy) -> Self {
-        match policy {
-            RouterQueuePolicy::AgentRoundRobin => Self::Session(SessionQueue::new()),
-            _ => Self::Request(BinaryHeap::new()),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        match self {
-            Self::Request(pending) => pending.is_empty(),
-            Self::Session(pending) => pending.is_empty(),
-        }
-    }
-
-    fn peek(&self) -> Option<&PolicyQueueEntry<T>> {
-        match self {
-            Self::Request(pending) => pending.peek(),
-            Self::Session(pending) => pending.peek(),
-        }
-    }
-
-    fn push(
-        &mut self,
-        session_id: Option<String>,
-        entry: PolicyQueueEntry<T>,
-    ) -> Result<(), PendingQueuePushError<T>> {
-        match self {
-            Self::Request(pending) => {
-                pending.push(entry);
-                Ok(())
-            }
-            Self::Session(pending) => {
-                let Some(session_id) = session_id else {
-                    return Err(PendingQueuePushError::MissingSessionId(entry));
-                };
-                pending
-                    .push(session_id, entry)
-                    .map_err(|(session_id, entry)| {
-                        PendingQueuePushError::DuplicateSession(session_id, entry)
-                    })
-            }
-        }
-    }
-
-    fn pop(&mut self) -> Option<PolicyQueueEntry<T>> {
-        match self {
-            Self::Request(pending) => pending.pop(),
-            Self::Session(pending) => pending.pop(),
-        }
-    }
-
-    fn retain(&mut self, mut keep: impl FnMut(&PolicyQueueEntry<T>) -> bool) {
-        match self {
-            Self::Request(pending) => pending.retain(keep),
-            Self::Session(pending) => pending.retain(&mut keep),
-        }
-    }
-
-    fn iter(&self) -> Box<dyn Iterator<Item = &PolicyQueueEntry<T>> + '_> {
-        match self {
-            Self::Request(pending) => Box::new(pending.iter()),
-            Self::Session(pending) => Box::new(pending.iter()),
-        }
-    }
-
-    fn into_entries(self) -> Vec<PolicyQueueEntry<T>> {
-        match self {
-            Self::Request(pending) => pending.into_iter().collect(),
-            Self::Session(pending) => pending.into_entries().collect(),
-        }
-    }
-}
-
 struct PolicyClassQueue<T> {
     config: PolicyClassConfig,
-    pending: PendingQueue<T>,
+    pending: BinaryHeap<PolicyQueueEntry<T>>,
     stats: PolicyQueueStats,
     deficit: usize,
 }
@@ -256,14 +152,11 @@ impl<T> PolicyQueue<T> {
                 .classes()
                 .iter()
                 .cloned()
-                .map(|config| {
-                    let pending = PendingQueue::new(config.queue_policy);
-                    PolicyClassQueue {
-                        config,
-                        pending,
-                        stats: PolicyQueueStats::default(),
-                        deficit: 0,
-                    }
+                .map(|config| PolicyClassQueue {
+                    config,
+                    pending: BinaryHeap::new(),
+                    stats: PolicyQueueStats::default(),
+                    deficit: 0,
                 })
                 .collect(),
             next_class: 0,
@@ -302,10 +195,14 @@ impl<T> PolicyQueue<T> {
     pub fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
         self.pending_count = 0;
         for class in &mut self.classes {
-            class.pending.retain(|entry| keep(entry.payload()));
+            let pending = std::mem::take(&mut class.pending);
             class.stats = PolicyQueueStats::default();
-            for entry in class.pending.iter() {
+            for entry in pending {
+                if !keep(entry.payload()) {
+                    continue;
+                }
                 add_stats(&mut class.stats, entry.snapshot);
+                class.pending.push(entry);
                 self.pending_count += 1;
             }
             if class.pending.is_empty() {
@@ -327,45 +224,9 @@ impl<T> PolicyQueue<T> {
         strict_priority: u32,
         payload: T,
     ) -> Result<(), (QueueRejection, T)> {
-        match self.enqueue_for_session(
-            class_index,
-            worker_count,
-            snapshot,
-            arrival_offset_secs,
-            priority_jump,
-            strict_priority,
-            None,
-            payload,
-        ) {
-            Ok(()) => Ok(()),
-            Err((SessionEnqueueError::QueueRejected(rejection), payload)) => {
-                Err((rejection, payload))
-            }
-            Err((
-                SessionEnqueueError::DuplicatePending { .. }
-                | SessionEnqueueError::MissingSessionId { .. },
-                _,
-            )) => {
-                unreachable!("request queue enqueue cannot return a session error")
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn enqueue_for_session(
-        &mut self,
-        class_index: usize,
-        worker_count: usize,
-        snapshot: QueueSnapshot,
-        arrival_offset_secs: f64,
-        priority_jump: f64,
-        strict_priority: u32,
-        session_id: Option<String>,
-        payload: T,
-    ) -> Result<(), (SessionEnqueueError, T)> {
         let class = &mut self.classes[class_index];
         if let Some(rejection) = queue_rejection(class, worker_count) {
-            return Err((rejection.into(), payload));
+            return Err((rejection, payload));
         }
 
         let policy_score = match class.config.queue_policy {
@@ -374,9 +235,6 @@ impl<T> PolicyQueue<T> {
                 (1.0 + priority_jump.max(0.0)) / snapshot.scheduling_cost_tokens as f64
             }
             RouterQueuePolicy::Lcfs => priority_jump.max(0.0) + arrival_offset_secs.max(0.0),
-            RouterQueuePolicy::AgentRoundRobin => {
-                priority_jump.max(0.0) - arrival_offset_secs.max(0.0)
-            }
         };
         let entry = PolicyQueueEntry {
             class_index,
@@ -388,26 +246,9 @@ impl<T> PolicyQueue<T> {
             snapshot,
             payload,
         };
-        if let Err(error) = class.pending.push(session_id, entry) {
-            let (error, entry) = match error {
-                PendingQueuePushError::MissingSessionId(entry) => (
-                    SessionEnqueueError::MissingSessionId {
-                        policy_class: class.config.name.clone(),
-                    },
-                    entry,
-                ),
-                PendingQueuePushError::DuplicateSession(session_id, entry) => (
-                    SessionEnqueueError::DuplicatePending {
-                        policy_class: class.config.name.clone(),
-                        session_id,
-                    },
-                    entry,
-                ),
-            };
-            return Err((error, entry.into_payload()));
-        }
         self.next_enqueue_seq = self.next_enqueue_seq.wrapping_add(1);
         add_stats(&mut class.stats, snapshot);
+        class.pending.push(entry);
         self.pending_count += 1;
         Ok(())
     }
@@ -502,7 +343,7 @@ impl<T> PolicyQueue<T> {
     pub fn drain(self) -> impl Iterator<Item = PolicyQueueEntry<T>> {
         self.classes
             .into_iter()
-            .flat_map(|class| class.pending.into_entries())
+            .flat_map(|class| class.pending.into_iter())
     }
 
     fn pop_class(&mut self, class_index: usize) -> PolicyQueueEntry<T> {
@@ -587,23 +428,6 @@ mod tests {
         RouterPolicyConfig::from_yaml(yaml)
             .unwrap()
             .resolve_profile(None, None, RouterQueuePolicy::Fcfs)
-    }
-
-    fn agent_round_robin_profile() -> PolicyProfile {
-        profile(
-            r#"
-default_policy_family: agent
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: agent
-    policy_family: agent
-    cache_bucket: all
-    queue_policy: agent_round_robin
-    quantum: 1
-"#,
-        )
     }
 
     #[test]
@@ -833,113 +657,6 @@ policy_classes:
         let second = queue.pop_next(|_, _, _| true).unwrap();
         assert_eq!(first.into_payload(), "fcfs-long");
         assert_eq!(second.into_payload(), "wspt-short");
-    }
-
-    #[test]
-    fn agent_round_robin_rotates_sequential_sessions_after_strict_priority() {
-        let mut queue = PolicyQueue::new(agent_round_robin_profile());
-        for (session, strict_priority, payload) in
-            [("a", 0, "a1"), ("b", 1, "b-high"), ("c", 0, "c1")]
-        {
-            queue
-                .enqueue_for_session(
-                    0,
-                    1,
-                    QueueSnapshot::new(1, 0),
-                    0.0,
-                    0.0,
-                    strict_priority,
-                    Some(session.to_string()),
-                    payload,
-                )
-                .unwrap();
-        }
-
-        let mut actual = vec![queue.pop_next(|_, _, _| true).unwrap().into_payload()];
-        queue
-            .enqueue_for_session(
-                0,
-                1,
-                QueueSnapshot::new(1, 0),
-                1.0,
-                0.0,
-                0,
-                Some("b".to_string()),
-                "b-low",
-            )
-            .unwrap();
-        actual.push(queue.pop_next(|_, _, _| true).unwrap().into_payload());
-        queue
-            .enqueue_for_session(
-                0,
-                1,
-                QueueSnapshot::new(1, 0),
-                2.0,
-                0.0,
-                0,
-                Some("a".to_string()),
-                "a2",
-            )
-            .unwrap();
-        actual.extend((0..3).map(|_| queue.pop_next(|_, _, _| true).unwrap().into_payload()));
-        assert_eq!(actual, ["b-high", "a1", "c1", "b-low", "a2"]);
-    }
-
-    #[test]
-    fn agent_round_robin_rejects_a_second_pending_turn_for_one_session() {
-        let mut queue = PolicyQueue::new(agent_round_robin_profile());
-        queue
-            .enqueue_for_session(
-                0,
-                1,
-                QueueSnapshot::new(1, 0),
-                0.0,
-                0.0,
-                0,
-                Some("a".to_string()),
-                "a1",
-            )
-            .unwrap();
-
-        let (error, payload) = queue
-            .enqueue_for_session(
-                0,
-                1,
-                QueueSnapshot::new(1, 0),
-                1.0,
-                0.0,
-                0,
-                Some("a".to_string()),
-                "a2",
-            )
-            .unwrap_err();
-
-        assert_eq!(
-            error,
-            SessionEnqueueError::DuplicatePending {
-                policy_class: "agent".to_string(),
-                session_id: "a".to_string(),
-            }
-        );
-        assert_eq!(payload, "a2");
-        assert_eq!(queue.pending_count(), 1);
-    }
-
-    #[test]
-    fn agent_round_robin_requires_a_session_id() {
-        let mut queue = PolicyQueue::new(agent_round_robin_profile());
-        let (error, payload) = queue
-            .enqueue_for_session(0, 1, QueueSnapshot::new(1, 0), 0.0, 0.0, 0, None, "missing")
-            .unwrap_err();
-
-        assert_eq!(
-            error,
-            SessionEnqueueError::MissingSessionId {
-                policy_class: "agent".to_string(),
-            }
-        );
-        assert_eq!(payload, "missing");
-        assert_eq!(queue.pending_count(), 0);
     }
 
     #[test]

@@ -446,7 +446,7 @@ fn resolve_policy_class(
     }
     if raw.queue_policy == RouterQueuePolicy::Lcfs {
         return Err(RouterPolicyConfigError::Validation(format!(
-            "{location} policy class {:?} queue_policy must be fcfs, wspt, or agent_round_robin",
+            "{location} policy class {:?} queue_policy must be fcfs or wspt",
             raw.name
         )));
     }
