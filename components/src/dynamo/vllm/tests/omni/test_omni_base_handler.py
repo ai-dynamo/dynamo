@@ -30,6 +30,7 @@ _SKIP_FIELDS = {
     "sequence_parallel_size",
     "enable_expert_parallel",
     "ulysses_mode",
+    "mask_sp_padding",
 }
 
 

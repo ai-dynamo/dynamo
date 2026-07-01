@@ -796,7 +796,7 @@ fn gate_anthropic_nvext(request: &mut AnthropicCreateMessageRequest, nvext_enabl
     if request.nvext.is_some() {
         tracing::warn!(
             endpoint = "anthropic_messages",
-            "request carried nvext data but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
+            "request carried nvext data but the nvext extension is disabled on this frontend; dropping it"
         );
     }
     request.nvext = None;

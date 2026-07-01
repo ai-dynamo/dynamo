@@ -55,6 +55,11 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
+  # Standalone CRD apiVersion converter: classification-only so it satisfies
+  # the changed-files coverage check without triggering the operator deploy
+  # pipeline (it is excluded from the `deploy` filter below).
+  - 'deploy/utils/convert_api_version.py'
+  - 'deploy/utils/tests/**'
   - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
@@ -150,6 +155,10 @@ deploy:
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
   - 'tests/utils/managed_deployment.py'
+  # Standalone CRD apiVersion converter: not used by the deploy-test harness and
+  # has no CI test wiring, so it should not trigger the operator deploy pipeline.
+  - '!deploy/utils/convert_api_version.py'
+  - '!deploy/utils/tests/**'
   - '!**/*.md'
   - '!**/*.rst'
 

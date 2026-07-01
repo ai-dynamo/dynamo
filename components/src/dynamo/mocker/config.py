@@ -243,6 +243,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         aic_moe_ep_size = getattr(args, "aic_moe_ep_size", None)
         aic_attention_dp_size = getattr(args, "aic_attention_dp_size", None)
     engine_type = getattr(args, "engine_type", None) or "vllm"
+    max_model_len = getattr(args, "max_model_len", None)
     num_gpu_blocks = _resolve_num_gpu_blocks(
         explicit_num_gpu_blocks=getattr(args, "num_gpu_blocks", None),
         engine_type=engine_type,
@@ -267,6 +268,7 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         engine_type=engine_type,
         num_gpu_blocks=num_gpu_blocks,
         block_size=getattr(args, "block_size", 0) or 0,
+        max_model_len=max_model_len,
         max_num_seqs=getattr(args, "max_num_seqs", _DEFAULT_MAX_NUM_SEQS),
         max_num_batched_tokens=getattr(
             args, "max_num_batched_tokens", _DEFAULT_MAX_NUM_BATCHED_TOKENS
@@ -349,8 +351,7 @@ def build_runtime_config(
     engine_args: MockEngineArgs,
 ) -> tuple[int, ModelRuntimeConfig]:
     rc = ModelRuntimeConfig()
-    # Mocker does not enforce a model context limit.
-    rc.context_length = 0
+    rc.context_length = engine_args.max_model_len or 0
     rc.total_kv_blocks = engine_args.num_gpu_blocks
     rc.max_num_seqs = engine_args.max_num_seqs
     if rc.max_num_seqs is None:

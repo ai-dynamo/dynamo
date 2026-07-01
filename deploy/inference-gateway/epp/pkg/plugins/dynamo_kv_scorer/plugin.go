@@ -303,9 +303,7 @@ func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error
 		}
 		requestBody["messages"] = messages
 	} else if req.Body.Completions != nil && !req.Body.Completions.Prompt.IsEmpty() {
-		requestBody["messages"] = []map[string]any{
-			{"role": "user", "content": req.Body.Completions.Prompt.PlainText()},
-		}
+		addCompletionPrompt(requestBody, req.Body.Completions.Prompt)
 	} else {
 		return nil, fmt.Errorf("no messages or prompt provided")
 	}
@@ -323,6 +321,23 @@ func BuildOpenAIRequest(req *schedtypes.InferenceRequest) (map[string]any, error
 	}
 
 	return requestBody, nil
+}
+
+func addCompletionPrompt(requestBody map[string]any, prompt fwkrh.Prompt) {
+	if len(prompt.TokenIDs) > 0 {
+		tokenIDs := make([]uint32, len(prompt.TokenIDs))
+		copy(tokenIDs, prompt.TokenIDs)
+		requestBody["prompt"] = tokenIDs
+		return
+	}
+
+	// Keep non-token completions on the legacy chat-shaped scorer path.
+	requestBody["messages"] = []map[string]any{
+		{
+			"role":    "user",
+			"content": prompt.PlainText(),
+		},
+	}
 }
 
 // extractNvext returns the caller-supplied nvext object from the PayloadMap,

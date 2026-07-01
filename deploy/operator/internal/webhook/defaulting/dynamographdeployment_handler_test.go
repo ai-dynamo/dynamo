@@ -21,6 +21,7 @@ import (
 	"context"
 	"testing"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	admissionv1 "k8s.io/api/admission/v1"
@@ -432,5 +433,29 @@ func TestDGDDefaulter_DefaultsGroveMinAvailable(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDGDV1Alpha1Defaulter_Default(t *testing.T) {
+	dgd := &nvidiacomv1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+				},
+			},
+		},
+	}
+	defaulter := &dgdV1Alpha1Defaulter{defaulter: NewDGDDefaulter("0.9.0", false)}
+
+	if err := defaulter.Default(admissionCtx(admissionv1.Create, nvidiacomv1alpha1.DynamoGraphDeploymentGVK), dgd); err != nil {
+		t.Fatalf("Default() unexpected error: %v", err)
+	}
+	if got := dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; got != "0.9.0" {
+		t.Errorf("origin annotation = %q, want %q", got, "0.9.0")
+	}
+	if got := dgd.Spec.Services["worker"].Replicas; got == nil || *got != 1 {
+		t.Errorf("worker replicas = %v, want 1", got)
 	}
 }

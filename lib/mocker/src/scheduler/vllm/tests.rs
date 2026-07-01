@@ -255,6 +255,52 @@ mod destination_lifecycle {
         assert!(later.iter().all(|hash| !activation.contains(hash)));
     }
 
+    #[test]
+    fn materialized_prompt_above_max_model_len_is_rejected() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(12)
+            .max_model_len(Some(8))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(1))
+            .enable_chunked_prefill(true)
+            .enable_prefix_caching(true)
+            .worker_type(WorkerType::Decode)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let mut core = VllmCore::new(args);
+        let handoff_id = HandoffId::from(Uuid::from_u128(30_001));
+        let uuid = Uuid::from_u128(30_002);
+
+        assert!(matches!(
+            core.apply_command(SchedulerCommand::ReserveDestination {
+                handoff_id,
+                request: request(uuid, vec![1; 9], 1),
+            })
+            .unwrap(),
+            SchedulerCommandResult::DestinationAccepted { request_id } if request_id == uuid
+        ));
+        assert_eq!(
+            core.apply_command(SchedulerCommand::ActivateDestination { handoff_id })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+
+        let pass = execute(&mut core, 0.0);
+        assert!(matches!(
+            pass.output_signals.as_slice(),
+            [OutputSignal {
+                uuid: signal_uuid,
+                token_id: None,
+                completed: true,
+                rejected: true,
+                ..
+            }] if *signal_uuid == uuid
+        ));
+        assert!(!core.state().requests.contains_key(&uuid));
+    }
+
     fn drive_source_to_hold(core: &mut VllmCore, handoff_id: HandoffId, req: DirectRequest) {
         assert!(matches!(
             core.apply_command(SchedulerCommand::SubmitHandoffPrefill {

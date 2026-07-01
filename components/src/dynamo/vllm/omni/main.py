@@ -20,6 +20,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
+from dynamo.vllm.omni.realtime_utils import init_omni_realtime
 from dynamo.vllm.omni.stage_router import init_omni_stage_router
 from dynamo.vllm.omni.stage_worker import init_omni_stage
 
@@ -141,6 +142,9 @@ async def worker():
     elif config.omni_router:
         await init_omni_stage_router(runtime, config, shutdown_endpoints)
         logger.debug("init_omni_stage_router completed")
+    elif config.realtime:
+        await init_omni_realtime(runtime, config, shutdown_endpoints, shutdown_event)
+        logger.debug("init_omni_realtime completed, exiting...")
     else:
         await init_omni(runtime, config, shutdown_event)
         logger.debug("Omni worker completed, exiting...")

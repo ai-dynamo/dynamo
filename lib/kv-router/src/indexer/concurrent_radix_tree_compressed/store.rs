@@ -572,4 +572,16 @@ impl ConcurrentRadixTreeCompressed {
 
         Ok(StoreInsertOutcome { duplicate_store })
     }
+
+    #[cfg(test)]
+    pub(super) fn insert_blocks_from_for_test(
+        &self,
+        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
+        worker: WorkerWithDpRank,
+        parent: &SharedNode,
+        seed_hash: ExternalSequenceBlockHash,
+        blocks: &[KvCacheStoredBlockData],
+    ) -> Result<StoreInsertOutcome, KvCacheEventError> {
+        self.insert_blocks_from(lookup, worker, parent, false, Some(seed_hash), blocks)
+    }
 }

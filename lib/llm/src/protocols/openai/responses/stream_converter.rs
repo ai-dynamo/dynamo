@@ -1107,6 +1107,29 @@ mod tests {
     }
 
     #[test]
+    fn test_function_call_finish_reason_closes_tool_call() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.emit_start_events();
+
+        let _ = conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("get_weather"),
+            Some("{\"city\":\"SF\"}"),
+        ));
+
+        let finish_types =
+            event_types(&conv.process_chunk(&finish_chunk(FinishReason::FunctionCall)));
+        assert_eq!(
+            finish_types,
+            vec![
+                "response.function_call_arguments.done".to_string(),
+                "response.output_item.done".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn test_identity_only_tool_call_is_emitted_and_finished() {
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
         let _ = conv.emit_start_events();

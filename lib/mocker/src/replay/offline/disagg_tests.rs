@@ -1215,6 +1215,27 @@ fn test_advance_to_moves_clock_across_idle_gap() {
     assert!((stats.duration_s - 0.5).abs() < 1e-9);
 }
 
+#[test]
+fn test_disagg_traffic_uses_context_capped_output_length() {
+    let mut config = disagg_config();
+    config.prefill_args.max_model_len = Some(8);
+    config.decode_args.max_model_len = Some(8);
+    let mut runtime = DisaggRuntime::new(
+        &config,
+        None,
+        None,
+        VecDeque::from([request(1, 7, 4, 0.0)]),
+        ReplayMode::Trace,
+        ReplayRouterMode::RoundRobin,
+    )
+    .unwrap();
+
+    assert!(runtime.advance_to(1000.0).unwrap());
+    let stats = runtime.drain_traffic();
+    assert_eq!(stats.num_req, 1);
+    assert_eq!(stats.avg_osl, 1.0);
+}
+
 /// Setting `max_sim_time_ms` causes `run()` to break before scheduled
 /// arrivals past the cap. This test verifies the cap operates on
 /// **simulated** time (`now_ms`), not real wall-clock time: with

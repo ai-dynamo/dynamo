@@ -150,3 +150,24 @@ For complete benchmarking and profiling workflows:
 ## Notes
 
 - This setup is focused on benchmarking and profiling resources only - the main Dynamo platform must be installed separately.
+
+## convert_api_version.py — nvidia.com apiVersion converter
+
+Converts Dynamo CRD manifests (DynamoGraphDeployment, DynamoComponentDeployment,
+DynamoGraphDeploymentRequest, DynamoGraphDeploymentScalingAdapter) between served
+apiVersions by driving the operator's conversion webhook — no conversion logic is
+duplicated, so output always matches the operator.
+
+**Requirements:** `kubectl` configured against a cluster running the Dynamo
+operator (the conversion webhook must be installed). Multi-document files and
+non-nvidia.com documents (passed through unchanged) are supported.
+
+```bash
+python deploy/utils/convert_api_version.py -i my-dgd.v1alpha1.yaml -o my-dgd.v1beta1.yaml
+# explicit target version:
+python deploy/utils/convert_api_version.py -i in.yaml -o out.yaml --to nvidia.com/v1beta1
+```
+
+The converter POSTs an `apiextensions.k8s.io/v1` ConversionReview to the CRD's
+conversion webhook through the API server service proxy. Nothing is created in
+the cluster (no reconcile, no pods, no cleanup).

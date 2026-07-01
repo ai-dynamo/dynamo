@@ -508,9 +508,19 @@ impl AggRuntime {
             // traffic deltas (they still free their slot and advance below).
             if !signal.rejected {
                 let latencies = self.collector.request_latencies(signal.uuid);
+                let actual_output_tokens = self
+                    .collector
+                    .actual_output_length(signal.uuid)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "offline replay missing collector state for {}",
+                            signal.uuid
+                        )
+                    })?;
+                debug_assert!(actual_output_tokens <= removed_state.output_tokens);
                 self.traffic.on_request(
                     removed_state.input_tokens,
-                    removed_state.output_tokens,
+                    actual_output_tokens,
                     latencies,
                 );
             }
@@ -2955,6 +2965,43 @@ mod tests {
             "expected MTP accept_length 3.0, got {:?}",
             stats.avg_accept_length
         );
+    }
+
+    #[test]
+    fn test_drain_traffic_uses_context_capped_output_length() {
+        let args = MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(32)
+            .max_model_len(Some(8))
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(4))
+            .enable_prefix_caching(false)
+            .speedup_ratio(0.0)
+            .build()
+            .unwrap();
+        let requests = VecDeque::from([DirectRequest {
+            tokens: vec![1; 7],
+            max_output_tokens: 4,
+            uuid: Some(Uuid::from_u128(1)),
+            dp_rank: 0,
+            arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
+        }]);
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            requests,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        assert!(rt.advance_to(1000.0).unwrap());
+        let stats = rt.drain_traffic();
+        assert_eq!(stats.num_req, 1);
+        assert_eq!(stats.avg_osl, 1.0);
     }
 
     #[test]

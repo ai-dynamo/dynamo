@@ -121,6 +121,9 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
+    // NOTE(perf): Pre-reserving the output maps in these survivor-recording
+    // helpers did not produce a repeatable throughput improvement. Re-profile
+    // before adding eager capacity here.
     fn record_surviving_details(details: &mut MatchDetails, walk_result: &MatchWalkResult) {
         for worker in &walk_result.active {
             details

@@ -33,7 +33,7 @@ use dynamo_parsers::tool_calling::{
 };
 use dynamo_parsers_v2::{Tool as ToolV2, ToolCallDelta, ToolParser, create_tool_parser_for_family};
 
-use super::NvCreateChatCompletionStreamResponse;
+use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_template};
 
 /// Tool-call families with a `dynamo-parsers-v2` parser wired into both the batch and
 /// the streaming path. Must stay a subset of the families
@@ -163,6 +163,62 @@ impl ChoiceState {
     }
 }
 
+/// Finish every choice that has not received an upstream finish reason. This is
+/// called before a usage-only chunk when one exists, with EOF as a fallback.
+fn finish_unterminated_choices(
+    states: &mut HashMap<u32, ChoiceState>,
+    finished: &mut HashSet<u32>,
+    tool_emitted: &mut HashSet<u32>,
+    template: &NvCreateChatCompletionStreamResponse,
+) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+    let mut indices: Vec<_> = states
+        .keys()
+        .copied()
+        .filter(|index| !finished.contains(index))
+        .collect();
+    indices.sort_unstable();
+
+    let mut responses = Vec::new();
+    for index in indices {
+        finished.insert(index);
+        let state = states
+            .get_mut(&index)
+            .expect("choice index came from parser state map");
+        let result = match state.parser.finish() {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(error = %error, choice_index = index, "v2 stream finish failed");
+                dynamo_parsers_v2::ToolParseResult::default()
+            }
+        };
+        let tool_calls = state.emit_chunks(result.calls);
+        if tool_calls.is_some() {
+            tool_emitted.insert(index);
+        }
+        // A choice that produced tool calls during the stream must terminate
+        // with `ToolCalls` even when the backend never sent a finish_reason.
+        // Text-only output without an upstream finish reason stays `None`.
+        let finish_reason = if tool_emitted.contains(&index) {
+            Some(FinishReason::ToolCalls)
+        } else {
+            None
+        };
+        let content = (!result.normal_text.is_empty())
+            .then_some(ChatCompletionMessageContent::Text(result.normal_text));
+        if content.is_none() && tool_calls.is_none() && finish_reason.is_none() {
+            continue;
+        }
+        responses.push(stream_choice_chunk_from_template(
+            template,
+            index,
+            content,
+            tool_calls,
+            finish_reason,
+        ));
+    }
+    responses
+}
+
 /// Streaming path: replace the jail with the `family` v2 parser. Each upstream text
 /// delta is pushed into the parser; the parser's `normal_text` becomes the emitted
 /// content and its tool-call deltas become OpenAI tool-call chunks. The jail is never
@@ -213,6 +269,7 @@ where
                 t.inner.choices.clear();
                 template = Some(t);
             }
+            let is_empty_choices = chat_response.inner.choices.is_empty();
 
             for choice in chat_response.inner.choices.iter_mut() {
                 let state = states.entry(choice.index).or_insert_with(|| {
@@ -282,47 +339,36 @@ where
                 }
             }
 
+            // OpenAI stream ordering requires a terminal finish_reason before the
+            // usage-only chunk. Finish every unterminated choice before yielding an
+            // empty-choices response; EOF below remains the fallback when no such
+            // response arrives.
+            if is_empty_choices && let Some(template) = &template {
+                for terminal in finish_unterminated_choices(
+                    &mut states,
+                    &mut finished,
+                    &mut tool_emitted,
+                    template,
+                ) {
+                    yield terminal;
+                }
+            }
+
             yield response;
         }
 
         // Backstop: the stream ended without a finish_reason for some choice. Flush
-        // each unfinished parser; emit a trailing chunk only when it yields output.
-        if let Some(template) = template {
-            for (index, state) in states.iter_mut() {
-                if finished.contains(index) {
-                    continue;
-                }
-                let Ok(result) = state.parser.finish() else {
-                    continue;
-                };
-                let tool_calls = state.emit_chunks(result.calls);
-                if result.normal_text.is_empty() && tool_calls.is_none() {
-                    continue;
-                }
-                let mut response = template.clone();
-                #[allow(deprecated)]
-                let choice = dynamo_protocols::types::ChatChoiceStream {
-                    index: *index,
-                    delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
-                        role: None,
-                        content: (!result.normal_text.is_empty())
-                            .then_some(ChatCompletionMessageContent::Text(result.normal_text)),
-                        tool_calls,
-                        function_call: None,
-                        refusal: None,
-                        reasoning_content: None,
-                    },
-                    finish_reason: None,
-                    logprobs: None,
-                };
-                response.inner.choices = vec![choice];
-                yield Annotated {
-                    data: Some(response),
-                    id: None,
-                    event: None,
-                    comment: None,
-                    error: None,
-                };
+        // each unfinished parser; emit a trailing chunk when the flush yields output
+        // or when the choice already emitted tool calls and still needs a terminal
+        // `ToolCalls` reason.
+        if let Some(template) = &template {
+            for terminal in finish_unterminated_choices(
+                &mut states,
+                &mut finished,
+                &mut tool_emitted,
+                template,
+            ) {
+                yield terminal;
             }
         }
     }
@@ -332,9 +378,25 @@ where
 mod tests {
     use super::*;
     use dynamo_protocols::types::{
-        ChatChoiceStream, ChatCompletionStreamResponseDelta, FinishReason, Role,
+        ChatChoiceStream, ChatCompletionStreamResponseDelta, CompletionUsage, FinishReason, Role,
     };
     use futures::stream;
+
+    struct FinishErrorParser;
+
+    impl ToolParser for FinishErrorParser {
+        fn create(_tools: &[ToolV2]) -> anyhow::Result<Box<dyn ToolParser>> {
+            Ok(Box::new(Self))
+        }
+
+        fn push(&mut self, _chunk: &str) -> anyhow::Result<dynamo_parsers_v2::ToolParseResult> {
+            Ok(dynamo_parsers_v2::ToolParseResult::default())
+        }
+
+        fn finish(&mut self) -> anyhow::Result<dynamo_parsers_v2::ToolParseResult> {
+            anyhow::bail!("intentional finish failure")
+        }
+    }
 
     const QWEN3_GET_WEATHER: &str = "<tool_call>\n<function=get_weather>\n<parameter=location>\nParis\n</parameter>\n</function>\n</tool_call>";
 
@@ -377,6 +439,35 @@ mod tests {
             comment: None,
             error: None,
         }
+    }
+
+    fn usage_chunk() -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chunk("", false);
+        let data = chunk.data.as_mut().expect("usage chunk response data");
+        data.inner.choices.clear();
+        data.inner.usage = Some(CompletionUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        });
+        data.llm_metrics = Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 5,
+            chunk_tokens: 0,
+            cached_tokens: None,
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: None,
+            detokenize_total_latency: None,
+            detokenize_count: None,
+        });
+        chunk
     }
 
     /// Reassemble the streamed tool-call deltas into (name, arguments) per index and
@@ -533,6 +624,141 @@ mod tests {
             final_finish_reason(&out),
             Some(FinishReason::ToolCalls),
             "finish_reason must flip Stop->ToolCalls when tool calls are emitted"
+        );
+    }
+
+    // Missing-finish-reason regression: the stream emits a complete tool call but
+    // ends without any finish_reason chunk (e.g. speculative decoding folded EOS
+    // into content, or the engine dropped the terminal signal). A strict OpenAI
+    // client waits for a non-null finish_reason before considering the tool call
+    // complete; the end-of-stream backstop must synthesize `ToolCalls` so the
+    // client doesn't hang until its timeout.
+    #[tokio::test]
+    async fn qwen3_bypass_synthesizes_tool_calls_when_stream_lacks_finish_reason() {
+        // Same call as the incremental test, but the final chunk carries NO
+        // finish_reason — the stream simply ends after the tool markup.
+        let mut chunks: Vec<_> = QWEN3_GET_WEATHER
+            .as_bytes()
+            .chunks(8)
+            .map(|b| chunk(std::str::from_utf8(b).unwrap(), false))
+            .collect();
+        // A usage-only chunk arrives without any terminating choice.
+        chunks.push(usage_chunk());
+
+        let out: Vec<_> = apply_stream(stream::iter(chunks), None, "qwen3_coder".to_string())
+            .collect::<Vec<_>>()
+            .await;
+
+        let (calls, _content) = reassemble(&out);
+        assert_eq!(calls.len(), 1, "expected exactly one tool call: {calls:?}");
+        assert_eq!(calls[0].0, "get_weather");
+        let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(args["location"], "Paris");
+        assert_eq!(
+            final_finish_reason(&out),
+            Some(FinishReason::ToolCalls),
+            "backstop must synthesize ToolCalls when the stream ended without a finish_reason"
+        );
+        let finish_positions: Vec<_> = out
+            .iter()
+            .enumerate()
+            .filter_map(|(position, response)| {
+                response.data.as_ref().and_then(|data| {
+                    data.inner
+                        .choices
+                        .iter()
+                        .any(|choice| choice.finish_reason == Some(FinishReason::ToolCalls))
+                        .then_some(position)
+                })
+            })
+            .collect();
+        assert_eq!(
+            finish_positions.len(),
+            1,
+            "expected exactly one synthesized finish chunk"
+        );
+        let usage_position =
+            out.iter()
+                .position(|response| {
+                    response.data.as_ref().is_some_and(|data| {
+                        data.inner.choices.is_empty() && data.inner.usage.is_some()
+                    })
+                })
+                .expect("usage-only response");
+        assert!(
+            finish_positions[0] < usage_position,
+            "synthesized finish chunk must precede usage"
+        );
+        let terminal = out[finish_positions[0]]
+            .data
+            .as_ref()
+            .expect("synthesized terminal response");
+        assert!(
+            terminal.inner.usage.is_none(),
+            "synthesized terminal chunk must not repeat usage"
+        );
+        assert!(
+            terminal.llm_metrics.is_none(),
+            "synthesized terminal chunk must not repeat LLM metrics"
+        );
+    }
+
+    // Text-only corollary: when the stream ends without a finish_reason and no
+    // tool call was emitted, the backstop must not invent a finish_reason. There
+    // is no signal to synthesize one from. A trailing content chunk may be
+    // emitted, but its finish_reason stays None.
+    #[tokio::test]
+    async fn qwen3_bypass_does_not_synthesize_finish_reason_for_text_only_stream() {
+        let chunks = vec![chunk("hello world", false), chunk("", false)];
+
+        let out: Vec<_> = apply_stream(stream::iter(chunks), None, "qwen3_coder".to_string())
+            .collect::<Vec<_>>()
+            .await;
+
+        let (calls, _content) = reassemble(&out);
+        assert!(calls.is_empty(), "no tool calls expected: {calls:?}");
+        assert_eq!(
+            final_finish_reason(&out),
+            None,
+            "text-only stream with no upstream finish_reason must not get a synthetic one"
+        );
+    }
+
+    #[test]
+    fn finish_error_still_terminates_a_choice_that_emitted_tools() {
+        let mut states = HashMap::from([(
+            3,
+            ChoiceState {
+                parser: Box::new(FinishErrorParser),
+                opened: HashSet::new(),
+            },
+        )]);
+        let mut finished = HashSet::new();
+        let mut tool_emitted = HashSet::from([3]);
+        let template = usage_chunk().data.expect("usage response data");
+
+        let responses =
+            finish_unterminated_choices(&mut states, &mut finished, &mut tool_emitted, &template);
+
+        assert_eq!(
+            responses.len(),
+            1,
+            "the choice still needs a terminal chunk"
+        );
+        let response = responses[0].data.as_ref().expect("terminal response data");
+        assert!(
+            response.inner.usage.is_none(),
+            "terminal chunk must not repeat usage"
+        );
+        assert!(
+            response.llm_metrics.is_none(),
+            "terminal chunk must not repeat LLM metrics"
+        );
+        assert_eq!(response.inner.choices.len(), 1);
+        assert_eq!(response.inner.choices[0].index, 3);
+        assert_eq!(
+            response.inner.choices[0].finish_reason,
+            Some(FinishReason::ToolCalls)
         );
     }
 }

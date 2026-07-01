@@ -896,6 +896,129 @@ mod registration_tests {
         assert_eq!(snap.stagings, 3);
     }
 
+    #[test]
+    fn test_batch_registration_mixed_rejects_preserves_order_presence_and_guards() {
+        let registry = BlockRegistry::new();
+        let manager = BlockManager::<TestBlockData>::builder()
+            .block_count(5)
+            .block_size(4)
+            .registry(registry)
+            .duplication_policy(BlockDuplicationPolicy::Reject)
+            .build()
+            .expect("Should build manager");
+
+        let token_a = create_test_token_block_from_iota(100);
+        let token_b = create_test_token_block_from_iota(200);
+        let token_c = create_test_token_block_from_iota(300);
+        let hash_a = token_a.kvbm_sequence_hash();
+        let hash_b = token_b.kvbm_sequence_hash();
+        let hash_c = token_c.kvbm_sequence_hash();
+
+        let primary_a = manager
+            .allocate_blocks(1)
+            .expect("allocate primary")
+            .pop()
+            .unwrap()
+            .complete(&token_a)
+            .unwrap();
+        let primary_a_id = primary_a.block_id();
+        let primary_a = manager.register_blocks(vec![primary_a]).pop().unwrap();
+
+        let mut candidates = manager
+            .allocate_blocks(4)
+            .expect("allocate batch candidates")
+            .into_iter();
+        let candidate_b = candidates.next().unwrap();
+        let duplicate_a = candidates.next().unwrap();
+        let duplicate_b = candidates.next().unwrap();
+        let candidate_c = candidates.next().unwrap();
+        let candidate_b_id = candidate_b.block_id();
+        let duplicate_a_id = duplicate_a.block_id();
+        let duplicate_b_id = duplicate_b.block_id();
+        let candidate_c_id = candidate_c.block_id();
+
+        let registered = manager.register_blocks(vec![
+            candidate_b.complete(&token_b).unwrap(),
+            duplicate_a.complete(&token_a).unwrap(),
+            duplicate_b.complete(&token_b).unwrap(),
+            candidate_c.complete(&token_c).unwrap(),
+        ]);
+
+        assert_eq!(
+            registered
+                .iter()
+                .map(|block| (block.sequence_hash(), block.block_id()))
+                .collect::<Vec<_>>(),
+            vec![
+                (hash_b, candidate_b_id),
+                (hash_a, primary_a_id),
+                (hash_b, candidate_b_id),
+                (hash_c, candidate_c_id),
+            ]
+        );
+        assert_eq!(
+            manager
+                .block_registry()
+                .check_presence::<TestBlockData>(&[hash_a, hash_b, hash_c]),
+            vec![(hash_a, true), (hash_b, true), (hash_c, true)]
+        );
+        assert_eq!(manager.metrics().snapshot().registration_dedup, 2);
+
+        // Both rejected candidates must have dropped their re-armed guards
+        // after the store critical section and returned to the reset pool.
+        assert_eq!(manager.available_blocks(), 2);
+        let mut returned_ids = manager
+            .allocate_blocks(2)
+            .expect("rejected candidates returned to reset")
+            .into_iter()
+            .map(|block| block.block_id())
+            .collect::<Vec<_>>();
+        returned_ids.sort_unstable();
+        let mut rejected_ids = vec![duplicate_a_id, duplicate_b_id];
+        rejected_ids.sort_unstable();
+        assert_eq!(returned_ids, rejected_ids);
+
+        drop(primary_a);
+        drop(registered);
+    }
+
+    #[test]
+    fn test_batch_registration_allow_marks_each_same_hash_slot_present() {
+        let registry = BlockRegistry::new();
+        let manager = BlockManager::<TestBlockData>::builder()
+            .block_count(2)
+            .block_size(4)
+            .registry(registry)
+            .duplication_policy(BlockDuplicationPolicy::Allow)
+            .build()
+            .expect("Should build manager");
+
+        let token = create_test_token_block_from_iota(400);
+        let seq_hash = token.kvbm_sequence_hash();
+        let completed = manager
+            .allocate_blocks(2)
+            .expect("allocate same-hash batch")
+            .into_iter()
+            .map(|block| block.complete(&token).unwrap())
+            .collect();
+
+        let mut registered = manager.register_blocks(completed);
+        assert_eq!(registered.len(), 2);
+        assert_ne!(registered[0].block_id(), registered[1].block_id());
+        assert_eq!(manager.metrics().snapshot().duplicate_blocks, 1);
+
+        // The duplicate releases one presence reference. Presence must remain
+        // set for the primary, proving both same-batch outcomes were marked.
+        let duplicate = registered.pop().unwrap();
+        drop(duplicate);
+        assert_eq!(
+            manager
+                .block_registry()
+                .check_presence::<TestBlockData>(&[seq_hash]),
+            vec![(seq_hash, true)]
+        );
+    }
+
     #[rstest]
     #[case(BlockDuplicationPolicy::Allow, 200, "allow", false)]
     #[case(BlockDuplicationPolicy::Reject, 300, "reject", true)]
@@ -1373,6 +1496,149 @@ mod single_lock_match_tests {
         metered.reset();
         assert!(manager.match_blocks(&[miss]).is_empty());
         assert_eq!(metered.touches(), 0, "a total miss must not touch");
+    }
+}
+
+// ============================================================================
+// ALIGNED SCATTERED MATCH TESTS
+// ============================================================================
+
+mod scattered_match_tests {
+    use super::*;
+
+    fn create_backend_manager(
+        block_count: usize,
+        backend_builder: fn(
+            BlockManagerConfigBuilder<TestBlockData>,
+        ) -> BlockManagerConfigBuilder<TestBlockData>,
+    ) -> BlockManager<TestBlockData> {
+        let registry = BlockRegistry::builder()
+            .frequency_tracker(FrequencyTrackingCapacity::default().create_tracker())
+            .build();
+        backend_builder(
+            BlockManager::<TestBlockData>::builder()
+                .block_count(block_count)
+                .block_size(4)
+                .registry(registry),
+        )
+        .build()
+        .expect("build manager")
+    }
+
+    fn register_one(
+        manager: &BlockManager<TestBlockData>,
+        base: u32,
+    ) -> (SequenceHash, ImmutableBlock<TestBlockData>) {
+        let token_block = create_token_block(&[base, base + 1, base + 2, base + 3]);
+        let seq_hash = token_block.kvbm_sequence_hash();
+        let mutable = manager
+            .allocate_blocks(1)
+            .expect("allocate")
+            .into_iter()
+            .next()
+            .unwrap();
+        let complete = mutable.complete(&token_block).expect("complete");
+        let immutable = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        (seq_hash, immutable)
+    }
+
+    /// Active and inactive hits remain aligned around a miss; duplicate
+    /// inactive hashes are returned at both positions and later hits are not
+    /// truncated. Run against every supported inactive backend.
+    #[rstest]
+    #[case("lru", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_lru_backend())]
+    #[case("multi_lru", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_multi_lru_backend())]
+    #[case("lineage", |b: BlockManagerConfigBuilder<TestBlockData>| b.with_lineage_backend())]
+    fn scattered_preserves_alignment_misses_duplicates_and_later_hits(
+        #[case] _backend_name: &str,
+        #[case] backend_builder: fn(
+            BlockManagerConfigBuilder<TestBlockData>,
+        ) -> BlockManagerConfigBuilder<TestBlockData>,
+    ) {
+        let manager = create_backend_manager(4, backend_builder);
+        let (active_hash, _active) = register_one(&manager, 20_000);
+        let (inactive_hash, inactive) = register_one(&manager, 20_010);
+        let (later_hash, _later) = register_one(&manager, 20_020);
+        drop(inactive);
+
+        let miss = create_token_block(&[90_000, 90_001, 90_002, 90_003]).kvbm_sequence_hash();
+        let input = [active_hash, miss, inactive_hash, inactive_hash, later_hash];
+        let before = manager.metrics().snapshot();
+
+        let matched = manager.match_blocks_scattered(&input);
+
+        assert_eq!(matched.len(), input.len());
+        assert_eq!(matched[0].as_ref().unwrap().sequence_hash(), active_hash);
+        assert!(matched[1].is_none(), "miss must retain its aligned slot");
+        assert_eq!(matched[2].as_ref().unwrap().sequence_hash(), inactive_hash);
+        assert_eq!(matched[3].as_ref().unwrap().sequence_hash(), inactive_hash);
+        assert_eq!(
+            matched[2].as_ref().unwrap().block_id(),
+            matched[3].as_ref().unwrap().block_id(),
+            "duplicate hashes must resolve to the same physical primary"
+        );
+        assert_eq!(matched[4].as_ref().unwrap().sequence_hash(), later_hash);
+
+        let after = manager.metrics().snapshot();
+        assert_eq!(
+            after.match_hashes_requested - before.match_hashes_requested,
+            input.len() as u64
+        );
+        assert_eq!(
+            after.match_blocks_returned - before.match_blocks_returned,
+            4,
+            "match return metric counts hit occurrences, including duplicates"
+        );
+        assert_eq!(
+            after.scan_hashes_requested - before.scan_hashes_requested,
+            0
+        );
+        assert_eq!(after.scan_blocks_returned - before.scan_blocks_returned, 0);
+    }
+
+    #[test]
+    fn scattered_empty_input_returns_empty() {
+        let manager = create_test_manager(1);
+        let before = manager.metrics().snapshot();
+        assert!(manager.match_blocks_scattered(&[]).is_empty());
+        let after = manager.metrics().snapshot();
+        assert_eq!(
+            after.match_hashes_requested - before.match_hashes_requested,
+            0
+        );
+        assert_eq!(
+            after.match_blocks_returned - before.match_blocks_returned,
+            0
+        );
+        assert_eq!(
+            after.scan_hashes_requested - before.scan_hashes_requested,
+            0
+        );
+        assert_eq!(after.scan_blocks_returned - before.scan_blocks_returned, 0);
+    }
+
+    #[test]
+    fn scattered_touches_once_per_hit_occurrence() {
+        let (manager, metered) = crate::testing::create_test_manager_metered::<TestBlockData>(3);
+        let (active_hash, _active) = register_one(&manager, 30_000);
+        let (inactive_hash, inactive) = register_one(&manager, 30_010);
+        drop(inactive);
+        let miss = create_token_block(&[91_000, 91_001, 91_002, 91_003]).kvbm_sequence_hash();
+
+        metered.reset();
+        let matched =
+            manager.match_blocks_scattered(&[active_hash, miss, inactive_hash, inactive_hash]);
+
+        assert_eq!(matched.iter().filter(|block| block.is_some()).count(), 3);
+        assert_eq!(
+            metered.touches(),
+            3,
+            "each aligned hit occurrence must touch exactly once; misses never touch"
+        );
     }
 }
 
@@ -2286,6 +2552,51 @@ mod capacity_lifecycle_tests {
 
 mod scan_matches_tests {
     use super::*;
+
+    #[test]
+    fn scan_metrics_count_input_occurrences_and_distinct_results() {
+        let manager = create_test_manager(2);
+        let token_block = create_iota_token_block(12_000, 4);
+        let hash = token_block.kvbm_sequence_hash();
+        let mutable = manager
+            .allocate_blocks(1)
+            .expect("allocate")
+            .into_iter()
+            .next()
+            .unwrap();
+        let complete = mutable.complete(&token_block).expect("complete");
+        let _active = manager
+            .register_blocks(vec![complete])
+            .into_iter()
+            .next()
+            .unwrap();
+        let missing_hash = create_iota_token_block(99_000, 4).kvbm_sequence_hash();
+        let before = manager.metrics().snapshot();
+
+        let found = manager.scan_matches(&[hash, hash, missing_hash], true);
+
+        assert_eq!(found.len(), 1);
+        assert!(found.contains_key(&hash));
+        let after = manager.metrics().snapshot();
+        assert_eq!(
+            after.scan_hashes_requested - before.scan_hashes_requested,
+            3,
+            "scan request metrics count duplicate input occurrences"
+        );
+        assert_eq!(
+            after.scan_blocks_returned - before.scan_blocks_returned,
+            1,
+            "scan return metrics count distinct result-map entries"
+        );
+        assert_eq!(
+            after.match_hashes_requested - before.match_hashes_requested,
+            0
+        );
+        assert_eq!(
+            after.match_blocks_returned - before.match_blocks_returned,
+            0
+        );
+    }
 
     #[test]
     fn test_scan_matches_with_pool_size_gauges() {

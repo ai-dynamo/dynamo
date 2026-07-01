@@ -139,6 +139,7 @@ pub async fn load_sse_fixture(path: impl AsRef<Path>) -> Result<Script> {
             format!("failed to decode SSE framing in fixture {}", path.display())
         })?;
         match message.data.as_deref() {
+            Some("[DONE]") => break,
             Some(_) => chunks.push(message.decode_data::<NvCreateChatCompletionStreamResponse>()?),
             None => {
                 return Err(anyhow!(

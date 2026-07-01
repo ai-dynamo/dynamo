@@ -3,8 +3,7 @@
 
 //! Engine-specific policy for the shared vLLM/TRT-LLM scheduler core.
 
-use crate::common::protocols::PrefillCost;
-use crate::common::protocols::SchedulingPolicy;
+use crate::common::protocols::{PrefillCost, SchedulingPolicy};
 use crate::common::sequence::ActiveSequence;
 use crate::kv_manager::KvManager;
 
@@ -13,6 +12,34 @@ pub(super) enum AdmissionDecision {
     Admit { prefill_cost: PrefillCost },
     Wait,
     Reject,
+}
+
+pub(super) fn should_reject_for_model_len(
+    policy: SchedulingPolicy,
+    sequence: &ActiveSequence,
+    max_model_len: Option<usize>,
+) -> bool {
+    policy == SchedulingPolicy::Vllm
+        && max_model_len.is_some_and(|limit| sequence.num_input_tokens() >= limit)
+}
+
+/// Number of additional tokens the request may generate before reaching
+/// either its requested output length or the model sequence-length limit.
+pub(super) fn remaining_generation_tokens(
+    sequence: &ActiveSequence,
+    max_model_len: Option<usize>,
+) -> usize {
+    let requested_remaining = sequence
+        .max_output_tokens()
+        .saturating_sub(sequence.generated_tokens());
+    let context_remaining = max_model_len
+        .map(|limit| limit.saturating_sub(sequence.len()))
+        .unwrap_or(usize::MAX);
+    requested_remaining.min(context_remaining)
+}
+
+pub(super) fn generation_complete(sequence: &ActiveSequence, max_model_len: Option<usize>) -> bool {
+    remaining_generation_tokens(sequence, max_model_len) == 0
 }
 
 /// Decide whether the FIFO head can enter the shared scheduler core.
@@ -32,11 +59,8 @@ pub(super) fn decide_waiting_admission<'a>(
     if is_fresh {
         match policy {
             SchedulingPolicy::Vllm => {
-                // TODO: Carry vLLM's max_model_len explicitly. Upstream bounds prompt
-                // plus generated tokens by max_model_len and sizes KV for one
-                // max-length sequence. Until the mocker models that value, total
-                // worker KV is only a proxy for the one-time fresh-sequence admission
-                // cap; it does not cap future output length.
+                // Total worker KV remains a fallback one-time admission cap
+                // when max_model_len is unset or larger than the KV pool.
                 if sequence.current_known_blocks() > num_gpu_blocks {
                     return AdmissionDecision::Reject;
                 }

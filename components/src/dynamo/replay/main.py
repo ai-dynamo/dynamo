@@ -295,7 +295,7 @@ def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
         num_gpu=1,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
-        context_length=max_kv_tokens if max_kv_tokens > 0 else None,
+        context_length=args.max_model_len,
         max_kv_tokens=max_kv_tokens if max_kv_tokens > 0 else None,
         speculative_nextn=args.aic_nextn,
     )

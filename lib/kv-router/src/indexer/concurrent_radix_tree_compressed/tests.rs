@@ -20,6 +20,13 @@ fn direct_lookup() -> DirectLookup {
     FxHashMap::default()
 }
 
+fn stored_data(event: RouterEvent) -> KvCacheStoreData {
+    match event.event.data {
+        KvCacheEventData::Stored(op) => op,
+        _ => unreachable!("expected a store event"),
+    }
+}
+
 fn worker_lookup_len(lookup: &DirectLookup, worker: WorkerWithDpRank) -> Option<usize> {
     lookup.get(&worker).map(|worker_lookup| worker_lookup.len())
 }
@@ -206,6 +213,151 @@ mod race_tests {
             assert_direct_score(&index, &[1, 2, 3, 7, 8], worker0, 3);
             assert_direct_score(&index, &[1, 2, 3, 7, 8], worker1, 3);
             assert_direct_score(&index, &[1, 2, 3, 7, 8], worker2, 5);
+        }
+
+        #[test]
+        fn stale_scan_cannot_commit_after_split() {
+            let index = ConcurrentRadixTreeCompressed::new();
+            let worker1 = worker(1);
+            let worker2 = worker(2);
+            let worker3 = worker(3);
+            let mut lookup1 = direct_lookup();
+            let mut lookup2 = direct_lookup();
+            let mut lookup3 = direct_lookup();
+
+            apply_direct(
+                &index,
+                &mut lookup1,
+                make_store_event(1, &[1, 2, 3, 4, 5, 6]),
+            );
+            apply_direct(
+                &index,
+                &mut lookup2,
+                make_store_event(2, &[1, 2, 3, 4, 5, 6]),
+            );
+
+            let node = index
+                .root
+                .child_snapshot(LocalBlockHash(1))
+                .expect("root child should exist");
+            let blocks = stored_data(make_store_event(3, &[1, 2, 3, 4, 5, 6])).blocks;
+            let stale_scan = node.scan_store_prefix(&blocks);
+
+            apply_direct(
+                &index,
+                &mut lookup2,
+                make_store_event_with_parent(2, &[1, 2, 3], &[7]),
+            );
+
+            assert!(
+                node.promote_to_full_with_version(worker3, stale_scan.shape_version)
+                    .is_none()
+            );
+
+            apply_direct(
+                &index,
+                &mut lookup3,
+                make_store_event(3, &[1, 2, 3, 4, 5, 6]),
+            );
+
+            assert_eq!(
+                index.edge_topology_for_test(),
+                vec![edge_topology(
+                    &[1, 2, 3],
+                    vec![
+                        edge_topology(&[4, 5, 6], vec![]),
+                        edge_topology(&[7], vec![])
+                    ],
+                )],
+            );
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker2, 6);
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker3, 6);
+        }
+
+        #[test]
+        fn tail_parent_split_before_child_lookup_repairs_to_suffix() {
+            let index = ConcurrentRadixTreeCompressed::new();
+            let worker1 = worker(1);
+            let worker2 = worker(2);
+            let worker3 = worker(3);
+            let worker4 = worker(4);
+            let mut lookup1 = direct_lookup();
+            let mut lookup2 = direct_lookup();
+            let mut lookup3 = direct_lookup();
+            let mut lookup4 = direct_lookup();
+
+            for (worker_id, lookup) in [
+                (1, &mut lookup1),
+                (2, &mut lookup2),
+                (3, &mut lookup3),
+                (4, &mut lookup4),
+            ] {
+                apply_direct(&index, lookup, make_store_event(worker_id, &[1, 2, 3, 4]));
+            }
+            apply_direct(
+                &index,
+                &mut lookup1,
+                make_store_event_with_parent(1, &[1, 2, 3, 4], &[5, 6]),
+            );
+            apply_direct(
+                &index,
+                &mut lookup2,
+                make_store_event_with_parent(2, &[1, 2, 3, 4], &[7, 8]),
+            );
+
+            let stale_parent = index
+                .root
+                .child_snapshot(LocalBlockHash(1))
+                .expect("root child should exist");
+            let continuation = stored_data(make_store_event_with_parent(3, &[1, 2, 3, 4], &[9]));
+            let parent_hash = continuation.parent_hash.expect("continuation has a parent");
+            let plan = stale_parent
+                .plan_store_parent_edge(parent_hash, &continuation.blocks)
+                .expect("tail parent should be present before the split");
+            assert!(matches!(
+                plan.action,
+                ParentEdgePlanAction::InsertFromParent
+            ));
+
+            apply_direct(
+                &index,
+                &mut lookup4,
+                make_store_event_with_parent(4, &[1, 2], &[10]),
+            );
+
+            index
+                .insert_blocks_from_for_test(
+                    &mut lookup3,
+                    worker3,
+                    &stale_parent,
+                    parent_hash,
+                    &continuation.blocks,
+                )
+                .unwrap();
+
+            assert_eq!(
+                index.edge_topology_for_test(),
+                vec![edge_topology(
+                    &[1, 2],
+                    vec![
+                        edge_topology(
+                            &[3, 4],
+                            vec![
+                                edge_topology(&[5, 6], vec![]),
+                                edge_topology(&[7, 8], vec![]),
+                                edge_topology(&[9], vec![]),
+                            ],
+                        ),
+                        edge_topology(&[10], vec![]),
+                    ],
+                )],
+            );
+            assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
+            assert_direct_score(&index, &[1, 2, 3, 4, 7, 8], worker2, 6);
+            assert_direct_score(&index, &[1, 2, 3, 4, 9], worker3, 5);
+            assert_direct_score(&index, &[1, 2, 9], worker3, 2);
+            assert_direct_score(&index, &[1, 2, 10], worker4, 3);
         }
     }
 
