@@ -229,6 +229,12 @@ manifests: controller-gen yq ## Generate WebhookConfiguration, ClusterRole and C
 	done
 	echo "Removing name from standalone v1beta1 DynamoComponentDeployment required fields"
 	$(YQ) eval '(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.required) |= (. - ["name"])' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	# PodTemplateSpec is an external Kubernetes type, so its item-level markers cannot be declared on the API field.
+	# Item-scoped rules avoid unbounded list comprehensions without imposing maxItems on the public API.
+	# The annotation value bound matches Kubernetes' total annotation size limit.
+	echo "Adding item-scoped v1beta1 pod template CEL validation"
+	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamocomponentdeployments.yaml
+	$(YQ) eval 'with(.spec.versions[] | select(.name == "v1beta1") | .schema.openAPIV3Schema.properties.spec.properties.components.items.properties.podTemplate.properties; .spec.properties.containers.items."x-kubernetes-validations" = [{"rule": "self.name == \"main\" || (has(self.image) && self.image != \"\")", "message": "sidecar containers must specify a non-empty image"}] | .spec.properties.initContainers.items."x-kubernetes-validations" = [{"rule": "has(self.image) && self.image != \"\"", "message": "init containers must specify a non-empty image"}] | .metadata.properties.annotations.additionalProperties.maxLength = 262144)' -i --indent 2 config/crd/bases/nvidia.com_dynamographdeployments.yaml
 	echo "Fixing PluginSpec parameters field: json.RawMessage needs x-kubernetes-preserve-unknown-fields instead of type: string"
 	for file in config/crd/bases/*.yaml; do \
 		$(YQ) eval '(.. | select(has("parameters")) | .parameters | select(has("format") and .format == "byte")) |= (del(.format) | del(.type) | .x-kubernetes-preserve-unknown-fields = true)' -i --indent 2 $$file || exit 1; \

@@ -179,7 +179,7 @@ type ExperimentalSpec struct {
 
 	// failover configures active-passive GPU failover for this component.
 	// Requires `gpuMemoryService` to also be set, and `failover.mode` must
-	// match `gpuMemoryService.mode` (enforced by the validation webhook).
+	// match `gpuMemoryService.mode` (enforced by validation).
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
 

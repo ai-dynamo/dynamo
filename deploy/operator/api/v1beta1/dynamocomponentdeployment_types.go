@@ -112,9 +112,10 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// with standard defaults. All other containers in `podTemplate.spec.containers`
 	// are treated as user-managed sidecars: the operator does not inject
 	// defaults into them, so sidecars must specify required fields (e.g. `image`)
-	// themselves. The validation webhook rejects pod templates where a
+	// themselves. Validation rejects pod templates where a
 	// non-`"main"` container is missing a required field such as `image`.
 	// +optional
+	// +kubebuilder:validation:XValidation:rule="!has(self.metadata) || !has(self.metadata.annotations) || !('nvidia.com/vllm-distributed-executor-backend' in self.metadata.annotations) || self.metadata.annotations['nvidia.com/vllm-distributed-executor-backend'].lowerAscii() in ['mp', 'ray']",message="podTemplate backend annotation must be mp or ray, case-insensitively"
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
 	// replicas is the desired number of Pods for this component. When
@@ -180,7 +181,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// The full container definition (image, args, envFrom, env) lives in
 	// `podTemplate` -- this eliminates the redundant `image`, `args`,
 	// `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.
-	// The validation webhook rejects values that do not match any container
+	// Validation rejects values that do not match any container
 	// name in `podTemplate.spec.containers`.
 	// +optional
 	FrontendSidecar *string `json:"frontendSidecar,omitempty"`

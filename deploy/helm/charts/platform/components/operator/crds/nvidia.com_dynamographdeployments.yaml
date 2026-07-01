@@ -12511,7 +12511,7 @@ spec:
                             description: |-
                               failover configures active-passive GPU failover for this component.
                               Requires `gpuMemoryService` to also be set, and `failover.mode` must
-                              match `gpuMemoryService.mode` (enforced by the validation webhook).
+                              match `gpuMemoryService.mode` (enforced by validation).
                             properties:
                               mode:
                                 default: IntraPod
@@ -12608,7 +12608,7 @@ spec:
                           The full container definition (image, args, envFrom, env) lives in
                           `podTemplate` -- this eliminates the redundant `image`, `args`,
                           `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.
-                          The validation webhook rejects values that do not match any container
+                          Validation rejects values that do not match any container
                           name in `podTemplate.spec.containers`.
                         type: string
                       globalDynamoNamespace:
@@ -12691,7 +12691,7 @@ spec:
                           with standard defaults. All other containers in `podTemplate.spec.containers`
                           are treated as user-managed sidecars: the operator does not inject
                           defaults into them, so sidecars must specify required fields (e.g. `image`)
-                          themselves. The validation webhook rejects pod templates where a
+                          themselves. Validation rejects pod templates where a
                           non-`"main"` container is missing a required field such as `image`.
                         properties:
                           metadata:
@@ -12702,6 +12702,7 @@ spec:
                               annotations:
                                 additionalProperties:
                                   type: string
+                                  maxLength: 262144
                                 type: object
                               finalizers:
                                 items:
@@ -15070,6 +15071,9 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: self.name == "main" || (has(self.image) && self.image != "")
+                                      message: sidecar containers must specify a non-empty image
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -18142,6 +18146,9 @@ spec:
                                   required:
                                     - name
                                   type: object
+                                  x-kubernetes-validations:
+                                    - rule: has(self.image) && self.image != ""
+                                      message: init containers must specify a non-empty image
                                 type: array
                                 x-kubernetes-list-map-keys:
                                   - name
@@ -20805,6 +20812,9 @@ spec:
                               - containers
                             type: object
                         type: object
+                        x-kubernetes-validations:
+                          - message: podTemplate backend annotation must be mp or ray, case-insensitively
+                            rule: '!has(self.metadata) || !has(self.metadata.annotations) || !(''nvidia.com/vllm-distributed-executor-backend'' in self.metadata.annotations) || self.metadata.annotations[''nvidia.com/vllm-distributed-executor-backend''].lowerAscii() in [''mp'', ''ray'']'
                       replicas:
                         description: |-
                           replicas is the desired number of Pods for this component. When

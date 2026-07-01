@@ -57,17 +57,16 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantErr: "spec.components must have at least one component",
 		},
 		{
-			name: "component name is required",
+			name: "component identity is left to request-version validation",
 			deployment: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-graph", Namespace: "default"},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{}},
 				},
 			},
-			wantErr: "spec.components[0].name is required",
 		},
 		{
-			name: "component names are unique case-insensitively",
+			name: "component name uniqueness is left to request-version validation",
 			deployment: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-graph", Namespace: "default"},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
@@ -77,7 +76,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			wantErr: `spec.components[1].name "WORKER" duplicates component "worker" case-insensitively`,
 		},
 		{
 			name: "component replicas must be non-negative",
@@ -174,20 +172,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantErr: "spec.components[worker].experimental.gpuMemoryService: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1",
-		},
-		{
-			name: "sidecars must provide an image",
-			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
-				worker.PodTemplate = &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{Name: consts.MainContainerName},
-							{Name: "metrics"},
-						},
-					},
-				}
-			}),
-			wantErr: `spec.components[worker].podTemplate.spec.containers[1].image is required for sidecar container "metrics"`,
 		},
 	}
 
@@ -297,7 +281,6 @@ func TestDynamoGraphDeploymentValidator_ValidateAggregatesErrors(t *testing.T) {
 		spec.Restart = &nvidiacomv1beta1.Restart{}
 		spec.Components[0].Replicas = k8sptr.To(int32(-1))
 		spec.Components[1].Replicas = k8sptr.To(int32(-2))
-		spec.Components[1].CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{}
 	})
 	deployment.Annotations = map[string]string{
 		consts.KubeAnnotationDynamoOperatorOriginVersion: "not-semver",
@@ -312,7 +295,6 @@ func TestDynamoGraphDeploymentValidator_ValidateAggregatesErrors(t *testing.T) {
 		"spec.restart.id is required",
 		"spec.components[frontend].replicas must be non-negative",
 		"spec.components[worker].replicas must be non-negative",
-		"spec.components[worker].compilationCache.pvcName is required",
 	} {
 		assertBetaValidationError(t, err, wantErr)
 	}
@@ -635,7 +617,7 @@ func TestDynamoGraphDeploymentValidator_ValidateConvertedAlphaResourceSemantics(
 			},
 		},
 		{
-			name: "converted alpha extraPodMetadata annotations get beta podTemplate validation",
+			name: "converted alpha extraPodMetadata annotations are not revalidated as beta",
 			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].ExtraPodMetadata = &nvidiacomv1alpha1.ExtraPodMetadata{
 					Annotations: map[string]string{
@@ -643,19 +625,17 @@ func TestDynamoGraphDeploymentValidator_ValidateConvertedAlphaResourceSemantics(
 					},
 				}
 			},
-			wantErr: `spec.components[worker].podTemplate.metadata.annotations[nvidia.com/vllm-distributed-executor-backend] has invalid value "typo"`,
 		},
 		{
-			name: "converted alpha service names collide case-insensitively",
+			name: "converted alpha case-insensitive service names are accepted",
 			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["WORKER"] = &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: consts.ComponentTypeWorker,
 				}
 			},
-			wantErr: "duplicates component",
 		},
 		{
-			name: "converted alpha compilation cache mount requires a PVC name",
+			name: "converted alpha compilation cache mount keeps empty PVC name",
 			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].VolumeMounts = []nvidiacomv1alpha1.VolumeMount{
 					{
@@ -663,10 +643,9 @@ func TestDynamoGraphDeploymentValidator_ValidateConvertedAlphaResourceSemantics(
 					},
 				}
 			},
-			wantErr: "spec.components[worker].compilationCache.pvcName is required",
 		},
 		{
-			name: "converted alpha empty service map key is rejected as empty component name",
+			name: "converted alpha empty service map key is accepted",
 			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services = map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 					"": {
@@ -674,10 +653,9 @@ func TestDynamoGraphDeploymentValidator_ValidateConvertedAlphaResourceSemantics(
 					},
 				}
 			},
-			wantErr: "spec.components[0].name is required",
 		},
 		{
-			name: "converted alpha init containers must provide an image",
+			name: "converted alpha init containers are not revalidated as beta",
 			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{
 					PodSpec: &corev1.PodSpec{
@@ -685,7 +663,6 @@ func TestDynamoGraphDeploymentValidator_ValidateConvertedAlphaResourceSemantics(
 					},
 				}
 			},
-			wantErr: `spec.components[worker].podTemplate.spec.initContainers[0].image is required for init container "prep"`,
 		},
 	}
 
