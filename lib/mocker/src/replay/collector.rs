@@ -7,6 +7,8 @@ use serde::ser::{SerializeMap, Serializer};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use uuid::Uuid;
 
+use crate::common::protocols::OutputSignal;
+
 #[derive(Debug, Clone)]
 pub struct TraceSimulationReport {
     pub request_counts: TraceRequestCounts,
@@ -56,8 +58,9 @@ pub struct TraceThroughputStats {
     pub prefill_worker_seconds: f64,
     pub decode_worker_seconds: f64,
     /// GPUs per worker per role, derived from the mocker engine parallelism
-    /// (`MockEngineArgs::aic_gpus_per_worker` = aic_tp × aic_attention_dp); the
-    /// runtime sets it on the collector. 0 when not set (e.g. the online path).
+    /// (`MockEngineArgs::aic_gpus_per_worker` = tensor parallelism × materialized
+    /// DP topology); the runtime sets it on the collector. 0 when not set
+    /// (e.g. the online path).
     pub prefill_gpus_per_worker: usize,
     pub decode_gpus_per_worker: usize,
     /// GPU-hours = Σ_role `worker_seconds × gpus_per_worker / 3600` — the
@@ -753,6 +756,35 @@ impl TraceCollector {
     pub(crate) fn on_token(&mut self, uuid: Uuid, token_time_ms: f64) {
         if let Some(stats) = self.requests.get_mut(&uuid) {
             stats.token_times_ms.push(token_time_ms);
+        }
+    }
+
+    /// Move the tokens emitted by one scheduler pass to a shared completion
+    /// boundary. Scheduler cores record their rank-local end time while the
+    /// pass is formed; attention-DP replay then aligns every rank in the group
+    /// to the slowest rank before the pass becomes externally visible.
+    pub(crate) fn align_pass_token_times(
+        &mut self,
+        output_signals: &[OutputSignal],
+        completion_time_ms: f64,
+    ) {
+        let mut emitted_by_request = FxHashMap::default();
+        for signal in output_signals {
+            if signal.token_id.is_some() {
+                *emitted_by_request.entry(signal.uuid).or_insert(0usize) += 1;
+            }
+        }
+
+        for (uuid, emitted) in emitted_by_request {
+            let Some(stats) = self.requests.get_mut(&uuid) else {
+                continue;
+            };
+            let start = stats
+                .token_times_ms
+                .len()
+                .checked_sub(emitted)
+                .expect("scheduler emitted more output signals than collector tokens");
+            stats.token_times_ms[start..].fill(completion_time_ms);
         }
     }
 
