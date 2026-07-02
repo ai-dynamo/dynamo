@@ -82,7 +82,9 @@ use crate::preprocessor::prompt::{MediaRequestExt, prompt_formatter_from_mdc};
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
-pub use crate::protocols::common::metrics::{ANNOTATION_LLM_METRICS, LLMMetricAnnotation};
+pub use crate::protocols::common::metrics::{
+    ANNOTATION_AUDIT_USAGE, ANNOTATION_LLM_METRICS, LLMMetricAnnotation,
+};
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
@@ -2010,16 +2012,17 @@ impl OpenAIPreprocessor {
         stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
+        emit_audit_usage_chunk: bool,
         trace_tokens_enabled: bool,
         trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
     ) -> impl Stream<Item = Annotated<Resp>> + Send
     where
         S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
-        Resp: Send + Sync + 'static + std::fmt::Debug,
+        Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
     {
         struct State<Resp>
         where
-            Resp: Send + Sync + 'static + std::fmt::Debug,
+            Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
         {
             response_stream: Pin<Box<dyn Stream<Item = Annotated<BackendOutput>> + Send>>,
             response_generator: Box<dyn DeltaGeneratorExt<Resp>>,
@@ -2028,7 +2031,11 @@ impl OpenAIPreprocessor {
             cumulative_output_tokens: usize,
             finish_reason_sent: bool,
             usage_chunk_sent: bool,
+            /// Buffered plain usage chunk to send to the client after the audit
+            /// chunk (ANNOTATION_AUDIT_USAGE). Only Some when is_usage_enabled().
+            pending_client_usage: Option<Annotated<Resp>>,
             finished: bool,
+            emit_audit_usage_chunk: bool,
             trace_tokens_enabled: bool,
             trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
         }
@@ -2041,7 +2048,9 @@ impl OpenAIPreprocessor {
             cumulative_output_tokens: 0,
             finish_reason_sent: false,
             usage_chunk_sent: false,
+            pending_client_usage: None,
             finished: false,
+            emit_audit_usage_chunk,
             trace_tokens_enabled,
             trace_finish_reason_metadata,
         };
@@ -2050,7 +2059,20 @@ impl OpenAIPreprocessor {
 
         stream::unfold(state, |mut inner| {
             async move {
-                // If already finished, return None immediately
+                // Drain the buffered client-facing plain usage chunk first.
+                // This MUST come before the `finished` guard: the stream-end
+                // handler sets inner.finished = true before returning the audit
+                // chunk, so on the very next iteration the finished guard would
+                // terminate before we ever emit the client chunk.
+                if let Some(client_chunk) = inner.pending_client_usage.take() {
+                    inner.finished = true;
+                    // Emit unconditionally to match the non-audit path below; the
+                    // chunk is only buffered after a finish_reason, so auditing must
+                    // not alter the client SSE tail.
+                    return Some((client_chunk, inner));
+                }
+
+                // If already finished (and no pending client chunk), stop.
                 if inner.finished {
                     return None;
                 }
@@ -2149,7 +2171,9 @@ impl OpenAIPreprocessor {
                         decode_dp_rank,
                         decode_worker_type,
                         tokenize_latency: tracker.as_ref().and_then(|t| t.tokenize_latency()),
-                        detokenize_total_latency: tracker.as_ref().and_then(|t| t.detokenize_total_latency()),
+                        detokenize_total_latency: tracker
+                            .as_ref()
+                            .and_then(|t| t.detokenize_total_latency()),
                         detokenize_count: tracker.as_ref().map(|t| t.detokenize_count()),
                     };
                     if inner.trace_tokens_enabled {
@@ -2247,29 +2271,57 @@ impl OpenAIPreprocessor {
                             DETOKENIZE_TOKEN_COUNT.inc_by(t.detokenize_count() as f64);
                         }
 
-                        // Send the usage chunk if needed
-                        let data = if inner.response_generator.is_usage_enabled() {
-                            Some(usage_chunk)
+                        let usage_requested = inner.response_generator.is_usage_enabled();
+
+                        if inner.emit_audit_usage_chunk {
+                            // Audit on: emit a dedicated audit-usage chunk that
+                            // always carries usage for the audit DeltaAggregator
+                            // (the EventConverter strips it entirely from the
+                            // client), and buffer the plain client usage chunk only
+                            // when include_usage was requested.
+                            if usage_requested {
+                                inner.pending_client_usage = Some(Annotated::<Resp> {
+                                    id: None,
+                                    data: Some(usage_chunk.clone()),
+                                    event: None,
+                                    comment: None,
+                                    error: None,
+                                });
+                            }
+
+                            let annotation =
+                                llm_metrics.to_annotation::<()>().unwrap_or_else(|e| {
+                                    tracing::warn!("Failed to serialize metrics: {}", e);
+                                    Annotated::<()>::from_data(())
+                                });
+                            let audit_usage = Annotated::<Resp> {
+                                id: None,
+                                data: Some(usage_chunk),
+                                event: Some(ANNOTATION_AUDIT_USAGE.to_string()),
+                                comment: annotation.comment,
+                                error: None,
+                            };
+                            Some((audit_usage, inner))
                         } else {
-                            None
-                        };
-
-                        let mut annotated_usage = Annotated::<Resp> {
-                            id: None,
-                            data,
-                            event: None,
-                            comment: None,
-                            error: None,
-                        };
-                        attach_llm_metrics(&mut annotated_usage, llm_metrics);
-
-                        tracing::trace!(
-                            request_id = inner.context.id(),
-                            "Sending final usage chunk for OpenAI compliance, annotated_usage: {:?}",
-                            annotated_usage
-                        );
-
-                        Some((annotated_usage, inner))
+                            // Audit off: a single usage chunk; data is present only
+                            // when include_usage was requested. Metrics ride via the
+                            // typed (serde-skip) llm_metrics field for internal
+                            // observation, never reaching the client.
+                            let data = if usage_requested {
+                                Some(usage_chunk)
+                            } else {
+                                None
+                            };
+                            let mut annotated_usage = Annotated::<Resp> {
+                                id: None,
+                                data,
+                                event: None,
+                                comment: None,
+                                error: None,
+                            };
+                            attach_llm_metrics(&mut annotated_usage, llm_metrics);
+                            Some((annotated_usage, inner))
+                        }
                     } else {
                         // stream closed
                         None
@@ -2919,12 +2971,11 @@ impl
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
 
-        // Build audit handle (None if no DYN_AUDIT_SINKS)
-        let mut audit_handle = crate::audit::handle::create_handle(&request, &request_id);
-
-        if let Some(ref mut h) = audit_handle {
-            h.set_request(std::sync::Arc::new(request.clone()));
-        }
+        // Build audit handle (None if no DYN_AUDIT_SINKS / not audit-eligible).
+        // The handle snapshots the pristine request and its arrival time here;
+        // the single combined record is published once at stream completion
+        // (or with an empty response on cancel/timeout), off the request path.
+        let audit_handle = crate::audit::handle::create_handle(&request, &request_id);
 
         // For non-streaming requests (stream=false), enable usage by default
         // This ensures compliance with OpenAI API spec where non-streaming responses
@@ -2998,6 +3049,7 @@ impl
             response_stream,
             response_generator,
             context.clone(),
+            audit_handle.is_some(),
             trace_tokens_enabled,
             trace_finish_reason_metadata,
         );
@@ -3012,7 +3064,7 @@ impl
         // Apply audit aggregation strategy.
         // The audit branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
         // while the non-audit branch boxes the impl Stream from postprocessor_parsing_stream.
-        let final_stream = if let Some(mut audit) = audit_handle {
+        let final_stream = if let Some(audit) = audit_handle {
             let (stream, agg_fut) = if audit.streaming() {
                 // Streaming: apply scan (pass-through + parallel aggregation)
                 crate::audit::stream::scan_aggregate_with_future(transformed_stream)
@@ -3021,11 +3073,22 @@ impl
                 crate::audit::stream::fold_aggregate_with_future(transformed_stream)
             };
 
-            // Spawn audit task
+            // Spawn the audit emit off the request path. `agg_fut` resolves to
+            // None on client cancel / gateway timeout / aggregation failure; we
+            // still emit the combined record with an empty response so those
+            // cases remain auditable. The record carries the request snapshot
+            // and arrival time captured at handle creation.
             tokio::spawn(async move {
-                let final_resp = agg_fut.await;
-                audit.set_response(Arc::new(final_resp));
-                audit.emit();
+                match agg_fut.await {
+                    Some(final_resp) => audit.emit(Some(Arc::new(final_resp))),
+                    None => {
+                        tracing::debug!(
+                            request_id = %audit.request_id(),
+                            "audit: response aggregation incomplete (client cancel / timeout); emitting request-only record"
+                        );
+                        audit.emit(None);
+                    }
+                }
             });
 
             stream
@@ -3163,6 +3226,7 @@ impl
             response_stream,
             response_generator,
             context.clone(),
+            false,
             trace_tokens_enabled,
             trace_finish_reason_metadata,
         );
@@ -3308,6 +3372,80 @@ mod tests {
             (Some(0.0), Some(7), Some(-3))
         );
         assert_eq!(routing_priorities(None), (None, None, None));
+    }
+
+    fn test_llm_metrics_annotation() -> LLMMetricAnnotation {
+        LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 20,
+            chunk_tokens: 3,
+            cached_tokens: Some(4),
+            prefill_worker_id: Some(1),
+            prefill_dp_rank: Some(2),
+            prefill_worker_type: Some("prefill".to_string()),
+            decode_worker_id: Some(3),
+            decode_dp_rank: Some(4),
+            decode_worker_type: Some("decode".to_string()),
+            tokenize_latency: Some(std::time::Duration::from_millis(5)),
+            detokenize_total_latency: Some(std::time::Duration::from_micros(50)),
+            detokenize_count: Some(6),
+        }
+    }
+
+    #[test]
+    fn llm_metrics_from_annotation_recognizes_both_metric_event_tags() {
+        // Both the per-chunk `llm_metrics` event and the audit-only `audit_usage`
+        // event carry the serialized LLMMetricAnnotation as their comment and must
+        // be observed by the metrics collector.
+        let base = test_llm_metrics_annotation()
+            .to_annotation::<()>()
+            .expect("metrics annotation serializes");
+        for tag in [ANNOTATION_LLM_METRICS, ANNOTATION_AUDIT_USAGE] {
+            let tagged = Annotated::<()> {
+                id: None,
+                data: None,
+                event: Some(tag.to_string()),
+                comment: base.comment.clone(),
+                error: None,
+            };
+            let metrics = LLMMetricAnnotation::from_annotation(&tagged)
+                .expect("metrics annotation parses")
+                .unwrap_or_else(|| panic!("metrics recognized for tag {tag}"));
+            assert_eq!(metrics.input_tokens, 10);
+            assert_eq!(metrics.output_tokens, 20);
+            assert_eq!(metrics.detokenize_count, Some(6));
+        }
+    }
+
+    #[test]
+    fn llm_metrics_from_annotation_ignores_untagged_and_other_events() {
+        // No event → not metrics (per-chunk metrics are event-tagged again).
+        let untagged = Annotated::<()> {
+            id: None,
+            data: None,
+            event: None,
+            comment: Some(vec!["{\"input_tokens\":1}".to_string()]),
+            error: None,
+        };
+        assert!(
+            LLMMetricAnnotation::from_annotation(&untagged)
+                .expect("untagged chunk is not an error")
+                .is_none()
+        );
+
+        // A different event tag → not metrics.
+        let other = Annotated::<()> {
+            id: None,
+            data: None,
+            event: Some(ANNOTATION_TOKEN_IDS.to_string()),
+            comment: None,
+            error: None,
+        };
+        assert!(
+            LLMMetricAnnotation::from_annotation(&other)
+                .expect("other event is not an error")
+                .is_none()
+        );
     }
 
     /// PRE.1 — `skip_special_tokens` default. See `lib/llm/PREPROCESSOR_CASES.md`.

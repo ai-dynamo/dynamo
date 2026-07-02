@@ -43,6 +43,12 @@ RUN apt-get update && \
     ldconfig -p | grep -q 'libturbojpeg.so.0' && \
     rm -rf /var/lib/apt/lists/*
 
+RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    CUBINS_DIR="$SITE_PACKAGES/flashinfer_cubin/cubins" && \
+    if [ -d "$CUBINS_DIR" ]; then \
+        find "$CUBINS_DIR" -type d -exec chmod g+rwx {} + ; \
+    fi
+
 {% if device == "xpu" %}
 {# XPU runtime: NIXL + UCX are needed for P2P transport on Intel GPUs.
    CUDA sglang runtime does NOT include NIXL/UCX (matching upstream main);
