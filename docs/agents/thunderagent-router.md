@@ -43,7 +43,7 @@ A program is created on its first turn, keyed by `session_id`. Public session id
 
 ## Utilization-Driven Control Loop
 
-Pause/resume is driven by per-worker utilization — the program working set as a fraction of the worker's KV pool. The loop has three bands:
+Pause/resume is driven by per-worker utilization — the program working set as a fraction of the worker's retention budget. With SGLang HiCache enabled, Dynamo reads the worker's published GPU KV and host HiCache capacities and uses their sum. The host tier is included so native GPU-to-host spill can happen before this scheduler pauses programs. Mooncake is excluded: it is conditional content-addressed storage, not guaranteed per-program retention. The loop has three bands:
 
 - At or above `pause-threshold`, the worker is over-subscribed; the tick pauses ACTING programs until utilization falls back to `pause-target`.
 - In the `[soft-demote-threshold, pause-threshold)` band, programs are soft-demoted (a negative priority jump) but not paused — early backpressure before a hard pause is needed.
@@ -51,7 +51,7 @@ Pause/resume is driven by per-worker utilization — the program working set as 
 
 | Flag | Env var | Default | Description |
 |---|---|---|---|
-| `--pause-threshold` | `DYN_THUNDERAGENT_PAUSE_THRESHOLD` | `0.95` | Working-set fraction of the KV pool that fires a pause cycle. |
+| `--pause-threshold` | `DYN_THUNDERAGENT_PAUSE_THRESHOLD` | `0.95` | Working-set fraction of the retention budget that fires a pause cycle. |
 | `--soft-demote-threshold` | `DYN_THUNDERAGENT_SOFT_DEMOTE_THRESHOLD` | `0.80` | Soft-demote band start (negative priority jump in `[soft, pause)`). |
 | `--pause-target` | `DYN_THUNDERAGENT_PAUSE_TARGET` | `0.80` | Setpoint that pause cycles drive utilization back down to. Must be `<= pause-threshold`. |
 | `--resume-hysteresis` | `DYN_THUNDERAGENT_RESUME_HYSTERESIS` | `0.10` | Headroom below `pause-threshold` required before any resume. |
@@ -126,14 +126,14 @@ Enable these by lowering the log level for `dynamo.thunderagent_router`. They gi
 
 For per-request tracing (token counts, cache hits, worker placement), the router also integrates with [Agent Tracing](agent-tracing.md#enable-output): set `DYN_REQUEST_TRACE=1` on the frontend to land a `request_end` record per LLM call. Harness tool-event spans are separate: they require `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` plus a configured publisher.
 
-## Reproducing the MiniMax-M2 Results
+## Reproducing with Pi
 
-The headline numbers (program-aware scheduling vs KV-routing-only on the same hardware, ~12-16% throughput improvement on SWE-bench-Lite with two TP4 MiniMax-M2 replicas on a single 8×H100 node) and the exact launch/repro commands live in the [folder README](../../components/src/dynamo/thunderagent_router/README.md).
+The maintained smoke path is Pi through the Dynamo provider. The complete setup and session-header verification steps live in the [folder README](../../components/src/dynamo/thunderagent_router/README.md#reproducing-with-pi). Run a Harbor/SWE-bench cohort only after that smoke confirms one stable session ID reaches the router.
 
 ## References
 
 - ThunderAgent paper: [arxiv.org/abs/2602.13692](https://arxiv.org/abs/2602.13692)
 - Upstream ThunderAgent reference: [HaoKang-Timmy/ThunderAgent](https://github.com/HaoKang-Timmy/ThunderAgent)
-- Repro fork (mini-swe-agent + session injector): [ishandhanani/ThunderAgent](https://github.com/ishandhanani/ThunderAgent)
+- Pi Dynamo provider: [ai-dynamo/agent-plugins](https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin)
 - Dynamo KV router: [Router Guide](../components/router/router-guide.md)
 - [Session IDs](session-ids.md), [Agent Tracing](agent-tracing.md), and [Agent Hints](agent-hints.md)

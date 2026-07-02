@@ -73,6 +73,12 @@ Requests without session identity are passed through as one-off (no program
 admission, no pause/resume). This is the safe fallback for non-agentic traffic
 sharing the same workers.
 
+### SGLang HiCache retention budget
+
+`dynamo.sglang` publishes the authoritative GPU KV and HiCache host capacities in each worker's model deployment card. The scheduler automatically uses their sum as its retention budget, so `--pause-threshold 0.95` means 95% of the combined GPU + host pool; there is no ThunderAgent HiCache flag to set. This lets SGLang spill from GPU to its native host tier before ThunderAgent starts holding programs at tool boundaries.
+
+Mooncake capacity is deliberately excluded. It is a content-addressed storage tier whose contents may be evicted or may not match the next request, not an unconditional program-retention budget. ThunderAgent does not call HiCache eviction, restore, prefetch, or Mooncake APIs; SGLang remains the admission and materialization authority.
+
 ## Tracing
 
 Enable request tracing on the frontend with the master switch
@@ -94,70 +100,29 @@ at that endpoint (producers connect) and `tool_start` / `tool_end` /
 `tool_call_id` pairs, giving you the full LLM-turn ↔ tool-gap timeline per
 agent.
 
-## Reproducing the MiniMax-M2 results
+## Reproducing with Pi
 
-The headline numbers — program-aware scheduling vs KV-routing-only on the
-same hardware — come from driving SWE-bench-Lite through **mini-SWE-agent** at
-128 concurrent workers, against two TP4 MiniMax-M2 replicas on a single 8×H100
-node.
-
-### 1. Bring up Dynamo (2× TP4 MiniMax-M2)
-
-One script brings up both TP4 workers, the program-aware router, and the
-frontend on `:8100`:
+The maintained smoke path is Pi through the Dynamo provider, not the old private mini-SWE-agent fork. Start the workers, this router, and the frontend as described above, then wait for the frontend to advertise the served model:
 
 ```bash
-bash components/src/dynamo/thunderagent_router/run_minimax_8xh100.sh
+curl -fsS http://127.0.0.1:8000/v1/models
 ```
 
-First launch JIT-warms the FP8 kernels — wait for `curl localhost:8100/v1/models`
-to list the model before starting the client.
-
-For the **KV-routing-only baseline** arm, drop the `thunderagent_router` line
-from the script and run the frontend in KV-router mode against the same two
-workers (`--router-mode kv`).
-
-### 2. Run mini-SWE-agent
-
-The mini-SWE-agent variant we reference is bundled in the ThunderAgent fork on
-the `feat/mini-swe-direct-dynamo` branch: it patches mini-SWE-agent so that with
-`MSWEA_BACKEND=dynamo` it injects Dynamo session headers natively (no proxy in the
-loop), mapping each SWE-bench instance to one ThunderAgent program. Clone it,
-point it at the frontend on `:8100`, and drive SWE-bench-Lite at 128 concurrent
-workers:
+Install the [Pi Dynamo provider](https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin) from a checkout, then send a sessionized turn through the frontend:
 
 ```bash
-git clone -b feat/mini-swe-direct-dynamo https://github.com/ishandhanani/ThunderAgent
-cd ThunderAgent/examples/inference/mini-swe-agent
-# [full] pulls the swebench extras (datasets + swe-rex); a bare `-e .` can't run swebench.
-uv venv && source .venv/bin/activate && uv pip install -e ".[full]"
+git clone https://github.com/ai-dynamo/agent-plugins.git
+cd agent-plugins/pi-plugin
+npm install && npm run build
+pi install "$PWD"
 
-# The bundled config defaults base_url to :8000; point it at step 1's frontend (:8100).
-sed -i 's#http://localhost:8000/v1#http://localhost:8100/v1#' \
-  src/minisweagent/config/extra/swebench.yaml
-
-export OPENAI_API_KEY="DUMMY"          # any non-empty value; the frontend ignores it
-export MSWEA_BACKEND="dynamo"          # inject Dynamo session headers natively
-
-mini-extra swebench \
-  --config src/minisweagent/config/extra/swebench.yaml \
-  --subset lite --split test --workers 128 \
-  --model 'MiniMaxAI/MiniMax-M2' \
-  --output ./swebench_out --redo-existing
+export DYNAMO_BASE_URL=http://127.0.0.1:8000/v1
+export DYNAMO_API_KEY=dummy
+export DYN_AGENT_SESSION_ID=ta-repro-$(uuidgen)
+pi --model dynamo/<served-model-name> -p 'Reply exactly READY.'
 ```
 
-For the **KV-routing-only baseline** arm, bring Dynamo up in KV-router mode
-(step 1, `--router-mode kv`, no `thunderagent_router`) and rerun the same
-command against the same two workers.
-
-### Expected
-
-Over the 10–67 min steady-state window, program-aware routing
-(`thunderagent_router`) sustains **≈27.5 steps/min** versus **≈23.7** for the
-KV-routing-only baseline on the same two workers — an **8–16% throughput
-improvement** (≈16% at the steady-state peak; ≈8.8% in the stricter matched-A/B
-framing). Throughput (steps/min over the window), not resolved-rate, is the
-metric at this concurrency; resolved-rate deltas are within run-to-run noise.
+The provider sends `x-dynamo-session-id` on every LLM request. `DYN_REQUEST_TRACE` is optional and controls Dynamo trace collection/tool-event relay only; it does not control session headers. With `DYN_REQUEST_TRACE=1` on the frontend, confirm the trace row carries the same session ID before running a larger Harbor/SWE-bench cohort. See [Agent Harnesses](/docs/agents/agent-harnesses.md#pi) for the provider contract.
 
 ## Citation
 
@@ -181,5 +146,5 @@ ThunderAgent paper:
 - Conceptual docs: [docs/agents/thunderagent-router.md](/docs/agents/thunderagent-router.md)
 - ThunderAgent paper: <https://arxiv.org/abs/2602.13692>
 - Upstream ThunderAgent reference: <https://github.com/HaoKang-Timmy/ThunderAgent>
-- Repro fork (mini-swe-agent + session injector): <https://github.com/ishandhanani/ThunderAgent>
+- Pi Dynamo provider: <https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin>
 - Dynamo KV router: [Router Guide](/docs/components/router/router-guide.md)
