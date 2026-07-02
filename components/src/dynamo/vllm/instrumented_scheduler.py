@@ -270,6 +270,7 @@ class InstrumentedScheduler(AsyncScheduler):
         kv_cache_config: "KVCacheConfig",
         structured_output_manager: "StructuredOutputManager",
         block_size: int,
+        hash_block_size: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -277,7 +278,11 @@ class InstrumentedScheduler(AsyncScheduler):
             kv_cache_config=kv_cache_config,
             structured_output_manager=structured_output_manager,
             block_size=block_size,
+            hash_block_size=hash_block_size,
             **kwargs,
+        )
+        self._bench_hash_block_size = (
+            block_size if hash_block_size is None else hash_block_size
         )
 
         dp_rank = self._resolve_dp_rank(vllm_config.parallel_config)
@@ -652,7 +657,7 @@ class InstrumentedScheduler(AsyncScheduler):
             )
             init_none_hash(caching_hash_fn)
             self._bench_block_hasher = get_request_block_hasher(
-                self.block_size, caching_hash_fn
+                self._bench_hash_block_size, caching_hash_fn
             )
         else:
             self._bench_block_hasher = None
@@ -738,15 +743,18 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
     def _bench_cached_kv_read_tokens(self, req: Request) -> int:
+        coordinator = self.kv_cache_manager.coordinator
         if self._bench_uses_per_group_cache_lookup():
-            _, per_group_hits = (
-                self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
-                    req.block_hashes,
-                    req.num_tokens - 1,
-                )
+            _, per_group_hits = coordinator.find_longest_cache_hit_per_group(
+                req.block_hashes,
+                req.num_tokens - 1,
             )
             return max(per_group_hits, default=0)
-        return self.kv_cache_manager.get_computed_blocks(req)[1]
+        _, cached_tokens = coordinator.find_longest_cache_hit(
+            req.block_hashes,
+            req.num_tokens - 1,
+        )
+        return cached_tokens
 
     def _bench_generate_decode_grid(self) -> None:
         n_len = max(1, self._bench_config.decode_length_granularity)

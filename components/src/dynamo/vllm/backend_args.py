@@ -246,9 +246,15 @@ class DynamoVllmArgGroup(ArgGroup):
             default=1,
             arg_type=int,
             help=(
-                "Number of block-aligned initial KV-read sample points per ISL "
-                "for the prefill sweep. The default keeps the existing "
-                "cache-miss-only sweep (default: 1)."
+                "Maximum number of initial KV-read samples per prefill ISL "
+                f"(1 to {MAX_BENCHMARK_AXIS_GRANULARITY}). For values greater "
+                "than 1, candidate samples are "
+                "evenly spaced from 0 to the largest usable KV-read prefix below "
+                "the ISL, rounded down to KV-block boundaries, and deduplicated; "
+                "therefore fewer samples may result. A value of 1 samples only 0 "
+                "(cache miss; default: 1). Values greater than 1 require prefix "
+                "caching. The total benchmark grid is limited to "
+                f"{MAX_BENCHMARK_GRID_POINTS} points."
             ),
         )
         add_argument(

@@ -28,6 +28,7 @@ from vllm.v1.request import RequestStatus  # noqa: E402
 # If this import is deferred to inside a test body, the real ``vllm`` will
 # not be resolvable and ``instrumented_scheduler`` will fail to load with
 # ``ModuleNotFoundError: No module named 'vllm.sampling_params'``.
+import dynamo.vllm.instrumented_scheduler as instrumented_scheduler_module  # noqa: E402
 from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
     BenchmarkConfig,
     BenchmarkPoint,
@@ -664,9 +665,9 @@ def test_decode_grid_first_ctx_yields_block_aligned_capacity():
     InstrumentedScheduler._bench_generate_decode_grid(stub)
 
     boundary_points = [p for p in stub._bench_grid if p.context_length == block_size]
-    assert len(boundary_points) > 0, (
-        f"grid missing ctx_len={block_size} entries: {stub._bench_grid}"
-    )
+    assert (
+        len(boundary_points) > 0
+    ), f"grid missing ctx_len={block_size} entries: {stub._bench_grid}"
     # 100 blocks // 2 blocks-per-req == 50 max batch.
     assert max(p.batch_size for p in boundary_points) <= 50, (
         f"boundary ctx_len={block_size}: max batch must not exceed "
@@ -678,6 +679,70 @@ def test_decode_grid_first_ctx_yields_block_aligned_capacity():
 # ---------------------------------------------------------------------------
 # Prefill KV-read grid and seed lifecycle
 # ---------------------------------------------------------------------------
+
+
+def test_benchmark_hasher_uses_vllm_hash_granularity(monkeypatch, tmp_path):
+    parent_init_args = {}
+
+    def fake_parent_init(self, **kwargs):
+        parent_init_args.update(kwargs)
+        self.block_size = kwargs["block_size"]
+        self.cache_config = SimpleNamespace(
+            enable_prefix_caching=True,
+            prefix_caching_hash_algo="builtin",
+        )
+
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "__init__",
+        fake_parent_init,
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module,
+        "_FpmPublisherThread",
+        MagicMock(),
+    )
+    caching_hash_fn = MagicMock()
+    monkeypatch.setattr(
+        instrumented_scheduler_module,
+        "get_hash_fn_by_name",
+        MagicMock(return_value=caching_hash_fn),
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module,
+        "init_none_hash",
+        MagicMock(),
+    )
+    block_hasher = MagicMock()
+    block_hasher_factory = MagicMock(return_value=block_hasher)
+    monkeypatch.setattr(
+        instrumented_scheduler_module,
+        "get_request_block_hasher",
+        block_hasher_factory,
+    )
+    monkeypatch.delenv(
+        instrumented_scheduler_module.ENV_FPM_BENCHMARK_OUTPUT_PATH,
+        raising=False,
+    )
+
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_index=0),
+        additional_config={
+            "benchmark": {"output_path": str(tmp_path / "benchmark.json")}
+        },
+    )
+    scheduler = InstrumentedScheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=object(),
+        structured_output_manager=object(),
+        block_size=32,
+        hash_block_size=16,
+    )
+
+    assert parent_init_args["hash_block_size"] == 16
+    assert scheduler._bench_hash_block_size == 16
+    assert scheduler._bench_block_hasher is block_hasher
+    block_hasher_factory.assert_called_once_with(16, caching_hash_fn)
 
 
 def _prefill_grid_stub(*, kv_read_granularity: int, block_size: int = 8):
@@ -751,6 +816,29 @@ def test_mamba_connector_uses_scheduler_per_group_cache_lookup():
     coordinator.find_longest_cache_hit_per_group.assert_called_once_with(
         request.block_hashes, request.num_tokens - 1
     )
+
+
+def test_prefill_kv_read_validation_does_not_record_prefix_cache_stats():
+    stub = _prefill_grid_stub(kv_read_granularity=3, block_size=8)
+    coordinator = SimpleNamespace(
+        find_longest_cache_hit=MagicMock(return_value=(([],), 16))
+    )
+    get_computed_blocks = MagicMock(
+        side_effect=AssertionError("stats-recording lookup should not be used")
+    )
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=coordinator,
+        get_computed_blocks=get_computed_blocks,
+    )
+    stub.connector = None
+    stub.has_mamba_layers = False
+    request = SimpleNamespace(block_hashes=[b"hash"], num_tokens=40)
+
+    assert InstrumentedScheduler._bench_cached_kv_read_tokens(stub, request) == 16
+    coordinator.find_longest_cache_hit.assert_called_once_with(
+        request.block_hashes, request.num_tokens - 1
+    )
+    get_computed_blocks.assert_not_called()
 
 
 def test_prefill_kv_read_seed_drains_then_measures_with_same_salt():
