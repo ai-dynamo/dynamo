@@ -3,10 +3,12 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
-use tokio::sync::Notify;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::{Mutex, Notify, mpsc::Sender};
 use tokio::task::{JoinHandle, JoinSet};
 
 use anyhow::Context as _;
@@ -185,9 +187,13 @@ pub struct ModelWatcher {
     /// Wakes tasks blocked in `recover_concurrent_registration` when a
     /// `RegistrationGuard` drops (i.e. a registration completes or panics).
     registration_notify: Notify,
-    /// Tracks in-flight `handle_put` tasks by instance path so that `handle_delete`
-    /// can await a racing put before proceeding with cleanup.
-    pending_puts: DashMap<String, JoinHandle<()>>,
+    /// Tracks in-flight `handle_put` tasks by instance path so a later operation
+    /// can cancel a superseded registration.
+    pending_puts: DashMap<String, PendingPut>,
+    /// Serializes state changes for one model-card instance. The generation
+    /// fence preserves discovery-event order even when spawned tasks acquire
+    /// the per-instance lock in a different order.
+    instance_operations: DashMap<String, Arc<InstanceOperation>>,
     /// Maps an MDC instance path to the LoRA adapter name recorded in the pre-spawn state-tracker
     /// addition, so a removal whose model card was never durably saved (handle_put failed before
     /// save) can still remove exactly that adapter from the tracker instead of leaving phantom
@@ -245,6 +251,46 @@ struct RegistrationGuard<'a> {
     notify: &'a Notify,
 }
 
+struct PendingPut {
+    generation: u64,
+    handle: JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct InstanceOperation {
+    generation: AtomicU64,
+    lock: Mutex<()>,
+}
+
+impl InstanceOperation {
+    fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    fn begin(&self) -> u64 {
+        self.generation
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
+    }
+
+    fn reserve_after(&self, expected: u64) -> Option<u64> {
+        let next = expected.wrapping_add(1);
+        self.generation
+            .compare_exchange(expected, next, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| next)
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.current_generation() == generation
+    }
+}
+
+enum DeleteOutcome {
+    Superseded,
+    Processed(Option<String>),
+}
+
 impl Drop for RegistrationGuard<'_> {
     fn drop(&mut self) {
         self.set.remove(&self.key);
@@ -278,6 +324,7 @@ impl ModelWatcher {
             registering_worker_sets: DashSet::new(),
             registration_notify: Notify::new(),
             pending_puts: DashMap::new(),
+            instance_operations: DashMap::new(),
             pending_lora_adds: DashMap::new(),
             local_model_path: None,
             tokenizer_backend: None,
@@ -300,6 +347,63 @@ impl ModelWatcher {
         if let Some(tokenizer_backend) = self.tokenizer_backend {
             card.runtime_config.tokenizer_backend = Some(tokenizer_backend);
         }
+    }
+
+    fn instance_operation(&self, key: &str) -> Arc<InstanceOperation> {
+        self.instance_operations
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(InstanceOperation::default()))
+            .clone()
+    }
+
+    fn begin_instance_operation(&self, key: &str) -> (Arc<InstanceOperation>, u64) {
+        let operation = self.instance_operation(key);
+        let generation = operation.begin();
+        (operation, generation)
+    }
+
+    fn observe_instance_operation(&self, key: &str) -> (Arc<InstanceOperation>, u64) {
+        let operation = self.instance_operation(key);
+        let generation = operation.current_generation();
+        (operation, generation)
+    }
+
+    fn prune_instance_operation(&self, key: &str, operation: &Arc<InstanceOperation>) {
+        self.instance_operations.remove_if(key, |_, current| {
+            Arc::ptr_eq(current, operation) && Arc::strong_count(current) == 2
+        });
+    }
+
+    fn seed_lora_state_for_put(
+        &self,
+        mcid: &ModelCardInstanceId,
+        card: &ModelDeploymentCard,
+    ) {
+        use crate::kv_router::protocols::WorkerWithDpRank;
+
+        let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
+        if let Some(adapter_name) =
+            seed_lora_state_from_card(self.manager.lora_state_tracker(), worker, card)
+        {
+            self.pending_lora_adds
+                .insert(mcid.to_path(), adapter_name);
+        }
+    }
+
+    async fn handle_put_if_current(
+        &self,
+        mcid: &ModelCardInstanceId,
+        card: &mut ModelDeploymentCard,
+        operation: &InstanceOperation,
+        generation: u64,
+    ) -> Option<anyhow::Result<()>> {
+        let _guard = operation.lock.lock().await;
+        if !operation.is_current(generation) {
+            return None;
+        }
+
+        self.seed_lora_state_for_put(mcid, card);
+        Some(self.handle_put(mcid, card).await)
     }
 
     /// Wait until we have at least one chat completions model and return it's name.
@@ -441,38 +545,23 @@ impl ModelWatcher {
                         continue;
                     }
 
-                    // Feed the LoRA state tracker for every worker registration (before the spawn
-                    // below, so `card` is read before it is moved into the task). An adapter card
-                    // registers the loaded adapter (+capacity); a base card advertising
-                    // runtime_config.max_gpu_lora_count seeds capacity-only so idle LoRA-capable
-                    // workers are visible to the controller before any adapter is loaded there.
-                    {
-                        use crate::kv_router::protocols::WorkerWithDpRank;
-                        let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
-                        if let Some(adapter_name) = seed_lora_state_from_card(
-                            self.manager.lora_state_tracker(),
-                            worker,
-                            &card,
-                        ) {
-                            // Record the adapter name keyed by instance path so a later removal
-                            // whose card was never durably saved can still remove exactly this
-                            // adapter (R4-2).
-                            self.pending_lora_adds.insert(mcid.to_path(), adapter_name);
-                        }
-                    }
-
                     // Spawn each handle_put into its own task so that a slow
                     // HuggingFace config download for one model cannot block
                     // discovery events for all subsequent models.
                     //
-                    // The JoinHandle is stored in `pending_puts` so that a
-                    // subsequent `handle_delete` for the same instance can
-                    // await the in-flight put before attempting cleanup.
+                    // The per-instance operation generation preserves event
+                    // order if this task is scheduled after a later operation.
                     let instance_key = mcid.to_path();
+                    let task_key = instance_key.clone();
+                    let (operation, generation) =
+                        self.begin_instance_operation(&instance_key);
                     let watcher = Arc::clone(&self);
                     let handle = tokio::spawn(async move {
-                        match watcher.handle_put(&mcid, &mut card).await {
-                            Ok(()) => {
+                        match watcher
+                            .handle_put_if_current(&mcid, &mut card, &operation, generation)
+                            .await
+                        {
+                            Some(Ok(())) => {
                                 tracing::info!(
                                     model_name = card.name(),
                                     namespace = mcid.namespace,
@@ -480,7 +569,7 @@ impl ModelWatcher {
                                 );
                                 watcher.notify_on_model.notify_waiters();
                             }
-                            Err(err) => {
+                            Some(Err(err)) => {
                                 tracing::error!(
                                     model_name = card.name(),
                                     namespace = mcid.namespace,
@@ -488,7 +577,15 @@ impl ModelWatcher {
                                     "Error adding model from discovery",
                                 );
                             }
+                            None => {
+                                tracing::debug!(
+                                    key = %task_key,
+                                    generation,
+                                    "Skipping superseded model registration"
+                                );
+                            }
                         }
+                        watcher.prune_instance_operation(&task_key, &operation);
                         // Note: we intentionally do NOT remove from pending_puts here.
                         // Only the watch loop (on duplicate events) and handle_delete
                         // manage pending_puts, avoiding a race where a completed task's
@@ -503,10 +600,16 @@ impl ModelWatcher {
                     // The only case that hits this branch is the etcd watch replaying the same
                     // worker's Added event (reconnect or re-sync) — where cancelling the earlier
                     // redundant task is exactly what we want.
-                    if let Some((_, old_handle)) = self.pending_puts.remove(&instance_key) {
-                        old_handle.abort();
+                    if let Some((_, old_put)) = self.pending_puts.remove(&instance_key) {
+                        old_put.handle.abort();
                     }
-                    self.pending_puts.insert(instance_key, handle);
+                    self.pending_puts.insert(
+                        instance_key,
+                        PendingPut {
+                            generation,
+                            handle,
+                        },
+                    );
                 }
                 DiscoveryEvent::Removed(id) => {
                     // Extract ModelCardInstanceId from the removal event
@@ -520,19 +623,25 @@ impl ModelWatcher {
                         }
                     };
 
-                    // LoRA state-tracker cleanup runs inside handle_delete, after it waits for
-                    // any in-flight handle_put, so the card is reliably present even when a
-                    // Removed event races an in-flight add (N2).
+                    let instance_key = model_card_instance_id.to_path();
+                    let (operation, generation) =
+                        self.begin_instance_operation(&instance_key);
                     match self
-                        .handle_delete(model_card_instance_id, &namespace_filter)
+                        .handle_delete(
+                            model_card_instance_id,
+                            &namespace_filter,
+                            operation,
+                            generation,
+                        )
                         .await
                     {
-                        Ok(Some(model_name)) => {
+                        Ok(DeleteOutcome::Processed(Some(model_name))) => {
                             tracing::info!(model_name, "removed model");
                         }
-                        Ok(None) => {
+                        Ok(DeleteOutcome::Processed(None)) => {
                             // There are other instances running this model, nothing to do
                         }
+                        Ok(DeleteOutcome::Superseded) => {}
                         Err(e) => {
                             tracing::error!(error = %e, "error removing model");
                         }
@@ -551,6 +660,19 @@ impl ModelWatcher {
     /// `handle_delete`. The snapshot is sorted so repeated failures are logged
     /// and retried in a deterministic order.
     async fn reconcile(self: &Arc<Self>, namespace_filter: &NamespaceFilter) -> anyhow::Result<()> {
+        // Snapshot local keys and their operation generations before awaiting
+        // discovery. A registration that starts after this point advances its
+        // generation and prevents this snapshot from deleting the fresh card.
+        let local_entries = self
+            .manager
+            .get_model_card_keys()
+            .into_iter()
+            .map(|key| {
+                let (operation, generation) = self.observe_instance_operation(&key);
+                (key, operation, generation)
+            })
+            .collect::<Vec<_>>();
+
         let mut instances = self.drt.discovery().list(DiscoveryQuery::AllModels).await?;
         instances.sort_by_key(|instance| {
             model_card_instance_id(instance)
@@ -601,8 +723,8 @@ impl ModelWatcher {
             }
         }
 
-        let mut stale_keys = Vec::new();
-        for key in self.manager.get_model_card_keys() {
+        let mut stale_entries = Vec::new();
+        for (key, operation, generation) in local_entries {
             let mcid = match ModelCardInstanceId::from_path(&key) {
                 Ok(mcid) => mcid,
                 Err(err) => {
@@ -611,25 +733,39 @@ impl ModelWatcher {
                 }
             };
             if namespace_filter.matches(&mcid.namespace) && !desired_keys.contains(&key) {
-                stale_keys.push(key);
+                stale_entries.push((key, mcid, operation, generation));
             }
         }
-        stale_keys.sort();
+        stale_entries.sort_by(|left, right| left.0.cmp(&right.0));
+        let stale_entry_count = stale_entries.len();
 
         let mut removed_stale_count = 0usize;
-        for key in &stale_keys {
-            let mcid = match ModelCardInstanceId::from_path(key) {
-                Ok(mcid) => mcid,
-                Err(err) => {
-                    tracing::warn!(%err, key, "Ignoring malformed stale model-card key");
-                    continue;
-                }
+        let mut superseded_stale_count = 0usize;
+        for (key, mcid, operation, snapshot_generation) in stale_entries {
+            let Some(delete_generation) = operation.reserve_after(snapshot_generation) else {
+                superseded_stale_count += 1;
+                tracing::debug!(
+                    key = %key,
+                    snapshot_generation,
+                    current_generation = operation.current_generation(),
+                    "Skipping stale cleanup superseded after reconciliation snapshot"
+                );
+                continue;
             };
-            match self.handle_delete(&mcid, namespace_filter).await {
-                Ok(_) => removed_stale_count += 1,
+            match self
+                .handle_delete(
+                    &mcid,
+                    namespace_filter,
+                    operation,
+                    delete_generation,
+                )
+                .await
+            {
+                Ok(DeleteOutcome::Processed(_)) => removed_stale_count += 1,
+                Ok(DeleteOutcome::Superseded) => superseded_stale_count += 1,
                 Err(err) => {
                     tracing::error!(
-                        key,
+                        key = %key,
                         error = format!("{err:#}"),
                         "Error removing stale model during reconciliation"
                     );
@@ -641,7 +777,9 @@ impl ModelWatcher {
             expected_model_cards = desired_keys.len(),
             retried_model_cards = retry_count,
             removed_stale_model_cards = removed_stale_count,
-            failed_stale_model_cards = stale_keys.len() - removed_stale_count,
+            superseded_stale_model_cards = superseded_stale_count,
+            failed_stale_model_cards = stale_entry_count
+                .saturating_sub(removed_stale_count + superseded_stale_count),
             "Completed frontend model registration reconciliation"
         );
         Ok(())
@@ -659,7 +797,7 @@ impl ModelWatcher {
         if self
             .pending_puts
             .get(&instance_key)
-            .is_some_and(|handle| !handle.is_finished())
+            .is_some_and(|pending| !pending.handle.is_finished())
         {
             return false;
         }
@@ -678,17 +816,6 @@ impl ModelWatcher {
             return false;
         }
 
-        {
-            use crate::kv_router::protocols::WorkerWithDpRank;
-            let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
-            if let Some(adapter_name) =
-                seed_lora_state_from_card(self.manager.lora_state_tracker(), worker, &card)
-            {
-                self.pending_lora_adds
-                    .insert(instance_key.clone(), adapter_name);
-            }
-        }
-
         tracing::warn!(
             model_name = card.name(),
             namespace = mcid.namespace,
@@ -696,10 +823,15 @@ impl ModelWatcher {
             "Retrying incomplete frontend model registration from discovery snapshot"
         );
 
+        let task_key = instance_key.clone();
+        let (operation, generation) = self.begin_instance_operation(&instance_key);
         let watcher = Arc::clone(self);
         let handle = tokio::spawn(async move {
-            match watcher.handle_put(&mcid, &mut card).await {
-                Ok(()) => {
+            match watcher
+                .handle_put_if_current(&mcid, &mut card, &operation, generation)
+                .await
+            {
+                Some(Ok(())) => {
                     tracing::info!(
                         model_name = card.name(),
                         namespace = mcid.namespace,
@@ -707,7 +839,7 @@ impl ModelWatcher {
                     );
                     watcher.notify_on_model.notify_waiters();
                 }
-                Err(err) => {
+                Some(Err(err)) => {
                     tracing::error!(
                         model_name = card.name(),
                         namespace = mcid.namespace,
@@ -715,13 +847,27 @@ impl ModelWatcher {
                         "Model registration reconciliation retry failed"
                     );
                 }
+                None => {
+                    tracing::debug!(
+                        key = %task_key,
+                        generation,
+                        "Skipping superseded model registration retry"
+                    );
+                }
             }
+            watcher.prune_instance_operation(&task_key, &operation);
         });
 
-        if let Some((_, old_handle)) = self.pending_puts.remove(&instance_key) {
-            old_handle.abort();
+        if let Some((_, old_put)) = self.pending_puts.remove(&instance_key) {
+            old_put.handle.abort();
         }
-        self.pending_puts.insert(instance_key, handle);
+        self.pending_puts.insert(
+            instance_key,
+            PendingPut {
+                generation,
+                handle,
+            },
+        );
         true
     }
 
@@ -731,31 +877,76 @@ impl ModelWatcher {
         &self,
         mcid: &ModelCardInstanceId,
         namespace_filter: &NamespaceFilter,
+        operation: Arc<InstanceOperation>,
+        generation: u64,
+    ) -> anyhow::Result<DeleteOutcome> {
+        let key = mcid.to_path();
+
+        let operation_guard = match tokio::time::timeout(
+            Duration::from_secs(60),
+            operation.lock.lock(),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                if !operation.is_current(generation) {
+                    self.prune_instance_operation(&key, &operation);
+                    return Ok(DeleteOutcome::Superseded);
+                }
+
+                if let Some((_, pending)) = self.pending_puts.remove_if(&key, |_, pending| {
+                    pending.generation < generation
+                }) {
+                    pending.handle.abort();
+                    let _ = pending.handle.await;
+                }
+                tracing::warn!(
+                    key = %key,
+                    "Timed out waiting for an earlier model registration; aborted it before delete"
+                );
+                operation.lock.lock().await
+            }
+        };
+
+        if !operation.is_current(generation) {
+            drop(operation_guard);
+            self.prune_instance_operation(&key, &operation);
+            tracing::debug!(
+                key = %key,
+                generation,
+                current_generation = operation.current_generation(),
+                "Skipping superseded model removal"
+            );
+            return Ok(DeleteOutcome::Superseded);
+        }
+
+        // An earlier put either released the operation lock or is waiting on
+        // it with an obsolete generation. Cancel its task before mutating the
+        // local card and WorkerSet state.
+        if let Some((_, pending)) = self
+            .pending_puts
+            .remove_if(&key, |_, pending| pending.generation < generation)
+        {
+            pending.handle.abort();
+            let _ = pending.handle.await;
+        }
+
+        let result = self
+            .handle_delete_serialized(mcid, namespace_filter)
+            .await;
+        drop(operation_guard);
+        self.prune_instance_operation(&key, &operation);
+        result.map(DeleteOutcome::Processed)
+    }
+
+    async fn handle_delete_serialized(
+        &self,
+        mcid: &ModelCardInstanceId,
+        namespace_filter: &NamespaceFilter,
     ) -> anyhow::Result<Option<String>> {
         let key = mcid.to_path();
 
-        // If there is an in-flight handle_put for this instance, wait for it
-        // to complete before we attempt cleanup. Without this, a Removed event
-        // arriving while handle_put is still downloading HF config would fail
-        // to find the model card, leaving a stale registration.
-        if let Some((_, mut handle)) = self.pending_puts.remove(&key) {
-            tracing::debug!(key = %key, "awaiting in-flight handle_put before delete");
-            // Ignore join errors (panic in the spawned task) — we still proceed
-            // with cleanup since the put may have partially registered the model.
-            match tokio::time::timeout(Duration::from_secs(60), &mut handle).await {
-                Ok(_) => {}
-                Err(_) => {
-                    // Abort the timed-out task so it cannot register the model
-                    // after we proceed with deletion.
-                    handle.abort();
-                    let _ = handle.await;
-                    tracing::warn!(
-                        key = %key,
-                        "Timed out waiting for in-flight handle_put, aborted and proceeding with delete"
-                    );
-                }
-            }
-        }
         let card = match self.manager.get_model_card(&key) {
             Some(card) => card,
             None => {
@@ -1858,6 +2049,43 @@ mod tests {
 
         manager.remove_model_card(&mcid.to_path());
         assert!(!is_registration_complete(&manager, &mcid, &card));
+    }
+
+    #[test]
+    fn stale_cleanup_cannot_reserve_after_a_new_registration() {
+        let operation = InstanceOperation::default();
+        let snapshot_generation = operation.current_generation();
+
+        let registration_generation = operation.begin();
+
+        assert!(operation.is_current(registration_generation));
+        assert_eq!(operation.reserve_after(snapshot_generation), None);
+    }
+
+    #[tokio::test]
+    async fn newer_registration_waits_for_cleanup_and_remains_current() {
+        let operation = Arc::new(InstanceOperation::default());
+        let cleanup_generation = operation
+            .reserve_after(operation.current_generation())
+            .expect("cleanup should reserve the unchanged snapshot generation");
+        let cleanup_guard = operation.lock.lock().await;
+
+        let registration_generation = operation.begin();
+        assert!(!operation.is_current(cleanup_generation));
+
+        let registration_operation = Arc::clone(&operation);
+        let registration = tokio::spawn(async move {
+            let _guard = registration_operation.lock.lock().await;
+            registration_operation.is_current(registration_generation)
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !registration.is_finished(),
+            "the newer registration must wait until cleanup releases the instance lock"
+        );
+
+        drop(cleanup_guard);
+        assert!(registration.await.unwrap());
     }
 
     #[test]
