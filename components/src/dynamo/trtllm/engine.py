@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 from tensorrt_llm import LLM, MultimodalEncoder
 from tensorrt_llm.llmapi.llm import BaseLLM
-from transformers import AutoConfig
+from transformers import PretrainedConfig
 
 from dynamo.trtllm.constants import DisaggregationMode
 from dynamo.trtllm.engine_monitor import TrtllmEngineMonitor
@@ -78,10 +78,7 @@ class TensorRTLLMEngine:
 
                 # Skip MultimodalEncoder for architectures that handle vision
                 # encoding inside the main model (e.g. Llama4).
-                if self._is_unsupported_encoder_arch(
-                    model,  # type: ignore[arg-type]
-                    trust_remote_code=self.engine_args.get("trust_remote_code", False),
-                ):
+                if self._is_unsupported_encoder_arch(model):  # type: ignore[arg-type]
                     return
 
                 max_batch_size = self.engine_args.get("max_batch_size", 1)
@@ -207,16 +204,13 @@ class TensorRTLLMEngine:
         )
 
     @staticmethod
-    def _is_unsupported_encoder_arch(
-        model_path: str, trust_remote_code: bool = False
-    ) -> bool:
+    def _is_unsupported_encoder_arch(model_path: str) -> bool:
         """Return True if *model_path*'s architecture is not supported by
         TRT-LLM's standalone MultimodalEncoder."""
         try:
-            config = AutoConfig.from_pretrained(
-                model_path, trust_remote_code=trust_remote_code
-            )
-            archs = getattr(config, "architectures", None) or []
+            # get_config_dict reads config.json without executing repo code.
+            config_dict, _ = PretrainedConfig.get_config_dict(model_path)
+            archs = config_dict.get("architectures") or []
             return any(a in _UNSUPPORTED_STANDALONE_ENCODER_ARCHS for a in archs)
         except Exception:
             return False

@@ -184,7 +184,6 @@ async def worker(runtime: DistributedRuntime) -> None:
         model=args.model,
         model_type=args.model_type,
         block_size=args.block_size,
-        trust_remote_code=args.trust_remote_code,
     )
 
     # Register this worker's endpoint
