@@ -92,6 +92,10 @@ bash launch/disagg_router.sh
 
 The frontend runs in KV routing mode and automatically detects prefill workers to activate an internal prefill router.
 
+### Cross-Cluster Disaggregated Serving
+
+Run prefill and decode as independently managed services in separate bare-metal or Slurm clusters. The [cross-cluster disaggregated serving guide](vllm-cross-cluster-disagg.md) covers shared discovery, fixed network ports, NIXL over an inter-cluster TCP path, and strict disaggregated-route verification.
+
 ### Data Parallel / Expert Parallelism
 
 Launches 4 data-parallel workers with expert parallelism behind a KV-aware router. Uses a Mixture-of-Experts model (`Qwen/Qwen3-30B-A3B`). Requires 4 GPUs.

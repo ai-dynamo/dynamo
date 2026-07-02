@@ -392,6 +392,8 @@ navigation:
                 path: backends/vllm/vllm-logits-processing.md
               - page: Examples
                 path: backends/vllm/vllm-examples.md
+              - page: Cross-Cluster Disaggregated Serving
+                path: backends/vllm/vllm-cross-cluster-disagg.md
               - page: KV Cache Offloading
                 path: backends/vllm/vllm-kv-offloading.md
               - page: Observability
