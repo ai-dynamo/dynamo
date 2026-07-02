@@ -1915,7 +1915,7 @@ mod tests {
         );
     }
 
-    // DIS-2296: the jail moved to dynamo-parsers and operates on the shared
+    // The jail moved to dynamo-parsers and operates on the shared
     // `Create` payload, so the boundary adapter (apply_tool_calling_jail) must
     // buffer the dynamo-only typed `llm_metrics` and re-attach it. This asserts
     // the buffered chunk_tokens sum and latest output_tokens survive the jail on
