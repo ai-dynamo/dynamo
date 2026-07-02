@@ -257,8 +257,8 @@ impl KVStoreDiscovery {
                 let key = Self::strip_bucket_prefix(key.as_ref(), CLAIMS_BUCKET).to_string();
                 Some(ClaimEvent::Delete(key))
             }
-            // Claim watchers keep their own cache shape, so a storage resync is
-            // exposed as Reset and each coordinator rebuilds from the claims bucket.
+            // Claim coordinators clear cached claim entries on Reset and lazily
+            // re-claim on demand, matching the lagged-watch recovery path.
             kv::WatchEvent::Resync(_) => Some(ClaimEvent::Reset),
             kv::WatchEvent::Put(_) => None,
         }
@@ -528,6 +528,8 @@ impl KVStoreDiscovery {
                 let mut events = Vec::new();
                 for (id, instance) in &next_instances {
                     if known_instances.get(id) != Some(instance) {
+                        // Added is an upsert event here: a resync can discover
+                        // either a new instance or changed data for an existing id.
                         events.push(DiscoveryEvent::Added(instance.clone()));
                     }
                 }

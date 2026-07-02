@@ -419,16 +419,22 @@ impl Client {
         // Watch for new events in background
         let connector = self.connector.clone();
         let prefix_str = prefix.as_ref().to_string();
+        let cancel_token = self.runtime.primary_token();
         self.rt.spawn(async move {
             let mut first_connect = true;
             let mut reconnect = true;
             while reconnect {
                 if !first_connect {
-                    while let Err(err) =
-                        Self::resync_watch_prefix(&connector, &prefix_str, &mut start_revision, &tx)
-                            .await
+                    while let Err(err) = Self::resync_watch_prefix(
+                        &connector,
+                        &prefix_str,
+                        &mut start_revision,
+                        &tx,
+                        &cancel_token,
+                    )
+                    .await
                     {
-                        if tx.is_closed() {
+                        if tx.is_closed() || cancel_token.is_cancelled() {
                             return;
                         }
 
@@ -449,7 +455,10 @@ impl Client {
                             }
                         }
 
-                        tokio::time::sleep(Self::watch_retry_backoff()).await;
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => return,
+                            _ = tokio::time::sleep(Self::watch_retry_backoff()) => {}
+                        }
                     }
                 }
 
@@ -510,6 +519,7 @@ impl Client {
         prefix: &str,
         start_revision: &mut i64,
         tx: &mpsc::Sender<WatchEvent>,
+        cancel_token: &CancellationToken,
     ) -> Result<()> {
         let mut response = connector
             .get_client()
@@ -531,9 +541,12 @@ impl Client {
             "resyncing etcd watch prefix after reconnect"
         );
 
-        tx.send(WatchEvent::Resync(kvs))
-            .await
-            .context("failed to send WatchEvent::Resync")
+        tokio::select! {
+            _ = cancel_token.cancelled() => anyhow::bail!("watch resync cancelled"),
+            result = tx.send(WatchEvent::Resync(kvs)) => {
+                result.context("failed to send WatchEvent::Resync")
+            }
+        }
     }
 
     fn is_etcd_connection_error(err: &anyhow::Error) -> bool {
