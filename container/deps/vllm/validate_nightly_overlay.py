@@ -74,19 +74,15 @@ def native_vllm_state(package_dir: Path) -> dict[str, str]:
 
 
 def vllm_extension(package_dir: Path) -> Path:
-    candidates = sorted(
-        path.resolve()
-        for path in package_dir.glob("_C*.so")
-        if path.name.startswith("_C.")
-    )
+    candidates = sorted(package_dir.glob("_C_stable_libtorch.*.so"))
     if len(candidates) != 1:
         native_files = sorted(path.name for path in package_dir.glob("*.so"))
         raise RuntimeError(
-            "Expected one nightly vllm._C extension, found "
+            "Expected one nightly vllm._C_stable_libtorch extension, found "
             f"{[str(path) for path in candidates]}; "
             f"top-level native files are {native_files}"
         )
-    return candidates[0]
+    return candidates[0].resolve()
 
 
 def capture_state() -> dict[str, Any]:
@@ -297,10 +293,11 @@ def validate() -> None:
         raise RuntimeError(f"Unexpected vLLM base: {source}")
 
     if os.environ.get("REQUIRE_VLLM_C_IMPORT") == "1":
-        module = importlib.import_module("vllm._C")
+        module = importlib.import_module("vllm._C_stable_libtorch")
         if Path(module.__file__).resolve() != Path(current["vllm"]["extension"]):
             raise RuntimeError(
-                f"vllm._C loaded from an unexpected path: {module.__file__}"
+                "vllm._C_stable_libtorch loaded from an unexpected path: "
+                f"{module.__file__}"
             )
 
     verify_flashinfer()
