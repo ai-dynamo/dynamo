@@ -232,6 +232,15 @@ pub mod frontend_service {
     /// pooling-model latencies (sub-second) without sacrificing resolution.
     pub const EMBEDDING_LATENCY_SECONDS: &str = "embedding_latency_seconds";
 
+    /// Number of `image_url` content parts per request (histogram)
+    pub const IMAGES_PER_REQUEST: &str = "images_per_request";
+
+    /// Number of `video_url` content parts per request (histogram)
+    pub const VIDEOS_PER_REQUEST: &str = "videos_per_request";
+
+    /// Number of `audio_url` content parts per request (histogram)
+    pub const AUDIO_PER_REQUEST: &str = "audio_per_request";
+
     /// Model configuration metrics
     ///
     /// Runtime config metrics (from ModelRuntimeConfig):
