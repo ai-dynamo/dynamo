@@ -30,22 +30,18 @@ from typing import (
     cast,
 )
 
-import numpy as np
 import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig, VllmConfig
-from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
-from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt, mm_input
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
-    MultiModalKwargsItems,
     PlaceholderRange,
 )
 from vllm.outputs import RequestOutput
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
 from vllm.sampling_params import (
-    RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
@@ -96,6 +92,14 @@ from dynamo.vllm.kv_connector_protocols import (
 from .args import Config
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .engine_monitor import VllmEngineMonitor
+from .engine_generate import (
+    build_prompt as _build_engine_generate_prompt,
+    build_sampling_params as _build_engine_generate_sampling_params,
+    merge_kv_transfer_params as _merge_kv_transfer_params,
+    payload as _engine_generate_payload,
+    priority as _engine_generate_priority,
+    serialize_routed_experts as _serialize_routed_experts_vllm,
+)
 from .multimodal_utils.async_vision_encoder import AsyncVisionEncoder
 from .multimodal_utils.embed_assembler import build_mixed_embeds
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
@@ -727,176 +731,6 @@ def _serialize_routed_experts(
         # element type instead of assuming a fixed width.
         "dtype": str(getattr(routed_experts, "dtype", "")),
     }
-
-
-def _serialize_routed_experts_vllm(routed_experts: Any) -> Optional[str]:
-    """Encode routed experts using vLLM's public base64-of-NumPy format."""
-    if routed_experts is None:
-        return None
-    try:
-        buffer = io.BytesIO()
-        np.save(buffer, routed_experts)
-        return base64.b64encode(buffer.getvalue()).decode("ascii")
-    except Exception:
-        logger.warning("Unable to encode routed_experts for generate API", exc_info=True)
-        return None
-
-
-def _engine_generate_payload(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    payload = request.get("generate_request")
-    return payload if isinstance(payload, dict) else None
-
-
-def _engine_generate_priority(request: Dict[str, Any], routing: Dict[str, Any]) -> int:
-    priority = int(routing.get("priority", 0))
-    return priority if _engine_generate_payload(request) is not None else -priority
-
-
-def _merge_kv_transfer_params(
-    caller: Any, framework: Any
-) -> Dict[str, Any] | Any:
-    if caller is None:
-        return framework
-    if framework is None:
-        return caller
-    if not isinstance(caller, dict) or not isinstance(framework, dict):
-        raise ValueError("kv_transfer_params from both caller and framework must be objects")
-    duplicate = caller.keys() & framework.keys()
-    if duplicate:
-        raise ValueError(
-            "caller and framework kv_transfer_params collide on: "
-            + ", ".join(sorted(duplicate))
-        )
-    return {**caller, **framework}
-
-
-def _build_engine_generate_prompt(request: Dict[str, Any]) -> Any:
-    payload = _engine_generate_payload(request)
-    if payload is None:
-        raise ValueError("generate_request is missing from token-native request")
-
-    token_ids = list(request.get("token_ids") or payload.get("token_ids") or [])
-    cache_salt = payload.get("cache_salt")
-    features = payload.get("features")
-    if not isinstance(features, dict):
-        prompt = TokensPrompt(prompt_token_ids=token_ids)
-        if cache_salt is not None:
-            prompt["cache_salt"] = cache_salt
-        return prompt
-
-    mm_hashes = features.get("mm_hashes") or {}
-    placeholders = features.get("mm_placeholders") or {}
-    kwargs_data = features.get("kwargs_data")
-    mm_placeholders = {
-        modality: [
-            PlaceholderRange(offset=int(item["offset"]), length=int(item["length"]))
-            for item in ranges
-        ]
-        for modality, ranges in placeholders.items()
-    }
-    mm_kwargs: Dict[str, list[MultiModalKwargsItem | None]] = {}
-    if isinstance(kwargs_data, dict):
-        for modality, items in kwargs_data.items():
-            mm_kwargs[modality] = [
-                decode_mm_kwargs_item(item) if item is not None else None
-                for item in items
-            ]
-    else:
-        for modality, hashes in mm_hashes.items():
-            mm_kwargs[modality] = [None] * len(hashes)
-
-    return mm_input(
-        prompt_token_ids=token_ids,
-        mm_kwargs=MultiModalKwargsItems(mm_kwargs),
-        mm_hashes=mm_hashes,
-        mm_placeholders=mm_placeholders,
-        cache_salt=cache_salt,
-    )
-
-
-def _build_engine_generate_sampling_params(
-    request: Dict[str, Any],
-    default_sampling_params: Dict[str, Any],
-    model_max_len: int | None,
-) -> SamplingParams:
-    payload = _engine_generate_payload(request)
-    if payload is None:
-        raise ValueError("generate_request is missing from token-native request")
-    raw_params = payload.get("sampling_params") or {}
-    if not isinstance(raw_params, dict):
-        raise ValueError("generate_request.sampling_params must be an object")
-
-    provided = request.get("generate_sampling_fields")
-    provided_fields = set(provided if isinstance(provided, list) else raw_params.keys())
-    kwargs: Dict[str, Any] = {}
-    base = SamplingParams()
-    extension_maps: list[Dict[str, Any]] = []
-    for extension_name in ("extra_args", "vllm_xargs"):
-        extension = raw_params.get(extension_name)
-        if extension is not None:
-            if not isinstance(extension, dict):
-                raise ValueError(f"sampling_params.{extension_name} must be an object")
-            extension_maps.append(extension)
-
-    extensions: Dict[str, Any] = {}
-    for extension in extension_maps:
-        duplicate = extensions.keys() & extension.keys()
-        if duplicate:
-            raise ValueError(
-                "duplicate backend sampling extension(s): "
-                + ", ".join(sorted(duplicate))
-            )
-        extensions.update(extension)
-    caller_kv = payload.get("kv_transfer_params")
-    if caller_kv is not None:
-        if "kv_transfer_params" in extensions:
-            raise ValueError(
-                "kv_transfer_params appears in both the request and sampling extensions"
-            )
-        extensions["kv_transfer_params"] = caller_kv
-
-    for key in provided_fields:
-        if key in ("extra_args", "vllm_xargs"):
-            continue
-        if key not in raw_params:
-            continue
-        value = raw_params[key]
-        if key == "structured_outputs" and isinstance(value, dict):
-            value = StructuredOutputsParams(
-                json=value.get("json"),
-                regex=value.get("regex"),
-                choice=value.get("choice"),
-                grammar=value.get("grammar"),
-                json_object=value.get("json_object"),
-                disable_any_whitespace=value.get("disable_any_whitespace", False),
-                disable_additional_properties=value.get(
-                    "disable_additional_properties", False
-                ),
-                whitespace_pattern=value.get("whitespace_pattern"),
-                structural_tag=serialize_structural_tag(value.get("structural_tag")),
-            )
-        elif key == "repetition_detection" and isinstance(value, dict):
-            value = RepetitionDetectionParams(**value)
-        elif key == "logit_bias" and isinstance(value, dict):
-            value = {int(token_id): bias for token_id, bias in value.items()}
-        if not hasattr(base, key):
-            raise ValueError(f"unsupported sampling parameter for this vLLM: {key}")
-        kwargs[key] = value
-
-    if extensions:
-        kwargs["extra_args"] = extensions
-    sampling_params = SamplingParams(**kwargs)
-
-    if "max_tokens" not in provided_fields and model_max_len is not None:
-        input_length = len(request.get("token_ids") or [])
-        dynamic_default = max(1, model_max_len - input_length)
-        configured_default = default_sampling_params.get("max_tokens", dynamic_default)
-        sampling_params.max_tokens = min(configured_default, dynamic_default)
-
-    # Dynamo always transports disjoint token deltas internally; the HTTP layer
-    # decides whether to aggregate them or emit SSE.
-    sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
-    return sampling_params
 
 
 def build_sampling_params(
