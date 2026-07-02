@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="438" viewBox="0 0 900 438" role="img" aria-label="PFaS throughput by locked repetition">
+<title>PFaS throughput by locked repetition</title>
+<rect width="900" height="438" fill="#111111"/>
+<text x="30.0" y="38.0" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="24" font-weight="700" text-anchor="start">Per-repetition throughput</text>
+<text x="30.0" y="62.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="13" font-weight="400" text-anchor="start">Closed-loop concurrency 4 · 64 requests per repetition · fingerprint 29d1f823181e</text>
+<rect x="30.0" y="84.0" width="405.0" height="300.0" rx="8" fill="#1b1b1b"/>
+<text x="48.0" y="110.0" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="16" font-weight="600" text-anchor="start">Request throughput</text>
+<line x1="84.0" y1="336.0" x2="417.0" y2="336.0" stroke="#3a3a3a" stroke-width="1"/>
+<text x="76.0" y="340.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="end">0.00</text>
+<line x1="84.0" y1="282.5" x2="417.0" y2="282.5" stroke="#3a3a3a" stroke-width="1"/>
+<text x="76.0" y="286.5" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="end">0.06</text>
+<line x1="84.0" y1="229.0" x2="417.0" y2="229.0" stroke="#3a3a3a" stroke-width="1"/>
+<text x="76.0" y="233.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="end">0.12</text>
+<line x1="84.0" y1="175.5" x2="417.0" y2="175.5" stroke="#3a3a3a" stroke-width="1"/>
+<text x="76.0" y="179.5" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="end">0.19</text>
+<line x1="84.0" y1="122.0" x2="417.0" y2="122.0" stroke="#3a3a3a" stroke-width="1"/>
+<text x="76.0" y="126.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="end">0.25</text>
+<rect x="110.6" y="166.8" width="57.7" height="169.2" rx="3" fill="#76b900"/>
+<text x="139.5" y="159.8" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="middle">0.198</text>
+<text x="139.5" y="356.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="middle">Run 1</text>
+<rect x="221.6" y="175.8" width="57.7" height="160.2" rx="3" fill="#00a6a6"/>
+<text x="250.5" y="168.8" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="middle">0.187</text>
+<text x="250.5" y="356.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="middle">Run 2</text>
+<rect x="332.6" y="175.3" width="57.7" height="160.7" rx="3" fill="#fac200"/>
+<text x="361.5" y="168.3" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="middle">0.188</text>
+<text x="361.5" y="356.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="middle">Run 3</text>
+<text x="250.5" y="376.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">requests / second</text>
+<rect x="465.0" y="84.0" width="405.0" height="300.0" rx="8" fill="#1b1b1b"/>
+<text x="483.0" y="110.0" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="16" font-weight="600" text-anchor="start">Output-token throughput</text>
+<line x1="519.0" y1="336.0" x2="852.0" y2="336.0" stroke="#3a3a3a" stroke-width="1"/>
+<text x="511.0" y="340.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="end">0.00</text>
+<line x1="519.0" y1="282.5" x2="852.0" y2="282.5" stroke="#3a3a3a" stroke-width="1"/>
+<text x="511.0" y="286.5" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="end">18.75</text>
+<line x1="519.0" y1="229.0" x2="852.0" y2="229.0" stroke="#3a3a3a" stroke-width="1"/>
+<text x="511.0" y="233.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="end">37.50</text>
+<line x1="519.0" y1="175.5" x2="852.0" y2="175.5" stroke="#3a3a3a" stroke-width="1"/>
+<text x="511.0" y="179.5" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="end">56.25</text>
+<line x1="519.0" y1="122.0" x2="852.0" y2="122.0" stroke="#3a3a3a" stroke-width="1"/>
+<text x="511.0" y="126.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="end">75.00</text>
+<rect x="545.6" y="191.6" width="57.7" height="144.4" rx="3" fill="#76b900"/>
+<text x="574.5" y="184.6" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="middle">50.605</text>
+<text x="574.5" y="356.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="middle">Run 1</text>
+<rect x="656.6" y="199.3" width="57.7" height="136.7" rx="3" fill="#00a6a6"/>
+<text x="685.5" y="192.3" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="middle">47.910</text>
+<text x="685.5" y="356.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="middle">Run 2</text>
+<rect x="767.6" y="198.9" width="57.7" height="137.1" rx="3" fill="#fac200"/>
+<text x="796.5" y="191.9" fill="#f5f5f5" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="middle">48.053</text>
+<text x="796.5" y="356.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="11" font-weight="400" text-anchor="middle">Run 3</text>
+<text x="685.5" y="376.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">tokens / second</text>
+<text x="30.0" y="412.0" fill="#b3b3b3" font-family="Arial, sans-serif" font-size="12" font-weight="400" text-anchor="start">Bars report canonical AIPerf averages; no cross-cluster control arm was measured.</text>
+</svg>
