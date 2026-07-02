@@ -93,7 +93,8 @@ vllm:
   vllm_git_url: ""
   vllm_git_ref: ""
   vllm_git_sha: ""
-  # "auto" preserves the upstream, Python-overlay, and exact-native modes.
+  # "python-overlay" overlays an allowlisted Python delta on an exact nightly.
+  # "auto" preserves the upstream and exact-native modes.
   # "full-source" replaces the upstream native package with a local CUDA build.
   vllm_install_mode: "auto"
   vllm_torch_version: ""

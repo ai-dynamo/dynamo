@@ -71,6 +71,7 @@ on:
         type: choice
         options:
           - auto
+          - python-overlay
           - full-source
         default: auto
       vllm_torch_version:
@@ -84,7 +85,7 @@ on:
       vllm_runtime_base_image:
         description: 'Immutable standalone vLLM image ref used by full-source builds'
         type: string
-        default: 'vllm/vllm-openai:v0.23.0-ubuntu2404'
+        default: 'vllm/vllm-openai@sha256:5da1eb79b49d3edb3b3601a116273f019adb7cab403e86790f61130f8596810a'
       vllm_nccl_version:
         description: 'nvidia-nccl-cu13 wheel version for full-source vLLM builds'
         type: string
@@ -137,9 +138,9 @@ jobs:
       framework: vllm
       target: runtime
       cuda_version: '["13.0"]'
-      platform: ${{ (inputs.vllm_install_mode == 'full-source' || inputs.vllm_precompiled_wheel_commit != '') && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+      platform: ${{ (inputs.vllm_install_mode == 'full-source' || inputs.vllm_install_mode == 'python-overlay' || inputs.vllm_precompiled_wheel_commit != '') && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_timeout_minutes: ${{ inputs.vllm_install_mode == 'full-source' && 180 || (inputs.vllm_precompiled_wheel_commit != '' && 90 || 60) }}
+      build_timeout_minutes: ${{ inputs.vllm_install_mode == 'full-source' && 180 || ((inputs.vllm_install_mode == 'python-overlay' || inputs.vllm_precompiled_wheel_commit != '') && 90 || 60) }}
       extra_build_args: |
         FLASHINFER_GIT_URL=${{ inputs.flashinfer_git_url }}
         FLASHINFER_GIT_REF=${{ inputs.flashinfer_git_ref }}

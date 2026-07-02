@@ -50,9 +50,6 @@ WORKDIR /workspace
 
 ENV DYNAMO_HOME=/opt/dynamo
 ENV HOME=/home/dynamo
-{% if device == "cuda" %}
-ENV VLLM_NCCL_SO_PATH=/opt/dynamo/nccl/libnccl.so.2
-{% endif %}
 {% if device != "cuda" %}
 ENV PATH=/usr/local/ucx/bin:/usr/local/bin/etcd:${PATH}
 {% else %}
@@ -98,7 +95,9 @@ COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 
 {% if device == "cuda" %}
 # Build On Demand has three custom vLLM modes:
-# - blank VLLM_PRECOMPILED_WHEEL_COMMIT: legacy Python-only package overlay;
+# - VLLM_INSTALL_MODE=python-overlay: copy an exact allowlisted Python delta
+#   onto a digest-pinned upstream nightly without replacing native extensions;
+# - blank VLLM_PRECOMPILED_WHEEL_COMMIT: legacy package overlay;
 # - exact 40-character commit: replace vLLM from custom source while reusing
 #   native artifacts from that exact ancestor's official x86_64 wheel.
 # - VLLM_INSTALL_MODE=full-source: replace vLLM with a complete local CUDA
@@ -107,10 +106,16 @@ COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
 # checkpoint-aware FlashInfer fork. The helper records durable provenance under
 # /opt/dynamo for later pod inspection.
 COPY --chmod=755 container/deps/vllm/install_custom_sources.sh /usr/local/bin/install_custom_vllm_sources
+COPY --chmod=755 container/deps/vllm/install_nightly_overlay.sh /usr/local/bin/install_nightly_overlay
+COPY --chmod=644 container/deps/vllm/validate_nightly_overlay.py /usr/local/lib/validate_nightly_overlay.py
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
-    install_custom_vllm_sources
+    if [ "${VLLM_INSTALL_MODE}" = "python-overlay" ]; then \
+        install_nightly_overlay; \
+    else \
+        install_custom_vllm_sources; \
+    fi
 {% endif %}
 
 # Create dynamo user with group 0 for OpenShift compatibility.
@@ -225,7 +230,9 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     set -eux; \
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
-    bash /tmp/install_vllm_omni.sh
+    if [ "${VLLM_INSTALL_MODE:-auto}" != "python-overlay" ]; then \
+        bash /tmp/install_vllm_omni.sh; \
+    fi
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
@@ -248,16 +255,6 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
 {% endif %}
 
 {% if device == "cuda" %}
-COPY --chmod=755 container/deps/vllm/build_nccl_checkpoint.sh /usr/local/bin/build_nccl_checkpoint
-COPY --chmod=644 container/deps/vllm/validate_pynccl_checkpoint_binding.py /usr/local/lib/validate_pynccl_checkpoint_binding.py
-RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
-    set -eux; \
-    export UV_CACHE_DIR=/root/.cache/uv; \
-    build_nccl_checkpoint
-ENV NCCL_CHECKPOINT_SHIM=${NCCL_CHECKPOINT_VERSION:+/opt/nccl-checkpoint/lib/libnccl-checkpoint-shim.so}
-{% endif %}
-
-{% if device == "cuda" %}
 # The upstream vllm/vllm-openai base image ships a GPL/GPL-3.0 ffmpeg built
 # against libx264/libx265/libmp3lame. Purge ONLY the explicitly-named ffmpeg +
 # codec packages and replace them with the LGPL-only in-tree ffmpeg built in
@@ -268,7 +265,7 @@ ENV NCCL_CHECKPOINT_SHIM=${NCCL_CHECKPOINT_VERSION:+/opt/nccl-checkpoint/lib/lib
 # suffixes (e.g. libavcodec58 vs 60).
 #
 # This grep is the COMPLETE, auditable set of what leaves the image. It also
-# removes three build-only CUDA packages after the source and shim builds:
+# removes three build-only CUDA packages after source builds:
 # cuda-libraries-dev is a metapackage, while cuda-sandbox-dev and
 # libnvfatbin-dev provide headers and static/stub libraries. There is
 # deliberately NO apt-get autoremove, so the removal can never cascade into
@@ -325,17 +322,11 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
         --requirement /tmp/requirements.vllm.txt
 
 {% if device == "cuda" %}
-# Revalidate the pinned Torch, NCCL, FlashInfer, and checkpoint shim stack after
-# every Python package layer. Full native imports still wait for a GPU runtime
-# because the image build environment has no libcuda.so.1.
+# Validate after every Python package layer so dependency installation cannot
+# silently replace the nightly's Torch, NCCL, or vLLM native extensions.
 RUN set -eux; \
-    if [ -f "${NCCL_CHECKPOINT_SHIM}" ]; then \
-        NCCL_CHECKPOINT_SHIM="${NCCL_CHECKPOINT_SHIM}" \
-        EXPECTED_NCCL_VERSION="${NCCL_CHECKPOINT_VERSION}" \
-        EXPECTED_TORCH_VERSION="${VLLM_TORCH_VERSION}" \
-        EXPECTED_TORCH_LOCAL_VERSION="${VLLM_TORCH_BACKEND:-${VLLM_PRECOMPILED_WHEEL_VARIANT}}" \
-        LD_PRELOAD="${NCCL_CHECKPOINT_SHIM}" \
-            python3 /usr/local/lib/validate_pynccl_checkpoint_binding.py; \
+    if [ "${VLLM_INSTALL_MODE}" = "python-overlay" ]; then \
+        python3 /usr/local/lib/validate_nightly_overlay.py validate; \
     fi; \
     rm -rf /home/dynamo/.cache/flashinfer
 {% endif %}
@@ -364,17 +355,6 @@ RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/
     sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen && \
     chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
-
-{% if device == "cuda" %}
-# NCCLCheckpoint's Python wrapper resolves symbols from the process global
-# namespace, so the shim must be preloaded before Python starts. Activate it
-# only for images where the optional shim build produced the shared library.
-RUN set -eux; \
-    if [ -f "${NCCL_CHECKPOINT_SHIM}" ]; then \
-        printf '%s\n' "${NCCL_CHECKPOINT_SHIM}" > /etc/ld.so.preload; \
-        python3 -c 'from nccl_checkpoint import NCCLCheckpointLibrary; print(NCCLCheckpointLibrary().get_version())'; \
-    fi
-{% endif %}
 
 USER dynamo
 
