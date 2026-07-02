@@ -131,6 +131,21 @@ pub static REQUEST_PREPROCESS_WAIT_MS: Lazy<Histogram> = Lazy::new(|| {
     .expect("request_preprocess_wait_ms histogram")
 });
 
+/// Time from the chat-completions HTTP handler entry to the engine.generate() call that
+/// kicks off the pipeline (request validation, template resolution, engine lookup).
+pub static HTTP_TO_PREPROCESS_WAIT_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            frontend_metric_name(frontend_perf::HTTP_TO_PREPROCESS_WAIT_MS),
+            "Time from HTTP handler entry to engine.generate() call (milliseconds)",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0,
+        ]),
+    )
+    .expect("http_to_preprocess_wait_ms histogram")
+});
+
 /// Cumulative detokenization time across all tokens (microseconds).
 /// Use `rate(total) / rate(count)` in Prometheus to derive per-token average.
 pub static DETOKENIZE_TOTAL_US: Lazy<Counter> = Lazy::new(|| {
@@ -192,6 +207,9 @@ pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
             .add_metric(Box::new(REQUEST_PREPROCESS_WAIT_MS.clone()))
             .ok();
         registry
+            .add_metric(Box::new(HTTP_TO_PREPROCESS_WAIT_MS.clone()))
+            .ok();
+        registry
             .add_metric(Box::new(DETOKENIZE_TOTAL_US.clone()))
             .ok();
         registry
@@ -220,6 +238,7 @@ pub fn ensure_frontend_perf_metrics_registered_prometheus(
     registry.register(Box::new(TEMPLATE_SECONDS.clone()))?;
     registry.register(Box::new(TOKENIZE_ENCODE_MS.clone()))?;
     registry.register(Box::new(REQUEST_PREPROCESS_WAIT_MS.clone()))?;
+    registry.register(Box::new(HTTP_TO_PREPROCESS_WAIT_MS.clone()))?;
     registry.register(Box::new(DETOKENIZE_TOTAL_US.clone()))?;
     registry.register(Box::new(DETOKENIZE_TOKEN_COUNT.clone()))?;
     registry.register(Box::new(TOKENIZER_CACHE_HITS_TOTAL.clone()))?;

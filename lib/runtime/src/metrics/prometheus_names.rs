@@ -634,6 +634,11 @@ pub mod frontend_perf {
     /// calling into preprocess_request_with_options (tokenize). Detects task scheduling /
     /// operator setup delay ahead of tokenize, distinct from tokenize itself.
     pub const REQUEST_PREPROCESS_WAIT_MS: &str = "request_preprocess_wait_ms";
+    /// Time from the chat-completions HTTP handler entry to the `engine.generate()` call
+    /// that kicks off the pipeline (request validation, template resolution, engine
+    /// lookup). Earlier/broader than REQUEST_PREPROCESS_WAIT_MS, which starts at the
+    /// preprocessor operator's own entry inside that pipeline.
+    pub const HTTP_TO_PREPROCESS_WAIT_MS: &str = "http_to_preprocess_wait_ms";
     /// L1 tokenizer cache hits (cumulative); only incremented when DYN_TOKENIZER_CACHE is enabled
     pub const TOKENIZER_CACHE_HITS_TOTAL: &str = "tokenizer_cache_hits_total";
     /// L1 tokenizer cache misses (cumulative); only incremented when DYN_TOKENIZER_CACHE is enabled
@@ -697,6 +702,18 @@ pub mod request_plane {
     /// SharedTcpEndpoint write_loop. Every traced item, not just ones past
     /// the DYN_ACK_TRACE_WARN_MS log threshold.
     pub const ACK_FLUSH_SECONDS: &str = "ack_flush_seconds";
+    /// Time to register the request/response stream halves with the response transport
+    /// (AddressedPushRouter::register_streams), in milliseconds.
+    pub const REGISTER_STREAMS_MS: &str = "register_streams_ms";
+    /// Time for the tombstone-check `associate_instance` call against the response
+    /// transport, in milliseconds.
+    pub const ASSOCIATE_INSTANCE_MS: &str = "associate_instance_ms";
+    /// Time to build the request envelope (build_request_envelope: serialization +
+    /// control message assembly), in milliseconds.
+    pub const BUILD_ENVELOPE_MS: &str = "build_envelope_ms";
+    /// Time for dispatch_buffer to complete (transport write of the built envelope),
+    /// in milliseconds. Finer-grained sibling of SEND_SECONDS at the same call site.
+    pub const DISPATCH_BUFFER_MS: &str = "dispatch_buffer_ms";
 }
 
 /// Transport-specific metrics (TCP / NATS)

@@ -5,7 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Display,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -25,6 +25,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::{
+    metrics::frontend_perf::HTTP_TO_PREPROCESS_WAIT_MS,
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
@@ -1551,6 +1552,8 @@ async fn chat_completions(
     mut request: Context<NvCreateChatCompletionRequest>,
     mut stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
+    let http_accepted_at = Instant::now();
+
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -1640,6 +1643,8 @@ async fn chat_completions(
         .create_response_collector(&metric_model);
 
     let annotations = request.annotations();
+
+    HTTP_TO_PREPROCESS_WAIT_MS.observe(http_accepted_at.elapsed().as_secs_f64() * 1000.0);
 
     // issue the generate call on the engine
     let stream = engine.generate(request).await.map_err(|e| {

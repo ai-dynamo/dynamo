@@ -61,6 +61,10 @@ pub struct SchedulingMetrics {
     /// waiting for the actor to be scheduled). Complements `queue_wait_ms`, which only
     /// observes the terminal wait once a request is finally admitted.
     pub pending_queue_age_ms: HistogramVec,
+    /// Time for a worker state change (prefill-complete / free) to propagate through
+    /// `LocalScheduler::mark_prefill_completed`/`free` into a completed `queue.update()`
+    /// round trip, labeled by event ("prefill_completed"/"free").
+    pub worker_state_update_to_scheduler_ms: HistogramVec,
 }
 
 #[cfg(feature = "metrics")]
@@ -92,7 +96,7 @@ impl SchedulingMetrics {
                     "Time from enqueueing router work to the router actor starting it, in milliseconds",
                 )
                 .buckets(actor_timing_buckets()),
-                &["worker_type"],
+                &["worker_type", "command"],
             )?,
             actor_poll_gap_ms: HistogramVec::new(
                 HistogramOpts::new(
@@ -118,6 +122,14 @@ impl SchedulingMetrics {
                 .buckets(queue_wait_buckets()),
                 &["worker_type"],
             )?,
+            worker_state_update_to_scheduler_ms: HistogramVec::new(
+                HistogramOpts::new(
+                    "dynamo_worker_state_update_to_scheduler_ms",
+                    "Time for a worker state change (prefill-complete/free) to propagate through a completed queue.update() round trip, in milliseconds",
+                )
+                .buckets(actor_timing_buckets()),
+                &["event"],
+            )?,
         })
     }
 
@@ -139,9 +151,9 @@ impl SchedulingMetrics {
             .observe(ms as f64);
     }
 
-    pub fn observe_actor_mailbox_wait(&self, worker_type: &str, ms: f64) {
+    pub fn observe_actor_mailbox_wait(&self, worker_type: &str, command: &str, ms: f64) {
         self.actor_mailbox_wait_ms
-            .with_label_values(&[worker_type])
+            .with_label_values(&[worker_type, command])
             .observe(ms);
     }
 
@@ -162,6 +174,12 @@ impl SchedulingMetrics {
             .with_label_values(&[worker_type])
             .observe(ms as f64);
     }
+
+    pub fn observe_worker_state_update_to_scheduler(&self, event: &str, ms: f64) {
+        self.worker_state_update_to_scheduler_ms
+            .with_label_values(&[event])
+            .observe(ms);
+    }
 }
 
 /// Register scheduling metrics with the given registry. Idempotent via the underlying
@@ -175,6 +193,7 @@ pub fn register_scheduling_metrics(registry: &prometheus::Registry) -> Result<()
     registry.register(Box::new(m.actor_poll_gap_ms.clone()))?;
     registry.register(Box::new(m.schedule_compute_ms.clone()))?;
     registry.register(Box::new(m.pending_queue_age_ms.clone()))?;
+    registry.register(Box::new(m.worker_state_update_to_scheduler_ms.clone()))?;
     Ok(())
 }
 

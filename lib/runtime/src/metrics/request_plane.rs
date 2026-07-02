@@ -82,6 +82,65 @@ pub static REQUEST_PLANE_ACK_FLUSH_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     .expect("request_plane_ack_flush_seconds histogram")
 });
 
+/// Time to register the request/response stream halves with the response transport
+/// (AddressedPushRouter::register_streams).
+pub static REQUEST_PLANE_REGISTER_STREAMS_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            request_plane_metric_name(request_plane::REGISTER_STREAMS_MS),
+            "Time to register request/response stream halves with the response transport (milliseconds)",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0,
+        ]),
+    )
+    .expect("request_plane_register_streams_ms histogram")
+});
+
+/// Time for the tombstone-check `associate_instance` call against the response transport.
+pub static REQUEST_PLANE_ASSOCIATE_INSTANCE_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            request_plane_metric_name(request_plane::ASSOCIATE_INSTANCE_MS),
+            "Time for the associate_instance tombstone check (milliseconds)",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0,
+        ]),
+    )
+    .expect("request_plane_associate_instance_ms histogram")
+});
+
+/// Time to build the request envelope (build_request_envelope: serialization + control
+/// message assembly).
+pub static REQUEST_PLANE_BUILD_ENVELOPE_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            request_plane_metric_name(request_plane::BUILD_ENVELOPE_MS),
+            "Time to build the request envelope (milliseconds)",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0,
+        ]),
+    )
+    .expect("request_plane_build_envelope_ms histogram")
+});
+
+/// Time for dispatch_buffer to complete (transport write of the built envelope). Finer
+/// granularity sibling of REQUEST_PLANE_SEND_SECONDS at the same call site.
+pub static REQUEST_PLANE_DISPATCH_BUFFER_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            request_plane_metric_name(request_plane::DISPATCH_BUFFER_MS),
+            "Time for dispatch_buffer to complete (milliseconds)",
+        )
+        .buckets(vec![
+            0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0,
+        ]),
+    )
+    .expect("request_plane_dispatch_buffer_ms histogram")
+});
+
 /// Guards idempotency for the `MetricsRegistry` registration path.
 static METRICS_REGISTERED: OnceCell<()> = OnceCell::new();
 
@@ -113,6 +172,22 @@ pub fn ensure_request_plane_metrics_registered(registry: &MetricsRegistry) {
             Box::new(REQUEST_PLANE_ACK_FLUSH_SECONDS.clone()),
             "request_plane_ack_flush_seconds",
         );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_REGISTER_STREAMS_MS.clone()),
+            "request_plane_register_streams_ms",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_ASSOCIATE_INSTANCE_MS.clone()),
+            "request_plane_associate_instance_ms",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_BUILD_ENVELOPE_MS.clone()),
+            "request_plane_build_envelope_ms",
+        );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_DISPATCH_BUFFER_MS.clone()),
+            "request_plane_dispatch_buffer_ms",
+        );
     });
 }
 
@@ -129,6 +204,10 @@ pub fn ensure_request_plane_metrics_registered_prometheus(
                 registry.register(Box::new(REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.clone()))?;
                 registry.register(Box::new(REQUEST_PLANE_INFLIGHT.clone()))?;
                 registry.register(Box::new(REQUEST_PLANE_ACK_FLUSH_SECONDS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_REGISTER_STREAMS_MS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_ASSOCIATE_INSTANCE_MS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_BUILD_ENVELOPE_MS.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_DISPATCH_BUFFER_MS.clone()))?;
                 Ok(())
             })()
             .map_err(|e| e.to_string())
