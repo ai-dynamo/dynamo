@@ -36,7 +36,9 @@ docs/<path>, matching where the sync publishes both):
 
 Both link forms resolve to a base-tree page here; links whose target is
 translated get the locale-prefixed URL so readers stay in their language.
-Links to pages that are not in the nav are left unchanged (with a warning).
+Links to pages that exist in the repo but are not published in the nav are
+rewritten to their GitHub source URL (with a warning) -- a relative path
+would naive-join into a dead link on the rendered page.
 
 Usage:
     resolve_translation_links.py --nav docs/index.yml \
@@ -56,6 +58,8 @@ import yaml
 
 LINK = re.compile(r"(!?)(\[[^\]]*\])\(([^)#\s]+)(#[^)]*)?\)")
 PAGE_EXT = (".md", ".mdx")
+# Fallback for links whose target isn't published in the nav (no site URL).
+GITHUB_BLOB = "https://github.com/ai-dynamo/dynamo/blob/main"
 
 
 def slugify(name: str) -> str:
@@ -170,9 +174,17 @@ def main() -> int:
                     return m.group(0)
                 slug = slugs.get(doc_rel)
                 if slug is None:
-                    print(f"  [warn] {lang}/{rel}: {target} not in nav, left as-is")
+                    # Target exists in the repo but isn't published in the nav,
+                    # so it has no site URL. A relative path would naive-join
+                    # into a guaranteed 404 on the rendered page; link to the
+                    # GitHub source instead so the reader still lands somewhere
+                    # real.
+                    print(
+                        f"  [warn] {lang}/{rel}: {target} not in nav, "
+                        f"linking to GitHub source"
+                    )
                     warned += 1
-                    return m.group(0)
+                    return f"{bang}{label}({GITHUB_BLOB}/docs/{doc_rel}{anchor})"
                 # Locale sits between product and version in Fern URLs
                 # (/dynamo/zh-CN/dev/...); links starting with the product
                 # slug pass through Fern's renderer unmodified.
@@ -191,8 +203,8 @@ def main() -> int:
                 page.write_text(new, encoding="utf-8")
 
     print(
-        f"resolve_translation_links: rewrote {rewritten} link(s), "
-        f"{warned} left unresolved"
+        f"resolve_translation_links: rewrote {rewritten} link(s) to site URLs, "
+        f"{warned} to GitHub source (not in nav)"
     )
     return 0
 
