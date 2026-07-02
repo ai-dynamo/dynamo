@@ -255,6 +255,23 @@ impl WorkerLoadState {
                 .is_none_or(|&deadline| Instant::now() >= deadline);
             if expired {
                 self.decode_overload_deadlines.remove(&dp_rank);
+
+                // Drop stored decode-signal values for any signal absent from this
+                // event. Without this, a signal that tripped overload and then went
+                // silent (e.g. kv_used_blocks=90 followed by events that omit
+                // kv_used_blocks) would leave its stale above-threshold value in the
+                // map, and current_decode_overloaded would report overload forever —
+                // the exact permanent-stuck failure this deadline model exists to
+                // prevent, merely relocated from the old latch to the stored signal.
+                // A signal present in this event has already been overwritten above
+                // with its current (below-threshold) value, so only omitted signals
+                // need clearing.
+                if active_decode_blocks.is_none() {
+                    self.active_decode_blocks.remove(&dp_rank);
+                }
+                if kv_used_blocks.is_none() {
+                    self.kv_used_blocks.remove(&dp_rank);
+                }
             }
         }
     }
@@ -1201,7 +1218,10 @@ mod tests {
 
         // A single active_decode_blocks signal arrives at a low value; kv_used_blocks
         // is absent from this event. With ZERO_HYSTERESIS the deadline is already
-        // expired, and the arriving signal is not overloaded, so the deadline is removed.
+        // expired, and the arriving signal is not overloaded, so the deadline is
+        // removed. Because kv_used_blocks was omitted, its stale above-threshold
+        // value (90) is dropped on the expired branch — otherwise it would keep the
+        // worker overloaded forever even though the signal has gone silent.
         state.update_from_active_load(
             &ActiveLoad {
                 worker_id: 1,
@@ -1213,26 +1233,9 @@ mod tests {
             Some(0.6),
             ZERO_HYSTERESIS,
         );
-        // state.kv_used_blocks still contains 90 (no below-threshold kv_used_blocks
-        // arrived), so current_decode_overloaded returns true via the kv_used_blocks
-        // field. This is correct: the deadline cleared, but the last-known
-        // kv_used_blocks value is still above threshold.
-        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
-
-        // Now a kv_used_blocks=10 event arrives, overwriting the stale 90.
-        // Deadline is already gone (ZERO_HYSTERESIS), and no current signal is over
-        // threshold — so is_overloaded should return false.
-        state.update_from_active_load(
-            &ActiveLoad {
-                worker_id: 1,
-                dp_rank: 0,
-                active_decode_blocks: None,
-                active_prefill_tokens: None,
-                kv_used_blocks: Some(10),
-            },
-            Some(0.6),
-            ZERO_HYSTERESIS,
-        );
+        // Deadline expired and the stale kv_used_blocks=90 was cleared, so
+        // current_decode_overloaded is false — the worker recovers without needing a
+        // fresh below-threshold kv_used_blocks event to arrive.
         assert!(!state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
@@ -1556,8 +1559,11 @@ mod tests {
     ///
     /// Under the deadline model with `ZERO_HYSTERESIS` the deadline expires
     /// immediately, and the next event (carrying only a below-threshold
-    /// `active_decode_blocks`) finds an expired deadline and no above-threshold
-    /// signals → `is_overloaded` returns `false`.
+    /// `active_decode_blocks`, with `kv_used_blocks` omitted) finds an expired
+    /// deadline; the stale above-threshold `kv_used_blocks` value is dropped, so
+    /// `is_overloaded` returns `false` without requiring a fresh below-threshold
+    /// `kv_used_blocks` event. This is the crux of the fix: recovery must not
+    /// depend on the silent signal ever speaking again.
     #[test]
     fn decode_overload_deadline_expires_when_signal_stops_arriving() {
         let mut state = WorkerLoadState::default();
@@ -1581,12 +1587,13 @@ mod tests {
         assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
 
         // Step 2: worker stops sending kv_used_blocks entirely. Only
-        // active_decode_blocks=10 (below threshold) arrives.
-        // The deadline is ZERO so it expired before this call. No arriving
-        // signal is above threshold, so the deadline entry is removed.
-        // But state.kv_used_blocks[0] still holds 90 — so current_decode_overloaded
-        // returns true (the stale value is still in the map). is_overloaded must
-        // still return true: the last-seen kv_used_blocks was above threshold.
+        // active_decode_blocks=10 (below threshold) arrives. The deadline is ZERO so
+        // it expired before this call; no arriving signal is above threshold, so the
+        // deadline entry is removed AND the stale kv_used_blocks=90 (omitted from this
+        // event) is dropped. is_overloaded must now return false — the worker recovers
+        // even though kv_used_blocks never sent another value. This is exactly the
+        // #10564 permanent-stuck failure, and it must not survive relocation from the
+        // old latch to the stored signal map.
         state.update_from_active_load(
             &ActiveLoad {
                 worker_id: 1,
@@ -1598,13 +1605,13 @@ mod tests {
             Some(0.6),
             ZERO_HYSTERESIS,
         );
-        // Still true because state.kv_used_blocks[0] == 90 drives
-        // current_decode_overloaded to true.
-        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+        assert!(
+            !state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)),
+            "worker must recover after the deadline expires even though the \
+             overloading kv_used_blocks signal went permanently silent"
+        );
 
-        // Step 3: a kv_used_blocks=10 event arrives, clearing the stale 90.
-        // With ZERO_HYSTERESIS the deadline is not set (signal is below threshold).
-        // Now current_decode_overloaded returns false for both signals.
+        // Step 3: a later below-threshold kv_used_blocks=10 event keeps it clear.
         state.update_from_active_load(
             &ActiveLoad {
                 worker_id: 1,
