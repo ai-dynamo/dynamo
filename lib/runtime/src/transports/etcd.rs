@@ -36,6 +36,7 @@ use crate::config::environment_names::etcd as env_etcd;
 const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 const STARTUP_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const WATCH_RETRY_BACKOFF: Duration = Duration::from_millis(250);
 
 /// ETCD Client
 #[derive(Clone)]
@@ -436,15 +437,18 @@ impl Client {
                             "failed to resync etcd watch prefix after reconnect; retrying"
                         );
 
-                        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-                        if let Err(err) = connector.reconnect(deadline).await {
-                            tracing::error!(
-                                error = %err,
-                                prefix = %prefix_str,
-                                "failed to reconnect to ETCD before watch resync"
-                            );
-                            return;
+                        if Self::is_etcd_connection_error(&err) {
+                            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                            if let Err(err) = connector.reconnect(deadline).await {
+                                tracing::warn!(
+                                    error = %err,
+                                    prefix = %prefix_str,
+                                    "failed to reconnect to ETCD before watch resync; retrying"
+                                );
+                            }
                         }
+
+                        tokio::time::sleep(WATCH_RETRY_BACKOFF).await;
                     }
                 }
 
@@ -529,6 +533,28 @@ impl Client {
         tx.send(WatchEvent::Resync(kvs))
             .await
             .context("failed to send WatchEvent::Resync")
+    }
+
+    fn is_etcd_connection_error(err: &anyhow::Error) -> bool {
+        err.chain().any(|cause| {
+            let Some(err) = cause.downcast_ref::<etcd_client::Error>() else {
+                return false;
+            };
+
+            match err {
+                etcd_client::Error::IoError(_)
+                | etcd_client::Error::TransportError(_)
+                | etcd_client::Error::EndpointError(_) => true,
+                etcd_client::Error::GRpcStatus(status) => matches!(
+                    status.code() as i32,
+                    1  // Cancelled
+                    | 2  // Unknown
+                    | 4  // DeadlineExceeded
+                    | 14 // Unavailable
+                ),
+                _ => false,
+            }
+        })
     }
 
     /// Establish a new watch stream with automatic retry and reconnection.
@@ -909,6 +935,31 @@ impl KvCache {
         cache_write.remove(&full_key);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_etcd_connection_errors() {
+        let err = anyhow::Error::new(etcd_client::Error::EndpointError(
+            "endpoint unavailable".to_string(),
+        ));
+        assert!(Client::is_etcd_connection_error(&err));
+
+        let err = anyhow::Error::new(etcd_client::Error::IoError(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        )));
+        assert!(Client::is_etcd_connection_error(&err));
+
+        let err = anyhow::Error::new(etcd_client::Error::InvalidArgs("bad request".to_string()));
+        assert!(!Client::is_etcd_connection_error(&err));
+
+        let err = anyhow::anyhow!("missing header during watch resync");
+        assert!(!Client::is_etcd_connection_error(&err));
     }
 }
 
