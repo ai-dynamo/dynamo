@@ -33,6 +33,8 @@ fn record_last_matched_hash(
 /// a shared gate.
 #[derive(Debug)]
 pub(super) struct Node {
+    // NOTE(perf): Consolidating the shape gate and version synchronization into
+    // one lock regressed throughput. Re-profile before combining these fields.
     shape_gate: RwLock<()>,
     /// NOTE(concurrency): This is a post-commit validation token, not a seqlock.
     /// Node state and children do not share one immutable publication boundary.
@@ -108,6 +110,8 @@ impl Node {
         // NOTE(perf): Reducing child-map sharding substantially lowered memory
         // usage but regressed throughput. Treat custom sharding as an explicit
         // memory tradeoff rather than a throughput optimization.
+        // NOTE(perf): Lazily allocating this map only after a node became
+        // internal also saved memory but regressed throughput under contention.
         let children_map = DashMap::with_hasher(FxBuildHasher);
         for (key, child) in children {
             children_map.insert(key, child);
@@ -233,6 +237,8 @@ impl Node {
     }
 
     pub(super) fn promote_worker_to_full_edge(&self, worker: WorkerWithDpRank) -> bool {
+        // NOTE(perf): This path is anchor-only today. Removing its shape read
+        // did not improve throughput; re-evaluate if non-anchor callers appear.
         let _gate = self.shape_gate.read();
         self.state.write().promote_to_full(worker)
     }
