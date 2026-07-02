@@ -60,14 +60,8 @@ class TestSelectMainAttentionBlockSize:
 class TestGetConfiguredKvEventBlockSize:
     """Tests for get_configured_kv_event_block_size."""
 
-    def test_reads_env_override(self, monkeypatch):
-        """DYN_VLLM_KV_EVENT_BLOCK_SIZE env var takes highest precedence."""
-        monkeypatch.setenv("DYN_VLLM_KV_EVENT_BLOCK_SIZE", "4096")
-
-        assert get_configured_kv_event_block_size(_make_vllm_config()) == 4096
-
-    def test_falls_back_to_additional_config_then_cache_config(self):
-        """additional_config key takes precedence over cache_config.block_size."""
+    def test_reads_additional_config_override(self):
+        """additional_config override takes precedence over cache_config.block_size."""
         assert (
             get_configured_kv_event_block_size(
                 _make_vllm_config(
@@ -76,7 +70,20 @@ class TestGetConfiguredKvEventBlockSize:
             )
             == 1024
         )
+
+    def test_falls_back_to_cache_config(self):
+        """Missing additional_config override falls back to cache_config.block_size."""
         assert get_configured_kv_event_block_size(_make_vllm_config()) == 16
+
+    @pytest.mark.parametrize("bad_value", [0, -1, "1024", 16.0, True, None])
+    def test_rejects_invalid_additional_config_override(self, bad_value):
+        """A non-positive-int additional_config override fails loudly."""
+        with pytest.raises(ValueError, match=DYNAMO_KV_EVENT_BLOCK_SIZE_KEY):
+            get_configured_kv_event_block_size(
+                _make_vllm_config(
+                    additional_config={DYNAMO_KV_EVENT_BLOCK_SIZE_KEY: bad_value}
+                )
+            )
 
 
 class TestConfigureKvEventBlockSize:
@@ -98,10 +105,11 @@ class TestConfigureKvEventBlockSize:
         engine.engine_core.call_utility_async.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_uses_env_override(self, monkeypatch):
-        """DYN_VLLM_KV_EVENT_BLOCK_SIZE skips engine metadata fetch entirely."""
-        monkeypatch.setenv("DYN_VLLM_KV_EVENT_BLOCK_SIZE", "4096")
-        vllm_config = _make_vllm_config()
+    async def test_additional_config_override_skips_metadata_fetch(self):
+        """An additional_config override skips the engine metadata fetch entirely."""
+        vllm_config = _make_vllm_config(
+            additional_config={DYNAMO_KV_EVENT_BLOCK_SIZE_KEY: 4096}
+        )
         engine = _make_engine(
             return_value=[{"kind": "full_attention", "block_size": 32}]
         )
@@ -110,6 +118,20 @@ class TestConfigureKvEventBlockSize:
 
         assert result == 4096
         assert vllm_config.additional_config[DYNAMO_KV_EVENT_BLOCK_SIZE_KEY] == 4096
+        engine.engine_core.call_utility_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_additional_config_override(self):
+        """A bad additional_config override fails loudly before touching the engine."""
+        vllm_config = _make_vllm_config(
+            additional_config={DYNAMO_KV_EVENT_BLOCK_SIZE_KEY: 0}
+        )
+        engine = _make_engine(
+            return_value=[{"kind": "full_attention", "block_size": 32}]
+        )
+
+        with pytest.raises(ValueError, match=DYNAMO_KV_EVENT_BLOCK_SIZE_KEY):
+            await configure_kv_event_block_size(engine, vllm_config)
         engine.engine_core.call_utility_async.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -145,7 +167,7 @@ class TestConfigureKvEventBlockSize:
         vllm_config = _make_vllm_config()
         engine = _make_engine(return_value=group_metadata)
 
-        with pytest.raises(RuntimeError, match="DYN_VLLM_KV_EVENT_BLOCK_SIZE"):
+        with pytest.raises(RuntimeError, match="dynamo_kv_event_block_size"):
             await configure_kv_event_block_size(
                 engine,
                 vllm_config,

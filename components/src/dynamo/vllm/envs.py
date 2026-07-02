@@ -20,7 +20,6 @@ REGISTERED_PORT_MAX = 49151
 
 if TYPE_CHECKING:
     DYN_FORWARDPASS_METRIC_PORT: int = 20380
-    DYN_VLLM_KV_EVENT_BLOCK_SIZE: int
 
 
 def _resolve_port(env_var: str, default_port: int) -> int:
@@ -57,43 +56,10 @@ def _resolve_port(env_var: str, default_port: int) -> int:
     return port
 
 
-def _resolve_positive_int(env_var: str) -> int:
-    """
-    Resolve a positive integer from an environment variable.
-
-    Args:
-        env_var: Environment variable name
-
-    Returns:
-        Parsed positive integer value
-
-    Raises:
-        ValueError: If the env var is set to a non-integer or non-positive value
-    """
-    env_value = os.getenv(env_var)
-    if env_value is None:
-        raise ValueError(f"{env_var} is not set.")
-
-    try:
-        value = int(env_value)
-    except ValueError as exc:
-        raise ValueError(
-            f"{env_var} must be a positive integer, got {env_value!r}."
-        ) from exc
-
-    if value <= 0:
-        raise ValueError(f"{env_var} must be a positive integer, got {value}.")
-
-    return value
-
-
 # Environment variables configuration
 environment_variables: dict[str, Callable[[], Any]] = {
     "DYN_FORWARDPASS_METRIC_PORT": lambda: _resolve_port(
         "DYN_FORWARDPASS_METRIC_PORT", 20380
-    ),
-    "DYN_VLLM_KV_EVENT_BLOCK_SIZE": lambda: _resolve_positive_int(
-        "DYN_VLLM_KV_EVENT_BLOCK_SIZE"
     ),
 }
 
