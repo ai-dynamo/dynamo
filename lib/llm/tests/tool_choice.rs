@@ -253,7 +253,7 @@ async fn test_required_tool_choice_parses_json_array() {
 }
 
 #[tokio::test]
-async fn test_tool_choice_parse_failure_returns_as_content() {
+async fn test_required_tool_choice_parse_failure_does_not_leak_content() {
     let mut request = create_test_request();
     let tool_choice = Some(ChatCompletionToolChoiceOption::Required);
     request.inner.tool_choice = tool_choice.clone();
@@ -267,9 +267,8 @@ async fn test_tool_choice_parse_failure_returns_as_content() {
     let response = apply_jail_transformation(raw_response, tool_choice).await;
     let delta = &response.inner.choices[0].delta;
 
-    // Jail stream behavior: if parsing fails, return accumulated content as-is
-    // This matches marker-based FC behavior
-    assert_eq!(delta.content.as_ref().map(get_text), Some("not-json"));
+    // Required/named jail buffers are protocol payload, never assistant prose.
+    assert_eq!(delta.content.as_ref().map(get_text), Some(""));
     assert!(delta.tool_calls.is_none());
 }
 

@@ -458,13 +458,20 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
     /// # Note
     /// The `function_call` field is deprecated.
     fn from(delta: DeltaChoice) -> Self {
-        // If tool calls are present and non-empty, finish reason should be ToolCalls
+        // A completed tool call turns an ordinary stop into ToolCalls, but a
+        // backend terminal condition such as Length or ContentFilter must stay
+        // observable in the non-streaming response just as it is in streaming.
         let finish_reason = if delta
             .tool_calls
             .as_ref()
             .is_some_and(|calls| !calls.is_empty())
         {
-            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+            match delta.finish_reason {
+                None | Some(dynamo_protocols::types::FinishReason::Stop) => {
+                    Some(dynamo_protocols::types::FinishReason::ToolCalls)
+                }
+                finish_reason => finish_reason,
+            }
         } else {
             delta.finish_reason
         };
@@ -1291,50 +1298,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_calling_finish_reason_override_from_length() {
-        // Test that when tool calls are present but finish reason is Length, it gets overridden to ToolCalls
+    async fn test_tool_calling_preserves_backend_finish_reasons() {
         let tool_call_json = r#"{"name": "search", "arguments": {"query": "rust programming"}}"#;
 
-        let annotated_delta = create_test_delta(
-            0,
-            "Let me search for that.",
-            Some(dynamo_protocols::types::Role::Assistant),
-            Some(dynamo_protocols::types::FinishReason::Length), // Original finish reason is Length
-            None,
-            Some(tool_call_json),
-        );
+        for finish_reason in [
+            dynamo_protocols::types::FinishReason::Length,
+            dynamo_protocols::types::FinishReason::ContentFilter,
+        ] {
+            let annotated_delta = create_test_delta(
+                0,
+                "Let me search for that.",
+                Some(dynamo_protocols::types::Role::Assistant),
+                Some(finish_reason),
+                None,
+                Some(tool_call_json),
+            );
 
-        let data = annotated_delta.data.unwrap();
-        let annotated_delta = Annotated {
-            data: Some(data),
-            id: Some("test_id".to_string()),
-            event: None,
-            comment: None,
-            error: None,
-        };
-        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+            let data = annotated_delta.data.unwrap();
+            let annotated_delta = Annotated {
+                data: Some(data),
+                id: Some("test_id".to_string()),
+                event: None,
+                comment: None,
+                error: None,
+            };
+            let stream = Box::pin(stream::iter(vec![annotated_delta]));
+            let response = DeltaAggregator::apply(stream, ParsingOptions::default())
+                .await
+                .unwrap();
+            let choice = response.inner.choices.first().unwrap();
 
-        let result = DeltaAggregator::apply(stream, ParsingOptions::default()).await;
-
-        assert!(result.is_ok());
-        let response = result.unwrap();
-        assert_eq!(response.inner.choices.len(), 1);
-        let choice = &response.inner.choices[0];
-
-        // Verify tool calls are present
-        assert!(choice.message.tool_calls.is_some());
-        let tool_calls = choice.message.tool_calls.as_ref().unwrap();
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(
-            tool_calls[0].r#type,
-            dynamo_protocols::types::FunctionType::Function
-        );
-
-        // Verify that finish reason was overridden to ToolCalls despite original being Length
-        assert_eq!(
-            choice.finish_reason,
-            Some(dynamo_protocols::types::FinishReason::ToolCalls)
-        );
+            let tool_calls = choice.message.tool_calls.as_ref().unwrap();
+            assert_eq!(tool_calls.len(), 1);
+            assert_eq!(
+                tool_calls[0].r#type,
+                dynamo_protocols::types::FunctionType::Function
+            );
+            assert_eq!(choice.finish_reason, Some(finish_reason));
+        }
     }
 
     #[tokio::test]
