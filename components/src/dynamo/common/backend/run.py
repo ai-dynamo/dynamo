@@ -13,34 +13,40 @@ Each backend's ``unified_main.py`` calls :func:`run` with its
         run(VllmLLMEngine)
 """
 
+from collections.abc import Awaitable, Callable
+
 import uvloop
 
 from .engine import BaseEngine
-from .worker import Worker
+from .worker import Worker, WorkerConfig
+
+EngineFactory = Callable[[list[str] | None], Awaitable[tuple[BaseEngine, WorkerConfig]]]
 
 
 async def _start(
-    engine_cls: type[BaseEngine], argv: list[str] | None = None, config=None
+    engine_cls: type[BaseEngine],
+    argv: list[str] | None = None,
+    engine_factory: EngineFactory | None = None,
 ):
-    # Forward a pre-parsed config only when supplied, so engines whose
-    # from_args doesn't accept `config` keep their original call shape.
-    if config is not None:
-        engine, worker_config = await engine_cls.from_args(argv, config=config)
-    else:
-        engine, worker_config = await engine_cls.from_args(argv)
+    from_args = engine_factory or engine_cls.from_args
+    engine, worker_config = await from_args(argv)
     w = Worker(engine, worker_config)
     await w.run()
 
 
-def run(engine_cls: type[BaseEngine], argv: list[str] | None = None, config=None):
+def run(
+    engine_cls: type[BaseEngine],
+    argv: list[str] | None = None,
+    engine_factory: EngineFactory | None = None,
+):
     """Entry point for per-backend unified_main.py files.
 
     ``engine_cls`` may be an :class:`LLMEngine` or a :class:`DiffusionEngine`
     subclass; both share the ``from_args -> (engine, WorkerConfig)`` contract.
 
-    ``config`` lets an entry point that already parsed args (e.g. the vLLM
-    headless check in ``unified_main``) thread the parsed config through so
-    ``from_args`` does not re-parse; engines whose ``from_args`` does not
-    accept ``config`` are only ever called without it.
+    ``engine_factory`` lets an entry point that already parsed args construct
+    its engine without parsing again. The default remains
+    ``engine_cls.from_args(argv)`` so backend-specific arguments do not leak
+    into the shared :class:`BaseEngine` contract.
     """
-    uvloop.run(_start(engine_cls, argv, config))
+    uvloop.run(_start(engine_cls, argv, engine_factory))

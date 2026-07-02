@@ -11,6 +11,7 @@ and feature gap details.
 """
 
 from dynamo.common.backend.run import run
+from dynamo.common.backend.worker import WorkerConfig
 from dynamo.vllm.args import parse_args
 from dynamo.vllm.headless import run_dynamo_headless
 from dynamo.vllm.llm_engine import VllmLLMEngine
@@ -25,8 +26,15 @@ def main():
     if config.headless:
         run_dynamo_headless(config)
         return
-    # Thread the already-parsed config through so from_args doesn't re-parse.
-    run(VllmLLMEngine, config=config)
+
+    async def from_parsed_args(
+        argv: list[str] | None = None,
+    ) -> tuple[VllmLLMEngine, WorkerConfig]:
+        return await VllmLLMEngine.from_args(argv, config=config)
+
+    # Construct from the already-parsed config without widening BaseEngine's
+    # generic from_args(argv) contract with vLLM-specific arguments.
+    run(VllmLLMEngine, engine_factory=from_parsed_args)
 
 
 if __name__ == "__main__":

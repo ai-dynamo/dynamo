@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -36,7 +36,8 @@ def test_main_routes_headless_to_run_dynamo_headless():
     run.assert_not_called()
 
 
-def test_main_routes_normal_node_to_run():
+@pytest.mark.asyncio
+async def test_main_routes_normal_node_to_run():
     """A non-headless node drives the unified Worker via run(VllmLLMEngine)."""
     config = SimpleNamespace(headless=False)
     with (
@@ -48,7 +49,20 @@ def test_main_routes_normal_node_to_run():
 
     parse_args.assert_called_once()
     run_headless.assert_not_called()
-    run.assert_called_once_with(unified_main.VllmLLMEngine, config=config)
+    run.assert_called_once()
+    assert run.call_args.args == (unified_main.VllmLLMEngine,)
+
+    engine_factory = run.call_args.kwargs["engine_factory"]
+    expected = (MagicMock(), MagicMock())
+    with patch.object(
+        unified_main.VllmLLMEngine,
+        "from_args",
+        new_callable=AsyncMock,
+        return_value=expected,
+    ) as from_args:
+        assert await engine_factory(["--model", "test-model"]) == expected
+
+    from_args.assert_awaited_once_with(["--model", "test-model"], config=config)
 
 
 @pytest.mark.asyncio
