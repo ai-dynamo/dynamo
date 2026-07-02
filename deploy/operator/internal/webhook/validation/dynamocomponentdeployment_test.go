@@ -22,8 +22,13 @@ import (
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
@@ -163,6 +168,171 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				t.Errorf("DynamoComponentDeploymentValidator.Validate() error message = %v, want %v", err.Error(), tt.errMsg)
 			}
 		})
+	}
+}
+
+func TestDynamoComponentDeploymentValidator_Admission(t *testing.T) {
+	requestValidators := requestValidatorsFromCRD(t, "nvidia.com_dynamocomponentdeployments.yaml")
+
+	tests := []struct {
+		name       string
+		deployment runtime.Object
+		wantCELErr string
+	}{
+		{
+			name: "v1beta1 sidecar without image is rejected by CEL",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: consts.MainContainerName}, {Name: "metrics"}},
+				}}
+			}),
+			wantCELErr: "spec.podTemplate.spec.containers[1]: Invalid value: sidecar containers must specify a non-empty image",
+		},
+		{
+			name: "v1alpha1 sidecar without image reaches the webhook",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "metrics"}},
+				}}
+			}),
+		},
+		{
+			name: "v1beta1 init container without image is rejected by CEL",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers:     []corev1.Container{{Name: consts.MainContainerName}},
+					InitContainers: []corev1.Container{{Name: "prepare"}},
+				}}
+			}),
+			wantCELErr: "spec.podTemplate.spec.initContainers[0]: Invalid value: init containers must specify a non-empty image",
+		},
+		{
+			name: "v1alpha1 init container without image reaches the webhook",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
+					InitContainers: []corev1.Container{{Name: "prepare"}},
+				}}
+			}),
+		},
+		{
+			name: "v1beta1 invalid pod template backend annotation is rejected by CEL",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.PodTemplate = &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
+					}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: consts.MainContainerName}}},
+				}
+			}),
+			wantCELErr: "spec.podTemplate: Invalid value: podTemplate backend annotation must be mp or ray, case-insensitively",
+		},
+		{
+			name: "v1alpha1 invalid extra pod metadata annotation reaches the webhook",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodMetadata = &nvidiacomv1alpha1.ExtraPodMetadata{
+					Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid"},
+				}
+			}),
+		},
+		{
+			name:       "valid v1beta1 deployment reaches the converted webhook",
+			deployment: betaDCDForAdmission(nil),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := admissionUnstructured(t, tt.deployment)
+			version := tt.deployment.GetObjectKind().GroupVersionKind().Version
+			requestValidator, ok := requestValidators[version]
+			if !ok {
+				t.Fatalf("no request validator for source version %q", version)
+			}
+			if schemaErrs := requestValidator.validateSchema(request, nil); len(schemaErrs) != 0 {
+				t.Fatalf("schema errors = %v, want none", schemaErrs)
+			}
+
+			celErrs := requestValidator.celValidator(request, nil)
+			if tt.wantCELErr != "" {
+				assertRequestValidationError(t, celErrs, tt.wantCELErr)
+				return
+			}
+			if len(celErrs) != 0 {
+				t.Fatalf("CEL errors = %v, want none", celErrs)
+			}
+
+			handler := NewDynamoComponentDeploymentHandler()
+			_, err := handler.ValidateCreate(
+				dgdAdmissionContext(admissionv1.Create, nvidiacomv1alpha1.DynamoComponentDeploymentGVK),
+				dcdAdmissionAlpha(t, tt.deployment),
+			)
+			if err != nil {
+				t.Fatalf("webhook error = %v, want none", err)
+			}
+		})
+	}
+}
+
+func alphaDCDForAdmission(
+	mutate func(*nvidiacomv1alpha1.DynamoComponentDeployment),
+) *nvidiacomv1alpha1.DynamoComponentDeployment {
+	dcd := &nvidiacomv1alpha1.DynamoComponentDeployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+			Kind:       "DynamoComponentDeployment",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default"},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:   "worker",
+				ComponentType: consts.ComponentTypeWorker,
+			},
+		},
+	}
+	if mutate != nil {
+		mutate(dcd)
+	}
+	return dcd
+}
+
+func betaDCDForAdmission(
+	mutate func(*nvidiacomv1beta1.DynamoComponentDeployment),
+) *nvidiacomv1beta1.DynamoComponentDeployment {
+	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: nvidiacomv1beta1.GroupVersion.String(),
+			Kind:       "DynamoComponentDeployment",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default"},
+		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+			BackendFramework: "vllm",
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+				ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+			},
+		},
+	}
+	if mutate != nil {
+		mutate(dcd)
+	}
+	return dcd
+}
+
+func dcdAdmissionAlpha(t *testing.T, deployment runtime.Object) *nvidiacomv1alpha1.DynamoComponentDeployment {
+	t.Helper()
+	switch deployment := deployment.(type) {
+	case *nvidiacomv1alpha1.DynamoComponentDeployment:
+		return deployment.DeepCopy()
+	case *nvidiacomv1beta1.DynamoComponentDeployment:
+		alpha := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+		if err := alpha.ConvertFrom(deployment); err != nil {
+			t.Fatalf("convert v1beta1 DCD to v1alpha1: %v", err)
+		}
+		return alpha
+	default:
+		t.Fatalf("unsupported DCD type %T", deployment)
+		return nil
 	}
 }
 
