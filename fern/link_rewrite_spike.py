@@ -42,6 +42,7 @@ MD_EXTENSIONS = {".md", ".mdx"}
 SENTINEL_PREFIX = "https://link-rewrite-spike.invalid/"
 REFERENCE_PREFIX = re.compile(r"(?m)^[ \t]{0,3}\[(?:\\.|[^\[\]\r\n])+\]:[ \t]*")
 SENTINEL = re.compile(rf"^{re.escape(SENTINEL_PREFIX)}(?P<id>\d+)$")
+MDX_TAG_START = re.compile(r"^[ \t]*<(?P<closing>/)?(?P<name>[A-Z][A-Za-z0-9_.:-]*)")
 
 
 @dataclass
@@ -62,16 +63,12 @@ class Candidate:
 class Replacement:
     start: int
     end: int
-    destination: str
     replacement: str
-    parser_kinds: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class MdxTag:
-    start: int
     end: int
-    name: str
     indent: int
     closing: bool
     self_closing: bool
@@ -97,24 +94,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_parser() -> MarkdownIt:
-    return MarkdownIt(
-        "commonmark",
-        {
-            "html": True,
-            "inline_definitions": True,
-            "store_labels": True,
-        },
-    ).enable(["strikethrough", "table"])
+    return MarkdownIt("commonmark", {"html": True}).enable(["strikethrough", "table"])
 
 
-def destination_span(source: str, start: int, end: int) -> tuple[int, int] | None:
+def destination_span(source: str, start: int, end: int) -> tuple[int, int]:
     """Return the source span inside optional angle brackets."""
 
-    if start >= end:
-        return None
     if source[start] == "<" and source[end - 1] == ">":
-        if start + 1 == end - 1:
-            return None
         return start + 1, end - 1
     return start, end
 
@@ -128,9 +114,9 @@ def scan_inline_destinations(source: str) -> list[tuple[int, int, str, str]]:
         parsed = parseLinkDestination(source, position, len(source))
         if not parsed.ok:
             continue
-        span = destination_span(source, position, parsed.pos)
-        if span is not None:
-            found.append((*span, parsed.str, "inline"))
+        found.append(
+            (*destination_span(source, position, parsed.pos), parsed.str, "inline")
+        )
     return found
 
 
@@ -152,28 +138,21 @@ def scan_reference_destinations(source: str) -> list[tuple[int, int, str, str]]:
         parsed = parseLinkDestination(source, position, len(source))
         if not parsed.ok:
             continue
-        span = destination_span(source, position, parsed.pos)
-        if span is not None:
-            found.append((*span, parsed.str, "reference"))
+        found.append(
+            (*destination_span(source, position, parsed.pos), parsed.str, "reference")
+        )
     return found
 
 
 def scan_candidates(source: str) -> list[Candidate]:
-    scanned = scan_inline_destinations(source) + scan_reference_destinations(source)
-    unique: dict[tuple[int, int], tuple[str, str]] = {}
-    for start, end, destination, syntax in scanned:
-        unique.setdefault((start, end), (destination, syntax))
-
-    candidates: list[Candidate] = []
-    previous_end = -1
-    for candidate_id, ((start, end), (destination, syntax)) in enumerate(
-        sorted(unique.items())
-    ):
-        if start < previous_end:
-            raise ValueError(f"overlapping scanner candidates at offsets {start}:{end}")
-        candidates.append(Candidate(candidate_id, start, end, destination, syntax))
-        previous_end = end
-    return candidates
+    return [
+        Candidate(candidate_id, start, end, destination, syntax)
+        for candidate_id, (start, end, destination, syntax) in enumerate(
+            sorted(
+                scan_inline_destinations(source) + scan_reference_destinations(source)
+            )
+        )
+    ]
 
 
 def replace_candidate_spans(source: str, candidates: Iterable[Candidate]) -> str:
@@ -195,18 +174,12 @@ def walk_tokens(tokens: Iterable[Token]) -> Iterable[Token]:
 
 
 def mask_characters(source: str, start: int, end: int) -> str:
-    return "".join(
-        "\r" if char == "\r" else "\n" if char == "\n" else " "
-        for char in source[start:end]
-    )
+    return re.sub(r"[^\r\n]", " ", source[start:end])
 
 
-def mdx_tag_end(source: str, start: int) -> int | None:
-    """Find a top-level closing angle bracket for a JSX component tag."""
-
+def mdx_tag_end(source: str, position: int) -> int | None:
     quote_character: str | None = None
     brace_depth = 0
-    position = start
     while position < len(source):
         character = source[position]
         if quote_character is not None:
@@ -221,7 +194,7 @@ def mdx_tag_end(source: str, start: int) -> int | None:
             brace_depth += 1
         elif character == "}" and brace_depth:
             brace_depth -= 1
-        elif character == ">" and brace_depth == 0:
+        elif character == ">" and not brace_depth:
             return position + 1
         position += 1
     return None
@@ -231,32 +204,25 @@ def standalone_mdx_tags(source: str) -> dict[int, MdxTag]:
     tags: dict[int, MdxTag] = {}
     line_start = 0
     while line_start < len(source):
-        content_start = line_start
-        while content_start < len(source) and source[content_start] in " \t":
-            content_start += 1
-        if content_start < len(source) and source[content_start] == "<":
-            name_start = content_start + 1
-            if name_start < len(source) and source[name_start] == "/":
-                name_start += 1
-            if name_start < len(source) and source[name_start].isupper():
-                tag_end = mdx_tag_end(source, name_start)
-                if tag_end is not None:
-                    line_end = source.find("\n", tag_end)
-                    if line_end == -1:
-                        line_end = len(source)
-                    if not source[tag_end:line_end].strip():
-                        tag_text = source[content_start:tag_end]
-                        name_match = re.match(r"</?([A-Z][A-Za-z0-9_.:-]*)", tag_text)
-                        if name_match is not None:
-                            tags[line_start] = MdxTag(
-                                start=line_start,
-                                end=tag_end,
-                                name=name_match.group(1),
-                                indent=content_start - line_start,
-                                closing=tag_text.startswith("</"),
-                                self_closing=tag_text.rstrip().endswith("/>"),
-                            )
-                        line_start = tag_end
+        line_end = source.find("\n", line_start)
+        if line_end == -1:
+            line_end = len(source)
+        match = MDX_TAG_START.match(source[line_start:line_end])
+        if match is not None:
+            tag_end = mdx_tag_end(source, line_start + match.end())
+            if tag_end is not None:
+                trailing_line_end = source.find("\n", tag_end)
+                if trailing_line_end == -1:
+                    trailing_line_end = len(source)
+                if not source[tag_end:trailing_line_end].strip():
+                    tag_text = source[line_start:tag_end]
+                    tags[line_start] = MdxTag(
+                        end=tag_end,
+                        indent=len(tag_text) - len(tag_text.lstrip()),
+                        closing=match.group("closing") is not None,
+                        self_closing=tag_text.rstrip().endswith("/>"),
+                    )
+                    line_start = tag_end
         next_line = source.find("\n", line_start)
         if next_line == -1:
             break
@@ -280,11 +246,11 @@ def parser_view(source: str) -> str:
     # not parse its Markdown children. Blank standalone component tags and
     # remove their structural child indentation in this parser-only view.
     tags = standalone_mdx_tags(source)
-    for tag in tags.values():
-        masked[tag.start : tag.end] = mask_characters(source, tag.start, tag.end)
+    for start, tag in tags.items():
+        masked[start : tag.end] = mask_characters(source, start, tag.end)
 
     result: list[str] = []
-    component_stack: list[MdxTag] = []
+    component_indents: list[int] = []
     line_start = 0
     while line_start < len(source):
         line_end = source.find("\n", line_start)
@@ -294,15 +260,12 @@ def parser_view(source: str) -> str:
             line_end += 1
 
         tag = tags.get(line_start)
-        if tag is not None and tag.closing:
-            while component_stack:
-                opened = component_stack.pop()
-                if opened.name == tag.name:
-                    break
+        if tag is not None and tag.closing and component_indents:
+            component_indents.pop()
 
         line = "".join(masked[line_start:line_end])
-        if tag is None and component_stack:
-            desired_indent = component_stack[-1].indent + 2
+        if tag is None and component_indents:
+            desired_indent = component_indents[-1] + 2
             removed = 0
             while (
                 removed < len(line)
@@ -314,7 +277,7 @@ def parser_view(source: str) -> str:
         result.append(line)
 
         if tag is not None and not tag.closing and not tag.self_closing:
-            component_stack.append(tag)
+            component_indents.append(tag.indent)
         line_start = line_end
 
     return "".join(result)
@@ -333,11 +296,6 @@ def token_destinations(
             src = token.attrGet("src")
             if src is not None:
                 destinations.append((src, "image"))
-        elif token.type == "definition":
-            url = token.meta.get("url")
-            if url is not None:
-                destinations.append((url, "definition"))
-
     for reference in env.get("references", {}).values():
         href = reference.get("href")
         if href is not None:
@@ -361,8 +319,7 @@ def confirm_candidates(
             untagged_destinations.append((destination, kind))
             continue
         candidate_id = int(match.group("id"))
-        if 0 <= candidate_id < len(candidates):
-            candidates[candidate_id].parser_kinds.add(kind)
+        candidates[candidate_id].parser_kinds.add(kind)
     return untagged_destinations
 
 
@@ -400,19 +357,17 @@ def github_url(
     ref: str,
     parser_kinds: set[str],
     destination: str,
-) -> tuple[str | None, str | None]:
+) -> str:
     relative_path = quote(path.relative_to(repo_root).as_posix(), safe="/@:+")
     quoted_ref = quote(ref, safe="/@:+")
 
     if "image" in parser_kinds:
-        if parser_kinds - {"image", "definition"}:
-            return None, "destination is shared by image and non-image syntax"
         url = f"https://raw.githubusercontent.com/{repository}/{quoted_ref}/{relative_path}"
-        return append_url_suffix(url, destination), None
+        return append_url_suffix(url, destination)
 
     object_kind = "tree" if path.is_dir() else "blob"
     url = f"https://github.com/{repository}/{object_kind}/{quoted_ref}/{relative_path}"
-    return append_url_suffix(url, destination), None
+    return append_url_suffix(url, destination)
 
 
 def line_and_column(source: str, offset: int) -> tuple[int, int]:
@@ -434,10 +389,6 @@ def candidate_report(source: str, candidate: Candidate) -> dict[str, Any]:
 def apply_replacements(source: str, replacements: Iterable[Replacement]) -> str:
     rewritten = source
     for replacement in sorted(replacements, key=lambda item: item.start, reverse=True):
-        if rewritten[replacement.start : replacement.end] != replacement.destination:
-            raise ValueError(
-                f"source changed before replacement at {replacement.start}:{replacement.end}"
-            )
         rewritten = (
             rewritten[: replacement.start]
             + replacement.replacement
@@ -515,7 +466,7 @@ def process_file(
             )
             continue
 
-        replacement_url, error = github_url(
+        replacement_url = github_url(
             path,
             repo_root,
             repository,
@@ -523,17 +474,11 @@ def process_file(
             candidate.parser_kinds,
             candidate.destination,
         )
-        if error is not None or replacement_url is None:
-            result["unresolved"].append({**issue, "reason": error})
-            continue
-
         replacements.append(
             Replacement(
                 candidate.start,
                 candidate.end,
-                source[candidate.start : candidate.end],
                 replacement_url,
-                tuple(sorted(candidate.parser_kinds)),
             )
         )
         result["replacements"].append({**issue, "replacement": replacement_url})
@@ -545,25 +490,7 @@ def process_file(
 
     if replacements:
         rewritten = apply_replacements(source, replacements)
-        rewritten_destinations = {
-            md.normalizeLink(destination)
-            for destination, _kind in parser_destinations(md, rewritten)
-        }
-        missing_rewrites = sorted(
-            {md.normalizeLink(replacement.replacement) for replacement in replacements}
-            - rewritten_destinations
-        )
-        if missing_rewrites:
-            result["mappingErrors"].append(
-                {
-                    "error": "rewritten destinations were not recognized by the parser",
-                    "destinations": missing_rewrites,
-                }
-            )
-            result["skippedReplacements"] = result["replacements"]
-            result["replacements"] = []
-        else:
-            destination_path.write_bytes(rewritten.encode("utf-8"))
+        destination_path.write_bytes(rewritten.encode("utf-8"))
 
     return result
 
