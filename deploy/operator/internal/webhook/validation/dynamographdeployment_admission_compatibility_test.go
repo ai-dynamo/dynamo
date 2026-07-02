@@ -18,7 +18,6 @@
 package validation
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -38,7 +37,6 @@ import (
 	apitest "k8s.io/apiextensions-apiserver/pkg/test"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -544,18 +542,6 @@ func dgdAdmissionAlphaDCD(t *testing.T, version string, request map[string]any) 
 		t.Fatalf("convert v1beta1 DCD to v1alpha1: %v", err)
 	}
 	return out
-}
-
-func dgdAdmissionContext(operation admissionv1.Operation, gvk schema.GroupVersionKind) context.Context {
-	request := admissionv1.AdmissionRequest{
-		Operation: operation,
-		Kind: metav1.GroupVersionKind{
-			Group:   gvk.Group,
-			Version: gvk.Version,
-			Kind:    gvk.Kind,
-		},
-	}
-	return admission.NewContextWithRequest(context.Background(), admission.Request{AdmissionRequest: request})
 }
 
 func betaDGDAdmissionRequest(
