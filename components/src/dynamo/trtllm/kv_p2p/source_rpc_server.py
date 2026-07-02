@@ -29,9 +29,154 @@ import asyncio
 import logging
 import os
 import pickle
+import socket
 import threading
 import time
+import uuid
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
+
+
+REMOTE_G2_DIRECT_CONTROL_PORT_ENV = "DYN_REMOTE_G2_DIRECT_CONTROL_PORT"
+REMOTE_G2_DIRECT_CONTROL_BIND_HOST_ENV = "DYN_REMOTE_G2_DIRECT_CONTROL_BIND_HOST"
+REMOTE_G2_DIRECT_CONTROL_ADVERTISE_HOST_ENV = "DYN_REMOTE_G2_DIRECT_CONTROL_ADVERTISE_HOST"
+
+
+class RemoteG2DirectControlServer:
+    """Small source-side direct control endpoint for remote-G2.
+
+    Stage 1 only exposes ``identify`` so targets can validate that a
+    discovered TCP endpoint belongs to the intended source worker before
+    any side-effecting resolve/lease call is moved off Dynamo
+    ``client.direct``.
+    """
+
+    def __init__(
+        self,
+        *,
+        worker_id: int | str,
+        dp_rank: int = 0,
+        tp_rank: int = 0,
+        process_generation: str,
+        source_generation: int | str,
+        bind_host: str = "127.0.0.1",
+        advertise_host: str = "127.0.0.1",
+        bind_port: int | None = None,
+        timeout_ms: int = 5000,
+    ) -> None:
+        self._identity = {
+            "worker_id": str(worker_id),
+            "dp_rank": int(dp_rank),
+            "tp_rank": int(tp_rank),
+            "process_generation": str(process_generation),
+            "source_generation": str(source_generation),
+            "protocol_version": 1,
+        }
+        self._bind_host = bind_host
+        self._advertise_host = advertise_host
+        self._bind_port = (
+            bind_port if bind_port is not None else self._port_from_env()
+        )
+        self._timeout_ms = timeout_ms
+        self._ctx = None
+        self._socket = None
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._port: Optional[int] = None
+
+    @staticmethod
+    def _port_from_env() -> int | None:
+        raw = os.environ.get(REMOTE_G2_DIRECT_CONTROL_PORT_ENV)
+        if raw is None or raw == "" or raw == "0":
+            return None
+        try:
+            port = int(raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"{REMOTE_G2_DIRECT_CONTROL_PORT_ENV} must be an integer port"
+            ) from exc
+        if port <= 0 or port > 65535:
+            raise ValueError(
+                f"{REMOTE_G2_DIRECT_CONTROL_PORT_ENV} must be in [1, 65535]"
+            )
+        return port
+
+    @property
+    def identity(self) -> dict:
+        return dict(self._identity)
+
+    @property
+    def address(self) -> str:
+        if self._port is None:
+            raise RuntimeError("remote-G2 direct control server is not started")
+        return f"tcp://{self._advertise_host}:{self._port}"
+
+    def start(self) -> "RemoteG2DirectControlServer":
+        import zmq
+
+        if self._thread is not None:
+            raise RuntimeError("remote-G2 direct control server already started")
+
+        self._ctx = zmq.Context.instance()
+        self._socket = self._ctx.socket(zmq.REP)
+        self._socket.RCVTIMEO = self._timeout_ms
+        self._socket.SNDTIMEO = self._timeout_ms
+        if self._bind_port is None:
+            self._port = self._socket.bind_to_random_port(
+                f"tcp://{self._bind_host}"
+            )
+        else:
+            self._socket.bind(f"tcp://{self._bind_host}:{self._bind_port}")
+            self._port = self._bind_port
+        self._thread = threading.Thread(
+            target=self._serve,
+            name="remote_g2_direct_control",
+            daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._socket is not None:
+            self._socket.close(linger=0)
+            self._socket = None
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+
+    def _serve(self) -> None:
+        import zmq
+
+        if self._socket is None:
+            return
+        poller = zmq.Poller()
+        poller.register(self._socket, zmq.POLLIN)
+        while not self._stop.is_set():
+            try:
+                events = dict(poller.poll(100))
+            except Exception:
+                if not self._stop.is_set():
+                    logging.exception("remote_g2: direct control poll failed")
+                return
+            if self._socket not in events:
+                continue
+            try:
+                request = pickle.loads(self._socket.recv())
+                method = request.get("method") if isinstance(request, dict) else None
+                if method == "identify":
+                    response = {"ok": True, "result": dict(self._identity)}
+                else:
+                    response = {"ok": False, "error": f"unknown method: {method!r}"}
+            except Exception as exc:
+                logging.exception("remote_g2: direct control handler failed")
+                response = {"ok": False, "error": repr(exc)}
+            try:
+                self._socket.send(pickle.dumps(response))
+            except Exception:
+                if not self._stop.is_set():
+                    logging.exception("remote_g2: direct control send failed")
+                return
 
 
 class _ZmqReqWrapper:
@@ -94,6 +239,24 @@ class _ZmqReqWrapper:
             raise last_exc  # type: ignore[misc]
 
 
+@dataclass
+class RemoteG2SourceRpcHandle:
+    req_wrapper: _ZmqReqWrapper
+    resolve_task: asyncio.Future
+    release_task: asyncio.Future
+    metadata_task: asyncio.Future
+    control_info_task: asyncio.Future
+    direct_control: RemoteG2DirectControlServer
+
+    @property
+    def direct_address(self) -> str:
+        return self.direct_control.address
+
+    @property
+    def direct_identity(self) -> dict:
+        return self.direct_control.identity
+
+
 def _make_resolve_handler(req_wrapper: _ZmqReqWrapper):
     """Build the async-generator handler for the remote-g2-resolve endpoint."""
 
@@ -142,6 +305,22 @@ def _make_release_handler(req_wrapper: _ZmqReqWrapper):
     return handler
 
 
+def _make_control_info_handler(direct_control: RemoteG2DirectControlServer):
+    """Build a non-side-effecting endpoint for direct-control discovery."""
+
+    async def handler(request: dict, context: Any = None) -> AsyncIterator[dict]:
+        del request, context
+        yield {
+            "ok": True,
+            "result": {
+                "address": direct_control.address,
+                "identity": direct_control.identity,
+            },
+        }
+
+    return handler
+
+
 def _make_metadata_handler(req_wrapper: _ZmqReqWrapper):
     """Build the async-generator handler for the remote-g2-metadata endpoint.
 
@@ -180,6 +359,21 @@ def _make_metadata_handler(req_wrapper: _ZmqReqWrapper):
     return handler
 
 
+def _direct_control_bind_host() -> str:
+    return os.environ.get(REMOTE_G2_DIRECT_CONTROL_BIND_HOST_ENV, "0.0.0.0")
+
+
+def _direct_control_advertise_host() -> str:
+    configured = os.environ.get(REMOTE_G2_DIRECT_CONTROL_ADVERTISE_HOST_ENV)
+    if configured:
+        return configured
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except Exception:
+        logging.exception("remote_g2: failed to infer direct control advertise host")
+        return "127.0.0.1"
+
+
 def _ipc_socket_path() -> str:
     """The Unix-domain-socket path the engine subprocess's REP service
     binds to. Keyed by the dynamo parent's PID so multiple workers on
@@ -205,10 +399,11 @@ async def setup_source_rpc_endpoints(
     runtime: Any,
     namespace: str,
     component: str,
-) -> Optional[_ZmqReqWrapper]:
-    """Register the two source-side dynamo runtime endpoints and spawn
-    their serving tasks. Returns the ``_ZmqReqWrapper`` so the caller
-    can hold it alive (the socket closes when the wrapper is GCed).
+) -> Optional[RemoteG2SourceRpcHandle]:
+    """Register source-side Dynamo runtime and direct-control endpoints.
+
+    Returns a handle so the caller can keep sockets, tasks, and the
+    direct-control thread alive for the worker lifetime.
 
     Returns ``None`` if the engine subprocess's ZMQ REP socket never
     appears (e.g. remote-G2 wasn't actually bootstrapped).
@@ -222,10 +417,27 @@ async def setup_source_rpc_endpoints(
         return None
 
     req_wrapper = _ZmqReqWrapper(socket_path)
+    worker_id = os.environ.get("DYNAMO_REMOTE_G2_WORKER_ID", "")
+    dp_rank = int(os.environ.get("DYNAMO_REMOTE_G2_DP_RANK", "0"))
+    # Stage 1 uses process generation as the source generation until the
+    # source memory-registration path exposes an independent generation.
+    process_generation = uuid.uuid4().hex
+    direct_control = RemoteG2DirectControlServer(
+        worker_id=worker_id,
+        dp_rank=dp_rank,
+        tp_rank=0,
+        process_generation=process_generation,
+        source_generation=process_generation,
+        bind_host=_direct_control_bind_host(),
+        advertise_host=_direct_control_advertise_host(),
+    ).start()
 
     resolve_ep = runtime.endpoint(f"{namespace}.{component}.remote-g2-resolve")
     release_ep = runtime.endpoint(f"{namespace}.{component}.remote-g2-release")
     metadata_ep = runtime.endpoint(f"{namespace}.{component}.remote-g2-metadata")
+    control_info_ep = runtime.endpoint(
+        f"{namespace}.{component}.remote-g2-control-info"
+    )
 
     # serve_endpoint may return either a coroutine or a Future depending on
     # the dynamo runtime version. asyncio.ensure_future accepts both and
@@ -239,11 +451,17 @@ async def setup_source_rpc_endpoints(
     _metadata_task = asyncio.ensure_future(
         metadata_ep.serve_endpoint(_make_metadata_handler(req_wrapper))
     )
+    _control_info_task = asyncio.ensure_future(
+        control_info_ep.serve_endpoint(_make_control_info_handler(direct_control))
+    )
 
     logging.warning(
         "remote_g2: source RPC endpoints registered "
         "(resolve=%s.%s.remote-g2-resolve release=%s.%s.remote-g2-release "
-        "metadata=%s.%s.remote-g2-metadata ipc=%s)",
+        "metadata=%s.%s.remote-g2-metadata control_info=%s.%s.remote-g2-control-info "
+        "ipc=%s direct=%s identity=%s)",
+        namespace,
+        component,
         namespace,
         component,
         namespace,
@@ -251,5 +469,14 @@ async def setup_source_rpc_endpoints(
         namespace,
         component,
         socket_path,
+        direct_control.address,
+        direct_control.identity,
     )
-    return req_wrapper
+    return RemoteG2SourceRpcHandle(
+        req_wrapper=req_wrapper,
+        resolve_task=_resolve_task,
+        release_task=_release_task,
+        metadata_task=_metadata_task,
+        control_info_task=_control_info_task,
+        direct_control=direct_control,
+    )

@@ -22,6 +22,74 @@ import logging
 from typing import Any, Optional
 
 
+class RemoteG2DirectControlClient:
+    """Direct TCP control client used by the staged remote-G2 RPC path.
+
+    Stage 1 uses this only for ``identify``. Side-effecting operations
+    remain on the existing path until endpoint discovery and identity
+    validation are proven independently.
+    """
+
+    def __init__(self, timeout_ms: int = 5000) -> None:
+        self._timeout_ms = timeout_ms
+
+    def identify(
+        self, address: str, expected_worker_id: int | str | None = None
+    ) -> Optional[dict]:
+        response = self.request(address, "identify", {})
+        if not isinstance(response, dict) or not response.get("ok"):
+            return None
+
+        result = response.get("result")
+        if not isinstance(result, dict):
+            # Backward-compatible shape from the original direct-ZMQ spike.
+            result = response
+
+        worker_id = result.get("worker_id")
+        if expected_worker_id is not None and str(worker_id) != str(
+            expected_worker_id
+        ):
+            logging.warning(
+                "remote_g2: direct identify worker mismatch expected=%s actual=%s address=%s",
+                expected_worker_id,
+                worker_id,
+                address,
+            )
+            return None
+        return result
+
+    def request(self, address: str, method: str, payload: dict) -> Optional[dict]:
+        import pickle
+
+        import zmq
+
+        ctx = zmq.Context.instance()
+        req = ctx.socket(zmq.REQ)
+        req.RCVTIMEO = self._timeout_ms
+        req.SNDTIMEO = self._timeout_ms
+        try:
+            req.connect(self._normalize_address(address))
+            req.send(pickle.dumps({"method": method, "payload": payload}))
+            raw = req.recv()
+            response = pickle.loads(raw)
+            return response if isinstance(response, dict) else None
+        except Exception:
+            logging.exception(
+                "remote_g2: direct control request failed method=%s address=%s",
+                method,
+                address,
+            )
+            return None
+        finally:
+            req.close(linger=0)
+
+    @staticmethod
+    def _normalize_address(address: str) -> str:
+        if address.startswith("tcp://"):
+            return address
+        return f"tcp://{address}"
+
+
 class _TargetRpcClient:
     """Wraps the dynamo runtime client for making remote-G2 RPC calls.
 
@@ -38,6 +106,8 @@ class _TargetRpcClient:
         self._resolve_client: Optional[Any] = None
         self._release_client: Optional[Any] = None
         self._metadata_client: Optional[Any] = None
+        self._control_info_client: Optional[Any] = None
+        self._direct_control_client = RemoteG2DirectControlClient()
         self._client_init_lock = asyncio.Lock()
 
     async def _prime_discovery(self, client: Any, endpoint_name: str) -> None:
@@ -79,6 +149,18 @@ class _TargetRpcClient:
                     self._release_client = client
         return self._release_client
 
+    async def _control_info_endpoint_client(self) -> Any:
+        if self._control_info_client is None:
+            async with self._client_init_lock:
+                if self._control_info_client is None:
+                    ep = self._runtime.endpoint(
+                        f"{self._namespace}.{self._component}.remote-g2-control-info"
+                    )
+                    client = await ep.client()
+                    await self._prime_discovery(client, "remote-g2-control-info")
+                    self._control_info_client = client
+        return self._control_info_client
+
     async def _metadata_endpoint_client(self) -> Any:
         if self._metadata_client is None:
             async with self._client_init_lock:
@@ -90,6 +172,51 @@ class _TargetRpcClient:
                     await self._prime_discovery(client, "remote-g2-metadata")
                     self._metadata_client = client
         return self._metadata_client
+
+    async def get_direct_control_info(
+        self, source_worker_id: int
+    ) -> Optional[dict]:
+        """Fetch and validate the source worker's direct-control address.
+
+        This remains non-side-effecting: the Dynamo runtime endpoint only
+        returns the advertised direct endpoint, and this method then calls
+        direct ``identify`` to prove the endpoint belongs to the requested
+        source worker.
+        """
+        try:
+            client = await self._control_info_endpoint_client()
+        except Exception:
+            logging.exception(
+                "remote_g2: failed to obtain control-info endpoint client"
+            )
+            return None
+
+        try:
+            stream = await client.direct({}, instance_id=source_worker_id)
+            async for response in stream:
+                if hasattr(response, "data") and callable(response.data):
+                    response = response.data()
+                if not isinstance(response, dict) or not response.get("ok"):
+                    return None
+                result = response.get("result")
+                if not isinstance(result, dict):
+                    return None
+                address = result.get("address")
+                if not isinstance(address, str) or not address:
+                    return None
+                identity = self._direct_control_client.identify(
+                    address, expected_worker_id=source_worker_id
+                )
+                if identity is None:
+                    return None
+                return {"address": address, "identity": identity}
+        except Exception:
+            logging.exception(
+                "remote_g2: control-info RPC to source_worker_id=%s failed",
+                source_worker_id,
+            )
+            return None
+        return None
 
     async def get_source_metadata(
         self,
