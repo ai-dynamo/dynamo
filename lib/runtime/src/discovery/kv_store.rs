@@ -257,6 +257,8 @@ impl KVStoreDiscovery {
                 let key = Self::strip_bucket_prefix(key.as_ref(), CLAIMS_BUCKET).to_string();
                 Some(ClaimEvent::Delete(key))
             }
+            // Claim watchers keep their own cache shape, so a storage resync is
+            // exposed as Reset and each coordinator rebuilds from the claims bucket.
             kv::WatchEvent::Resync(_) => Some(ClaimEvent::Reset),
             kv::WatchEvent::Put(_) => None,
         }
