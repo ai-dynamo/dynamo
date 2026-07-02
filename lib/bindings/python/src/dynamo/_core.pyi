@@ -456,6 +456,13 @@ class Context:
         """
         ...
 
+    def detached(self, id: str) -> "Context":
+        """
+        Create a context with a fresh cancellation controller and request ID
+        while preserving trace parentage and a metadata snapshot.
+        """
+        ...
+
     def async_killed_or_stopped(self) -> asyncio.Future[bool]:
         """
         Asynchronously wait until the context is killed or stopped.
@@ -1958,6 +1965,7 @@ class MockEngineArgs:
         enable_g4_storage: bool = False,
         bandwidth_g2_to_g4_gbps: Optional[float] = None,
         bandwidth_g4_to_g2_gbps: Optional[float] = None,
+        max_model_len: Optional[int] = None,
     ) -> None:
         ...
 
@@ -1975,6 +1983,9 @@ class MockEngineArgs:
 
     @num_gpu_blocks.setter
     def num_gpu_blocks(self, value: int) -> None: ...
+
+    @property
+    def max_model_len(self) -> Optional[int]: ...
 
     @property
     def max_num_seqs(self) -> Optional[int]: ...
