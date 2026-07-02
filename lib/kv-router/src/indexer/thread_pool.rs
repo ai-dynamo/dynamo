@@ -631,14 +631,21 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
                 self.maybe_enqueue_cleanup(idx);
             }
             None => {
-                // Worker was never assigned a thread - broadcast to all
+                // Reserve the sticky queue before broadcasting so the structural
+                // sweep and subsequent events for this worker share one FIFO.
+                let sweep_idx = Self::get_or_assign_thread_idx(
+                    &self.worker_assignments,
+                    &self.worker_assignment_count,
+                    worker_id,
+                    self.num_workers,
+                );
                 for (idx, channel) in self.worker_event_channels.iter().enumerate() {
                     let _ = channel.send(WorkerTask::RemoveWorker {
                         worker_id,
-                        sweep_tree: idx == 0,
+                        sweep_tree: idx == sweep_idx,
                     });
                 }
-                self.maybe_enqueue_cleanup(0);
+                self.maybe_enqueue_cleanup(sweep_idx);
             }
         }
     }
@@ -648,12 +655,14 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
         }
 
-        // Broadcast local-map cleanup, but let only the sticky worker thread run
-        // shared structural cleanup so the sweep occurs once and stays FIFO.
-        let sweep_idx = self
-            .worker_assignments
-            .get(&worker_id)
-            .map_or(0, |idx| *idx);
+        // Reserve the sticky queue before broadcasting so the structural sweep
+        // and subsequent events for this worker share one FIFO.
+        let sweep_idx = Self::get_or_assign_thread_idx(
+            &self.worker_assignments,
+            &self.worker_assignment_count,
+            worker_id,
+            self.num_workers,
+        );
         for (idx, channel) in self.worker_event_channels.iter().enumerate() {
             let _ = channel.send(WorkerTask::RemoveWorkerDpRank {
                 worker_id,
@@ -661,7 +670,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
                 sweep_tree: idx == sweep_idx,
             });
         }
-        self.maybe_enqueue_cleanup(0);
+        self.maybe_enqueue_cleanup(sweep_idx);
     }
 
     fn shutdown(&self) {
@@ -800,5 +809,54 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
 
     fn node_edge_lengths(&self) -> Vec<usize> {
         self.backend.node_edge_lengths()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        ConcurrentRadixTreeCompressed,
+        test_utils::{assert_score, make_store_event},
+    };
+
+    fn assigned_thread(
+        indexer: &ThreadPoolIndexer<ConcurrentRadixTreeCompressed>,
+        worker_id: WorkerId,
+    ) -> Option<usize> {
+        indexer
+            .worker_assignments
+            .get(&worker_id)
+            .map(|entry| *entry)
+    }
+
+    #[tokio::test]
+    async fn cold_worker_remove_reserves_sticky_queue() {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        indexer.apply_event(make_store_event(1, &[1])).await;
+        assert_eq!(assigned_thread(&indexer, 1), Some(0));
+
+        indexer.remove_worker(2).await;
+
+        assert_eq!(assigned_thread(&indexer, 2), Some(1));
+        indexer.apply_event(make_store_event(2, &[2])).await;
+        assert_eq!(assigned_thread(&indexer, 2), Some(1));
+        indexer.flush().await;
+        assert_score(&indexer, &[2], WorkerWithDpRank::new(2, 0), 1).await;
+    }
+
+    #[tokio::test]
+    async fn cold_rank_remove_reserves_sticky_queue() {
+        let indexer = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 16);
+        indexer.apply_event(make_store_event(1, &[1])).await;
+        assert_eq!(assigned_thread(&indexer, 1), Some(0));
+
+        indexer.remove_worker_dp_rank(2, 0).await;
+
+        assert_eq!(assigned_thread(&indexer, 2), Some(1));
+        indexer.apply_event(make_store_event(2, &[2])).await;
+        assert_eq!(assigned_thread(&indexer, 2), Some(1));
+        indexer.flush().await;
+        assert_score(&indexer, &[2], WorkerWithDpRank::new(2, 0), 1).await;
     }
 }
