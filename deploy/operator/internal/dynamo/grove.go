@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -81,19 +81,13 @@ func (d *GroveMultinodeDeployer) GetHostNames(serviceName string, numberOfNodes 
 // and returns the replica statuses for each component.
 // - PodCliques: spec.replicas == status.readyReplicas
 // - PodCliqueScalingGroups: spec.replicas == status.availableReplicas
-// The returned classification reason is one of the v1beta1.DGDReadyReason*
-// constants when every not-ready component shares a single classification,
-// or v1beta1.DGDReadyReasonMixedNotReadyReasons when they don't.
-// It is returned as its own value (not embedded in the message) because
-// Kubernetes Condition.Reason must be a bare CamelCase token and cannot
-// safely be reconstructed by splitting a free-text message string.
 func GetComponentReadinessAndServiceReplicaStatuses(ctx context.Context, client client.Client, dgd *v1beta1.DynamoGraphDeployment) (bool, string, map[string]v1beta1.ComponentReplicaStatus) {
 	allReady, _, message, componentStatuses := evaluateGroveComponents(ctx, client, dgd)
 	return allReady, message, componentStatuses
 }
 
 // ClassifyGroveReadiness returns the DGD-level Ready condition reason for a
-// Grove-backed DGD (REQ 1): one of the v1beta1.DGDReadyReason* constants.
+// Grove-backed DGD one of the v1beta1.DGDReadyReason* constants.
 // It performs the same Grove status reads as
 // GetComponentReadinessAndServiceReplicaStatuses; callers that need both the
 // reason and the readiness/message/component-status detail in the same
@@ -152,8 +146,6 @@ func evaluateGroveComponents(ctx context.Context, client client.Client, dgd *v1b
 // The returned ComponentReadyClassification distinguishes capacity/scheduling blockers
 // (componentInsufficientCapacity) from components that are scheduled but not yet rolled
 // out (componentUpdating) or not yet runtime-ready (componentPodsNotReady).
-// The raw Grove counters used to compute this (scheduledReplicas, scheduleGatedReplicas)
-// are read here but not copied onto v1beta1.ComponentReplicaStatus.
 func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus, ComponentReadyClassification) {
 	podClique := &grovev1alpha1.PodClique{}
 	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, podClique)
@@ -209,20 +201,23 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 		return true, "", serviceStatus, componentReady
 	}
 
-	// classify as InsufficientCapacity
-	// before checking runtime readiness, so a component blocked on
-	// scheduling is never misreported as merely "not ready".
-	if scheduledReplicas < desiredReplicas {
-		logger.V(1).Info("PodClique insufficient scheduled replicas", "resourceName", resourceName, "desired", desiredReplicas, "scheduled", scheduledReplicas)
-		return false, fmt.Sprintf("insufficient scheduled replicas: desired=%d, scheduled=%d", desiredReplicas, scheduledReplicas), serviceStatus, componentInsufficientCapacity
+	// Fully ready: replicas exist, are updated, and are ready. Checked first so
+	// a healthy component is never mis-diagnosed as InsufficientCapacity when
+	// Grove does not populate scheduledReplicas on a ready PodClique.
+	if replicas == desiredReplicas && updatedReplicas == desiredReplicas && readyReplicas == desiredReplicas {
+		return true, "", serviceStatus, componentReady
 	}
+
+	// Not ready: classify capacity/scheduling blockers before runtime readiness so a
+	// component stuck on scheduling is not misreported as merely "pods not
+	// ready".
 	if scheduleGatedReplicas > 0 {
 		logger.V(1).Info("PodClique has schedule-gated replicas", "resourceName", resourceName, "scheduleGated", scheduleGatedReplicas)
 		return false, fmt.Sprintf("schedule-gated replicas: %d", scheduleGatedReplicas), serviceStatus, componentInsufficientCapacity
 	}
 	if cond := meta.FindStatusCondition(podClique.Status.Conditions, groveconstants.ConditionTypePodCliqueScheduled); cond != nil &&
 		cond.Status == metav1.ConditionFalse &&
-		(cond.Reason == groveconstants.ConditionReasonInsufficientScheduledPods || cond.Reason == groveconstants.ConditionReasonScheduledReplicasBelowMinAvailable) {
+		cond.Reason == groveconstants.ConditionReasonInsufficientScheduledPods {
 		logger.V(1).Info("PodClique scheduling condition reports insufficient capacity", "resourceName", resourceName, "reason", cond.Reason, "message", cond.Message)
 		return false, fmt.Sprintf("scheduling condition %s: %s", cond.Reason, cond.Message), serviceStatus, componentInsufficientCapacity
 	}
@@ -237,27 +232,15 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 		return false, fmt.Sprintf("performing rolling update: desired=%d, replicas=%d", desiredReplicas, replicas), serviceStatus, componentUpdating
 	}
 
-	if desiredReplicas != readyReplicas {
-		logger.V(1).Info("PodClique not ready", "resourceName", resourceName, "desired", desiredReplicas, "ready", readyReplicas)
-		return false, fmt.Sprintf("scheduled but ready=%d/%d", readyReplicas, desiredReplicas), serviceStatus, componentPodsNotReady
-	}
-
-	return true, "", serviceStatus, componentReady
+	// Scheduled and rolled out, but not enough ready replicas.
+	logger.V(1).Info("PodClique not ready", "resourceName", resourceName, "desired", desiredReplicas, "ready", readyReplicas)
+	return false, fmt.Sprintf("scheduled but ready=%d/%d", readyReplicas, desiredReplicas), serviceStatus, componentPodsNotReady
 }
 
-// CheckPCSGReady determines if a Grove PodCliqueScalingGroup is fully ready and available.
-// It checks various status fields to ensure all replicas are available and the PodClique
 // CheckPCSGReady determines if a Grove PodCliqueScalingGroup is fully ready and available.
 // It checks various status fields to ensure all replicas are available and the PCSG
 // configuration has been fully applied. This is the PodCliqueScalingGroup equivalent of IsDeploymentReady
 // for standard Kubernetes Deployments.
-//
-// The returned ComponentReadyClassification follows the same capacity-before-readiness
-// ordering as CheckPodCliqueReady. Per the proposal's diagnosis rules, this checks the
-// PCSG's own status.scheduledReplicas and its MinAvailableBreached condition; it does
-// NOT walk child PodCliques to look for component-scoped schedule-gating, since that
-// would require an extra List call per PCSG and the proposal's first implementation is
-// Grove-status-only (REQ 5).
 func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1beta1.ComponentReplicaStatus, ComponentReadyClassification) {
 	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
 	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg)
@@ -312,15 +295,20 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 		return true, "", serviceStatus, componentReady
 	}
 
-	// REQ 1 / proposal "Diagnosis rules": classify as InsufficientCapacity
-	// before checking runtime readiness.
-	if scheduledReplicas < desiredReplicas {
-		logger.V(1).Info("PodCliqueScalingGroup insufficient scheduled replicas", "resourceName", resourceName, "desired", desiredReplicas, "scheduled", scheduledReplicas)
-		return false, fmt.Sprintf("insufficient scheduled replicas: desired=%d, scheduled=%d", desiredReplicas, scheduledReplicas), serviceStatus, componentInsufficientCapacity
+	// Fully ready: replicas exist, are updated, and are available. Checked
+	// first so a healthy PCSG is never mis-diagnosed as InsufficientCapacity
+	// when Grove does not populate scheduledReplicas on a ready group.
+	if replicas == desiredReplicas && updatedReplicas == desiredReplicas && availableReplicas == desiredReplicas {
+		return true, "", serviceStatus, componentReady
 	}
+
+	// Not ready: Only the explicit MinAvailableBreached scheduling condition is used; the numeric
+	// scheduledReplicas counter is deliberately not compared (Grove defaults it
+	// to 0 and it is legitimately below desired during rollout), to avoid
+	// misclassifying ordinary rollout/readiness churn as InsufficientCapacity.
 	if cond := meta.FindStatusCondition(pcsg.Status.Conditions, groveconstants.ConditionTypeMinAvailableBreached); cond != nil &&
 		cond.Status == metav1.ConditionTrue &&
-		(cond.Reason == groveconstants.ConditionReasonInsufficientScheduledPCSGReplicas || cond.Reason == groveconstants.ConditionReasonScheduledReplicasBelowMinAvailable) {
+		cond.Reason == groveconstants.ConditionReasonInsufficientScheduledPCSGReplicas {
 		logger.V(1).Info("PodCliqueScalingGroup MinAvailableBreached reports insufficient capacity", "resourceName", resourceName, "reason", cond.Reason, "message", cond.Message)
 		return false, fmt.Sprintf("min-available breached (%s): %s", cond.Reason, cond.Message), serviceStatus, componentInsufficientCapacity
 	}
@@ -335,12 +323,9 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 		return false, fmt.Sprintf("performing rolling update: desired=%d, replicas=%d", desiredReplicas, replicas), serviceStatus, componentUpdating
 	}
 
-	if desiredReplicas != availableReplicas {
-		logger.V(1).Info("PodCliqueScalingGroup not ready", "resourceName", resourceName, "desired", desiredReplicas, "available", availableReplicas)
-		return false, fmt.Sprintf("scheduled but available=%d/%d", availableReplicas, desiredReplicas), serviceStatus, componentPodsNotReady
-	}
-
-	return true, "", serviceStatus, componentReady
+	// Scheduled and rolled out, but not enough available replicas.
+	logger.V(1).Info("PodCliqueScalingGroup not ready", "resourceName", resourceName, "desired", desiredReplicas, "available", availableReplicas)
+	return false, fmt.Sprintf("scheduled but available=%d/%d", availableReplicas, desiredReplicas), serviceStatus, componentPodsNotReady
 }
 
 // specToGroveTopologyConstraint converts a deployment-level SpecTopologyConstraint

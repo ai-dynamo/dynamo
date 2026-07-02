@@ -10,15 +10,8 @@ import "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 // It mirrors the public v1beta1.DGDReadyReason* constants (InsufficientCapacity,
 // PodsNotReady, etc.) but is kept as a separate internal type for two reasons:
 //
-//  1. REQ 2: raw Grove counters (scheduledReplicas, scheduleGatedReplicas) are
-//     used to *produce* the classification but must never be copied onto
-//     v1beta1.ComponentReplicaStatus, so keeping classification internal
-//     makes it harder to accidentally expose them.
-//
-//  2. The aggregation step (evaluateGroveComponents → aggregateReadyReason) needs
-//     a stable set value to count over without colliding with the string constants
-//     used at the DGD-condition level. Using a distinct named type makes the
-//     compiler catch any missing switch cases.
+// raw Grove counters (scheduledReplicas, scheduleGatedReplicas) are
+// used to *produce* the classification but not copied onto v1beta1.ComponentReplicaStatus
 type ComponentReadyClassification string
 
 const (
@@ -34,10 +27,6 @@ const (
 	//     insufficient-capacity reason                          (PodClique)
 	//   • ConditionTypeMinAvailableBreached=True with an
 	//     insufficient-scheduled-replicas reason                (PCSG)
-	//
-	// Per REQ 1, this must be checked and set *before* any runtime-readiness
-	// check (Updating / PodsNotReady), so a scheduling-blocked component is
-	// never misreported as merely "pods not ready".
 	componentInsufficientCapacity ComponentReadyClassification = "InsufficientCapacity"
 
 	// componentUpdating: scheduling is sufficient (capacity is available), but
@@ -60,7 +49,7 @@ const (
 	//   • a client.Get error prevented reading status
 	//
 	// At the DGD level, componentUnclassified aggregates to
-	// v1beta1.DGDReadyReasonSomeResourcesNotReady (REQ 1 fallback).
+	// v1beta1.DGDReadyReasonSomeResourcesNotReady
 	componentUnclassified ComponentReadyClassification = "Unclassified"
 )
 

@@ -102,6 +102,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=clustertopologies,verbs=get;list;watch
+// +kubebuilder:rbac:groups=scheduler.grove.io,resources=podgangs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
@@ -506,9 +507,9 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 		// corresponding PodClique never exists.
 		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
 		if usesPCSG {
-			isReady, reason, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		} else {
-			isReady, reason, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		}
 		if !isReady {
 			logger.V(1).Info("component not ready", "componentName", componentName, "resourceName", resourceName, "reason", reason)
@@ -1177,12 +1178,17 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	// Both reads are served from the controller-runtime informer cache, not
 	// the API server, so the cost is negligible and they observe the same
 	// PodClique/PCSG generation within a single reconcile.
-	if result.State != nvidiacomv1beta1.DGDStateSuccessful {
-		if classification := dynamo.ClassifyGroveReadiness(ctx, r.Client, dynamoDeployment); classification != "" {
-			result.Reason = Reason(classification)
-		}
-	}
+	r.applyGroveReadyClassification(ctx, dynamoDeployment, &result)
 	return result, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) applyGroveReadyClassification(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment, result *ReconcileResult) {
+	if result.State == nvidiacomv1beta1.DGDStateSuccessful {
+		return
+	}
+	if classification := dynamo.ClassifyGroveReadiness(ctx, r.Client, dynamoDeployment); classification != "" {
+		result.Reason = Reason(classification)
+	}
 }
 
 // isNewRestartRequest checks if the current spec.restart.id represents a new restart request

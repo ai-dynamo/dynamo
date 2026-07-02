@@ -2364,8 +2364,8 @@ func Test_reconcileGroveResources(t *testing.T) {
 			},
 			wantReconcileResult: ReconcileResult{
 				State:   v1beta1.DGDStatePending,
-				Reason:  "some_resources_are_not_ready",
-				Message: Message("Resources not ready: test-dgd: podclique/test-dgd-0-decode: desired=2, ready=1"),
+				Reason:  "Updating",
+				Message: Message("Resources not ready: test-dgd: decode: desired=2, updated=1"),
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
 						ComponentKind:   v1beta1.ComponentKindPodClique,
@@ -2511,8 +2511,8 @@ func Test_reconcileGroveResources(t *testing.T) {
 			},
 			wantReconcileResult: ReconcileResult{
 				State:   v1beta1.DGDStatePending,
-				Reason:  "some_resources_are_not_ready",
-				Message: Message("Resources not ready: test-dgd: pcsg/test-dgd-0-aggregated: desired=2, available=1"),
+				Reason:  "PodsNotReady",
+				Message: Message("Resources not ready: test-dgd: aggregated: scheduled but available=1/2"),
 				ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{
 					"frontend": {
 						ComponentKind:   v1beta1.ComponentKindPodClique,
