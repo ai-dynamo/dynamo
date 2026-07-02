@@ -16,8 +16,9 @@
 """Measure Python Markdown AST round-trip compatibility across the docs tree.
 
 This spike copies the input tree, parses and renders every Markdown/MDX file
-with mdformat's markdown-it-py pipeline, and reports formatting churn,
-idempotence, and parser failures. It never edits the source tree.
+with mdformat's markdown-it-py pipeline plus the local Fern MDX plugin, and
+reports formatting churn, idempotence, and parser failures. It never edits the
+source tree.
 """
 
 from __future__ import annotations
@@ -29,10 +30,22 @@ from pathlib import Path
 from typing import Any
 
 import mdformat
+import mdformat.plugins
+
+if __package__:
+    from . import markdown_it_fern_mdx
+else:
+    import markdown_it_fern_mdx
 
 
 MD_EXTENSIONS = {".md", ".mdx"}
-PARSER_EXTENSIONS = {"frontmatter", "gfm", "gfm_alerts"}
+PARSER_EXTENSIONS = ("frontmatter", "gfm", "gfm_alerts", "fern_mdx")
+
+
+def register_fern_mdx_extension() -> None:
+    """Register the local spike as an in-process mdformat extension."""
+
+    mdformat.plugins.PARSER_EXTENSIONS.setdefault("fern_mdx", markdown_it_fern_mdx)
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,11 +53,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, default=Path("docs"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--report", type=Path)
-    parser.add_argument("--force", action="store_true", help="replace an existing output tree")
+    parser.add_argument(
+        "--force", action="store_true", help="replace an existing output tree"
+    )
     return parser.parse_args()
 
 
 def round_trip(text: str) -> str:
+    register_fern_mdx_extension()
     return mdformat.text(
         text,
         extensions=PARSER_EXTENSIONS,
@@ -75,7 +91,9 @@ def main() -> int:
 
     if output_root.exists():
         if not args.force:
-            raise SystemExit(f"output already exists: {output_root} (pass --force to replace it)")
+            raise SystemExit(
+                f"output already exists: {output_root} (pass --force to replace it)"
+            )
         shutil.rmtree(output_root)
     shutil.copytree(input_root, output_root)
 
@@ -84,14 +102,18 @@ def main() -> int:
         "parserExtensions": sorted(PARSER_EXTENSIONS),
         "input": str(input_root),
         "output": str(output_root),
-        "byExtension": {extension: new_extension_report() for extension in sorted(MD_EXTENSIONS)},
+        "byExtension": {
+            extension: new_extension_report() for extension in sorted(MD_EXTENSIONS)
+        },
         "changedFiles": [],
         "errors": [],
         "nonIdempotentFiles": [],
     }
 
     files = sorted(
-        path for path in input_root.rglob("*") if path.is_file() and path.suffix in MD_EXTENSIONS
+        path
+        for path in input_root.rglob("*")
+        if path.is_file() and path.suffix in MD_EXTENSIONS
     )
     for source_path in files:
         relative_path = source_path.relative_to(input_root)
@@ -106,7 +128,10 @@ def main() -> int:
             rerendered = round_trip(rendered)
         except Exception as error:  # noqa: BLE001 - the report records parser failures
             report["errors"].append(
-                {"file": str(relative_path), "error": f"{type(error).__name__}: {error}"}
+                {
+                    "file": str(relative_path),
+                    "error": f"{type(error).__name__}: {error}",
+                }
             )
             continue
 

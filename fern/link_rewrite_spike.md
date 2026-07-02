@@ -44,9 +44,10 @@ The implementation does not depend on AST line or column metadata:
 2. Every candidate span is replaced in memory with a unique temporary URL.
 3. `markdown-it-py` parses that instrumented document once. Only candidate IDs
    emitted as links, images, or definitions are accepted.
-4. A parser-only view blanks MDX comments and standalone Fern component tags,
-   and removes structural indentation from their children. This exposes links
-   inside components such as `<Info>` and `<Tab>` without changing source.
+4. A local `markdown-it-py` block plugin recognizes standalone Fern component
+   tags, emits paired container tokens, and recursively parses their Markdown
+   children. Raw comment tokens prevent links in MDX comments from being
+   accepted. No parser-only copy of the source is needed.
 5. Accepted relative destinations are resolved on disk. The tool refuses to
    rewrite a file when the parser and scanner cannot be reconciled or when a
    parser-confirmed target cannot be resolved.
@@ -88,6 +89,12 @@ The [parser-free lexer spike](link_rewrite_lexer_spike.md) produces
 byte-for-byte identical rewritten output on the current corpus and documents
 the additional grammar that must be maintained without the parser oracle.
 
+Replacing the old parser-only MDX source transformation with the reusable
+plugin also produces byte-for-byte identical output and the same JSON report:
+3,083 parser-confirmed destinations, 33 rejected examples, and 100 rewrites.
+The same module exposes an `mdformat` renderer extension for the
+[round-trip experiment](ast_roundtrip_spike.md).
+
 ## Simplification pass
 
 A corpus-backed cleanup reduced the standalone implementation from 654 to
@@ -113,9 +120,10 @@ defensive duplication.
 
 - This handles Markdown links, images, and reference definitions. Explicit
   HTML or JSX `href` and `src` attributes need a separate syntax-aware pass.
-- The parser-only MDX view supports the standalone Fern component structure in
-  the current corpus; it is not a complete MDX parser. Scanner candidates that
-  are not parser-confirmed remain visible in the JSON report.
+- The MDX plugin supports standalone uppercase Fern components and MDX
+  comments in the current corpus; it is not a complete MDX implementation.
+  Scanner candidates that are not parser-confirmed remain visible in the JSON
+  report.
 - The spike copies a tree for inspection. Integrating it into publishing should
   combine this pass, callout conversion, GitHub `main`-to-tag pinning, and the
   comment transformation behind one preprocessing entry point.

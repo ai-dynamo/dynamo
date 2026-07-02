@@ -37,12 +37,16 @@ from markdown_it import MarkdownIt
 from markdown_it.helpers import parseLinkDestination
 from markdown_it.token import Token
 
+if __package__:
+    from .markdown_it_fern_mdx import fern_mdx_plugin
+else:
+    from markdown_it_fern_mdx import fern_mdx_plugin
+
 
 MD_EXTENSIONS = {".md", ".mdx"}
 SENTINEL_PREFIX = "https://link-rewrite-spike.invalid/"
 REFERENCE_PREFIX = re.compile(r"(?m)^[ \t]{0,3}\[(?:\\.|[^\[\]\r\n])+\]:[ \t]*")
 SENTINEL = re.compile(rf"^{re.escape(SENTINEL_PREFIX)}(?P<id>\d+)$")
-MDX_TAG_START = re.compile(r"^[ \t]*<(?P<closing>/)?(?P<name>[A-Z][A-Za-z0-9_.:-]*)")
 
 
 @dataclass
@@ -57,21 +61,6 @@ class Candidate:
     @property
     def sentinel(self) -> str:
         return f"{SENTINEL_PREFIX}{self.id}"
-
-
-@dataclass(frozen=True)
-class Replacement:
-    start: int
-    end: int
-    replacement: str
-
-
-@dataclass(frozen=True)
-class MdxTag:
-    end: int
-    indent: int
-    closing: bool
-    self_closing: bool
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,7 +83,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_parser() -> MarkdownIt:
-    return MarkdownIt("commonmark", {"html": True}).enable(["strikethrough", "table"])
+    return (
+        MarkdownIt("commonmark", {"html": True})
+        .enable(["strikethrough", "table"])
+        .use(fern_mdx_plugin)
+    )
 
 
 def destination_span(source: str, start: int, end: int) -> tuple[int, int]:
@@ -155,15 +148,12 @@ def scan_candidates(source: str) -> list[Candidate]:
     ]
 
 
-def replace_candidate_spans(source: str, candidates: Iterable[Candidate]) -> str:
-    rewritten = source
-    for candidate in sorted(candidates, key=lambda item: item.start, reverse=True):
-        rewritten = (
-            rewritten[: candidate.start]
-            + candidate.sentinel
-            + rewritten[candidate.end :]
-        )
-    return rewritten
+def splice(source: str, spans: Iterable[tuple[int, int, str]]) -> str:
+    """Replace non-overlapping [start, end) spans, applying right-to-left."""
+
+    for start, end, text in sorted(spans, reverse=True):
+        source = source[:start] + text + source[end:]
+    return source
 
 
 def walk_tokens(tokens: Iterable[Token]) -> Iterable[Token]:
@@ -171,116 +161,6 @@ def walk_tokens(tokens: Iterable[Token]) -> Iterable[Token]:
         yield token
         if token.children:
             yield from walk_tokens(token.children)
-
-
-def mask_characters(source: str, start: int, end: int) -> str:
-    return re.sub(r"[^\r\n]", " ", source[start:end])
-
-
-def mdx_tag_end(source: str, position: int) -> int | None:
-    quote_character: str | None = None
-    brace_depth = 0
-    while position < len(source):
-        character = source[position]
-        if quote_character is not None:
-            if character == "\\":
-                position += 2
-                continue
-            if character == quote_character:
-                quote_character = None
-        elif character in {'"', "'"}:
-            quote_character = character
-        elif character == "{":
-            brace_depth += 1
-        elif character == "}" and brace_depth:
-            brace_depth -= 1
-        elif character == ">" and not brace_depth:
-            return position + 1
-        position += 1
-    return None
-
-
-def standalone_mdx_tags(source: str) -> dict[int, MdxTag]:
-    tags: dict[int, MdxTag] = {}
-    line_start = 0
-    while line_start < len(source):
-        line_end = source.find("\n", line_start)
-        if line_end == -1:
-            line_end = len(source)
-        match = MDX_TAG_START.match(source[line_start:line_end])
-        if match is not None:
-            tag_end = mdx_tag_end(source, line_start + match.end())
-            if tag_end is not None:
-                trailing_line_end = source.find("\n", tag_end)
-                if trailing_line_end == -1:
-                    trailing_line_end = len(source)
-                if not source[tag_end:trailing_line_end].strip():
-                    tag_text = source[line_start:tag_end]
-                    tags[line_start] = MdxTag(
-                        end=tag_end,
-                        indent=len(tag_text) - len(tag_text.lstrip()),
-                        closing=match.group("closing") is not None,
-                        self_closing=tag_text.rstrip().endswith("/>"),
-                    )
-                    line_start = tag_end
-        next_line = source.find("\n", line_start)
-        if next_line == -1:
-            break
-        line_start = next_line + 1
-    return tags
-
-
-def parser_view(source: str) -> str:
-    """Expose Markdown nested in Fern JSX in a parser-only source view."""
-
-    masked = list(source)
-
-    # markdown-it-py does not understand MDX comments. Leaving them in place can
-    # turn the following reference definitions into paragraph text.
-    for comment in re.finditer(r"\{/\*.*?\*/\}", source, flags=re.DOTALL):
-        masked[comment.start() : comment.end()] = mask_characters(
-            source, comment.start(), comment.end()
-        )
-
-    # CommonMark treats an uppercase JSX container as a raw HTML block and does
-    # not parse its Markdown children. Blank standalone component tags and
-    # remove their structural child indentation in this parser-only view.
-    tags = standalone_mdx_tags(source)
-    for start, tag in tags.items():
-        masked[start : tag.end] = mask_characters(source, start, tag.end)
-
-    result: list[str] = []
-    component_indents: list[int] = []
-    line_start = 0
-    while line_start < len(source):
-        line_end = source.find("\n", line_start)
-        if line_end == -1:
-            line_end = len(source)
-        else:
-            line_end += 1
-
-        tag = tags.get(line_start)
-        if tag is not None and tag.closing and component_indents:
-            component_indents.pop()
-
-        line = "".join(masked[line_start:line_end])
-        if tag is None and component_indents:
-            desired_indent = component_indents[-1] + 2
-            removed = 0
-            while (
-                removed < len(line)
-                and removed < desired_indent
-                and line[removed] in " \t"
-            ):
-                removed += 1
-            line = line[removed:]
-        result.append(line)
-
-        if tag is not None and not tag.closing and not tag.self_closing:
-            component_indents.append(tag.indent)
-        line_start = line_end
-
-    return "".join(result)
 
 
 def token_destinations(
@@ -305,13 +185,13 @@ def token_destinations(
 
 def parser_destinations(md: MarkdownIt, source: str) -> list[tuple[str, str]]:
     env: dict[str, Any] = {}
-    return token_destinations(md.parse(parser_view(source), env), env)
+    return token_destinations(md.parse(source, env), env)
 
 
 def confirm_candidates(
     md: MarkdownIt, source: str, candidates: list[Candidate]
 ) -> list[tuple[str, str]]:
-    instrumented = replace_candidate_spans(source, candidates)
+    instrumented = splice(source, [(c.start, c.end, c.sentinel) for c in candidates])
     untagged_destinations: list[tuple[str, str]] = []
     for destination, kind in parser_destinations(md, instrumented):
         match = SENTINEL.fullmatch(destination)
@@ -386,17 +266,6 @@ def candidate_report(source: str, candidate: Candidate) -> dict[str, Any]:
     }
 
 
-def apply_replacements(source: str, replacements: Iterable[Replacement]) -> str:
-    rewritten = source
-    for replacement in sorted(replacements, key=lambda item: item.start, reverse=True):
-        rewritten = (
-            rewritten[: replacement.start]
-            + replacement.replacement
-            + rewritten[replacement.end :]
-        )
-    return rewritten
-
-
 def process_file(
     md: MarkdownIt,
     source_path: Path,
@@ -442,7 +311,7 @@ def process_file(
             }
         )
         return result
-    replacements: list[Replacement] = []
+    replacements: list[tuple[int, int, str]] = []
     for candidate in confirmed:
         path = resolved_path(source_path, candidate.destination)
         if path is None or is_within(path, docs_root):
@@ -474,13 +343,7 @@ def process_file(
             candidate.parser_kinds,
             candidate.destination,
         )
-        replacements.append(
-            Replacement(
-                candidate.start,
-                candidate.end,
-                replacement_url,
-            )
-        )
+        replacements.append((candidate.start, candidate.end, replacement_url))
         result["replacements"].append({**issue, "replacement": replacement_url})
 
     if result["unresolved"]:
@@ -489,7 +352,7 @@ def process_file(
         return result
 
     if replacements:
-        rewritten = apply_replacements(source, replacements)
+        rewritten = splice(source, replacements)
         destination_path.write_bytes(rewritten.encode("utf-8"))
 
     return result
