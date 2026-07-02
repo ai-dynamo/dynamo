@@ -243,14 +243,34 @@ impl Node {
         self.state.write().promote_to_full(worker)
     }
 
-    pub(super) fn drop_worker(&self, worker: WorkerWithDpRank) {
+    pub(super) fn remove_target_and_snapshot_children(
+        &self,
+        target: WorkerRemovalTarget,
+    ) -> Vec<SharedNode> {
         let _gate = self.shape_gate.write();
-        let should_clear_children = {
-            let mut state = self.state.write();
-            state.drop_worker(worker);
-            state.full_edge_workers.is_empty()
-        };
+        let mut state = self.state.write();
+        let old_full_len = state.full_edge_workers.len();
+        let old_cutoff_len = state.worker_cutoffs.len();
+        state
+            .full_edge_workers
+            .retain(|worker| !target.matches(*worker));
+        state
+            .worker_cutoffs
+            .retain(|worker, _| !target.matches(*worker));
+        let removed_worker = old_full_len != state.full_edge_workers.len()
+            || old_cutoff_len != state.worker_cutoffs.len();
+        let should_clear_children = removed_worker && state.full_edge_workers.is_empty();
+
+        // A concurrent split is either visible in this snapshot or starts after
+        // the target coverage is gone and therefore cannot copy it forward.
+        let children = self
+            .children
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        drop(state);
         self.clear_children_if_unreachable(should_clear_children);
+        children
     }
 
     fn clear_children_if_unreachable(&self, should_clear_children: bool) {

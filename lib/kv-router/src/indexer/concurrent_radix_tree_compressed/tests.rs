@@ -4,8 +4,9 @@
 use super::*;
 use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
 use crate::test_utils::{
-    assert_score, flush_and_settle, make_remove_event_with_parent, make_store_event,
-    make_store_event_with_parent, remove_event, snapshot_events, snapshot_tree,
+    assert_score, flush_and_settle, make_clear_event_with_dp_rank, make_remove_event_with_parent,
+    make_store_event, make_store_event_with_dp_rank, make_store_event_with_parent, remove_event,
+    snapshot_events, snapshot_tree,
 };
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -515,6 +516,109 @@ mod race_tests {
             assert_direct_score(&index, &[1, 2, 3, 4, 5, 6], worker1, 6);
             assert_direct_score(&index, &[1, 2, 3, 4], worker2, 1);
             assert_direct_score(&index, &[1, 2, 3, 4, 7, 8], worker3, 6);
+        }
+    }
+
+    mod clear {
+        use super::super::*;
+
+        #[tokio::test]
+        async fn clear_sweeps_split_suffixes_across_event_threads_and_dp_ranks() {
+            let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 2, 32);
+            let worker_a0 = WorkerWithDpRank::new(1, 0);
+            let worker_a1 = WorkerWithDpRank::new(1, 1);
+            let worker_b = WorkerWithDpRank::new(2, 0);
+
+            index
+                .apply_event(make_store_event_with_dp_rank(1, &[1, 2], 0))
+                .await;
+            index
+                .apply_event(make_store_event_with_dp_rank(1, &[1, 2], 1))
+                .await;
+            index.apply_event(make_store_event(2, &[1, 2])).await;
+            flush_and_settle(&index).await;
+
+            index
+                .apply_event(make_store_event_with_parent(2, &[1], &[3]))
+                .await;
+            flush_and_settle(&index).await;
+
+            index.apply_event(make_clear_event_with_dp_rank(1, 0)).await;
+            flush_and_settle(&index).await;
+            assert_eq!(index.backend().worker_removal_sweep_count_for_test(), 1);
+
+            index
+                .apply_event(make_store_event_with_dp_rank(1, &[1], 0))
+                .await;
+            index
+                .apply_event(make_store_event_with_dp_rank(1, &[1], 1))
+                .await;
+            flush_and_settle(&index).await;
+
+            assert_score(&index, &[1, 2], worker_a0, 1).await;
+            assert_score(&index, &[1, 2], worker_a1, 1).await;
+            assert_score(&index, &[1, 2], worker_b, 2).await;
+            assert_score(&index, &[1, 3], worker_b, 2).await;
+        }
+
+        #[test]
+        fn clear_before_split_prevents_copying_removed_coverage() {
+            let index = ConcurrentRadixTreeCompressed::new();
+            let worker_a = worker(1);
+            let worker_b = worker(2);
+            let mut lookup_a = direct_lookup();
+            let mut lookup_b = direct_lookup();
+
+            apply_direct(&index, &mut lookup_a, make_store_event(1, &[1, 2]));
+            apply_direct(&index, &mut lookup_b, make_store_event(2, &[1, 2]));
+            apply_direct(&index, &mut lookup_a, make_clear_event_with_dp_rank(1, 0));
+            apply_direct(
+                &index,
+                &mut lookup_b,
+                make_store_event_with_parent(2, &[1], &[3]),
+            );
+            apply_direct(&index, &mut lookup_a, make_store_event(1, &[1]));
+
+            assert_direct_score(&index, &[1, 2], worker_a, 1);
+            assert_direct_score(&index, &[1, 2], worker_b, 2);
+            assert_direct_score(&index, &[1, 3], worker_b, 2);
+        }
+
+        #[tokio::test]
+        async fn worker_removal_broadcast_sweeps_once_and_respects_dp_rank_target() {
+            let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 4, 32);
+            let worker_a0 = WorkerWithDpRank::new(1, 0);
+            let worker_a1 = WorkerWithDpRank::new(1, 1);
+            let worker_b = WorkerWithDpRank::new(2, 0);
+
+            index
+                .apply_event(make_store_event_with_dp_rank(1, &[1, 2], 0))
+                .await;
+            index
+                .apply_event(make_store_event_with_dp_rank(1, &[1, 2], 1))
+                .await;
+            index.apply_event(make_store_event(2, &[1, 2])).await;
+            flush_and_settle(&index).await;
+            index
+                .apply_event(make_store_event_with_parent(2, &[1], &[3]))
+                .await;
+            flush_and_settle(&index).await;
+
+            index.remove_worker_dp_rank(1, 0).await;
+            flush_and_settle(&index).await;
+            assert_eq!(index.backend().worker_removal_sweep_count_for_test(), 1);
+            let scores = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
+            assert!(!scores.scores.contains_key(&worker_a0));
+            assert_eq!(scores.scores.get(&worker_a1), Some(&2));
+            assert_eq!(scores.scores.get(&worker_b), Some(&2));
+
+            index.remove_worker(1).await;
+            flush_and_settle(&index).await;
+            assert_eq!(index.backend().worker_removal_sweep_count_for_test(), 2);
+            let scores = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
+            assert!(!scores.scores.contains_key(&worker_a0));
+            assert!(!scores.scores.contains_key(&worker_a1));
+            assert_eq!(scores.scores.get(&worker_b), Some(&2));
         }
     }
 

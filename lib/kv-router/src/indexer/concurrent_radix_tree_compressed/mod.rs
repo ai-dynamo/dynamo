@@ -44,6 +44,8 @@ pub struct ConcurrentRadixTreeCompressed {
 
     anchor_nodes: DashMap<ExternalSequenceBlockHash, SharedNode, FxBuildHasher>,
     cleanup: CleanupState,
+    #[cfg(test)]
+    worker_removal_sweeps: std::sync::atomic::AtomicUsize,
     #[cfg(feature = "bench")]
     bench_metrics: CrtcBenchMetrics,
 }
@@ -97,6 +99,8 @@ impl ConcurrentRadixTreeCompressed {
             root: Arc::new(Node::new()),
             anchor_nodes: DashMap::with_hasher(FxBuildHasher),
             cleanup: CleanupState::new(),
+            #[cfg(test)]
+            worker_removal_sweeps: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(feature = "bench")]
             bench_metrics: CrtcBenchMetrics::new(),
         }
@@ -158,6 +162,12 @@ impl ConcurrentRadixTreeCompressed {
             .collect();
         children.sort_by(|left, right| left.edge.cmp(&right.edge));
         children
+    }
+
+    #[cfg(test)]
+    pub(crate) fn worker_removal_sweep_count_for_test(&self) -> usize {
+        self.worker_removal_sweeps
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn resolve_anchor_lookup(
@@ -235,7 +245,6 @@ impl ConcurrentRadixTreeCompressed {
             KvCacheEventData::Stored(op) => self.apply_stored(lookup, worker, op, id, counters),
             KvCacheEventData::Removed(op) => self.apply_removed(lookup, worker, op, id),
             KvCacheEventData::Cleared => {
-                lookup.entry(worker).or_default();
                 self.clear_all_blocks(lookup, worker.worker_id);
                 Ok(())
             }

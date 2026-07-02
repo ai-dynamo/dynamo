@@ -213,52 +213,39 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
-    pub(super) fn remove_or_clear_worker_blocks(
+    pub(super) fn erase_worker_coverage(
         &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker_id: WorkerId,
-        keep_worker: bool,
+        target: WorkerRemovalTarget,
+        sweep_tree: bool,
     ) {
-        let workers: Vec<WorkerWithDpRank> = lookup
-            .keys()
-            .filter(|w| w.worker_id == worker_id)
-            .copied()
-            .collect();
-
-        for worker in workers {
-            if let Some(worker_lookup) = lookup.remove(&worker) {
-                let mut seen = FxHashSet::<usize>::default();
-                for (_, node) in worker_lookup.into_iter() {
-                    let ptr = Arc::as_ptr(&node) as usize;
-                    if !seen.insert(ptr) {
-                        continue;
-                    }
-                    node.drop_worker(worker);
-                }
-
-                if keep_worker {
-                    lookup.insert(worker, FxHashMap::default());
-                }
-            }
+        lookup.retain(|worker, _| !target.matches(*worker));
+        if !sweep_tree {
+            return;
         }
-    }
 
-    pub(super) fn remove_worker_dp_rank(
-        &self,
-        lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
-        worker_id: WorkerId,
-        dp_rank: DpRank,
-    ) {
-        let key = WorkerWithDpRank { worker_id, dp_rank };
-        if let Some(worker_lookup) = lookup.remove(&key) {
-            let mut seen = FxHashSet::<usize>::default();
-            for (_, node) in worker_lookup.into_iter() {
-                let ptr = Arc::as_ptr(&node) as usize;
-                if !seen.insert(ptr) {
-                    continue;
-                }
-                node.drop_worker(key);
+        #[cfg(test)]
+        self.worker_removal_sweeps
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let mut queue = VecDeque::new();
+        self.root.push_children_into(&mut queue);
+        let anchor_roots: Vec<_> = self
+            .anchor_nodes
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        queue.extend(anchor_roots);
+
+        let mut seen = FxHashSet::<usize>::default();
+        while let Some(node) = queue.pop_front() {
+            let ptr = Arc::as_ptr(&node) as usize;
+            if !seen.insert(ptr) {
+                continue;
             }
+
+            let children = node.remove_target_and_snapshot_children(target);
+            queue.extend(children);
         }
     }
 
@@ -267,6 +254,6 @@ impl ConcurrentRadixTreeCompressed {
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker_id: WorkerId,
     ) {
-        self.remove_or_clear_worker_blocks(lookup, worker_id, true);
+        self.erase_worker_coverage(lookup, WorkerRemovalTarget::WorkerId(worker_id), true);
     }
 }
