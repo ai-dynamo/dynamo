@@ -9,6 +9,8 @@ from vllm.device_allocator.sleep_mode_backend import SleepModeBackendFactory
 
 from dynamo.vllm.snapshot_backend import (
     BACKEND_NAME,
+    GMS_BACKEND_NAME,
+    DynamoGMSSnapshotBackend,
     DynamoSnapshotBackend,
     register_dynamo_snapshot_backend,
     select_dynamo_snapshot_backend,
@@ -17,12 +19,16 @@ from dynamo.vllm.snapshot_backend import (
 
 def test_plugin_registration_is_idempotent():
     SleepModeBackendFactory._registry.pop(BACKEND_NAME, None)
+    SleepModeBackendFactory._registry.pop(GMS_BACKEND_NAME, None)
 
     register_dynamo_snapshot_backend()
     register_dynamo_snapshot_backend()
 
     assert SleepModeBackendFactory.get_backend_class(BACKEND_NAME) is (
         DynamoSnapshotBackend
+    )
+    assert SleepModeBackendFactory.get_backend_class(GMS_BACKEND_NAME) is (
+        DynamoGMSSnapshotBackend
     )
 
 
@@ -35,6 +41,20 @@ def test_snapshot_mode_selects_backend(monkeypatch):
     monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", "/run/dynamo/snapshot")
     select_dynamo_snapshot_backend(config)
     assert config.model_config.sleep_mode_backend == BACKEND_NAME
+
+
+def test_snapshot_mode_selects_gms_backend_for_gms_load_format(monkeypatch):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(sleep_mode_backend="cumem"),
+        load_config=SimpleNamespace(load_format="gms"),
+    )
+
+    select_dynamo_snapshot_backend(config)
+    assert config.model_config.sleep_mode_backend == "cumem"
+
+    monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", "/run/dynamo/snapshot")
+    select_dynamo_snapshot_backend(config)
+    assert config.model_config.sleep_mode_backend == GMS_BACKEND_NAME
 
 
 def test_suspend_orders_checkpoint_before_allocator():
@@ -152,4 +172,55 @@ def test_failed_suspend_retries_failed_allocator_rollback():
 
     assert backend._allocator.resume.call_count == 2
     restore.assert_called_once_with()
+    assert backend.state() == "RUNNING"
+
+
+def test_gms_suspend_orders_checkpoint_before_unmap():
+    backend = DynamoGMSSnapshotBackend()
+    calls = []
+    backend._unmap_gms_tags = lambda: calls.append("gms_unmap")
+
+    with patch(
+        "vllm.distributed.parallel_state.checkpoint_prepare_distributed_state",
+        side_effect=lambda: calls.append("checkpoint_prepare"),
+    ):
+        backend.suspend(1)
+
+    assert calls == ["checkpoint_prepare", "gms_unmap"]
+    assert backend.state() == "SUSPENDED"
+
+
+def test_gms_resume_remaps_before_checkpoint_restore():
+    backend = DynamoGMSSnapshotBackend()
+    backend._state = "SUSPENDED"
+    calls = []
+    backend._resume_gms_tags = lambda tags=None: calls.append(("gms_resume", tags))
+
+    with patch(
+        "vllm.distributed.parallel_state.checkpoint_restore_distributed_state",
+        side_effect=lambda: calls.append(("checkpoint_restore", None)),
+    ):
+        backend.resume()
+
+    assert calls == [("gms_resume", None), ("checkpoint_restore", None)]
+    assert backend.state() == "RUNNING"
+
+
+def test_gms_failed_unmap_rolls_back_before_rethrow():
+    backend = DynamoGMSSnapshotBackend()
+    calls = []
+    backend._unmap_gms_tags = MagicMock(side_effect=RuntimeError("unmap failed"))
+    backend._resume_gms_tags = lambda tags=None: calls.append(("gms_resume", tags))
+
+    with (
+        patch("vllm.distributed.parallel_state.checkpoint_prepare_distributed_state"),
+        patch(
+            "vllm.distributed.parallel_state.checkpoint_restore_distributed_state",
+            side_effect=lambda: calls.append(("checkpoint_restore", None)),
+        ),
+        pytest.raises(RuntimeError, match="unmap failed"),
+    ):
+        backend.suspend()
+
+    assert calls == [("gms_resume", None), ("checkpoint_restore", None)]
     assert backend.state() == "RUNNING"

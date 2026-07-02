@@ -302,7 +302,16 @@ class GMSWorker(Worker):
         _mappings and _scratch_mappings, releasing physical and preserving VA
         reservations. Wake reconnects and rebuilds via the standard
         prepare_scratch_for_reallocation → reallocate → remap pipeline.
+
+        Under Dynamo Snapshot the selected sleep-mode backend
+        (dynamo_gms_snapshot) owns the GMS unmap/abort plus the FlashInfer
+        checkpoint lifecycle, so route through the upstream sleep path,
+        which invokes it.
         """
+        if os.getenv("DYN_SNAPSHOT_CONTROL_DIR"):
+            super().sleep(level)
+            return
+
         free_bytes_before = torch.cuda.mem_get_info()[0]
 
         # Pause MX serving before GMS unmap
@@ -331,6 +340,13 @@ class GMSWorker(Worker):
 
     def wake_up(self, tags: Optional[List[str]] = None) -> None:
         """vLLM wake implementation with GMS integration."""
+        if os.getenv("DYN_SNAPSHOT_CONTROL_DIR"):
+            # The dynamo_gms_snapshot backend remaps GMS memory and restores
+            # FlashInfer collectives; upstream wake_up then re-initializes
+            # the KV cache state (post_kv_cache_wake_up).
+            super().wake_up(tags)
+            return
+
         if tags is None:
             tags = list(GMS_TAGS)
 
