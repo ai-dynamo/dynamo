@@ -52,6 +52,9 @@ outputs:
   docs:
     description: 'Whether docs files changed'
     value: ${{ steps.filter.outputs.docs_any_modified }}
+  base_ref:
+    description: 'PR target branch (baseRefName) for push-to-pull-request/N events; empty otherwise. Used for OSRB compliance-diff baseline selection.'
+    value: ${{ steps.merge-base.outputs.base_ref }}
 
 runs:
   using: "composite"
@@ -87,8 +90,12 @@ runs:
           # Fetch the merge-base commit so tj-actions can `git diff` against it.
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+          # Expose the PR's target branch for the OSRB compliance-diff baseline
+          # selection (main vs release/*). See resolve_diff_base.py.
+          echo "base_ref=$BASE" >> "$GITHUB_OUTPUT"
         else
           echo "base_sha=" >> "$GITHUB_OUTPUT"
+          echo "base_ref=" >> "$GITHUB_OUTPUT"
         fi
 
     - name: Check for changes

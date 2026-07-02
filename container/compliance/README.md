@@ -20,6 +20,8 @@ own filesystem; CI extracts `/legal` and `/sboms` from that stage with a warm ca
 | `overrides.py`, `license_overrides.yaml` | Authoritative `(ecosystem, name) → SPDX` overrides consulted before automatic detection. |
 | `native_packages.yaml` | From-source / binary components attributed via a hand-curated overlay (optional `license_text_path`). |
 | `verify_sbom_diff.py` | Cross-checks generated NOTICES against the base SBOM corpus; fails on drift. |
+| `resolve_diff_base.py` | Picks the baseline commit to diff a build's OSRB CSV against (PR→main / post-merge→main / release branch→prior release tag). |
+| `diff_osrb_csv.py` | Diffs two OSRB CSVs into a change-typed `*.diff.csv` (additions, version bumps, license changes, removals). |
 
 ## How it works
 
@@ -67,6 +69,43 @@ switched a base image and the corpus must be re-captured.
 
 Artifacts appear in the workflow run as `compliance-<prefix>-<suffix>-legal` /
 `-sboms` / `-sources`.
+
+### Per-build OSRB diff
+
+Alongside each `osrb-<image>-<arch>-<sha8>.csv`, the compliance-extract action
+writes `osrb-<image>-<arch>-<sha8>.diff.csv` comparing this build's dependency
+set against a context-dependent baseline. The diff notes four change kinds —
+additions, version bumps, license changes, removals — ordered by change bucket
+(additions → version+license changes → version bumps → license-only changes →
+removals), then by ecosystem (`rust, python, go, dpkg, native`), then name.
+
+The baseline (resolved by `resolve_diff_base.py`) depends on where the build runs:
+
+- **PR targeting `main`** → the latest commit on `main`.
+- **Post-merge on `main`** → the previous commit on `main`.
+- **PR targeting / post-merge on `release/*`** → the release tag `vX.Y.Z` that is
+  the highest one strictly older than the current version (semver order first —
+  `1.3.0` beats `1.2.5` for a `1.3.1` build regardless of publish date). Among
+  tags sharing an `X.Y.Z` base (e.g. `v1.2.3-nemo-3` vs `v1.2.3-minimax`), the
+  one published later wins.
+- **Nightly** → the previous successful run of the nightly workflow (found via
+  the Actions API); its commit names the baseline artifact.
+
+The baseline CSV is fetched by downloading the baseline commit's
+`compliance-<baseSHA>-<container>` artifact (needs `actions: read`). Baselines
+live only as Actions artifacts, so an expired/absent one is not fatal: the diff
+then contains a single `baseline_unavailable` row and the build stays green.
+
+Each arch also gets a self-describing `baseline/` folder next to the diff so the
+archive records exactly what was compared against:
+
+```text
+linux_<arch>/
+  osrb-<container>-<arch>-<sha8>.diff.csv
+  baseline/
+    BASELINE.md                              # selection rules + baseline SHA, commit link, generating-run link, label
+    osrb-<container>-<arch>-<baseSHA8>.csv   # a copy of the baseline CSV (absent when the baseline was unavailable)
+```
 
 ## License detection
 
