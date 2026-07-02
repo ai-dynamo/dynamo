@@ -2447,17 +2447,47 @@ impl OpenAIPreprocessor {
         use dynamo_parsers::tool_calling::jail::{
             Annotated as JailAnnotated, apply_tool_calling_jail as jail_apply,
         };
+        use std::sync::{Arc, Mutex};
 
-        // dynamo `Annotated<Nv>` -> jail `Annotated<Create>`
-        let jail_input = stream.map(|a| JailAnnotated {
-            data: a.data.map(|nv| nv.inner),
-            id: a.id,
-            event: a.event,
-            comment: a.comment,
-            error: a.error.map(|e| e.to_string()),
+        // The jail operates on the shared `Create` payload and never touches the
+        // dynamo-only typed `llm_metrics`, which `transform_postprocessor_stream`
+        // stamps *upstream* of the jail. `Create` has no slot for it, so buffer it
+        // here on the way in and re-attach on the way out — keeping the metrics off
+        // the shared type while preserving them across the boundary.
+        //
+        // `llm_metrics` is cumulative (`output_tokens`) plus per-chunk
+        // (`chunk_tokens`), and the jail may fold N buffered input chunks into one
+        // emitted chunk. So accumulate `chunk_tokens` and stamp the running total,
+        // with the latest cumulative fields, onto the next emitted data chunk. That
+        // preserves what `metrics.rs` records: `observe_response` sums `chunk_tokens`
+        // and `observe_current_osl` takes the latest `output_tokens`. (The
+        // annotation form on data-less usage chunks rides through untouched via
+        // `event`/`comment`.)
+        #[derive(Default)]
+        struct PendingMetrics {
+            template: Option<LLMMetricAnnotation>,
+            chunk_tokens: usize,
+        }
+        let pending = Arc::new(Mutex::new(PendingMetrics::default()));
+        let pending_in = Arc::clone(&pending);
+
+        // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
+        let jail_input = stream.map(move |a| {
+            if let Some(metrics) = a.data.as_ref().and_then(|nv| nv.llm_metrics.clone()) {
+                let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
+                p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
+                p.template = Some(metrics);
+            }
+            JailAnnotated {
+                data: a.data.map(|nv| nv.inner),
+                id: a.id,
+                event: a.event,
+                comment: a.comment,
+                error: a.error.map(|e| e.to_string()),
+            }
         });
 
-        // jail `Annotated<Create>` -> dynamo `Annotated<Nv>`
+        // jail `Annotated<Create>` -> dynamo `Annotated<Nv>` (re-attach llm_metrics)
         jail_apply(
             tool_call_parser,
             tool_choice,
@@ -2465,16 +2495,29 @@ impl OpenAIPreprocessor {
             uses_tool_call_structural_tag,
             jail_input,
         )
-        .map(|a| Annotated {
-            data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
-                inner,
-                nvext: None,
-                llm_metrics: None,
-            }),
-            id: a.id,
-            event: a.event,
-            comment: a.comment,
-            error: a.error.map(DynamoError::msg),
+        .map(move |a| {
+            // Stamp the accumulated metrics onto the next emitted data chunk;
+            // data-less/synthesized chunks carry it forward (or `None`).
+            let llm_metrics = a.data.as_ref().and_then(|_| {
+                let mut p = pending.lock().expect("jail metrics buffer poisoned");
+                let chunk_tokens = p.chunk_tokens;
+                p.chunk_tokens = 0;
+                p.template.take().map(|mut metrics| {
+                    metrics.chunk_tokens = chunk_tokens;
+                    metrics
+                })
+            });
+            Annotated {
+                data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                    inner,
+                    nvext: None,
+                    llm_metrics,
+                }),
+                id: a.id,
+                event: a.event,
+                comment: a.comment,
+                error: a.error.map(DynamoError::msg),
+            }
         })
     }
 
