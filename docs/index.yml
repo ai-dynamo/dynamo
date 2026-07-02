@@ -161,6 +161,8 @@ navigation:
                 path: kubernetes/modelexpress.md
           - section: Operate
             contents:
+              - page: Security and Authentication
+                path: kubernetes/security.md
               - page: Autoscaling
                 path: kubernetes/autoscaling.md
               - page: Rolling Update
