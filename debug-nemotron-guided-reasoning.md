@@ -4,7 +4,7 @@
 **Status:** Fixed; automated validation and all four post-review deployment matrices complete.
 **Dynamo branch:** `rmccormick/fix-guided-force-reasoning`
 **frontend-crates branch:** `rmccormick/fix-minimax-append-reasoning`
-**PR/push:** None
+**PR:** None; both branches pushed for direct inspection
 
 ## Executive summary
 
@@ -228,6 +228,246 @@ The user-requested review loop was run iteratively across Rust, vLLM Python, SGL
 
 The final review criterion is behavioral, not just test cleanliness: every live matrix below must show correct field ownership and no reasoning/tool syntax in any OpenAI output field.
 
+## Commands used for validation
+
+All four deployments used the exact same model and GPU. Native vLLM and Dynamo+vLLM used the same vLLM venv; native SGLang and Dynamo+SGLang used the same separate SGLang venv. Each server was run alone on the GPU.
+
+### Common environment and local Dynamo build
+
+```bash
+export DYNAMO_ROOT=/home/rmccormick/dynamo/codex/dynamo-reasoning-deploy
+export FRONTEND_CRATES_ROOT=/home/rmccormick/dynamo/codex/frontend-crates-reasoning
+export VLLM_VENV=/home/rmccormick/dynamo/codex/dynamo/.venv-vllm-reasoning
+export SGLANG_VENV=/home/rmccormick/dynamo/codex/dynamo/.venv-sglang-reasoning
+export MODEL=nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export CUDA_VISIBLE_DEVICES=GPU-38649abc-ccc9-7743-2625-815f2a299aec
+export TMPDIR=/dev/shm/dynamo-tmp
+export CARGO_TARGET_DIR=/dev/shm/dynamo-reasoning-target
+export CARGO_INCREMENTAL=0
+export CARGO_BUILD_JOBS=2
+```
+
+The Dynamo extension and editable package were installed independently into both backend venvs:
+
+```bash
+source "$VLLM_VENV/bin/activate"
+cd "$DYNAMO_ROOT/lib/bindings/python"
+maturin develop --uv
+cd "$DYNAMO_ROOT"
+uv pip install --no-deps -e .
+deactivate
+
+source "$SGLANG_VENV/bin/activate"
+cd "$DYNAMO_ROOT/lib/bindings/python"
+maturin develop --uv
+cd "$DYNAMO_ROOT"
+uv pip install --no-deps -e .
+deactivate
+```
+
+During parser integration validation, this temporary root `Cargo.toml` override selected the sibling frontend-crates checkout. It was removed before committing Dynamo:
+
+```toml
+[patch.crates-io]
+dynamo-parsers = { path = "../frontend-crates-reasoning/parsers" }
+```
+
+### Native vLLM 0.24.0
+
+```bash
+source "$VLLM_VENV/bin/activate"
+cd "$DYNAMO_ROOT"
+vllm serve "$MODEL" \
+  --served-model-name "$MODEL" \
+  --host 127.0.0.1 \
+  --port 28010 \
+  --trust-remote-code \
+  --max-model-len 4096 \
+  --max-num-seqs 2 \
+  --enforce-eager \
+  --kv-cache-memory-bytes 920126000 \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder \
+  --reasoning-parser nemotron_v3
+```
+
+### Dynamo+vLLM 0.24.0
+
+```bash
+source "$VLLM_VENV/bin/activate"
+cd "$DYNAMO_ROOT"
+export DYN_HTTP_PORT=28000
+export DYN_SYSTEM_PORT=28001
+export ETCD_UNSAFE_NO_FSYNC=true
+export MAX_MODEL_LEN=4096
+export MAX_CONCURRENT_SEQS=2
+export _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES=920126000
+bash examples/backends/vllm/launch/agg.sh \
+  --model "$MODEL" \
+  --dyn-tool-call-parser nemotron_nano \
+  --dyn-reasoning-parser nemotron_v3 \
+  --reasoning-parser nemotron_v3
+```
+
+The native vLLM reasoner is required so its structured-output engine can delay grammar masking. Dynamo's `--dyn-tool-call-parser` owns response parsing; vLLM's OpenAI-server-layer `--tool-call-parser` is therefore used only with native `vllm serve`, not the Dynamo engine worker.
+
+### Native SGLang 0.5.14
+
+```bash
+source "$SGLANG_VENV/bin/activate"
+cd "$DYNAMO_ROOT"
+python -m sglang.launch_server \
+  --model-path "$MODEL" \
+  --served-model-name "$MODEL" \
+  --host 127.0.0.1 \
+  --port 28020 \
+  --trust-remote-code \
+  --context-length 4096 \
+  --mem-fraction-static 0.82 \
+  --max-running-requests 2 \
+  --disable-cuda-graph \
+  --reasoning-parser nemotron_3 \
+  --tool-call-parser qwen3_coder \
+  --grammar-backend xgrammar
+```
+
+### Dynamo+SGLang 0.5.14
+
+```bash
+source "$SGLANG_VENV/bin/activate"
+cd "$DYNAMO_ROOT"
+export DYN_HTTP_PORT=28030
+export DYN_SYSTEM_PORT=28031
+export ETCD_UNSAFE_NO_FSYNC=true
+bash examples/backends/sglang/launch/agg.sh \
+  --model-path "$MODEL" \
+  --context-length 4096 \
+  --mem-fraction-static 0.82 \
+  --max-running-requests 2 \
+  --disable-cuda-graph \
+  --grammar-backend xgrammar \
+  --dyn-tool-call-parser nemotron_nano \
+  --dyn-reasoning-parser nemotron_v3 \
+  --reasoning-parser nemotron_3
+```
+
+As with vLLM, the native SGLang reasoner controls grammar activation while Dynamo owns response tool parsing. Passing both native and Dynamo tool parsers is rejected because it would create two response-parser owners.
+
+### Health and six-case request matrix
+
+The endpoint ports were `28010` (native vLLM), `28000` (Dynamo+vLLM), `28020` (native SGLang), and `28030` (Dynamo+SGLang):
+
+```bash
+curl -sS "http://127.0.0.1:${PORT}/health"
+```
+
+This request function reproduces every matrix cell. It emits ordinary JSON when `STREAM=false` and SSE when `STREAM=true`:
+
+```bash
+run_case() {
+  curl -sS -N "http://127.0.0.1:${PORT}/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -d @- <<JSON
+{
+  "model": "$MODEL",
+  "messages": [{"role": "user", "content": "$PROMPT"}],
+  "tools": [{
+    "type": "function",
+    "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a location.",
+      "parameters": {
+        "type": "object",
+        "properties": {"location": {"type": "string"}},
+        "required": ["location"],
+        "additionalProperties": false
+      }
+    }
+  }],
+  "tool_choice": "$TOOL_CHOICE",
+  "parallel_tool_calls": false,
+  "temperature": 0,
+  "max_tokens": 1024,
+  "stream": $STREAM,
+  "chat_template_kwargs": {"enable_thinking": true}
+}
+JSON
+}
+
+TOOL_CHOICE=required STREAM=false \
+  PROMPT='What is the weather in San Francisco? You must use get_weather.' run_case
+TOOL_CHOICE=required STREAM=true \
+  PROMPT='What is the weather in San Francisco? You must use get_weather.' run_case
+TOOL_CHOICE=auto STREAM=false \
+  PROMPT='What is the weather in San Francisco? Use get_weather to answer.' run_case
+TOOL_CHOICE=auto STREAM=true \
+  PROMPT='What is the weather in San Francisco? Use get_weather to answer.' run_case
+TOOL_CHOICE=auto STREAM=false \
+  PROMPT='What is 37 multiplied by 19? Answer directly and do not use a tool.' run_case
+TOOL_CHOICE=auto STREAM=true \
+  PROMPT='What is 37 multiplied by 19? Answer directly and do not use a tool.' run_case
+```
+
+The final assertion harness aggregated streaming deltas, parsed tool arguments, checked finish reasons and field ownership, and rejected reasoning/tool tag leakage. These were the exact invocations:
+
+```bash
+python /dev/shm/nemotron_matrix.py \
+  --url http://127.0.0.1:28020/v1/chat/completions \
+  --label native-sglang-0.5.14
+python /dev/shm/nemotron_matrix.py \
+  --url http://127.0.0.1:28030/v1/chat/completions \
+  --label dynamo-sglang-0.5.14
+python /dev/shm/nemotron_matrix.py \
+  --url http://127.0.0.1:28010/v1/chat/completions \
+  --label native-vllm-0.24.0
+python /dev/shm/nemotron_matrix.py \
+  --url http://127.0.0.1:28000/v1/chat/completions \
+  --label dynamo-vllm-0.24.0
+```
+
+### Automated tests and static checks
+
+```bash
+source "$SGLANG_VENV/bin/activate"
+cd "$DYNAMO_ROOT"
+python -m pytest -q \
+  components/src/dynamo/frontend/tests/test_sglang_processor_unit.py \
+  components/src/dynamo/frontend/tests/test_sglang_tool_calls.py \
+  components/src/dynamo/sglang/tests/test_sglang_reasoning.py \
+  components/src/dynamo/sglang/tests/test_sglang_unit.py
+deactivate
+
+source "$VLLM_VENV/bin/activate"
+cd "$DYNAMO_ROOT"
+python -m pytest -q \
+  components/src/dynamo/frontend/tests/test_vllm_processor_unit.py \
+  components/src/dynamo/vllm/tests/test_backend_args.py \
+  components/src/dynamo/vllm/tests/test_runtime_metadata.py \
+  components/src/dynamo/vllm/tests/test_vllm_unit.py \
+  components/src/dynamo/vllm/tests/test_vllm_worker_handler.py \
+  components/src/dynamo/vllm/tests/test_vllm_trace_propagation.py \
+  components/src/dynamo/vllm/tests/test_vllm_lora.py
+deactivate
+
+cd "$DYNAMO_ROOT"
+cargo test -p dynamo-llm --test postprocessor_parsing_stream
+cargo check -p dynamo-llm --tests
+cargo fmt --package dynamo-llm -- --check
+git diff --check
+
+cd "$FRONTEND_CRATES_ROOT"
+cargo test -p dynamo-parsers
+```
+
+Server shutdowns used `Ctrl-C`; GPU release was verified with:
+
+```bash
+nvidia-smi \
+  --query-gpu=index,uuid,memory.used,utilization.gpu \
+  --format=csv,noheader
+```
+
 ## Final E2E matrices
 
 All four final deployments must use isolated backend environments. Dynamo+vLLM and native vLLM must share the vLLM venv; Dynamo+SGLang and native SGLang must share the separate SGLang venv. Use the exact Nemotron model and `parallel_tool_calls=false` for deterministic required-tool comparison.
@@ -287,5 +527,7 @@ Both Dynamo backends pass the strict 6/6 response contract. Across all 12 Dynamo
 ## Handoff
 
 - Final Dynamo+vLLM deployment: `127.0.0.1:28000`.
-- Dynamo and frontend-crates changes are kept on separate local DCO-signed branches; no PR or project-repository push was created.
+- Dynamo and frontend-crates changes are on separate pushed DCO-signed branches; no PR was created.
+- Dynamo branch: <https://github.com/ai-dynamo/dynamo/tree/rmccormick/fix-guided-force-reasoning>
+- frontend-crates branch: <https://github.com/ai-dynamo/frontend-crates/tree/rmccormick/fix-minimax-append-reasoning>
 - The temporary Dynamo Cargo path patch was used for builds/tests only and removed before the Dynamo commit.
