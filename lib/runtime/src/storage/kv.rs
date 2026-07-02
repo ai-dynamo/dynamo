@@ -365,9 +365,14 @@ impl Manager {
                 };
                 match event {
                     WatchEvent::Resync(_) => {
-                        if let Err(err) = tx.send(event).await {
-                            tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding resync to channel");
-                            break;
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => break,
+                            result = tx.send(event) => {
+                                if let Err(err) = result {
+                                    tracing::error!(bucket_name, %err, "KeyValueStoreManager.watch failed adding resync to channel");
+                                    break;
+                                }
+                            }
                         }
                     }
                     event => {

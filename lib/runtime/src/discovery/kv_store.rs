@@ -502,7 +502,6 @@ impl KVStoreDiscovery {
             }
             kv::WatchEvent::Resync(snapshot) => {
                 let mut next_instances = HashMap::<DiscoveryInstanceId, DiscoveryInstance>::new();
-                let mut events = Vec::new();
 
                 for (key, value) in snapshot {
                     let key_str = key.as_ref();
@@ -512,8 +511,7 @@ impl KVStoreDiscovery {
 
                     match Self::parse_instance(value.as_ref()) {
                         Ok(instance) => {
-                            next_instances.insert(instance.id(), instance.clone());
-                            events.push(DiscoveryEvent::Added(instance));
+                            next_instances.insert(instance.id(), instance);
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -522,6 +520,13 @@ impl KVStoreDiscovery {
                                 "Failed to parse discovery instance from resync event"
                             );
                         }
+                    }
+                }
+
+                let mut events = Vec::new();
+                for (id, instance) in &next_instances {
+                    if known_instances.get(id) != Some(instance) {
+                        events.push(DiscoveryEvent::Added(instance.clone()));
                     }
                 }
 
@@ -943,6 +948,7 @@ mod tests {
 
         let first = endpoint_instance(1);
         let second = endpoint_instance(2);
+        let third = endpoint_instance(3);
         known_instances.insert(first.id(), first);
         known_instances.insert(second.id(), second.clone());
 
@@ -952,6 +958,11 @@ mod tests {
             kv::Key::new(second_kv.key()),
             second_kv.value().to_vec().into(),
         );
+        let third_kv = endpoint_kv(3);
+        snapshot.insert(
+            kv::Key::new(third_kv.key()),
+            third_kv.value().to_vec().into(),
+        );
 
         let events = KVStoreDiscovery::discovery_events_from_watch_event(
             kv::WatchEvent::Resync(snapshot),
@@ -960,10 +971,12 @@ mod tests {
             &mut known_instances,
         );
 
-        assert!(events.contains(&DiscoveryEvent::Added(second)));
+        assert!(!events.contains(&DiscoveryEvent::Added(second)));
+        assert!(events.contains(&DiscoveryEvent::Added(third)));
         assert!(events.contains(&DiscoveryEvent::Removed(endpoint_instance(1).id())));
-        assert_eq!(known_instances.len(), 1);
+        assert_eq!(known_instances.len(), 2);
         assert!(known_instances.contains_key(&endpoint_instance(2).id()));
+        assert!(known_instances.contains_key(&endpoint_instance(3).id()));
     }
 
     #[test]
