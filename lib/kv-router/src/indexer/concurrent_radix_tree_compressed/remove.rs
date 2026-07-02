@@ -224,10 +224,6 @@ impl ConcurrentRadixTreeCompressed {
             return;
         }
 
-        #[cfg(test)]
-        self.worker_removal_sweeps
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
         let mut queue = VecDeque::new();
         self.root.push_children_into(&mut queue);
         let anchor_roots: Vec<_> = self

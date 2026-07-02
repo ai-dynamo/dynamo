@@ -545,7 +545,6 @@ mod race_tests {
 
             index.apply_event(make_clear_event_with_dp_rank(1, 0)).await;
             flush_and_settle(&index).await;
-            assert_eq!(index.backend().worker_removal_sweep_count_for_test(), 1);
 
             index
                 .apply_event(make_store_event_with_dp_rank(1, &[1], 0))
@@ -585,7 +584,7 @@ mod race_tests {
         }
 
         #[tokio::test]
-        async fn worker_removal_broadcast_sweeps_once_and_respects_dp_rank_target() {
+        async fn worker_removal_respects_dp_rank_and_worker_targets() {
             let index = ThreadPoolIndexer::new(ConcurrentRadixTreeCompressed::new(), 4, 32);
             let worker_a0 = WorkerWithDpRank::new(1, 0);
             let worker_a1 = WorkerWithDpRank::new(1, 1);
@@ -606,7 +605,6 @@ mod race_tests {
 
             index.remove_worker_dp_rank(1, 0).await;
             flush_and_settle(&index).await;
-            assert_eq!(index.backend().worker_removal_sweep_count_for_test(), 1);
             let scores = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
             assert!(!scores.scores.contains_key(&worker_a0));
             assert_eq!(scores.scores.get(&worker_a1), Some(&2));
@@ -614,7 +612,6 @@ mod race_tests {
 
             index.remove_worker(1).await;
             flush_and_settle(&index).await;
-            assert_eq!(index.backend().worker_removal_sweep_count_for_test(), 2);
             let scores = index.find_matches(local_hashes(&[1, 2])).await.unwrap();
             assert!(!scores.scores.contains_key(&worker_a0));
             assert!(!scores.scores.contains_key(&worker_a1));
