@@ -168,19 +168,21 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErr: "spec.components[worker].experimental.gpuMemoryService: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1",
 		},
+
+		// Pair every validation rule changed by this PR across both served source versions.
 		{
-			name: "v1beta1 empty component name is rejected by the schema",
+			name: "v1beta1 component name is required by the schema",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[1].ComponentName = ""
 			}),
 			wantSchemaErr: `spec.components[1].name: Invalid value: "": spec.components[1].name in body should be at least 1 chars long`,
 		},
 		{
-			name:       "v1alpha1 empty service name reaches the webhook",
+			name:       "v1alpha1 converted empty service map key is accepted",
 			deployment: alphaDGDForAdmissionWithServiceNames(""),
 		},
 		{
-			name: "v1beta1 case-insensitive component names are rejected by CEL",
+			name: "v1beta1 component names are unique case-insensitively in CEL",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].ComponentName = dgdAdmissionWorkerName
 				dgd.Spec.Components[1].ComponentName = dgdAdmissionUpperWorkerName
@@ -188,7 +190,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components: Invalid value: component names must be unique case-insensitively",
 		},
 		{
-			name:       "v1alpha1 case-insensitive service names reach the webhook",
+			name:       "v1alpha1 converted service names may collide case-insensitively",
 			deployment: alphaDGDForAdmissionWithServiceNames(dgdAdmissionWorkerName, dgdAdmissionUpperWorkerName),
 		},
 		{
@@ -214,14 +216,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment:    dgdAdmissionWithLabel(t, alphaDGDForAdmissionWithServiceNames("")),
 		},
 		{
-			name: "v1beta1 empty compilation cache PVC name is rejected by the schema",
+			name: "v1beta1 compilation cache mount requires a PVC name in the schema",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{}
 			}),
 			wantSchemaErr: `spec.components[1].compilationCache.pvcName: Invalid value: "": spec.components[1].compilationCache.pvcName in body should be at least 1 chars long`,
 		},
 		{
-			name: "v1alpha1 empty compilation cache volume name reaches the webhook",
+			name: "v1alpha1 converted compilation cache mount with an empty PVC name reaches the webhook",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].VolumeMounts = []nvidiacomv1alpha1.VolumeMount{{
 					UseAsCompilationCache: true,
@@ -230,7 +232,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			mutateRequest: setAlphaCompilationCacheVolumeNameEmpty,
 		},
 		{
-			name: "v1beta1 sidecar without image is rejected by CEL",
+			name: "v1beta1 sidecars must provide an image in CEL",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: consts.MainContainerName}, {Name: "metrics"}},
@@ -239,7 +241,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1].podTemplate.spec.containers[1]: Invalid value: sidecar containers must specify a non-empty image",
 		},
 		{
-			name: "v1alpha1 sidecar without image reaches the webhook",
+			name: "v1alpha1 converted sidecar without image reaches the webhook",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "metrics"}},
@@ -256,7 +258,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 init container without image is rejected by CEL",
+			name: "v1beta1 init containers must provide an image in CEL",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers:     []corev1.Container{{Name: consts.MainContainerName}},
@@ -266,15 +268,15 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1].podTemplate.spec.initContainers[0]: Invalid value: init containers must specify a non-empty image",
 		},
 		{
-			name: "v1alpha1 init container without image reaches the webhook",
+			name: "v1alpha1 converted init container without image reaches the webhook",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{PodSpec: &corev1.PodSpec{
-					InitContainers: []corev1.Container{{Name: "prepare"}},
+					InitContainers: []corev1.Container{{Name: "prep"}},
 				}}
 			}),
 		},
 		{
-			name: "v1beta1 invalid pod template backend annotation is rejected by CEL",
+			name: "v1beta1 pod template backend annotation is validated by CEL",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).PodTemplate = &corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
@@ -286,10 +288,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1].podTemplate: Invalid value: podTemplate backend annotation must be mp or ray, case-insensitively",
 		},
 		{
-			name: "v1alpha1 invalid extra pod metadata annotation reaches the webhook",
+			name: "v1alpha1 converted extraPodMetadata annotation does not receive v1beta1 CEL validation",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].ExtraPodMetadata = &nvidiacomv1alpha1.ExtraPodMetadata{
-					Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid"},
+					Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "typo"},
 				}
 			}),
 		},
@@ -354,7 +356,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				old = admissionUnstructured(t, tt.oldDeployment)
 			}
 
-			version := tt.deployment.GetObjectKind().GroupVersionKind().Version
+			version := admissionSourceVersion(t, tt.deployment)
 			requestValidator, ok := requestValidators[version]
 			if !ok {
 				t.Fatalf("no request validator for source version %q", version)

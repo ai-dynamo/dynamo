@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
@@ -105,6 +106,22 @@ func admissionUnstructured(t *testing.T, deployment runtime.Object) map[string]a
 	return request
 }
 
+func admissionSourceVersion(t *testing.T, object runtime.Object) string {
+	t.Helper()
+	if version := object.GetObjectKind().GroupVersionKind().Version; version != "" {
+		return version
+	}
+	switch object.(type) {
+	case *nvidiacomv1alpha1.DynamoGraphDeployment, *nvidiacomv1alpha1.DynamoComponentDeployment:
+		return nvidiacomv1alpha1.GroupVersion.Version
+	case *nvidiacomv1beta1.DynamoGraphDeployment, *nvidiacomv1beta1.DynamoComponentDeployment:
+		return nvidiacomv1beta1.GroupVersion.Version
+	default:
+		t.Fatalf("unsupported admission object type %T", object)
+		return ""
+	}
+}
+
 func assertRequestValidationError(t *testing.T, got field.ErrorList, want string) {
 	t.Helper()
 	if len(got) != 1 {
@@ -112,6 +129,19 @@ func assertRequestValidationError(t *testing.T, got field.ErrorList, want string
 	}
 	if got[0].Error() != want {
 		t.Fatalf("request error = %q, want %q", got[0], want)
+	}
+}
+
+func assertWebhookError(t *testing.T, got error, want string) {
+	t.Helper()
+	if want == "" {
+		if got != nil {
+			t.Fatalf("webhook error = %v, want none", got)
+		}
+		return
+	}
+	if got == nil || !strings.Contains(got.Error(), want) {
+		t.Fatalf("webhook error = %v, want one containing %q", got, want)
 	}
 }
 
