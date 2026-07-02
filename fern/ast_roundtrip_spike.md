@@ -52,6 +52,7 @@ The generated tree still passes `fern check` with 0 errors and 2 warnings.
 That confirms Fern's structural check does not detect this MDX semantic drift
 and cannot serve as the round-trip equivalence test by itself.
 
-The next experiment should use `markdown-it-py` for ordinary `.md` documents
-and source-preserving destination edits for `.mdx`, unless a mature Python MDX
-parser and Markdown renderer can be identified.
+The follow-up [source-preserving link rewrite spike](link_rewrite_spike.md) uses
+`markdown-it-py` only as a syntax oracle and changes destination spans in the
+original source. It avoids both the broad `.md` formatting churn and the unsafe
+MDX rendering seen here.
