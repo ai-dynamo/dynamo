@@ -6,13 +6,9 @@ sidebar-title: 本地安装
 description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynamo
 ---
 
-<p align="left">
-  <a href="./local-installation.md" hreflang="en">English</a> | <strong>简体中文</strong>
-</p>
-
 本指南介绍如何在配备一个或多个 GPU 的本地机器或 VM 上安装并运行 Dynamo。完成后，你将拥有一个可工作的 OpenAI 兼容端点，用于提供模型服务。
 
-对于生产环境的多节点集群，请参阅 [Kubernetes 部署指南](../kubernetes/README.md)。如需为开发从源码构建，请参阅[从源码构建](building-from-source.zh-CN.md)。
+对于生产环境的多节点集群，请参阅 [Kubernetes 部署指南](../../../kubernetes/README.md)。如需为开发从源码构建，请参阅[从源码构建](building-from-source.md)。
 
 ## 系统要求
 
@@ -27,7 +23,7 @@ description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynam
 
 TensorRT-LLM 不支持 Python 3.11。
 
-如需查看包含后端框架版本在内的完整兼容性矩阵，请参阅[支持矩阵](../reference/support-matrix.md)。
+如需查看包含后端框架版本在内的完整兼容性矩阵，请参阅[支持矩阵](../../../reference/support-matrix.md)。
 
 ## 安装 Dynamo
 
@@ -51,9 +47,9 @@ docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runt
 - 使用 `&` 在后台运行进程（请参阅下方“运行 Dynamo”部分），或
 - 打开第二个终端并使用 `docker exec -it <container_id> bash`
 
-如需查看可用版本，请参阅[发布产物](../reference/release-artifacts.md#container-images)；
-如需运行说明，请参阅各后端指南：[SGLang](../backends/sglang/README.md) |
-[TensorRT-LLM](../backends/trtllm/README.md) | [vLLM](../backends/vllm/README.md)
+如需查看可用版本，请参阅[发布产物](../../../reference/release-artifacts.md#container-images)；
+如需运行说明，请参阅各后端指南：[SGLang](../../../backends/sglang/README.md) |
+[TensorRT-LLM](../../../backends/trtllm/README.md) | [vLLM](../../../backends/vllm/README.md)
 
 ### 选项 B：从 PyPI 安装
 
@@ -89,7 +85,7 @@ pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
 
 由于传递性 Git URL 依赖项 `uv` 无法解析，TensorRT-LLM 需要使用 `pip`。
 为获得更广泛的兼容性，我们建议使用 TensorRT-LLM 容器。
-详情请参阅 [TRT-LLM 后端指南](../backends/trtllm/README.md)。
+详情请参阅 [TRT-LLM 后端指南](../../../backends/trtllm/README.md)。
 
 **vLLM**
 
@@ -109,7 +105,7 @@ Dynamo 组件通过共享后端相互发现。可使用两个选项：
 | **File** | 单机、本地开发 | 无需设置 -- 将 `--discovery-backend file` 传递给所有组件。事件平面会自动默认使用 ZMQ（无需 NATS）。 |
 | **etcd** | 多节点、生产环境 | 需要正在运行的 etcd 实例（如果未指定标志，则为默认值）。事件平面默认使用 NATS。 |
 
-本指南使用 `--discovery-backend file`。如需设置 etcd，请参阅[服务发现](../kubernetes/service-discovery.md)。
+本指南使用 `--discovery-backend file`。如需设置 etcd，请参阅[服务发现](../../../kubernetes/service-discovery.md)。
 
 ### 验证安装（可选）
 
@@ -159,7 +155,7 @@ python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file
 是预期行为（没有正在运行的 ModelExpress server），可以安全忽略。在配置了 `MODEL_EXPRESS_URL` 的 Kubernetes 部署中，
 此警告，或相关的 `Failed to resolve local model path after server download`，
 表示已配置 ModelExpress，但它实际上没有提供缓存模型；
-请参阅 [Kubernetes 中的模型缓存](../kubernetes/model-caching.md#option-2-modelexpress-p2p-distribution)
+请参阅 [Kubernetes 中的模型缓存](../../../kubernetes/model-caching.md#option-2-modelexpress-p2p-distribution)
 了解正确配置。
 
 **vLLM**
@@ -193,7 +189,7 @@ curl localhost:8000/v1/chat/completions \
 
 **CUDA/驱动版本不匹配**
 
-运行 `nvidia-smi` 检查你的驱动版本。Dynamo 对 CUDA 12 需要驱动 575.51.03+，对 CUDA 13 需要驱动 580.00.03+。B300/GB300 GPU 需要 CUDA 13。完整要求请参阅[支持矩阵](../reference/support-matrix.md)。
+运行 `nvidia-smi` 检查你的驱动版本。Dynamo 对 CUDA 12 需要驱动 575.51.03+，对 CUDA 13 需要驱动 580.00.03+。B300/GB300 GPU 需要 CUDA 13。完整要求请参阅[支持矩阵](../../../reference/support-matrix.md)。
 
 **模型无法装入 GPU（OOM）**
 
@@ -225,7 +221,7 @@ docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
 ## 后续步骤
 
-- [后端指南](../backends/sglang/README.md) -- 后端特定配置和功能
-- [分离式服务](../features/disaggregated-serving/README.md) -- 独立扩展 prefill 和 decode
-- [KV Cache 感知路由](../components/router/router-guide.md) -- 智能请求路由
-- [Kubernetes 部署](../kubernetes/README.md) -- 生产环境多节点部署
+- [后端指南](../../../backends/sglang/README.md) -- 后端特定配置和功能
+- [分离式服务](../../../features/disaggregated-serving/README.md) -- 独立扩展 prefill 和 decode
+- [KV Cache 感知路由](../../../components/router/router-guide.md) -- 智能请求路由
+- [Kubernetes 部署](../../../kubernetes/README.md) -- 生产环境多节点部署

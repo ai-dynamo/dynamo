@@ -121,7 +121,21 @@ jobs:
           rsync -a \
             --exclude='digest' \
             --exclude='index.yml' \
+            --exclude='translations' \
             source-checkout/docs/ docs-checkout/fern/pages-dev/
+
+          # Sync translated content into Fern's native-localization mirror:
+          # docs/translations/<lang>/<path> -> fern/translations/<lang>/pages-dev/<path>
+          # (mirrors where the base page lands, so Fern pairs them per locale)
+          rm -rf docs-checkout/fern/translations
+          if [ -d source-checkout/docs/translations ]; then
+            echo "Syncing translations/ to docs-website branch..."
+            for lang_dir in source-checkout/docs/translations/*/; do
+              lang=$(basename "$lang_dir")
+              mkdir -p "docs-checkout/fern/translations/$lang/pages-dev"
+              rsync -a "$lang_dir" "docs-checkout/fern/translations/$lang/pages-dev/"
+            done
+          fi
 
           # Sync index.yml as versions/dev.yml and transform paths for docs-website layout
           echo "Syncing index.yml to docs-website branch as versions/dev.yml..."
@@ -144,6 +158,11 @@ jobs:
           # Sync convert_callouts.py script
           if [ -f source-checkout/fern/convert_callouts.py ]; then
             cp source-checkout/fern/convert_callouts.py docs-checkout/fern/convert_callouts.py
+          fi
+
+          # Sync resolve_translation_links.py script
+          if [ -f source-checkout/fern/resolve_translation_links.py ]; then
+            cp source-checkout/fern/resolve_translation_links.py docs-checkout/fern/resolve_translation_links.py
           fi
 
           # Sync components/ directory (e.g., CustomFooter.tsx)
@@ -182,7 +201,23 @@ jobs:
         run: |
           echo "Converting GitHub-style callouts to Fern format in pages/..."
           python3 docs-checkout/fern/convert_callouts.py --dir docs-checkout/fern/pages-dev
+          if [ -d docs-checkout/fern/translations ]; then
+            python3 docs-checkout/fern/convert_callouts.py --dir docs-checkout/fern/translations
+          fi
           echo "Callout conversion complete."
+
+      - name: Resolve relative links in translated pages
+        run: |
+          # Rewrites relative page links in translations to site URLs computed
+          # from the current nav (Fern's early-access localization does not yet
+          # resolve them; see fern/resolve_translation_links.py).
+          if [ -d docs-checkout/fern/translations ]; then
+            pip install --quiet pyyaml
+            python3 docs-checkout/fern/resolve_translation_links.py \
+              --nav source-checkout/docs/index.yml \
+              --translations-root docs-checkout/fern/translations \
+              --site-root /dynamo --version-slug dev
+          fi
 
       - name: Update docs.yml preserving products
         run: |

@@ -6,10 +6,6 @@ subtitle: 如何为 Dynamo 做贡献
 max-toc-depth: 3
 ---
 
-<p align="left">
-  <a href="./contribution-guide.md" hreflang="en">English</a> | <strong>简体中文</strong>
-</p>
-
 Dynamo 是一个开源分布式推理平台，由不断壮大的贡献者社区共同构建。该项目采用 [Apache 2.0](https://github.com/ai-dynamo/dynamo/blob/main/LICENSE) 许可证，欢迎各种规模的贡献 -- 从修正错别字到开发重要功能都包括在内。社区贡献已经塑造了 Dynamo 的核心领域，包括后端集成、文档、部署工具和性能改进。
 
 Dynamo 拥有 200 多位外部贡献者、220 多个已合并的社区 PR，并且每月都有新贡献者加入，是增长最快的开源推理项目之一。欢迎查看我们的[提交活动](https://github.com/ai-dynamo/dynamo/graphs/commit-activity)和 [GitHub stars](https://github.com/ai-dynamo/dynamo/stargazers)。本指南将帮助你开始贡献。

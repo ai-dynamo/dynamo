@@ -5,18 +5,14 @@ title: 工具调用解析（Dynamo）
 subtitle: 使用 Dynamo 内置的工具调用解析器，将模型连接到外部工具和服务
 ---
 
-<p align="left">
-  <a href="./README.md" hreflang="en">English</a> | <strong>简体中文</strong>
-</p>
-
 你可以通过工具调用把 Dynamo 连接到外部工具和服务。通过提供一组可用函数，Dynamo 可以为相关函数输出函数参数，你执行这些函数后，即可用外部信息来增强提示。
 
 工具调用由 `tool_choice` 和 `tools` 请求参数控制。
 
 本页介绍默认的 Dynamo 原生路径的解析器名称。如果 Dynamo 未列出适用于你的模型的解析器，请参阅
-[Parser Engine Fallback](engine-fallback.md)。关于 `--dyn-tool-call-parser` 如何与
+[Parser Engine Fallback](../../../tool-calling/engine-fallback.md)。关于 `--dyn-tool-call-parser` 如何与
 `--dyn-chat-processor` 和 `--dyn-reasoning-parser` 组合（以及哪些组合是无效的），请参阅
-[Parser Configuration](parser-configuration.md)。
+[Parser Configuration](../../../tool-calling/parser-configuration.md)。
 
 ## 前置条件
 
@@ -34,11 +30,11 @@ python -m dynamo.<backend> --help
 > `python -m dynamo.<backend> --custom-jinja-template </path/to/template.jinja>`。
 
 > [!TIP]
-> 如果你的模型还会输出需要与正常内容分离的推理内容，请参阅 [Reasoning Parsing (Dynamo)](../reasoning/README.md) 了解支持的 `--dyn-reasoning-parser` 取值。
+> 如果你的模型还会输出需要与正常内容分离的推理内容，请参阅 [Reasoning Parsing (Dynamo)](../../../reasoning/README.md) 了解支持的 `--dyn-reasoning-parser` 取值。
 
 ## 支持的工具调用解析器
 
-下表列出 Dynamo 注册表中当前支持的工具调用解析器。**Upstream name** 列标出 vLLM 或 SGLang 的解析器名称与 Dynamo 不同之处——在使用 `--dyn-chat-processor vllm` 或 `sglang` 时（参阅 [Parser Engine Fallback](engine-fallback.md)）尤为相关。upstream 列为空表示同名在各处通用。`Dynamo-only` 表示该格式没有对应的上游解析器。
+下表列出 Dynamo 注册表中当前支持的工具调用解析器。**Upstream name** 列标出 vLLM 或 SGLang 的解析器名称与 Dynamo 不同之处——在使用 `--dyn-chat-processor vllm` 或 `sglang` 时（参阅 [Parser Engine Fallback](../../../tool-calling/engine-fallback.md)）尤为相关。upstream 列为空表示同名在各处通用。`Dynamo-only` 表示该格式没有对应的上游解析器。
 
 | 解析器名称 | 模型 | Upstream name | 说明 |
 |---|---|---|---|
@@ -63,7 +59,7 @@ python -m dynamo.<backend> --help
 | `default` | *(fallback)* | Dynamo-only | 空 JSON 配置（无 start/end token）。生产环境请优先使用模型专用解析器。 |
 
 > [!TIP]
-> 对于 Kimi K2.5 thinking 模型，将 `--dyn-tool-call-parser kimi_k2` 与 [Reasoning Parsing (Dynamo)](../reasoning/README.md) 中的 `--dyn-reasoning-parser kimi_k25` 配对，以便从同一响应中正确解析 `<think>` 块和工具调用。
+> 对于 Kimi K2.5 thinking 模型，将 `--dyn-tool-call-parser kimi_k2` 与 [Reasoning Parsing (Dynamo)](../../../reasoning/README.md) 中的 `--dyn-reasoning-parser kimi_k25` 配对，以便从同一响应中正确解析 `<think>` 块和工具调用。
 
 ## 示例
 
@@ -107,8 +103,8 @@ Dynamo 会从模型输出中解析出工具调用，并在响应中以兼容 Ope
 
 > [!TIP]
 > 如果工具调用返回结果不正确，请向单个复现请求添加 `"logprobs": true` 并分享响应。有关报告问题时需要捕获和包含的内容，请参阅
-> [工具调用故障排查](troubleshooting.md)。
+> [工具调用故障排查](../../../tool-calling/troubleshooting.md)。
 
 ## 可选：结构化标签（structural tags）
 
-你可以启用 **xgrammar 结构化标签**，让引导式解码在 token 粒度上匹配解析器的工具调用格式。参阅 [Structural tag (guided decoding for tool calls)](structural-tag.md)。
+你可以启用 **xgrammar 结构化标签**，让引导式解码在 token 粒度上匹配解析器的工具调用格式。参阅 [Structural tag (guided decoding for tool calls)](../../../tool-calling/structural-tag.md)。
