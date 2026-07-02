@@ -96,7 +96,9 @@ RUN gcc -O2 -Wall -Wextra -o /cuda-checkpoint-helper \
 # =============================================================================
 # Stage: CRIU Builder - Build CRIU with CUDA plugin
 # =============================================================================
-FROM ubuntu:24.04 AS criu-builder
+# Build against the oldest supported placeholder libc; the resulting binaries
+# also run in the newer snapshot-agent image.
+FROM ubuntu:22.04 AS criu-builder
 
 ARG CRIU_REPO
 ARG CRIU_REF
@@ -116,6 +118,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-c-compiler \
     protobuf-compiler \
     python3 \
+    python3-pip \
     python3-protobuf \
     libgnutls28-dev \
     libnftables-dev \
