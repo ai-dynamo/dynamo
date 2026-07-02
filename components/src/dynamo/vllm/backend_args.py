@@ -132,6 +132,16 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--engine-config-json",
+            env_var="DYN_VLLM_ENGINE_CONFIG_JSON",
+            default=None,
+            help=(
+                "Path to a JSON object containing vLLM AsyncEngineArgs values. "
+                "Explicit CLI engine arguments override values from this file."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--mm-prompt-template",
             env_var="DYN_VLLM_MM_PROMPT_TEMPLATE",
             default="USER: <image>\n<prompt> ASSISTANT:",
@@ -343,6 +353,7 @@ class DynamoVllmConfig(ConfigBase):
     enable_multimodal: bool
     # Enables RL-style token-in/token-out defaults.
     enable_rl: bool = False
+    engine_config_json: Optional[str] = None
     mm_prompt_template: str
     frontend_decoding: bool
     embedding_transfer_mode: Union[
