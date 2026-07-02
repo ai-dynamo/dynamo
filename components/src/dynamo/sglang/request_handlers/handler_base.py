@@ -43,6 +43,7 @@ from dynamo.llm import (
 )
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import start_profile_compat
 from dynamo.sglang.args import Config
 from dynamo.sglang.pause import SGLangEnginePauseController
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -878,7 +879,7 @@ class BaseWorkerHandler(LoraMixin, RLMixin, BaseGenerativeHandler[RequestT, Resp
         Args:
             body: Dict with profiling parameters passed to start_profile.
         """
-        await self.engine.tokenizer_manager.start_profile(**body)
+        await start_profile_compat(self.engine.tokenizer_manager, body)
         return {"status": "ok", "message": "Profiling started"}
 
     async def stop_profile(self, body: dict) -> dict:
