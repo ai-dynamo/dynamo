@@ -23,6 +23,7 @@ class QwenGridParams:
     min_pixels: int
     max_pixels: int
     vision_hidden_dim: int
+    decode_embedding_dim: int
 
 
 def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
@@ -63,6 +64,10 @@ def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
         vision_hidden_dim: int = getattr(
             vision_config, "out_hidden_size", vision_config.hidden_size
         )
+        deepstack_visual_indexes = (
+            getattr(vision_config, "deepstack_visual_indexes", []) or []
+        )
+        decode_embedding_dim = vision_hidden_dim * (1 + len(deepstack_visual_indexes))
 
         return QwenGridParams(
             patch_size=patch_size,
@@ -71,6 +76,7 @@ def load_qwen_grid_params(model_name: str) -> QwenGridParams | None:
             min_pixels=min_pixels,
             max_pixels=max_pixels,
             vision_hidden_dim=vision_hidden_dim,
+            decode_embedding_dim=decode_embedding_dim,
         )
     except (OSError, ValueError) as exc:
         logger.warning(
@@ -101,7 +107,7 @@ def _compute_qwen_grid_thw(
     Returns:
         (grid_thw, embeddings_shape) or (None, None) on failure.
         grid_thw: list of [grid_t, grid_h, grid_w] per image.
-        embeddings_shape: [total_tokens, vision_hidden_dim].
+        embeddings_shape: [total_tokens, decode_embedding_dim].
     """
     if isinstance(image_data, Image.Image):
         images = [image_data]
@@ -132,7 +138,7 @@ def _compute_qwen_grid_thw(
         grid_thw.append([grid_t, grid_h, grid_w])
         total_tokens += (grid_t * grid_h * grid_w) // merge_sq
 
-    return grid_thw, [total_tokens, params.vision_hidden_dim]
+    return grid_thw, [total_tokens, params.decode_embedding_dim]
 
 
 def build_qwen_embedding_params(
