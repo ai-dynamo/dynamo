@@ -1128,6 +1128,52 @@ mod tests {
         assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
     }
 
+    /// The hysteresis window holds overload across a transient dip: once a
+    /// deadline is set, a subsequent below-threshold signal must NOT clear
+    /// overload while the deadline is still in the future. This exercises the
+    /// `deadline_active` branch of `is_overloaded` directly — distinct from the
+    /// stale-stored-value path, because here the current signal is overwritten
+    /// with a below-threshold value, so `current_decode_overloaded` is false and
+    /// only the future deadline can keep the worker overloaded.
+    #[test]
+    fn decode_overload_deadline_holds_across_transient_below_threshold_signal() {
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 100);
+
+        // Trip overload with a long hysteresis window: deadline = now + 1h.
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(90),
+            },
+            Some(0.6),
+            LONG_HYSTERESIS,
+        );
+        assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+
+        // A below-threshold kv_used_blocks=10 arrives, overwriting the stale 90.
+        // current_decode_overloaded is now false, but the deadline is still an
+        // hour in the future, so the worker must remain overloaded (hysteresis).
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: Some(10),
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(10),
+            },
+            Some(0.6),
+            LONG_HYSTERESIS,
+        );
+        assert!(
+            state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)),
+            "future deadline must hold overload across a transient below-threshold signal"
+        );
+    }
+
     /// Under the deadline model, receiving a single below-threshold signal is
     /// enough to clear overload once the hysteresis window expires.
     /// With ZERO_HYSTERESIS the deadline is already expired on the next check.
