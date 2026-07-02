@@ -86,23 +86,24 @@ impl Decoder for ImageDecoder {
     fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
         let bytes = data.into_bytes()?;
 
-        if self.backend == ImageDecoderBackend::LibjpegTurbo && jpeg_turbo::is_jpeg(&bytes) {
-            if let Some(jpeg) = jpeg_turbo::decode_jpeg_rgb(
+        if self.backend == ImageDecoderBackend::LibjpegTurbo
+            && jpeg_turbo::is_jpeg(&bytes)
+            && let Some(jpeg) = jpeg_turbo::decode_jpeg_rgb(
                 &bytes,
                 self.limits.max_image_width,
                 self.limits.max_image_height,
                 self.limits.max_alloc,
-            )? {
-                let shape = (jpeg.height as usize, jpeg.width as usize, 3_usize);
-                let array = Array3::from_shape_vec(shape, jpeg.data)?;
-                let mut decoded: DecodedMediaData = array.try_into()?;
-                decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
-                    format: Some(ImageFormat::Jpeg),
-                    color_type: ColorType::Rgb8,
-                    layout: ImageLayout::HWC,
-                }));
-                return Ok(decoded);
-            }
+            )?
+        {
+            let shape = (jpeg.height as usize, jpeg.width as usize, 3_usize);
+            let array = Array3::from_shape_vec(shape, jpeg.data)?;
+            let mut decoded: DecodedMediaData = array.try_into()?;
+            decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
+                format: Some(ImageFormat::Jpeg),
+                color_type: ColorType::Rgb8,
+                layout: ImageLayout::HWC,
+            }));
+            return Ok(decoded);
         }
 
         let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;

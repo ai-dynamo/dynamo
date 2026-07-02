@@ -1610,6 +1610,7 @@ dependencies = [
  "image",
  "ipnet",
  "json-five",
+ "libloading 0.8.9",
  "lru",
  "minijinja",
  "modelexpress-client",

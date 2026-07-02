@@ -174,11 +174,11 @@ pub(crate) fn decode_jpeg_rgb(
                 bail!("Image allocation size overflow for dimensions: {width}x{height}");
             }
         };
-        if let Some(limit) = max_alloc {
-            if nbytes > limit {
-                (tj.destroy)(handle);
-                bail!("Image allocation {nbytes} bytes exceeds configured limit {limit} bytes");
-            }
+        if let Some(limit) = max_alloc
+            && nbytes > limit
+        {
+            (tj.destroy)(handle);
+            bail!("Image allocation {nbytes} bytes exceeds configured limit {limit} bytes");
         }
 
         let mut buf = vec![0_u8; nbytes as usize];

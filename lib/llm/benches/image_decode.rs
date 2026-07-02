@@ -10,7 +10,7 @@ use dynamo_llm::preprocessor::media::{Decoder, EncodedMediaData, ImageDecoder};
 use image::{ImageBuffer, Rgb, codecs::jpeg::JpegEncoder};
 use libloading::Library;
 
-fn require_libturbojpeg() {
+fn has_libturbojpeg() -> bool {
     const CANDIDATES: &[&str] = &[
         "libturbojpeg.so.0",
         "libturbojpeg.so",
@@ -18,37 +18,16 @@ fn require_libturbojpeg() {
         "libturbojpeg.dylib",
     ];
 
-    if CANDIDATES
+    CANDIDATES
         .iter()
         .any(|name| unsafe { Library::new(name) }.is_ok())
-    {
-        return;
-    }
-
-    panic!("image_decode benchmark requires libturbojpeg; install libturbojpeg0-dev or equivalent");
-}
-
-fn make_jpeg(width: u32, height: u32) -> Vec<u8> {
-    let img = ImageBuffer::from_fn(width, height, |x, y| {
-        Rgb([
-            ((x * 17 + y * 3) % 256) as u8,
-            ((x * 5 + y * 29) % 256) as u8,
-            ((x * 43 + y * 7) % 256) as u8,
-        ])
-    });
-
-    let mut out = Cursor::new(Vec::new());
-    let mut encoder = JpegEncoder::new_with_quality(&mut out, 87);
-    encoder.encode_image(&img).unwrap();
-    out.into_inner()
-}
-
-fn image_decoder(config: serde_json::Value) -> ImageDecoder {
-    serde_json::from_value(config).unwrap()
 }
 
 fn bench_jpeg_decode(c: &mut Criterion) {
-    require_libturbojpeg();
+    if !has_libturbojpeg() {
+        eprintln!("skipping image_decode benchmark: libturbojpeg is not available");
+        return;
+    }
 
     let jpeg = make_jpeg(2400, 1080);
     let decoders = [
@@ -71,6 +50,25 @@ fn bench_jpeg_decode(c: &mut Criterion) {
         });
     }
     group.finish();
+}
+
+fn make_jpeg(width: u32, height: u32) -> Vec<u8> {
+    let img = ImageBuffer::from_fn(width, height, |x, y| {
+        Rgb([
+            ((x * 17 + y * 3) % 256) as u8,
+            ((x * 5 + y * 29) % 256) as u8,
+            ((x * 43 + y * 7) % 256) as u8,
+        ])
+    });
+
+    let mut out = Cursor::new(Vec::new());
+    let mut encoder = JpegEncoder::new_with_quality(&mut out, 87);
+    encoder.encode_image(&img).unwrap();
+    out.into_inner()
+}
+
+fn image_decoder(config: serde_json::Value) -> ImageDecoder {
+    serde_json::from_value(config).unwrap()
 }
 
 criterion_group!(benches, bench_jpeg_decode);
