@@ -179,7 +179,8 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
         from gpu_memory_service.client.torch.allocator import (
             get_gms_client_memory_manager,
         )
-        from gpu_memory_service.common.locks import RequestedLockType
+        from gpu_memory_service.common.cuda_utils import cumem_set_access
+        from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
         from gpu_memory_service.integrations.common.utils import GMS_TAGS
 
         if tags is None:
@@ -191,10 +192,26 @@ class DynamoGMSSnapshotBackend(SleepModeBackend):
                 continue
             if tag == "weights":
                 manager.connect(RequestedLockType.RO, timeout_ms=None)
+                manager.remap_all_vas()
+                # The checkpointed engine published these allocations and kept
+                # RW mappings, and some model paths write into weights-tag
+                # buffers after load (observed as MMU FAULT_RO_VIOLATION
+                # ACCESS_TYPE_VIRT_WRITE with NVFP4 MoE on B200). The CuMem
+                # snapshot baseline restores all sleep-tag memory writable;
+                # mirror that by upgrading the RO import mappings to
+                # read-write device access.
+                for mapping in manager.mappings.values():
+                    if mapping.handle:
+                        cumem_set_access(
+                            mapping.va,
+                            mapping.aligned_size,
+                            manager.device,
+                            GrantedLockType.RW,
+                        )
             else:
                 manager.connect(RequestedLockType.RW)
                 manager.reallocate_all_handles(tag=tag)
-            manager.remap_all_vas()
+                manager.remap_all_vas()
 
     @classmethod
     def preserves_nccl(cls) -> bool:
