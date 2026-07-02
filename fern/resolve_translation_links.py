@@ -32,7 +32,10 @@ docs/<path>, matching where the sync publishes both):
   - links to untranslated pages are deep-relative into the base tree
     (../../../../../docs/reference/support-matrix.md), so they stay valid for the
     repo link checker and GitHub browsing
-  - image refs are left alone (Fern resolves them against the base page)
+  - image refs are left alone and NOT copied into the mirror -- Fern
+    resolves them against the base page location (verified on hosted
+    builds: they serve from the pages-dev assets), so copies would only
+    drift
 
 Both link forms resolve to a base-tree page here; links whose target is
 translated get the locale-prefixed URL so readers stay in their language.
@@ -97,11 +100,21 @@ def build_slug_map(nav_file: Path) -> dict[str, str]:
                 mapping[node["path"]] = "/".join(new_prefix)
             walk(node.get("contents", []), new_prefix)
             return
-        for key in ("tab", "contents", "layout", "navigation"):
+        if "tab" in node:
+            # Tabs contribute a URL segment unless skip-slug'd (the docs tab
+            # is; recipes isn't: /dynamo/dev/recipes/...).
+            tab_cfg = tabs.get(node["tab"]) or {}
+            slug = tab_cfg.get("slug")
+            if slug is None:
+                slug = "" if tab_cfg.get("skip-slug") else slugify(node["tab"])
+            if slug:
+                prefix = prefix + [slug]
+        for key in ("contents", "layout", "navigation"):
             if key in node:
                 walk(node[key], prefix)
 
     data = yaml.safe_load(nav_file.read_text(encoding="utf-8"))
+    tabs = data.get("tabs") or {}
     walk(data.get("navigation", data), [])
     return mapping
 
@@ -169,7 +182,9 @@ def main() -> int:
                 elif q.is_relative_to("docs"):
                     doc_rel = str(q.relative_to("docs"))
                 else:
-                    print(f"  [warn] {lang}/{rel}: {target} escapes docs/, left as-is")
+                    print(
+                        f"::warning::{lang}/{rel}: {target} escapes docs/, left as-is"
+                    )
                     warned += 1
                     return m.group(0)
                 slug = slugs.get(doc_rel)
@@ -180,7 +195,7 @@ def main() -> int:
                     # GitHub source instead so the reader still lands somewhere
                     # real.
                     print(
-                        f"  [warn] {lang}/{rel}: {target} not in nav, "
+                        f"::warning::{lang}/{rel}: {target} not in nav, "
                         f"linking to GitHub source"
                     )
                     warned += 1
@@ -198,7 +213,11 @@ def main() -> int:
                 return f"{bang}{label}({url}{anchor})"
 
             text = page.read_text(encoding="utf-8")
-            new = LINK.sub(repl, text)
+            # Skip link-shaped text inside fenced code blocks / inline code.
+            parts = re.split(r"(```.*?```|~~~.*?~~~|`[^`\n]*`)", text, flags=re.S)
+            new = "".join(
+                p if i % 2 else LINK.sub(repl, p) for i, p in enumerate(parts)
+            )
             if new != text:
                 page.write_text(new, encoding="utf-8")
 

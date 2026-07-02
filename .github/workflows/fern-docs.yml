@@ -155,11 +155,6 @@ jobs:
             cp source-checkout/fern/convert_callouts.py docs-checkout/fern/convert_callouts.py
           fi
 
-          # Sync resolve_translation_links.py script
-          if [ -f source-checkout/fern/resolve_translation_links.py ]; then
-            cp source-checkout/fern/resolve_translation_links.py docs-checkout/fern/resolve_translation_links.py
-          fi
-
           # Sync components/ directory (e.g., CustomFooter.tsx)
           if [ -d source-checkout/fern/components ]; then
             echo "Syncing components/ to docs-website branch..."
@@ -208,7 +203,7 @@ jobs:
           # resolve them; see fern/resolve_translation_links.py).
           if [ -d docs-checkout/fern/translations ]; then
             pip install --quiet pyyaml
-            python3 docs-checkout/fern/resolve_translation_links.py \
+            python3 source-checkout/fern/resolve_translation_links.py \
               --nav source-checkout/docs/index.yml \
               --translations-root docs-checkout/fern/translations \
               --site-root /dynamo --version-slug dev

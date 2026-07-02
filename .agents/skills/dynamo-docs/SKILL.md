@@ -322,9 +322,11 @@ Design Docs, Documentation, Hidden Pages. To place a page, match the nearest exi
   the frontmatter `title` renders the heading, no manual language-switcher links). Fern's native
   localization pairs them and adds the header language picker; untranslated pages fall back to
   English. Links to translated siblings stay shallow-relative; links to untranslated pages are
-  deep-relative into `docs/` (`../../../../../docs/...`) so the repo link checker and GitHub
-  browsing stay valid — the sync workflow rewrites them to site URLs at publish via
-  `fern/resolve_translation_links.py`. Translate prose, not code, flags, or terminology
+  deep-relative into `docs/` — count `../` as 4 plus one per directory level of the page under
+  `pages-dev/` (`getting-started/x.md` → 5, `components/router/x.md` → 6) — so the repo link
+  checker and GitHub browsing stay valid; the sync workflow rewrites them to site URLs at publish
+  via `fern/resolve_translation_links.py`. Image refs stay shallow-relative (`../assets/...`) and
+  are **not** copied into the mirror — Fern resolves them against the base page. Translate prose, not code, flags, or terminology
   (vLLM / SGLang / TensorRT-LLM stay verbatim). Keep it in sync when the English page changes,
   or don't ship it stale.
 - **Versioned navs.** Author only against `docs/` on `main` (the `pages-dev` set). When a release is
