@@ -37,6 +37,7 @@ const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 const STARTUP_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const WATCH_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+const WATCH_RETRY_MAX_JITTER_MS: u64 = 250;
 
 /// ETCD Client
 #[derive(Clone)]
@@ -448,7 +449,7 @@ impl Client {
                             }
                         }
 
-                        tokio::time::sleep(WATCH_RETRY_BACKOFF).await;
+                        tokio::time::sleep(Self::watch_retry_backoff()).await;
                     }
                 }
 
@@ -555,6 +556,11 @@ impl Client {
                 _ => false,
             }
         })
+    }
+
+    fn watch_retry_backoff() -> Duration {
+        WATCH_RETRY_BACKOFF
+            + Duration::from_millis(rand::random::<u64>() % WATCH_RETRY_MAX_JITTER_MS)
     }
 
     /// Establish a new watch stream with automatic retry and reconnection.
