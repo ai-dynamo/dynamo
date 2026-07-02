@@ -56,8 +56,6 @@ export DYN_AGENT_SESSION_ID=pi-demo-$(uuidgen)
 pi --model dynamo/zai-org/GLM-4.7-Flash -p 'Reply exactly ok.'
 ```
 
-The provider sends `x-dynamo-session-id` on every LLM request and adds `x-dynamo-parent-session-id` for Pi subagents. `DYN_REQUEST_TRACE` controls optional tool-event relay and Dynamo trace collection; it does not gate the session headers. For a Harbor run, the Pi process is inside the task container, so `DYNAMO_BASE_URL` must be reachable from that container and each trial must receive a distinct `DYN_AGENT_SESSION_ID`.
-
 ## Claude Code
 
 Claude Code uses Anthropic-compatible Messages API. The local launcher above starts `dynamo.frontend` with `--enable-anthropic-api`; for other deployments, pass that flag when starting the frontend. Then set:
