@@ -23,7 +23,10 @@ try:
         _run_autoscale_sim,
         _run_default_sim,
     )
-    from dynamo.profiler.thorough import run_thorough
+    from dynamo.profiler.thorough import (
+        _normalize_candidate_model_identity,
+        run_thorough,
+    )
     from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
@@ -403,6 +406,25 @@ class TestThoroughResolvesModelPath:
         mock_enumerate = await self._capture_enumerate(dgdr, tmp_path)
 
         assert mock_enumerate.call_args.kwargs["model_path"] == _HF_ID
+
+    def test_cache_only_pvc_does_not_rewrite_candidate_model(self):
+        """A PVC without pvcModelPath remains an HF_HOME-style cache mount."""
+        dgdr = _make_dgdr(
+            modelCache=ModelCacheSpec(
+                pvcName="model-cache",
+                pvcMountPath="/opt/model-cache",
+            )
+        )
+        candidate_config = {"sentinel": "unchanged"}
+        candidate = MagicMock(dgd_config=candidate_config)
+        modifier = MagicMock()
+
+        _normalize_candidate_model_identity(
+            [candidate], dgdr, dgdr.modelCache, modifier
+        )
+
+        modifier.update_model_from_pvc.assert_not_called()
+        assert candidate.dgd_config is candidate_config
 
     async def test_candidates_keep_hf_name_and_pvc_runtime_path(self, tmp_path):
         """Every sweep candidate separates API identity from PVC load path."""

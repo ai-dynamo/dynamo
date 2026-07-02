@@ -64,7 +64,7 @@ def _normalize_candidate_model_identity(
     config_modifier,
 ) -> None:
     """Keep the DGDR model name separate from its PVC runtime path."""
-    if not model_cache.pvcName:
+    if not model_cache.pvcName or not model_cache.pvcModelPath:
         return
 
     for candidate in candidates:
@@ -73,7 +73,7 @@ def _normalize_candidate_model_identity(
             model_name=dgdr.model,
             pvc_name=model_cache.pvcName,
             pvc_mount_path=model_cache.pvcMountPath,
-            pvc_path=model_cache.pvcModelPath or "",
+            pvc_path=model_cache.pvcModelPath,
         )
 
 
