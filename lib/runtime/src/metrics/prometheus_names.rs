@@ -685,6 +685,11 @@ pub mod request_plane {
     pub const ROUNDTRIP_TTFT_SECONDS: &str = "roundtrip_ttft_seconds";
     /// Currently in-flight requests (gauge)
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
+    /// Ingress-side ACK flush latency: decoded_at -> socket flush complete
+    /// (write-task scheduling delay + socket write time), on the worker's
+    /// SharedTcpEndpoint write_loop. Every traced item, not just ones past
+    /// the DYN_ACK_TRACE_WARN_MS log threshold.
+    pub const ACK_FLUSH_SECONDS: &str = "ack_flush_seconds";
 }
 
 /// Transport-specific metrics (TCP / NATS)

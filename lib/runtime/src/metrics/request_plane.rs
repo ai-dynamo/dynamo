@@ -65,6 +65,23 @@ pub static REQUEST_PLANE_INFLIGHT: Lazy<Gauge> = Lazy::new(|| {
     .expect("request_plane_inflight gauge")
 });
 
+/// Ingress-side ACK flush latency (worker SharedTcpEndpoint write_loop): decoded_at ->
+/// socket flush complete. Observed for every traced response (DYN_ACK_TRACE=1), not just
+/// ones that cross the DYN_ACK_TRACE_WARN_MS log threshold -- gives the full distribution
+/// instead of only the tail that happened to get logged.
+pub static REQUEST_PLANE_ACK_FLUSH_SECONDS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            request_plane_metric_name(request_plane::ACK_FLUSH_SECONDS),
+            "Ingress ACK flush latency: decoded_at -> socket flush complete (seconds)",
+        )
+        .buckets(vec![
+            0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0,
+        ]),
+    )
+    .expect("request_plane_ack_flush_seconds histogram")
+});
+
 /// Guards idempotency for the `MetricsRegistry` registration path.
 static METRICS_REGISTERED: OnceCell<()> = OnceCell::new();
 
@@ -92,6 +109,10 @@ pub fn ensure_request_plane_metrics_registered(registry: &MetricsRegistry) {
             Box::new(REQUEST_PLANE_INFLIGHT.clone()),
             "request_plane_inflight",
         );
+        registry.add_metric_or_warn(
+            Box::new(REQUEST_PLANE_ACK_FLUSH_SECONDS.clone()),
+            "request_plane_ack_flush_seconds",
+        );
     });
 }
 
@@ -107,6 +128,7 @@ pub fn ensure_request_plane_metrics_registered_prometheus(
                 registry.register(Box::new(REQUEST_PLANE_SEND_SECONDS.clone()))?;
                 registry.register(Box::new(REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.clone()))?;
                 registry.register(Box::new(REQUEST_PLANE_INFLIGHT.clone()))?;
+                registry.register(Box::new(REQUEST_PLANE_ACK_FLUSH_SECONDS.clone()))?;
                 Ok(())
             })()
             .map_err(|e| e.to_string())

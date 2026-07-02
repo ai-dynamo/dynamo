@@ -97,6 +97,9 @@ struct SchedulerQueueActor<
     overlap_scores_refresh: Option<Arc<RF>>,
     overlap_refresh_after: Option<Duration>,
     overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+    /// "prefill" or "decode" — used only to label the `decode_select`/`prefill_select`
+    /// DYN_STALL_OP_TRACE lines; carries no scheduling behavior.
+    worker_type: &'static str,
 }
 
 /// Queue that gates scheduling requests behind a capacity check.
@@ -145,6 +148,7 @@ impl<
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overlap_scores_refresh: Option<Arc<RF>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        worker_type: &'static str,
     ) -> Self {
         if let Some(frac) = threshold_frac {
             tracing::info!("Router queue enabled with threshold fraction {frac}");
@@ -186,6 +190,7 @@ impl<
             overlap_scores_refresh,
             overlap_refresh_after,
             overloaded_worker_provider,
+            worker_type,
         };
         tokio::spawn(actor.run(admission_rx));
         Self {
@@ -218,6 +223,7 @@ impl<
         selector: Sel,
         policy: S,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_type: &'static str,
     ) -> Self {
         Self::new_with_overlap_refresh(
             slots,
@@ -230,6 +236,7 @@ impl<
             prefill_load_estimator,
             None,
             None,
+            worker_type,
         )
     }
 
@@ -244,6 +251,7 @@ impl<
         policy: S,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+        worker_type: &'static str,
     ) -> Self {
         Self::new_with_overlap_refresh(
             slots,
@@ -256,6 +264,7 @@ impl<
             prefill_load_estimator,
             None,
             overloaded_worker_provider,
+            worker_type,
         )
     }
 }
@@ -536,6 +545,9 @@ impl<
             )
             .await;
             let wait_ms = entry.enqueue_at.elapsed().as_millis() as u64;
+            #[cfg(feature = "metrics")]
+            super::metrics::SchedulingMetrics::get_or_init()
+                .observe_queue_wait(self.worker_type, wait_ms);
             if let Some(RefreshedOverlap {
                 tier_overlap_blocks,
                 effective_overlap_blocks,
@@ -573,6 +585,7 @@ impl<
     /// Run the full scheduling pipeline for a single request:
     /// compute projected load -> select worker -> book tracked state -> respond.
     fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
+        let op_start = Instant::now();
         request.worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
@@ -587,6 +600,54 @@ impl<
             self.selector
                 .select_worker(&workers, &request, eligibility, self.block_size)
         };
+
+        // Full distribution, every call, regardless of DYN_STALL_OP_TRACE: a Prometheus histogram
+        // (cheap atomic bucket increment) rather than a WARN log that only samples the tail.
+        #[cfg(feature = "metrics")]
+        super::metrics::SchedulingMetrics::get_or_init()
+            .observe_admission_compute(self.worker_type, op_start.elapsed().as_millis());
+
+        // Per-op BUSY-time attribution (DYN_STALL_OP_TRACE=1): project_worker_loads + select_worker run
+        // synchronously on the scheduler-actor task (which lives on the frontend runtime), so this is
+        // on-event-loop busy time (no await above). WARN past DYN_STALL_OP_WARN_MS so a residual
+        // frontend stall can be attributed to scheduler admission vs request-path hashing. Zero-cost off.
+        // op name is `decode_select`/`prefill_select` per this queue's worker_type — same underlying
+        // work (project_worker_loads + select_worker), just labeled by which pool it ran for.
+        {
+            static STALL_OP_WARN_MS: std::sync::OnceLock<Option<u128>> = std::sync::OnceLock::new();
+            let warn = *STALL_OP_WARN_MS.get_or_init(|| {
+                if std::env::var("DYN_STALL_OP_TRACE")
+                    .ok()
+                    .is_some_and(|v| v == "1" || v == "true")
+                {
+                    Some(
+                        std::env::var("DYN_STALL_OP_WARN_MS")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(50u128),
+                    )
+                } else {
+                    None
+                }
+            });
+            if let Some(warn_ms) = warn {
+                let ms = op_start.elapsed().as_millis();
+                if ms >= warn_ms {
+                    let op = if self.worker_type == "prefill" {
+                        "prefill_select"
+                    } else {
+                        "decode_select"
+                    };
+                    tracing::warn!(
+                        target: "dynamo_stall_op",
+                        op = op,
+                        busy_ms = ms as u64,
+                        isl_tokens = request.isl_tokens,
+                        "scheduler admission busy on actor task"
+                    );
+                }
+            }
+        }
 
         let selection = match selection {
             Ok(s) => s,
@@ -964,6 +1025,7 @@ mod tests {
             selector,
             FcfsPolicy,
             None,
+            "test",
         ));
 
         (queue, slots)
@@ -1037,6 +1099,7 @@ mod tests {
             selector,
             FcfsPolicy,
             prefill_load_estimator,
+            "test",
         ));
 
         (queue, slots, cfg_tx)
@@ -1085,6 +1148,7 @@ mod tests {
             FcfsPolicy,
             None,
             Some(overloaded_worker_provider),
+            "test",
         ));
 
         (queue, slots)
@@ -1194,6 +1258,7 @@ mod tests {
             None,
             Some(refresher),
             None,
+            "test",
         ));
 
         (queue, slots)
@@ -1252,6 +1317,7 @@ mod tests {
             None,
             Some(refresher),
             None,
+            "test",
         ));
 
         (queue, slots)
@@ -1383,6 +1449,7 @@ mod tests {
             DefaultWorkerSelector::new(None, "test"),
             FcfsPolicy,
             None,
+            "test",
         );
 
         let (request, receiver) = make_request("delivery-race", isl);

@@ -811,6 +811,11 @@ impl SharedTcpServer {
                 let total_ms = now.duration_since(meta.decoded_at).as_millis() as u64;
                 let queue_ms = dq.duration_since(meta.decoded_at).as_millis() as u64;
                 let write_ms = now.duration_since(dq).as_millis() as u64;
+                // Full distribution, every traced item -- not gated by warn_ms. This is what makes
+                // the request-plane picture a real histogram instead of only the tail that happened
+                // to cross the log threshold.
+                crate::metrics::request_plane::REQUEST_PLANE_ACK_FLUSH_SECONDS
+                    .observe(now.duration_since(meta.decoded_at).as_secs_f64());
                 if total_ms >= warn_ms {
                     tracing::warn!(
                         target: "dynamo_ack_trace",
