@@ -22,9 +22,9 @@ instances:
 
 title: NVIDIA Dynamo Documentation
 
-# Native language picker (header dropdown). Translated pages live in a tree
-# mirroring the base content paths: docs/translations/<lang>/<path> in this
-# repo, synced to fern/translations/<lang>/pages-dev/<path> on docs-website.
+# Native language picker (header dropdown). Translated pages live at
+# fern/translations/<lang>/pages-dev/<path>, mirroring the base page at
+# docs/<path> (published as fern/pages-dev/<path> on docs-website).
 # Untranslated pages fall back to English under every locale.
 translations:
   - lang: en

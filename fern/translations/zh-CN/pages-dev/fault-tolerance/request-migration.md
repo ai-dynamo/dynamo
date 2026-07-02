@@ -145,7 +145,7 @@ dynamo_frontend_model_migration_max_seq_len_exceeded_total{model="Qwen/Qwen3-0.6
 - 跟踪故障容错机制的有效性
 - 监控 `--migration-max-seq-len` 达到限制的频率，这可能表示需要调整该限制
 
-有关 Dynamo 指标的更多信息，请参阅[指标文档](../../../observability/metrics.md)。
+有关 Dynamo 指标的更多信息，请参阅[指标文档](../../../../../docs/observability/metrics.md)。
 
 ## 已知限制
 

@@ -26,10 +26,11 @@ page links in fern/translations/<lang>/pages-dev/** to root-relative site
 URLs, computed from the *current* nav on every publish so they cannot go
 stale when pages move.
 
-Source-repo convention (docs/translations/<lang>/<path> mirrors docs/<path>):
+Source-repo convention (fern/translations/<lang>/pages-dev/<path> mirrors
+docs/<path>, matching where the sync publishes both):
   - links to translated siblings stay shallow-relative (quickstart.mdx)
   - links to untranslated pages are deep-relative into the base tree
-    (../../../reference/support-matrix.md), so they stay valid for the
+    (../../../../../docs/reference/support-matrix.md), so they stay valid for the
     repo link checker and GitHub browsing
   - image refs are left alone (Fern resolves them against the base page)
 
@@ -139,8 +140,11 @@ def main() -> int:
             if page.suffix not in PAGE_EXT or not page.is_file():
                 continue
             rel = page.relative_to(pages_root)  # mirrors docs/<rel>
-            # links were authored from docs/translations/<lang>/<rel>
-            virtual_dir = PurePosixPath("docs/translations") / lang / rel.parent
+            # links were authored from fern/translations/<lang>/pages-dev/<rel>
+            # in the source repo (same layout the sync publishes)
+            virtual_dir = (
+                PurePosixPath("fern/translations") / lang / "pages-dev" / rel.parent
+            )
 
             def repl(m: re.Match) -> str:
                 nonlocal rewritten, warned
@@ -155,7 +159,7 @@ def main() -> int:
                 if not target.endswith(PAGE_EXT):
                     return m.group(0)
                 q = PurePosixPath(os.path.normpath(str(virtual_dir / target)))
-                mirror_prefix = PurePosixPath("docs/translations") / lang
+                mirror_prefix = PurePosixPath("fern/translations") / lang / "pages-dev"
                 if q.is_relative_to(mirror_prefix):
                     doc_rel = str(q.relative_to(mirror_prefix))
                 elif q.is_relative_to("docs"):

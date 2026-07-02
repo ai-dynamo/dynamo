@@ -121,20 +121,15 @@ jobs:
           rsync -a \
             --exclude='digest' \
             --exclude='index.yml' \
-            --exclude='translations' \
             source-checkout/docs/ docs-checkout/fern/pages-dev/
 
-          # Sync translated content into Fern's native-localization mirror:
-          # docs/translations/<lang>/<path> -> fern/translations/<lang>/pages-dev/<path>
-          # (mirrors where the base page lands, so Fern pairs them per locale)
+          # Sync Fern's native-localization mirror as-is:
+          # fern/translations/<lang>/pages-dev/<path> pairs with the base page
+          # at fern/pages-dev/<path>, per locale
           rm -rf docs-checkout/fern/translations
-          if [ -d source-checkout/docs/translations ]; then
+          if [ -d source-checkout/fern/translations ]; then
             echo "Syncing translations/ to docs-website branch..."
-            for lang_dir in source-checkout/docs/translations/*/; do
-              lang=$(basename "$lang_dir")
-              mkdir -p "docs-checkout/fern/translations/$lang/pages-dev"
-              rsync -a "$lang_dir" "docs-checkout/fern/translations/$lang/pages-dev/"
-            done
+            cp -r source-checkout/fern/translations docs-checkout/fern/translations
           fi
 
           # Sync index.yml as versions/dev.yml and transform paths for docs-website layout
