@@ -89,6 +89,8 @@ pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 
+const REASONING_AWARE_GUIDED_DECODING_RUNTIME_KEY: &str = "reasoning_aware_guided_decoding";
+
 fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, Option<i32>) {
     let priority_jump = hints.and_then(|h| {
         h.priority
@@ -742,6 +744,49 @@ impl OpenAIPreprocessor {
         }
 
         Ok((preprocessed, annotations, prompt_injected_reasoning))
+    }
+
+    fn reasoning_aware_guided_decoding(&self) -> bool {
+        self.runtime_config
+            .get_engine_specific::<bool>(REASONING_AWARE_GUIDED_DECODING_RUNTIME_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or(false)
+    }
+
+    fn attach_nemotron_reasoning_metadata<R: OAIChatLikeRequest>(
+        &self,
+        request: &R,
+        preprocessed: &mut PreprocessedRequest,
+    ) -> Result<()> {
+        if !self.reasoning_aware_guided_decoding()
+            || !Self::is_nemotron_force_reasoning(self.runtime_config.reasoning_parser.as_deref())
+        {
+            return Ok(());
+        }
+
+        let chat_template_kwargs = request.chat_template_args().cloned().unwrap_or_default();
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(
+            "reasoning_parser_kwargs".to_string(),
+            serde_json::json!({
+                "chat_template_kwargs": chat_template_kwargs
+            }),
+        );
+        if request
+            .chat_template_args()
+            .and_then(|args| args.get("enable_thinking"))
+            == Some(&serde_json::Value::Bool(false))
+        {
+            metadata.insert("reasoning_ended".to_string(), serde_json::Value::Bool(true));
+        }
+
+        match preprocessed.extra_args.as_mut() {
+            Some(serde_json::Value::Object(extra_args)) => extra_args.extend(metadata),
+            Some(_) => bail!("preprocessed extra_args must be a JSON object"),
+            None => preprocessed.extra_args = Some(serde_json::Value::Object(metadata)),
+        }
+        Ok(())
     }
 
     pub fn builder<
@@ -1895,7 +1940,10 @@ impl OpenAIPreprocessor {
             Some(ChatCompletionToolChoiceOption::Required)
                 | Some(ChatCompletionToolChoiceOption::Named(_))
         );
+        let reasoning_aware_nemotron = self.reasoning_aware_guided_decoding()
+            && Self::is_nemotron_force_reasoning(self.runtime_config.reasoning_parser.as_deref());
         let skip_reasoning_for_guided_json = is_guided_tool_choice
+            && !reasoning_aware_nemotron
             && Self::is_force_reasoning_parser(self.runtime_config.reasoning_parser.as_deref());
         let bypass_reasoning_for_bare_guided_json = is_guided_tool_choice
             && prompt_injected_reasoning
@@ -3006,6 +3054,7 @@ impl
             &mut common_request,
             prompt_injected_reasoning,
         )?;
+        self.attach_nemotron_reasoning_metadata(&request, &mut common_request)?;
 
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
         let trace_state = crate::request_trace::build_request_end_trace_state(

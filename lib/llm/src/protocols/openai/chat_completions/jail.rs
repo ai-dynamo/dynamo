@@ -152,6 +152,15 @@ fn create_choice_stream(
     }
 }
 
+#[allow(deprecated)]
+fn delta_has_payload(delta: &ChatCompletionStreamResponseDelta) -> bool {
+    delta.content.is_some()
+        || delta.tool_calls.is_some()
+        || delta.function_call.is_some()
+        || delta.refusal.is_some()
+        || delta.reasoning_content.is_some()
+}
+
 impl ChoiceJailState {
     /// Create a new jail state for a choice
     fn new(index: u32, starts_jailed: bool) -> Self {
@@ -583,6 +592,16 @@ impl ChoiceJailStateCollection {
             }
         }
     }
+
+    async fn finalize(&mut self, jail_stream: &JailedStream) -> Vec<ChoiceEmission> {
+        let mut emissions = Vec::new();
+        for state in &mut self.states {
+            if let Some(emission) = state.finalize(jail_stream).await {
+                emissions.push(emission);
+            }
+        }
+        emissions
+    }
 }
 
 /// Emission mode for handling multiple choices
@@ -673,8 +692,31 @@ impl JailedStream {
                     let mut all_emissions = Vec::new();
 
                     if chat_response.inner.choices.is_empty() {
-                        // No choices processed (e.g., usage-only chunk)
-                        // Pass through as-is to preserve usage and other metadata
+                        // Usage is terminal. Flush any buffered choice before it
+                        // so OpenAI ordering remains choice/finish, then usage.
+                        if chat_response.inner.usage.is_some() {
+                            let final_emissions = choice_states.finalize(&self).await;
+                            if !final_emissions.is_empty() {
+                                let mut template = chat_response.clone();
+                                template.inner.usage = None;
+                                template.nvext = None;
+                                template.llm_metrics = None;
+                                let final_metadata = (
+                                    last_annotated_id.clone(),
+                                    last_annotated_event.clone(),
+                                    last_annotated_comment.clone(),
+                                );
+                                let responses = self.emit_choice_emissions(
+                                    final_emissions,
+                                    &template,
+                                    final_metadata,
+                                );
+                                for emitted_response in responses {
+                                    yield emitted_response;
+                                }
+                            }
+                        }
+                        // Pass the choices-free chunk through unchanged.
                         yield response;
                         continue;
                     }
@@ -741,22 +783,34 @@ impl JailedStream {
                             }
                             let has_pending_buffered_output =
                                 !choice_state.partial_match_buffer.is_empty();
-                            let was_ever_jailed = !choice_state.accumulated_content.is_empty()
+                            let has_accumulated_output =
+                                !choice_state.accumulated_content.is_empty();
+                            let was_ever_jailed = has_accumulated_output
                                 || choice_state.is_jailed
                                 || has_pending_buffered_output;
+                            let defer_finish = choice.finish_reason.is_some()
+                                && (has_accumulated_output || has_pending_buffered_output);
 
                             // Reasoning-only chunks must pass through even when jailed; only
                             // `content` is subject to accumulation.
-                            let should_emit = choice.delta.role.is_some()
-                                || choice.delta.tool_calls.is_some()
-                                || choice.delta.reasoning_content.is_some()
-                                || !was_ever_jailed;
+                            // If buffered protocol output still needs EOF finalization,
+                            // that finalization owns the terminal reason. Preserve any
+                            // semantic delta, but defer its finish until then.
+                            let should_emit = delta_has_payload(&choice.delta)
+                                || (!defer_finish
+                                    && (choice.finish_reason.is_some()
+                                        || choice.delta.role.is_some()
+                                        || !was_ever_jailed));
 
                             if should_emit {
                                 let pass_through_choice = ChatChoiceStream {
                                     index: choice.index,
                                     delta: choice.delta.clone(),
-                                    finish_reason: choice.finish_reason,
+                                    finish_reason: if defer_finish {
+                                        None
+                                    } else {
+                                        choice.finish_reason
+                                    },
                                     logprobs: choice.logprobs.clone(),
                                 };
                                 all_emissions.push(ChoiceEmission::PassThrough(pass_through_choice));
@@ -825,12 +879,7 @@ impl JailedStream {
             }
 
             // Stream ended - finalize any remaining jailed choices
-            let mut final_emissions = Vec::new();
-            for state in choice_states.states.iter_mut() {
-                if let Some(emission) = state.finalize(&self).await {
-                    final_emissions.push(emission);
-                }
-            }
+            let final_emissions = choice_states.finalize(&self).await;
 
             if !final_emissions.is_empty() {
                 tracing::debug!("Stream ended while jailed, releasing accumulated content");
@@ -1340,37 +1389,24 @@ impl JailedStream {
                     chunk.index = (tool_call_offset + new_idx) as u32;
                 }
 
-                if !tool_call_chunks.is_empty() {
-                    create_choice_stream(
-                        choice_index,
-                        Some(Role::Assistant),
-                        "",
-                        Some(tool_call_chunks),
-                        base_choice.finish_reason,
-                        base_choice.logprobs.clone(),
-                    )
-                } else if filter_dropped_all {
-                    // Named filter rejected every parsed call — do not leak
-                    // the wrong-tool JSON back as content.
-                    create_choice_stream(
-                        choice_index,
-                        Some(Role::Assistant),
-                        "",
-                        None,
-                        base_choice.finish_reason,
-                        base_choice.logprobs.clone(),
-                    )
-                } else {
-                    // All parsing paths failed — return accumulated content as text.
-                    create_choice_stream(
-                        choice_index,
-                        Some(Role::Assistant),
-                        accumulated_content,
-                        None,
-                        base_choice.finish_reason,
-                        base_choice.logprobs.clone(),
-                    )
+                if tool_call_chunks.is_empty() && !filter_dropped_all {
+                    // Immediate mode is used only for required/named tool choice,
+                    // so this buffer is protocol payload rather than assistant
+                    // prose. Fail closed instead of leaking malformed or truncated
+                    // tool JSON into `content`.
+                    tracing::warn!(
+                        "forced tool choice produced no parseable tool calls; dropping jail output"
+                    );
                 }
+                let tool_calls = (!tool_call_chunks.is_empty()).then_some(tool_call_chunks);
+                create_choice_stream(
+                    choice_index,
+                    Some(Role::Assistant),
+                    "",
+                    tool_calls,
+                    base_choice.finish_reason,
+                    base_choice.logprobs.clone(),
+                )
             }
         }
     }

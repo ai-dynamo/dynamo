@@ -66,13 +66,29 @@ impl OpenAIPreprocessor {
             gd.json = None;
         }
 
-        if self.apply_tool_choice_structural_tag(
-            &convert_tool_choice(tool_choice),
-            &convert_tools(tools),
-            request.inner.parallel_tool_calls,
-            prompt_injected_reasoning,
-            common_request,
-        )? {
+        let reasoning_parser = self.runtime_config.reasoning_parser.as_deref();
+        let nemotron_reasoning_may_start = Self::is_nemotron_force_reasoning(reasoning_parser)
+            && !Self::is_reasoning_disabled_by_request(
+                reasoning_parser,
+                request.chat_template_args.as_ref(),
+            );
+        let auto_reasoning_needs_unconstrained_prefix =
+            matches!(tool_choice, ChatCompletionToolChoiceOption::Auto)
+                && nemotron_reasoning_may_start
+                && !self.reasoning_aware_guided_decoding();
+
+        // Auto structural tags describe only the optional tool-call suffix. A
+        // backend that cannot delay guidance would apply that grammar at token
+        // zero and suppress Nemotron's reasoning prefix.
+        if !auto_reasoning_needs_unconstrained_prefix
+            && self.apply_tool_choice_structural_tag(
+                &convert_tool_choice(tool_choice),
+                &convert_tools(tools),
+                request.inner.parallel_tool_calls,
+                prompt_injected_reasoning,
+                common_request,
+            )?
+        {
             return Ok(true);
         }
 

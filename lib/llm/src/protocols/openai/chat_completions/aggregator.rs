@@ -458,13 +458,20 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
     /// # Note
     /// The `function_call` field is deprecated.
     fn from(delta: DeltaChoice) -> Self {
-        // If tool calls are present and non-empty, finish reason should be ToolCalls
+        // A completed tool call turns an ordinary stop into ToolCalls, but a
+        // backend terminal condition such as Length or ContentFilter must stay
+        // observable in the non-streaming response just as it is in streaming.
         let finish_reason = if delta
             .tool_calls
             .as_ref()
             .is_some_and(|calls| !calls.is_empty())
         {
-            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+            match delta.finish_reason {
+                None | Some(dynamo_protocols::types::FinishReason::Stop) => {
+                    Some(dynamo_protocols::types::FinishReason::ToolCalls)
+                }
+                finish_reason => finish_reason,
+            }
         } else {
             delta.finish_reason
         };
