@@ -1883,24 +1883,30 @@ impl OpenAIPreprocessor {
                 Some("kimi_k25")
             );
 
-        // Under guided-decoding (tool_choice=required/named), force-reasoning
-        // parsers must skip because the backend emits bare JSON and the jail
-        // needs to see that JSON as content. Some non-force parsers can also
-        // hit that shape after prompt-injected reasoning, but they need a
-        // stream-content check so `reasoning</think>JSON` still gets parsed.
+        // Guided tool choice can produce either bare JSON or reasoning followed
+        // by a close marker and JSON. Most force-reasoning parsers keep the
+        // historical unconditional bypass because bare JSON would otherwise be
+        // swallowed as reasoning. Proven reasoner-gated Nemotron v3 variants
+        // instead inspect the first meaningful content: bare JSON bypasses the
+        // parser, while `reasoning</think>JSON` is split before the jail.
         let is_guided_tool_choice = matches!(
             request.inner.tool_choice,
             Some(ChatCompletionToolChoiceOption::Required)
                 | Some(ChatCompletionToolChoiceOption::Named(_))
         );
-        let skip_reasoning_for_guided_json = is_guided_tool_choice
-            && Self::is_force_reasoning_parser(self.runtime_config.reasoning_parser.as_deref());
-        let bypass_reasoning_for_bare_guided_json = is_guided_tool_choice
+        let reasoning_parser = self.runtime_config.reasoning_parser.as_deref();
+        let inspect_force_reasoning_guided_output = is_guided_tool_choice
+            && !uses_tool_call_structural_tag
+            && Self::supports_reasoning_before_guided_json(reasoning_parser);
+        let inspect_prompt_injected_guided_output = is_guided_tool_choice
             && prompt_injected_reasoning
             && !uses_tool_call_structural_tag
-            && Self::skips_guided_json_when_prompt_injected(
-                self.runtime_config.reasoning_parser.as_deref(),
-            );
+            && Self::skips_guided_json_when_prompt_injected(reasoning_parser);
+        let bypass_reasoning_for_bare_guided_json =
+            inspect_force_reasoning_guided_output || inspect_prompt_injected_guided_output;
+        let skip_reasoning_for_guided_json = is_guided_tool_choice
+            && Self::is_force_reasoning_parser(reasoning_parser)
+            && !inspect_force_reasoning_guided_output;
 
         let reasoning_disabled_by_request = Self::is_reasoning_disabled_by_request(
             self.runtime_config.reasoning_parser.as_deref(),
@@ -2526,6 +2532,13 @@ impl OpenAIPreprocessor {
         )
     }
 
+    /// Force-reasoning parsers proven to receive both bare guided JSON and
+    /// native-reasoner-gated `reasoning</think>JSON`. These use the stream-shape
+    /// detector instead of the historical unconditional guided-JSON bypass.
+    fn supports_reasoning_before_guided_json(reasoning_parser: Option<&str>) -> bool {
+        matches!(reasoning_parser, Some("nemotron3" | "nemotron_v3"))
+    }
+
     fn skips_guided_json_when_prompt_injected(reasoning_parser: Option<&str>) -> bool {
         matches!(
             reasoning_parser,
@@ -2682,9 +2695,9 @@ impl OpenAIPreprocessor {
 
         stream::unfold(state, |mut state| async move {
             if let Some(response) = state.stream.next().await {
-                let should_bypass_reasoning = if state.bypass_bare_guided_json {
+                let guided_json_bypass_decision = if state.bypass_bare_guided_json {
                     match state.guided_json_bypass_decision {
-                        Some(decision) => decision,
+                        Some(decision) => Some(decision),
                         None => {
                             let decision = response.data.as_ref().and_then(|data| {
                                 data.inner.choices.iter().find_map(|choice| {
@@ -2703,15 +2716,18 @@ impl OpenAIPreprocessor {
                             if let Some(decision) = decision {
                                 state.guided_json_bypass_decision = Some(decision);
                             }
-                            decision.unwrap_or(false)
+                            decision
                         }
                     }
                 } else {
-                    false
+                    Some(false)
                 };
 
                 // Process the response through reasoning parser if available
-                let processed_response = if should_bypass_reasoning {
+                let processed_response = if guided_json_bypass_decision != Some(false) {
+                    // Bare JSON bypasses parsing. An undecided empty/whitespace
+                    // chunk also passes through; Immediate jail mode buffers it
+                    // until a later meaningful chunk establishes the shape.
                     response
                 } else if let Some(ref mut parser) = state.reasoning_parser {
                     response.map_data(|mut data| {
