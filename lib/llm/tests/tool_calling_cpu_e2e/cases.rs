@@ -37,6 +37,105 @@ async fn required_nemotron_delays_guided_json_until_force_reasoning_ends() {
 
 #[tokio::test]
 #[serial]
+async fn auto_force_nonempty_content_only_falls_back_for_reasoning_only_response() {
+    temp_env::async_with_vars(ENV, async {
+        for force_nonempty_content in [false, true] {
+            let requests = run_streaming_and_unary(
+                model_card("nemotron_v3", "nemotron_nano", false, true),
+                scripted_text(&["terminal thought", "</thi", "nk>"]),
+                chat_body_with_template_kwargs(
+                    "auto",
+                    vec![weather_tool()],
+                    false,
+                    json!({"force_nonempty_content": force_nonempty_content}),
+                ),
+                ExpectedResponse {
+                    reasoning: (!force_nonempty_content).then(|| "terminal thought".to_string()),
+                    content: if force_nonempty_content {
+                        ContentExpectation::Exact("terminal thought")
+                    } else {
+                        ContentExpectation::Empty
+                    },
+                    calls: Vec::new(),
+                    finish_reason: "stop",
+                },
+            )
+            .await;
+            assert_no_guidance(&requests);
+            assert_reasoning_metadata(
+                &requests,
+                false,
+                &json!({"force_nonempty_content": force_nonempty_content}),
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn auto_force_nonempty_content_keeps_reasoning_with_direct_answer() {
+    temp_env::async_with_vars(ENV, async {
+        let requests = run_streaming_and_unary(
+            model_card("nemotron_v3", "nemotron_nano", false, true),
+            scripted_text(&["I need to calculate.", "</thi", "nk>", "The answer is 42."]),
+            chat_body_with_template_kwargs(
+                "auto",
+                vec![weather_tool()],
+                false,
+                json!({"force_nonempty_content": true}),
+            ),
+            ExpectedResponse {
+                reasoning: Some("I need to calculate.".to_string()),
+                content: ContentExpectation::Exact("The answer is 42."),
+                calls: Vec::new(),
+                finish_reason: "stop",
+            },
+        )
+        .await;
+        assert_no_guidance(&requests);
+        assert_reasoning_metadata(&requests, false, &json!({"force_nonempty_content": true}));
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn required_force_nonempty_content_keeps_reasoning_with_tool_call() {
+    temp_env::async_with_vars(ENV, async {
+        let requests = run_streaming_and_unary(
+            model_card("nemotron_v3", "nemotron_nano", false, true),
+            scripted_text(&[
+                "I need weather data.",
+                "</thi",
+                "nk>",
+                r#"[{"name":"get_weather","parameters":{"location":"Reykjavik"}}]"#,
+            ]),
+            chat_body_with_template_kwargs(
+                "required",
+                vec![weather_tool()],
+                false,
+                json!({"force_nonempty_content": true}),
+            ),
+            ExpectedResponse {
+                reasoning: Some("I need weather data.".to_string()),
+                content: ContentExpectation::Empty,
+                calls: vec![ExpectedCall {
+                    name: "get_weather",
+                    arguments: json!({"location": "Reykjavik"}),
+                }],
+                finish_reason: "tool_calls",
+            },
+        )
+        .await;
+        assert_json_guidance(&requests, &[weather_tool()]);
+        assert_reasoning_metadata(&requests, false, &json!({"force_nonempty_content": true}));
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn required_guided_json_handles_reasoning_off_and_multiple_tools() {
     temp_env::async_with_vars(ENV, async {
         let script = scripted_text(&[

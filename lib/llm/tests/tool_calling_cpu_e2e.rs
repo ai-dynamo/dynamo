@@ -425,6 +425,20 @@ fn chat_body(
     thinking_key: &str,
     reasoning_enabled: bool,
 ) -> Value {
+    chat_body_with_template_kwargs(
+        tool_choice,
+        tools,
+        parallel_tool_calls,
+        json!({thinking_key: reasoning_enabled}),
+    )
+}
+
+fn chat_body_with_template_kwargs(
+    tool_choice: &str,
+    tools: Vec<Value>,
+    parallel_tool_calls: bool,
+    chat_template_kwargs: Value,
+) -> Value {
     json!({
         "model": MODEL,
         "messages": [{"role": "user", "content": "Use the available tools when appropriate."}],
@@ -434,7 +448,7 @@ fn chat_body(
         "temperature": 0,
         "max_tokens": 1024,
         "stream_options": {"include_usage": true},
-        "chat_template_kwargs": {thinking_key: reasoning_enabled}
+        "chat_template_kwargs": chat_template_kwargs
     })
 }
 
@@ -566,8 +580,12 @@ fn assert_response(observed: &ObservedResponse, expected: &ExpectedResponse) {
         );
     }
     if observed.streaming && !expected.calls.is_empty() && expected.reasoning.is_some() {
+        // force_nonempty_content must buffer reasoning until it knows whether
+        // content or a tool call follows, so the boundary may be coalesced into
+        // one delta. Reasoning may accompany the first tool delta, but must
+        // never arrive after it.
         assert!(
-            observed.last_reasoning_position < observed.first_tool_position,
+            observed.last_reasoning_position <= observed.first_tool_position,
             "tool delta arrived before reasoning completed: {observed:#?}"
         );
     }
