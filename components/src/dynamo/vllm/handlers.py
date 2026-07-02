@@ -1038,6 +1038,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.enable_multimodal = enable_multimodal
         # LoRA tracking: name -> LoRAInfo(id, path)
         self.loaded_loras: dict[str, LoRAInfo] = {}
+        # Adapters whose discovery ModelDeploymentCard is currently published.
+        # Tracked separately from loaded_loras because the two can diverge:
+        # an adapter can be loaded in the engine with no card (publish failed
+        # and the engine-side rollback also failed). Keeping the two sets
+        # distinct lets load_lora reconcile that state on the next attempt
+        # instead of short-circuiting as "already loaded" with no card, which
+        # left the adapter permanently invisible to the frontend.
+        self._published_loras: set[str] = set()
         # Per-LoRA locks to prevent concurrent load operations for the same LoRA
         self._lora_load_locks: dict[str, asyncio.Lock] = {}
         # Guard lock-map access in case handlers are invoked from multiple threads.
@@ -1918,6 +1926,80 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 self._lora_load_locks[lora_name] = lock
             return lock
 
+    async def _publish_lora_card(self, lora_name: str, lora_id: int) -> None:
+        """Publish a LoRA adapter as a ModelDeploymentCard for discovery.
+
+        Assumes ``self.generate_endpoint`` is set (callers gate on it). Raises
+        on failure so callers can roll back or retry; on success the caller is
+        responsible for recording ``lora_name`` in ``self._published_loras``.
+        """
+        assert self.generate_endpoint is not None
+
+        # Mark this as a LoRA in user_data
+        user_data = {
+            "lora_adapter": True,
+            "lora_id": lora_id,
+        }
+
+        runtime_config = ModelRuntimeConfig()
+        runtime_config.context_length = self.model_max_len
+        runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
+        runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
+
+        # Match the base-model registration topology (see
+        # worker_factory.py _create_decode_worker /
+        # _create_prefill_worker) so the router activates for the
+        # LoRA model name the same way it does for the base model.
+        # A prefill worker carries its role via worker_type=Prefill;
+        # we register the legacy ModelType.Prefill marker bit (not a
+        # surface) so an old frontend still detects it during the
+        # cross-version rollout. Decode and aggregated workers expose the
+        # LoRA on the same chat/completions surface.
+        # --route-to-encoder adds Encode to the AND-set of peers.
+        if self.config.disaggregation_mode == DisaggregationMode.PREFILL:
+            lora_model_type = ModelType.Prefill
+            lora_worker_type = WorkerType.Prefill
+            lora_needs_set: list[WorkerType] = [WorkerType.Decode]
+        elif self.config.disaggregation_mode == DisaggregationMode.DECODE:
+            lora_model_type = ModelType.Chat | ModelType.Completions
+            lora_worker_type = WorkerType.Decode
+            lora_needs_set = [WorkerType.Prefill]
+        else:  # AGGREGATED
+            lora_model_type = ModelType.Chat | ModelType.Completions
+            lora_worker_type = WorkerType.Aggregated
+            lora_needs_set = []
+        if self.config.route_to_encoder:
+            lora_needs_set.append(WorkerType.Encode)
+        lora_needs: list[list[WorkerType]] = [lora_needs_set] if lora_needs_set else []
+
+        # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
+        await register_model(
+            model_input=ModelInput.Tokens,
+            model_type=lora_model_type,
+            endpoint=self.generate_endpoint,
+            model_path=self.config.model,
+            kv_cache_block_size=self.config.engine_args.block_size,
+            runtime_config=runtime_config,
+            user_data=user_data,
+            lora_name=lora_name,
+            base_model_path=self.config.model,
+            worker_type=lora_worker_type,
+            needs=lora_needs,
+            # The engine is already serving the base model
+            # when a LoRA loads, and the card only references
+            # config/tokenizer/chat-template files — never
+            # weights. Without this, a cache miss on
+            # model_path re-downloads the full base repo
+            # (hundreds of GB for large MoEs) on every
+            # publish, and any network failure aborts the
+            # publish.
+            ignore_weights=True,
+            # Publish the worker's per-worker LoRA slot budget so the frontend
+            # allocator sizes placement against real capacity instead of the
+            # hard-coded default.
+            max_gpu_lora_count=getattr(self.config.engine_args, "max_loras", None),
+        )
+
     async def load_lora(self, request=None):
         """
         Load a LoRA adapter dynamically into the vLLM's AsyncLLM engine.
@@ -1964,6 +2046,38 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     is_hot_swap = old_info is not None and hot_swap_enabled
 
                     if old_info is not None and not hot_swap_enabled:
+                        # The adapter is loaded into the engine, but its
+                        # discovery card may be missing (a prior publish failed
+                        # and the engine-side rollback also failed). Reconcile
+                        # by retrying the publish instead of reporting early
+                        # success — otherwise the adapter stays permanently
+                        # invisible to the frontend while every caller is told
+                        # the load succeeded.
+                        if (
+                            self.generate_endpoint is not None
+                            and lora_name not in self._published_loras
+                        ):
+                            logger.info(
+                                f"LoRA '{lora_name}' loaded but unpublished; "
+                                "retrying discovery publish"
+                            )
+                            try:
+                                await self._publish_lora_card(lora_name, old_info.id)
+                                self._published_loras.add(lora_name)
+                            except Exception as e:
+                                logger.exception(
+                                    f"Failed to publish LoRA {lora_name} "
+                                    f"ModelDeploymentCard: {e}"
+                                )
+                                yield {
+                                    "status": "error",
+                                    "message": (
+                                        f"LoRA '{lora_name}' is loaded but "
+                                        f"discovery publish failed: {str(e)}"
+                                    ),
+                                    "lora_name": lora_name,
+                                }
+                                return
                         logger.info(
                             f"LoRA adapter already loaded: {lora_name} "
                             f"with ID {old_info.id}"
@@ -2108,88 +2222,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"
                         )
                         try:
-                            logger.debug(
-                                f"Publishing LoRA '{lora_name}' ModelDeploymentCard"
-                            )
-
-                            # Mark this as a LoRA in user_data
-                            user_data = {
-                                "lora_adapter": True,
-                                "lora_id": lora_id,
-                            }
-
-                            runtime_config = ModelRuntimeConfig()
-                            runtime_config.context_length = self.model_max_len
-                            runtime_config.tool_call_parser = (
-                                self.config.dyn_tool_call_parser
-                            )
-                            runtime_config.reasoning_parser = (
-                                self.config.dyn_reasoning_parser
-                            )
-
-                            # Match the base-model registration topology (see
-                            # worker_factory.py _create_decode_worker /
-                            # _create_prefill_worker) so the router activates for the
-                            # LoRA model name the same way it does for the base model.
-                            # A prefill worker carries its role via worker_type=Prefill;
-                            # we register the legacy ModelType.Prefill marker bit (not a
-                            # surface) so an old frontend still detects it during the
-                            # cross-version rollout. Decode and aggregated workers expose the
-                            # LoRA on the same chat/completions surface.
-                            # --route-to-encoder adds Encode to the AND-set of peers.
-                            if (
-                                self.config.disaggregation_mode
-                                == DisaggregationMode.PREFILL
-                            ):
-                                lora_model_type = ModelType.Prefill
-                                lora_worker_type = WorkerType.Prefill
-                                lora_needs_set: list[WorkerType] = [WorkerType.Decode]
-                            elif (
-                                self.config.disaggregation_mode
-                                == DisaggregationMode.DECODE
-                            ):
-                                lora_model_type = ModelType.Chat | ModelType.Completions
-                                lora_worker_type = WorkerType.Decode
-                                lora_needs_set = [WorkerType.Prefill]
-                            else:  # AGGREGATED
-                                lora_model_type = ModelType.Chat | ModelType.Completions
-                                lora_worker_type = WorkerType.Aggregated
-                                lora_needs_set = []
-                            if self.config.route_to_encoder:
-                                lora_needs_set.append(WorkerType.Encode)
-                            lora_needs: list[list[WorkerType]] = (
-                                [lora_needs_set] if lora_needs_set else []
-                            )
-
-                            # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
-                            await register_model(
-                                model_input=ModelInput.Tokens,
-                                model_type=lora_model_type,
-                                endpoint=self.generate_endpoint,
-                                model_path=self.config.model,
-                                kv_cache_block_size=self.config.engine_args.block_size,
-                                runtime_config=runtime_config,
-                                user_data=user_data,
-                                lora_name=lora_name,
-                                base_model_path=self.config.model,
-                                worker_type=lora_worker_type,
-                                needs=lora_needs,
-                                # The engine is already serving the base model
-                                # when a LoRA loads, and the card only references
-                                # config/tokenizer/chat-template files — never
-                                # weights. Without this, a cache miss on
-                                # model_path re-downloads the full base repo
-                                # (hundreds of GB for large MoEs) on every
-                                # publish, and any network failure aborts the
-                                # publish.
-                                ignore_weights=True,
-                                # Publish the worker's per-worker LoRA slot budget so the frontend
-                                # allocator sizes placement against real capacity instead of the
-                                # hard-coded default.
-                                max_gpu_lora_count=getattr(
-                                    self.config.engine_args, "max_loras", None
-                                ),
-                            )
+                            await self._publish_lora_card(lora_name, lora_id)
+                            self._published_loras.add(lora_name)
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
                             )
@@ -2198,7 +2232,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
                             )
 
-                            # Rollback: remove the LoRA from the engine to maintain consistency
+                            # Rollback: remove the LoRA from the engine to keep
+                            # engine state and discovery consistent. If the
+                            # rollback itself fails, the entry stays in
+                            # `loaded_loras` but absent from `_published_loras`,
+                            # so a retried load reconciles the publish instead
+                            # of short-circuiting as "already loaded" with no
+                            # card.
                             try:
                                 logger.debug(
                                     f"Rolling back: removing LoRA '{lora_name}' from engine"
@@ -2212,6 +2252,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 logger.exception(
                                     f"Failed to rollback LoRA {lora_name}: {rollback_error}"
                                 )
+                            self._published_loras.discard(lora_name)
 
                             # Return error status since registration failed
                             yield {
@@ -2270,6 +2311,40 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # Check if the LoRA exists *after* waiting for any in-progress load.
                     lora = self.loaded_loras.get(lora_name)
                     if lora is None:
+                        # The adapter is gone from the engine but may still
+                        # have a stale discovery card (a prior unload's
+                        # unregister failed). Reconcile by retrying the
+                        # unregister so discovery converges.
+                        if (
+                            self.generate_endpoint is not None
+                            and lora_name in self._published_loras
+                        ):
+                            logger.info(
+                                f"LoRA '{lora_name}' not loaded but still "
+                                "published; retrying discovery unregister"
+                            )
+                            try:
+                                await unregister_model(
+                                    endpoint=self.generate_endpoint,
+                                    lora_name=lora_name,
+                                )
+                                self._published_loras.discard(lora_name)
+                                yield {
+                                    "status": "success",
+                                    "message": f"LoRA adapter '{lora_name}' discovery card removed",
+                                    "lora_name": lora_name,
+                                }
+                            except Exception as e:
+                                logger.exception(
+                                    f"Failed to unregister stale LoRA {lora_name} "
+                                    f"ModelDeploymentCard: {e}"
+                                )
+                                yield {
+                                    "status": "error",
+                                    "message": f"Failed to unregister stale LoRA '{lora_name}' from discovery registry: {str(e)}",
+                                    "lora_name": lora_name,
+                                }
+                            return
                         yield {
                             "status": "error",
                             "message": f"LoRA adapter '{lora_name}' not found. Available LoRAs: {list(self.loaded_loras.keys())}",
@@ -2278,15 +2353,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     logger.debug(f"Unloading LoRA adapter: {lora_name}")
                     lora_id = lora.id
-                    lora_path = lora.path
 
-                    await self.engine_client.remove_lora(lora_id)
-
-                    # Remove from tracking
-                    del self.loaded_loras[lora_name]
-
-                    # Unregister the LoRA model from the model registry
-                    if self.generate_endpoint is not None:
+                    # Stop advertising the adapter *before* removing it from
+                    # the engine, so the frontend stops routing LoRA traffic
+                    # here while the adapter still exists. Removing it first
+                    # would leave a window where requests route to a worker
+                    # that no longer has the adapter — and re-adding the
+                    # adapter as a rollback is unsafe (vLLM's fused-MoE LoRA
+                    # re-activation after a partial remove can assert and take
+                    # down the whole engine).
+                    if (
+                        self.generate_endpoint is not None
+                        and lora_name in self._published_loras
+                    ):
                         logger.debug(
                             f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
                         )
@@ -2295,49 +2374,50 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 endpoint=self.generate_endpoint,
                                 lora_name=lora_name,
                             )
+                            self._published_loras.discard(lora_name)
                             logger.info(
                                 f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
                             )
                         except Exception as e:
+                            # Nothing mutated yet: the engine still has the
+                            # adapter and discovery still advertises it
+                            # (consistent and still routable). Surface the
+                            # error and leave state intact for a retry.
                             logger.exception(
                                 f"Failed to unregister LoRA {lora_name} ModelDeploymentCard: {e}"
                             )
-
-                            # Rollback: re-add the LoRA to the engine to maintain consistency
-                            try:
-                                logger.debug(
-                                    f"Rolling back: re-adding LoRA '{lora_name}' to engine"
-                                )
-                                await self.engine_client.add_lora(
-                                    LoRARequest(
-                                        lora_name=lora_name,
-                                        lora_int_id=lora_id,
-                                        lora_path=lora_path,
-                                    )
-                                )
-                                # Re-add to tracking
-                                self.loaded_loras[lora_name] = LoRAInfo(
-                                    id=lora_id, path=lora_path
-                                )
-                                logger.debug(
-                                    f"Successfully rolled back LoRA '{lora_name}'"
-                                )
-                            except Exception as rollback_error:
-                                logger.exception(
-                                    f"Failed to rollback LoRA {lora_name}: {rollback_error}"
-                                )
-
-                            # Return error status since unregistration failed
                             yield {
                                 "status": "error",
                                 "message": f"Failed to unregister LoRA '{lora_name}' from discovery registry: {str(e)}",
                                 "lora_name": lora_name,
                             }
                             return
-                    else:
+                    elif self.generate_endpoint is None:
                         logger.debug(
                             f"Cannot unregister LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}"
                         )
+
+                    # Discovery no longer routes to this adapter; remove it
+                    # from the engine.
+                    try:
+                        await self.engine_client.remove_lora(lora_id)
+                    except Exception as e:
+                        # The discovery card is already gone but the engine
+                        # still holds the adapter (loaded-but-unpublished).
+                        # Leave it in loaded_loras so a retried unload skips
+                        # the unregister and retries only the engine removal.
+                        logger.exception(
+                            f"Failed to remove LoRA {lora_name} from engine: {e}"
+                        )
+                        yield {
+                            "status": "error",
+                            "message": f"Failed to remove LoRA '{lora_name}' from engine: {str(e)}",
+                            "lora_name": lora_name,
+                        }
+                        return
+
+                    # Remove from tracking
+                    del self.loaded_loras[lora_name]
 
                     logger.info(
                         f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
