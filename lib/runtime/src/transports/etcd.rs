@@ -36,8 +36,8 @@ use crate::config::environment_names::etcd as env_etcd;
 const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 const STARTUP_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
-const WATCH_RETRY_BACKOFF: Duration = Duration::from_millis(250);
-const WATCH_RETRY_MAX_JITTER_MS: u64 = 250;
+const WATCH_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const WATCH_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
 /// ETCD Client
 #[derive(Clone)]
@@ -425,6 +425,7 @@ impl Client {
             let mut reconnect = true;
             while reconnect {
                 if !first_connect {
+                    let mut retry_backoff = WATCH_RETRY_INITIAL_BACKOFF;
                     while let Err(err) = Self::resync_watch_prefix(
                         &connector,
                         &prefix_str,
@@ -457,8 +458,10 @@ impl Client {
 
                         tokio::select! {
                             _ = cancel_token.cancelled() => return,
-                            _ = tokio::time::sleep(Self::watch_retry_backoff()) => {}
+                            _ = tokio::time::sleep(Self::watch_retry_backoff(retry_backoff)) => {}
                         }
+                        retry_backoff =
+                            retry_backoff.saturating_mul(2).min(WATCH_RETRY_MAX_BACKOFF);
                     }
                 }
 
@@ -561,19 +564,25 @@ impl Client {
                 | etcd_client::Error::EndpointError(_) => true,
                 etcd_client::Error::GRpcStatus(status) => matches!(
                     status.code() as i32,
-                    1  // Cancelled
-                    | 2  // Unknown
-                    | 4  // DeadlineExceeded
-                    | 14 // Unavailable
+                    // tonic::Code::Cancelled
+                    1
+                    // tonic::Code::Unknown
+                    | 2
+                    // tonic::Code::DeadlineExceeded
+                    | 4
+                    // tonic::Code::Unavailable
+                    | 14
                 ),
                 _ => false,
             }
         })
     }
 
-    fn watch_retry_backoff() -> Duration {
-        WATCH_RETRY_BACKOFF
-            + Duration::from_millis(rand::random::<u64>() % WATCH_RETRY_MAX_JITTER_MS)
+    fn watch_retry_backoff(current: Duration) -> Duration {
+        let max_ms = u64::try_from(current.as_millis()).unwrap_or(u64::MAX);
+        let min_ms = (max_ms / 2).max(1);
+        let jitter_range = max_ms.saturating_sub(min_ms).saturating_add(1);
+        Duration::from_millis(min_ms + rand::random::<u64>() % jitter_range)
     }
 
     /// Establish a new watch stream with automatic retry and reconnection.

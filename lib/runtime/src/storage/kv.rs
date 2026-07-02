@@ -365,6 +365,9 @@ impl Manager {
                 };
                 match event {
                     WatchEvent::Resync(_) => {
+                        // Resync is an authoritative snapshot; do not drop it on a
+                        // timeout like incremental events. If the receiver closes,
+                        // the watch has no consumer and can stop.
                         tokio::select! {
                             _ = cancel_token.cancelled() => break,
                             result = tx.send(event) => {
