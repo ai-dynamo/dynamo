@@ -116,6 +116,70 @@ jobs:
           extra_tags: |
             ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
 
+# ============================================================================
+# Power Agent
+# ============================================================================
+
+  power-agent:
+    name: Power Agent
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Build and push power agent
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: power-agent
+          target: runtime  # push the slim shipped stage, not the test stage
+          image_tag: ${{ github.sha }}-power-agent
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-power-agent
+      - name: Refresh BuildKit builder
+        # The runtime build above can leave the remote BuildKit connection stale;
+        # re-establish it (re-routing only if unhealthy) before the test build.
+        uses: ./.github/actions/builder-refresher
+        with:
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          flavor: general
+          arch: linux/amd64
+      - name: Run unit tests inside the container image
+        # Build the Dockerfile `test` stage (FROM runtime): its RUN pytest runs
+        # the suite against the exact shipped image (Python 3.12 + baked deps),
+        # validating the container itself rather than a pip-installed runner env.
+        # Reuses the builder + ECR Docker Hub mirror the build step set up above
+        # (runtime layers are a cache hit); no --push/--load runs pytest without
+        # exporting the never-shipped test image.
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker buildx build --builder b-${{ github.run_id }}-${{ github.run_attempt }} \
+            --target test \
+            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+            -f deploy/power-agent/Dockerfile deploy/power-agent
+      - name: Set up Helm
+        uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112  # v4.3.0
+        with:
+          version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
+      - name: Lint and render (production + dev)
+        run: |
+          CHART=deploy/helm/charts/power-agent
+          helm lint "$CHART" --set image.tag=ci-test
+          # Production DaemonSet render (default daemonset.enabled=true).
+          helm template power-agent "$CHART" --set image.tag=ci-test >/dev/null
+          # Dev-pod render: uses dev.image.* and must NOT require the production
+          # image.tag (regression guard for the daemonset-gated validation).
+          helm template power-agent "$CHART" \
+            --set daemonset.enabled=false \
+            --set dev.enabled=true \
+            --set dev.nodeName=ci-node >/dev/null
+
   # ============================================================================
   # BUILD JOBS
   # ============================================================================
@@ -128,13 +192,15 @@ jobs:
     with:
       framework: vllm
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   vllm-dev-build:
@@ -145,7 +211,7 @@ jobs:
     with:
       framework: vllm
       target: dev
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       push_image: true
@@ -164,13 +230,15 @@ jobs:
       framework: vllm
       target: runtime
       platform: 'linux/amd64,linux/arm64'
-      cuda_version: '["12.9"]'
+      cuda_version: '["13.0"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-efa-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   sglang-build:
@@ -181,13 +249,15 @@ jobs:
     with:
       framework: sglang
       target: runtime
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   sglang-dev-build:
@@ -198,7 +268,7 @@ jobs:
     with:
       framework: sglang
       target: dev
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       push_image: true
@@ -217,13 +287,15 @@ jobs:
       framework: sglang
       target: runtime
       platform: 'linux/amd64,linux/arm64'
-      cuda_version: '["12.9"]'
+      cuda_version: '["13.0"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-efa-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   trtllm-build:
@@ -237,10 +309,12 @@ jobs:
       cuda_version: '["13.1"]'
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   trtllm-dev-build:
@@ -273,10 +347,12 @@ jobs:
       cuda_version: '["13.1"]'
       make_efa: true
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      inline_compliance: true
       build_timeout_minutes: 120
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-efa' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-efa-{0}', github.sha) || '' }}
+      archive_sources: false
     secrets: inherit
 
   planner-build:
@@ -321,11 +397,12 @@ jobs:
     needs: [vllm-build]
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: post-merge
       test_suite_name: vllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
@@ -343,11 +420,12 @@ jobs:
     needs: [vllm-build]
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: post-merge
       test_suite_name: vllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
       gpu_test_markers: '(pre_merge or post_merge) and vllm and (gpu_2 or gpu_4)'
@@ -359,11 +437,12 @@ jobs:
     needs: [vllm-efa-build]
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: post-merge
       test_suite_name: vllm-efa
       test_type: CPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]'
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
@@ -375,11 +454,12 @@ jobs:
     needs: [sglang-build]
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: post-merge
       test_suite_name: sglang
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
@@ -397,11 +477,12 @@ jobs:
     needs: [sglang-build]
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: post-merge
       test_suite_name: sglang
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
+      cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
       gpu_test_markers: '(pre_merge or post_merge) and sglang and (gpu_2 or gpu_4)'
@@ -413,6 +494,7 @@ jobs:
     needs: [trtllm-build]
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: post-merge
       test_suite_name: trtllm
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
@@ -435,6 +517,7 @@ jobs:
     needs: [trtllm-build]
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: post-merge
       test_suite_name: trtllm
       test_type: Multi-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -451,6 +534,7 @@ jobs:
     needs: [trtllm-efa-build]
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: post-merge
       test_suite_name: trtllm-efa
       test_type: CPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
@@ -467,6 +551,7 @@ jobs:
     needs: [planner-build]
     uses: ./.github/workflows/shared-test.yml
     with:
+      dd_env: post-merge
       test_suite_name: planner
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2
@@ -482,45 +567,31 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # IMAGE COMPLIANCE JOBS
+  # XPU TEST JOBS
   # ============================================================================
 
-  vllm-compliance:
-    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
-    needs: [vllm-build]
-    uses: ./.github/workflows/shared-compliance.yml
+  vllm-test-xpu:
+    name: vllm-xpu
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true'
+    uses: ./.github/workflows/xpu-ci.yaml
     with:
       framework: vllm
-      target: runtime
-      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
+      pytest_markers: '(pre_merge or post_merge) and vllm and xpu_1'
 
-  sglang-compliance:
-    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
-    needs: [sglang-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: sglang
-      target: runtime
-      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
-      cuda_version: '["12.9", "13.0"]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
-  trtllm-compliance:
-    name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
-    needs: [trtllm-build]
-    uses: ./.github/workflows/shared-compliance.yml
-    with:
-      framework: trtllm
-      target: runtime
-      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
-      cuda_version: '["13.1"]'
-      platform: '["amd64", "arm64"]'
-    secrets: inherit
-
+  # ============================================================================
+  # IMAGE COMPLIANCE
+  # ============================================================================
+  # vllm/sglang/trtllm: compliance extract + verify runs as an inline step
+  # INSIDE each shipped framework build job (inline_compliance: true above), on
+  # the same warm builder — a cache hit + small scratch export instead of a cold
+  # full-image rebuild on a separate fresh builder. archive_sources is currently
+  # false (source archival temporarily disabled), so release branches do not emit
+  # the /sources.zip OSRB artifact; EFA images are covered (make_efa flows to the
+  # extract). A compliance failure fails the build.
+  #
+  # planner/frontend stay on the legacy shared-compliance scan until they
+  # migrate to the inline system.
   planner-compliance:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [planner-build]
@@ -559,6 +630,33 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  snapshot-placeholder-vllm:
+    name: vLLM Snapshot Placeholder
+    needs: [vllm-copy-to-acr]
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ github.sha }}-vllm-placeholder
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-runtime
+
   vllm-dev-copy-to-acr:
     name: vllm-dev # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-dev-build]
@@ -579,6 +677,33 @@ jobs:
       cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
       copy_timeout_minutes: 20
     secrets: inherit
+
+  snapshot-placeholder-sglang:
+    name: SGLang Snapshot Placeholder
+    needs: [sglang-copy-to-acr]
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and push snapshot placeholder
+        uses: ./.github/actions/build-deploy-component
+        with:
+          component: snapshot
+          target: placeholder
+          image_tag: ${{ github.sha }}-sglang-placeholder
+          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          extra_tags: |
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-placeholder
+          extra_build_args: |
+            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-runtime
 
   sglang-dev-copy-to-acr:
     name: sglang-dev # This name overlaps with other sglang jobs to group them in the UI
@@ -643,6 +768,8 @@ jobs:
       operator_tag: ${{ steps.setup.outputs.operator_tag }}
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        persist-credentials: false
     - name: Setup vCluster and operator
       id: setup
       uses: ./.github/actions/setup-dynamo-operator
@@ -689,18 +816,320 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
     secrets: inherit
 
+  deploy-operator-checkpoint-vllm:
+    name: vLLM DynamoCheckpoint Operator Setup
+    needs: [operator]
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Setup vCluster and operator
+      id: setup
+      uses: ./.github/actions/setup-dynamo-operator
+      with:
+        vcluster_name: ci-${{ github.run_id }}-checkpoint-vllm
+        vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-vllm-dt
+        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+        hf_token: ${{ secrets.HF_TOKEN }}
+        dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+        dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+        checkpoint_enabled: 'true'
+        checkpoint_storage_size: 64Gi
+
+  deploy-operator-checkpoint-sglang:
+    name: SGLang DynamoCheckpoint Operator Setup
+    needs: [operator]
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+      operator_tag: ${{ steps.setup.outputs.operator_tag }}
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Setup vCluster and operator
+      id: setup
+      uses: ./.github/actions/setup-dynamo-operator
+      with:
+        vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
+        vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
+        registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+        operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+        hf_token: ${{ secrets.HF_TOKEN }}
+        dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+        dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+        checkpoint_enabled: 'true'
+        checkpoint_storage_size: 64Gi
+
+  deploy-snapshot-agent-checkpoint-vllm:
+    name: vLLM DynamoCheckpoint Snapshot Agent Setup
+    needs: [deploy-operator-checkpoint-vllm, snapshot-agent]
+    if: |
+      github.event_name != 'workflow_dispatch' &&
+      needs.deploy-operator-checkpoint-vllm.result == 'success' &&
+      needs.snapshot-agent.result == 'success'
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-vllm.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
+      - name: Install snapshot-agent
+        uses: ./.github/actions/setup-snapshot-agent
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+
+  deploy-snapshot-agent-checkpoint-sglang:
+    name: SGLang DynamoCheckpoint Snapshot Agent Setup
+    needs: [deploy-operator-checkpoint-sglang, snapshot-agent]
+    if: |
+      github.event_name != 'workflow_dispatch' &&
+      needs.deploy-operator-checkpoint-sglang.result == 'success' &&
+      needs.snapshot-agent.result == 'success'
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-sglang.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+      - name: Install snapshot-agent
+        uses: ./.github/actions/setup-snapshot-agent
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+
+  deploy-test-checkpoint-vllm:
+    name: vLLM DynamoCheckpoint Deploy Test
+    needs: [deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, snapshot-placeholder-vllm, frontend-copy-to-acr]
+    if: |
+      always() && !cancelled() &&
+      needs.deploy-snapshot-agent-checkpoint-vllm.result == 'success' &&
+      needs.snapshot-placeholder-vllm.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success'
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-vllm.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
+      - name: Install snapshot-agent (rerun bootstrap)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-snapshot-agent
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+      - name: Run DynamoCheckpoint Deploy Test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-vllm.outputs.operator_tag }}
+          framework: checkpoint
+          profile: dgd_restore
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-vllm-placeholder
+          test_name: checkpoint_dgd_restore_vllm
+          test_file: tests/deploy/test_dynamocheckpoint.py
+          extra_pytest_args: >-
+            -m dynamocheckpoint
+            --checkpoint-backend=vllm
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
+
+  deploy-test-checkpoint-sglang:
+    name: SGLang DynamoCheckpoint Deploy Test
+    needs: [deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, snapshot-placeholder-sglang, frontend-copy-to-acr]
+    if: |
+      always() && !cancelled() &&
+      needs.deploy-snapshot-agent-checkpoint-sglang.result == 'success' &&
+      needs.snapshot-placeholder-sglang.result == 'success' &&
+      needs.frontend-copy-to-acr.result == 'success'
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Check if vCluster exists
+        id: vcluster-check
+        uses: ./.github/actions/check-vcluster-exists
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+      - name: Self-bootstrap vCluster (rerun)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-sglang.outputs.operator_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+          checkpoint_enabled: 'true'
+          checkpoint_storage_size: 64Gi
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
+      - name: Install snapshot-agent (rerun bootstrap)
+        if: steps.vcluster-check.outputs.exists != 'true'
+        uses: ./.github/actions/setup-snapshot-agent
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          snapshot_agent_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-snapshot-agent
+      - name: Run DynamoCheckpoint Deploy Test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.deploy-operator-checkpoint-sglang.outputs.operator_tag }}
+          framework: checkpoint
+          profile: dgd_restore
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-sglang-placeholder
+          test_name: checkpoint_dgd_restore_sglang
+          test_file: tests/deploy/test_dynamocheckpoint.py
+          extra_pytest_args: >-
+            -m dynamocheckpoint
+            --checkpoint-backend=sglang
+            --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-dynamo-frontend
+
   deploy-cleanup:
     if: always()
     needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
     runs-on: prod-deploy-tester-v1
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        persist-credentials: false
     - name: Teardown vCluster
       if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
       uses: ./.github/actions/teardown-dynamo-operator
       with:
         vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
         vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+
+  deploy-cleanup-checkpoint-vllm:
+    name: vLLM DynamoCheckpoint Cleanup
+    if: always() && github.event_name != 'workflow_dispatch'
+    needs: [deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, deploy-test-checkpoint-vllm]
+    runs-on: prod-deploy-tester-v1
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Teardown vCluster
+      uses: ./.github/actions/teardown-dynamo-operator
+      with:
+        vcluster_name: ci-${{ github.run_id }}-checkpoint-vllm
+        vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-vllm-dt
+
+  deploy-cleanup-checkpoint-sglang:
+    name: SGLang DynamoCheckpoint Cleanup
+    if: always() && github.event_name != 'workflow_dispatch'
+    needs: [deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, deploy-test-checkpoint-sglang]
+    runs-on: prod-deploy-tester-v1
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - name: Teardown vCluster
+      uses: ./.github/actions/teardown-dynamo-operator
+      with:
+        vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
+        vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
 
   # ============================================================================
   # GAIE DEPLOY TEST
@@ -765,7 +1194,24 @@ jobs:
 
   deploy-status-check:
     runs-on: ubuntu-latest
-    needs: [deploy-operator, deploy-test-vllm, deploy-test-sglang, deploy-test-trtllm, deploy-test-gaie]
+    needs:
+      - deploy-operator
+      - deploy-test-vllm
+      - deploy-test-sglang
+      - deploy-test-trtllm
+      - deploy-operator-checkpoint-vllm
+      - deploy-operator-checkpoint-sglang
+      - deploy-snapshot-agent-checkpoint-vllm
+      - deploy-snapshot-agent-checkpoint-sglang
+      - snapshot-placeholder-vllm
+      - snapshot-placeholder-sglang
+      - frontend-copy-to-acr
+      - deploy-test-checkpoint-vllm
+      - deploy-test-checkpoint-sglang
+      - deploy-test-gaie
+      - deploy-cleanup
+      - deploy-cleanup-checkpoint-vllm
+      - deploy-cleanup-checkpoint-sglang
     if: always()
     steps:
       - name: "Check all deploy test jobs"
@@ -780,7 +1226,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-agent, snapshot-placeholder-vllm, snapshot-placeholder-sglang, power-agent, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -806,9 +1252,15 @@ jobs:
       contents: read
     steps:
       - name: Get Failed jobs
+        id: failed-jobs
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Jobs whose names contain any of these substrings are excluded from Slack failure reporting
+          # (see ops-support). Add one substring per line to silence additional jobs.
+          IGNORED_JOBS: |
+            build-xpu
+            test-xpu
         run: |
           JOBS_JSON=$(mktemp)
           curl -sSL \
@@ -817,14 +1269,26 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
             >$JOBS_JSON
 
-          FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
+          # Turn the newline-separated IGNORED_JOBS list into a trimmed, non-empty JSON array for jq.
+          IGNORED_JSON=$(printf '%s\n' "$IGNORED_JOBS" | jq -R 'gsub("^\\s+|\\s+$";"")' | jq -s 'map(select(length > 0))')
+
+          # Drop any failed job whose name contains one of the ignored substrings.
+          FAILED_JOBS=$(jq -r --argjson ignored "$IGNORED_JSON" '.jobs[] | select(.conclusion == "failure") | select(.name as $n | ($ignored | any(. as $i | $n | contains($i))) | not) | .name | split(" / ") | if length > 2 then ":failed: " + .[0] + " > " + .[-1] else ":failed: " + .[-1] end | . + "\\n"' "$JOBS_JSON")
           echo $FAILED_JOBS
           {
             echo "FAILED_JOBS<<EOF"
             echo "$FAILED_JOBS"
             echo "EOF"
           } >> "$GITHUB_ENV"
+
+          # Skip the Slack alert when there are no reportable failures (e.g. only IGNORED_JOBS failed).
+          if [ -n "$(echo "$FAILED_JOBS" | tr -d '[:space:]')" ]; then
+            echo "has_failures=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_failures=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Notify Slack
+        if: steps.failed-jobs.outputs.has_failures == 'true'
         uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a #v2.1.1
         with:
           webhook: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}

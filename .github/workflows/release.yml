@@ -338,28 +338,8 @@ jobs:
             fi
           done
 
-          # ---- CUDA 12 runtime images (vllm and sglang) — explicit ----
-          # cuda12 is no longer the default: both the ECR source and the NGC
-          # target carry an explicit -cuda12 suffix.
-          echo ""
-          echo "=== CUDA 12 Runtime Images (vllm, sglang) — explicit ==="
-          CUDA12_FRAMEWORKS=("vllm" "sglang")
-          for FRAMEWORK in "${CUDA12_FRAMEWORKS[@]}"; do
-            NGC_NAME="${FRAMEWORK}-runtime${NGC_NAME_SUFFIX}"
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-${FRAMEWORK}-runtime-cuda12${NIGHTLY_TAG_SUFFIX}"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${NGC_NAME}:${NGC_VERSION_TAG}-cuda12"
-            copy_image "${SOURCE}" "${TARGET}" "${NGC_NAME}:${NGC_VERSION_TAG}-cuda12"
-
-            # Mutable `:nightly-cuda12` floating tag on the stable repo
-            # (e.g. vllm-runtime:nightly-cuda12).
-            if [[ "${NIGHTLY}" == "true" ]]; then
-              MUTABLE_TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:nightly-cuda12"
-              copy_image "${SOURCE}" "${MUTABLE_TARGET}" "${FRAMEWORK}-runtime:nightly-cuda12"
-            fi
-          done
-
           # Nightly builds only the runtime images above (vllm/sglang/trtllm
-          # cuda12+cuda13). EFA/frontend/operator/planner/snapshot are built
+          # cuda13). EFA/frontend/operator/planner/snapshot are built
           # by post-merge and other workflows on release branches; for nightly
           # we skip them entirely so we don't try to copy ECR tags that don't
           # exist for the resolved SHA.
@@ -370,15 +350,15 @@ jobs:
             echo ""
             echo "=== EFA Runtime Images ==="
 
-            # vllm EFA (CUDA 12 — explicit suffix since cuda13 is default)
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa-cuda12"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa-cuda12"
-            copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa-cuda12"
+            # vllm EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-vllm-runtime-efa"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/vllm-runtime:${NGC_VERSION_TAG}-efa"
+            copy_image "${SOURCE}" "${TARGET}" "vllm-runtime:${NGC_VERSION_TAG}-efa"
 
-            # sglang EFA (CUDA 12 — explicit suffix since cuda13 is default)
-            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa-cuda12"
-            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa-cuda12"
-            copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa-cuda12"
+            # sglang EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
+            SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-sglang-runtime-efa"
+            TARGET="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/sglang-runtime:${NGC_VERSION_TAG}-efa"
+            copy_image "${SOURCE}" "${TARGET}" "sglang-runtime:${NGC_VERSION_TAG}-efa"
 
             # trtllm EFA (CUDA 13 — default; no cuda suffix on ECR or NGC)
             SOURCE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${COMMIT_SHA}-trtllm-runtime-efa"
@@ -516,22 +496,18 @@ jobs:
           echo "- \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}\` / \`tensorrtllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda13\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Runtime images (CUDA 12 - explicit):" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda12\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime${NGC_NAME_SUFFIX}:${NGC_VERSION_TAG}-cuda12\`" >> $GITHUB_STEP_SUMMARY
           if [[ "${NIGHTLY}" == "true" ]]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Mutable floating tags (repushed every nightly):" >> $GITHUB_STEP_SUMMARY
-            echo "- \`vllm-runtime:nightly\` / \`vllm-runtime:nightly-cuda13\` / \`vllm-runtime:nightly-cuda12\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`sglang-runtime:nightly\` / \`sglang-runtime:nightly-cuda13\` / \`sglang-runtime:nightly-cuda12\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`vllm-runtime:nightly\` / \`vllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`sglang-runtime:nightly\` / \`sglang-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
             echo "- \`tensorrtllm-runtime:nightly\` / \`tensorrtllm-runtime:nightly-cuda13\`" >> $GITHUB_STEP_SUMMARY
           fi
           if [[ "${NIGHTLY}" != "true" ]]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "EFA runtime images (multi-arch):" >> $GITHUB_STEP_SUMMARY
-            echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa-cuda12\`" >> $GITHUB_STEP_SUMMARY
-            echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa-cuda12\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`vllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`sglang-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
             echo "- \`tensorrtllm-runtime:${NGC_VERSION_TAG}-efa\`" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Operator image:" >> $GITHUB_STEP_SUMMARY

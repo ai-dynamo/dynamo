@@ -10,12 +10,17 @@
 # when building.
 
 dynamo:
-  cuda12.9:
-    base_image: nvcr.io/nvidia/cuda-dl-base
-    base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
+    # No baseline_sbom: dynamo-runtime is an unpublished wheel-builder image that
+    # skips compliance (see dynamo_runtime.Dockerfile). The published framework
+    # images + the wheels carry the attribution.
+    #
+    # Per-arch baseline convention (vllm/sglang/trtllm): the baseline_sbom value
+    # is a STEM; the licenses stage appends -${TARGETARCH}.cdx.json so each arch
+    # of a multi-arch build subtracts its own-arch floor (the @<digest8> is the
+    # shared multi-arch index digest).
   epp_image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v1.5.0-rc.2
   frontend_image: nvcr.io/nvidia/base/ubuntu:noble-20250619
   planner_build_image: python
@@ -27,7 +32,7 @@ dynamo:
   nats_version: v2.10.28
   etcd_version: v3.5.30
 
-  nixl_ref: 0.10.1
+  nixl_ref: v1.0.1
   nixl_ucx_ref: v1.20.x
   nixl_gdrcopy_ref: v2.5.2
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
@@ -46,65 +51,91 @@ dynamo:
   efa_version: 1.47.0
 
 vllm:
-  cuda12.9:
-    base_image: nvcr.io/nvidia/cuda-dl-base
-    runtime_image: vllm/vllm-openai
-    base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
-    runtime_image_tag: v0.21.0-cu129-ubuntu2404
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.21.0-ubuntu2404
+    runtime_image_tag: v0.24.0-ubuntu2404
+    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
+    # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
+    # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
+    # adds over the clean NVIDIA CUDA floor (uv/rust stack, framework, codecs)
+    # rather than hiding it. Per-arch stem; the licenses stage appends
+    # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
+    # the runtime image — see the codec-purge follow-up.)
+    baseline_sbom: cuda@2ab6381d
   xpu:
     base_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
     runtime_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
     base_image_tag: ad7125a431e176d4161099480a66f0169609a690-xpu
     runtime_image_tag: ad7125a431e176d4161099480a66f0169609a690-xpu
+    baseline_sbom: vllm-ci-test-repo@efec382c
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
-    runtime_image_tag: v0.21.0
+    runtime_image_tag: v0.24.0
+    # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
   flashinf_ref: v0.6.8.post1
-  vllm_omni_ref: "v0.21.0rc1"
+  vllm_omni_ref: "v0.23.0rc1"
   nixl_ref: v1.1.0
   max_jobs: "10"
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
-  enable_modelexpress_p2p: "false"
-  modelexpress_ref: "76fc5d7f06c37121ee8789a29fac6f9b08c4743a"  # v0.3.0
+  enable_modelexpress: "true"
+  modelexpress_version: "0.4.0"
   # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
   aws_sdk_cpp_version: "1.11.760"
 
 sglang:
-  cuda12.9:
-    base_image: nvcr.io/nvidia/cuda-dl-base
-    runtime_image: lmsysorg/sglang
-    base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
-    runtime_image_tag: v0.5.12.post1-cu129-runtime
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: lmsysorg/sglang
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.5.12.post1-cu130-runtime
+    runtime_image_tag: v0.5.14-cu130-runtime
+    # Baseline is the TRUE base of the third-party lmsysorg/sglang image,
+    # nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04 (Docker Hub; CUDA_VERSION=13.0.1,
+    # cuDNN 9.13.0.50, ubuntu24.04), NOT a self-baseline of lmsysorg/sglang.
+    # lmsysorg/sglang is built FROM this nvidia/cuda cudnn-devel base, so this
+    # attributes everything sglang adds over the clean NVIDIA CUDA+cuDNN floor
+    # (framework, python stack, system libs) rather than hiding it. Per-arch stem;
+    # the licenses stage appends -${TARGETARCH}.cdx.json. (sglang ships no system
+    # GPL ffmpeg/codec dpkgs; the GPL imageio-ffmpeg pip binary is replaced by an
+    # in-tree LGPL ffmpeg in sglang_runtime.Dockerfile — no dpkg purge needed.)
+    baseline_sbom: cuda@8b2705ea
+  xpu:
+    base_image: intel/deep-learning-essentials
+    base_image_tag: 2025.3.2-0-devel-ubuntu24.04
+    runtime_image: intel/deep-learning-essentials
+    runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
+    sglang_ref: v0.5.11
+    sglang_git_url: https://github.com/sgl-project/sglang.git
+    sglang_kernel_ref: 3fbd4d33721ce3cf818b1cec3978043951406f10
+    sglang_kernel_git_url: https://github.com/sgl-project/sgl-kernel-xpu.git
+    # XPU SGLang requires a newer NIXL than the framework default; scoped here
+    # to avoid affecting sglang-cuda or other frameworks (e.g. dynamo KVBM link).
+    nixl_ref: v1.1.0
   # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
   # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
   # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
   # build doesn't leak into the runtime image.
-  nixl_ref: 0.10.1
+  nixl_ref: v1.0.1
   enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
+  enable_modelexpress: "true"
+  modelexpress_version: "0.4.0"
 
 trtllm:
   cuda13.1:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    runtime_image_tag: 1.3.0rc16
-  nixl_ref: 0.10.1
+    runtime_image_tag: 1.3.0rc19
+    # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
+    baseline_sbom: release@0082fd4f
+  nixl_ref: v1.0.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"

@@ -1,6 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
+#
+# ⚠️  TEST HARNESS ONLY — NEVER DEPLOY IN PRODUCTION
+#
+# This manifest creates the `fault-injection-api` ClusterRole, which grants:
+#   - patch on nodes/pods/services        (disrupt running workloads)
+#   - create/delete on NetworkPolicy      (install / remove partitions)
+#   - full control on chaos-mesh CRDs     (NetworkChaos, PodChaos, StressChaos, IoChaos)
+#
+# Any caller reachable to the API service can cause cluster-wide pod kills,
+# network partitions, and IO faults. Deploy only into dedicated test clusters
+# you are willing to disrupt, never expose the API externally, and tear down
+# with `kubectl delete -f deploy/` after each test run.
+#
+# See ../README.md for the full security posture and operational guard rails.
 
 ---
 apiVersion: v1

@@ -13,8 +13,8 @@
 # `KvRouter` directly. This is the original MM-aware routing path.
 #
 # The default script (`agg_multimodal_router.sh`) uses the Rust frontend with
-# the `lightseek-mm` feature instead — pure-Rust per-image token-count via
-# the `llm-multimodal` crate, no PyO3/GIL on the routing hot path. Use this
+# the `mm-routing` feature instead — pure-Rust per-image token-count, no
+# PyO3/GIL on the routing hot path. Use this
 # `_chat_processor` variant when you specifically want the vLLM Python path
 # (e.g., to take advantage of `DYNAMO_MM_TRANSFER` shm/NIXL pre-rendered
 # `mm_kwargs`).

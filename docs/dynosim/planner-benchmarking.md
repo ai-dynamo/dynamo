@@ -13,11 +13,13 @@ For the general mechanics of DynoSim runs (input format, arrival speedup, router
 
 ### Build
 
-Build the Dynamo Python bindings so `python -m dynamo.replay` is available:
+Install the Dynamo Python components and build the Rust runtime bindings. The
+`python -m dynamo.replay` CLI is part of the Python components, and it imports the
+runtime `_core` module from the bindings package:
 
 ```bash
-cd lib/bindings/python
-.venv/bin/maturin develop --release
+.venv/bin/maturin develop --release -m lib/bindings/python/Cargo.toml
+uv pip install -e .
 ```
 
 The `--release` flag is strongly recommended. DynoSim execution is largely single-threaded and CPU-bound on the mocker engine core; a debug build can be 5–10× slower, which compounds across sweep runs.
@@ -35,8 +37,9 @@ Passed as JSON via `--planner-config`. Uses the same schema as the live planner.
 | `enable_load_scaling` | Reactive scaling to short-term traffic spikes. |
 | `throughput_adjustment_interval_seconds` | Seconds between throughput-scaling decisions. |
 | `load_adjustment_interval_seconds` | Seconds between load-scaling decisions. Short intervals mean faster reaction but more flapping. |
-| `pre_deployment_sweeping_mode` | `"rapid"` uses the AIC analytical model; leave unset to fall back to recorded profile data. |
+| `pre_deployment_sweeping_mode` | `"rapid"` uses AIC for optional bootstrap data and native perf-model identity; `"none"` lets planner warm from native AIC or live FPMs. |
 | `prefill_engine_num_gpu` / `decode_engine_num_gpu` | GPUs per engine replica. **Must be set explicitly** — both default to `None`, and the simulation adapter silently treats `None` as `0`, which collapses the cumulative-GPU-hours metric in the report to zero. |
+| `speculative_nextn` | Manual speculative-decode depth fallback. Replay normally supplies this from engine args, but the planner config fallback is useful when engine metadata is absent. |
 | `report_filename` | Output HTML filename under `./planner_reports/`. |
 
 ### Key Engine Arg Knobs
@@ -49,9 +52,35 @@ Passed as JSON via `--extra-engine-args` (agg) or `--prefill-engine-args` / `--d
 | `aic_system` | GPU SKU for the perf model, e.g. `"h200_sxm"`, `"h100_sxm"`, `"b200"`. |
 | `aic_model_path` | HF model identifier used by the perf model. |
 | `aic_tp_size` | Tensor-parallel size of each engine replica. |
+| `aic_nextn` | Speculative-decode depth for AIC-backed MTP runs. In disagg, put this on the decode engine args. |
+| `aic_nextn_accept_rates` | Conditional draft-token accept rates used by the mocker burst sampler, for example `"1,1"` with `aic_nextn=2` accepts up to three visible tokens per decode forward. |
 | `startup_time` | Simulated seconds between a planner scale-up decision and the new worker becoming active. Unset or `0` means workers activate instantly. |
 
 Other fields follow the standard mocker engine protocol (see [DynoSim Runs](runs.md)).
+
+### Planner Traffic Metrics From Replay
+
+Planner-in-the-loop replay feeds the same traffic shape that the live planner consumes, but the observation source is the offline simulator instead of Prometheus. On planner traffic ticks, replay drains:
+
+| Replay metric | Planner meaning |
+|---|---|
+| `num_req` | Completed requests in the observation window. |
+| `avg_isl` / `avg_osl` | Raw request input and output lengths. `avg_osl` is not divided by speculative decode accept length. |
+| `avg_kv_hit_rate` | Mean router prefix-cache hit rate at admission time, computed as the arithmetic mean of per-request `overlap_blocks / isl_blocks`. |
+| `avg_accept_length` | Mean visible output tokens per decode request-forward, including the base token. Agg records the decode portion of the mixed engine pass; disagg records decode workers only. |
+
+The planner treats KV hit rate and accept length as runtime metadata with last-value semantics. Missing accept-length samples leave the last valid value unchanged; without MTP metadata or without a prior valid sample, the effective accept length is `1.0`. When MTP is enabled, the planner clamps accept length to `[1.0, nextn + 1.0]`, where `nextn` comes from replay engine capabilities (`aic_nextn`) or the `speculative_nextn` planner fallback.
+
+MTP changes decode capacity by discounting ITL, not by rewriting raw OSL. Accept length can be slightly below `nextn + 1` when the final decode burst is partial; for example, `nextn=2` with all draft tokens accepted over `OSL=64` gives `64 / 22 = 2.91`. With decode batch size `16` and raw per-forward wall time `40 ms`:
+
+| Case | Accept length | Effective ITL | Engine RPS |
+|---|---:|---:|---:|
+| No MTP | `1.0` | `40.0 ms` | `16 / (64 * 0.040) = 6.25` |
+| MTP | `2.91` | `40 / 2.91 = 13.7 ms` | `16 / (64 * 0.0137) = 18.2` |
+
+The raw `64` output tokens still feed KV residency, context-length estimates, and request length. In agg capacity, raw OSL remains the request output length, but accept length also tightens the prefill/decode balance because faster decode egress requires more prefill admissions per forward. Decode ITL SLA checks and decode RPS use the discounted ITL.
+
+For AIC-backed MTP replay, set `aic_nextn` on the agg engine args or on the disagg decode engine args, and set `aic_nextn_accept_rates` to control the mocker burst sampler. The planner bootstrap path asks AIC for raw forward iteration time with zero accept rates internally, so the regression is trained on undiscounted wall time and the planner applies the observed replay accept length exactly once.
 
 ## 2. Example: Agg vs Disagg On The Mooncake Agentic Trace
 
@@ -65,7 +94,7 @@ curl -sLO https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-rele
 Run agg (2 workers, TP=1):
 
 ```bash
-.venv/bin/python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
+python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
   --planner-config '{
     "mode": "agg",
     "optimization_target": "sla",
@@ -83,7 +112,7 @@ Run agg (2 workers, TP=1):
 Run disagg (1P1D, TP=1):
 
 ```bash
-.venv/bin/python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
+python -m dynamo.replay traces/mooncake_fast25/toolagent_trace.jsonl \
   --planner-config '{
     "mode": "disagg",
     "optimization_target": "sla",
@@ -122,7 +151,7 @@ run_one() {
   else
     extra=$(printf '{"aic_backend":"vllm","aic_system":"h200_sxm","aic_model_path":"nvidia/Llama-3.1-8B-Instruct-FP8","aic_tp_size":1,"startup_time":%d}' "$s")
   fi
-  .venv/bin/python -m dynamo.replay "$TRACE" \
+  python -m dynamo.replay "$TRACE" \
     --planner-config "$(printf '{"mode":"agg","optimization_target":"sla","ttft_ms":1500,"itl_ms":50,"enable_throughput_scaling":true,"enable_load_scaling":true,"pre_deployment_sweeping_mode":"rapid","throughput_adjustment_interval_seconds":300,"load_adjustment_interval_seconds":10,"prefill_engine_num_gpu":1,"decode_engine_num_gpu":1,"report_filename":"%s"}' "$name")" \
     --extra-engine-args "$extra" \
     --num-workers 2 --arrival-speedup-ratio 1.0 \

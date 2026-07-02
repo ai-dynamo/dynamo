@@ -11,6 +11,23 @@ You can benchmark any combination of:
 - **DynamoGraphDeployments**
 - **External HTTP endpoints** (vLLM, llm-d, AIBrix, etc.)
 
+## Start from Dynamo Recipes When Possible
+
+If you are benchmarking a supported model, backend, hardware target, or Dynamo
+feature, check [Dynamo Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)
+before writing deployment and benchmark manifests from scratch. Recipes provide
+known-good starting points, including:
+
+- `deploy.yaml` manifests for tuned `DynamoGraphDeployment` configurations
+- model-cache setup for downloading and reusing model weights
+- `perf.yaml` benchmark jobs for many recipes
+- model-specific notes about GPU requirements, serving mode, and expected setup
+
+Use recipes when you want a validated baseline or a feature comparison such as
+aggregated vs. disaggregated serving, KV-aware routing, or embedding cache.
+Use this guide when you need to benchmark a custom DGD, compare arbitrary HTTP
+endpoints, or adapt an existing recipe to your own environment.
+
 ## Choosing Your Benchmarking Approach
 
 **Client-side** runs benchmarks on your local machine via port-forwarding. **Server-side** runs benchmarks directly within the Kubernetes cluster using internal service URLs.
@@ -87,7 +104,14 @@ Client-side benchmarking runs on your local machine and connects to Kubernetes d
 
 ### Step 1: Set Up Cluster and Deploy
 
-Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Kubernetes Platform following the [installation guide](../kubernetes/installation-guide.md). Then deploy your DynamoGraphDeployments using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends).
+Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Kubernetes Platform following the [installation guide](../kubernetes/installation-guide.md). Then deploy your `DynamoGraphDeployment`.
+
+Prefer [Dynamo Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)
+when a recipe matches your model, backend, hardware, and serving mode. Recipes
+include tuned `deploy.yaml` manifests and, in many cases, matching `perf.yaml`
+benchmark jobs that you can run or adapt. If no recipe matches, start from the
+[Deployment Overview](../kubernetes/model-deployment-guide.md) or the backend
+examples in [examples/backends](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends).
 
 ### Step 2: Port-Forward and Run a Single Benchmark
 
@@ -297,9 +321,19 @@ Server-side benchmarking runs directly within the Kubernetes cluster, eliminatin
 ## Quick Start
 
 ### Step 1: Deploy Your DynamoGraphDeployment
-Deploy using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends). Ensure it has a frontend service exposed and the model is fully loaded before running benchmarks — check pod logs or verify the health endpoint returns `200 OK`.
+Deploy a `DynamoGraphDeployment` using a matching
+[Dynamo Recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes), the
+[Deployment Overview](../kubernetes/model-deployment-guide.md), or the backend
+examples in [examples/backends](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends).
+Ensure it has a frontend service exposed and the model is fully loaded before
+running benchmarks — check pod logs or verify the health endpoint returns
+`200 OK`.
 
 ### Step 2: Configure and Run Benchmark Job
+
+If your recipe includes a `perf.yaml`, start from that benchmark job because it
+already encodes the model, endpoint, workload shape, and result collection
+expected by the recipe. Otherwise, use the generic job below.
 
 First, edit `benchmarks/incluster/benchmark_job.yaml` to match your deployment:
 
@@ -405,6 +439,7 @@ AIPerf has many capabilities beyond basic profiling. Here are some particularly 
 
 | Feature | Description | Docs |
 |---------|-------------|------|
+| Priority Validation | Send per-request `nvext.agent_hints.priority` values and verify router or backend priority behavior under contention | [Priority Scheduling](../components/router/priority-scheduling.md#verify-priority-is-working) |
 | Trace Replay | Replay production traces for deterministic benchmarking | [Trace Replay](https://github.com/ai-dynamo/aiperf/blob/main/docs/benchmark-modes/trace-replay.md) |
 | Arrival Patterns | Poisson, constant, gamma traffic distributions | [Arrival Patterns](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/arrival-patterns.md) |
 | Gradual Ramping | Smooth ramp-up of concurrency and request rate | [Ramping](https://github.com/ai-dynamo/aiperf/blob/main/docs/tutorials/ramping.md) |

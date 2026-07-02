@@ -118,6 +118,7 @@ fn load_test_data(file_path: &str) -> TestData {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -1425,6 +1426,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             event: None,
             comment: None,
@@ -1537,6 +1539,210 @@ mod tests {
         assert_eq!(aggregated.tool_calls.len(), 2);
     }
 
+    // ── Streaming-jail markup suppression (hermes / qwen25) ─────────────────
+    // These exercise `create_tool_call_choice`'s no-tool-calls finalize branch
+    // directly. The conformance suite validates the batch parser, not this
+    // streaming-jail glue, so it lives here in-repo.
+
+    /// Truncated wrapper with leading prose: keep the prose, drop the markup.
+    #[tokio::test]
+    async fn test_hermes_stream_truncated_with_prose_keeps_prose_drops_markup() {
+        let chunks = vec![
+            make_chunk(
+                "I'll check the weather. <tool_call>{\"name\": \"get_w",
+                None,
+            ),
+            make_chunk("eather\", \"arguments\": {\"loc", None),
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.has_tool_calls,
+            "no call should be recovered; got {:?}",
+            agg.tool_calls
+        );
+        assert!(
+            !agg.normal_content.contains("<tool_call>"),
+            "markup must not leak; got: {:?}",
+            agg.normal_content
+        );
+        assert!(
+            agg.normal_content.contains("I'll check the weather"),
+            "pre-marker prose must be preserved; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// Truncated wrapper with no prose: content suppressed to empty.
+    #[tokio::test]
+    async fn test_hermes_stream_truncated_no_prose_is_empty() {
+        let chunks = vec![
+            make_chunk("<tool_call>{\"name\": \"get_w", None),
+            make_chunk("eather\", \"arguments\": {\"loc", None),
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.has_tool_calls,
+            "no call should be recovered; got {:?}",
+            agg.tool_calls
+        );
+        assert!(
+            agg.normal_content.trim().is_empty(),
+            "truncated call with no prose must suppress to empty; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// Orphan close with no opener: strip the markers, keep the inner body.
+    #[tokio::test]
+    async fn test_hermes_stream_orphan_close_strips_markers_keeps_body() {
+        let chunks = vec![make_chunk(
+            "{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}</tool_call></tool_call></tool_call>",
+            Some(FinishReason::Length),
+        )];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.normal_content.contains("</tool_call>"),
+            "orphan close markers must be stripped; got: {:?}",
+            agg.normal_content
+        );
+        assert!(
+            agg.normal_content.contains("get_weather"),
+            "inner JSON body must be kept; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// Mid-buffer orphan close: every occurrence is removed, not just trailing
+    /// ones (guards the `.replace()` over trim-suffix).
+    #[tokio::test]
+    async fn test_hermes_stream_mid_buffer_orphan_close_stripped() {
+        let chunks = vec![make_chunk(
+            "{\"name\": \"get_weather\"}</tool_call> and then more text",
+            Some(FinishReason::Length),
+        )];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.normal_content.contains("</tool_call>"),
+            "a mid-buffer orphan marker must be stripped, not just trailing ones; got: {:?}",
+            agg.normal_content
+        );
+        assert!(
+            agg.normal_content.contains("more text"),
+            "surrounding text must be preserved; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// qwen25 shares the never-leak gate: same suppression for truncated and
+    /// orphan-close streams.
+    #[tokio::test]
+    async fn test_qwen25_stream_suppresses_truncated_and_orphan() {
+        // truncated mid-body -> empty
+        let truncated = vec![
+            make_chunk("<tool_call>{\"name\": \"get_w", None),
+            make_chunk("eather\", \"arguments\": {\"loc", None),
+            make_chunk("", Some(FinishReason::Stop)),
+        ];
+        let agg = aggregate_content_from_chunks(
+            &parse_response_stream(
+                stream::iter(truncated),
+                true,
+                false,
+                Some("qwen25".to_string()),
+                None,
+            )
+            .await,
+        );
+        assert!(
+            agg.normal_content.trim().is_empty() && !agg.has_tool_calls,
+            "qwen25 truncated must suppress to empty; got: {:?}",
+            agg.normal_content
+        );
+
+        // orphan close -> markers stripped, body kept
+        let orphan = vec![make_chunk(
+            "{\"name\": \"get_weather\", \"arguments\": {\"location\": \"NYC\"}}</tool_call></tool_call></tool_call>",
+            Some(FinishReason::Length),
+        )];
+        let agg = aggregate_content_from_chunks(
+            &parse_response_stream(
+                stream::iter(orphan),
+                true,
+                false,
+                Some("qwen25".to_string()),
+                None,
+            )
+            .await,
+        );
+        assert!(
+            !agg.normal_content.contains("</tool_call>")
+                && agg.normal_content.contains("get_weather"),
+            "qwen25 orphan close must strip markers and keep the body; got: {:?}",
+            agg.normal_content
+        );
+    }
+
+    /// False-positive: content with no tool-call markers passes through verbatim
+    /// (suppression must not eat ordinary prose).
+    #[tokio::test]
+    async fn test_hermes_stream_no_markers_passes_through_verbatim() {
+        let text = "I will not call any tools today.";
+        let chunks = vec![make_chunk(text, Some(FinishReason::Stop))];
+        let out = parse_response_stream(
+            stream::iter(chunks),
+            true,
+            false,
+            Some("hermes".to_string()),
+            None,
+        )
+        .await;
+        let agg = aggregate_content_from_chunks(&out);
+        assert!(
+            !agg.has_tool_calls,
+            "no tool calls expected; got {:?}",
+            agg.tool_calls
+        );
+        assert_eq!(
+            agg.normal_content, text,
+            "marker-free prose must pass through unchanged; got: {:?}",
+            agg.normal_content
+        );
+    }
+
     /// `TOOLCALLING.stream.4.b` — Kimi K2 truncated mid-argument (no
     /// `<|tool_call_end|>`), customer regression. Also validates
     /// finish_reason=stop passthrough.
@@ -1605,6 +1811,107 @@ mod tests {
         assert!(
             validate_finish_reason(&output_chunks, FinishReason::Stop),
             "finish_reason should pass through as Stop when no tool calls are emitted"
+        );
+    }
+
+    // TOOLCALLING.stream.4.c — recover complete bare inner calls without
+    // leaking protocol markup, matching DeepSeek V3.2/V4 behavior.
+
+    #[tokio::test]
+    async fn test_deepseek_v3_streaming_orphan_call_recovered() {
+        let chunks = vec![
+            make_chunk(
+                "<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n{\"location\": \"NYC\"}\n```\n<｜tool▁call▁end｜>\n<｜tool▁call▁end｜>\n<｜tool▁call▁end｜>",
+                None,
+            ),
+            make_chunk("", Some(FinishReason::Length)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            false,
+            Some("deepseek_v3".to_string()),
+            None,
+        )
+        .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            aggregated.has_tool_calls,
+            "Bare DeepSeek V3 inner call (no outer wrapper) should be recovered"
+        );
+        assert_eq!(aggregated.tool_calls.len(), 1);
+        assert_eq!(
+            aggregated.tool_calls[0]["function"]["name"].as_str(),
+            Some("get_weather")
+        );
+        let args: serde_json::Value = serde_json::from_str(
+            aggregated.tool_calls[0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args["location"], "NYC");
+        assert!(
+            aggregated.normal_content.is_empty(),
+            "Orphan tool-call markup must not leak into normal_content. Got: {:?}",
+            aggregated.normal_content
+        );
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Length),
+            "finish_reason validation failed for recovered orphan DeepSeek V3 call"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deepseek_v3_1_streaming_orphan_call_recovered() {
+        let chunks = vec![
+            make_chunk(
+                "<｜tool▁call▁begin｜>get_weather<｜tool▁sep｜>{\"location\":\"NYC\"}<｜tool▁call▁end｜><｜tool▁call▁end｜><｜tool▁call▁end｜>",
+                None,
+            ),
+            make_chunk("", Some(FinishReason::Length)),
+        ];
+
+        let input_stream = stream::iter(chunks);
+        let output_chunks = parse_response_stream(
+            input_stream,
+            true,
+            false,
+            Some("deepseek_v3_1".to_string()),
+            None,
+        )
+        .await;
+
+        let aggregated = aggregate_content_from_chunks(&output_chunks);
+
+        assert!(
+            aggregated.has_tool_calls,
+            "Bare DeepSeek V3.1 inner call (no outer wrapper) should be recovered"
+        );
+        assert_eq!(aggregated.tool_calls.len(), 1);
+        assert_eq!(
+            aggregated.tool_calls[0]["function"]["name"].as_str(),
+            Some("get_weather")
+        );
+        let args: serde_json::Value = serde_json::from_str(
+            aggregated.tool_calls[0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args["location"], "NYC");
+        assert!(
+            aggregated.normal_content.is_empty(),
+            "Orphan tool-call markup must not leak into normal_content. Got: {:?}",
+            aggregated.normal_content
+        );
+        assert!(
+            validate_finish_reason(&output_chunks, FinishReason::Length),
+            "finish_reason validation failed for recovered orphan DeepSeek V3.1 call"
         );
     }
 }

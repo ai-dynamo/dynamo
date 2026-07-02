@@ -35,9 +35,9 @@ SCCACHE_REGION ?=
 
 DOCKER_BUILDX_CMD ?= docker buildx
 IMAGE_BUILD_CMD ?= $(DOCKER_BUILDX_CMD) build
-RUST_IMAGE ?= $(DOCKER_PROXY)rust:1.93.1
-BUILDER_IMAGE ?= $(DOCKER_PROXY)golang:1.25
-BASE_IMAGE ?= $(DOCKER_PROXY)ubuntu:24.04
+RUST_IMAGE ?= $(DOCKER_PROXY)library/rust:1.93.1
+BUILDER_IMAGE ?= $(DOCKER_PROXY)library/golang:1.26.3
+BASE_IMAGE ?= $(DOCKER_PROXY)library/ubuntu:24.04
 
 # Container tool
 CONTAINER_TOOL ?= docker

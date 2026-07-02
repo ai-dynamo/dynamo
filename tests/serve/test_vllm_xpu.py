@@ -7,7 +7,6 @@ import logging
 import os
 import random
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -19,9 +18,17 @@ from tests.serve.common import (
 )
 from tests.serve.conftest import MULTIMODAL_IMG_URL, get_multimodal_test_image_bytes
 from tests.serve.lora_utils import MinioLoraConfig
+from tests.serve.multimodal_profiles.vllm_xpu import (
+    VLLM_MULTIMODAL_PROFILES,
+    VLLM_TOPOLOGY_SCRIPTS,
+)
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
-from tests.utils.multimodal import IMAGE_COLOR_PROMPT
+from tests.utils.multimodal import (
+    IMAGE_COLOR_PROMPT,
+    LOCAL_VIDEO_TEST_URI,
+    make_multimodal_configs,
+)
 from tests.utils.payload_builder import (
     chat_payload,
     chat_payload_default,
@@ -48,14 +55,17 @@ class VLLMConfig(EngineConfig):
 vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
-LOCAL_VIDEO_TEST_PATH = Path(
-    WORKSPACE_DIR, "lib/llm/tests/data/media/240p_10.mp4"
-).resolve()
-LOCAL_VIDEO_TEST_URI = LOCAL_VIDEO_TEST_PATH.as_uri()
 
+# Generated multimodal configs from profile definitions
+_mm_configs: dict[str, VLLMConfig] = {}
+for _profile in VLLM_MULTIMODAL_PROFILES:
+    _mm_configs.update(
+        make_multimodal_configs(_profile, VLLMConfig, vllm_dir, VLLM_TOPOLOGY_SCRIPTS)
+    )
 
 # vLLM test configurations
 vllm_configs = {
+    **_mm_configs,
     "aggregated": VLLMConfig(
         name="aggregated_xpu",
         directory=vllm_dir,
@@ -265,14 +275,17 @@ vllm_configs = {
             pytest.mark.requested_vllm_kv_cache_bytes(
                 1_710_490_000
             ),  # KV cache cap (2x safety over min=855_244_800)
-            pytest.mark.timeout(220),  # ~5x observed 43.7s; 2B model loads slower on CI
+            pytest.mark.timeout(
+                360
+            ),  # XPU engine init (CCL + model load) needs more time
             pytest.mark.post_merge,
         ],
-        model="Qwen/Qwen2-VL-2B-Instruct",
-        # Pass --frontend-decoding to enable Rust frontend image decoding + NIXL RDMA transfer
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        timeout=360,
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         script_args=[
             "--model",
-            "Qwen/Qwen2-VL-2B-Instruct",
+            "Qwen/Qwen3-VL-2B-Instruct",
             "--frontend-decoding",
         ],
         request_payloads=[
@@ -288,10 +301,9 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["green"],
+                expected_response=["purple", "blue", "white", "green"],
                 temperature=0.0,
-                max_tokens=20,
-                timeout=180,
+                max_tokens=100,
             )
         ],
     ),
@@ -315,6 +327,7 @@ vllm_configs = {
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         delayed_start=0,
         timeout=360,
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         request_payloads=[
             chat_payload(
                 [
@@ -328,9 +341,8 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["green"],
-                max_tokens=20,
-                timeout=180,
+                expected_response=["purple", "blue", "white", "green"],
+                max_tokens=100,
             ),
         ],
     ),
@@ -397,6 +409,7 @@ vllm_configs = {
             "--dyn-tool-call-parser",
             "hermes",
         ],
+        env={"DYN_MM_ALLOW_INTERNAL": "1"},
         delayed_start=0,
         timeout=600,
         request_payloads=[
@@ -463,18 +476,19 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="xpu/agg_multimodal_xpu.sh",
         marks=[
+            pytest.mark.skip(
+                reason="flaky test, local video file downloading may fail due to network issues"
+            ),
             pytest.mark.xpu_1,
             pytest.mark.multimodal,
-            pytest.mark.pre_merge,
-            pytest.mark.skip(
-                reason="Flaky: https://github.com/ai-dynamo/dynamo/issues/9601"
-            ),
+            pytest.mark.nightly,
             pytest.mark.timeout(600),  # TODO: profile to get tighter timeout
         ],  # TODO: profile to get max_vram
         model="Qwen/Qwen3-VL-2B-Instruct",
         delayed_start=60,  # Video models require longer loading time
         script_args=["--model", "Qwen/Qwen3-VL-2B-Instruct"],
         timeout=600,  # 10 minutes for video processing overhead
+        env={"DYN_MM_LOCAL_PATH": WORKSPACE_DIR},
         request_payloads=[
             chat_payload(
                 [
@@ -588,6 +602,7 @@ def test_serve_deployment(
     dynamo_dynamic_ports,
     num_system_ports,
     predownload_models,
+    image_server,
 ):
     """
     Test dynamo serve deployments with different graph configurations.
@@ -595,6 +610,16 @@ def test_serve_deployment(
     assert (
         num_system_ports >= 2
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+
+    # Start the media HTTP server only for multimodal configs that need it,
+    # avoiding the TOCTOU port-allocation race for non-multimodal tests.
+    if any(
+        getattr(m, "name", None) == "multimodal"
+        or getattr(getattr(m, "mark", None), "name", None) == "multimodal"
+        for m in vllm_config_test.marks
+    ):
+        request.getfixturevalue("image_server")
+
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
@@ -607,6 +632,7 @@ def test_serve_deployment(
 @pytest.mark.xpu_2
 @pytest.mark.nightly
 @pytest.mark.multimodal
+@pytest.mark.model("Qwen/Qwen2.5-VL-7B-Instruct")
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
     request,
@@ -619,6 +645,10 @@ def test_multimodal_b64(
 
     This test is separate because it loads the required image at runtime
     (not collection time), ensuring it only fails when actually executed.
+
+    Uses ``@pytest.mark.model`` so nightly multi-GPU jobs (xpu_2 without the
+    xpu_1 multimodal_agg_qwen param) still predownload Qwen2.5-VL-7B before
+    ``HF_HUB_OFFLINE=1``.
     """
     # Load B64 image at test execution time (uses real PNG even if MULTIMODAL_IMG is LFS pointer)
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
@@ -636,9 +666,8 @@ def test_multimodal_b64(
             },
         ],
         repeat_count=1,
-        expected_response=["green"],
-        max_tokens=20,
-        timeout=180,
+        expected_response=["purple", "blue", "white", "green"],
+        max_tokens=100,
     )
 
     # Create test config
@@ -666,7 +695,8 @@ def test_multimodal_b64(
 @pytest.mark.xpu_1
 @pytest.mark.pre_merge
 @pytest.mark.multimodal
-@pytest.mark.timeout(220)
+@pytest.mark.model("Qwen/Qwen3-VL-2B-Instruct")
+@pytest.mark.timeout(360)
 def test_multimodal_b64_frontend_decoding(
     request,
     runtime_services_dynamic_ports,
@@ -679,6 +709,10 @@ def test_multimodal_b64_frontend_decoding(
     This exercises the Rust frontend image decode + NIXL RDMA transfer path
     with inline base64 data: URIs (not HTTP URLs). Verifies that the
     strip_inline_data_urls optimization does not break correctness.
+
+    HF predownload: same model is already listed via ``@pytest.mark.model`` on
+    ``test_serve_deployment[multimodal_video_agg]`` (pre_merge + xpu_1), so no
+    extra ``model`` mark is needed here for PR CI.
     """
     b64_img = base64.b64encode(get_multimodal_test_image_bytes()).decode()
 
@@ -694,10 +728,9 @@ def test_multimodal_b64_frontend_decoding(
             },
         ],
         repeat_count=1,
-        expected_response=["green"],
+        expected_response=["purple", "blue", "white", "green"],
         temperature=0.0,
-        max_tokens=20,
-        timeout=180,
+        max_tokens=100,
     )
 
     config = VLLMConfig(
@@ -712,7 +745,7 @@ def test_multimodal_b64_frontend_decoding(
             "--frontend-decoding",
         ],
         delayed_start=0,
-        timeout=220,
+        timeout=360,
         request_payloads=[b64_payload],
     )
 

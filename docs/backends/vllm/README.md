@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: vLLM
+subtitle: vLLM engines run in Dynamo's distributed runtime with disaggregated serving, NIXL KV transfer, and KV-aware routing.
 ---
-
-# LLM Deployment using vLLM
 
 Dynamo vLLM integrates [vLLM](https://github.com/vllm-project/vllm) engines into Dynamo's distributed runtime, enabling disaggregated serving, KV-aware routing, and request cancellation while maintaining full compatibility with vLLM's native engine arguments. Dynamo leverages vLLM's native KV cache events, NIXL-based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
 
@@ -88,6 +87,43 @@ bash launch/agg.sh
 > ```
 >
 > Then run the launch script. Without these, workers register but the frontend cannot discover them and requests hang.
+
+### Rust Backend Preview
+
+The Python vLLM backend remains the recommended entry point for production
+deployments and examples. The Rust backend is a development preview for
+validating the Rust `LLMEngine` integration with vLLM's engine-core client.
+Use it when working on the Rust backend contract, cancellation, metrics,
+or P/D wiring; use `python -m dynamo.vllm` or
+`python -m dynamo.vllm.unified_main` for the most complete vLLM feature
+coverage.
+
+> [!NOTE]
+> The Rust backend depends on vLLM's engine-core crates, which are not yet
+> published to crates.io and are pulled as git dependencies. They are gated
+> behind the off-by-default `vllm_rs` cargo feature, so the default workspace
+> build does not require the git sources and the crate is excluded from the
+> published Dynamo crates. You must pass `--features vllm_rs` to build or run it.
+
+To run the Rust backend locally, start the same infrastructure services and
+frontend, then launch the Rust worker in another terminal:
+
+```bash
+docker compose -f dev/docker-compose.yml up -d
+
+python -m dynamo.frontend --http-port 8000
+```
+
+```bash
+DYN_SYSTEM_PORT=8081 cargo run -p dynamo-vllm-rs-backend --features vllm_rs -- Qwen/Qwen3-0.6B -- \
+  --enforce-eager \
+  --max-model-len 4096
+```
+
+The Rust worker starts a managed vLLM engine-core process and registers with
+the Dynamo frontend using the same discovery path as the Python unified
+backend. The Rust backend is expected to become the default only after it
+reaches feature and operational parity with the Python vLLM backend.
 
 ## Next Steps
 

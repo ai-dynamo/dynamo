@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Prometheus
+subtitle: TensorRT-LLM exposes request, latency, and KV cache transfer metrics through Dynamo's Prometheus /metrics endpoint.
 ---
 
 For general TensorRT-LLM features and configuration, see the [Reference Guide](trtllm-reference-guide.md).

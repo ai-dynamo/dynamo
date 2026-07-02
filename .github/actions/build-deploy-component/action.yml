@@ -2,15 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: 'Build Deploy Component'
-description: 'Build and push a deploy component container (operator or snapshot)'
+description: 'Build and push a deploy component container (operator, snapshot, or power-agent)'
 
 inputs:
   component:
-    description: 'Component to build: operator or snapshot'
+    description: 'Component to build: operator, snapshot, or power-agent'
     required: true
   image_tag:
     description: 'Image tag to apply to built images'
     required: true
+  target:
+    description: 'Dockerfile target to build. Defaults to agent for snapshot and the default target for operator.'
+    required: false
+    default: ''
   builder_name:
     description: 'Buildx builder name'
     required: true
@@ -38,6 +42,10 @@ inputs:
     default: ''
   extra_tags:
     description: 'Optional newline-separated list of fully-qualified extra image URIs to also tag and push'
+    required: false
+    default: ''
+  extra_build_args:
+    description: 'Optional newline-separated KEY=VALUE build args'
     required: false
     default: ''
 
@@ -97,15 +105,35 @@ runs:
         TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
         echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
+        TARGET="${{ inputs.target }}"
+        if [[ -z "${TARGET}" && "${{ inputs.component }}" == "snapshot" ]]; then
+          TARGET="agent"
+        fi
+
         TARGET_FLAG=""
-        if [[ "${{ inputs.component }}" == "snapshot" ]]; then
-          TARGET_FLAG="--target agent"
+        if [[ -n "${TARGET}" ]]; then
+          TARGET_FLAG="--target ${TARGET}"
+        fi
+
+        BUILD_ARGS=("--build-arg" "DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/")
+        while IFS= read -r build_arg; do
+          if [[ -n "${build_arg}" ]]; then
+            BUILD_ARGS+=("--build-arg" "${build_arg}")
+          fi
+        done <<< "${{ inputs.extra_build_args }}"
+
+        # operator and snapshot both consume the named `snapshot` build context
+        # (deploy/operator/Dockerfile COPYs --from=snapshot; the snapshot image
+        # IS that tree). power-agent is self-contained, so omit it there.
+        BUILD_CONTEXT_FLAG=""
+        if [[ "${{ inputs.component }}" != "power-agent" ]]; then
+          BUILD_CONTEXT_FLAG="--build-context snapshot=../snapshot"
         fi
 
         docker buildx build --push \
             --platform ${{ steps.settings.outputs.build_platforms }} \
-            --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-            --build-context snapshot=../snapshot \
+            "${BUILD_ARGS[@]}" \
+            ${BUILD_CONTEXT_FLAG} \
             ${TARGET_FLAG} \
             ${TAGGING_FLAGS} -f Dockerfile .
 

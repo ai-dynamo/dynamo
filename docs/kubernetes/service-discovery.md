@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Service Discovery
+subtitle: Lets Dynamo frontends, workers, and planners locate each other on Kubernetes via native CRDs and EndpointSlices, or via etcd.
 ---
 
 Dynamo components (frontends, workers, planner) need to be able to discover each other and their capabilities at runtime. We refer to this as service discovery. There are 2 kinds of service discovery backends supported on Kubernetes.
@@ -67,7 +68,81 @@ A pod is marked ready if the readiness probe succeeds. On Dynamo workers, this i
 
 #### RBAC
 
-Each Dynamo component pod is automatically given a ServiceAccount that allows it to watch `EndpointSlice` and `DynamoWorkerMetadata` resources within its namespace.
+By default, each Dynamo component pod is given a ServiceAccount that allows it
+to watch `EndpointSlice` and `DynamoWorkerMetadata` resources within its
+namespace.
+
+When Kubernetes discovery is enabled, the operator creates these RBAC resources
+in the `DynamoGraphDeployment` namespace:
+
+- ServiceAccount: `<DGD NAME>-k8s-service-discovery`
+- Role: `<DGD NAME>-k8s-service-discovery-role`
+- RoleBinding: `<DGD NAME>-k8s-service-discovery-binding`
+
+The Role is scoped to the `DynamoGraphDeployment` and is deleted with it.
+
+##### Use a Pre-Created ServiceAccount
+
+If a normal frontend or worker component needs to run as an existing Kubernetes
+ServiceAccount, such as a cloud workload identity ServiceAccount, set
+`spec.components[*].podTemplate.spec.serviceAccountName`. The controller uses
+that custom ServiceAccount for normal frontend and worker components, including
+prefill and decode workers.
+
+Those component pods need the permissions defined in the generated
+`<DGD NAME>-k8s-service-discovery-role` for Kubernetes-native service
+discovery. Bind your custom ServiceAccount to that Role in the same namespace
+as the `DynamoGraphDeployment`.
+
+```yaml
+# Relevant fields only.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-dgd
+  namespace: dynamo-system
+spec:
+  components:
+    - name: decode
+      type: decode
+      podTemplate:
+        spec:
+          serviceAccountName: workload-identity-sa
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+```
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workload-identity-discovery
+  namespace: dynamo-system
+subjects:
+  - kind: ServiceAccount
+    name: workload-identity-sa
+    namespace: dynamo-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: my-dgd-k8s-service-discovery-role
+```
+
+Keep these caveats in mind:
+
+- Kubernetes discovery must be enabled. It is the default Kubernetes backend, but
+  the discovery Role is not reconciled when the deployment selects the `etcd`
+  backend.
+- You can apply the custom RoleBinding before the generated Role exists. It
+  grants permissions only after the operator reconciles the
+  `DynamoGraphDeployment` and creates the Role.
+- The operator still creates the default discovery ServiceAccount and
+  RoleBinding. This is harmless when the component pods use your custom
+  ServiceAccount.
+- This custom ServiceAccount path applies to normal frontend and worker
+  components. Planner and Endpoint Picker Plugin (EPP) components have separate
+  service-account and RBAC paths.
 
 #### Environment Variables
 

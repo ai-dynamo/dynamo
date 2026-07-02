@@ -261,6 +261,8 @@ const (
 // DestinationRules) for EPP components so that sidecar proxies connect
 // correctly without double-TLS issues.
 type ServiceMeshConfiguration struct {
+	// Enabled overrides service mesh auto-detection. nil = auto-detect.
+	Enabled *bool `json:"enabled,omitempty"`
 	// Provider selects the service mesh implementation. Supported: "istio", "".
 	// Empty string disables service mesh resource generation.
 	Provider string `json:"provider"`
@@ -268,8 +270,12 @@ type ServiceMeshConfiguration struct {
 	Istio *IstioMeshConfiguration `json:"istio,omitempty"`
 }
 
-// IsEnabled returns true if a supported service mesh provider is configured.
+// IsEnabled returns true if service mesh resources should be created or updated.
+// Cleanup of previously owned resources is handled separately during reconcile.
 func (s *ServiceMeshConfiguration) IsEnabled() bool {
+	if s.Enabled != nil && !*s.Enabled {
+		return false
+	}
 	return ServiceMeshProvider(s.Provider) == ServiceMeshProviderIstio
 }
 
@@ -332,6 +338,10 @@ type CheckpointConfiguration struct {
 	// behavior of discovering storage from a snapshot-agent DaemonSet in the
 	// workload namespace.
 	Storage CheckpointStorageConfiguration `json:"storage"`
+	// CleanupImage is the image used by best-effort artifact cleanup Jobs for
+	// automatically-created checkpoints. It must provide a POSIX shell and `rm`.
+	// +kubebuilder:default="busybox:1.36"
+	CleanupImage string `json:"cleanupImage,omitempty"`
 }
 
 // CheckpointSeccompConfiguration controls the localhost seccomp profile applied

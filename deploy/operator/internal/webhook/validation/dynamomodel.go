@@ -97,8 +97,8 @@ func (v *DynamoModelValidator) validateSourceURI(uri string) error {
 	}
 
 	// Check for supported schemes
-	if !strings.HasPrefix(uri, "s3://") && !strings.HasPrefix(uri, "hf://") {
-		return fmt.Errorf("source URI must start with 's3://' or 'hf://', got: %s", uri)
+	if !strings.HasPrefix(uri, "s3://") && !strings.HasPrefix(uri, "hf://") && !strings.HasPrefix(uri, "file:///") {
+		return fmt.Errorf("source URI must start with 's3://', 'hf://', or 'file:///', got: %s", uri)
 	}
 
 	return nil

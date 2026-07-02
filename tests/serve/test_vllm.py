@@ -14,6 +14,7 @@ import pytest
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
+    run_prefill_drain_deployment,
     run_serve_deployment,
 )
 from tests.serve.conftest import MULTIMODAL_IMG_URL
@@ -105,6 +106,10 @@ vllm_configs = {
         # max_thinking_tokens payload below: vLLM only enables the thinking-
         # budget logits processor when reasoning_config is populated.
         script_args=["--reasoning-parser", "qwen3"],
+        # vLLM #43808 (0.23.0) moved the MRv2 thinking_token_budget check from
+        # startup to request time, removing the auto-fallback to V1. Force V1
+        # runner here until native MRv2 support is added.
+        env={"VLLM_USE_V2_MODEL_RUNNER": "0"},
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
@@ -541,19 +546,29 @@ vllm_configs = {
         marks=[
             pytest.mark.core,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(18.3),  # actual profiled peak with kv-bytes
+            # Verifies dynamo+backend can serve a model that ships NO chat
+            # template, via the completions endpoint. The model is NOT
+            # incidental: it must be a base model without a chat template.
+            # TinyLlama-1.1B (intermediate base checkpoint) is a small Llama-
+            # family base without a chat template (replaces deepseek-llm-7b-base,
+            # 7B) -- keeps the coverage, cuts VRAM. TinyLlama-1.1B-Chat is
+            # already used in the router e2e suite.
+            # VRAM + KV cap profiled locally on an RTX 6000 Ada.
+            pytest.mark.profiled_vram_gib(3.9),  # actual nvidia-smi peak
             pytest.mark.requested_vllm_kv_cache_bytes(
-                4_074_898_000
-            ),  # KV cache cap (2x safety over min=2_037_448_704)
+                530_432_000
+            ),  # KV cache cap (2x safety over profiled min=265_216_000)
             pytest.mark.timeout(
-                420
-            ),  # 7B model loads ~48s on CI (A10G/L4) vs ~15s locally
+                300
+            ),  # 1.1B loads quickly; margin covers CI model download
             pytest.mark.post_merge,
         ],
-        model="deepseek-ai/deepseek-llm-7b-base",
+        model="TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+        # TinyLlama-1.1B caps at 2048 positions; agg.sh defaults to 4096.
+        env={"MAX_MODEL_LEN": "2048"},
         script_args=[
             "--model",
-            "deepseek-ai/deepseek-llm-7b-base",
+            "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
             "--dyn-endpoint-types",
             "completions",
         ],
@@ -673,8 +688,12 @@ vllm_configs = {
                 repeat_count=1,
                 expected_response=["Generated 3 embeddings with dimension"],
             ),
-            # `dimensions` truncation (Matryoshka). Qwen3-Embedding-0.6B has a
-            # hidden dim of 1024, so the truncated vector should be exactly 128.
+            # `dimensions` reduction (Matryoshka). Qwen3-Embedding-0.6B has a
+            # hidden dim of 1024, so the reduced vector should be exactly 128.
+            # The worker forwards `dimensions` to vLLM's pooler (truncate +
+            # re-normalize); `agg_embed.sh` launches this model with
+            # `--hf-overrides '{"is_matryoshka": true}'` so vLLM accepts the
+            # request (Qwen3-Embedding's config doesn't declare Matryoshka).
             # Built inline because the `embedding_payload()` helper doesn't
             # expose an `extra_body` kwarg yet.
             EmbeddingPayload(
@@ -730,6 +749,64 @@ def test_serve_deployment(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+# ---------------------------------------------------------------------------
+# Prefill drain on graceful shutdown, unified entry point. A concurrent burst
+# gives the prefill worker in-flight work; it's then SIGTERMed mid-flight, and
+# the test asserts the Rust Worker drove a graceful shutdown (drain -> cleanup).
+# vLLM has no is_quiescent() override, so the drain waits the full budget.
+# ---------------------------------------------------------------------------
+_PREFILL_DRAIN_CONFIG = VLLMConfig(
+    name="prefill_drain_unified",
+    directory=vllm_dir,
+    script_name="disagg_same_gpu.sh",
+    script_args=["--unified"],
+    marks=[],  # applied on the test function below
+    model="Qwen/Qwen3-0.6B",
+    delayed_start=10,
+    health_check_workers=True,
+    env={
+        "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "0",
+        "DYN_PREFILL_DRAIN_TIMEOUT_S": "3",
+        "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "30",
+        # The unified decode worker disables its health canary by design
+        # (NixlConnector has no local-only bypass), so its system /health is
+        # gated on starting status, which defaults to NotReady. Mark it
+        # ready-on-liveness so the harness's worker health check passes; the
+        # prefill worker still gates on its real canary.
+        "DYN_SYSTEM_STARTING_HEALTH_STATUS": "ready",
+    },
+    # Required by EngineConfig and used to add frontend readiness checks; the
+    # burst issues its own requests.
+    request_payloads=[chat_payload_default()],
+)
+
+
+@pytest.mark.vllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.profiled_vram_gib(7.3)
+@pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000)
+@pytest.mark.timeout(360)
+@pytest.mark.post_merge
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_prefill_drain_unified(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+):
+    """Fire a concurrent burst, SIGTERM the prefill worker mid-flight, and
+    assert the Rust Worker drove graceful shutdown (drain -> cleanup). vLLM has
+    no is_quiescent() override, so the framework drains prefill for the full
+    budget (safe-by-default)."""
+    config = dataclasses.replace(
+        _PREFILL_DRAIN_CONFIG, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    run_prefill_drain_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
 # LoRA Test Directory

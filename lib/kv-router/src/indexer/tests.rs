@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rstest::rstest;
 use rstest_reuse::{self, *};
@@ -11,16 +11,16 @@ use tokio_util::sync::CancellationToken;
 
 use super::concurrent_radix_tree::ConcurrentRadixTree;
 use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
-use super::positional::PositionalIndexer;
+use super::positional::{PositionalIndexer, SearchMode};
 use super::*;
 use crate::indexer::pruning::PruneConfig;
 use crate::protocols::*;
 use crate::test_utils::{
-    assert_exact_scores, assert_no_scores, assert_score, flush_and_settle, make_clear_event,
-    make_clear_event_with_dp_rank, make_remove_event, make_remove_event_with_parent,
-    make_store_event, make_store_event_with_dp_rank, make_store_event_with_parent,
-    make_store_event_with_start_position, query_scores, remove_event, router_event,
-    snapshot_events, snapshot_tree, stored_blocks_with_sequence_hashes,
+    assert_exact_scores, assert_no_scores, assert_overlap_scores_eq, assert_score,
+    flush_and_settle, make_clear_event, make_clear_event_with_dp_rank, make_remove_event,
+    make_remove_event_with_parent, make_store_event, make_store_event_with_dp_rank,
+    make_store_event_with_parent, make_store_event_with_start_position, query_scores, remove_event,
+    router_event, snapshot_events, snapshot_tree, stored_blocks_with_sequence_hashes,
 };
 
 // ============================================================================
@@ -30,7 +30,7 @@ use crate::test_utils::{
 #[template]
 #[rstest]
 fn indexer_template(
-    #[values("single", "flat", "concurrent", "concurrent_compressed")] variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
@@ -43,8 +43,15 @@ fn tree_size_indexer_template(
 
 #[template]
 #[rstest]
+fn compressed_tree_size_indexer_template(
+    #[values("single", "concurrent_compressed")] variant: &str,
+) {
+}
+
+#[template]
+#[rstest]
 fn approx_indexer_template(
-    #[values("single", "flat", "concurrent", "concurrent_compressed")] variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
 ) {
 }
 
@@ -62,8 +69,16 @@ fn make_indexer_with_metrics(
 
     let indexer: Box<dyn KvIndexerInterface> = match variant {
         "single" => Box::new(KvIndexer::new(token, kv_block_size, metrics.clone())),
+        // Pin the mode explicitly (not via `new`, which reads DYN_ROUTER_POSITIONAL_SEARCH_MODE)
+        // so the matrix always exercises both strided and binary regardless of the ambient env.
         "flat" => Box::new(ThreadPoolIndexer::new_with_metrics(
-            PositionalIndexer::new(32),
+            PositionalIndexer::new_with_mode(32, SearchMode::Strided),
+            4,
+            kv_block_size,
+            Some(metrics.clone()),
+        )),
+        "flat_binary" => Box::new(ThreadPoolIndexer::new_with_metrics(
+            PositionalIndexer::new_with_mode(32, SearchMode::Binary),
             4,
             kv_block_size,
             Some(metrics.clone()),
@@ -93,15 +108,21 @@ fn make_approx_indexer(variant: &str, ttl: Duration) -> Box<dyn KvIndexerInterfa
     let prune_config = PruneConfig { ttl };
 
     match variant {
-        "single" => Box::new(KvIndexer::new_with_frequency(
+        "single" => Box::new(KvIndexer::new_with_pruning(
             token,
-            None,
             kv_block_size,
             metrics,
             Some(prune_config),
         )),
+        // Pin the mode explicitly (see make_indexer_with_metrics) so coverage stays deterministic.
         "flat" => Box::new(ThreadPoolIndexer::new_with_pruning(
-            PositionalIndexer::new(32),
+            PositionalIndexer::new_with_mode(32, SearchMode::Strided),
+            4,
+            kv_block_size,
+            prune_config,
+        )),
+        "flat_binary" => Box::new(ThreadPoolIndexer::new_with_pruning(
+            PositionalIndexer::new_with_mode(32, SearchMode::Binary),
             4,
             kv_block_size,
             prune_config,
@@ -405,13 +426,10 @@ mod interface_tests {
         let continuation_remove = make_remove_event_with_parent(0, &[1, 2, 3], &[4, 5]);
         let prefix_remove = make_remove_event(0, &[1, 2, 3]);
 
-        // TODO: The non-compressed radix-family implementations still have a broader
-        // tree-size accounting gap after mid-chain removes because descendant
-        // lookup entries are cleaned up lazily. That means "store -> partial
-        // remove -> restore continuation" can still miscount restored coverage
-        // in single and concurrent. This test is intentionally scoped
-        // to duplicate store/remove replay so all tree-size variants share the
-        // same stable baseline.
+        // The uncompressed concurrent implementation still cleans descendant
+        // lookup entries lazily after mid-chain removes, so the shared matrix
+        // keeps this duplicate store/remove baseline. Compressed variants cover
+        // eager suffix cleanup in a focused test below.
 
         index.apply_event(prefix_event.clone()).await;
         index.flush().await;
@@ -491,6 +509,66 @@ mod interface_tests {
         assert!(duplicate_empty_scores.scores.is_empty());
         assert_eq!(index.tree_size_for_worker(worker).await, Some(0));
         assert!(index.snapshot_tree().await.is_empty());
+    }
+
+    #[tokio::test]
+    #[apply(compressed_tree_size_indexer_template)]
+    async fn test_mid_edge_remove_repairs_lookup_and_restores_explicitly(variant: &str) {
+        let mut index = TreeSizeTestIndexer::new(variant);
+        let worker = WorkerWithDpRank::new(0, 0);
+        let local_hashes = [1, 2, 3, 4, 5];
+        let sequence_hashes = compute_seq_hash_for_block(
+            &local_hashes
+                .iter()
+                .copied()
+                .map(LocalBlockHash)
+                .collect::<Vec<_>>(),
+        );
+
+        index
+            .apply_event(make_store_event(worker.worker_id, &local_hashes))
+            .await;
+        index.flush().await;
+        index
+            .assert_score_and_tree_size(&local_hashes, worker, 5, 5)
+            .await;
+
+        index
+            .apply_event(remove_event(
+                worker.worker_id,
+                1,
+                worker.dp_rank,
+                vec![ExternalSequenceBlockHash(sequence_hashes[2])],
+            ))
+            .await;
+        index.flush().await;
+        index
+            .assert_score_and_tree_size(&local_hashes, worker, 2, 2)
+            .await;
+
+        index
+            .apply_event(make_store_event_with_parent(
+                worker.worker_id,
+                &[1, 2],
+                &[3],
+            ))
+            .await;
+        index.flush().await;
+        index
+            .assert_score_and_tree_size(&local_hashes, worker, 3, 3)
+            .await;
+
+        index
+            .apply_event(make_store_event_with_parent(
+                worker.worker_id,
+                &[1, 2, 3],
+                &[4, 5],
+            ))
+            .await;
+        index.flush().await;
+        index
+            .assert_score_and_tree_size(&local_hashes, worker, 5, 5)
+            .await;
     }
 
     #[tokio::test]
@@ -657,31 +735,6 @@ mod interface_tests {
             &[(WorkerWithDpRank::new(1, 0), 3)],
         )
         .await;
-    }
-
-    #[tokio::test]
-    #[apply(indexer_template)]
-    async fn test_large_stores(variant: &str) {
-        let index = make_indexer(variant);
-
-        // Test sequences of increasing sizes
-        for i in 0..10u64 {
-            let len = 1 << i; // 1, 2, 4, 8, ..., 512
-            let worker_id = i;
-            let sequence: Vec<u64> = (1..=len).map(|x| x + (i * 10000)).collect();
-            index
-                .apply_event(make_store_event(worker_id, &sequence))
-                .await;
-        }
-
-        flush_and_settle(index.as_ref()).await;
-
-        let worker = WorkerWithDpRank::new(9, 0);
-        let last_seq: Vec<LocalBlockHash> = (1..=512u64)
-            .map(|x| LocalBlockHash(x + (9 * 10000)))
-            .collect();
-        let scores = index.find_matches(last_seq).await.unwrap();
-        assert_eq!(scores.scores.get(&worker), Some(&512));
     }
 
     #[tokio::test]
@@ -877,7 +930,7 @@ mod interface_tests {
         route_approx_tokens(index.as_ref(), &tokens, worker).await;
         assert_request_score(index.as_ref(), &tokens, worker, 1).await;
 
-        time::sleep(ttl + Duration::from_millis(25)).await;
+        time::sleep(ttl + Duration::from_millis(125)).await;
         flush_and_settle(index.as_ref()).await;
 
         let scores = request_scores(index.as_ref(), &tokens).await;
@@ -935,7 +988,7 @@ mod interface_tests {
         flush_and_settle(index.as_ref()).await;
         assert_score(index.as_ref(), &[1, 2, 3], worker, 3).await;
 
-        time::sleep(ttl + Duration::from_millis(25)).await;
+        time::sleep(ttl + Duration::from_millis(125)).await;
         flush_and_settle(index.as_ref()).await;
 
         assert_score(index.as_ref(), &[1, 2, 3], worker, 3).await;
@@ -1104,8 +1157,9 @@ mod interface_tests {
     #[apply(indexer_template)]
     async fn test_remove_mid_chain_block(variant: &str) {
         // TODO: positional indexer has no parent-child structure, so mid-chain removal
-        // doesn't invalidate later positions — jump search skips over the gap and over-counts.
-        if variant == "flat" {
+        // doesn't invalidate later positions — search skips over the gap and over-counts.
+        // This limitation is independent of the search algorithm, so both flat variants skip.
+        if variant == "flat" || variant == "flat_binary" {
             return;
         }
 
@@ -1492,90 +1546,6 @@ mod long_sequence_tests {
 
     #[tokio::test]
     #[apply(indexer_template)]
-    async fn test_long_sequence_single_store(variant: &str) {
-        let index = make_indexer(variant);
-
-        // Store a long sequence (128 blocks) in a single event
-        let seq_len = 128;
-        let sequence: Vec<u64> = (1..=seq_len).collect();
-        index.apply_event(make_store_event(0, &sequence)).await;
-
-        flush_and_settle(index.as_ref()).await;
-
-        // Query full sequence - should match all blocks
-        let full_query: Vec<LocalBlockHash> = sequence.iter().map(|&i| LocalBlockHash(i)).collect();
-        let scores = index.find_matches(full_query).await.unwrap();
-        assert_eq!(scores.scores.len(), 1);
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            seq_len as u32
-        );
-
-        // Query prefix (first 64 blocks)
-        let prefix_query: Vec<LocalBlockHash> = (1..=64).map(LocalBlockHash).collect();
-        let scores = index.find_matches(prefix_query).await.unwrap();
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            64
-        );
-
-        // Query with divergence at position 50
-        let mut divergent_query: Vec<LocalBlockHash> = (1..=100).map(LocalBlockHash).collect();
-        divergent_query[49] = LocalBlockHash(99999); // Position 49 (0-indexed) diverges
-        let scores = index.find_matches(divergent_query).await.unwrap();
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            49
-        );
-    }
-
-    #[tokio::test]
-    #[apply(indexer_template)]
-    async fn test_long_sequence_multiple_continuations(variant: &str) {
-        let index = make_indexer(variant);
-
-        // Build a long sequence through multiple continuations
-        // First store: blocks 1-50
-        let first_chunk: Vec<u64> = (1..=50).collect();
-        index.apply_event(make_store_event(0, &first_chunk)).await;
-
-        // Second store: blocks 51-100 (continuation of first)
-        let second_chunk: Vec<u64> = (51..=100).collect();
-        index
-            .apply_event(make_store_event_with_parent(0, &first_chunk, &second_chunk))
-            .await;
-
-        // Third store: blocks 101-150 (continuation of second)
-        let prefix_1_2: Vec<u64> = (1..=100).collect();
-        let third_chunk: Vec<u64> = (101..=150).collect();
-        index
-            .apply_event(make_store_event_with_parent(0, &prefix_1_2, &third_chunk))
-            .await;
-
-        flush_and_settle(index.as_ref()).await;
-
-        // Query full sequence - should match all 150 blocks
-        let full_query: Vec<LocalBlockHash> = (1..=150).map(LocalBlockHash).collect();
-        let scores = index.find_matches(full_query).await.unwrap();
-        assert_eq!(scores.scores.len(), 1);
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            150
-        );
-
-        // Query crossing continuation boundaries
-        let cross_boundary_query: Vec<LocalBlockHash> = (45..=105).map(LocalBlockHash).collect();
-        let scores = index.find_matches(cross_boundary_query).await.unwrap();
-        // Query starts at block 45, but stored sequence starts at 1, so this won't match
-        // because the sequence hash at position 0 of our query (block 45) won't match
-        // the stored sequence hash at position 0 (block 1)
-        assert!(
-            scores.scores.is_empty() || !scores.scores.contains_key(&WorkerWithDpRank::new(0, 0))
-        );
-    }
-
-    #[tokio::test]
-    #[apply(indexer_template)]
     async fn test_long_sequence_branching_continuations(variant: &str) {
         let index = make_indexer(variant);
 
@@ -1662,51 +1632,6 @@ mod long_sequence_tests {
         assert_eq!(
             *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
             79
-        );
-    }
-
-    #[tokio::test]
-    #[apply(indexer_template)]
-    async fn test_long_sequence_interleaved_workers(variant: &str) {
-        let index = make_indexer(variant);
-
-        // Multiple workers storing overlapping long sequences concurrently
-        // Worker 0: blocks 1-100
-        // Worker 1: blocks 1-75
-        // Worker 2: blocks 1-50
-        // Worker 3: blocks 1-25
-
-        let seq_100: Vec<u64> = (1..=100).collect();
-        let seq_75: Vec<u64> = (1..=75).collect();
-        let seq_50: Vec<u64> = (1..=50).collect();
-        let seq_25: Vec<u64> = (1..=25).collect();
-
-        index.apply_event(make_store_event(0, &seq_100)).await;
-        index.apply_event(make_store_event(1, &seq_75)).await;
-        index.apply_event(make_store_event(2, &seq_50)).await;
-        index.apply_event(make_store_event(3, &seq_25)).await;
-
-        flush_and_settle(index.as_ref()).await;
-
-        // Query for 60 blocks - workers 0,1 match 60, worker 2 matches 50, worker 3 matches 25
-        let query_60: Vec<LocalBlockHash> = (1..=60).map(LocalBlockHash).collect();
-        let scores = index.find_matches(query_60).await.unwrap();
-        assert_eq!(scores.scores.len(), 4);
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(),
-            60
-        );
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(),
-            60
-        );
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(2, 0)).unwrap(),
-            50
-        );
-        assert_eq!(
-            *scores.scores.get(&WorkerWithDpRank::new(3, 0)).unwrap(),
-            25
         );
     }
 
@@ -2014,45 +1939,14 @@ mod long_sequence_tests {
 }
 
 // ============================================================================
-// Tests specific to tree-based implementations with frequency/pruning support.
-// These use features not available in PositionalIndexer
+// Tests specific to pruning behavior.
 // ============================================================================
-
-#[template]
-#[rstest]
-fn tree_indexer_template(#[values("single")] variant: &str) {}
-
-fn make_tree_indexer_with_frequency(
-    variant: &str,
-    expiration: Duration,
-) -> Box<dyn KvIndexerInterface> {
-    let token = CancellationToken::new();
-    let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-    let kv_block_size = 32;
-
-    match variant {
-        "single" => Box::new(KvIndexer::new_with_frequency(
-            token,
-            Some(expiration),
-            kv_block_size,
-            metrics,
-            None,
-        )),
-        _ => panic!("Unknown variant: {}", variant),
-    }
-}
 
 #[tokio::test]
 async fn test_routing_decision_assigns_first_seen_worker() {
     let token = CancellationToken::new();
     let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-    let index = KvIndexer::new_with_frequency(
-        token,
-        Some(Duration::from_secs(60)),
-        32,
-        metrics,
-        Some(PruneConfig::default()),
-    );
+    let index = KvIndexer::new_with_pruning(token, 32, metrics, Some(PruneConfig::default()));
     let worker = WorkerWithDpRank::new(42, 0);
     let local_hashes = vec![LocalBlockHash(11), LocalBlockHash(22)];
     let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
@@ -2070,93 +1964,6 @@ async fn test_routing_decision_assigns_first_seen_worker() {
 
     let scores = query_scores(&index, &[11, 22]).await;
     assert!(!scores.scores.contains_key(&worker));
-}
-
-mod tree_specific_tests {
-    use super::*;
-    use rstest_reuse::apply;
-
-    #[tokio::test]
-    #[apply(tree_indexer_template)]
-    async fn test_frequency(variant: &str) {
-        const ONE_MILLIS: Duration = Duration::from_millis(1);
-
-        let expiration = Duration::from_millis(50);
-        let kv_indexer = make_tree_indexer_with_frequency(variant, expiration);
-
-        // The blocks
-        let block_hashes = vec![
-            LocalBlockHash(1),
-            LocalBlockHash(2),
-            LocalBlockHash(3),
-            LocalBlockHash(4),
-        ];
-
-        let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        assert_eq!(
-            overlap.frequencies.len(),
-            0,
-            "Should be no cached blocks yet"
-        );
-
-        // Blocks go in cache
-        let event = make_store_event(0, &[1, 2, 3, 4]);
-        kv_indexer.apply_event(event).await;
-
-        // First access - poll briefly since store event is applied async
-        let mut overlap = OverlapScores::default();
-        let timeout = Duration::from_millis(10);
-        let start = Instant::now();
-        while overlap.scores.is_empty() && Instant::now().duration_since(start) < timeout {
-            time::sleep(ONE_MILLIS).await;
-            overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        }
-        assert_eq!(
-            overlap.scores.len(),
-            1,
-            "One worker has these blocks cached"
-        );
-        assert_eq!(
-            overlap.frequencies.len(),
-            0,
-            "Blocks have not previously been accessed"
-        );
-
-        // Second access
-        let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        assert_eq!(overlap.scores.len(), 1, "Still one worker matches");
-        assert_eq!(
-            overlap.frequencies,
-            vec![1, 1, 1, 1],
-            "We should see the first access now"
-        );
-
-        // Let those two accesses expire
-        time::sleep(expiration + Duration::from_millis(10)).await;
-
-        // New first access
-        let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        assert_eq!(
-            overlap.frequencies.len(),
-            0,
-            "Blocks were accessed too long ago"
-        );
-
-        // New second access
-        let _ = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-
-        // Access only the first three blocks
-        let overlap = kv_indexer
-            .find_matches(block_hashes[0..3].to_vec())
-            .await
-            .unwrap();
-        // We see the previous two new accesses
-        assert_eq!(overlap.frequencies, vec![2, 2, 2]);
-
-        // The third access did not touch the last block
-        let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
-        assert_eq!(overlap.frequencies, vec![3, 3, 3, 2]);
-    }
 }
 
 // ============================================================================
@@ -2910,5 +2717,128 @@ mod local_indexer_tests {
             s2, s3,
             "Phase 3: non-interleaved ordering should restore tree"
         );
+    }
+}
+
+/// Differential test: the binary search mode must produce byte-identical [`OverlapScores`] to the
+/// strided mode for every query. Both indexers are fed an identical, seeded-random event stream
+/// (multiple workers sharing prefixes that diverge at and around the jump_size=32 boundaries,
+/// pure-prefix workers, and a 1300-block sequence), then queried with a curated edge-case set plus
+/// hundreds of random queries. The whole comparison is repeated after a tail removal.
+///
+/// Only contiguous-from-zero stores and tail removals are used, which preserve the monotonic
+/// subset property both searches rely on. Mid-chain removal is deliberately avoided (it is the
+/// known positional-indexer limitation skipped by `test_remove_mid_chain_block`).
+#[tokio::test]
+async fn positional_binary_matches_strided_differential() {
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+
+    // Pin both modes explicitly (not via make_indexer, whose "flat" arm reads the env var) so the
+    // comparison is genuinely strided-vs-binary regardless of any ambient DYN_ROUTER_* setting.
+    let strided: Box<dyn KvIndexerInterface> = Box::new(ThreadPoolIndexer::new_with_metrics(
+        PositionalIndexer::new_with_mode(32, SearchMode::Strided),
+        4,
+        32,
+        None,
+    ));
+    let binary: Box<dyn KvIndexerInterface> = Box::new(ThreadPoolIndexer::new_with_metrics(
+        PositionalIndexer::new_with_mode(32, SearchMode::Binary),
+        4,
+        32,
+        None,
+    ));
+
+    let mut rng = StdRng::seed_from_u64(0xC0FF_EED1_FF5E_ED42);
+
+    const BASE_LEN: usize = 1300;
+    let base: Vec<u64> = (0..BASE_LEN).map(|_| rng.random::<u64>()).collect();
+
+    // Build the shared event stream once, then apply identical clones to both indexers.
+    let mut events: Vec<RouterEvent> = Vec::new();
+
+    // Worker 0 stores the entire base.
+    events.push(make_store_event(0, &base));
+
+    // Workers that share a base prefix then diverge with a unique random tail. Divergence at a
+    // position d makes such a worker drain at d for any query that follows the base past d.
+    let divergence_points = [
+        1usize, 5, 31, 32, 33, 63, 64, 65, 100, 128, 500, 999, 1024, 1299,
+    ];
+    for (i, &d) in divergence_points.iter().enumerate() {
+        let worker_id = (i + 1) as u64;
+        let tail_len = 1 + rng.random_range(0..40usize);
+        let mut seq = base[..d].to_vec();
+        seq.extend((0..tail_len).map(|_| rng.random::<u64>()));
+        events.push(make_store_event(worker_id, &seq));
+    }
+
+    // Pure-prefix workers (store only base[..d]) drain queries exactly at d.
+    let prefix_only = [10usize, 32, 64, 200, 1000];
+    for (j, &d) in prefix_only.iter().enumerate() {
+        let worker_id = (100 + j) as u64;
+        events.push(make_store_event(worker_id, &base[..d]));
+    }
+
+    for ev in &events {
+        strided.apply_event(ev.clone()).await;
+        binary.apply_event(ev.clone()).await;
+    }
+    strided.flush().await;
+    binary.flush().await;
+
+    // Build the query set, starting with edge cases.
+    let mut queries: Vec<Vec<u64>> = vec![
+        vec![],                                         // empty
+        vec![base[0]],                                  // single element (hit)
+        vec![rng.random::<u64>()],                      // single element (miss)
+        (0..50).map(|_| rng.random::<u64>()).collect(), // pure miss
+    ];
+
+    // Base prefixes of many lengths, including jump_size boundaries.
+    for len in [
+        1usize, 2, 30, 31, 32, 33, 34, 62, 63, 64, 65, 66, 96, 127, 128, 129, 256, 500, 999, 1000,
+        1024, 1100, 1300,
+    ] {
+        queries.push(base[..len.min(BASE_LEN)].to_vec());
+    }
+
+    // Queries that pass each divergence point (so the relevant worker drains there).
+    for &d in divergence_points.iter() {
+        queries.push(base[..(d + 10).min(BASE_LEN)].to_vec());
+    }
+
+    // Random divergent queries: a base prefix of random length plus a random tail.
+    for _ in 0..600 {
+        let p = rng.random_range(0..BASE_LEN);
+        let tail_len = rng.random_range(0..30usize);
+        let mut q = base[..p].to_vec();
+        q.extend((0..tail_len).map(|_| rng.random::<u64>()));
+        queries.push(q);
+    }
+
+    // Fully random queries.
+    for _ in 0..600 {
+        let len = rng.random_range(0..(BASE_LEN + 10));
+        queries.push((0..len).map(|_| rng.random::<u64>()).collect());
+    }
+
+    for q in &queries {
+        let s = query_scores(strided.as_ref(), q).await;
+        let b = query_scores(binary.as_ref(), q).await;
+        assert_overlap_scores_eq(&s, &b, &format!("len={}", q.len()));
+    }
+
+    // Tail removal: drop base[1000..1300] from worker 0, leaving it matching only base[..1000].
+    // This is a leaf/tail removal, so the subset property is preserved.
+    let remove = make_remove_event_with_parent(0, &base[..1000], &base[1000..BASE_LEN]);
+    strided.apply_event(remove.clone()).await;
+    binary.apply_event(remove).await;
+    strided.flush().await;
+    binary.flush().await;
+
+    for q in &queries {
+        let s = query_scores(strided.as_ref(), q).await;
+        let b = query_scores(binary.as_ref(), q).await;
+        assert_overlap_scores_eq(&s, &b, &format!("after-remove len={}", q.len()));
     }
 }

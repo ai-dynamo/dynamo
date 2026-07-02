@@ -3,6 +3,19 @@
 .vscode/
 .helix
 issues/
+
+# Compliance: NOTICES / ATTRIBUTIONS are generated per-image at build time
+# and ship inside the runtime container under /legal/. Never committed.
+ATTRIBUTIONS-*.md
+ATTRIBUTIONS.md
+NOTICES-*.txt
+NOTICES.txt
+# Local extraction destinations for `docker buildx build --target {legal,sboms}`.
+legal-extract/
+sboms-extract/
+# EPP Go compliance SBOM exported by the CI EPP-build step (make sbom-export);
+# consumed by the frontend build from the build context, never committed.
+.epp-sbom/
 plans/
 *rendered.Dockerfile
 rendered.*.Dockerfile
@@ -37,7 +50,13 @@ CMakeCache.txt
 *.vcxproj
 *.vcxproj.filters
 *_pb2.py
+*_pb2_grpc.py
 *_pb2.pyi
+# Planner plugin framework: stubs are checked in so test/build environments
+# don't need grpcio-tools or a protoc step just to import the module.
+!components/src/dynamo/planner/plugins/proto/v1/plugin_pb2.py
+!components/src/dynamo/planner/plugins/proto/v1/plugin_pb2_grpc.py
+!components/src/dynamo/planner/plugins/proto/v1/plugin_pb2.pyi
 *.svg
 !docs/assets/**/*.svg
 
@@ -67,6 +86,7 @@ server/
 # Replay/Snapshot test artifacts
 *.new
 lib/llm/tests/data/sample-models/models--meta-llama--Llama-3.1-70B-Instruct/
+lib/llm/tests/data/sample-models/models--openai--gpt-oss-120b/
 
 **/*backups*
 
@@ -121,6 +141,7 @@ core.*
 !/.claude/skills
 /.agents/*
 !/.agents/skills
+/.codex
 /CLAUDE.md
 /CLAUDE.md.bak
 

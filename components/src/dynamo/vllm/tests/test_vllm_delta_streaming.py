@@ -257,6 +257,7 @@ async def test_unified_llm_engine_passes_delta_chunks_and_counts_usage():
     engine._default_sampling_params = {}
     engine._model_max_len = None
     engine.disaggregation_mode = DisaggregationMode.AGGREGATED
+    engine.enable_rl = False
     engine._dp_range = None
 
     chunks = [

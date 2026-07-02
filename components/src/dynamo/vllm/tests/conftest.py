@@ -15,6 +15,24 @@ import pytest
 # Cached result of attempting to import the omni handler module.
 # `None` = not yet attempted, `True` = succeeded, `False` = raised.
 _omni_importable: bool | None = None
+_vllm_importable: bool | None = None
+
+
+def _can_import_vllm() -> bool:
+    """Try to import a canonical vLLM submodule once and cache the result.
+
+    Some CI images carry a top-level ``vllm`` namespace without the full vLLM
+    package. ``find_spec("vllm")`` is true there, but backend tests still fail
+    during collection when they import ``vllm.config``/``vllm.inputs``.
+    """
+    global _vllm_importable
+    if _vllm_importable is None:
+        try:
+            importlib.import_module("vllm.config")
+            _vllm_importable = True
+        except Exception:
+            _vllm_importable = False
+    return _vllm_importable
 
 
 def _can_import_omni() -> bool:
@@ -42,7 +60,7 @@ def pytest_ignore_collect(collection_path, config):
     """
     filename = collection_path.name
     if filename.startswith("test_vllm_"):
-        if importlib.util.find_spec("vllm") is None:
+        if not _can_import_vllm():
             return True  # vllm not available, skip this file
     # Omni tests import dynamo.vllm.omni.* which transitively imports
     # vllm_omni at module load. On CPU-only sample-runtime runners the

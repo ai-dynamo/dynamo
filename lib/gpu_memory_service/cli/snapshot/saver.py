@@ -30,11 +30,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# How long the saver waits for the engine to commit weights before giving up
-# and failing the Job. Without a bound, an engine that crashes before commit
-# would leave the saver blocked indefinitely and the Job stuck Running.
-DEFAULT_SAVE_LOCK_TIMEOUT_MS = 30 * 60 * 1000  # 30 minutes
-
 
 def _save_device(
     checkpoint_dir: str,
@@ -73,7 +68,10 @@ def _save_device(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Save a GMS checkpoint.")
+    parser = argparse.ArgumentParser(
+        description="Save a GMS checkpoint.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument(
         "--checkpoint-dir",
         default=None,
@@ -88,17 +86,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--save-lock-timeout-ms",
         type=int,
-        default=DEFAULT_SAVE_LOCK_TIMEOUT_MS,
+        default=30 * 60 * 1000,
         help=(
-            "Timeout for acquiring the GMS RO lock before save. "
-            f"Default is {DEFAULT_SAVE_LOCK_TIMEOUT_MS}."
+            "Timeout for acquiring the GMS RO lock before save. Without a "
+            "bound, an engine that crashes before commit would leave the "
+            "saver blocked indefinitely and the Job stuck Running."
         ),
     )
     parser.add_argument(
         "--shard-size-bytes",
         type=int,
         default=4 * 1024**3,
-        help="Shard size in bytes. Default is 4 GiB.",
+        help="Shard size in bytes.",
     )
     parser.add_argument(
         "--sharded-ssd-roots",
