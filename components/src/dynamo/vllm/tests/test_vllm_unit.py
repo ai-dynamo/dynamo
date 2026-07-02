@@ -27,6 +27,7 @@ from dynamo.vllm.args import (
     update_engine_config_with_dynamo,
 )
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.headless import build_headless_namespace
 from dynamo.vllm.tests.conftest import make_cli_args_fixture
 
 # Get path relative to this test file
@@ -281,8 +282,6 @@ def test_headless_namespace_has_required_fields(mock_vllm_cli):
     config = parse_args()
     assert config.headless is True
 
-    from dynamo.vllm.main import build_headless_namespace
-
     ns = build_headless_namespace(config)
 
     # Required by run_headless()
@@ -344,6 +343,7 @@ def test_unified_from_args_applies_rl_logprobs_default(monkeypatch):
         served_model_name="Qwen/Qwen3-0.6B",
         model="Qwen/Qwen3-0.6B",
         disaggregation_mode=CommonDisaggregationMode.AGGREGATED,
+        headless=False,
         component="backend",
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
@@ -1215,3 +1215,16 @@ class TestEmbeddingWorkerFlag:
             ValueError, match="--embedding-worker cannot be combined with multimodal"
         ):
             parse_args()
+
+
+def test_build_sampling_params_openai_maps_max_thinking_tokens():
+    from dynamo.vllm.handlers import build_sampling_params_openai
+
+    request = {
+        "model": "test-model",
+        "prompt": "Solve: 1+1.",
+        "max_tokens": 32,
+        "nvext": {"max_thinking_tokens": 1024},
+    }
+    sp = build_sampling_params_openai(request, default_sampling_params={})
+    assert sp.thinking_token_budget == 1024

@@ -120,7 +120,7 @@ pub static DETOKENIZE_TOKEN_COUNT: Lazy<Counter> = Lazy::new(|| {
     .expect("detokenize_token_count counter")
 });
 
-/// Cumulative L1 tokenizer cache hits. Only nonzero when `DYN_TOKENIZER_CACHE=1`.
+/// Cumulative L1 tokenizer cache hits. The cache is enabled unless `DYN_TOKENIZER_CACHE=0`.
 pub static TOKENIZER_CACHE_HITS_TOTAL: Lazy<Counter> = Lazy::new(|| {
     Counter::with_opts(Opts::new(
         frontend_metric_name(frontend_perf::TOKENIZER_CACHE_HITS_TOTAL),
@@ -129,7 +129,7 @@ pub static TOKENIZER_CACHE_HITS_TOTAL: Lazy<Counter> = Lazy::new(|| {
     .expect("tokenizer_cache_hits_total counter")
 });
 
-/// Cumulative L1 tokenizer cache misses. Only nonzero when `DYN_TOKENIZER_CACHE=1`.
+/// Cumulative L1 tokenizer cache misses. The cache is enabled unless `DYN_TOKENIZER_CACHE=0`.
 pub static TOKENIZER_CACHE_MISSES_TOTAL: Lazy<Counter> = Lazy::new(|| {
     Counter::with_opts(Opts::new(
         frontend_metric_name(frontend_perf::TOKENIZER_CACHE_MISSES_TOTAL),

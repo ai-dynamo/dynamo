@@ -31,6 +31,22 @@ impl Codec {
         }
     }
 
+    /// Encode an event envelope while borrowing its immutable topic and payload.
+    pub fn encode_envelope_parts(
+        &self,
+        publisher_id: u64,
+        sequence: u64,
+        published_at: u64,
+        topic: &str,
+        payload: &[u8],
+    ) -> Result<Bytes> {
+        match self {
+            Codec::Msgpack(c) => {
+                c.encode_envelope_parts(publisher_id, sequence, published_at, topic, payload)
+            }
+        }
+    }
+
     /// Decode wire bytes to an EventEnvelope
     pub fn decode_envelope(&self, bytes: &Bytes) -> Result<EventEnvelope> {
         match self {
@@ -63,9 +79,44 @@ impl Codec {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MsgpackCodec;
 
+#[derive(Serialize)]
+struct BorrowedEventEnvelope<'a> {
+    publisher_id: u64,
+    sequence: u64,
+    published_at: u64,
+    topic: &'a str,
+    #[serde(serialize_with = "serialize_bytes")]
+    payload: &'a [u8],
+}
+
+fn serialize_bytes<S>(bytes: &&[u8], serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_bytes(bytes)
+}
+
 impl MsgpackCodec {
     pub fn encode_envelope(&self, envelope: &EventEnvelope) -> Result<Bytes> {
         Ok(Bytes::from(rmp_serde::to_vec_named(envelope)?))
+    }
+
+    pub fn encode_envelope_parts(
+        &self,
+        publisher_id: u64,
+        sequence: u64,
+        published_at: u64,
+        topic: &str,
+        payload: &[u8],
+    ) -> Result<Bytes> {
+        let envelope = BorrowedEventEnvelope {
+            publisher_id,
+            sequence,
+            published_at,
+            topic,
+            payload,
+        };
+        Ok(Bytes::from(rmp_serde::to_vec_named(&envelope)?))
     }
 
     pub fn decode_envelope(&self, bytes: &Bytes) -> Result<EventEnvelope> {
@@ -115,6 +166,34 @@ mod tests {
         assert_eq!(decoded.published_at, envelope.published_at);
         assert_eq!(decoded.topic, envelope.topic);
         assert_eq!(decoded.payload, envelope.payload);
+    }
+
+    #[test]
+    fn test_msgpack_codec_borrowed_envelope_roundtrip() {
+        let codec = MsgpackCodec;
+        let payload = b"borrowed payload";
+
+        let borrowed = codec
+            .encode_envelope_parts(12345, 42, 1700000000000, "test-topic", payload)
+            .unwrap();
+        let owned = codec
+            .encode_envelope(&EventEnvelope {
+                publisher_id: 12345,
+                sequence: 42,
+                published_at: 1700000000000,
+                topic: "test-topic".to_string(),
+                payload: Bytes::from_static(payload),
+            })
+            .unwrap();
+        assert_eq!(borrowed, owned);
+
+        let decoded: EventEnvelope = rmp_serde::from_slice(&borrowed).unwrap();
+
+        assert_eq!(decoded.publisher_id, 12345);
+        assert_eq!(decoded.sequence, 42);
+        assert_eq!(decoded.published_at, 1700000000000);
+        assert_eq!(decoded.topic, "test-topic");
+        assert_eq!(decoded.payload.as_ref(), payload);
     }
 
     #[test]

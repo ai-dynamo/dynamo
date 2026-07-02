@@ -24,7 +24,7 @@ use futures::Stream;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     marker::PhantomData,
     pin::Pin,
     sync::{
@@ -185,9 +185,10 @@ pub enum RouterMode {
 }
 
 #[derive(Clone, Copy)]
-enum TransportFallback {
+enum TransportFallback<'a> {
     Allow,
     Deny,
+    Within(&'a HashSet<u64>),
 }
 
 struct DeviceAwareCandidates {
@@ -739,6 +740,19 @@ where
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
+        self.direct_within(request, instance_id, None).await
+    }
+
+    /// Like [`direct`], but if the selected instance disappears between selection and dispatch,
+    /// the internal reselection is constrained to `allowed_fallback` (when `Some`). Callers that
+    /// pre-narrowed the candidate set (e.g. LoRA replica-set filtering) pass that set so the
+    /// vanished-instance fallback cannot escape it and route to an arbitrary worker.
+    pub async fn direct_within(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+        allowed_fallback: Option<&HashSet<u64>>,
+    ) -> anyhow::Result<ManyOut<U>> {
         // When fault detection is disabled, check the raw discovery list
         // (not filtered by report_instance_down) so transient failures
         // don't poison the instance for subsequent retries.
@@ -768,7 +782,10 @@ where
             "Selected worker"
         );
 
-        self.generate_with_fault_detection(instance_id, request, TransportFallback::Allow)
+        let fallback = allowed_fallback
+            .map(TransportFallback::Within)
+            .unwrap_or(TransportFallback::Allow);
+        self.generate_with_fault_detection(instance_id, request, fallback)
             .await
     }
 
@@ -798,6 +815,32 @@ where
     {
         let (instance_id, permit) = self
             .select_exact_target(request.content(), pinned_worker)
+            .await?;
+        let metadata = prepare(&mut request, instance_id)?;
+        let stream = self.dispatch_exact(request, instance_id).await?;
+        let stream = match permit {
+            Some(permit) => permit.into_tracked_stream(stream),
+            None => stream,
+        };
+        Ok((metadata, stream))
+    }
+
+    /// Book a previously arbitrated worker and dispatch without reselection or fallback.
+    pub async fn book_and_dispatch_exact<M, F>(
+        &self,
+        mut request: SingleIn<T>,
+        instance_id: u64,
+        advance_round_robin: bool,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        if advance_round_robin && self.router_mode == RouterMode::RoundRobin {
+            self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
+        }
+        let (instance_id, permit) = self
+            .select_exact_target(request.content(), Some(instance_id))
             .await?;
         let metadata = prepare(&mut request, instance_id)?;
         let stream = self.dispatch_exact(request, instance_id).await?;
@@ -1058,6 +1101,23 @@ where
         }
     }
 
+    /// Peek the worker this routing mode would choose for a request without booking it.
+    pub fn peek_worker_for_request(&self, request: &T) -> Option<u64> {
+        let instance_ids = self.client.routing_instances().free_ids().to_vec();
+        if instance_ids.is_empty() {
+            return None;
+        }
+
+        match self.router_mode {
+            RouterMode::DeviceAwareWeighted => {
+                let state = self.occupancy_state.as_deref()?;
+                let selection = self.device_aware_candidates(request, state, &instance_ids);
+                state.peek_min(&selection.candidates)
+            }
+            _ => self.peek_next_worker(),
+        }
+    }
+
     async fn select_exact_target(
         &self,
         request: &T,
@@ -1166,7 +1226,7 @@ where
         &self,
         instance_id: u64,
         request: SingleIn<T>,
-        fallback: TransportFallback,
+        fallback: TransportFallback<'_>,
     ) -> anyhow::Result<ManyOut<U>> {
         let route_start = Instant::now();
         let request_id = request.id().to_string();
@@ -1251,7 +1311,7 @@ where
     fn resolve_transport(
         &self,
         instance_id: u64,
-        fallback: TransportFallback,
+        fallback: TransportFallback<'_>,
     ) -> anyhow::Result<(u64, String, &'static str, Instance)> {
         use crate::component::TransportType;
 
@@ -1274,20 +1334,22 @@ where
         if let Some((addr, kind, inst)) = lookup(instance_id) {
             return Ok((instance_id, addr, kind, inst));
         }
-        if matches!(fallback, TransportFallback::Deny) {
-            return Err(anyhow::anyhow!(
-                "Instance {} not found for endpoint {}",
-                instance_id,
-                self.client.endpoint.id()
-            ));
-        }
+        let allowed_fallback = match fallback {
+            TransportFallback::Allow => None,
+            TransportFallback::Deny => {
+                return Err(anyhow::anyhow!(
+                    "Instance {} not found for endpoint {}",
+                    instance_id,
+                    self.client.endpoint.id()
+                ));
+            }
+            TransportFallback::Within(allowed) => Some(allowed),
+        };
 
         let routing_instances = self.client.routing_instances();
-        let fallback_id = routing_instances
-            .free_ids()
-            .iter()
-            .copied()
-            .find(|&id| id != instance_id);
+        let fallback_id = routing_instances.free_ids().iter().copied().find(|&id| {
+            id != instance_id && allowed_fallback.is_none_or(|allowed| allowed.contains(&id))
+        });
         match fallback_id {
             Some(id) => {
                 tracing::warn!(
@@ -2045,6 +2107,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_within_rejects_overloaded_constrained_target() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_direct_within_overload_rejection".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        client.set_overloaded_instances(&[worker_id]);
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+        let allowed = HashSet::from([worker_id]);
+        let error = router
+            .direct_within(SingleIn::new(42), worker_id, Some(&allowed))
+            .await
+            .unwrap_err();
+
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::ResourceExhausted],
+            &[]
+        ));
+        assert!(
+            error.to_string().contains("Selected worker is overloaded"),
+            "expected overload rejection, got: {error}"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
     async fn no_workers_is_reported_as_unavailable() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
@@ -2384,7 +2489,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_transport_resolution_never_falls_back() {
+    async fn transport_resolution_honors_fallback_policy() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
             .await
@@ -2411,6 +2516,20 @@ mod tests {
                 .resolve_transport(stale_id, TransportFallback::Allow)
                 .is_ok(),
             "normal dispatch should preserve transport fallback"
+        );
+        let allowed = HashSet::from([real_id]);
+        assert!(
+            router
+                .resolve_transport(stale_id, TransportFallback::Within(&allowed))
+                .is_ok(),
+            "constrained dispatch should fall back within the allowed worker set"
+        );
+        let disallowed = HashSet::new();
+        assert!(
+            router
+                .resolve_transport(stale_id, TransportFallback::Within(&disallowed))
+                .is_err(),
+            "constrained dispatch must not fall back outside the allowed worker set"
         );
         let error = router
             .resolve_transport(stale_id, TransportFallback::Deny)

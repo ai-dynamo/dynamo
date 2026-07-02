@@ -527,7 +527,8 @@ def test_frontend_api_surface_compliance(
         # agg.sh doesn't forward frontend args, but the frontend reads this
         # env var directly. Enables /v1/messages for the claude smoke step.
         "DYN_ENABLE_ANTHROPIC_API": "1",
-        "DYN_ENABLE_FRONTEND_NVEXT": "1",
+        # nvext is enabled by default; no env needed. (Set
+        # DYN_DISABLE_FRONTEND_NVEXT=1 to turn it off.)
         "DYN_REQUEST_TRACE": "1",
         "DYN_REQUEST_TRACE_SINKS": "jsonl",
         "DYN_REQUEST_TRACE_OUTPUT_PATH": str(request_trace_path),
