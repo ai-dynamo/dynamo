@@ -539,6 +539,13 @@ impl KVStoreDiscovery {
                                 error = %e,
                                 "Failed to parse discovery instance from resync event"
                             );
+                            // The key is still present in the authoritative snapshot; keep
+                            // the previous value if only this local parse failed.
+                            if let Some(id) = Self::parse_instance_id_from_key(key_str, bucket_name)
+                                && let Some(existing) = known_instances.get(&id)
+                            {
+                                next_instances.insert(id, existing.clone());
+                            }
                         }
                     }
                 }
@@ -992,6 +999,32 @@ mod tests {
         assert_eq!(known_instances.len(), 2);
         assert!(known_instances.contains_key(&endpoint_instance(2).id()));
         assert!(known_instances.contains_key(&endpoint_instance(3).id()));
+    }
+
+    #[test]
+    fn test_resync_retains_known_instance_on_parse_failure() {
+        let prefix = format!("{}/{}/{}", INSTANCES_BUCKET, "ns", "component");
+        let mut known_instances = HashMap::new();
+
+        let first = endpoint_instance(1);
+        known_instances.insert(first.id(), first.clone());
+
+        let mut snapshot = HashMap::new();
+        snapshot.insert(
+            kv::Key::new(format!("ns/component/endpoint/{:x}", 1)),
+            bytes::Bytes::from_static(b"not json"),
+        );
+
+        let events = KVStoreDiscovery::discovery_events_from_watch_event(
+            kv::WatchEvent::Resync(snapshot),
+            &prefix,
+            INSTANCES_BUCKET,
+            &mut known_instances,
+        );
+
+        assert!(events.is_empty());
+        assert_eq!(known_instances.len(), 1);
+        assert_eq!(known_instances.get(&first.id()), Some(&first));
     }
 
     #[test]

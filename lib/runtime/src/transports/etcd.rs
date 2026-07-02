@@ -571,6 +571,14 @@ impl Client {
     }
 
     fn is_etcd_connection_error(err: &anyhow::Error) -> bool {
+        if err.chain().any(|cause| {
+            cause
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        }) {
+            return true;
+        }
+
         err.chain().any(|cause| {
             let Some(err) = cause.downcast_ref::<etcd_client::Error>() else {
                 return false;
@@ -999,6 +1007,18 @@ mod unit_tests {
             std::io::ErrorKind::ConnectionRefused,
             "connection refused",
         )));
+        assert!(Client::is_etcd_connection_error(&err));
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let elapsed = runtime.block_on(async {
+            tokio::time::timeout(Duration::from_millis(0), std::future::pending::<()>())
+                .await
+                .unwrap_err()
+        });
+        let err = anyhow::Error::new(elapsed).context("timed out fetching etcd prefix snapshot");
         assert!(Client::is_etcd_connection_error(&err));
 
         let err = anyhow::Error::new(etcd_client::Error::InvalidArgs("bad request".to_string()));
