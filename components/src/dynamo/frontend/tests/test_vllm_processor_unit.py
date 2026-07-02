@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
-from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
+from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
 from dynamo.frontend.prepost import _prepare_request
 
@@ -325,21 +325,33 @@ class TestRoutedEnginePath:
 
         chunks = await _run_generate(processor, _base_preproc())
 
-        assert chunks == [
-            {
-                "id": "request-id",
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": "x"},
-                        "finish_reason": None,
-                    }
-                ],
-                "created": chunks[0]["created"],
-                "model": MODEL,
-                "object": "chat.completion.chunk",
-            }
-        ]
+        # One annotated envelope per iteration carries both data and the
+        # llm_metrics annotation; observer strips the annotation before SSE.
+        assert len(chunks) == 1
+        envelope = chunks[0]
+
+        assert envelope["_dynamo_annotated"] is True
+        assert envelope["data"] == {
+            "id": "request-id",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "x"},
+                    "finish_reason": None,
+                }
+            ],
+            "created": envelope["data"]["created"],
+            "model": MODEL,
+            "object": "chat.completion.chunk",
+        }
+
+        assert envelope["event"] == "llm_metrics"
+        assert len(envelope["comment"]) == 1
+        assert json.loads(envelope["comment"][0]) == {
+            "input_tokens": 3,
+            "output_tokens": 1,
+            "chunk_tokens": 1,
+        }
 
 
 OBJECT_TYPED_TOOL_REQUEST = {
@@ -397,7 +409,7 @@ class TestSchemaAwareToolParser:
         request_for_sampling, parser, _, _, _ = _prepare_request(
             OBJECT_TYPED_TOOL_REQUEST,
             tokenizer=tokenizer,
-            tool_parser_class=Qwen3CoderToolParser,
+            tool_parser_class=Qwen3EngineToolParser,
         )
         assert parser is not None, "Expected _prepare_request to construct the parser"
 
@@ -489,3 +501,22 @@ class TestChatTemplateKwargsForwarding:
             tokenizer,
         )
         assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
+
+
+@pytest.mark.parametrize(
+    ("runtime_config", "expected"),
+    [
+        ({"context_length": 1048576}, 1048576),
+        ({}, None),
+        ({"context_length": None}, None),
+        ({"context_length": 0}, None),
+        ({"context_length": -1}, None),
+        ({"context_length": "1048576"}, None),
+        ({"context_length": True}, None),
+        (None, None),
+    ],
+)
+def test_runtime_config_context_length(vllm_processor_module, runtime_config, expected):
+    mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
+
+    assert vllm_processor_module._runtime_config_context_length(mdc) == expected

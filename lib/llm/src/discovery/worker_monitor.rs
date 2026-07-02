@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +29,7 @@ use dynamo_runtime::transports::event_plane::EventSubscriber;
 pub use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
 
-/// Clean up all Prometheus metrics for a worker across the specified dp_ranks.
+/// Clean up load and latency Prometheus metrics for a worker across the specified dp_ranks.
 ///
 /// This removes metrics with the given worker_id, dp_rank, and worker_type label combination.
 /// Called when workers are removed to prevent stale metrics from accumulating.
@@ -56,6 +56,74 @@ fn cleanup_worker_metrics(worker_id: u64, dp_ranks: &[u32], worker_type: &str) {
 /// report it. Set high enough that the frac-based overload check (which multiplies
 /// this value by the threshold fraction) can never fire with realistic loads.
 const DEFAULT_MAX_TOKENS: u64 = 10_000_000;
+
+/// Compute the set of overloaded worker ids across all tracked worker load states
+/// under the given thresholds. The returned set mixes decode workers (flagged by
+/// `active_decode_blocks`) and prefill workers (flagged by `active_prefill_tokens`).
+///
+/// Although a monitor is owned 1-to-1 by its (decode/aggregated) WorkerSet — the
+/// prefill WorkerSet has none — its load observation is namespace-wide: it subscribes
+/// to the namespace-scoped `kv_metrics` subject (`EventSubscriber::for_namespace`), so
+/// it receives `ActiveLoad` from every worker in the namespace, prefill and decode
+/// alike. Hence the mixed set. `publish_overloaded_instances` then pushes this set to
+/// both the decode and prefill `Client`s; each ignores ids outside its own pool.
+fn compute_overloaded_instances(
+    worker_load_states: &DashMap<u64, WorkerLoadState>,
+    cfg: &LoadThresholdConfig,
+) -> Vec<u64> {
+    worker_load_states
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .value()
+                .is_overloaded(
+                    cfg.active_decode_blocks_threshold,
+                    cfg.active_prefill_tokens_threshold,
+                    cfg.active_prefill_tokens_threshold_frac,
+                )
+                .then_some(*entry.key())
+        })
+        .collect()
+}
+
+/// Publish the overloaded instance set to the decode/main router's Client and, in
+/// disaggregated serving, to the registered prefill router's Client.
+///
+/// Prefill workers are routed by a separate `PrefillRouter` with its own Client.
+/// `overloaded_instances` already includes prefill workers flagged via
+/// `active_prefill_tokens`, but unless the set is published to the prefill Client
+/// the `PrefillRouter`'s scheduler never consults it — making
+/// `--active-prefill-tokens-threshold` (and its `_frac` variant) a silent no-op on
+/// the prefill path. Ids that are not members of a given pool are
+/// ignored when that Client derives its free workers, so publishing the full set
+/// to both Clients is safe.
+fn publish_overloaded_instances(
+    decode_client: &Client,
+    prefill_client_holder: &RwLock<Option<Client>>,
+    overloaded_instances: &[u64],
+) {
+    if decode_client.set_overloaded_instances(overloaded_instances) {
+        let counts = decode_client.routing_instance_counts();
+        tracing::debug!(
+            overloaded_instances = ?overloaded_instances,
+            free_workers = counts.free,
+            total_workers = counts.discovered,
+            "overloaded instances changed"
+        );
+    }
+
+    if let Some(prefill_client) = prefill_client_holder.read().unwrap().clone()
+        && prefill_client.set_overloaded_instances(overloaded_instances)
+    {
+        let counts = prefill_client.routing_instance_counts();
+        tracing::debug!(
+            overloaded_instances = ?overloaded_instances,
+            free_workers = counts.free,
+            total_workers = counts.discovered,
+            "overloaded instances changed (prefill pool)"
+        );
+    }
+}
 
 /// Configuration for worker load thresholds used in overload detection.
 ///
@@ -307,6 +375,69 @@ impl WorkerLoadState {
             false
         })
     }
+
+    fn is_overloaded_for_config(&self, config: &LoadThresholdConfig) -> bool {
+        self.is_overloaded(
+            config.active_decode_blocks_threshold,
+            config.active_prefill_tokens_threshold,
+            config.active_prefill_tokens_threshold_frac,
+        )
+    }
+}
+
+#[derive(Debug, Default)]
+struct OverloadedWorkerTracker {
+    overloaded_workers: HashSet<u64>,
+}
+
+impl OverloadedWorkerTracker {
+    fn update_worker(&mut self, worker_id: u64, overloaded: bool) -> bool {
+        if overloaded {
+            self.overloaded_workers.insert(worker_id)
+        } else {
+            self.overloaded_workers.remove(&worker_id)
+        }
+    }
+
+    fn replace(&mut self, overloaded_workers: HashSet<u64>) -> bool {
+        if self.overloaded_workers == overloaded_workers {
+            return false;
+        }
+        self.overloaded_workers = overloaded_workers;
+        true
+    }
+
+    fn remove_workers(&mut self, removed_workers: &[u64]) -> bool {
+        let mut changed = false;
+        for worker_id in removed_workers {
+            changed |= self.overloaded_workers.remove(worker_id);
+        }
+        changed
+    }
+
+    #[cfg(test)]
+    fn contains(&self, worker_id: u64) -> bool {
+        self.overloaded_workers.contains(&worker_id)
+    }
+
+    fn ids(&self) -> Vec<u64> {
+        self.overloaded_workers.iter().copied().collect()
+    }
+}
+
+fn collect_overloaded_workers(
+    worker_load_states: &DashMap<u64, WorkerLoadState>,
+    config: &LoadThresholdConfig,
+) -> HashSet<u64> {
+    worker_load_states
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .value()
+                .is_overloaded_for_config(config)
+                .then_some(*entry.key())
+        })
+        .collect()
 }
 
 /// Worker monitor for tracking KV cache usage and overload states.
@@ -318,8 +449,9 @@ impl WorkerLoadState {
 /// which should be registered with the HTTP service's Prometheus registry using
 /// [`register_worker_load_metrics`](crate::kv_router::metrics::register_worker_load_metrics).
 ///
-/// In disaggregated mode, use `set_prefill_client` to register the prefill endpoint for
-/// proper TTFT metric cleanup when prefill workers are removed.
+/// In disaggregated mode, use `attach_prefill_client` to attach the prefill endpoint so the
+/// monitor publishes the overloaded set to the prefill pool and cleans up TTFT metrics when
+/// prefill workers are removed.
 #[derive(Clone)]
 pub struct KvWorkerMonitor {
     /// Decode endpoint client (used for ITL cleanup and overload detection)
@@ -349,8 +481,9 @@ impl KvWorkerMonitor {
     /// using [`register_worker_load_metrics`](crate::kv_router::metrics::register_worker_load_metrics)
     /// during HTTP service setup.
     ///
-    /// For disaggregated mode, call `set_prefill_client` after creation to enable
-    /// proper TTFT metric cleanup when prefill workers are removed.
+    /// For disaggregated mode, call `attach_prefill_client` after creation to enable
+    /// prefill-pool overload publishing and TTFT metric cleanup when prefill workers
+    /// are removed.
     pub fn new(client: Client, config: LoadThresholdConfig) -> Self {
         Self {
             client,
@@ -365,25 +498,38 @@ impl KvWorkerMonitor {
     /// Returns true iff the user explicitly configured at least one threshold.
     ///
     /// When false, all three per-field checks are skipped in `is_overloaded` and
-    /// rejection is fully disabled. Callers that gate 503 responses on overload
+    /// rejection is fully disabled. Callers that gate 529 responses on overload
     /// detection should check this before enabling the gate.
     pub fn is_configured(&self) -> bool {
         self.thresholds.read().unwrap().is_configured()
     }
 
-    /// Set the prefill client for disaggregated mode.
+    /// Attach the prefill router's `Client` for disaggregated mode.
     ///
-    /// This enables monitoring of prefill endpoint instances for TTFT metric cleanup.
-    /// In disaggregated mode, TTFT metrics are attributed to prefill workers, so we need
-    /// to watch the prefill endpoint to clean up TTFT gauges when prefill workers disappear.
+    /// This is what wires prefill backpressure end-to-end: once attached, the monitor
+    /// publishes the overloaded set to the prefill `Client` (so the PrefillRouter excludes
+    /// overloaded workers / sheds when all are over) and watches the prefill
+    /// endpoint to clean up TTFT gauges when prefill workers disappear.
     ///
     /// This method can be called after `start_monitoring` - the monitoring loop will
     /// be immediately notified and start watching the prefill endpoint.
-    pub fn set_prefill_client(&self, prefill_client: Client) {
+    pub fn attach_prefill_client(&self, prefill_client: Client) {
+        // Synchronously seed the freshly-attached prefill Client with the current
+        // overloaded set BEFORE storing/notifying. Late attachment (prefill router
+        // activates after workers are already overloaded) would otherwise leave a
+        // window — between attach and the monitor loop's notify-driven seed — where
+        // the prefill Client reports an empty overloaded set and admits requests it
+        // should shed.
+        let cfg = self.thresholds.read().unwrap().clone();
+        let overloaded = compute_overloaded_instances(&self.worker_load_states, &cfg);
+        prefill_client.set_overloaded_instances(&overloaded);
+
         let mut guard = self.prefill_client.write().unwrap();
         *guard = Some(prefill_client);
         self.prefill_client_notify.notify_one();
-        tracing::debug!("KvWorkerMonitor: prefill client registered for TTFT cleanup");
+        tracing::debug!(
+            "KvWorkerMonitor: prefill client attached (seeded overloaded set; overload publish + TTFT cleanup)"
+        );
     }
 
     /// Get the current active decode blocks threshold, if configured.
@@ -536,6 +682,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
             let mut known_worker_dp_ranks: HashMap<u64, std::collections::HashSet<u32>> =
                 HashMap::new();
+            let mut overloaded_tracker = OverloadedWorkerTracker::default();
+            let mut last_thresholds = thresholds.read().unwrap().clone();
 
             loop {
                 // Create a future that either reads from kv_metrics or pends forever if unavailable
@@ -580,7 +728,15 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         }
 
                         worker_load_states.retain(|lease_id, _| runtime_configs.contains_key(lease_id));
+                        overloaded_tracker.remove_workers(&removed_workers);
                         client.clear_overloaded_instances_for_removed(&removed_workers);
+                        // Mirror the prune to the prefill Client (disagg). Prefill workers are
+                        // routed by a separate PrefillRouter with its own Client, so its
+                        // overloaded set must be cleared too or removed prefill ids would
+                        // linger as phantom-overloaded entries.
+                        if let Some(prefill_client) = prefill_client_holder.read().unwrap().clone() {
+                            prefill_client.clear_overloaded_instances_for_removed(&removed_workers);
+                        }
 
                         // Update worker load states with runtime config values for all dp_ranks
                         // This ensures we track workers from MDCs even if they don't publish ActiveLoad
@@ -610,6 +766,18 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 }
                             }
                         }
+
+                        let cfg = thresholds.read().unwrap().clone();
+                        last_thresholds = cfg.clone();
+                        let overloaded_workers = collect_overloaded_workers(&worker_load_states, &cfg);
+                        if overloaded_tracker.replace(overloaded_workers) {
+                            let overloaded_instances = overloaded_tracker.ids();
+                            publish_overloaded_instances(
+                                &client,
+                                &prefill_client_holder,
+                                &overloaded_instances,
+                            );
+                        }
                     }
 
                     // Handle KV metrics updates (ActiveLoad) - only if subscriber is available
@@ -638,35 +806,22 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         // Snapshot thresholds once per event — rare writes (HTTP endpoint)
                         // mean RwLock contention is effectively zero.
                         let cfg = thresholds.read().unwrap().clone();
+                        let thresholds_changed = cfg != last_thresholds;
 
                         // Update worker load state per dp_rank (for overload detection only).
                         // Note: Prometheus gauges are updated directly by sequence.rs
-                        let total_blocks = {
+                        let (total_blocks, worker_overloaded) = {
                             let mut state = worker_load_states.entry(worker_id).or_default();
                             state.update_from_active_load(
                                 &active_load,
                                 cfg.active_decode_blocks_threshold,
                             );
-                            state.kv_total_blocks.get(&dp_rank).copied()
+                            let total_blocks = state.kv_total_blocks.get(&dp_rank).copied();
+                            let worker_overloaded = state.is_overloaded_for_config(&cfg);
+                            (total_blocks, worker_overloaded)
                         };
 
-                        // Recalculate all overloaded instances and update.
-                        let overloaded_instances: Vec<u64> = worker_load_states
-                            .iter()
-                            .filter_map(|entry| {
-                                entry
-                                    .value()
-                                    .is_overloaded(
-                                        cfg.active_decode_blocks_threshold,
-                                        cfg.active_prefill_tokens_threshold,
-                                        cfg.active_prefill_tokens_threshold_frac,
-                                    )
-                                    .then_some(*entry.key())
-                            })
-                            .collect();
-
                         if tracing::enabled!(tracing::Level::DEBUG) {
-                            let worker_overloaded = overloaded_instances.contains(&worker_id);
                             tracing::debug!(
                                 worker_id,
                                 dp_rank,
@@ -682,13 +837,25 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             );
                         }
 
-                        if client.set_overloaded_instances(&overloaded_instances) {
-                            let counts = client.routing_instance_counts();
-                            tracing::debug!(
-                                overloaded_instances = ?overloaded_instances,
-                                free_workers = counts.free,
-                                total_workers = counts.discovered,
-                                "overloaded instances changed"
+                        // Recompute the full overloaded set only when thresholds change;
+                        // otherwise incrementally update just this worker. When the set
+                        // changes, publish to both the decode Client and (in disaggregated
+                        // serving) the prefill Client — see `publish_overloaded_instances`.
+                        let overloaded_changed = if thresholds_changed {
+                            last_thresholds = cfg.clone();
+                            let overloaded_workers =
+                                collect_overloaded_workers(&worker_load_states, &cfg);
+                            overloaded_tracker.replace(overloaded_workers)
+                        } else {
+                            overloaded_tracker.update_worker(worker_id, worker_overloaded)
+                        };
+
+                        if overloaded_changed {
+                            let overloaded_instances = overloaded_tracker.ids();
+                            publish_overloaded_instances(
+                                &client,
+                                &prefill_client_holder,
+                                &overloaded_instances,
                             );
                         }
                     }
@@ -718,6 +885,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     worker_id
                                 );
                             }
+                            overloaded_tracker.remove_workers(&removed_workers);
+                            client.clear_overloaded_instances_for_removed(&removed_workers);
                         }
 
                         known_decode_workers = current_instances;
@@ -767,6 +936,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     worker_id
                                 );
                             }
+                            overloaded_tracker.remove_workers(&removed_workers);
+                            client.clear_overloaded_instances_for_removed(&removed_workers);
                         }
 
                         known_prefill_workers = current_instances;
@@ -783,6 +954,16 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 "KvWorkerMonitor: prefill endpoint watcher activated, tracking {} workers",
                                 known_prefill_workers.len()
                             );
+
+                            // Seed the freshly-registered prefill Client with the current
+                            // overloaded set. The prefill router can activate after KV events
+                            // have already been processed; without this seed the prefill pool
+                            // would not learn about already-overloaded workers until the next
+                            // KV event arrives.
+                            let cfg = thresholds.read().unwrap().clone();
+                            let overloaded_instances =
+                                compute_overloaded_instances(&worker_load_states, &cfg);
+                            prefill_client.set_overloaded_instances(&overloaded_instances);
                         }
                     }
                 }
@@ -797,8 +978,45 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoadThresholdConfig, WorkerLoadState};
+    use super::{
+        LoadThresholdConfig, OverloadedWorkerTracker, WorkerLoadState,
+        compute_overloaded_instances, publish_overloaded_instances,
+    };
     use dynamo_kv_router::protocols::ActiveLoad;
+    use std::collections::HashSet;
+
+    #[test]
+    fn overloaded_worker_tracker_updates_one_worker() {
+        let mut tracker = OverloadedWorkerTracker::default();
+
+        assert!(tracker.update_worker(7, true));
+        assert!(tracker.contains(7));
+        assert!(!tracker.update_worker(7, true));
+
+        assert!(tracker.update_worker(7, false));
+        assert!(!tracker.contains(7));
+        assert!(!tracker.update_worker(7, false));
+    }
+
+    #[test]
+    fn overloaded_worker_tracker_replaces_and_removes_workers() {
+        let mut tracker = OverloadedWorkerTracker::default();
+
+        assert!(tracker.replace(HashSet::from([1, 3, 5])));
+        assert!(!tracker.replace(HashSet::from([1, 3, 5])));
+
+        assert!(tracker.remove_workers(&[3, 5]));
+        assert!(tracker.contains(1));
+        assert!(!tracker.contains(3));
+        assert!(!tracker.contains(5));
+        assert!(
+            tracker.update_worker(3, true),
+            "rejoined overloaded workers must be republished after removal"
+        );
+        assert!(tracker.contains(3));
+
+        assert!(!tracker.remove_workers(&[2, 4]));
+    }
 
     #[test]
     fn load_threshold_config_default_is_not_configured() {
@@ -1092,5 +1310,143 @@ mod tests {
         state.active_prefill_tokens.insert(0, 2_500);
 
         assert!(state.is_overloaded(None, None, Some(2.0)));
+    }
+
+    #[test]
+    fn compute_overloaded_instances_flags_prefill_workers_over_token_threshold() {
+        use dashmap::DashMap;
+        use std::collections::HashSet;
+
+        let states = DashMap::new();
+
+        // Prefill worker far over the prefill-token threshold.
+        let mut prefill = WorkerLoadState::default();
+        prefill.active_prefill_tokens.insert(0, 300_000);
+        states.insert(1u64, prefill);
+
+        // Prefill worker under the threshold — must not be flagged.
+        let mut quiet = WorkerLoadState::default();
+        quiet.active_prefill_tokens.insert(0, 100);
+        states.insert(2u64, quiet);
+
+        let cfg = LoadThresholdConfig {
+            active_prefill_tokens_threshold: Some(5_000),
+            ..Default::default()
+        };
+
+        let overloaded: HashSet<u64> = compute_overloaded_instances(&states, &cfg)
+            .into_iter()
+            .collect();
+        assert_eq!(overloaded, HashSet::from([1]));
+    }
+
+    /// Regression: the overloaded set must reach the prefill
+    /// router's Client, not only the decode/main router's Client. Without the
+    /// prefill propagation, `--active-prefill-tokens-threshold` is a silent
+    /// no-op in disaggregated serving.
+    #[tokio::test]
+    async fn publish_overloaded_instances_reaches_registered_prefill_client() {
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use std::collections::HashSet;
+        use std::sync::RwLock;
+
+        let rt = Runtime::from_current().unwrap();
+        // process_local avoids needing etcd/nats.
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_prefill_overload_propagation".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+
+        let decode_client = component
+            .endpoint("decode".to_string())
+            .client()
+            .await
+            .unwrap();
+        let prefill_client = component
+            .endpoint("prefill".to_string())
+            .client()
+            .await
+            .unwrap();
+
+        let holder: RwLock<Option<_>> = RwLock::new(None);
+
+        // Before the prefill client is registered, only the decode client is updated.
+        publish_overloaded_instances(&decode_client, &holder, &[1, 2]);
+        assert_eq!(
+            decode_client.overloaded_instance_ids(),
+            Some(HashSet::from([1, 2]))
+        );
+        assert_eq!(prefill_client.overloaded_instance_ids(), None);
+
+        // Once registered (as happens via attach_prefill_client on prefill router
+        // activation), the prefill client must receive the same set.
+        *holder.write().unwrap() = Some(prefill_client.clone());
+        publish_overloaded_instances(&decode_client, &holder, &[1, 2]);
+        assert_eq!(
+            prefill_client.overloaded_instance_ids(),
+            Some(HashSet::from([1, 2]))
+        );
+
+        rt.shutdown();
+    }
+
+    /// Late attachment: if prefill workers are already overloaded when the prefill
+    /// router activates, `attach_prefill_client` must seed the new Client with the
+    /// current overloaded set synchronously (not wait for the monitor loop), so the
+    /// attach->seed window cannot admit requests it should shed.
+    #[tokio::test]
+    async fn attach_prefill_client_synchronously_seeds_overloaded_set() {
+        use super::KvWorkerMonitor;
+        use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use std::collections::HashSet;
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let component = drt
+            .namespace("test_attach_seed".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap();
+        let decode_client = component
+            .endpoint("decode".to_string())
+            .client()
+            .await
+            .unwrap();
+        let prefill_client = component
+            .endpoint("prefill".to_string())
+            .client()
+            .await
+            .unwrap();
+
+        let monitor = KvWorkerMonitor::new(
+            decode_client,
+            LoadThresholdConfig {
+                active_prefill_tokens_threshold: Some(5_000),
+                ..Default::default()
+            },
+        );
+
+        // A prefill worker already over the token threshold, recorded before any
+        // prefill client is attached and without the monitor loop running.
+        monitor
+            .worker_load_states
+            .entry(7)
+            .or_default()
+            .active_prefill_tokens
+            .insert(0, 10_000);
+
+        monitor.attach_prefill_client(prefill_client.clone());
+        assert_eq!(
+            prefill_client.overloaded_instance_ids(),
+            Some(HashSet::from([7])),
+            "attach must seed the prefill client with the current overloaded set"
+        );
+
+        rt.shutdown();
     }
 }

@@ -7,7 +7,8 @@ import json
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from dynamo.llm import KvRouterConfig, MockEngineArgs
+from dynamo.llm import KvRouterConfig
+from dynamo.mocker import MockEngineArgs
 
 from .constants import AIC_BACKEND_VERSIONS
 

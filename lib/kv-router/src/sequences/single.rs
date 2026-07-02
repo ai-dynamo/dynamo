@@ -108,11 +108,20 @@ pub struct ActiveSequences {
     prefill: PrefillLoadTracker,
     blocks: BlockTracker,
     last_expiry_check_time: Instant,
+    expiry_duration: Option<Duration>,
 }
 
 impl ActiveSequences {
     /// Create a new SharedSequenceManager instance
     pub(super) fn new(block_size: usize) -> Self {
+        Self::new_with_expiry(block_size, Some(EXPIRY_DURATION))
+    }
+
+    pub(super) fn new_without_expiry(block_size: usize) -> Self {
+        Self::new_with_expiry(block_size, None)
+    }
+
+    fn new_with_expiry(block_size: usize, expiry_duration: Option<Duration>) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
 
         Self {
@@ -120,6 +129,7 @@ impl ActiveSequences {
             prefill: PrefillLoadTracker::default(),
             blocks: BlockTracker::default(),
             last_expiry_check_time: Instant::now(),
+            expiry_duration,
         }
     }
 
@@ -264,24 +274,15 @@ impl ActiveSequences {
 
         let _ = request_state.expected_output_tokens;
         let mut membership_delta = PromptMembershipDelta::default();
-        let mut first_absent_prompt_idx = None;
-        let prompt_hashes: Vec<_> = request_state
-            .prompt_blocks
-            .iter()
-            .map(|(hash, _)| *hash)
-            .collect();
+        let mut prompt_remove = Vec::new();
 
-        for (idx, (block_hash, rc)) in request_state.prompt_blocks.into_iter().enumerate() {
+        for (block_hash, rc) in request_state.prompt_blocks {
             drop(rc);
-            if self.blocks.try_remove_block(&block_hash) && first_absent_prompt_idx.is_none() {
-                first_absent_prompt_idx = Some(idx);
+            if self.blocks.try_remove_block(&block_hash) || !prompt_remove.is_empty() {
+                prompt_remove.push(block_hash);
             }
         }
-
-        if let Some(first_absent_prompt_idx) = first_absent_prompt_idx {
-            let prompt_remove = prompt_hashes[first_absent_prompt_idx..].to_vec();
-            membership_delta.push_remove(prompt_remove);
-        }
+        membership_delta.push_remove(prompt_remove);
 
         for (block_hash, rc) in request_state.output_blocks {
             drop(rc);
@@ -326,6 +327,9 @@ impl ActiveSequences {
     /// Force expiry of stale requests if the timer has elapsed.
     /// Returns block membership transitions plus the set of expired request IDs that were removed.
     pub(super) fn force_expiry(&mut self) -> SequenceMutationOutcome {
+        let Some(expiry_duration) = self.expiry_duration else {
+            return SequenceMutationOutcome::default();
+        };
         let now = Instant::now();
 
         if now < self.last_expiry_check_time + CHECK_EXPIRY_FREQUENCY {
@@ -333,7 +337,7 @@ impl ActiveSequences {
         }
 
         self.last_expiry_check_time = now;
-        let expired_requests_time = now - EXPIRY_DURATION;
+        let expired_requests_time = now - expiry_duration;
         let expired_request_ids: HashSet<RequestId> = self
             .requests
             .iter()
@@ -375,6 +379,7 @@ impl ActiveSequences {
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks: self.active_blocks(),
+            active_requests: self.requests.len(),
             prefill: self.prefill.snapshot(),
         }
     }

@@ -91,6 +91,10 @@ pub mod name_prefix {
     /// Prefix for work-handler transport breakdown metrics (backend side)
     pub const WORK_HANDLER: &str = "dynamo_work_handler";
 
+    /// Prefix for request admission/rejection control metrics (e.g.
+    /// `dynamo_rejection_request_total`).
+    pub const REJECTION: &str = "dynamo_rejection";
+
     /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     pub const TOKIO: &str = "dynamo_tokio";
 
@@ -305,6 +309,15 @@ pub mod frontend_service {
     /// Number of in-flight (active) requests for a LoRA adapter
     pub const LORA_ACTIVE_REQUESTS: &str = "lora_active_requests";
 
+    /// Total LoRA loads (new placements) this controller tick
+    pub const LORA_CHURN_LOADS_TOTAL: &str = "lora_churn_loads_total";
+
+    /// Total LoRA unloads (removed placements) this controller tick
+    pub const LORA_CHURN_UNLOADS_TOTAL: &str = "lora_churn_unloads_total";
+
+    /// MCF solver overflow count (unplaceable replicas)
+    pub const LORA_OVERFLOW_COUNT: &str = "lora_overflow_count";
+
     /// Label name for the type of migration
     pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
 
@@ -358,8 +371,11 @@ pub mod frontend_service {
         /// Model or resource not found (404)
         pub const NOT_FOUND: &str = "not_found";
 
-        /// Service overloaded, too many requests (503)
+        /// Service overloaded or rate limited (429 or 529)
         pub const OVERLOAD: &str = "overload";
+
+        /// Service unavailable because no backend worker can serve the request
+        pub const UNAVAILABLE: &str = "unavailable";
 
         /// Request cancelled by client or timeout
         pub const CANCELLED: &str = "cancelled";
@@ -604,6 +620,9 @@ pub mod router {
 
     /// Shared cache blocks beyond device overlap for the selected worker
     pub const SHARED_CACHE_BEYOND_BLOCKS: &str = "router_shared_cache_beyond_blocks";
+
+    /// Whether the router currently has a worker/dp_rank registered (1 = registered)
+    pub const WORKER_REGISTERED: &str = "router_worker_registered";
 }
 
 /// Frontend pipeline stage and event-loop metrics
@@ -623,9 +642,9 @@ pub mod frontend_perf {
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor
     pub const TEMPLATE_SECONDS: &str = "template_seconds";
-    /// L1 tokenizer cache hits (cumulative); only incremented when DYN_TOKENIZER_CACHE is enabled
+    /// L1 tokenizer cache hits (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
     pub const TOKENIZER_CACHE_HITS_TOTAL: &str = "tokenizer_cache_hits_total";
-    /// L1 tokenizer cache misses (cumulative); only incremented when DYN_TOKENIZER_CACHE is enabled
+    /// L1 tokenizer cache misses (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
     pub const TOKENIZER_CACHE_MISSES_TOTAL: &str = "tokenizer_cache_misses_total";
     /// Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
     pub const DETOKENIZE_TOTAL_US: &str = "detokenize_total_us";
@@ -750,6 +769,15 @@ pub mod trtllm_additional {
 
     /// KV cache transfer speed per request in GB/s
     pub const KV_TRANSFER_SPEED_GB_S: &str = "trtllm_kv_transfer_speed_gb_s";
+
+    /// Configured maximum number of TRT-LLM KV events buffered before older events are dropped
+    pub const KV_EVENT_BUFFER_CAPACITY: &str = "trtllm_kv_event_buffer_capacity";
+
+    /// Number of TRT-LLM KV events returned to Dynamo in one polling drain
+    pub const KV_EVENT_DRAIN_BATCH_SIZE: &str = "trtllm_kv_event_drain_batch_size";
+
+    /// Total number of missing TRT-LLM KV event IDs detected by Dynamo
+    pub const KV_EVENT_ID_GAP_EVENTS_TOTAL: &str = "trtllm_kv_event_id_gap_events_total";
 }
 
 // KV cache statistics metrics

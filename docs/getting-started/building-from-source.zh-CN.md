@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: 从源代码构建
 sidebar-title: 从源代码构建
 description: 从源代码构建 Dynamo，用于开发和贡献
 ---
@@ -8,8 +9,6 @@ description: 从源代码构建 Dynamo，用于开发和贡献
 <p align="left">
   <a href="./building-from-source.md" hreflang="en">English</a> | <strong>简体中文</strong>
 </p>
-
-# 从源代码构建
 
 当你想贡献代码、测试开发分支上的功能，或自定义构建时，可以从源代码构建 Dynamo。如果你只是想运行 Dynamo，[本地安装](local-installation.zh-CN.md)指南会更快。
 
@@ -60,10 +59,10 @@ source .venv/bin/activate
 ## 4. 安装构建工具
 
 ```bash
-uv pip install pip maturin
+uv pip install pip 'maturin[patchelf]'
 ```
 
-[Maturin](https://github.com/PyO3/maturin) 是 Rust-Python 绑定的构建工具。
+[Maturin](https://github.com/PyO3/maturin) 是 Rust-Python 绑定的构建工具。`patchelf` extra 让 maturin 能在构建期间修补原生扩展库路径。
 
 ## 5. 构建 Rust 绑定
 

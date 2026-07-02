@@ -19,6 +19,7 @@ dependencies = [
     "kubernetes>=32.0.1,<33.0.0",
     "prometheus_client>=0.23.1,<1.0",
     "msgspec>=0.19.0",
+    "zstandard>=0.23.0,<1.0",
     "pyzmq>=26.0.0",
     # typing.Self is 3.11+; declared minimum is 3.10 (see requires-python),
     # so back-port Self via typing_extensions in dynamo.common.configuration.
@@ -47,13 +48,13 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc16",
+    "tensorrt-llm==1.3.0rc19",
 ]
 
 vllm = [
     "uvloop",
-    "nixl[cu12]==1.1.0",
-    "vllm[flashinfer,runai,otel]==0.21.0",
+    "nixl[cu13]==1.1.0",
+    "vllm[flashinfer,runai,otel]==0.24.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.
@@ -66,10 +67,11 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.12.post1",
+    "sglang[diffusion]==0.5.14",
     # sglang[diffusion] dropped accelerate in 0.5.12; diffusers still needs it.
     "accelerate>=0.17.0",
-    "nixl[cu12]>=1.0.0,<1.1.0",
+    "blake3>=1.0.0,<2.0.0",
+    "nixl[cu13]>=1.0.0,<1.1.0",
     "cupy-cuda12x>=13.0.0",
 ]
 
@@ -177,6 +179,10 @@ addopts = [
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
+    # power-agent ships a standalone suite run in-image (deploy/power-agent
+    # Dockerfile `test` stage + its own pytest.ini); its tests/ package name
+    # collides with the repo-root tests/ package during repo-wide collection.
+    "--ignore-glob=deploy/power-agent/tests/*",
     "--ignore-glob=components/src/dynamo/sglang/request_handlers/*",
     "--ignore-glob=components/src/dynamo/sglang/multimodal_utils/*",
     "--ignore-glob=components/src/dynamo/vllm/multimodal_utils/*",
@@ -204,8 +210,6 @@ filterwarnings = [
     "ignore:.*unclosed event loop.*:ResourceWarning",
     # unraisable exception warnings
     "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning",
-    # CPython relaunches resource_tracker after engine subprocess teardown
-    "ignore:resource_tracker.*process died unexpectedly.*:UserWarning",
     # pynvml deprecation, temporary until upstream migrates to nvidia-ml-py
     "ignore:The pynvml package is deprecated.*:FutureWarning",
     # Dynamo's own KV events deprecation warning
@@ -273,6 +277,7 @@ markers = [
     "e2e: marks tests as end-to-end tests",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "wheel_smoke: marks tests that validate wheels copied from runtime images",
     "stress: marks tests as stress tests",
     "performance: marks tests as performance tests",
     "benchmark: marks tests as benchmark tests",
@@ -297,6 +302,7 @@ markers = [
     "deploy: marks tests as deployment tests",
     "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
     "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
+    "dynamocheckpoint: marks tests for the DynamoCheckpoint controller deploy path",
     "unified: marks unified-backend e2e tests (LLMEngine ABC + Worker, DEP #8251)",
     # Built-in markers
     "skip: skip this test",
@@ -381,6 +387,7 @@ ignore_missing_imports = true
 # "Should never get here in normal mode, got TypeAlias:numpy.float64 instead of TypeInfo"
 module = ["numpy", "numpy.*"]
 follow_imports = "skip"
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # Third-party libs without type stubs or optional internal deps
@@ -389,6 +396,8 @@ module = [
     "nvtx",
     "fsspec",
     "fsspec.*",
+    "zstandard",
+    "zstandard.*",
     "kubernetes",
     "kubernetes.*",
     "scipy",
@@ -462,6 +471,15 @@ ignore_missing_imports = true
 # msgspec.Struct uses custom __init_subclass__ kwargs (frozen, gc) that mypy
 # cannot resolve without the msgspec package installed.
 module = ["msgspec", "msgspec.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# grpc / google.protobuf ship without type stubs in the dynamo-runtime image
+# (grpc-stubs / types-protobuf are not pulled in by requirements.common.txt).
+# The planner plugin transport imports grpc.aio + google.protobuf.message at
+# module top — silence import-untyped errors there.
+module = ["grpc", "grpc.*", "google.protobuf", "google.protobuf.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 

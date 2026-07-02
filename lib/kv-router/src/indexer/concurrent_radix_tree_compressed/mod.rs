@@ -19,6 +19,7 @@ use super::{
     MatchDetails, PreBoundEventCounters, SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::cleanup::{CleanupGuard, CleanupState};
+use crate::lookup_update::update_arc_lookup_for_keys;
 use crate::protocols::*;
 
 mod node;
@@ -208,19 +209,11 @@ impl ConcurrentRadixTreeCompressed {
         blocks: &[KvCacheStoredBlockData],
         node: &SharedNode,
     ) -> bool {
-        let mut changed = false;
-        for block in blocks {
-            match worker_lookup.insert(block.block_hash, node.clone()) {
-                Some(existing) if Arc::ptr_eq(&existing, node) => {}
-                Some(_) => {
-                    changed = true;
-                }
-                None => {
-                    changed = true;
-                }
-            }
-        }
-        changed
+        update_arc_lookup_for_keys(
+            worker_lookup,
+            blocks.iter().map(|block| block.block_hash),
+            node,
+        ) > 0
     }
 
     // ------------------------------------------------------------------

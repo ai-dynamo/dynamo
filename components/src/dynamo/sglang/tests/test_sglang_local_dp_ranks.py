@@ -44,6 +44,19 @@ def test_dp_attention_multi_node_slices_ranks_by_node_index():
     assert _slice(dp_size=8, enable_dp_attention=True, nnodes=2, node_rank=1) == (4, 8)
 
 
+def test_model_card_registration_keeps_global_dp_range():
+    from dynamo.sglang.capacity import model_card_dp_rank_bounds
+
+    server_args = SimpleNamespace(
+        dp_size=16,
+        enable_dp_attention=True,
+        nnodes=4,
+        node_rank=0,
+    )
+
+    assert model_card_dp_rank_bounds(server_args) == (0, 16)
+
+
 def test_missing_attributes_use_safe_defaults():
     from dynamo.sglang.llm_engine import _local_dp_rank_range as helper
 

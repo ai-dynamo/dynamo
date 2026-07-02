@@ -79,9 +79,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libclang-dev \
         patchelf \
         git \
-        git-lfs && \
+        git-lfs \
+        libjemalloc2 && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3
+
+# libjemalloc2 is installed above so user may opt into jemalloc for memory allocation
+# tuning. We deliberately do NOT set ENV LD_PRELOAD here — that would force jemalloc
+# on every process in the image.
 
 # Switch to dynamo user and create virtual environment
 USER dynamo
@@ -163,3 +168,11 @@ ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+
+
+# Compliance stages are intentionally NOT included here: dynamo-runtime is an
+# UNPUBLISHED wheel-builder image (release.yml ships vllm/sglang/trtllm-runtime,
+# frontend, operator, planner, snapshot-agent — not this), so it carries no
+# shipped-NOTICES obligation. The Rust-crate attribution that matters lives in
+# the published wheels themselves (maturin SBOM + bundled THIRD-PARTY-RUST-
+# LICENSES, see wheel_builder) and in the published framework images' /legal.

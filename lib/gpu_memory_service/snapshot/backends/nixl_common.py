@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, TypeVar
 
+from gpu_memory_service.snapshot.transfer import FileTransferSource
+
 NIXL_POSIX_BACKEND = "POSIX"
 NIXL_GDS_BACKEND = "GDS_MT"
 
@@ -37,6 +39,9 @@ class NixlTransferResources:
 
 
 _TransferItemT = TypeVar("_TransferItemT")
+
+NixlFileGroup = tuple[str, Sequence[FileTransferSource]]
+NixlWorkGroup = tuple[str, Sequence[NixlFileGroup]]
 
 
 def load_nixl_api() -> NixlApi:
@@ -65,6 +70,53 @@ def create_nixl_agent(
     else:
         agent.create_backend(backend_name)
     return agent
+
+
+def split_work_groups(
+    work_groups: Sequence[NixlWorkGroup],
+    worker_count: int,
+) -> list[NixlWorkGroup]:
+    """Split logical work groups into at most worker_count balanced buckets."""
+    if not work_groups:
+        return []
+
+    worker_count = max(1, min(int(worker_count), len(work_groups)))
+    if len(work_groups) <= worker_count:
+        return list(work_groups)
+
+    bucket_file_groups: list[list[NixlFileGroup]] = [[] for _ in range(worker_count)]
+    bucket_names: list[list[str]] = [[] for _ in range(worker_count)]
+    bucket_bytes = [0] * worker_count
+
+    # Largest-first greedy bin packing keeps workers reasonably balanced while
+    # staying deterministic for equal-sized groups.
+    sized_groups = [
+        (
+            sum(
+                source.byte_count
+                for _path, sources in file_groups
+                for source in sources
+            ),
+            index,
+            group_name,
+            file_groups,
+        )
+        for index, (group_name, file_groups) in enumerate(work_groups)
+    ]
+    sized_groups.sort(key=lambda item: (-item[0], item[1]))
+
+    for size_bytes, _index, group_name, file_groups in sized_groups:
+        bucket_index = min(range(worker_count), key=lambda idx: bucket_bytes[idx])
+        bucket_file_groups[bucket_index].extend(file_groups)
+        bucket_names[bucket_index].append(group_name)
+        bucket_bytes[bucket_index] += size_bytes
+
+    buckets: list[NixlWorkGroup] = []
+    for index, file_groups in enumerate(bucket_file_groups):
+        if not file_groups:
+            continue
+        buckets.append((",".join(bucket_names[index]), file_groups))
+    return buckets
 
 
 def open_direct_read_fd(

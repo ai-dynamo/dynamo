@@ -73,6 +73,20 @@ func makeTestController(t *testing.T, objs ...runtime.Object) *NodeController {
 	}
 }
 
+func sawEventReason(clientset *fake.Clientset, reason string) bool {
+	for _, action := range clientset.Actions() {
+		create, ok := action.(clientgotesting.CreateAction)
+		if !ok || create.GetResource().Resource != "events" {
+			continue
+		}
+		event, ok := create.GetObject().(*corev1.Event)
+		if ok && event.Reason == reason {
+			return true
+		}
+	}
+	return false
+}
+
 func makeLease(namespace, name, holder string, renewTime time.Time) *coordinationv1.Lease {
 	leaseDurationSeconds := int32(checkpointLeaseDuration.Seconds())
 	renewMicroTime := metav1.NewMicroTime(renewTime)
@@ -437,16 +451,10 @@ func TestReconcileCheckpointPod(t *testing.T) {
 
 			w.reconcileCheckpointPod(ctx, pod)
 
-			// tryAcquire adds to inFlight synchronously before launching the goroutine.
-			// For filtered pods, inFlight stays at its original size.
-			triggered := len(w.inFlight) > 0 && !tc.preSeed
-			if tc.preSeed {
-				// Duplicate: inFlight was 1 before and should remain exactly 1
-				triggered = false
-			}
+			triggered := sawEventReason(w.clientset.(*fake.Clientset), "CheckpointRequested")
 
 			if triggered != tc.want {
-				t.Errorf("triggered = %v, want %v (inFlight=%d, preSeed=%v)", triggered, tc.want, len(w.inFlight), tc.preSeed)
+				t.Errorf("triggered = %v, want %v (inFlight=%d, preSeed=%v, actions=%#v)", triggered, tc.want, len(w.inFlight), tc.preSeed, w.clientset.(*fake.Clientset).Actions())
 			}
 
 			// Let the background goroutine (if any) finish before the test ends
@@ -754,13 +762,10 @@ func TestReconcileRestorePod(t *testing.T) {
 
 			w.reconcileRestorePod(ctx, pod)
 
-			triggered := len(w.inFlight) > 0 && !tc.preSeed
-			if tc.preSeed {
-				triggered = false
-			}
+			triggered := sawEventReason(w.clientset.(*fake.Clientset), "RestoreRequested")
 
 			if triggered != tc.want {
-				t.Errorf("triggered = %v, want %v (inFlight=%d, preSeed=%v)", triggered, tc.want, len(w.inFlight), tc.preSeed)
+				t.Errorf("triggered = %v, want %v (inFlight=%d, preSeed=%v, actions=%#v)", triggered, tc.want, len(w.inFlight), tc.preSeed, w.clientset.(*fake.Clientset).Actions())
 			}
 
 			// Let the background goroutine (if any) finish before the test ends

@@ -43,7 +43,7 @@ Clients call the `generate` endpoint to stream completions, call `best_worker_id
 ## Example: Manual Disaggregated Serving (Alternative Setup)
 
 > [!Note]
-> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `ModelType.Prefill`. See [Disaggregated Serving](/docs/components/router/router-disaggregated-serving.md) for the default setup.
+> **This is an alternative advanced setup.** The recommended approach for disaggregated serving is to use the frontend's automatic prefill routing, which activates when you register workers with `WorkerType.Prefill`. See [Disaggregated Serving](/docs/components/router/router-disaggregated-serving.md) for the default setup.
 >
 > Use this manual setup if you need explicit control over prefill routing configuration or want to manage prefill and decode routers separately.
 

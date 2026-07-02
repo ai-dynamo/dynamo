@@ -17,7 +17,6 @@ export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backend
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/decode.yaml"}
 export PREFILL_CUDA_VISIBLE_DEVICES=${PREFILL_CUDA_VISIBLE_DEVICES:-"0"}
 export DECODE_CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-"1"}
-export MODALITY=${MODALITY:-"multimodal"}
 
 # Profiler/test-harness override applied to KV-cache-bearing workers (prefill, decode).
 TRTLLM_OVERRIDE_ARGS=()
@@ -38,7 +37,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
-  --modality "$MODALITY" \
+  --enable-multimodal \
   "${TRTLLM_OVERRIDE_ARGS[@]}" \
   --disaggregation-mode prefill &
 
@@ -47,7 +46,7 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \
-  --modality "$MODALITY" \
+  --enable-multimodal \
   "${TRTLLM_OVERRIDE_ARGS[@]}" \
   --disaggregation-mode decode &
 

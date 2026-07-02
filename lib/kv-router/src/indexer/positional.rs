@@ -36,6 +36,51 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 
+/// Environment variable selecting the default algorithm used by
+/// [`PositionalIndexer::find_matches`]. Values: `"strided"` (default, current behavior) or
+/// `"binary"`. Only consulted by [`PositionalIndexer::new`]; explicit constructors override it.
+pub const DYN_ROUTER_POSITIONAL_SEARCH_MODE: &str = "DYN_ROUTER_POSITIONAL_SEARCH_MODE";
+
+/// Selects which algorithm [`PositionalIndexer::find_matches`] uses.
+///
+/// `Strided` jumps by `jump_size`; `Binary` binary-searches the monotone "all active workers
+/// still match" predicate (with a linear-scan base case for tight windows). The two produce
+/// identical [`OverlapScores`] whenever the worker set matching the query is monotonically
+/// non-increasing with position — i.e. for contiguous-from-zero stores and tail removals. Both
+/// modes rely on this `count == active.len() ⟹ set equality` property (`Strided` via its
+/// per-`jump_size` count check); sparse absolute-position stores (e.g. front eviction or a
+/// partial snapshot restore that leaves a worker at a later position without its prefix) can
+/// violate it, and there `Binary`'s coarser probing can diverge from `Strided`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SearchMode {
+    /// Strided jump-search (the original behavior).
+    #[default]
+    Strided,
+    /// Monotone-predicate binary search with a linear-scan base case.
+    Binary,
+}
+
+impl SearchMode {
+    /// Read the default search mode from [`DYN_ROUTER_POSITIONAL_SEARCH_MODE`], falling back to
+    /// [`SearchMode::Strided`]. Follows the `DYN_ROUTER_*` pattern: parse, default, warn on bad value.
+    fn from_env() -> Self {
+        match std::env::var(DYN_ROUTER_POSITIONAL_SEARCH_MODE) {
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "strided" => SearchMode::Strided,
+                "binary" => SearchMode::Binary,
+                other => {
+                    tracing::warn!(
+                        value = %other,
+                        "invalid {DYN_ROUTER_POSITIONAL_SEARCH_MODE}, expected 'strided' or 'binary'; falling back to strided"
+                    );
+                    SearchMode::Strided
+                }
+            },
+            Err(_) => SearchMode::Strided,
+        }
+    }
+}
+
 /// Entry for the innermost level of the index.
 ///
 /// Optimizes for the common case where there's only one sequence hash
@@ -115,22 +160,43 @@ pub struct PositionalIndexer {
     index: DashMap<(usize, LocalBlockHash), SeqEntry, FxBuildHasher>,
 
     jump_size: usize,
+
+    search_mode: SearchMode,
 }
 
 impl PositionalIndexer {
     /// Create a new PositionalIndexer.
     ///
+    /// The search mode defaults to whatever [`DYN_ROUTER_POSITIONAL_SEARCH_MODE`] selects
+    /// (or [`SearchMode::Strided`] when unset). Use [`PositionalIndexer::new_with_mode`] or
+    /// [`PositionalIndexer::with_search_mode`] to pin a mode regardless of the environment.
+    ///
     /// # Arguments
     /// * `jump_size` - Jump size for find_matches optimization (e.g., 32).
     ///   The algorithm jumps by this many positions at a time, only scanning
-    ///   intermediate positions when workers drain (stop matching).
+    ///   intermediate positions when workers drain (stop matching). In `Binary` mode it also
+    ///   serves as the window threshold below which the search falls back to a linear scan.
     pub fn new(jump_size: usize) -> Self {
+        Self::new_with_mode(jump_size, SearchMode::from_env())
+    }
+
+    /// Create a new PositionalIndexer with an explicit [`SearchMode`].
+    ///
+    /// The explicit mode always wins over the environment variable.
+    pub fn new_with_mode(jump_size: usize, search_mode: SearchMode) -> Self {
         assert!(jump_size > 0, "jump_size must be greater than 0");
 
         Self {
             index: DashMap::with_hasher(FxBuildHasher),
             jump_size,
+            search_mode,
         }
+    }
+
+    /// Builder-style override of the [`SearchMode`] (chiefly for tests / benchmarks).
+    pub fn with_search_mode(mut self, search_mode: SearchMode) -> Self {
+        self.search_mode = search_mode;
+        self
     }
 }
 
@@ -213,7 +279,10 @@ impl SyncIndexer for PositionalIndexer {
     }
 
     fn find_matches(&self, sequence: &[LocalBlockHash], early_exit: bool) -> OverlapScores {
-        self.jump_search_matches(sequence, early_exit)
+        match self.search_mode {
+            SearchMode::Strided => self.jump_search_matches(sequence, early_exit),
+            SearchMode::Binary => self.binary_search_matches(sequence, early_exit),
+        }
     }
 }
 
@@ -690,5 +759,243 @@ impl PositionalIndexer {
         }
 
         scores
+    }
+
+    /// Binary-search variant of [`Self::jump_search_matches`].
+    ///
+    /// Produces output identical to the strided search for any query whose matching-worker set is
+    /// monotonically non-increasing with position (contiguous-from-zero stores and tail removals),
+    /// but the number of index probes scales with the number of distinct drain points
+    /// (`O(W · log L)`, `W` = workers at position 0) rather than `O(len / jump_size)`.
+    ///
+    /// # Preconditions
+    ///
+    /// Both this and [`Self::jump_search_matches`] use a count-only predicate
+    /// (`count_workers_at(p) == active.len()`) that assumes `workers(p) ⊆ active` for `p` past the
+    /// frontier. Sparse absolute-position stores (`start_position` writes, e.g. front eviction or a
+    /// partial snapshot restore that leaves a worker at a later position without its prefix) can
+    /// break that subset property. Because this search probes far fewer positions than the strided
+    /// scan (notably the `len - 1` fast path below), a non-active worker that only exists late in
+    /// the sequence can short-circuit it to a full match where the strided scan would still drain
+    /// an active worker earlier — so the two can diverge in that regime. The bench/test event
+    /// streams that drive [`PositionalIndexer`] today are all contiguous, so the property holds.
+    ///
+    /// # Algorithm
+    ///
+    /// The set of workers still matching the query is monotonically non-increasing as position
+    /// grows (a worker can leave the `active` set but never rejoin it), so
+    /// `P(p) := (workers matching at p) == active` is a monotone-decreasing predicate. It is
+    /// checked cheaply as `count_workers_at(p) == active.len()`, which is sound because
+    /// `workers(p) ⊆ active` for any position past the current frontier (count equality therefore
+    /// implies set equality).
+    ///
+    /// Each round binary-searches for the largest position where the whole `active` set still
+    /// matches; the next position is where one or more workers drain. Because every active worker
+    /// matched at that last-true position, every worker missing one step later drained exactly
+    /// there. Those workers are scored, the survivors become the new `active`, and the search
+    /// continues rightward from there. Each round drops at least one worker, so the loop runs at
+    /// most once per worker.
+    ///
+    /// For tight windows (`<= jump_size`) it defers to [`Self::linear_scan_drain`], which is
+    /// already proven and records the same exact drain positions, bounding the worst case while
+    /// reusing validated code.
+    fn binary_search_matches(
+        &self,
+        local_hashes: &[LocalBlockHash],
+        early_exit: bool,
+    ) -> OverlapScores {
+        let mut scores = OverlapScores::new();
+
+        if local_hashes.is_empty() {
+            return scores;
+        }
+
+        // Lazily computed sequence hashes. `ensure_seq_hash_computed` only ever extends this
+        // vector from its current length up to the requested position, so probing positions out
+        // of order (as binary search does) is safe and deterministic.
+        let mut seq_hashes: Vec<ExternalSequenceBlockHash> = Vec::with_capacity(local_hashes.len());
+
+        // Check first position to initialize active set.
+        let Some(mut active) =
+            self.get_workers_lazy(0, local_hashes[0], &mut seq_hashes, local_hashes)
+        else {
+            return scores;
+        };
+
+        if active.is_empty() {
+            return scores;
+        }
+
+        if early_exit {
+            // Mirror jump_search_matches exactly: record that these workers matched position 0.
+            for worker in &active {
+                scores.scores.insert(*worker, 1);
+            }
+            return scores;
+        }
+
+        let len = local_hashes.len();
+
+        // Invariant: every worker in `active` matches all positions through `frontier`, and
+        // `active == workers(frontier)`, so `P(frontier)` is always true at the loop head.
+        let mut frontier = 0;
+
+        while frontier < len - 1 && !active.is_empty() {
+            // Fast path: do all active workers survive to the final position? If so, they all
+            // matched through the end and are scored `len` by the final loop below.
+            if self
+                .count_workers_at(
+                    len - 1,
+                    local_hashes[len - 1],
+                    &mut seq_hashes,
+                    local_hashes,
+                )
+                .unwrap_or(0)
+                == active.len()
+            {
+                break;
+            }
+
+            // P(frontier) is true and P(len - 1) is false. Find the last-true boundary.
+            let mut lo = frontier;
+            let mut hi = len - 1;
+
+            // Base case: once the window is small, defer to the proven linear scan over
+            // (lo, hi]. It records exact drain positions (matching the bisection path) and
+            // leaves the survivors in `active`. Since `hi == len - 1` here, this resolves the
+            // remaining suffix and the outer loop then terminates.
+            if hi - lo <= self.jump_size {
+                self.linear_scan_drain(
+                    local_hashes,
+                    &mut seq_hashes,
+                    &mut active,
+                    &mut scores,
+                    lo + 1,
+                    hi + 1,
+                    false,
+                );
+                frontier = hi;
+                continue;
+            }
+
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                if self
+                    .count_workers_at(mid, local_hashes[mid], &mut seq_hashes, local_hashes)
+                    .unwrap_or(0)
+                    == active.len()
+                {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+
+            // `hi` is the first position where at least one active worker drains. Because every
+            // active worker matched at `lo == hi - 1`, each worker missing at `hi` drained exactly
+            // here. Reconcile `active` against workers(hi) IN PLACE (no clone): cloning the
+            // survivor set here is a per-drain heap allocation that scales with fan-out (workers
+            // sharing the prefix) and becomes an allocator bottleneck under high concurrency.
+            // A missing index entry (or a seq_hash mismatch) means every active worker drains here.
+            let drain_pos = hi;
+            Self::ensure_seq_hash_computed(&mut seq_hashes, drain_pos, local_hashes);
+            let drain_seq_hash = seq_hashes[drain_pos];
+
+            match self
+                .index
+                .get(&(drain_pos, local_hashes[drain_pos]))
+                .as_ref()
+                .and_then(|entry| entry.get(drain_seq_hash))
+            {
+                Some(workers) => {
+                    reconcile_active_workers(&mut active, workers, |worker| {
+                        scores.scores.insert(worker, drain_pos as u32);
+                    });
+                }
+                None => {
+                    for worker in active.drain() {
+                        scores.scores.insert(worker, drain_pos as u32);
+                    }
+                }
+            }
+
+            frontier = drain_pos;
+        }
+
+        // Record final scores for remaining active workers; they matched through the end.
+        let final_score = len as u32;
+        for worker in active {
+            scores.scores.insert(worker, final_score);
+        }
+
+        scores
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LevelIndex, PositionalIndexer, SearchMode};
+    use crate::protocols::{LocalBlockHash, RouterEvent, WorkerWithDpRank};
+    use crate::test_utils::{assert_overlap_scores_eq, make_store_event};
+    use rustc_hash::FxHashMap;
+
+    fn local_hashes(hashes: &[u64]) -> Vec<LocalBlockHash> {
+        hashes.iter().copied().map(LocalBlockHash).collect()
+    }
+
+    /// Populate an indexer's shared index by applying events against a local `worker_blocks`
+    /// map, exactly as the worker thread does.
+    fn populate(indexer: &PositionalIndexer, events: &[RouterEvent]) {
+        let mut worker_blocks: FxHashMap<WorkerWithDpRank, LevelIndex> = FxHashMap::default();
+        for ev in events {
+            indexer
+                .apply_event(&mut worker_blocks, ev.clone(), None)
+                .expect("apply_event should succeed");
+        }
+    }
+
+    /// The strided and binary searches must produce identical results for both `early_exit`
+    /// settings. The public async surface always passes `early_exit = false`, so the
+    /// `early_exit = true` path is exercised here by calling the two methods directly.
+    #[test]
+    fn binary_matches_strided_both_early_exit_settings() {
+        // jump_size = 8 keeps sequences long enough relative to the stride to exercise both the
+        // bisection and the linear base case; the search-mode field is irrelevant because we call
+        // the two algorithms directly rather than via find_matches dispatch.
+        let indexer = PositionalIndexer::new_with_mode(8, SearchMode::Strided);
+
+        populate(
+            &indexer,
+            &[
+                make_store_event(0, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+                make_store_event(1, &[1, 2, 3, 99, 100]),
+                make_store_event(2, &[1, 2, 3, 4, 5, 6, 7, 8, 200, 201]),
+                make_store_event(3, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+            ],
+        );
+
+        let queries: &[&[u64]] = &[
+            &[],
+            &[1],
+            &[42], // miss
+            &[1, 2, 3],
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            &[1, 2, 3, 99, 100],
+            &[1, 2, 3, 4, 5, 6, 7, 8, 200, 201],
+        ];
+
+        for q in queries {
+            let seq = local_hashes(q);
+            for early_exit in [false, true] {
+                let strided = indexer.jump_search_matches(&seq, early_exit);
+                let binary = indexer.binary_search_matches(&seq, early_exit);
+                assert_overlap_scores_eq(
+                    &strided,
+                    &binary,
+                    &format!("q={q:?} early_exit={early_exit}"),
+                );
+            }
+        }
     }
 }

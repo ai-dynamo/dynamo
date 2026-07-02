@@ -6,8 +6,9 @@ from projected load into sequence-state booking.
 ## Guardrails
 
 - `SchedulerQueue::admit_one` is the canonical admission path: compute projected
-  load, select worker, respond, then book state. Do not bypass this for normal
-  scheduling.
+  load, select worker, skip booking if the response receiver is closed, then
+  book state before responding. Failed response delivery must roll back the
+  booking. Do not bypass this for normal scheduling.
 - Do not remove or weaken `admission_gate` without proving selection plus
   booking remains serialized enough to avoid oversubscription regressions.
 - Potential-load projection must go through

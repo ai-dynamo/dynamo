@@ -70,7 +70,7 @@ Use the project virtual environment:
 .venv/bin/python --version
 ```
 
-If the Python bindings are not importable yet, build them first:
+If the runtime `_core` bindings are not importable yet, build them first:
 
 ```bash
 .venv/bin/maturin develop --uv -m lib/bindings/python/Cargo.toml
@@ -101,10 +101,11 @@ If DynoSim sweep setup fails with AIC errors about missing perf databases or par
 
 If those files begin with `version https://git-lfs.github.com/spec/v1`, you have Git LFS pointer stubs instead of real perf tables. Install `aiconfigurator` from a checkout or wheel that includes the real LFS materialized payloads in `systems/`.
 
-When running directly from a source checkout, expose the in-repo Python packages:
+When running directly from a source checkout, expose the in-repo Python components
+and runtime bindings:
 
 ```bash
-export PYTHONPATH=lib/bindings/python/src:components/src
+export PYTHONPATH=components/src:lib/bindings/python/src
 ```
 
 If the sweep uses multiple worker processes, prefer a real script file over a heredoc. On macOS, `ProcessPoolExecutor` child workers need a stable module path, and the driver module must guard its entry behind `if __name__ == "__main__":`.

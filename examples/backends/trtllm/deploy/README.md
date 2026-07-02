@@ -55,7 +55,18 @@ Advanced disaggregated deployment with SLA-based automatic scaling.
 - `prefill`: Specialized prefill-only worker
 
 > [!NOTE]
-> This deployment requires pre-deployment profiling to be completed first. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for detailed instructions.
+> This deployment can use native AIC estimates when available, optional pre-deployment profiling data, or live FPM observations after warmup. See [Pre-Deployment Profiling](../../../../docs/components/profiler/profiler-guide.md) for the optional bootstrap workflow.
+
+### 7. **Snapshot Restore Example** (`v1beta1/snapshot-restore.yaml`)
+Experimental Dynamo Snapshot restore example for Qwen3-0.6B with a single
+TensorRT-LLM worker. This example uses the conservative engine configuration in
+[`../engine_configs/qwen3/snapshot.yaml`](../engine_configs/qwen3/snapshot.yaml).
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server
+- `TRTLLMWorker`: Single GPU TensorRT-LLM worker restored with
+  `experimental.checkpoint.enabled: true` and
+  `startupPolicy: WaitForCheckpoint`
 
 ## CRD Structure
 

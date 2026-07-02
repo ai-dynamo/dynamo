@@ -43,10 +43,25 @@ struct NativeMockerMetricsState {
 
 enum NativeCollectors {
     Vllm(VllmCollectors),
+    Trtllm(TrtllmCollectors),
     Sglang(SglangCollectors),
 }
 
 struct VllmCollectors {
+    num_requests_running: IntGaugeVec,
+    num_requests_waiting: IntGaugeVec,
+    kv_cache_usage_perc: GaugeVec,
+    gpu_cache_usage_perc: GaugeVec,
+    num_preemptions_total: IntCounterVec,
+    time_to_first_token_seconds: HistogramVec,
+    inter_token_latency_seconds: HistogramVec,
+    e2e_request_latency_seconds: HistogramVec,
+}
+
+/// TRT-LLM runs on the vLLM scheduler core, so it exposes the same metric
+/// shape as [`VllmCollectors`] but under the `trtllm:` native name prefix. It
+/// binds into the same [`NativeMetricHandles::Vllm`] update path.
+struct TrtllmCollectors {
     num_requests_running: IntGaugeVec,
     num_requests_waiting: IntGaugeVec,
     kv_cache_usage_perc: GaugeVec,
@@ -257,6 +272,47 @@ impl NativeMockerMetrics {
                 }
                 Some(NativeMetricHandles::Vllm(handles))
             }
+            NativeCollectors::Trtllm(collectors) => {
+                // Identical shape to the vLLM path; bind into the same handles
+                // so the snapshot-application logic is shared.
+                let mut handles = HashMap::with_capacity(self.dp_size as usize);
+                for dp_rank in 0..self.dp_size {
+                    let engine = dp_rank.to_string();
+                    let label_values = [model_name, engine.as_str()];
+                    handles.insert(
+                        dp_rank,
+                        VllmDpHandles {
+                            num_requests_running: collectors
+                                .num_requests_running
+                                .with_label_values(&label_values),
+                            num_requests_waiting: collectors
+                                .num_requests_waiting
+                                .with_label_values(&label_values),
+                            kv_cache_usage_perc: collectors
+                                .kv_cache_usage_perc
+                                .with_label_values(&label_values),
+                            gpu_cache_usage_perc: collectors
+                                .gpu_cache_usage_perc
+                                .with_label_values(&label_values),
+                            num_preemptions_total: collectors
+                                .num_preemptions_total
+                                .with_label_values(&label_values),
+                            request_metrics: NativeRequestMetricHandles::Vllm {
+                                time_to_first_token_seconds: collectors
+                                    .time_to_first_token_seconds
+                                    .with_label_values(&label_values),
+                                inter_token_latency_seconds: collectors
+                                    .inter_token_latency_seconds
+                                    .with_label_values(&label_values),
+                                e2e_request_latency_seconds: collectors
+                                    .e2e_request_latency_seconds
+                                    .with_label_values(&label_values),
+                            },
+                        },
+                    );
+                }
+                Some(NativeMetricHandles::Vllm(handles))
+            }
             NativeCollectors::Sglang(collectors) => {
                 let scheduler_label_values = [model_name, "sglang", "0", "0", "0"];
                 let request_label_values = [model_name, "sglang"];
@@ -363,6 +419,7 @@ impl NativeCollectors {
     fn new(engine_type: EngineType) -> Result<Self> {
         match engine_type {
             EngineType::Vllm => Ok(Self::Vllm(VllmCollectors::new()?)),
+            EngineType::Trtllm => Ok(Self::Trtllm(TrtllmCollectors::new()?)),
             EngineType::Sglang => Ok(Self::Sglang(SglangCollectors::new()?)),
         }
     }
@@ -370,6 +427,7 @@ impl NativeCollectors {
     fn register(&self, registry: &MetricsRegistry) -> Result<()> {
         match self {
             Self::Vllm(collectors) => collectors.register(registry),
+            Self::Trtllm(collectors) => collectors.register(registry),
             Self::Sglang(collectors) => collectors.register(registry),
         }
     }
@@ -432,6 +490,84 @@ impl VllmCollectors {
             e2e_request_latency_seconds: HistogramVec::new(
                 HistogramOpts::new(
                     "vllm:e2e_request_latency_seconds",
+                    "Histogram of e2e request latency in seconds.",
+                )
+                .buckets(vllm_e2e_buckets()),
+                VLLM_LABELS,
+            )?,
+        })
+    }
+
+    fn register(&self, registry: &MetricsRegistry) -> Result<()> {
+        registry.add_metric(Box::new(self.num_requests_running.clone()))?;
+        registry.add_metric(Box::new(self.num_requests_waiting.clone()))?;
+        registry.add_metric(Box::new(self.kv_cache_usage_perc.clone()))?;
+        registry.add_metric(Box::new(self.gpu_cache_usage_perc.clone()))?;
+        registry.add_metric(Box::new(self.num_preemptions_total.clone()))?;
+        registry.add_metric(Box::new(self.time_to_first_token_seconds.clone()))?;
+        registry.add_metric(Box::new(self.inter_token_latency_seconds.clone()))?;
+        registry.add_metric(Box::new(self.e2e_request_latency_seconds.clone()))?;
+        Ok(())
+    }
+}
+
+impl TrtllmCollectors {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            num_requests_running: IntGaugeVec::new(
+                Opts::new(
+                    "trtllm:num_requests_running",
+                    "Number of requests currently running on GPU.",
+                ),
+                VLLM_LABELS,
+            )?,
+            num_requests_waiting: IntGaugeVec::new(
+                Opts::new(
+                    "trtllm:num_requests_waiting",
+                    "Number of requests waiting to be processed.",
+                ),
+                VLLM_LABELS,
+            )?,
+            kv_cache_usage_perc: GaugeVec::new(
+                Opts::new(
+                    "trtllm:kv_cache_usage_perc",
+                    "KV-cache usage as a fraction of available cache blocks.",
+                ),
+                VLLM_LABELS,
+            )?,
+            gpu_cache_usage_perc: GaugeVec::new(
+                Opts::new(
+                    "trtllm:gpu_cache_usage_perc",
+                    "Compatibility alias for KV-cache usage as a fraction of available cache blocks.",
+                ),
+                VLLM_LABELS,
+            )?,
+            num_preemptions_total: IntCounterVec::new(
+                Opts::new(
+                    "trtllm:num_preemptions_total",
+                    "Cumulative number of request preemptions (always 0 under GUARANTEED_NO_EVICT).",
+                ),
+                VLLM_LABELS,
+            )?,
+            time_to_first_token_seconds: HistogramVec::new(
+                HistogramOpts::new(
+                    "trtllm:time_to_first_token_seconds",
+                    "Histogram of time to first token in seconds.",
+                )
+                .buckets(vllm_ttft_buckets()),
+                VLLM_LABELS,
+            )?,
+            inter_token_latency_seconds: HistogramVec::new(
+                HistogramOpts::new(
+                    "trtllm:inter_token_latency_seconds",
+                    "Histogram of inter-token latency in seconds.",
+                )
+                .buckets(vllm_itl_buckets()),
+                VLLM_LABELS,
+            )?,
+            e2e_request_latency_seconds: HistogramVec::new(
+                HistogramOpts::new(
+                    "trtllm:e2e_request_latency_seconds",
                     "Histogram of e2e request latency in seconds.",
                 )
                 .buckets(vllm_e2e_buckets()),
