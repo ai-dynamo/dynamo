@@ -41,8 +41,8 @@ use crate::{
             audios::OpenAIAudiosStreamingEngine,
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
-            embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
-            videos::OpenAIVideosStreamingEngine,
+            embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
+            images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
         },
     },
 };
@@ -366,6 +366,14 @@ impl ModelManager {
             .collect()
     }
 
+    pub fn list_generate_models(&self) -> Vec<String> {
+        self.models
+            .iter()
+            .filter(|entry| entry.value().has_generate_engine())
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
     pub fn list_prefill_models(&self) -> Vec<String> {
         self.models
             .iter()
@@ -454,6 +462,16 @@ impl ModelManager {
             .get_realtime_engine()
     }
 
+    pub fn get_generate_engine(
+        &self,
+        model: &str,
+    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_generate_engine()
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_completions_engine_with_parsing(
@@ -486,6 +504,22 @@ impl ModelManager {
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
             .get_completions_engine_with_parsing()
+    }
+
+    pub fn get_generate_engine_with_parsing(
+        &self,
+        model: &str,
+    ) -> Result<
+        (
+            GenerateStreamingEngine,
+            crate::protocols::openai::ParsingOptions,
+        ),
+        ModelManagerError,
+    > {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .get_generate_engine_with_parsing()
     }
 
     // -- Convenience methods for in-process models (http.rs, grpc.rs) --
@@ -674,6 +708,27 @@ impl ModelManager {
         Ok(())
     }
 
+    pub fn add_generate_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: GenerateStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let model_entry = self.get_or_create_model(model);
+        if model_entry.has_generate_engine() {
+            return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
+        }
+        let namespace = format!("__local_generate_{}", model);
+        let mut ws = WorkerSet::new(
+            namespace.clone(),
+            card_checksum.to_string(),
+            Self::aggregated_local_card(),
+        );
+        ws.generate_engine = Some(engine);
+        model_entry.add_worker_set(namespace, Arc::new(ws));
+        Ok(())
+    }
+
     pub fn add_prefill_model(
         &self,
         model: &str,
@@ -747,6 +802,13 @@ impl ModelManager {
 
     pub fn remove_realtime_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let namespace = format!("__local_realtime_{}", model);
+        self.remove_worker_set(model, &namespace)
+            .map(|_| ())
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn remove_generate_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let namespace = format!("__local_generate_{}", model);
         self.remove_worker_set(model, &namespace)
             .map(|_| ())
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))

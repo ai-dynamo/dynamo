@@ -139,6 +139,7 @@ allow = [
   "LicenseRef-Khronos",               # libamdhip64 — Khronos permissive license
   "LicenseRef-Lucent",                # libre2 — Lucent's permissive license
   "LicenseRef-Chromium",              # libpsl — Chromium-derived BSD-3
+  "LicenseRef-Intel-ISSL",            # Intel Simplified Software License — oneCCL binary wheels
   "LicenseRef-gnulib",                # libpsl — gnulib permissive
   "LicenseRef-NRL-2-clause",          # libnorm — NRL BSD-2-clause variant
   "LicenseRef-NRL-3-clause",          # libnorm
@@ -2621,7 +2622,6 @@ type = "dpkg"
 name = "libfftw3-double3"
 allow = ["GPL-2.0-or-later"]
 reason = "Base-image system library: LGPL components are dynamically linked and any GPL components are mere aggregation (separate works, not linked into Dynamo's Apache-2.0 code). Ubuntu source available via the OSRB archive."
-
 [[exceptions]]
 type = "dpkg"
 name = "libflac12t64"
