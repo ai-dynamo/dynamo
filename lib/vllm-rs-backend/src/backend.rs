@@ -184,6 +184,17 @@ impl LLMEngine for VllmBackend {
             return Err(engine_shutdown("vLLM backend has already been started"));
         }
 
+        // Fail fast on an unsupported role: the Encode disaggregation mode is a
+        // multimodal encoder upstream of P/D/Agg, but this backend is text-only
+        // (multimodal payloads are rejected in `validate_request`). Reject at
+        // startup so the misconfiguration can't register as a healthy worker and
+        // only surface as a per-request error in `apply_disaggregation_mode`.
+        if self.disaggregation_mode.is_encode() {
+            return Err(invalid_arg(
+                "encode disaggregation mode is not supported by the native vLLM backend",
+            ));
+        }
+
         // TODO: currently vLLM's Rust engine-core client only supports local data-parallel engines
         if !self.managed_engine.frontend_local_only() {
             return Err(invalid_arg(
@@ -197,10 +208,22 @@ impl LLMEngine for VllmBackend {
             .map_err(|e| cannot_connect(format!("failed to resolve handshake port: {e:#}")))?;
 
         let managed_config = {
-            let mut config =
-                self.managed_engine
-                    .clone()
-                    .into_config(self.model.clone(), None, handshake_port);
+            // vLLM 0.24 into_config takes 7 positional args; name them so a future
+            // value/signature change can't silently land in the wrong slot.
+            let max_model_len: Option<u32> = None; // let vLLM auto-fit from KV profiling
+            let max_logprobs: Option<i32> = None;
+            let language_model_only = false;
+            let disable_log_stats = false; // keep stats on (mirrors with_log_stats(true) below)
+            let shutdown_timeout: u64 = 0; // NOTE: 0 = abort in-flight requests on shutdown
+            let mut config = self.managed_engine.clone().into_config(
+                self.model.clone(),
+                max_model_len,
+                max_logprobs,
+                language_model_only,
+                disable_log_stats,
+                shutdown_timeout,
+                handshake_port,
+            );
             self.extra.append_python_args(&mut config.python_args);
             config
         };
@@ -249,9 +272,7 @@ impl LLMEngine for VllmBackend {
             }
         };
 
-        let context_length = client
-            .max_model_len()
-            .ok_or_else(|| backend_unknown("vLLM engine-core did not report max_model_len"))?;
+        let context_length = client.max_model_len();
         let total_kv_blocks = match client.total_num_gpu_blocks() {
             0 => None,
             blocks => Some(blocks),

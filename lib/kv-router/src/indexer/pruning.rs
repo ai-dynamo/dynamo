@@ -761,26 +761,6 @@ mod tests {
         assert_eq!(expired_after, vec![42]);
     }
 
-    /// Test that BlockEntry ordering prioritizes sequence position.
-    #[test]
-    fn test_block_entry_ordering() {
-        let worker = WorkerWithDpRank::from_worker_id(0);
-
-        let entry1 = BlockEntry {
-            key: ExternalSequenceBlockHash(100),
-            worker,
-            seq_position: 0,
-        };
-        let entry2 = BlockEntry {
-            key: ExternalSequenceBlockHash(50),
-            worker,
-            seq_position: 1,
-        };
-
-        // entry1 < entry2 because seq_position 0 < 1
-        assert!(entry1 < entry2);
-    }
-
     #[test]
     fn test_worker_expiry_heap_rebuilds_under_churn() {
         let manager = WorkerPruneManager::new(PruneConfig {

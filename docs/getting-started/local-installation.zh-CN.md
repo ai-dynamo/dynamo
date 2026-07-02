@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: 本地安装
 sidebar-title: 本地安装
 description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynamo
 ---
@@ -8,8 +9,6 @@ description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynam
 <p align="left">
   <a href="./local-installation.md" hreflang="en">English</a> | <strong>简体中文</strong>
 </p>
-
-# 本地安装
 
 本指南介绍如何在配备一个或多个 GPU 的本地机器或 VM 上安装并运行 Dynamo。完成后，你将拥有一个可工作的 OpenAI 兼容端点，用于提供模型服务。
 

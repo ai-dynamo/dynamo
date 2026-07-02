@@ -3,7 +3,6 @@
 
 pub mod coding;
 pub mod common;
-pub mod request_trace;
 
 #[path = "../kv_router/common/mod.rs"]
 pub mod kv_router_common;

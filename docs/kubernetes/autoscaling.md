@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Autoscaling
+subtitle: Scales DGD services with the DynamoGraphDeploymentScalingAdapter using KEDA, Kubernetes HPA, or the Dynamo Planner.
 ---
 
 This guide explains how to configure autoscaling for DynamoGraphDeployment (DGD) services using the `sglang-agg` example from `examples/backends/sglang/deploy/agg.yaml`.

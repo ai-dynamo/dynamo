@@ -17,20 +17,12 @@ permissions:
 
 jobs:
   ok-to-test:
+    if: github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
     environment: external_collaborator
     steps:
-      - name: Check if PR is from a fork
-        id: fork_check
-        run: |
-          if [[ "${{ github.event.pull_request.head.repo.fork }}" == "true" ]]; then
-            echo "is_fork=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_fork=false" >> "$GITHUB_OUTPUT"
-          fi
       - name: Validate approved contributor
         id: author_check
-        if: steps.fork_check.outputs.is_fork == 'true'
         env:
           APPROVED_EXTERNAL_CONTRIBUTORS: ${{ secrets.APPROVED_EXTERNAL_CONTRIBUTORS }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
@@ -41,7 +33,7 @@ jobs:
             exit 0
           fi
 
-          if echo "$APPROVED_EXTERNAL_CONTRIBUTORS" | jq -e --arg author "$PR_AUTHOR" 'contains([$author])' > /dev/null; then
+          if echo "$APPROVED_EXTERNAL_CONTRIBUTORS" | jq -e --arg author "$PR_AUTHOR" 'any(.[]; . == $author)' > /dev/null; then
             echo "Author $PR_AUTHOR is in APPROVED_EXTERNAL_CONTRIBUTORS."
             echo "is_approved=true" >> "$GITHUB_OUTPUT"
           else
@@ -50,7 +42,7 @@ jobs:
           fi
       - name: Verify commit signatures
         id: signature_check
-        if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true'
+        if: steps.author_check.outputs.is_approved == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO_OWNER: ${{ github.repository_owner }}
@@ -96,7 +88,7 @@ jobs:
             echo "unsigned_commits=$unsigned_commits" >> "$GITHUB_OUTPUT"
           fi
       - name: Clean up previous unsigned-commits comments
-        if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true'
+        if: steps.author_check.outputs.is_approved == 'true'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
@@ -112,7 +104,7 @@ jobs:
               gh api --method DELETE "repos/$REPO_OWNER/$REPO_NAME/issues/comments/$comment_id"
             done
       - name: Comment unsigned commits
-        if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'false'
+        if: steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'false'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}
@@ -136,7 +128,7 @@ jobs:
             --repo "$REPO_OWNER/$REPO_NAME" \
             --body "$body"
       - name: Comment /ok to test
-        if: steps.fork_check.outputs.is_fork == 'true' && steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'true'
+        if: steps.author_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'true'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
           REPO_OWNER: ${{ github.repository_owner }}

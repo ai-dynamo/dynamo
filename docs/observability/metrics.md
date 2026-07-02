@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Metrics
+subtitle: Reference for the Prometheus metrics Dynamo's runtime, frontend, and workers expose on the local system metrics endpoint.
 ---
 
 ## Overview
@@ -472,5 +473,5 @@ For the full list of metrics, configuration options, and architecture details, s
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
 - [Dynamo Architecture Overview](../design-docs/architecture.md)
 - [Backend Guide](../development/backend-guide.md)
-- [Forward Pass Metrics (SGLang)](../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) — Per-iteration scheduler telemetry via ZMQ/NATS for planner-driven scaling (intended architecture; not available in the 1.2.1 SGLang runtime image)
+- [Forward Pass Metrics (SGLang)](../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) — Per-iteration scheduler telemetry via ZMQ/NATS for planner-driven scaling (requires the SGLang runtime to ship the upstream FPM module; available as of `sglang==0.5.13.post1`)
 - [Forward Pass Metrics RFC](../proposals/vllm-rfc-forward-pass-metrics.md) - Design rationale for per-iteration metrics

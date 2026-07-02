@@ -29,7 +29,7 @@ use dynamo_runtime::{
     protocols::annotated::AnnotationsProvider,
 };
 use futures::{StreamExt, stream};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     RouteDoc,
@@ -38,6 +38,8 @@ use super::{
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
         CancellationLabels, Endpoint, ErrorType, EventConverter,
+        process_chat_response_and_observe_metrics,
+        process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
         process_response_using_event_converter_and_observe_metrics,
     },
@@ -46,8 +48,8 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, agent_context_from_headers,
-    apply_header_routing_overrides,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+    agent_context_from_headers, apply_header_routing_overrides, session_affinity_from_headers,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
@@ -79,7 +81,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 const VALIDATION_PREFIX: &str = "Validation: ";
 
-use super::error::SanitizedError;
+use super::error::{SanitizedError, overload_status_code};
 
 pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
@@ -115,6 +117,7 @@ pub(crate) struct ErrorMessage {
 fn map_error_code_to_error_type(code: StatusCode) -> String {
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
+        None if code.as_u16() == 529 => "Overloaded".to_string(),
         // 499 is not IANA-registered (nginx convention for client-closed-request),
         // so canonical_reason() returns None. Use the de facto standard name.
         None if code.as_u16() == 499 => "Client Closed Request".to_string(),
@@ -136,8 +139,9 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
         StatusCode::NOT_FOUND => ErrorType::NotFound, // 404
         StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented, // 501
         StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload, // 429
-        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload, // 503
+        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Unavailable, // 503
         StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal, // 500
+        _ if code.as_u16() == 529 => ErrorType::Overload, // 529
         _ if code.as_u16() == 499 => ErrorType::Cancelled, // 499 Client Closed Request
         _ if code.is_client_error() => ErrorType::Validation, // other 4xx
         _ => ErrorType::Internal,                     // everything else
@@ -202,26 +206,18 @@ impl ErrorMessage {
         )
     }
 
-    /// Model exists but is temporarily unable to serve (e.g., prefill not activated,
-    /// no available workers). Returns 503 so clients can retry.
-    pub fn model_unavailable() -> ErrorResponse {
-        let code = StatusCode::SERVICE_UNAVAILABLE;
-        let error_type = map_error_code_to_error_type(code);
-        (
-            code,
-            Json(ErrorMessage {
-                message: "Model temporarily unavailable".to_string(),
-                error_type,
-                code: code.as_u16(),
-                details: None,
-            }),
-        )
-    }
-
     /// Convert a ModelManagerError to the appropriate HTTP response.
+    ///
+    /// `ModelUnavailable` is the dispatch-time backstop for the same condition
+    /// the readiness gate ([`check_model_serving_ready`]) catches up front — a
+    /// registered model with no servable worker set (whichever role is missing).
+    /// It returns the identical canonical 503 body so both code paths speak with
+    /// one voice to the client.
     pub fn from_model_error(e: &crate::discovery::ModelManagerError) -> ErrorResponse {
         match e {
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => Self::model_unavailable(),
+            crate::discovery::ModelManagerError::ModelUnavailable(model) => {
+                Self::service_unavailable_with_body(model_not_ready_message(model))
+            }
             _ => Self::model_not_found(),
         }
     }
@@ -365,7 +361,7 @@ impl ErrorMessage {
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
         if let Some(rejection) = find_queue_rejection_in_chain(err.as_ref()) {
-            let code = StatusCode::SERVICE_UNAVAILABLE;
+            let code = overload_status_code();
             return (
                 code,
                 Json(ErrorMessage {
@@ -377,10 +373,18 @@ impl ErrorMessage {
             );
         }
 
-        // Check for ResourceExhausted anywhere in the error chain → HTTP 503
+        // Check for ResourceExhausted anywhere in the error chain → HTTP 529
         if super::metrics::request_was_rejected(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Overloaded,
+                format!("{err:#}"),
+            );
+        }
+
+        // No backend workers are currently routable → HTTP 503.
+        if super::metrics::request_was_unavailable(err.as_ref()) {
+            return ErrorMessage::sanitized_with_details(
+                SanitizedError::Unavailable,
                 format!("{err:#}"),
             );
         }
@@ -547,6 +551,9 @@ fn context_from_headers<T: Send + Sync + 'static>(
     if let Some(agent_context) = agent_context_from_headers(headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
+    if let Some(session_affinity) = session_affinity_from_headers(headers) {
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+    }
     Ok(request)
 }
 
@@ -567,21 +574,33 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     if let Ok(agent_context) = source.get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY) {
         target.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.as_ref().clone());
     }
+    if let Ok(session_affinity) = source.get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY) {
+        target.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            session_affinity.as_ref().clone(),
+        );
+    }
 }
 
 /// Warn (once per request) when nvext data is dropped because the extension is
 /// disabled. Only called from the disabled branch, so the default path is free.
 fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
     use crate::protocols::common::extensions::{
-        HEADER_DP_RANK, HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_INSTANCE_ID,
-        HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, HEADER_WORKER_INSTANCE_ID,
+        HEADER_DATA_PARALLEL_RANK_ALIAS, HEADER_DP_RANK, HEADER_DP_RANK_ALIAS,
+        HEADER_PREFILL_DP_RANK, HEADER_PREFILL_DP_RANK_ALIAS, HEADER_PREFILL_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID_ALIAS, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY,
+        HEADER_WORKER_INSTANCE_ID, HEADER_WORKER_INSTANCE_ID_ALIAS,
     };
     let header_present = [
         HEADER_WORKER_INSTANCE_ID,
+        HEADER_WORKER_INSTANCE_ID_ALIAS,
         HEADER_PREFILL_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID_ALIAS,
         HEADER_DP_RANK,
         HEADER_DP_RANK_ALIAS,
+        HEADER_DATA_PARALLEL_RANK_ALIAS,
         HEADER_PREFILL_DP_RANK,
+        HEADER_PREFILL_DP_RANK_ALIAS,
         HEADER_REQUEST_PRIORITY,
         HEADER_REQUEST_STRICT_PRIORITY,
     ]
@@ -591,7 +610,7 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
     if nvext_present || header_present {
         tracing::warn!(
             endpoint,
-            "request carried nvext data but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
+            "request carried nvext data but the nvext extension is disabled on this frontend; dropping it"
         );
     }
 }
@@ -607,8 +626,11 @@ fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap)
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateCompletionRequest>,
+    body: Bytes,
 ) -> Result<Response, ErrorResponse> {
+    ensure_json_content_type(&headers)?;
+    let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
+
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
@@ -1202,8 +1224,11 @@ fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error>
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateChatCompletionRequest>,
+    body: Bytes,
 ) -> Result<Response, ErrorResponse> {
+    ensure_json_content_type(&headers)?;
+    let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
+
     // return a 503 if the service is not ready (process-level + per-model
     // serving readiness). An aggregated request to a decode-only namespace
     // would otherwise hang/crash on the decode worker. Resolve the templated
@@ -1256,6 +1281,142 @@ async fn handler_chat_completions(
     connection_handle.disarm();
 
     response
+}
+
+fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
+where
+    T: DeserializeOwned,
+{
+    match serde_json::from_slice(body) {
+        Ok(request) => Ok(request),
+        Err(original_error) => {
+            if let Some(escaped_body) = escape_json_string_control_chars(body) {
+                match serde_json::from_slice(&escaped_body) {
+                    Ok(request) => {
+                        tracing::warn!(
+                            endpoint,
+                            "Accepted request after escaping unescaped control characters in JSON strings"
+                        );
+                        Ok(request)
+                    }
+                    Err(_) => parse_json_request_lossy(endpoint, body)
+                        .map_err(|_| json_deserialize_error(original_error)),
+                }
+            } else {
+                parse_json_request_lossy(endpoint, body)
+                    .map_err(|_| json_deserialize_error(original_error))
+            }
+        }
+    }
+}
+
+fn parse_json_request_lossy<T>(endpoint: &'static str, body: &[u8]) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    let lossy_body = String::from_utf8_lossy(body);
+    if lossy_body.as_bytes() == body {
+        return serde_json::from_slice(body);
+    }
+
+    let escaped_body = escape_json_string_control_chars(lossy_body.as_bytes())
+        .unwrap_or_else(|| lossy_body.into_owned().into_bytes());
+    let request = serde_json::from_slice(&escaped_body)?;
+    tracing::warn!(
+        endpoint,
+        "Accepted request after replacing invalid UTF-8 and escaping unescaped control characters in JSON strings"
+    );
+    Ok(request)
+}
+
+fn json_deserialize_error(error: serde_json::Error) -> ErrorResponse {
+    let code = StatusCode::BAD_REQUEST;
+    (
+        code,
+        Json(ErrorMessage {
+            message: format!("Failed to deserialize the JSON body into the target type: {error}"),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+        }),
+    )
+}
+
+fn ensure_json_content_type(headers: &HeaderMap) -> Result<(), ErrorResponse> {
+    let Some(content_type) = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Err(unsupported_media_type_error());
+    };
+
+    if is_json_content_type(content_type) {
+        Ok(())
+    } else {
+        Err(unsupported_media_type_error())
+    }
+}
+
+fn unsupported_media_type_error() -> ErrorResponse {
+    let code = StatusCode::UNSUPPORTED_MEDIA_TYPE;
+    (
+        code,
+        Json(ErrorMessage {
+            message: "Expected request with Content-Type application/json".to_string(),
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+        }),
+    )
+}
+
+fn is_json_content_type(content_type: &str) -> bool {
+    let media_type = content_type.split(';').next().unwrap_or_default().trim();
+    let Some((media_type, subtype)) = media_type.split_once('/') else {
+        return false;
+    };
+
+    media_type.eq_ignore_ascii_case("application")
+        && (subtype.eq_ignore_ascii_case("json")
+            || subtype
+                .to_ascii_lowercase()
+                .rsplit_once('+')
+                .is_some_and(|(_, suffix)| suffix == "json"))
+}
+
+fn escape_json_string_control_chars(body: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut changed = false;
+
+    for &byte in body {
+        if in_string && byte <= 0x1f {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            if escaped {
+                out.extend_from_slice(b"\\\\u00");
+                escaped = false;
+            } else {
+                out.extend_from_slice(b"\\u00");
+            }
+            out.push(HEX[(byte >> 4) as usize]);
+            out.push(HEX[(byte & 0x0f) as usize]);
+            changed = true;
+            continue;
+        }
+
+        out.push(byte);
+
+        if escaped {
+            escaped = false;
+        } else if in_string && byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            in_string = !in_string;
+        }
+    }
+
+    changed.then_some(out)
 }
 
 /// Checks if an Annotated event represents a backend error and extracts error information.
@@ -1678,6 +1839,14 @@ async fn chat_completions(
             err_response
         })?;
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -1763,7 +1932,7 @@ async fn chat_completions(
 
                 // Convert to SSE event (this consumes the response).
                 // EventConverter will detect `event: "error"` and convert to SSE error events.
-                let sse_result = process_response_using_event_converter_and_observe_metrics(
+                let sse_result = process_chat_response_using_event_converter_and_observe_metrics(
                     EventConverter::from(response),
                     &mut response_collector,
                     &mut http_queue_guard,
@@ -1805,7 +1974,7 @@ async fn chat_completions(
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
             // Calls observe_response() on each token - drops http_queue_guard on first token
-            process_response_and_observe_metrics(
+            process_chat_response_and_observe_metrics(
                 response,
                 &mut response_collector,
                 &mut http_queue_guard,
@@ -2149,6 +2318,14 @@ async fn responses(
             err_response
         })?;
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state
         .metrics_clone()
         .create_response_collector(&metric_model);
@@ -2200,7 +2377,7 @@ async fn responses(
             let mut saw_error = false;
 
             while let Some(annotated_chunk) = engine_stream.next().await {
-                process_response_and_observe_metrics(
+                process_chat_response_and_observe_metrics(
                     &annotated_chunk,
                     &mut response_collector,
                     &mut http_queue_guard,
@@ -2256,7 +2433,7 @@ async fn responses(
 
         let mut http_queue_guard = Some(http_queue_guard);
         let stream = stream_with_check.inspect(move |response| {
-            process_response_and_observe_metrics(
+            process_chat_response_and_observe_metrics(
                 response,
                 &mut response_collector,
                 &mut http_queue_guard,
@@ -2344,12 +2521,27 @@ pub fn validate_response_unsupported_fields(
 }
 
 // todo - abstract this to the top level lib.rs to be reused
-// todo - move the service_observer to its own state/arc
-pub(crate) fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
-    // if state.service_observer.stage() != ServiceStage::Ready {
-    //     return Err(ErrorMessage::service_unavailable());
-    // }
+pub(crate) fn check_ready(state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
+    if !state.is_ready() {
+        return Err(ErrorMessage::_service_unavailable());
+    }
     Ok(())
+}
+
+/// Canonical, customer-facing message for "model is registered but not yet
+/// ready to serve requests" (deployment still initializing or incomplete).
+///
+/// One message for every not-ready cause — whichever worker role is missing,
+/// the client sees the same text. Deliberately free of internal taxonomy
+/// (worker types, namespaces, "worker set"): it stays clear and actionable for
+/// end users without leaking deployment internals. Operators get the detailed,
+/// per-role breakdown from `GET /v1/models/{model}/ready` instead.
+pub(crate) fn model_not_ready_message(model_name: &str) -> String {
+    format!(
+        "Model `{model_name}` is not ready to serve requests yet. \
+         The deployment may still be starting up or is not fully provisioned. \
+         Please retry shortly."
+    )
 }
 
 /// Per-model serving readiness gate.
@@ -2376,11 +2568,9 @@ pub(crate) fn check_model_serving_ready(
     if model.has_ready_workers() {
         return Ok(());
     }
-    Err(ErrorMessage::service_unavailable_with_body(format!(
-        "Model `{model_name}` is registered but no namespace has a complete worker set. \
-         At least one prefill/decode/encode worker type required by a registered worker is missing. \
-         Check worker startup logs for the affected namespace."
-    )))
+    Err(ErrorMessage::service_unavailable_with_body(
+        model_not_ready_message(model_name),
+    ))
 }
 
 /// openai compatible format
@@ -3212,10 +3402,147 @@ mod tests {
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
         ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
-        CreateCompletionRequest,
+        CreateCompletionRequest, Prompt,
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    #[test]
+    fn test_is_json_content_type() {
+        assert!(is_json_content_type("application/json"));
+        assert!(is_json_content_type("application/json; charset=utf-8"));
+        assert!(is_json_content_type("Application/JSON"));
+        assert!(is_json_content_type("application/vnd.dynamo+json"));
+        assert!(!is_json_content_type("text/plain"));
+        assert!(!is_json_content_type("application/json-patch"));
+        assert!(!is_json_content_type("application"));
+    }
+
+    #[test]
+    fn test_ensure_json_content_type_rejects_missing_or_non_json() {
+        let headers = HeaderMap::new();
+        let err = ensure_json_content_type(&headers).expect_err("missing content type should fail");
+        assert_eq!(err.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain".parse().unwrap(),
+        );
+        let err =
+            ensure_json_content_type(&headers).expect_err("non-json content type should fail");
+        assert_eq!(err.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_escapes_control_chars_in_strings() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"log \x1b[33mPK\x03\x04\"}]}";
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+
+        let message = request
+            .inner
+            .messages
+            .first()
+            .expect("message should exist");
+        let ChatCompletionRequestMessage::User(user_message) = message else {
+            panic!("expected user message");
+        };
+        let ChatCompletionRequestUserMessageContent::Text(content) = &user_message.content else {
+            panic!("expected text content");
+        };
+        assert_eq!(content, "log \u{1b}[33mPK\u{3}\u{4}");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_replaces_invalid_utf8_in_strings() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"raw \xff data\"}]}";
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+
+        let message = request
+            .inner
+            .messages
+            .first()
+            .expect("message should exist");
+        let ChatCompletionRequestMessage::User(user_message) = message else {
+            panic!("expected user message");
+        };
+        let ChatCompletionRequestUserMessageContent::Text(content) = &user_message.content else {
+            panic!("expected text content");
+        };
+        assert_eq!(content, "raw \u{fffd} data");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_escapes_control_char_after_backslash() {
+        let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"slash \\\nnext\"}]}";
+
+        let request: NvCreateChatCompletionRequest =
+            parse_json_request("chat completions", body).expect("request should parse");
+
+        let message = request
+            .inner
+            .messages
+            .first()
+            .expect("message should exist");
+        let ChatCompletionRequestMessage::User(user_message) = message else {
+            panic!("expected user message");
+        };
+        let ChatCompletionRequestUserMessageContent::Text(content) = &user_message.content else {
+            panic!("expected text content");
+        };
+        assert_eq!(content, "slash \\\nnext");
+    }
+
+    #[test]
+    fn test_parse_chat_completion_request_keeps_schema_errors() {
+        let body = br#"{"model":"test-model","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"working"}]}]}"#;
+
+        let err =
+            match parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body) {
+                Ok(_) => panic!("schema should still fail"),
+                Err(err) => err,
+            };
+
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(
+            err.1
+                .message
+                .contains("ChatCompletionRequestAssistantMessageContent"),
+            "unexpected error: {}",
+            err.1.message
+        );
+    }
+
+    #[test]
+    fn test_parse_completion_request_escapes_control_chars_in_prompt() {
+        let body =
+            b"{\"model\":\"test-model\",\"prompt\":\"log \x1b[33mPK\x03\x04\",\"max_tokens\":1}";
+
+        let request: NvCreateCompletionRequest =
+            parse_json_request("completions", body).expect("request should parse");
+
+        let Prompt::String(prompt) = &request.inner.prompt else {
+            panic!("expected string prompt");
+        };
+        assert_eq!(prompt, "log \u{1b}[33mPK\u{3}\u{4}");
+    }
+
+    #[test]
+    fn test_parse_completion_request_replaces_invalid_utf8_in_prompt() {
+        let body = b"{\"model\":\"test-model\",\"prompt\":\"raw \xff data\",\"max_tokens\":1}";
+
+        let request: NvCreateCompletionRequest =
+            parse_json_request("completions", body).expect("request should parse");
+
+        let Prompt::String(prompt) = &request.inner.prompt else {
+            panic!("expected string prompt");
+        };
+        assert_eq!(prompt, "raw \u{fffd} data");
+    }
 
     fn http_error_from_engine(code: u16) -> Result<(), anyhow::Error> {
         Err(HttpError {
@@ -3279,11 +3606,41 @@ mod tests {
     }
 
     #[test]
+    fn test_context_metadata_preserves_session_affinity() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-dynamo-session-id", "session-123".parse().unwrap());
+        let source = context_from_headers((), "request-1".to_string(), &headers).unwrap();
+        let affinity = source
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity attached");
+        assert_eq!(affinity.as_str(), "session-123");
+
+        let mut target = Context::new(());
+        copy_context_metadata(&source, &mut target);
+        let affinity = target
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity copied");
+        assert_eq!(affinity.as_str(), "session-123");
+    }
+
+    #[test]
     fn test_http_error_response_from_anyhow() {
         let err = http_error_from_engine(400).unwrap_err();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.message, "custom error message");
+    }
+
+    #[test]
+    fn test_check_ready_rejects_draining_service() {
+        let service = service_v2::HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        assert!(check_ready(&state).is_ok());
+
+        state.start_draining();
+        let response = check_ready(&state).unwrap_err();
+        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
@@ -3348,7 +3705,9 @@ mod tests {
             .build()
             .into();
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.code, 529);
+        assert_eq!(response.1.error_type, "Overloaded");
         assert_eq!(response.1.message, "Service temporarily overloaded");
         assert!(
             !response.1.message.contains("All workers are busy"),
@@ -3357,7 +3716,23 @@ mod tests {
     }
 
     #[test]
-    fn queue_rejection_maps_to_structured_http_503() {
+    fn unavailable_error_response_from_anyhow() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        let err: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Unavailable)
+            .message("No workers available for endpoint test/worker/generate")
+            .build()
+            .into();
+        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+        assert_eq!(response.1.message, "Service temporarily unavailable");
+    }
+
+    #[test]
+    fn queue_rejection_maps_to_structured_http_529() {
         use dynamo_kv_router::scheduling::{QueueLimitKind, QueueRejection};
 
         let rejection = QueueRejection {
@@ -3369,8 +3744,9 @@ mod tests {
         let response =
             ErrorMessage::from_anyhow(anyhow::Error::new(rejection), BACKUP_ERROR_MESSAGE);
 
-        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.code, 529);
+        assert_eq!(response.1.error_type, "Overloaded");
         assert_eq!(
             response.1.details.as_deref(),
             Some(&serde_json::json!({
@@ -3639,7 +4015,9 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}`thinking.type` must be `enabled` or `disabled`")
+                format!(
+                    "{VALIDATION_PREFIX}`thinking.type` must be `enabled`, `disabled`, or `adaptive`"
+                )
             );
         }
     }
@@ -4318,6 +4696,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -4357,6 +4736,7 @@ mod tests {
                     usage: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: Some("msg-1".to_string()),
             event: None,
@@ -4452,7 +4832,11 @@ mod tests {
             ErrorType::Overload
         );
         assert_eq!(
-            classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Overloaded"),
+            classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Unavailable"),
+            ErrorType::Unavailable
+        );
+        assert_eq!(
+            classify_error_for_metrics(overload_status_code(), "Overloaded"),
             ErrorType::Overload
         );
         assert_eq!(
@@ -4497,10 +4881,11 @@ mod tests {
 
     #[test]
     fn test_extract_error_type_from_response_unavailable() {
-        let response = ErrorMessage::model_unavailable();
+        let response =
+            ErrorMessage::from_model_error(&ModelManagerError::ModelUnavailable("x".to_string()));
         assert_eq!(
             extract_error_type_from_response(&response),
-            ErrorType::Overload
+            ErrorType::Unavailable
         );
     }
 
@@ -4517,6 +4902,49 @@ mod tests {
             ErrorMessage::from_model_error(&unavailable).0,
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    /// The not-ready 503 must be customer-facing: clear and actionable, but free
+    /// of internal worker-role / topology taxonomy. Whichever role is missing
+    /// (prefill or decode), the client sees the same text — so the message must
+    /// never name a specific role, namespace, or "worker set".
+    #[test]
+    fn test_model_not_ready_message_hides_internals() {
+        let msg = model_not_ready_message("my-model").to_lowercase();
+        for leak in [
+            "prefill",
+            "decode",
+            "encode",
+            "worker",
+            "namespace",
+            "needs",
+        ] {
+            assert!(
+                !msg.contains(leak),
+                "not-ready message leaks internal term `{leak}`: {msg}"
+            );
+        }
+        // Still names the model and signals retryability.
+        assert!(model_not_ready_message("my-model").contains("my-model"));
+        assert!(msg.contains("retry"));
+    }
+
+    /// The dispatch-time backstop (`from_model_error` on `ModelUnavailable`) and
+    /// the up-front readiness gate must speak with one voice: identical 503 body
+    /// for the same "registered but not servable" condition, regardless of which
+    /// role (prefill vs decode) is the missing one.
+    #[test]
+    fn test_unavailable_paths_share_one_message() {
+        let backstop = ErrorMessage::from_model_error(&ModelManagerError::ModelUnavailable(
+            "my-model".to_string(),
+        ));
+        assert_eq!(backstop.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(backstop.1.message, model_not_ready_message("my-model"));
+
+        // The gate constructs its body from the same canonical helper, so the
+        // two paths cannot drift apart.
+        let gate = ErrorMessage::service_unavailable_with_body(model_not_ready_message("my-model"));
+        assert_eq!(gate.1.message, backstop.1.message);
     }
 
     #[test]
@@ -4656,6 +5084,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         };
         Annotated {
             id: Some("test-id".to_string()),
@@ -5289,6 +5718,7 @@ mod tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         }
     }
 

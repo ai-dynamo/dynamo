@@ -1,17 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use anyhow::Result;
 use dynamo_kv_router::protocols::{TokensWithHashes, WorkerWithDpRank};
 use dynamo_runtime::{
+    discovery::ClaimPayloadFuture,
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
     },
     protocols::annotated::Annotated,
+    traits::DistributedRuntimeProvider,
 };
 use futures::stream::{self, StreamExt};
 use tracing::Instrument;
@@ -23,6 +24,9 @@ use crate::{
         llm_backend::LLMEngineOutput,
         timing::{RequestPhase, RoutingData},
     },
+    session_affinity::{
+        AffinityCoordinator, AffinityTarget, ResolvedAffinity, affinity_id, session_final,
+    },
 };
 
 mod cancellation;
@@ -31,24 +35,43 @@ mod selection;
 
 use cancellation::{cancel_on_stop, cancelled_error};
 use request_guard::RequestGuard;
-use selection::{RoutingRequestParts, WorkerSelection};
+use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
+
+const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
+const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    affinity: Option<AffinityCoordinator>,
 }
 
 impl KvPushRouter {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
-    ) -> Self {
+        session_affinity_ttl: Option<Duration>,
+    ) -> Result<Self, Error> {
+        let affinity = session_affinity_ttl
+            .map(|ttl| {
+                AffinityCoordinator::new_distributed(
+                    ttl,
+                    inner.client.endpoint.id().to_string(),
+                    inner.client.endpoint.drt().discovery(),
+                )
+            })
+            .transpose()?;
+
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
         // and the standalone router create KvPushRouter, so this covers both.
         RouterRequestMetrics::from_component(chooser.client().endpoint.component());
 
-        KvPushRouter { inner, chooser }
+        Ok(KvPushRouter {
+            inner,
+            chooser,
+            affinity,
+        })
     }
 
     async fn select_request(
@@ -56,6 +79,7 @@ impl KvPushRouter {
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         is_query_only: bool,
+        affinity_worker: Option<WorkerWithDpRank>,
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
@@ -68,7 +92,10 @@ impl KvPushRouter {
                 routing_parts,
                 phase,
                 is_query_only,
-                policy_class,
+                SelectionOptions {
+                    affinity_worker,
+                    policy_class,
+                },
             )
             .instrument(tracing::info_span!("kv_router.select_worker"))
             .await
@@ -96,10 +123,61 @@ impl KvPushRouter {
         }
     }
 
+    async fn select_with_affinity(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+        is_query_only: bool,
+    ) -> Result<(WorkerSelection, Option<ResolvedAffinity>), Error> {
+        let Some(affinity) = self.affinity.as_ref() else {
+            return Ok((
+                self.select_request(request, phase, is_query_only, None)
+                    .await?,
+                None,
+            ));
+        };
+        let Some(session_id) = affinity_id(request)? else {
+            return Ok((
+                self.select_request(request, phase, is_query_only, None)
+                    .await?,
+                None,
+            ));
+        };
+        if is_query_only {
+            let target = affinity.query_target(&session_id)?;
+            let worker = target.and_then(affinity_worker);
+            return Ok((
+                self.select_request(request, phase, true, worker).await?,
+                None,
+            ));
+        }
+
+        let request_context = request.context();
+        let operation = affinity
+            .acquire_with_context(&session_id, request_context.as_ref())
+            .await?;
+        let resolved = operation
+            .resolve(|| -> ClaimPayloadFuture<'_> {
+                Box::pin(async {
+                    let selection = self.select_request(request, phase, true, None).await?;
+                    let target = AffinityTarget {
+                        worker_id: selection.instance_id,
+                        dp_rank: Some(selection.dp_rank),
+                    };
+                    Ok(serde_json::to_value(target)?)
+                })
+            })
+            .await?;
+        let worker = affinity_worker(resolved.target());
+        let selection = self.select_request(request, phase, false, worker).await?;
+        Ok((selection, Some(resolved)))
+    }
+
     async fn track_selection(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         selection: &mut WorkerSelection,
+        is_query_only: bool,
     ) -> Result<RequestGuard, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
@@ -113,7 +191,7 @@ impl KvPushRouter {
         );
 
         let record_result: Result<(), Error> = async {
-            if self.chooser.indexer().records_routing_decisions() {
+            if !is_query_only && self.chooser.indexer().records_routing_decisions() {
                 let worker = WorkerWithDpRank::new(selection.instance_id, selection.dp_rank);
                 let record_result = if let Some(hashes) = selection.routing_hashes.take() {
                     cancel_on_stop(
@@ -199,6 +277,7 @@ impl KvPushRouter {
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         guard.start_dispatch(&phase_label);
+        self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.dp_rank);
@@ -268,20 +347,62 @@ impl KvPushRouter {
         Ok(ResponseStream::new(wrapped_stream, stream_context))
     }
 
+    fn warn_if_output_replay_annotation_ignored(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        selection: &WorkerSelection,
+    ) {
+        let Some(replay_key) = request.get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY) else {
+            return;
+        };
+        let consumes_replay = self
+            .chooser
+            .workers_with_configs
+            .borrow()
+            .get(&selection.instance_id)
+            .and_then(|config| {
+                config
+                    .get_engine_specific::<bool>(OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY)
+                    .ok()
+                    .flatten()
+            })
+            .unwrap_or(false);
+        if consumes_replay {
+            return;
+        }
+
+        tracing::warn!(
+            replay_key,
+            worker_id = selection.instance_id,
+            dp_rank = selection.dp_rank,
+            "request has output token replay annotation but selected worker has not declared replay-token consumption"
+        );
+    }
+
     pub(crate) async fn select_and_dispatch_prefill<M, F>(
         &self,
         mut request: SingleIn<PreprocessedRequest>,
         prepare: F,
     ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>), Error>
     where
-        F: FnOnce(&mut PreprocessedRequest, u64, Option<u32>) -> Result<M, Error>,
+        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
         let phase = RequestPhase::Prefill;
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let mut selection = self.select_request(&request, phase, false).await?;
-        let mut guard = self.track_selection(&request, &mut selection).await?;
-        let metadata = match prepare(&mut request, selection.instance_id, Some(selection.dp_rank)) {
+        let is_query_only = request.get_annotation_value("query_instance_id").is_some();
+        let close_on_finish = !is_query_only && session_final(request.content());
+        let (mut selection, operation) = self
+            .select_with_affinity(&request, phase, is_query_only)
+            .await?;
+        let mut guard = self
+            .track_selection(&request, &mut selection, is_query_only)
+            .await?;
+        let target = AffinityTarget {
+            worker_id: selection.instance_id,
+            dp_rank: Some(selection.dp_rank),
+        };
+        let metadata = match prepare(&mut request, target) {
             Ok(metadata) => metadata,
             Err(error) => {
                 guard.abort().await;
@@ -292,7 +413,10 @@ impl KvPushRouter {
         let stream = self
             .dispatch_selection(request, selection, guard, true)
             .await?;
-        Ok((metadata, stream))
+        let Some(operation) = operation else {
+            return Ok((metadata, stream));
+        };
+        Ok((metadata, operation.into_stream(stream, close_on_finish)))
     }
 }
 
@@ -331,7 +455,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .unwrap_or(RequestPhase::Aggregated);
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
-        let mut selection = self.select_request(&request, phase, is_query_only).await?;
+        let close_on_finish = !is_query_only && session_final(request.content());
+        let (mut selection, operation) = self
+            .select_with_affinity(&request, phase, is_query_only)
+            .await?;
         if is_query_only {
             let routing_parts = RoutingRequestParts::new(&request);
             if let Some(ref tracker) = request.tracker {
@@ -377,11 +504,24 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
 
-        let guard = self.track_selection(&request, &mut selection).await?;
+        let guard = self
+            .track_selection(&request, &mut selection, false)
+            .await?;
         drop(route_guard);
-        self.dispatch_selection(request, selection, guard, false)
-            .await
+        let stream = self
+            .dispatch_selection(request, selection, guard, operation.is_some())
+            .await?;
+        match operation {
+            Some(operation) => Ok(operation.into_stream(stream, close_on_finish)),
+            None => Ok(stream),
+        }
     }
+}
+
+fn affinity_worker(target: AffinityTarget) -> Option<WorkerWithDpRank> {
+    target
+        .dp_rank
+        .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
 }
 
 /// A direct routing wrapper for `RouterMode::Direct`.
@@ -426,5 +566,201 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         tracing::debug!(worker_id = worker_id, "Direct routing to specified worker");
 
         self.inner.direct(request, worker_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+
+    use dynamo_kv_router::{DefaultWorkerSelector, config::KvRouterConfig};
+    use dynamo_runtime::{
+        DistributedRuntime, Runtime,
+        distributed::DistributedConfig,
+        error::{ErrorType, match_error_chain},
+        pipeline::{AsyncEngineContext, Context, PushRouter, RouterMode, context::Controller},
+    };
+    use tokio::sync::watch;
+
+    use super::*;
+    use crate::{
+        local_model::runtime_config::ModelRuntimeConfig,
+        protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+    };
+
+    fn request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap()
+    }
+
+    async fn router(session_affinity_ttl: Option<Duration>) -> (KvPushRouter, Runtime) {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = distributed
+            .namespace("affinity-selection-cancellation".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap();
+        let endpoint = component.endpoint("generate");
+        let client = endpoint.client().await.unwrap();
+        let workers = HashMap::from([
+            (7, ModelRuntimeConfig::default()),
+            (8, ModelRuntimeConfig::default()),
+        ]);
+        let (_tx, workers) = watch::channel(workers);
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+        let chooser = KvRouter::new(
+            endpoint,
+            client.clone(),
+            workers,
+            16,
+            DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+            Some(config),
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let inner = PushRouter::from_client(client, RouterMode::KV)
+            .await
+            .unwrap();
+        let router = KvPushRouter::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+        (router, runtime)
+    }
+
+    #[tokio::test]
+    async fn session_affinity_disabled_does_not_create_coordinator() {
+        let (router, runtime) = router(None).await;
+        assert!(router.affinity.is_none());
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn session_affinity_existing_selection_cancellation_preserves_binding_without_retry() {
+        let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+        let session_id = SessionAffinityId::new("cancelled-selection");
+        let original_target = AffinityTarget {
+            worker_id: 7,
+            dp_rank: Some(0),
+        };
+        let resolved = router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .acquire(&session_id)
+            .await
+            .unwrap()
+            .resolve(|| Box::pin(async move { Ok(serde_json::to_value(original_target)?) }))
+            .await
+            .unwrap();
+        drop(resolved);
+
+        let controller = Controller::new("cancelled-selection-request".to_string());
+        controller.stop();
+        let mut request = Context::with_controller(request(), controller);
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+
+        let Err(error) = router
+            .select_with_affinity(&request, RequestPhase::Aggregated, false)
+            .await
+        else {
+            panic!("stopped request must return cancellation");
+        };
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::Cancelled],
+            &[]
+        ));
+        assert_eq!(
+            router
+                .affinity
+                .as_ref()
+                .unwrap()
+                .query_target(&session_id)
+                .unwrap(),
+            Some(original_target)
+        );
+
+        let resolved = router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .acquire(&session_id)
+            .await
+            .unwrap()
+            .resolve(|| {
+                Box::pin(async move {
+                    Ok(serde_json::to_value(AffinityTarget {
+                        worker_id: 8,
+                        dp_rank: Some(0),
+                    })?)
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(resolved.target(), original_target);
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn session_affinity_binding_overrides_conflicting_explicit_proposal() {
+        let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+        let session_id = SessionAffinityId::new("conflicting-explicit-proposal");
+        let bound_target = AffinityTarget {
+            worker_id: 7,
+            dp_rank: Some(0),
+        };
+        let resolved = router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .acquire(&session_id)
+            .await
+            .unwrap()
+            .resolve(|| Box::pin(async move { Ok(serde_json::to_value(bound_target)?) }))
+            .await
+            .unwrap();
+        drop(resolved);
+
+        let mut content = request();
+        content.routing_mut().backend_instance_id = Some(8);
+        content.routing_mut().decode_worker_id = Some(8);
+        content.routing_mut().dp_rank = Some(0);
+        let mut request = Context::new(content);
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+        let (selection, resolved) = router
+            .select_with_affinity(&request, RequestPhase::Aggregated, false)
+            .await
+            .unwrap();
+        assert_eq!(selection.instance_id, 7);
+        assert_eq!(selection.dp_rank, 0);
+        assert_eq!(resolved.unwrap().target(), bound_target);
+        router.chooser.free(request.context().id()).await.unwrap();
+
+        drop(router);
+        runtime.shutdown();
     }
 }

@@ -60,7 +60,7 @@ Queue limits are configured per discovered worker endpoint with
 configured value multiplied by the current number of discovered endpoints.
 Limits are checked against current usage before adding the incoming request,
 so the request that crosses a limit is accepted and the next queued request is
-rejected with HTTP 503 and the effective total. Worker removal does not evict
+rejected with HTTP 529 and the effective total. Worker removal does not evict
 queued requests; new arrivals reject until usage drains or capacity returns.
 DRR charges the uncached-token snapshot captured at enqueue, while raw, cached,
 and uncached snapshots remain unchanged for limits, WSPT, counters, and later
@@ -94,7 +94,7 @@ no separate first-stage admission queue or global cross-class cap.
 
 This is intentionally not behavior preserving. Class limits are worker-scaled
 and class-local rather than global; rejection returns the structured
-policy-class HTTP 503 response rather than the previous overload 429 path; and
+policy-class HTTP 529 response rather than the previous overload 429 path; and
 it does not exclude the entire router instance. The previous flat
 `default_policy_class` and `uncached_isl_policy_class_tiers` schema is not
 accepted, and ordinary physical classes are no longer direct header
@@ -102,6 +102,52 @@ overrides. The sample is a Baseten-oriented continuing-session starting point,
 not a compatibility profile.
 
 For `--router-mode device-aware-weighted`, set `DYN_ENCODER_CUDA_TO_CPU_RATIO` to the approximate throughput ratio of one non-CPU worker relative to one CPU worker. The default is `8`.
+
+## Session Affinity
+
+Session affinity is disabled by default. On the frontend, set
+`--router-session-affinity-ttl-secs` or `DYN_ROUTER_SESSION_AFFINITY_TTL_SECS` to
+a value from `1` through `31536000` to enable it, then send
+`X-Dynamo-Session-ID` to keep related requests on one worker. Supplying the header
+without the TTL option provides session identity but does not enable router affinity.
+
+The first affinity request creates one immutable binding from the session ID to a
+worker and, when available, a data-parallel rank. The binding is scoped to the
+existing endpoint and phase, so disaggregated prefill and decode routes remain
+separate. Later requests exact-dispatch to that target without transport fallback.
+An existing local or shared binding takes precedence over explicit routing headers;
+those headers are proposals only while the claim is absent. Direct mode therefore
+requires an explicit target for a new binding, but an existing binding supplies the
+target for later requests. Query-only requests remain read-only and do not create or
+close claims.
+
+With etcd or FileStore on a filesystem shared by all replicas, frontends coordinate
+through an immutable distributed claim. The existing-session hot path reads only the
+process-local cache. A cache miss reads shared storage first and attempts an atomic
+insertion only when the claim is absent. Racing frontends all cache and dispatch to
+the stored winner. Storage errors fail the request before scheduler bookkeeping or
+dispatch. MemoryStore coordinates only callers sharing the same process and store.
+Kubernetes discovery does not provide cross-process affinity and keeps process-local
+behavior.
+
+For distributed backends, `--router-session-affinity-ttl-secs` controls only
+process-local cache eviction. A cache miss after local eviction reloads the immutable
+claim. The claim itself follows the creating frontend's existing etcd lease or
+FileStore ownership lifetime; it is not a global idle-session timeout. Delete events
+eventually invalidate other frontend caches. Watch lag, disconnect, or restart clears
+the entire local affinity cache, and later requests reload claims on demand.
+
+`X-Dynamo-Session-Final: true` marks a terminal request. Dynamo routes that request
+normally, then evicts the closing frontend's cache entry and idempotently deletes the
+shared claim. Other replicas observe the delete eventually. Close must not race active
+requests, and callers must not use that session ID again. The same no-reuse rule
+applies after claim expiry. If the bound worker disappears while the claim exists,
+exact dispatch fails; start a new session with a new session ID.
+
+Global idle-session TTL, rebinding, dead-worker replacement, compare-and-swap updates,
+fencing, generations, broader `WorkerSet` affinity, and backend-tokenized path
+expansion are outside this contract. The setting remains independent of
+`--router-ttl-secs` and `--router-predicted-ttl-secs`; omit it to disable affinity.
 
 ### AIC Prefill Load Model
 
