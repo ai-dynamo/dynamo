@@ -5,38 +5,49 @@
 
 import logging
 import os
-from collections.abc import Callable
 from pathlib import Path
 
 _CPU_SYSFS_ROOT = Path("/sys/devices/system/cpu")
 
 
+def _format_cpu_ranges(cpus: list[int]) -> str:
+    ranges: list[tuple[int, int]] = []
+    for cpu in cpus:
+        if ranges and cpu == ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], cpu)
+        else:
+            ranges.append((cpu, cpu))
+    return ",".join(
+        str(start) if start == end else f"{start}-{end}" for start, end in ranges
+    )
+
+
 def warn_if_frontend_cpu_affinity_spans_numa_nodes(
     logger: logging.Logger,
-    *,
-    cpu_root: Path = _CPU_SYSFS_ROOT,
-    affinity_getter: Callable[[int], set[int]] | None = None,
 ) -> None:
     """Log a warning if the current CPU affinity covers multiple NUMA nodes."""
 
-    affinity_getter = affinity_getter or getattr(os, "sched_getaffinity", None)
-    if affinity_getter is None:
-        return
-
     try:
-        cpus = sorted(affinity_getter(0))
+        cpus = sorted(os.sched_getaffinity(0))
         nodes = sorted(
             {
-                int(node_path.name[4:])
+                node_path.name
                 for cpu in cpus
-                for node_path in (cpu_root / f"cpu{cpu}").glob("node[0-9]*")
-                if node_path.name[4:].isdigit()
+                for node_path in (_CPU_SYSFS_ROOT / f"cpu{cpu}").glob("node[0-9]*")
             }
         )
-    except Exception:
+    except (AttributeError, OSError) as error:
+        logger.debug("NUMA affinity check skipped: %s", error, exc_info=True)
         return
 
-    if len(nodes) < 2:
+    if not nodes:
+        logger.debug(
+            "NUMA affinity check skipped: no NUMA node links found for CPUs %s",
+            _format_cpu_ranges(cpus),
+        )
+        return
+
+    if len(nodes) == 1:
         return
 
     border = "=" * 80
@@ -50,7 +61,7 @@ def warn_if_frontend_cpu_affinity_spans_numa_nodes(
         "Pin the frontend to CPUs from a single NUMA node.\n"
         "%s",
         border,
-        cpus,
-        nodes,
+        _format_cpu_ranges(cpus),
+        ", ".join(nodes),
         border,
     )
