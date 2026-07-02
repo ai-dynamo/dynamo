@@ -27,11 +27,7 @@ func isPythonCommand(cmd string) bool {
 }
 
 func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	setWorkerHealthCheckDefault(
-		container,
-		component,
-		!(hasTruthyEnv(container.Env, "DYN_SGL_USE_TOKENIZER") || hasCLIFlag(container, "--use-sglang-tokenizer")),
-	)
+	setWorkerHealthCheckDefault(container, component, true)
 
 	if component.CompilationCache != nil {
 		logger := log.Log.WithName("sglang-backend")
