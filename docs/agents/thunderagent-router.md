@@ -227,6 +227,9 @@ The final `wait` keeps the stack alive. Stop it with `Ctrl-C`; the three PIDs ar
 In a second terminal, choose the host address reachable from Docker containers. Do this before starting a scored task so connection failures do not become benchmark failures.
 
 ```bash
+# Copy the RUN_DIR printed by the stack terminal so Harbor writes beside its traces.
+export MODEL=zai-org/GLM-4.7-Flash
+export RUN_DIR=/absolute/path/to/dynamo/runs/ta-harbor-<timestamp>
 export DYNAMO_HOST=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
 export DYNAMO_BASE_URL="http://${DYNAMO_HOST}:8000/v1"
 curl -fsS "$DYNAMO_BASE_URL/models"
