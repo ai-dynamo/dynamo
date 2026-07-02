@@ -359,6 +359,71 @@ mod race_tests {
             assert_direct_score(&index, &[1, 2, 9], worker3, 2);
             assert_direct_score(&index, &[1, 2, 10], worker4, 3);
         }
+
+        #[test]
+        fn stale_tail_cursor_replans_before_descending_same_local_child() {
+            let index = ConcurrentRadixTreeCompressed::new();
+            let worker_a = worker(1);
+            let worker_b = worker(2);
+            let mut lookup_a = direct_lookup();
+            let mut lookup_b = direct_lookup();
+
+            apply_direct(&index, &mut lookup_a, make_store_event(1, &[1]));
+            apply_direct(&index, &mut lookup_b, make_store_event(2, &[1]));
+
+            let stale_parent = index
+                .root
+                .child_snapshot(LocalBlockHash(1))
+                .expect("root child should exist");
+            let continuation = stored_data(make_store_event_with_parent(1, &[1], &[7]));
+            let parent_hash = continuation.parent_hash.expect("continuation has a parent");
+            let plan = stale_parent
+                .plan_store_parent_edge(parent_hash, &continuation.blocks)
+                .expect("tail parent should be present before extension");
+            let action =
+                stale_parent.apply_store_parent_edge_plan(worker_a, plan, &continuation.blocks);
+            assert!(matches!(action, ParentEdgeAction::InsertFromParent(None)));
+
+            let b_extension = make_store_event_with_parent(2, &[1], &[5, 6, 7]);
+            let b_extension_data = stored_data(b_extension.clone());
+            assert_ne!(
+                continuation.blocks[0].block_hash, b_extension_data.blocks[2].block_hash,
+                "same local child must have distinct sequence hashes at different depths",
+            );
+            apply_direct(&index, &mut lookup_b, b_extension);
+            apply_direct(
+                &index,
+                &mut lookup_b,
+                make_store_event_with_parent(2, &[1, 5, 6], &[8]),
+            );
+
+            index
+                .insert_blocks_from_for_test(
+                    &mut lookup_a,
+                    worker_a,
+                    &stale_parent,
+                    parent_hash,
+                    &continuation.blocks,
+                )
+                .unwrap();
+
+            assert_direct_score(&index, &[1, 7], worker_a, 2);
+            assert_direct_score(&index, &[1, 5, 6, 7], worker_b, 4);
+            assert_direct_score(&index, &[1, 5, 6, 8], worker_b, 4);
+            assert_eq!(
+                index.edge_topology_for_test(),
+                vec![edge_topology(
+                    &[1],
+                    vec![
+                        edge_topology(
+                            &[5, 6],
+                            vec![edge_topology(&[7], vec![]), edge_topology(&[8], vec![]),],
+                        ),
+                        edge_topology(&[7], vec![]),
+                    ],
+                )],
+            );
+        }
     }
 
     mod remove {

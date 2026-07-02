@@ -560,8 +560,11 @@ impl Node {
     ) -> ParentChildPlan {
         self.with_shape_plan(|state, children, shape_version| {
             if let Some(hash) = last_ext_hash
-                && !state.edge_index.contains_key(&hash)
+                && !state.tail_hash_is(hash)
             {
+                if state.edge_index.contains_key(&hash) {
+                    return ParentChildPlan::InteriorParent { shape_version };
+                }
                 return ParentChildPlan::StaleParent { hash };
             }
 
