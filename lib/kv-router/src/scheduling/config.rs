@@ -239,13 +239,12 @@ impl FromStr for SharedCacheType {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum RouterQueuePolicy {
     #[default]
     Fcfs,
     Lcfs,
     Wspt,
-    #[serde(rename = "session_las")]
     SessionLas,
 }
 

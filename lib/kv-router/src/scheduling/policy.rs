@@ -127,9 +127,9 @@ impl RouterSchedulingPolicy {
             RouterQueuePolicy::Fcfs => Self::Fcfs(FcfsPolicy),
             RouterQueuePolicy::Lcfs => Self::Lcfs(LcfsPolicy),
             RouterQueuePolicy::Wspt => Self::Wspt(WsptPolicy),
-            // The active PolicyQueue supplies session state; this legacy stateless
-            // adapter retains FIFO behavior instead of failing at construction.
-            RouterQueuePolicy::SessionLas => Self::Fcfs(FcfsPolicy),
+            RouterQueuePolicy::SessionLas => {
+                panic!("session_las is stateful and only supported by PolicyQueue")
+            }
         }
     }
 }
@@ -288,11 +288,14 @@ mod tests {
 
         let fcfs = RouterSchedulingPolicy::new(RouterQueuePolicy::Fcfs);
         assert!(enqueue_key(&fcfs, early, &req) > enqueue_key(&fcfs, late, &req));
-        let session_las = RouterSchedulingPolicy::new(RouterQueuePolicy::SessionLas);
-        assert!(enqueue_key(&session_las, early, &req) > enqueue_key(&session_las, late, &req));
-
         let lcfs = RouterSchedulingPolicy::new(RouterQueuePolicy::Lcfs);
         assert!(enqueue_key(&lcfs, late, &req) > enqueue_key(&lcfs, early, &req));
+    }
+
+    #[test]
+    #[should_panic(expected = "session_las is stateful and only supported by PolicyQueue")]
+    fn router_scheduling_policy_rejects_session_las() {
+        RouterSchedulingPolicy::new(RouterQueuePolicy::SessionLas);
     }
 
     #[test]
