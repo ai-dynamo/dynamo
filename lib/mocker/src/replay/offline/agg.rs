@@ -70,6 +70,8 @@ pub(in crate::replay) struct AggRuntimeStats;
 pub(in crate::replay) struct AggRuntime {
     now_ms: f64,
     next_worker_idx: usize,
+    next_dp_rank_by_worker: FxHashMap<usize, u32>,
+    dp_size: u32,
     next_event_seq: u64,
     admission: AdmissionQueue,
     requests: FxHashMap<Uuid, AggRequestState>,
@@ -152,7 +154,6 @@ impl AggRuntime {
         router_mode: ReplayRouterMode,
     ) -> anyhow::Result<Self> {
         let args = args.clone().normalized()?;
-        let decode_gpus_per_worker = args.aic_gpus_per_worker();
         let progress = ReplayProgress::new(admission.total_requests(), "offline replay");
         let router = match router_mode {
             ReplayRouterMode::RoundRobin => None,
@@ -164,29 +165,25 @@ impl AggRuntime {
             )?),
         };
         let capture_kv_events = router.is_some();
-        let mut engine = EngineComponent::new(
+        let mut engine = EngineComponent::new_ranked(
             SimulationWorkerStage::Aggregated,
             EnginePassMode::Visible,
-            (0..num_workers)
-                .map(|worker_idx| {
-                    super::state::OfflineWorkerState::new(
-                        worker_idx,
-                        args.clone(),
-                        capture_kv_events,
-                    )
-                })
-                .collect(),
+            args.clone(),
+            num_workers,
+            capture_kv_events,
         );
-        engine.set_scaling_args(args, capture_kv_events);
+        engine.set_scaling_args(args.clone(), capture_kv_events);
 
         // Aggregated replay has a single (decode) pool; record its GPUs/worker
         // so the report can express GPU-hours from the mocker's own parallelism.
         let mut collector = TraceCollector::default();
-        collector.set_gpus_per_worker(0, decode_gpus_per_worker);
+        collector.set_gpus_per_worker(0, args.aic_gpus_per_worker());
 
         Ok(Self {
             now_ms: 0.0,
             next_worker_idx: 0,
+            next_dp_rank_by_worker: FxHashMap::default(),
+            dp_size: args.dp_size.max(1),
             next_event_seq: 0,
             admission,
             requests: FxHashMap::default(),
@@ -205,7 +202,10 @@ impl AggRuntime {
             planner_hook: None,
             collect_fpm: false,
             #[cfg(test)]
-            worker_active_requests: vec![Vec::new(); num_workers],
+            worker_active_requests: vec![
+                Vec::new();
+                num_workers.saturating_mul(args.dp_size.max(1) as usize)
+            ],
             #[cfg(test)]
             stepped: false,
         })
@@ -293,11 +293,17 @@ impl AggRuntime {
 
     /// Pick the next active worker in round-robin order.
     fn next_worker(&mut self) -> usize {
-        let active = self.engine.active_worker_ids();
+        let active = self.engine.active_group_ids();
         debug_assert!(!active.is_empty(), "no active workers for round-robin");
         let idx = self.next_worker_idx % active.len();
         self.next_worker_idx = idx + 1;
-        active[idx]
+        let worker_id = active[idx];
+        let dp_rank = self.next_dp_rank_by_worker.entry(worker_id).or_default();
+        let rank = *dp_rank % self.dp_size;
+        *dp_rank = rank + 1;
+        self.engine
+            .rank_id(worker_id, rank)
+            .expect("active worker must contain every configured DP rank")
     }
 
     /// Record which worker accepted a request and refresh in-flight stats.
@@ -311,6 +317,22 @@ impl AggRuntime {
                 .insert(_uuid, _worker_idx);
         }
         self.record_in_flight_peak();
+    }
+
+    /// Preserve the live `(worker_id, dp_rank)` identity when forwarding a
+    /// rank-local scheduler snapshot to the planner bridge.
+    fn record_fpm(
+        &mut self,
+        rank_id: usize,
+        mut snapshot: ForwardPassSnapshot,
+    ) -> anyhow::Result<()> {
+        let (worker_id, dp_rank) = self.engine.rank_identity(rank_id).ok_or_else(|| {
+            anyhow::anyhow!("offline replay FPM references unknown rank scheduler {rank_id}")
+        })?;
+        snapshot.worker_id = worker_id.to_string();
+        snapshot.dp_rank = dp_rank;
+        self.fpm_buffer.push((worker_id, snapshot));
+        Ok(())
     }
 
     /// Deliver a request to a worker and update the runtime's bookkeeping for that assignment.
@@ -606,7 +628,7 @@ impl AggRuntime {
             if self.collect_fpm
                 && let Some(fpm) = payload.fpm
             {
-                self.fpm_buffer.push((payload.worker_idx, fpm));
+                self.record_fpm(payload.worker_idx, fpm)?;
             }
             self.process_completed_pass(
                 payload.worker_idx,
@@ -664,7 +686,9 @@ impl AggRuntime {
 
     fn handle_engine_effects(&mut self, effects: EngineEffects) -> anyhow::Result<()> {
         if self.collect_fpm {
-            self.fpm_buffer.extend(effects.fpm_snapshots);
+            for (rank_id, fpm) in effects.fpm_snapshots {
+                self.record_fpm(rank_id, fpm)?;
+            }
         }
         self.apply_router_events(effects.pass_start_kv_events)?;
         for payload in effects.immediate_completions {
@@ -672,7 +696,7 @@ impl AggRuntime {
             if self.collect_fpm
                 && let Some(fpm) = payload.fpm
             {
-                self.fpm_buffer.push((payload.worker_idx, fpm));
+                self.record_fpm(payload.worker_idx, fpm)?;
             }
             self.process_completed_pass(
                 payload.worker_idx,
@@ -724,6 +748,9 @@ impl AggRuntime {
             changed |= self.release_ready_arrivals()?;
             changed |= self.drive_ready_workers()?;
             let removed = self.engine.try_remove_drained();
+            for worker_id in &removed {
+                self.next_dp_rank_by_worker.remove(worker_id);
+            }
             if let Some(router) = self.router.as_mut() {
                 for worker_id in &removed {
                     router.finalize_worker_removal(*worker_id)?;
@@ -837,7 +864,7 @@ impl AggRuntime {
 
     /// Number of active (non-pending-removal) workers.
     pub(in crate::replay) fn active_worker_count(&self) -> usize {
-        self.engine.active_worker_ids().len()
+        self.engine.active_group_ids().len()
     }
 
     /// Total worker count including pending-removal.
@@ -856,9 +883,13 @@ impl AggRuntime {
     /// new requests land on it) and drains in-flight work in the engine.
     pub(in crate::replay) fn apply_scaling(&mut self, target_workers: usize) -> anyhow::Result<()> {
         let (added, newly_marked, removed) = self.engine.apply_target_count(target_workers);
+        let engine = &self.engine;
+        self.next_dp_rank_by_worker
+            .retain(|worker_id, _| engine.rank_id(*worker_id, 0).is_some());
         #[cfg(test)]
-        if let Some(new_len) = added.iter().max().map(|id| id + 1) {
-            self.worker_active_requests.resize(new_len, Vec::new());
+        if !added.is_empty() {
+            self.worker_active_requests
+                .resize(self.engine.rank_id_capacity(), Vec::new());
         }
         let startup_delay_ms = self.engine.startup_time_ms();
 
@@ -1361,6 +1392,78 @@ mod tests {
         assert!(
             !runtime.drain_fpm().is_empty(),
             "SGLang pass-end FPM must become planner-visible at completion"
+        );
+    }
+
+    #[test]
+    fn attention_dp_fpm_preserves_logical_worker_and_rank_identity() {
+        let mut args = sglang_replay_args();
+        args.dp_size = 2;
+        let pending = normalize_trace_requests(
+            vec![
+                DirectRequest {
+                    tokens: vec![1; 8],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(9_101)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+                DirectRequest {
+                    tokens: vec![2; 8],
+                    max_output_tokens: 2,
+                    uuid: Some(Uuid::from_u128(9_102)),
+                    arrival_timestamp_ms: Some(0.0),
+                    ..Default::default()
+                },
+            ],
+            1.0,
+        )
+        .unwrap();
+        let mut runtime = AggRuntime::new(
+            &args,
+            None,
+            None,
+            pending,
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap()
+        .with_fpm_capture();
+
+        while runtime.advance_one_timestamp().unwrap() {}
+        let identities = runtime
+            .drain_fpm()
+            .into_iter()
+            .map(|(worker_id, snapshot)| (worker_id, snapshot.worker_id, snapshot.dp_rank))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(identities.contains(&(0, "0".to_string(), 0)));
+        assert!(identities.contains(&(0, "0".to_string(), 1)));
+    }
+
+    #[test]
+    fn generic_attention_dp_counts_rank_resources_in_gpu_hours() {
+        let mut args = fast_router_args();
+        args.dp_size = 4;
+        let runtime = AggRuntime::new(
+            &args,
+            None,
+            None,
+            simple_requests(4, 0.0),
+            1,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        let (collector, _) = runtime.run().unwrap();
+        let report = collector.finish();
+
+        assert_eq!(report.throughput.decode_gpus_per_worker, 4);
+        assert_eq!(
+            report.throughput.gpu_hours,
+            report.throughput.decode_worker_seconds * 4.0 / 3600.0
         );
     }
 
@@ -2063,6 +2166,53 @@ mod tests {
         );
 
         assert_eq!(stats.dispatch_history, vec![0, 1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn test_attention_dp_round_robin_matches_live_worker_then_rank_order() {
+        let mut args = replay_args(false, true);
+        args.dp_size = 2;
+        let requests = (1..=5)
+            .map(|id| DirectRequest {
+                tokens: vec![id as u32; 8],
+                max_output_tokens: 1,
+                uuid: Some(Uuid::from_u128(id)),
+                arrival_timestamp_ms: Some(0.0),
+                ..Default::default()
+            })
+            .collect();
+
+        let (_, stats) =
+            run_trace_multi_collect_with_stats(&args, requests, 2, ReplayRouterMode::RoundRobin);
+
+        // Live routing round-robins mocker workers first, then each worker's
+        // MockEngine independently round-robins its DP ranks.
+        assert_eq!(stats.dispatch_history, vec![0, 2, 1, 3, 0]);
+    }
+
+    #[test]
+    fn test_attention_dp_planner_counts_mocker_workers_not_ranks() {
+        let mut args = replay_args(false, true);
+        args.dp_size = 2;
+        let mut runtime = AggRuntime::new(
+            &args,
+            None,
+            None,
+            VecDeque::new(),
+            2,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.active_worker_count(), 2);
+        assert_eq!(runtime.total_worker_count(), 2);
+        assert_eq!(runtime.engine.active_worker_ids(), vec![0, 1, 2, 3]);
+
+        runtime.apply_scaling(3).unwrap();
+        assert_eq!(runtime.active_worker_count(), 3);
+        assert_eq!(runtime.total_worker_count(), 3);
+        assert_eq!(runtime.engine.active_worker_ids(), vec![0, 1, 2, 3, 4, 5]);
     }
 
     #[test]
@@ -3024,6 +3174,30 @@ mod tests {
         // Without startup delay, new worker is immediately active.
         assert_eq!(rt.active_worker_count(), 2);
         assert_eq!(rt.total_worker_count(), 2);
+    }
+
+    #[test]
+    fn scale_down_forgets_retired_round_robin_rank_state() {
+        let args = fast_router_args();
+        let mut rt = AggRuntime::new(
+            &args,
+            None,
+            None,
+            simple_requests(2, 0.0),
+            2,
+            ReplayMode::Trace,
+            ReplayRouterMode::RoundRobin,
+        )
+        .unwrap();
+
+        assert!(rt.advance_one_timestamp().unwrap());
+        assert_eq!(rt.next_dp_rank_by_worker.len(), 2);
+        while rt.advance_one_timestamp().unwrap() {}
+
+        rt.apply_scaling(1).unwrap();
+
+        assert_eq!(rt.next_dp_rank_by_worker.len(), 1);
+        assert!(!rt.next_dp_rank_by_worker.contains_key(&1));
     }
 
     #[test]

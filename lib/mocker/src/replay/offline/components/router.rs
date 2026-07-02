@@ -189,6 +189,7 @@ impl PendingRequest {
 pub(crate) struct OfflineReplayRouter {
     config: KvRouterConfig,
     block_size: u32,
+    dp_size: u32,
     profile: PolicyProfile,
     worker_config_template: ReplayWorkerConfig,
     workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig>,
@@ -219,6 +220,7 @@ impl OfflineReplayRouter {
         Ok(Self {
             config,
             block_size: args.block_size as u32,
+            dp_size: args.dp_size.max(1),
             profile: profile.clone(),
             worker_config_template,
             workers_with_configs,
@@ -269,7 +271,9 @@ impl OfflineReplayRouter {
             self.pending
                 .enqueue(
                     class_index,
-                    self.workers_with_configs.len(),
+                    self.workers_with_configs
+                        .len()
+                        .saturating_mul(self.dp_size as usize),
                     snapshot,
                     now_ms.max(0.0) / 1000.0,
                     priority_jump,
@@ -359,7 +363,10 @@ impl OfflineReplayRouter {
         {
             return Err(anyhow!("router worker {worker_id} already exists"));
         }
-        if let Err(error) = self.slots.upsert_worker(WorkerDpRange::new(wid, 0, 1)) {
+        if let Err(error) = self
+            .slots
+            .upsert_worker(WorkerDpRange::new(wid, 0, self.dp_size))
+        {
             self.workers_with_configs.remove(&wid);
             return Err(error.into());
         }
@@ -534,8 +541,14 @@ impl OfflineReplayRouter {
             eligibility,
             self.block_size,
         )?;
-        let worker_idx = usize::try_from(selection.worker.worker_id)
+        let worker_id = usize::try_from(selection.worker.worker_id)
             .map_err(|_| anyhow!("selected worker id does not fit into usize"))?;
+        let dp_rank = usize::try_from(selection.worker.dp_rank)
+            .map_err(|_| anyhow!("selected dp rank does not fit into usize"))?;
+        let worker_idx = worker_id
+            .checked_mul(self.dp_size as usize)
+            .and_then(|base| base.checked_add(dp_rank))
+            .ok_or_else(|| anyhow!("selected worker/rank index overflow"))?;
         let request_id = request.request_id();
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
@@ -604,12 +617,16 @@ impl OfflineReplayRouter {
         class: &PolicyClassConfig,
     ) -> bool {
         workers_with_configs.iter().all(|(&worker_id, config)| {
-            let worker = WorkerWithDpRank::new(worker_id, config.data_parallel_start_rank());
-            let max_batched = config
-                .max_num_batched_tokens()
-                .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
-            let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
-            class.worker_is_busy(tokens, max_batched)
+            let start = config.data_parallel_start_rank();
+            let end = start.saturating_add(config.data_parallel_size());
+            (start..end).all(|dp_rank| {
+                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                let max_batched = config
+                    .max_num_batched_tokens()
+                    .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS);
+                let tokens = active_tokens.get(&worker).copied().unwrap_or(0);
+                class.worker_is_busy(tokens, max_batched)
+            })
         })
     }
 
@@ -766,6 +783,16 @@ mod tests {
         tokens_hash: u64,
         storage_tier: StorageTier,
     ) -> RouterEvent {
+        store_event_for_rank(worker_id, 0, event_id, tokens_hash, storage_tier)
+    }
+
+    fn store_event_for_rank(
+        worker_id: WorkerId,
+        dp_rank: u32,
+        event_id: u64,
+        tokens_hash: u64,
+        storage_tier: StorageTier,
+    ) -> RouterEvent {
         RouterEvent::with_storage_tier(
             worker_id,
             KvCacheEvent {
@@ -779,7 +806,7 @@ mod tests {
                         mm_extra_info: None,
                     }],
                 }),
-                dp_rank: 0,
+                dp_rank,
             },
             storage_tier,
         )
@@ -852,6 +879,63 @@ mod tests {
                 .map(|request| request.uuid)
                 .collect::<Vec<_>>(),
             vec![Uuid::from_u128(2)]
+        );
+    }
+
+    #[test]
+    fn attention_dp_routes_one_mocker_worker_across_rank_targets() {
+        let mut args = queueing_args();
+        args.dp_size = 2;
+        let mut router =
+            OfflineReplayRouter::new(&args, Some(queueing_router_config()), None, 1).unwrap();
+
+        let first = router
+            .on_request_arrival(&request(1, 7), None, 0.0)
+            .unwrap();
+        let second = router
+            .on_request_arrival(&request(2, 8), None, 0.0)
+            .unwrap();
+        let mut targets = first
+            .admissions
+            .into_iter()
+            .chain(second.admissions)
+            .map(|admission| admission.worker_idx)
+            .collect::<Vec<_>>();
+        targets.sort_unstable();
+
+        assert_eq!(targets, vec![0, 1]);
+        assert_eq!(router.pending_count(), 0);
+    }
+
+    #[test]
+    fn attention_dp_kv_router_routes_cached_prefix_to_matching_rank() {
+        let mut args = replay_args();
+        args.dp_size = 2;
+        let mut router = OfflineReplayRouter::new(&args, Some(router_config()), None, 1).unwrap();
+        let target = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&target.tokens, router.block_size);
+
+        router
+            .on_kv_events(vec![store_event_for_rank(
+                0,
+                1,
+                1,
+                hashes.local_block_hashes[0].0,
+                StorageTier::Device,
+            )])
+            .unwrap();
+
+        let effects = router
+            .on_request_arrival(&target, Some(hashes), 0.0)
+            .unwrap();
+        assert_eq!(
+            effects.admissions,
+            vec![WorkerAdmission {
+                uuid: Uuid::from_u128(1),
+                worker_idx: 1,
+                overlap_blocks: 1,
+                isl_blocks: 1,
+            }]
         );
     }
 

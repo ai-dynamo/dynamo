@@ -29,6 +29,7 @@ from dynamo.planner.offline.replay_adapter import (
     ReplayPlannerAdapter,
     _build_fpm_from_dict,
     _merge_traffic,
+    _update_fpm_cache,
 )
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
 from dynamo.replay.main import _engine_caps
@@ -59,10 +60,11 @@ def _agg_config_sla() -> PlannerConfig:
     )
 
 
-def _snap(worker_id: str, wall_time: float) -> dict:
+def _snap(worker_id: str, wall_time: float, dp_rank: int = 0) -> dict:
     """A bridge FPM snapshot dict with every key ``_build_fpm_from_dict`` reads."""
     return {
         "worker_id": worker_id,
+        "dp_rank": dp_rank,
         "wall_time": wall_time,
         "num_prefill_requests": 0,
         "sum_prefill_tokens": 0,
@@ -78,6 +80,24 @@ def _snap(worker_id: str, wall_time: float) -> dict:
         "sum_queued_decode_kv_tokens": 0,
         "var_queued_decode_kv_tokens": 0.0,
     }
+
+
+def test_fpm_cache_keeps_all_ranks_for_each_active_worker():
+    cache = {}
+    snapshots = [
+        _snap("0", wall_time=1.0, dp_rank=0),
+        _snap("0", wall_time=1.0, dp_rank=1),
+        _snap("1", wall_time=1.0, dp_rank=0),
+        _snap("1", wall_time=1.0, dp_rank=1),
+    ]
+
+    _update_fpm_cache(cache, snapshots, active_count=2)
+
+    assert set(cache) == {("0", 0), ("0", 1), ("1", 0), ("1", 1)}
+
+    _update_fpm_cache(cache, [], active_count=1)
+
+    assert set(cache) == {("0", 0), ("0", 1)}
 
 
 def _orch_agg_config_sla() -> PlannerConfig:
@@ -129,6 +149,32 @@ def test_get_regression_uses_orchestrator_scaling_state_without_aic_install():
         decode_snaps=decode_snaps,
         prefill_snaps=[],
     )
+
+
+def test_extra_fpm_feed_excludes_last_snapshot_per_worker_rank():
+    class RecordingRegression:
+        def __init__(self):
+            self.keys = []
+
+        def add_observations(self, observations):
+            self.keys.extend(observations)
+
+    regression = RecordingRegression()
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+    adapter._config = _agg_config_sla()
+    adapter._get_regression = lambda _kind: regression
+
+    adapter._feed_extra_fpm_to_regression(
+        decode_snaps=[
+            _snap("0", wall_time=1.0, dp_rank=0),
+            _snap("0", wall_time=1.0, dp_rank=1),
+            _snap("0", wall_time=2.0, dp_rank=0),
+            _snap("0", wall_time=2.0, dp_rank=1),
+        ],
+        prefill_snaps=[],
+    )
+
+    assert regression.keys == [("0", 0), ("0", 1)]
 
 
 def test_build_tick_input_maps_replay_accept_length():

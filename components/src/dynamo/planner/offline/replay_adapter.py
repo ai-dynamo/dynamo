@@ -88,7 +88,7 @@ def _build_fpm_from_dict(d: dict[str, Any]) -> ForwardPassMetrics:
     """Convert a bridge FPM snapshot dict into a ForwardPassMetrics struct."""
     return ForwardPassMetrics(
         worker_id=str(d["worker_id"]),
-        dp_rank=0,
+        dp_rank=int(d.get("dp_rank", 0)),
         wall_time=d["wall_time"],
         scheduled_requests=ScheduledRequestMetrics(
             num_prefill_requests=d["num_prefill_requests"],
@@ -120,12 +120,14 @@ def _update_fpm_cache(
         fpm = _build_fpm_from_dict(snap)
         cache[(fpm.worker_id, fpm.dp_rank)] = fpm
 
-    # Prune cache down to active_count entries. Workers are removed
-    # highest-ID-first during scale-down, so keep the lowest IDs.
-    while len(cache) > active_count:
-        # Remove the highest worker ID entry
-        worst_key = max(cache.keys(), key=lambda k: int(k[0]))
-        del cache[worst_key]
+    # Prune by logical worker, retaining every DP-rank entry for each active
+    # worker. Workers are removed highest-ID-first during scale-down.
+    active_worker_ids = set(
+        sorted({worker_id for worker_id, _ in cache}, key=int)[:active_count]
+    )
+    for key in list(cache):
+        if key[0] not in active_worker_ids:
+            del cache[key]
 
 
 def _merge_traffic(
@@ -538,9 +540,11 @@ class ReplayPlannerAdapter:
             agg_reg = self._get_regression("agg")
             if agg_reg is None:
                 return
-            last_idx_per_worker: dict[int, int] = {}
+            last_idx_per_worker: dict[tuple[Any, int], int] = {}
             for i, snap in enumerate(decode_snaps):
-                last_idx_per_worker[snap["worker_id"]] = i
+                last_idx_per_worker[
+                    (snap["worker_id"], int(snap.get("dp_rank", 0)))
+                ] = i
             exclude = set(last_idx_per_worker.values())
             for i, snap in enumerate(decode_snaps):
                 if i in exclude:
@@ -554,9 +558,9 @@ class ReplayPlannerAdapter:
             if has_prefill:
                 p_reg = self._get_regression("prefill")
                 if p_reg is not None:
-                    last_idx: dict[int, int] = {}
+                    last_idx: dict[tuple[Any, int], int] = {}
                     for i, snap in enumerate(prefill_snaps):
-                        last_idx[snap["worker_id"]] = i
+                        last_idx[(snap["worker_id"], int(snap.get("dp_rank", 0)))] = i
                     exclude = set(last_idx.values())
                     for i, snap in enumerate(prefill_snaps):
                         if i in exclude:
@@ -569,7 +573,7 @@ class ReplayPlannerAdapter:
                 if d_reg is not None:
                     last_idx = {}
                     for i, snap in enumerate(decode_snaps):
-                        last_idx[snap["worker_id"]] = i
+                        last_idx[(snap["worker_id"], int(snap.get("dp_rank", 0)))] = i
                     exclude = set(last_idx.values())
                     for i, snap in enumerate(decode_snaps):
                         if i in exclude:

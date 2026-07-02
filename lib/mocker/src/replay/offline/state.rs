@@ -209,6 +209,8 @@ impl DisaggRequestState {
 
 pub(crate) struct OfflineWorkerState {
     core: EngineCore,
+    worker_id: u64,
+    dp_rank: u32,
     busy: bool,
     in_flight: usize,
 }
@@ -224,15 +226,27 @@ pub(crate) struct OfflineWorkerSnapshot {
 
 impl OfflineWorkerState {
     pub(crate) fn new(worker_idx: usize, args: MockEngineArgs, capture_kv_events: bool) -> Self {
+        Self::new_with_rank(worker_idx, worker_idx as u64, 0, args, capture_kv_events)
+    }
+
+    pub(crate) fn new_with_rank(
+        worker_idx: usize,
+        worker_id: u64,
+        dp_rank: u32,
+        args: MockEngineArgs,
+        capture_kv_events: bool,
+    ) -> Self {
         let core = match args.engine_type {
             crate::common::protocols::EngineType::Vllm
             | crate::common::protocols::EngineType::Trtllm => {
                 #[cfg_attr(not(feature = "kvbm-offload"), allow(unused_mut))]
-                let mut core = if capture_kv_events {
-                    crate::scheduler::VllmCore::new_with_kv_capture(args, worker_idx as u64)
-                } else {
-                    crate::scheduler::VllmCore::new_with_worker_id(args, worker_idx as u64)
-                };
+                let mut core = crate::scheduler::VllmCore::new_with_worker_rank(
+                    args,
+                    worker_id,
+                    dp_rank,
+                    worker_idx as u64,
+                    capture_kv_events,
+                );
                 #[cfg(feature = "kvbm-offload")]
                 if let Err(e) = core.init_offload_offline() {
                     tracing::error!(
@@ -242,25 +256,27 @@ impl OfflineWorkerState {
                 EngineCore::Vllm(core)
             }
             crate::common::protocols::EngineType::Sglang => {
-                if capture_kv_events {
-                    EngineCore::Sglang(crate::scheduler::SglangCore::new_with_kv_capture(
-                        args,
-                        worker_idx as u64,
-                    ))
-                } else {
-                    EngineCore::Sglang(crate::scheduler::SglangCore::new_with_worker_id(
-                        args,
-                        worker_idx as u64,
-                    ))
-                }
+                EngineCore::Sglang(crate::scheduler::SglangCore::new_with_worker_rank(
+                    args,
+                    worker_id,
+                    dp_rank,
+                    worker_idx as u64,
+                    capture_kv_events,
+                ))
             }
         };
 
         Self {
             core,
+            worker_id,
+            dp_rank,
             busy: false,
             in_flight: 0,
         }
+    }
+
+    pub(crate) fn rank_identity(&self) -> (u64, u32) {
+        (self.worker_id, self.dp_rank)
     }
 
     pub(crate) fn in_flight(&self) -> usize {
@@ -268,11 +284,12 @@ impl OfflineWorkerState {
         self.in_flight
     }
 
-    pub(crate) fn receive_request(&mut self, request: DirectRequest) {
+    pub(crate) fn receive_request(&mut self, mut request: DirectRequest) {
         self.in_flight = self
             .in_flight
             .checked_add(1)
             .expect("offline worker in-flight request count overflow");
+        request.dp_rank = self.dp_rank;
         self.core.receive(request);
     }
 
@@ -457,6 +474,41 @@ mod tests {
             tokens: (0..tokens as u32).collect(),
             max_output_tokens: 2,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ranked_worker_preserves_router_worker_and_dp_rank_identity() {
+        for engine_type in [EngineType::Vllm, EngineType::Sglang] {
+            let mut builder = MockEngineArgs::builder()
+                .engine_type(engine_type)
+                .block_size(4)
+                .num_gpu_blocks(64)
+                .max_num_batched_tokens(Some(64))
+                .max_num_seqs(Some(4))
+                .dp_size(4)
+                .enable_prefix_caching(true)
+                .speedup_ratio(1000.0);
+            if engine_type == EngineType::Sglang {
+                builder = builder.sglang(Some(Default::default()));
+            }
+            let mut worker =
+                OfflineWorkerState::new_with_rank(3, 7, 3, builder.build().unwrap(), true);
+            worker.receive_request(request(900 + engine_type as u128, 8));
+
+            let mut now_ms = 0.0;
+            let mut events = Vec::new();
+            while !worker.core.is_empty() {
+                let pass = worker.execute_hidden_pass(now_ms);
+                now_ms = pass.end_ms;
+                worker.mark_completed(pass.completed_requests);
+                events.extend(pass.kv_events);
+            }
+            events.extend(worker.drain_kv_events());
+
+            assert!(!events.is_empty());
+            assert!(events.iter().all(|event| event.worker_id == 7));
+            assert!(events.iter().all(|event| event.event.dp_rank == 3));
         }
     }
 
