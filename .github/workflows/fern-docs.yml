@@ -384,7 +384,7 @@ jobs:
             if [ "$FORCE_REBUILD" = "true" ]; then
               echo "::warning::Version $TAG already exists; force_rebuild=true, overwriting its snapshot."
             else
-              echo "::error::Version $TAG already exists. Re-run via workflow_dispatch with force_rebuild=true to overwrite it intentionally."
+              echo "::error::Version $TAG already exists. If a prior run committed but failed to publish, re-run via workflow_dispatch with force_rebuild=true to overwrite it intentionally."
               exit 1
             fi
           else
@@ -516,6 +516,8 @@ jobs:
         run: npm install -g fern-api@$(jq -r '.version' docs-checkout/fern/fern.config.json)
 
       - name: Validate release snapshot
+        env:
+          FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           VERSION_FILE="docs-checkout/fern/versions/$TAG.yml"

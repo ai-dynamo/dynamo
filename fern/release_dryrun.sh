@@ -156,9 +156,11 @@ HAVE_FERN="$(
     'import json, pathlib, sys; package = pathlib.Path(sys.argv[1]).resolve().parent / "package.json"; print(json.loads(package.read_text())["version"])' \
     "$(command -v fern)" 2>/dev/null || echo "unknown"
 )"
-if [ "$WANT_FERN" != "$HAVE_FERN" ]; then
-  echo "note: local fern-api is $HAVE_FERN but docs-website pins $WANT_FERN."
-  echo "      Install the pinned version with: npm install -g fern-api@$WANT_FERN"
+if [ "$HAVE_FERN" != "unknown" ] && [ "$WANT_FERN" != "$HAVE_FERN" ]; then
+  echo "error: local fern-api is $HAVE_FERN but docs-website pins $WANT_FERN;" >&2
+  echo "       the 'fern check' below would not match CI. Install the pinned version:" >&2
+  echo "       npm install -g fern-api@$WANT_FERN" >&2
+  exit 2
 fi
 
 echo "Verifying the snapshot file inventory ..."
