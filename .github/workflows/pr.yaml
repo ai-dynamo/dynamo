@@ -633,6 +633,7 @@ jobs:
       cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
+      run_frontend_perf_pr_guard: ${{ needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.frontend == 'true' || needs.changed-files.outputs.benchmarks == 'true' }}
     secrets: inherit
 
   # ============================================================================

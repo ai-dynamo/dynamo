@@ -24,6 +24,22 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
             --requirement /tmp/requirements.test.txt; \
     fi
 
+RUN --mount=type=bind,source=./container/deps/requirements.benchmark.txt,target=/tmp/requirements.benchmark.txt \
+    --mount=type=cache,target=/root/.cache/uv,sharing=shared \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv PIP_CACHE_DIR=/root/.cache/pip && \
+    if command -v uv >/dev/null 2>&1; then \
+        uv venv /opt/dynamo/benchmark-tools --python python3 && \
+        uv pip install \
+            --python /opt/dynamo/benchmark-tools/bin/python \
+            --requirement /tmp/requirements.benchmark.txt; \
+    else \
+        python3 -m venv /opt/dynamo/benchmark-tools && \
+        /opt/dynamo/benchmark-tools/bin/python -m pip install \
+            --requirement /tmp/requirements.benchmark.txt; \
+    fi && \
+    ln -sf /opt/dynamo/benchmark-tools/bin/aiperf /usr/local/bin/aiperf
+
 USER dynamo
 
 # Copy pytest configuration (markers, filterwarnings, asyncio_mode, etc.)

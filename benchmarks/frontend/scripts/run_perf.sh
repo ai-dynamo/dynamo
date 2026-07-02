@@ -64,6 +64,14 @@ BENCHMARK_DURATION="${BENCHMARK_DURATION:-}"  # aiperf --benchmark-duration (sec
 REQUEST_RATE="${REQUEST_RATE:-}"              # aiperf --request-rate (requests/sec)
 WARMUP_DURATION="${WARMUP_DURATION:-}"        # aiperf --warmup-duration (seconds)
 WARMUP_COUNT="${WARMUP_COUNT:-}"              # aiperf --warmup-request-count
+AIPERF_RECORD_PROCESSORS="${AIPERF_RECORD_PROCESSORS:-32}"
+AIPERF_WORKERS_MAX="${AIPERF_WORKERS_MAX:-}"
+
+# Optional CPU affinity controls. These are intentionally environment-only so
+# the regular benchmark CLI stays compact while CI can pin roles deterministically.
+FRONTEND_CPUSET="${FRONTEND_CPUSET:-}"
+LOAD_CPUSET="${LOAD_CPUSET:-}"
+INFRA_CPUSET="${INFRA_CPUSET:-${LOAD_CPUSET}}"
 
 # Opt-out flags
 SKIP_BPF=false
@@ -213,6 +221,8 @@ echo "╚═══════════════════════�
 echo ""
 echo "Output:    $OUTPUT_DIR"
 echo "Tokenizer: ${TOKENIZER_BACKEND:-hf (default)}"
+[[ -n "$FRONTEND_CPUSET" ]] && echo "Frontend CPU set: $FRONTEND_CPUSET"
+[[ -n "$LOAD_CPUSET" ]] && echo "Load CPU set:     $LOAD_CPUSET"
 echo ""
 
 # ─── Pre-flight: detect available tools ──────────────────────────────────────
@@ -267,12 +277,33 @@ if ! command -v jq &>/dev/null; then
 fi
 echo "  jq:         available"
 
+if [[ -n "$FRONTEND_CPUSET" || -n "$LOAD_CPUSET" || -n "$INFRA_CPUSET" ]]; then
+    if ! command -v taskset &>/dev/null; then
+        echo "ERROR: CPU affinity requested, but taskset was not found in PATH"
+        exit 1
+    fi
+    echo "  taskset:    available"
+fi
+
 if ! command -v aiperf &>/dev/null && ! python3 -c "import aiperf" 2>/dev/null; then
     echo "ERROR: aiperf not found. Install: pip install git+https://github.com/ai-dynamo/aiperf.git"
     exit 1
 fi
 echo "  aiperf:     available"
 echo ""
+
+FRONTEND_TASKSET=()
+LOAD_TASKSET=()
+INFRA_TASKSET=()
+[[ -n "$FRONTEND_CPUSET" ]] && FRONTEND_TASKSET=(taskset -c "$FRONTEND_CPUSET")
+[[ -n "$LOAD_CPUSET" ]] && LOAD_TASKSET=(taskset -c "$LOAD_CPUSET")
+[[ -n "$INFRA_CPUSET" ]] && INFRA_TASKSET=(taskset -c "$INFRA_CPUSET")
+
+tcp_port_open() {
+    local host="$1"
+    local port="$2"
+    (exec 3<>"/dev/tcp/${host}/${port}") >/dev/null 2>&1
+}
 
 # ─── Tracked PIDs for cleanup ───────────────────────────────────────────────
 ALL_PIDS=()      # everything we need to kill on exit
@@ -337,13 +368,14 @@ if ! curl -sf http://localhost:2379/health >/dev/null 2>&1; then
     if command -v etcd &>/dev/null; then
         echo "  etcd not running — starting it..."
         ETCD_DATA_DIR=$(mktemp -d)
-        etcd --data-dir="$ETCD_DATA_DIR" \
+        ETCD_LOG="$OUTPUT_DIR/logs/etcd.log"
+        "${INFRA_TASKSET[@]}" etcd --data-dir="$ETCD_DATA_DIR" \
              --listen-client-urls=http://localhost:2379 \
              --advertise-client-urls=http://localhost:2379 \
              --listen-peer-urls=http://localhost:2380 \
              --initial-advertise-peer-urls=http://localhost:2380 \
              --initial-cluster=default=http://localhost:2380 \
-             > /dev/null 2>&1 &
+             > "$ETCD_LOG" 2>&1 &
         ETCD_PID=$!
         for i in $(seq 1 30); do
             if curl -sf http://localhost:2379/health >/dev/null 2>&1; then
@@ -352,7 +384,9 @@ if ! curl -sf http://localhost:2379/health >/dev/null 2>&1; then
             fi
             sleep 1
             if [[ $i -eq 30 ]]; then
-                echo "ERROR: etcd failed to start after 30s"; exit 1
+                echo "ERROR: etcd failed to start after 30s"
+                tail -n 80 "$ETCD_LOG" || true
+                exit 1
             fi
         done
     else
@@ -363,19 +397,27 @@ else
 fi
 
 # NATS
-if ! nc -z localhost 4222 2>/dev/null; then
+if ! tcp_port_open localhost 4222; then
     if command -v nats-server &>/dev/null; then
         echo "  nats-server not running — starting it..."
-        nats-server > /dev/null 2>&1 &
+        NATS_LOG="$OUTPUT_DIR/logs/nats-server.log"
+        "${INFRA_TASKSET[@]}" nats-server > "$NATS_LOG" 2>&1 &
         NATS_PID=$!
         for i in $(seq 1 30); do
-            if nc -z localhost 4222 2>/dev/null; then
+            if tcp_port_open localhost 4222; then
                 echo "  nats-server ready (PID $NATS_PID)"
                 break
             fi
+            if ! kill -0 "$NATS_PID" 2>/dev/null; then
+                echo "ERROR: nats-server exited before it became ready"
+                tail -n 80 "$NATS_LOG" || true
+                exit 1
+            fi
             sleep 1
             if [[ $i -eq 30 ]]; then
-                echo "ERROR: nats-server failed to start after 30s"; exit 1
+                echo "ERROR: nats-server failed to start after 30s"
+                tail -n 80 "$NATS_LOG" || true
+                exit 1
             fi
         done
     else
@@ -409,7 +451,7 @@ for MN in "${MODEL_NAMES[@]}"; do
         fi
 
         MN_SAFE="${MN//\//_}"
-        HF_HUB_OFFLINE=1 DYN_SYSTEM_PORT=$WORKER_PORT DYN_EVENT_PLANE="$EVENT_PLANE" python -m dynamo.mocker "${MOCKER_ARGS[@]}" \
+        "${LOAD_TASKSET[@]}" env HF_HUB_OFFLINE=1 DYN_SYSTEM_PORT=$WORKER_PORT DYN_EVENT_PLANE="$EVENT_PLANE" python -m dynamo.mocker "${MOCKER_ARGS[@]}" \
             > "$OUTPUT_DIR/logs/mocker_${MN_SAFE}_${i}.log" 2>&1 &
         ALL_PIDS+=($!)
         echo "  Worker $WORKER_IDX ($MN #$i): PID ${ALL_PIDS[-1]}, port $WORKER_PORT"
@@ -455,7 +497,7 @@ fi
 
 if [[ "$HAS_NSYS" == true ]]; then
     echo "  (under nsys profiling)"
-    env "${FRONTEND_ENV[@]}" \
+    "${FRONTEND_TASKSET[@]}" env "${FRONTEND_ENV[@]}" \
         "$NSYS_CMD" profile \
         --trace=osrt,nvtx \
         --sample=cpu \
@@ -485,7 +527,7 @@ if [[ "$HAS_NSYS" == true ]]; then
     echo "  nsys wrapper PID: $NSYS_WRAPPER_PID"
     echo "  Frontend PID: $FRONTEND_PID"
 else
-    env "${FRONTEND_ENV[@]}" python -m dynamo.frontend \
+    "${FRONTEND_TASKSET[@]}" env "${FRONTEND_ENV[@]}" python -m dynamo.frontend \
         > "$OUTPUT_DIR/logs/frontend.log" 2>&1 &
     FRONTEND_PID=$!
     ALL_PIDS+=($FRONTEND_PID)
@@ -692,6 +734,11 @@ echo "--- Running aiperf load ---"
 echo "  concurrency=$CONCURRENCY  requests=${NUM_REQUESTS:-auto}  isl=$ISL  osl=$OSL"
 [[ -n "$BENCHMARK_DURATION" ]] && echo "  benchmark-duration=${BENCHMARK_DURATION}s"
 [[ -n "$REQUEST_RATE" ]] && echo "  request-rate=${REQUEST_RATE} req/s"
+[[ -n "$LOAD_CPUSET" ]] && echo "  load-cpuset=$LOAD_CPUSET"
+
+if [[ -z "$AIPERF_WORKERS_MAX" ]]; then
+    AIPERF_WORKERS_MAX="$CONCURRENCY"
+fi
 
 # Build load-control args: prefer --benchmark-duration (time-based) over
 # --request-count (count-based) so each run gets a consistent measurement
@@ -751,7 +798,7 @@ for _AIPERF_MODEL in "${_AIPERF_MODELS[@]}"; do
         _AIPERF_TOK_ARGS=(--tokenizer "$MODEL")
     fi
 
-    HF_HUB_OFFLINE=1 aiperf profile --artifact-dir "$AIPERF_ARTIFACT_DIR" \
+    "${LOAD_TASKSET[@]}" env HF_HUB_OFFLINE=1 aiperf profile --artifact-dir "$AIPERF_ARTIFACT_DIR" \
         --model "$_AIPERF_MODEL" \
         "${_AIPERF_TOK_ARGS[@]}" \
         --endpoint-type chat \
@@ -772,8 +819,8 @@ for _AIPERF_MODEL in "${_AIPERF_MODELS[@]}"; do
         "${_WARMUP_ARGS[@]}" \
         --num-dataset-entries 12800 \
         --random-seed 100 \
-        --workers-max "$CONCURRENCY" \
-        --record-processors 32 \
+        --workers-max "$AIPERF_WORKERS_MAX" \
+        --record-processors "$AIPERF_RECORD_PROCESSORS" \
         --ui simple || echo "WARNING: aiperf failed for model ${_AIPERF_MODEL}"
 done
 
@@ -914,6 +961,11 @@ cat > "$OUTPUT_DIR/config.json" <<EOF
   "osl": $OSL,
   "capture_duration": $CAPTURE_DURATION,
   "frontend_pid": $FRONTEND_PID,
+  "frontend_cpuset": "${FRONTEND_CPUSET:-}",
+  "load_cpuset": "${LOAD_CPUSET:-}",
+  "infra_cpuset": "${INFRA_CPUSET:-}",
+  "aiperf_record_processors": $AIPERF_RECORD_PROCESSORS,
+  "aiperf_workers_max": $AIPERF_WORKERS_MAX,
   "has_nsys": $HAS_NSYS,
   "has_perf": $HAS_PERF,
   "has_bpf": $HAS_BPF,

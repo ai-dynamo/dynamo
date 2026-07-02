@@ -57,6 +57,16 @@ on:
       gpu_test_markers:
         required: true
         type: string
+      run_frontend_perf_pr_guard:
+        description: 'Whether to run the CPU-pinned frontend performance PR guard'
+        required: false
+        type: boolean
+        default: false
+      frontend_perf_guard_baseline:
+        description: 'Optional baseline JSON/CSV path inside the test image for frontend perf comparisons'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -226,6 +236,51 @@ jobs:
       source_ref: ${{ inputs.source_ref }}
       image_tag_suffix: ${{ inputs.image_tag_suffix }}
     secrets: inherit
+
+  frontend-perf-pr-guard:
+    name: frontend perf pr guard
+    needs: image
+    if: ${{ inputs.run_frontend_perf_pr_guard }}
+    runs-on: prod-tester-amd-v2
+    container:
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ needs.image.outputs.target_tag_plain }}${{ (inputs.cuda_version != '' && !startsWith(inputs.cuda_version, '13.')) && format('-cuda{0}', startsWith(inputs.cuda_version, '12.') && '12' || inputs.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Run CPU-pinned frontend perf guard
+        working-directory: /workspace
+        shell: bash
+        env:
+          FRONTEND_PERF_GUARD_BASELINE: ${{ inputs.frontend_perf_guard_baseline }}
+        run: |
+          set -euo pipefail
+
+          OUTPUT_DIR="${RUNNER_TEMP}/frontend-perf-pr-guard"
+          mkdir -p "${OUTPUT_DIR}"
+          DYNAMO_PYTHON="$(command -v python3)"
+
+          BASELINE_ARGS=()
+          if [[ -n "${FRONTEND_PERF_GUARD_BASELINE}" ]]; then
+            BASELINE_ARGS=(--baseline "${FRONTEND_PERF_GUARD_BASELINE}")
+          fi
+
+          "${DYNAMO_PYTHON}" benchmarks/frontend/scripts/ci/frontend_perf_pr_guard.py run \
+            --output-dir "${OUTPUT_DIR}" \
+            --report-json "${OUTPUT_DIR}/pr_guard_report.json" \
+            --summary-file "${OUTPUT_DIR}/pr_guard_summary.md" \
+            "${BASELINE_ARGS[@]}"
+
+      - name: Upload frontend perf guard artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: frontend-perf-pr-guard-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/frontend-perf-pr-guard
+          if-no-files-found: ignore
 
   gpu:
     name: test
