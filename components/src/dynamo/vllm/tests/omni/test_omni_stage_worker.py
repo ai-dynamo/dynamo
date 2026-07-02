@@ -30,6 +30,8 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
 ]
 
 
@@ -580,6 +582,36 @@ def test_single_stage_runtime_devices_normalized_when_visibility_is_narrowed(
 
 def test_single_stage_runtime_devices_preserve_visible_subset(monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    stage_arg = {
+        "stage_id": 0,
+        "stage_type": "diffusion",
+        "runtime": {"devices": "1"},
+    }
+
+    _normalize_single_stage_runtime_devices(stage_arg)
+
+    assert stage_arg["runtime"]["devices"] == "1"
+
+
+def test_single_stage_runtime_devices_normalized_for_xpu_visibility(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("ZE_AFFINITY_MASK", "2")
+    stage_arg = {
+        "stage_id": 0,
+        "stage_type": "diffusion",
+        "runtime": {"devices": "2"},
+    }
+
+    _normalize_single_stage_runtime_devices(stage_arg)
+
+    assert stage_arg["runtime"]["devices"] == "0"
+
+
+def test_single_stage_runtime_devices_preserve_xpu_visible_subset(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("ASCEND_RT_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("ZE_AFFINITY_MASK", "0,1")
     stage_arg = {
         "stage_id": 0,
         "stage_type": "diffusion",

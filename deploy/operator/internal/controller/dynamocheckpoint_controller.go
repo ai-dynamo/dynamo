@@ -19,14 +19,14 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
-	resourcev1 "k8s.io/api/resource/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,10 +43,10 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 )
+
+var errCheckpointCleanupPending = errors.New("checkpoint cleanup pending")
 
 // CheckpointReconciler reconciles a DynamoCheckpoint object
 type CheckpointReconciler struct {
@@ -65,10 +65,11 @@ func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get
 // +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
+//nolint:gocyclo
 func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -83,17 +84,46 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	logger.Info("Reconciling DynamoCheckpoint", "name", ckpt.Name, "phase", ckpt.Status.Phase)
 
-	identityHash, err := checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+	if ckpt.GetDeletionTimestamp().IsZero() {
+		if ckpt.Annotations != nil &&
+			ckpt.Annotations[consts.CheckpointAutoAnnotation] == consts.KubeLabelValueTrue &&
+			!commonController.ContainsFinalizer(ckpt) {
+			commonController.AddFinalizer(ckpt)
+			if err := r.Update(ctx, ckpt); err != nil {
+				logger.Error(err, "Failed to add finalizer")
+				return ctrl.Result{}, err
+			}
+		}
+	} else {
+		if commonController.ContainsFinalizer(ckpt) {
+			if err := r.FinalizeResource(ctx, ckpt); err != nil {
+				if errors.Is(err, errCheckpointCleanupPending) {
+					logger.Info("Checkpoint cleanup pending", "reason", err.Error())
+					return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+				}
+				logger.Error(err, "Failed to call finalizer")
+				return ctrl.Result{}, err
+			}
+			commonController.RemoveFinalizer(ckpt)
+			if err := r.Update(ctx, ckpt); err != nil {
+				logger.Error(err, "Failed to remove finalizer")
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	checkpointID, err := checkpoint.CheckpointID(ckpt)
 	if err != nil {
-		logger.Error(err, "Failed to compute checkpoint identity hash")
-		return ctrl.Result{}, fmt.Errorf("failed to compute checkpoint identity hash: %w", err)
+		logger.Error(err, "Failed to resolve checkpoint ID")
+		return ctrl.Result{}, fmt.Errorf("failed to resolve checkpoint ID: %w", err)
 	}
 
 	if ckpt.Labels == nil {
 		ckpt.Labels = map[string]string{}
 	}
-	if ckpt.Labels[snapshotprotocol.CheckpointIDLabel] != identityHash {
-		ckpt.Labels[snapshotprotocol.CheckpointIDLabel] = identityHash
+	if ckpt.Labels[snapshotprotocol.CheckpointIDLabel] != checkpointID {
+		ckpt.Labels[snapshotprotocol.CheckpointIDLabel] = checkpointID
 		if err := r.Update(ctx, ckpt); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -104,11 +134,15 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	needsStatusUpdate := false
 	phaseWasEmpty := ckpt.Status.Phase == ""
-	if ckpt.Status.IdentityHash != identityHash {
-		ckpt.Status.IdentityHash = identityHash
+	if ckpt.Status.CheckpointID != checkpointID {
+		ckpt.Status.CheckpointID = checkpointID
 		needsStatusUpdate = true
 	}
-	existing, err := checkpoint.FindCheckpointByIdentityHash(ctx, r.Client, ckpt.Namespace, identityHash, ckpt.Name)
+	if ckpt.Status.IdentityHash != checkpointID {
+		ckpt.Status.IdentityHash = checkpointID
+		needsStatusUpdate = true
+	}
+	existing, err := checkpoint.FindCheckpointByCheckpointID(ctx, r.Client, ckpt.Namespace, checkpointID, ckpt.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -116,7 +150,7 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
 		ckpt.Status.JobName = ""
 		ckpt.Status.CreatedAt = nil
-		ckpt.Status.Message = fmt.Sprintf("checkpoint identity hash %s is already owned by %s", identityHash, existing.Name)
+		ckpt.Status.Message = fmt.Sprintf("checkpoint ID %s is already owned by %s", checkpointID, existing.Name)
 		if err := r.Status().Update(ctx, ckpt); err != nil {
 			logger.Error(err, "Failed to mark duplicate DynamoCheckpoint as failed")
 			return ctrl.Result{}, err
@@ -124,7 +158,7 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 	desiredJobName := snapshotprotocol.GetCheckpointJobName(
-		identityHash,
+		checkpointID,
 		ckpt.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation],
 	)
 	switch ckpt.Status.Phase {
@@ -183,60 +217,21 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	logger := log.FromContext(ctx)
 
 	if err := checkpoint.ValidateGMSSnapshotGate("spec.gpuMemoryService", true, ckpt.Spec.GPUMemoryService); err != nil {
-		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
-		ckpt.Status.JobName = ""
-		ckpt.Status.CreatedAt = nil
-		ckpt.Status.Message = err.Error()
-		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
-			Status:             metav1.ConditionFalse,
-			Reason:             "GMSSnapshotDisabled",
-			Message:            err.Error(),
-			LastTransitionTime: metav1.Now(),
-		})
-		if updateErr := r.Status().Update(ctx, ckpt); updateErr != nil {
-			logger.Error(updateErr, "Failed to mark DynamoCheckpoint as failed")
-			return ctrl.Result{}, updateErr
-		}
-		return ctrl.Result{}, nil
+		return r.failPendingCheckpoint(ctx, ckpt, "GMSSnapshotDisabled", err)
+	}
+	if err := checkpoint.ValidatePreparedGPUMemoryServicePodTemplate(ckpt); err != nil {
+		return r.failPendingCheckpoint(ctx, ckpt, "GMSPodTemplateNotPrepared", err)
 	}
 
-	if err := r.reconcileK8sDiscoveryResources(ctx, ckpt); err != nil {
-		logger.Error(err, "Failed to reconcile K8s discovery resources for checkpoint")
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile K8s discovery resources for checkpoint: %w", err)
+	hash := ckpt.Status.CheckpointID
+	if hash == "" {
+		hash = ckpt.Status.IdentityHash
 	}
-
-	hash := ckpt.Status.IdentityHash
 	if hash == "" {
 		var err error
-		hash, err = checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+		hash, err = checkpoint.CheckpointID(ckpt)
 		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to compute checkpoint identity hash: %w", err)
-		}
-	}
-
-	// Sync DRA ResourceClaimTemplate for GMS-enabled checkpoints.
-	if ckpt.Spec.GPUMemoryService != nil && ckpt.Spec.GPUMemoryService.Enabled {
-		if !r.RuntimeConfig.DRAEnabled {
-			return ctrl.Result{}, fmt.Errorf(
-				"GMS requires DRA (Dynamic Resource Allocation), but the resource.k8s.io/v1 API is not available")
-		}
-		if len(ckpt.Spec.Job.PodTemplateSpec.Spec.Containers) == 0 {
-			return ctrl.Result{}, fmt.Errorf("checkpoint job requires at least one container for GMS")
-		}
-		gpuQty := ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0].Resources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)]
-		gpuCount := int(gpuQty.Value())
-		deviceClassName := ""
-		if ckpt.Spec.GPUMemoryService != nil {
-			deviceClassName = ckpt.Spec.GPUMemoryService.DeviceClassName
-		}
-		claimTemplateName := dra.ResourceClaimTemplateName("checkpoint-"+hash, "worker")
-		_, _, err := commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*resourcev1.ResourceClaimTemplate, bool, error) {
-			return dra.GenerateResourceClaimTemplate(ctx, r.Client, claimTemplateName, ckpt.Namespace, gpuCount, deviceClassName)
-		})
-		if err != nil {
-			logger.Error(err, "Failed to sync GMS ResourceClaimTemplate for checkpoint")
-			return ctrl.Result{}, fmt.Errorf("failed to sync GMS ResourceClaimTemplate for checkpoint: %w", err)
+			return ctrl.Result{}, fmt.Errorf("failed to resolve checkpoint ID: %w", err)
 		}
 	}
 
@@ -279,45 +274,29 @@ func (r *CheckpointReconciler) handlePending(ctx context.Context, ckpt *nvidiaco
 	return ctrl.Result{}, nil
 }
 
-func (r *CheckpointReconciler) reconcileK8sDiscoveryResources(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (err error) {
+func (r *CheckpointReconciler) failPendingCheckpoint(
+	ctx context.Context,
+	ckpt *nvidiacomv1alpha1.DynamoCheckpoint,
+	reason string,
+	err error,
+) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	resourceName := ""
-	defer func() {
-		if err == nil {
-			return
-		}
-		logger.Error(err, "failed to sync checkpoint k8s discovery resource", "resource", resourceName)
-		err = fmt.Errorf("failed to sync checkpoint k8s discovery %s: %w", resourceName, err)
-	}()
-
-	resourceName = "service account"
-	serviceAccount := discovery.GetK8sDiscoveryServiceAccount(ckpt.Name, ckpt.Namespace)
-	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*corev1.ServiceAccount, bool, error) {
-		return serviceAccount, false, nil
+	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
+	ckpt.Status.JobName = ""
+	ckpt.Status.CreatedAt = nil
+	ckpt.Status.Message = err.Error()
+	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
+		Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            err.Error(),
+		LastTransitionTime: metav1.Now(),
 	})
-	if err != nil {
-		return err
+	if updateErr := r.Status().Update(ctx, ckpt); updateErr != nil {
+		logger.Error(updateErr, "Failed to mark DynamoCheckpoint as failed")
+		return ctrl.Result{}, updateErr
 	}
-
-	resourceName = "role"
-	role := discovery.GetK8sDiscoveryRole(ckpt.Name, ckpt.Namespace)
-	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*rbacv1.Role, bool, error) {
-		return role, false, nil
-	})
-	if err != nil {
-		return err
-	}
-
-	resourceName = "role binding"
-	roleBinding := discovery.GetK8sDiscoveryRoleBinding(ckpt.Name, ckpt.Namespace)
-	_, _, err = commonController.SyncResource(ctx, r, ckpt, func(ctx context.Context) (*rbacv1.RoleBinding, bool, error) {
-		return roleBinding, false, nil
-	})
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return ctrl.Result{}, nil
 }
 
 func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
@@ -419,6 +398,78 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 	default:
 		return ctrl.Result{}, nil
 	}
+}
+
+//nolint:gocyclo
+func (r *CheckpointReconciler) FinalizeResource(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) error {
+	logger := log.FromContext(ctx)
+	if ckpt == nil || ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+		return nil
+	}
+	if r.Config == nil {
+		logger.Info("Automatic checkpoint artifact cleanup skipped because operator configuration is not available")
+		return nil
+	}
+
+	checkpointID, err := checkpoint.CheckpointID(ckpt)
+	if err != nil {
+		return err
+	}
+
+	storage, ok, err := checkpoint.StorageFromConfig(r.Config.Checkpoint.Storage)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		daemonSets := &appsv1.DaemonSetList{}
+		if err := r.List(
+			ctx,
+			daemonSets,
+			client.InNamespace(ckpt.Namespace),
+			client.MatchingLabels{snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue},
+		); err != nil {
+			return fmt.Errorf("list snapshot-agent daemonsets in %s: %w", ckpt.Namespace, err)
+		}
+		storage, err = snapshotprotocol.DiscoverStorageFromDaemonSets(ckpt.Namespace, daemonSets.Items)
+		if err != nil {
+			return fmt.Errorf("discover snapshot-agent storage for automatic checkpoint cleanup: %w", err)
+		}
+	}
+
+	job, err := buildCheckpointCleanupJob(r.Config, ckpt, checkpointID, storage)
+	if err != nil {
+		return err
+	}
+	current := &batchv1.Job{}
+	jobKey := client.ObjectKey{Namespace: job.Namespace, Name: job.Name}
+	if err := r.Get(ctx, jobKey, current); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("get checkpoint cleanup job %s/%s: %w", job.Namespace, job.Name, err)
+		}
+		if err := r.Create(ctx, job.DeepCopy()); err != nil && !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create checkpoint cleanup job %s/%s: %w", job.Namespace, job.Name, err)
+		}
+		return fmt.Errorf("%w: job %s/%s created", errCheckpointCleanupPending, job.Namespace, job.Name)
+	}
+	if current.Labels[snapshotprotocol.CheckpointIDLabel] != checkpointID {
+		return fmt.Errorf("checkpoint cleanup job %s/%s already exists for checkpoint ID %q", job.Namespace, job.Name, current.Labels[snapshotprotocol.CheckpointIDLabel])
+	}
+
+	for _, condition := range current.Status.Conditions {
+		switch {
+		case condition.Type == batchv1.JobComplete && condition.Status == corev1.ConditionTrue:
+			if err := r.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("delete completed checkpoint cleanup job %s/%s: %w", current.Namespace, current.Name, err)
+			}
+			return nil
+		case condition.Type == batchv1.JobFailed && condition.Status == corev1.ConditionTrue:
+			if err := r.Delete(ctx, current); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("delete failed checkpoint cleanup job %s/%s: %w", current.Namespace, current.Name, err)
+			}
+			return fmt.Errorf("%w: job %s/%s failed and was deleted for retry: %s", errCheckpointCleanupPending, current.Namespace, current.Name, condition.Message)
+		}
+	}
+	return fmt.Errorf("%w: job %s/%s is still running", errCheckpointCleanupPending, job.Namespace, job.Name)
 }
 
 // SetupWithManager sets up the controller with the Manager.

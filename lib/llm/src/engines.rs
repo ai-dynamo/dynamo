@@ -10,12 +10,11 @@ use async_stream::stream;
 use async_trait::async_trait;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
+#[cfg(test)]
+use dynamo_runtime::pipeline::RequestStream;
 use dynamo_runtime::pipeline::{Error, ManyIn, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::StreamExt;
-
-#[cfg(test)]
-use dynamo_runtime::engine::RequestStream;
 
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -23,6 +22,13 @@ use crate::protocols::openai::{
 };
 use crate::types::openai::embeddings::NvCreateEmbeddingRequest;
 use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
+use dynamo_protocols::types::realtime::{
+    EventType, MaxOutputTokens, RealtimeAPIError, RealtimeClientEvent, RealtimeResponse,
+    RealtimeResponseStatus, RealtimeServerEvent, RealtimeServerEventError,
+    RealtimeServerEventResponseAudioDelta, RealtimeServerEventResponseAudioDone,
+    RealtimeServerEventResponseCreated, RealtimeServerEventResponseDone,
+    RealtimeServerEventSessionUpdated,
+};
 
 //
 // The engines are each in their own crate under `lib/engines`
@@ -127,93 +133,184 @@ pub fn make_echo_engine() -> Arc<dyn StreamingEngine> {
     Arc::new(data)
 }
 
-/// Bidirectional echo engine: consumes a stream of `NvCreateChatCompletionRequest`s
-/// and, for each one, emits character-by-character `NvCreateChatCompletionStreamResponse`
-/// chunks followed by a terminal `FinishReason::Stop`. Used by the experimental
-/// `/v1/realtime` WebSocket endpoint to demonstrate end-to-end bidirectional plumbing.
-pub struct EchoBidirectionalEngine {}
+/// Per-delta chunk size for the echo engine's audio output, in UTF-8-aware bytes.
+const ECHO_AUDIO_DELTA_CHUNK_LEN: usize = 64;
+
+/// Mock realtime engine for `/v1/realtime` end-to-end plumbing.
+///
+/// Echoes `session.update` and wraps `input_audio_buffer.append` in a
+/// spec-shaped response envelope; rejects everything else as
+/// `echo_engine_unsupported`. Unlike a real engine, the response envelope
+/// is emitted immediately on append rather than gated on `response.create` —
+/// the mock has no concept of turn-taking.
+pub struct EchoBidirectionalEngine;
 
 #[async_trait]
-impl
-    AsyncEngine<
-        ManyIn<NvCreateChatCompletionRequest>,
-        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-        Error,
-    > for EchoBidirectionalEngine
+impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEvent>>, Error>
+    for EchoBidirectionalEngine
 {
     async fn generate(
         &self,
-        mut incoming: ManyIn<NvCreateChatCompletionRequest>,
-    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        incoming: ManyIn<RealtimeClientEvent>,
+    ) -> Result<ManyOut<Annotated<RealtimeServerEvent>>, Error> {
         let ctx = incoming.context();
         let session_id = ctx.id().to_string();
         let ctx_for_stream = ctx.clone();
+        let (request_stream, _ctx_unit) = incoming.into_parts();
+        let mut incoming = request_stream.take().ok_or_else(|| {
+            anyhow::anyhow!("RequestStream::take called twice on bidirectional input")
+        })?;
 
         let output = stream! {
             let ctx = ctx_for_stream;
-            let mut id: u64 = 1;
-            let mut chunk_index: u64 = 0;
+            let mut frame: u64 = 0;
 
-            while let Some(req) = incoming.next().await {
+            while let Some(client_event) = incoming.next().await {
                 if ctx.is_stopped() {
                     break;
                 }
-                chunk_index += 1;
 
-                let summary = req
-                    .inner
-                    .messages
-                    .iter()
-                    .next_back()
-                    .and_then(|msg| match msg {
-                        dynamo_protocols::types::ChatCompletionRequestMessage::User(user_msg) => {
-                            match &user_msg.content {
-                                dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(prompt) => Some(prompt.clone()),
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| format!("<chunk {chunk_index}: non-text content>"));
-
-                let mut deltas = req.response_generator(format!("{session_id}-{chunk_index}"));
-
-                for c in summary.chars() {
-                    if ctx.is_stopped() {
-                        break;
+                match client_event {
+                    RealtimeClientEvent::SessionUpdate(req) => {
+                        frame += 1;
+                        yield annotated_event(
+                            frame,
+                            RealtimeServerEvent::SessionUpdated(
+                                RealtimeServerEventSessionUpdated {
+                                    event_id: format!("event_{session_id}_{frame}"),
+                                    session: req.session,
+                                },
+                            ),
+                        );
                     }
-                    tokio::time::sleep(*TOKEN_ECHO_DELAY).await;
-                    let response = deltas.create_choice(0, Some(c.to_string()), None, None);
-                    yield Annotated {
-                        id: Some(id.to_string()),
-                        data: Some(response),
-                        event: None,
-                        comment: None,
-                        error: None,
-                    };
-                    id += 1;
-                }
+                    RealtimeClientEvent::InputAudioBufferAppend(req) => {
+                        let response_id = format!("resp_{session_id}_{frame}");
+                        let item_id = format!("item_{session_id}_{frame}");
 
-                if !ctx.is_stopped() {
-                    let response = deltas.create_choice(
-                        0,
-                        None,
-                        Some(dynamo_protocols::types::FinishReason::Stop),
-                        None,
-                    );
-                    yield Annotated {
-                        id: Some(id.to_string()),
-                        data: Some(response),
-                        event: None,
-                        comment: None,
-                        error: None,
-                    };
-                    id += 1;
+                        frame += 1;
+                        yield annotated_event(
+                            frame,
+                            RealtimeServerEvent::ResponseCreated(
+                                RealtimeServerEventResponseCreated {
+                                    event_id: format!("event_{session_id}_{frame}"),
+                                    response: echo_response(
+                                        &response_id,
+                                        RealtimeResponseStatus::InProgress,
+                                    ),
+                                },
+                            ),
+                        );
+
+                        // Slice the base64 audio in-place on UTF-8 char
+                        // boundaries — avoids the O(N) `Vec<char>` an upfront
+                        // `chars().collect()` would allocate on a 15 MB frame.
+                        let audio = req.audio.as_str();
+                        let mut start = 0;
+                        while start < audio.len() {
+                            if ctx.is_stopped() {
+                                break;
+                            }
+                            let mut end = (start + ECHO_AUDIO_DELTA_CHUNK_LEN).min(audio.len());
+                            while !audio.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            frame += 1;
+                            yield annotated_event(
+                                frame,
+                                RealtimeServerEvent::ResponseOutputAudioDelta(
+                                    RealtimeServerEventResponseAudioDelta {
+                                        event_id: format!("event_{session_id}_{frame}"),
+                                        response_id: response_id.clone(),
+                                        item_id: item_id.clone(),
+                                        output_index: 0,
+                                        content_index: 0,
+                                        delta: audio[start..end].to_string(),
+                                    },
+                                ),
+                            );
+                            start = end;
+                        }
+                        if ctx.is_stopped() {
+                            break;
+                        }
+                        frame += 1;
+                        yield annotated_event(
+                            frame,
+                            RealtimeServerEvent::ResponseOutputAudioDone(
+                                RealtimeServerEventResponseAudioDone {
+                                    event_id: format!("event_{session_id}_{frame}"),
+                                    response_id: response_id.clone(),
+                                    item_id: item_id.clone(),
+                                    output_index: 0,
+                                    content_index: 0,
+                                },
+                            ),
+                        );
+                        frame += 1;
+                        yield annotated_event(
+                            frame,
+                            RealtimeServerEvent::ResponseDone(
+                                RealtimeServerEventResponseDone {
+                                    event_id: format!("event_{session_id}_{frame}"),
+                                    response: echo_response(
+                                        &response_id,
+                                        RealtimeResponseStatus::Completed,
+                                    ),
+                                },
+                            ),
+                        );
+                    }
+                    other => {
+                        frame += 1;
+                        yield annotated_event(
+                            frame,
+                            RealtimeServerEvent::Error(RealtimeServerEventError {
+                                event_id: format!("event_{session_id}_{frame}"),
+                                error: RealtimeAPIError {
+                                    r#type: "invalid_request_error".to_string(),
+                                    code: Some("echo_engine_unsupported".to_string()),
+                                    message: format!(
+                                        "echo engine does not support client event {}",
+                                        other.event_type()
+                                    ),
+                                    param: None,
+                                    event_id: None,
+                                },
+                            }),
+                        );
+                    }
                 }
             }
         };
 
         Ok(ResponseStream::new(Box::pin(output), ctx))
+    }
+}
+
+fn annotated_event(frame: u64, event: RealtimeServerEvent) -> Annotated<RealtimeServerEvent> {
+    Annotated {
+        id: Some(frame.to_string()),
+        ..Annotated::from_data(event)
+    }
+}
+
+/// Minimal `RealtimeResponse` payload for the echo engine's `response.created`
+/// and `response.done` envelope frames. Real engines populate `output`,
+/// `usage`, etc.; the mock leaves them empty so the spec shape is intact
+/// without pretending to have generated tokens.
+fn echo_response(id: &str, status: RealtimeResponseStatus) -> RealtimeResponse {
+    RealtimeResponse {
+        audio: None,
+        conversation_id: None,
+        id: id.to_string(),
+        max_output_tokens: MaxOutputTokens::Inf,
+        metadata: None,
+        object: "realtime.response".to_string(),
+        output: Vec::new(),
+        output_modalities: vec!["audio".to_string()],
+        status,
+        status_details: None,
+        usage: None,
     }
 }
 
@@ -466,77 +563,39 @@ mod tests {
     use dynamo_runtime::pipeline::Context;
     use futures::stream;
 
-    fn make_user_request(text: &str) -> NvCreateChatCompletionRequest {
-        let body = serde_json::json!({
-            "model": "echo",
-            "messages": [{ "role": "user", "content": text }],
-        });
-        serde_json::from_value(body).expect("valid chat completion request")
+    fn make_input(events: Vec<RealtimeClientEvent>) -> ManyIn<RealtimeClientEvent> {
+        Context::new(RequestStream::new(Box::pin(stream::iter(events))))
     }
 
-    fn collect_text(
-        annotated_chunks: &[Annotated<NvCreateChatCompletionStreamResponse>],
-    ) -> String {
-        use dynamo_protocols::types::ChatCompletionMessageContent;
-        annotated_chunks
-            .iter()
-            .filter_map(|chunk| chunk.data.as_ref())
-            .flat_map(|resp| resp.inner.choices.iter())
-            .filter_map(|choice| match choice.delta.content.as_ref()? {
-                ChatCompletionMessageContent::Text(s) => Some(s.clone()),
-                _ => None,
-            })
-            .collect()
+    fn parse_client_event(json: serde_json::Value) -> RealtimeClientEvent {
+        serde_json::from_value(json).expect("valid realtime client event")
     }
 
-    fn count_finish_stops(
-        annotated_chunks: &[Annotated<NvCreateChatCompletionStreamResponse>],
-    ) -> usize {
-        use dynamo_protocols::types::FinishReason;
-        annotated_chunks
-            .iter()
-            .filter_map(|chunk| chunk.data.as_ref())
-            .flat_map(|resp| resp.inner.choices.iter())
-            .filter(|c| matches!(c.finish_reason, Some(FinishReason::Stop)))
-            .count()
-    }
-
-    fn make_input(
-        requests: Vec<NvCreateChatCompletionRequest>,
-    ) -> ManyIn<NvCreateChatCompletionRequest> {
-        RequestStream::new(Box::pin(stream::iter(requests)), Context::new(()).context())
-    }
-
-    /// Drive a fixed sequence of two requests through the bidirectional echo engine
-    /// and assert: every char of every prompt is echoed in order, and each request
-    /// gets its own terminal `FinishReason::Stop`.
+    /// Unsupported client events are rejected as a single Error server event;
+    /// the SessionUpdate / InputAudioBufferAppend round-trips are covered
+    /// end-to-end in `tests/http_websocket.rs`.
     #[tokio::test]
-    async fn echo_bidirectional_emits_per_char_then_finish() {
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            // SAFETY: runs at most once, before any worker thread reads the env;
-            // `TOKEN_ECHO_DELAY` captures it via `LazyLock` on first use.
-            unsafe {
-                std::env::set_var("DYN_TOKEN_ECHO_DELAY_MS", "0");
+    async fn echo_bidirectional_unknown_event_emits_error() {
+        let item_create = parse_client_event(serde_json::json!({
+            "type": "conversation.item.create",
+            "item": { "type": "message", "role": "user", "content": [] }
+        }));
+
+        let engine = EchoBidirectionalEngine;
+        let mut response_stream = engine
+            .generate(make_input(vec![item_create]))
+            .await
+            .expect("generate");
+
+        let chunk = response_stream.next().await.expect("one server event");
+        assert!(response_stream.next().await.is_none(), "exactly one event");
+
+        match chunk.data.expect("annotated payload") {
+            RealtimeServerEvent::Error(err) => {
+                assert_eq!(err.error.code.as_deref(), Some("echo_engine_unsupported"));
+                assert!(err.error.message.contains("conversation.item.create"));
             }
-        });
-
-        let engine = EchoBidirectionalEngine {};
-        let input = make_input(vec![make_user_request("hi"), make_user_request("ok")]);
-
-        let mut response_stream = engine.generate(input).await.expect("generate");
-        let mut chunks = Vec::new();
-        while let Some(chunk) = response_stream.next().await {
-            chunks.push(chunk);
+            other => panic!("expected error, got {other:?}"),
         }
-
-        assert_eq!(collect_text(&chunks), "hiok");
-        assert_eq!(count_finish_stops(&chunks), 2);
     }
-
-    // Cancellation is verified at the WebSocket integration level rather than here:
-    // `TOKEN_ECHO_DELAY` is a `LazyLock` that captures `DYN_TOKEN_ECHO_DELAY_MS` once
-    // per process, so tests sharing the binary cannot independently dial the per-char
-    // delay. The integration test in lib/llm/tests/http_websocket.rs exercises the
-    // client-disconnect path through the full handler.
 }

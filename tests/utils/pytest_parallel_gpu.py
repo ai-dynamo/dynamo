@@ -35,8 +35,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import pynvml
-
 _repo_root = str(Path(__file__).resolve().parents[2])
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
@@ -45,6 +43,7 @@ from tests.utils.vram_utils import (  # noqa: E402
     VRAM_MULTI_PROC_MARGIN,
     auto_worker_count,
     detect_gpus,
+    effective_cpu_budget,
     load_test_meta,
 )
 
@@ -66,6 +65,16 @@ class _TestEntry:
     w_id: int = 0
     assigned_gpu: int | None = None
     retries: int = 0
+
+    @property
+    def est_duration(self) -> float:
+        """Estimated runtime in seconds.
+
+        Repo convention sets ``@pytest.mark.timeout`` to ~3x a test's measured
+        runtime, so ``timeout / 3`` is the best a-priori duration estimate. The
+        scheduler orders longest-first (LPT) on this value to minimize makespan.
+        """
+        return self.timeout / 3.0
 
 
 @dataclass
@@ -235,6 +244,10 @@ def _collect_tests(pytest_args: list[str], max_vram_gib: float) -> list[str]:
 def _get_gpu_used_gib(gpu_index: int = 0) -> float:
     """Query actual GPU memory used via pynvml."""
     try:
+        import pynvml
+    except ImportError:
+        return 0.0
+    try:
         pynvml.nvmlInit()
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
         mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
@@ -302,6 +315,136 @@ def _parse_cuda_visible(raw: str | None, available: list[dict]) -> list[int]:
     return indices
 
 
+def _priority_key(test: _TestEntry) -> tuple[bool, float, float]:
+    """Scheduling-priority sort key (use with ``reverse=True``).
+
+    Ordered so that, highest priority first:
+      1. VRAM tests (``profiled_gib > 0``) come before zero-VRAM fillers, so the
+         memory-bound tests own the schedule and fillers only mop up spare slots.
+      2. Longest ``est_duration`` (= timeout/3) first (LPT) to minimize makespan.
+      3. Largest VRAM first, so a big test anchors an empty GPU at the full
+         single-proc cap and smaller tests pack alongside it.
+
+    Defined as a module function so ``run_parallel`` and its tests share one
+    definition and can't drift.
+    """
+    return (test.profiled_gib > 0, test.est_duration, test.profiled_gib)
+
+
+def _select_launches(
+    pending: list[_TestEntry],
+    gpu_states: dict[int, _GpuState],
+    actual_free: dict[int, float],
+    num_slots: int,
+    running_count: int,
+) -> list[tuple[int, int]]:
+    """Pick which pending tests to launch this pass, and on which GPU.
+
+    Pure (no NVML / no subprocesses): the caller passes the live per-GPU budget
+    state and the actual free VRAM (from nvidia-smi). ``pending`` must already be
+    in scheduling-priority order (VRAM tests by longest est_duration / largest
+    VRAM first, zero-VRAM fillers last -- see the sort in ``run_parallel``).
+
+    Returns a list of ``(pending_index, gpu_index)`` to launch now, honoring:
+
+      * ``num_slots`` -- global cap on concurrently running subprocesses.
+      * Per-GPU VRAM budget with two independent gates (same as before): a test
+        fits only if BOTH the reserved-budget sum AND the actual nvidia-smi
+        usage leave room under the cap. The cap is the full card for the first
+        test on an idle GPU, then ``budget_multi`` once it hosts 2+ (reserving
+        the multi-process margin for CUDA context overhead).
+      * Pairing -- best-fit places each VRAM test on the GPU with the most free
+        budget, so a large test that anchored an empty GPU gets backfilled with
+        smaller tests up to the budget instead of running alone.
+      * Anti-starvation -- when the highest-priority VRAM test does not fit, the
+        GPU where it is closest to fitting is *reserved* for it. Lower-priority
+        tests may still backfill that GPU, but only up to ``cap - required`` so
+        that once the current occupants free, the reserved test is guaranteed to
+        fit (the backfill we add now can never sum past the space it needs).
+        Zero-VRAM fillers bypass the budget gates entirely (they allocate no
+        memory) so transient memory pressure can't strand an otherwise-free slot.
+    """
+    tentative = {
+        gi: _TentativeGpu(
+            budget=gs.budget_used,
+            free=actual_free[gi],
+            count=gs.running_count,
+        )
+        for gi, gs in gpu_states.items()
+    }
+    # GPU -> required GiB of a blocked higher-priority VRAM test, and the budget
+    # we have since added to that GPU via lower-priority backfill. Backfill is
+    # capped at cap - required so the reserved test still fits once occupants free.
+    reserved_req: dict[int, float] = {}
+    backfill_added: dict[int, float] = {}
+    to_launch: list[tuple[int, int]] = []
+
+    def _cap(gi: int) -> float:
+        # First test on an idle GPU may use the whole card; once it hosts 2+,
+        # reserve the multi-process margin for CUDA context overhead.
+        gs = gpu_states[gi]
+        return gs.total_gib if tentative[gi].count < 1 else gs.budget_multi
+
+    for idx, test in enumerate(pending):
+        if running_count + len(to_launch) >= num_slots:
+            break
+
+        # Zero-VRAM filler: no budget impact, just needs a free slot. Place on
+        # the least-loaded GPU for balance; never reserves and is never blocked.
+        if test.profiled_gib <= 0:
+            gi = min(gpu_states, key=lambda g: tentative[g].count)
+            to_launch.append((idx, gi))
+            tentative[gi].count += 1
+            continue
+
+        # VRAM test: best-fit on the GPU with the most free budget that passes
+        # both gates and respects any reservation.
+        best_gi: int | None = None
+        best_avail = -1.0
+        for gi, gs in gpu_states.items():
+            ts = tentative[gi]
+            cap = _cap(gi)
+            avail = cap - ts.budget
+            if avail < test.profiled_gib:
+                continue  # reserved-budget gate
+            actual_used = gs.total_gib - ts.free
+            if actual_used + test.profiled_gib > cap:
+                continue  # actual-usage gate (catches init-time spikes)
+            if gi in reserved_req and (
+                backfill_added[gi] + test.profiled_gib > cap - reserved_req[gi]
+            ):
+                continue  # would crowd out the reserved higher-priority test
+            if avail > best_avail:
+                best_gi, best_avail = gi, avail
+
+        if best_gi is not None:
+            to_launch.append((idx, best_gi))
+            tentative[best_gi].budget += test.profiled_gib
+            tentative[best_gi].free -= test.profiled_gib
+            tentative[best_gi].count += 1
+            if best_gi in reserved_req:
+                backfill_added[best_gi] += test.profiled_gib
+            continue
+
+        # Blocked: reserve the GPU where this test is closest to fitting (most
+        # free budget), unless that GPU is already held for an even-higher-
+        # priority test. Keep scanning -- smaller tests may still fit elsewhere
+        # or backfill under the reservation, and fillers keep filling slots.
+        cand: int | None = None
+        cand_avail = -1.0
+        for gi in gpu_states:
+            if gi in reserved_req:
+                continue
+            a = _cap(gi) - tentative[gi].budget
+            if a > cand_avail:
+                cand, cand_avail = gi, a
+        if cand is not None:
+            reserved_req[cand] = test.profiled_gib
+            backfill_added[cand] = 0.0
+
+    return to_launch
+
+
 def run_parallel(
     test_ids: list[str],
     meta: dict[str, dict],
@@ -326,6 +469,20 @@ def run_parallel(
     if not gpus:
         _print("ERROR: No GPUs detected")
         return 1
+
+    # xdist resolves `-n auto` from os.cpu_count(), which reports HOST cores and
+    # ignores Docker --cpus -- so num_slots can be many times the real CPU budget
+    # (e.g. 32 under --cpus=4). Combined with the zero-VRAM filler backfill that
+    # would oversubscribe the CPU and slow every concurrent test. Cap at the
+    # container's true CPU budget; raise NUM_CPUS (or --cpus) to allow more.
+    cpu_budget = effective_cpu_budget()
+    if num_slots > cpu_budget:
+        _print(
+            f"Capping concurrency: {num_slots} -> {cpu_budget} slots "
+            f"(CPU budget; raise NUM_CPUS to allow more)"
+        )
+        num_slots = cpu_budget
+    num_slots = max(1, num_slots)
 
     if gpu_indices is None:
         gpu_indices = [g["index"] for g in gpus]
@@ -369,8 +526,16 @@ def run_parallel(
     skipped_tests = [t for t in tests if t.skip_reason is not None]
     tests = [t for t in tests if t.skip_reason is None]
 
-    # Sort by timeout descending (longest first to minimize tail latency)
-    tests.sort(key=lambda t: t.timeout, reverse=True)
+    # Scheduling priority (highest first):
+    #   1. VRAM tests (profiled_gib > 0) before zero-VRAM fillers, so the
+    #      memory-bound tests own the schedule; fillers only mop up spare slots
+    #      (they never consume the GPU budget, so they must not crowd a VRAM
+    #      test out of a concurrency slot).
+    #   2. Longest est_duration (= timeout/3) first (LPT) to minimize makespan.
+    #   3. Largest VRAM first, so a big test anchors an empty GPU at the full
+    #      single-proc cap and smaller tests pack into the remaining budget
+    #      alongside it instead of the big test running alone on the tail.
+    tests.sort(key=_priority_key, reverse=True)
 
     # Reject tests without a KV marker — without explicit memory control
     # they'd each grab the engine's default (e.g. vLLM 90%) and OOM when
@@ -530,6 +695,22 @@ def run_parallel(
             )
 
         safe_name = test.name.replace("/", "_").replace("::", "__")
+        # Give each child a unique COVERAGE_FILE so its session-end combine
+        # (pytest-cov collapses data_suffix=True shards into the unsuffixed
+        # path) doesn't clobber siblings. Harmless when pytest-cov is not
+        # active — the env var is just unread.
+        #
+        # Key only on w_id, which is a permanent, globally-unique per-test index
+        # (assigned via enumerate() above), so it already guarantees uniqueness.
+        # Do NOT append the test node-id: pytest-cov adds its own
+        # ".<hostname>.<pid>.<random>" parallel suffix (plus a temp suffix during
+        # the atomic save), so a long node-id here can push the filename past the
+        # filesystem's 255-byte NAME_MAX and crash the run with
+        # "OSError: [Errno 36] File name too long". The w_id->test mapping stays
+        # recoverable from the orchestrator log and the per-test JUnit filenames.
+        parent_cov_file = env.get("COVERAGE_FILE")
+        if parent_cov_file:
+            env["COVERAGE_FILE"] = f"{parent_cov_file}.w{test.w_id}"
         junit_path = os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
         has_tb = extra_pytest_args and any(
             a.startswith("--tb") for a in extra_pytest_args
@@ -681,64 +862,26 @@ def run_parallel(
                 next_status = now + 10
 
         # --- Launch pending tests ---
-        # For each pending test, find the GPU with most available budget.
-        # Gate on BOTH budget tracking AND actual GPU free memory.
-        # vLLM stagger is per-GPU only — tests on different GPUs launch
-        # simultaneously.
+        # _select_launches packs VRAM tests up to budget (pairing a big test
+        # with smaller ones), backfills spare slots with zero-VRAM fillers, and
+        # reserves space for a blocked high-priority test so it can't be starved
+        # onto the tail. The vLLM stagger below is per-GPU only — tests on
+        # different GPUs launch simultaneously.
         if pending and len(running) < num_slots:
             actual_free = {
                 gi: gs.total_gib - _get_gpu_used_gib(gi)
                 for gi, gs in gpu_states.items()
             }
-            tentative = {
-                gi: _TentativeGpu(
-                    budget=gs.budget_used,
-                    free=actual_free[gi],
-                    count=gs.running_count,
-                )
-                for gi, gs in gpu_states.items()
-            }
-
-            to_launch: list[tuple[int, int]] = []  # (pending_idx, gpu_idx)
-            n_total = len(running)
-            for i, test in enumerate(pending):
-                if n_total + len(to_launch) >= num_slots:
-                    break
-                best_gi: int | None = None
-                best_avail = -1.0
-                for gi, gs in gpu_states.items():
-                    ts = tentative[gi]
-                    will_be_multi = ts.count >= 1
-                    cap = gs.budget_multi if will_be_multi else gs.total_gib
-                    # Two independent gates against the SAME cap.  Both must
-                    # leave room for the new test or we skip this GPU.
-                    #   (1) Reserved-budget gate: sum of profiled markers of
-                    #       tests already on this GPU + this candidate must
-                    #       fit under cap.
-                    #   (2) Actual-usage gate: nvidia-smi current usage + this
-                    #       candidate must also fit under cap.  This catches
-                    #       transient peaks (e.g. multi-worker tests during
-                    #       model load) where actual usage exceeds the sum of
-                    #       steady-state markers.  Without this, the scheduler
-                    #       trusts markers and over-commits the GPU during
-                    #       init-time spikes.
-                    avail = cap - ts.budget
-                    if avail < test.profiled_gib:
-                        continue
-                    actual_used = gs.total_gib - ts.free
-                    if actual_used + test.profiled_gib > cap:
-                        continue
-                    if avail > best_avail:
-                        best_gi = gi
-                        best_avail = avail
-                if best_gi is not None:
-                    to_launch.append((i, best_gi))
-                    tentative[best_gi].budget += test.profiled_gib
-                    tentative[best_gi].free -= test.profiled_gib
-                    tentative[best_gi].count += 1
+            to_launch = _select_launches(
+                pending=pending,
+                gpu_states=gpu_states,
+                actual_free=actual_free,
+                num_slots=num_slots,
+                running_count=len(running),
+            )
 
             # Pop from pending in reverse to preserve indices, then reverse
-            # back so longest-timeout tests launch first.
+            # back so highest-priority tests launch first.
             batch: list[_TestEntry] = []
             for pending_idx, assigned_gpu in reversed(to_launch):
                 entry = pending.pop(pending_idx)

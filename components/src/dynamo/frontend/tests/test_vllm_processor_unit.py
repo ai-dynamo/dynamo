@@ -7,20 +7,25 @@ Tests for the tool-stripping behaviour of _prepare_request when
 tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
+from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
 from dynamo.frontend.prepost import _prepare_request
 
-# Needs vllm packages (gpu_1 container).  No need for parallel marker.
+# Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.gpu_1,
+    pytest.mark.xpu_1,
     pytest.mark.pre_merge,
+    pytest.mark.profiled_vram_gib(0),
+    pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"
@@ -320,18 +325,198 @@ class TestRoutedEnginePath:
 
         chunks = await _run_generate(processor, _base_preproc())
 
-        assert chunks == [
+        # One annotated envelope per iteration carries both data and the
+        # llm_metrics annotation; observer strips the annotation before SSE.
+        assert len(chunks) == 1
+        envelope = chunks[0]
+
+        assert envelope["_dynamo_annotated"] is True
+        assert envelope["data"] == {
+            "id": "request-id",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"content": "x"},
+                    "finish_reason": None,
+                }
+            ],
+            "created": envelope["data"]["created"],
+            "model": MODEL,
+            "object": "chat.completion.chunk",
+        }
+
+        assert envelope["event"] == "llm_metrics"
+        assert len(envelope["comment"]) == 1
+        assert json.loads(envelope["comment"][0]) == {
+            "input_tokens": 3,
+            "output_tokens": 1,
+            "chunk_tokens": 1,
+        }
+
+
+OBJECT_TYPED_TOOL_REQUEST = {
+    "model": MODEL,
+    "messages": [{"role": "user", "content": "set my profile"}],
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "set_profile",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "profile": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "age": {"type": "integer"},
+                            },
+                        }
+                    },
+                    "required": ["profile"],
+                },
+            },
+        }
+    ],
+    "tool_choice": "auto",
+}
+
+
+# ---------------------------------------------------------------------------
+# _prepare_request: schema-aware tool-parser end-to-end regression
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaAwareToolParser:
+    """Schema-aware parsers (e.g. qwen3_coder) need ``tools`` at construction
+    to coerce object/array-typed parameter values from raw text into JSON;
+    without them, the value comes through as a string-in-a-string inside the
+    final ``arguments`` JSON.
+    """
+
+    def test_qwen3_coder_coerces_object_typed_arg(self, tokenizer):
+        """qwen3_coder must coerce object-typed parameter values into nested
+        objects, not leave them as JSON-encoded strings inside ``arguments``.
+        """
+        model_output = (
+            "<tool_call><function=set_profile>\n"
+            "<parameter=profile>\n"
+            '{"name": "Alice", "age": 30}\n'
+            "</parameter>\n"
+            "</function></tool_call>"
+        )
+
+        request_for_sampling, parser, _, _, _ = _prepare_request(
+            OBJECT_TYPED_TOOL_REQUEST,
+            tokenizer=tokenizer,
+            tool_parser_class=Qwen3EngineToolParser,
+        )
+        assert parser is not None, "Expected _prepare_request to construct the parser"
+
+        result = parser.extract_tool_calls(model_output, request_for_sampling)
+
+        assert result.tools_called, f"Expected tools_called=True; got {result!r}"
+        assert len(result.tool_calls) == 1
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert isinstance(args["profile"], dict), (
+            f"Schema-aware parser should coerce object-typed arg to dict; "
+            f"got {type(args['profile']).__name__}: {args['profile']!r}"
+        )
+        assert args["profile"] == {"name": "Alice", "age": 30}
+
+
+# ---------------------------------------------------------------------------
+# _prepare_request: chat_template_kwargs forwarding
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.core
+class TestChatTemplateKwargsForwarding:
+    """chat_template_kwargs from the request are forwarded to ChatParams.
+
+    Uses Qwen3 which supports enable_thinking: False to suppress <think> blocks.
+    """
+
+    @staticmethod
+    def _messages():
+        return [{"role": "user", "content": "Hello"}]
+
+    def _prepare(self, request, tokenizer):
+        """Return (chat_params, messages) from _prepare_request."""
+        _, _, _, messages, chat_params = _prepare_request(
+            request,
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        return chat_params, messages
+
+    def _render(self, tokenizer, chat_params) -> str:
+        """Render prompt text using the chat_params template kwargs."""
+        kwargs = {**chat_params.chat_template_kwargs, "tokenize": False}
+        return tokenizer.apply_chat_template(self._messages(), **kwargs)
+
+    def test_qwen3_enable_thinking_true_no_closed_think_block(self, tokenizer):
+        """enable_thinking=True leaves reasoning open (model generates <think> itself)."""
+        chat_params, _ = self._prepare(
             {
-                "id": "request-id",
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": "x"},
-                        "finish_reason": None,
-                    }
-                ],
-                "created": chunks[0]["created"],
                 "model": MODEL,
-                "object": "chat.completion.chunk",
-            }
-        ]
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer,
+        )
+        prompt = self._render(tokenizer, chat_params)
+        assert "</think>" not in prompt
+
+    def test_qwen3_thinking_flag_changes_tokens(self, tokenizer):
+        """enable_thinking=True vs False produces different rendered prompts."""
+        think_params, _ = self._prepare(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": True},
+            },
+            tokenizer,
+        )
+        no_think_params, _ = self._prepare(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            tokenizer,
+        )
+        assert self._render(tokenizer, think_params) != self._render(
+            tokenizer, no_think_params
+        )
+
+    def test_reasoning_effort_forwarded_to_template_kwargs(self, tokenizer):
+        """reasoning_effort is always present in chat_params.chat_template_kwargs."""
+        chat_params, _ = self._prepare(
+            {
+                "model": MODEL,
+                "messages": self._messages(),
+                "reasoning_effort": "low",
+            },
+            tokenizer,
+        )
+        assert chat_params.chat_template_kwargs.get("reasoning_effort") == "low"
+
+
+@pytest.mark.parametrize(
+    ("runtime_config", "expected"),
+    [
+        ({"context_length": 1048576}, 1048576),
+        ({}, None),
+        ({"context_length": None}, None),
+        ({"context_length": 0}, None),
+        ({"context_length": -1}, None),
+        ({"context_length": "1048576"}, None),
+        ({"context_length": True}, None),
+        (None, None),
+    ],
+)
+def test_runtime_config_context_length(vllm_processor_module, runtime_config, expected):
+    mdc = SimpleNamespace(runtime_config=lambda: runtime_config)
+
+    assert vllm_processor_module._runtime_config_context_length(mdc) == expected

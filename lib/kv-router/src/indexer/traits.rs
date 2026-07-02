@@ -5,7 +5,9 @@ use async_trait::async_trait;
 
 use std::sync::Arc;
 
-use super::{AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, WorkerTask};
+use super::{
+    AnchorRef, AnchorTask, KvIndexerMetrics, KvRouterError, TieredMatchDetails, WorkerTask,
+};
 use crate::protocols::*;
 
 /// Trait for querying an external shared KV cache pool.
@@ -23,12 +25,20 @@ pub trait SharedKvCache: Send + Sync {
     ) -> Result<SharedCacheHits, KvRouterError>;
 }
 
+#[async_trait]
+pub trait TieredMatchProvider: Send + Sync {
+    async fn find_tiered_matches(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<TieredMatchDetails, KvRouterError>;
+}
+
 /// Per-shard size snapshot returned by [`KvIndexerInterface::shard_sizes`].
 ///
 /// `worker_count` and `block_count` are always populated.
 /// `node_count` is populated only when the `shard-metrics` feature is enabled
 /// on the `dynamo-kv-router` crate; otherwise it is `0`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShardSizeSnapshot {
     /// Zero-based shard index.
     pub shard_idx: usize,

@@ -47,22 +47,15 @@ class SLAPlannerDefaults(BasePlannerDefaults):
         "PROMETHEUS_ENDPOINT",
         "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
     )
-    # Optional bearer token sent as `Authorization: Bearer <token>` on every
-    # PromQL request. Useful for hardened monitoring stacks that require
-    # token auth (OpenShift thanos-querier, anything fronted by an OAuth
-    # proxy). When set, the token is read once at startup; for SA tokens
-    # that rotate, use a token_file knob instead (separate config field
-    # planned as follow-up).
     metric_pulling_prometheus_token = os.environ.get("PROMETHEUS_TOKEN")
-    # Verify the upstream Prometheus TLS certificate. Default False preserves
-    # the previous PrometheusConnect(disable_ssl=True) behavior so existing
-    # deployments are unaffected. Set to True (or env PROMETHEUS_SSL_VERIFY=1)
-    # for hardened monitoring stacks where you want the request to fail
-    # closed on a bad cert. Pair with PROMETHEUS_CA_BUNDLE if the upstream
-    # uses a private CA.
+    metric_pulling_prometheus_token_file = os.environ.get("PROMETHEUS_TOKEN_FILE")
     metric_pulling_prometheus_ssl_verify = os.environ.get(
         "PROMETHEUS_SSL_VERIFY", "false"
     ).lower() in ("1", "true", "yes")
+    metric_pulling_prometheus_extra_query_params = os.environ.get(
+        "PROMETHEUS_EXTRA_QUERY_PARAMS"
+    )
+    metric_pulling_prometheus_ca_bundle = os.environ.get("PROMETHEUS_CA_BUNDLE")
     profile_results_dir = "profiling_results"
 
     isl = 3000  # in number of tokens
@@ -89,19 +82,22 @@ class SLAPlannerDefaults(BasePlannerDefaults):
 
     # Load-based scaling settings
     load_adjustment_interval_seconds = (
-        5  # also controls FPM regression update frequency for throughput scaling
+        5  # also controls live FPM tuning frequency for throughput scaling
     )
-    max_num_fpm_samples = 64  # max retained FPM observations for regression
+    max_num_fpm_samples = 64  # max retained FPM observations for tuning/fallback
     fpm_sample_bucket_size = (
         16  # must be a perfect square; total buckets across input axes
     )
     load_scaling_down_sensitivity = 80  # 0-100
-    load_metric_samples = 10  # number of samples per interval
     load_min_observations = 5  # cold start threshold
     prefill_scale_up_queue_tokens = None
     prefill_scale_down_queue_tokens = None
     decode_scale_up_kv_rate = None
     decode_scale_down_kv_rate = None
+
+    # Speculative decoding. 0 disables planner-side spec decode discounts unless
+    # worker MDC publishes a positive runtime_config.runtime_data.spec_decode.nextn.
+    speculative_nextn = 0
 
     # Advisory mode: compute and log decisions without executing scaling
     advisory = False

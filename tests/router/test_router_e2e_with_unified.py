@@ -251,7 +251,9 @@ def test_unified_vllm_router_decisions_dp(
 @pytest.mark.gpu_1
 @pytest.mark.sglang
 @pytest.mark.model(SGLANG_MODEL_NAME)
-@pytest.mark.timeout(360)
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.timeout(400)  # 3x ~131s sglang (gpu_1 log)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_unified_sglang_kv_router_basic(
     request,
@@ -279,6 +281,8 @@ def test_unified_sglang_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.sglang
 @pytest.mark.model(SGLANG_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(12.0)
+@pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.timeout(360)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_unified_sglang_router_decisions_multiple_workers(
@@ -312,7 +316,11 @@ def test_unified_sglang_router_decisions_multiple_workers(
 @pytest.mark.model(SGLANG_MODEL_NAME)
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.skip(reason="DYN-2265 (same as legacy SGLang DP test)")
+@pytest.mark.skip(
+    reason="SGLang multi-worker DP startup races on the same GPU "
+    "(same blocker as legacy test_router_decisions_sglang_dp; re-enable "
+    "when SGLang side stabilizes)"
+)
 def test_unified_sglang_router_decisions_dp(
     request,
     runtime_services_dynamic_ports,
@@ -353,6 +361,8 @@ def test_unified_sglang_router_decisions_dp(
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
 @pytest.mark.model(TRTLLM_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(7.8)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_unified_trtllm_kv_router_basic(
@@ -382,6 +392,8 @@ def test_unified_trtllm_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
 @pytest.mark.model(TRTLLM_MODEL_NAME)
+@pytest.mark.profiled_vram_gib(7.8)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_unified_trtllm_router_decisions_multiple_workers(

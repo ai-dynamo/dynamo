@@ -4,18 +4,27 @@
 use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, HashMap};
 
-use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate;
+use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
 
 use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
 use crate::protocols::{
     Annotated,
     codec::{Message, SseCodecError},
+    common::extensions::merge_response_nvext,
     convert_sse_stream,
-    openai::{ParsingOptions, nvext::merge_response_nvext},
+    openai::ParsingOptions,
 };
 
 use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_runtime::engine::DataStream;
+
+fn is_harmony_parser(parser: &str) -> bool {
+    parser == "harmony"
+}
+
+fn contains_harmony_protocol(text: &str) -> bool {
+    text.contains("<|channel|>")
+}
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
 /// [`NvCreateChatCompletionResponse`]. This struct accumulates incremental responses
@@ -64,7 +73,7 @@ struct DeltaChoice {
     tool_call_chunks: BTreeMap<u32, dynamo_protocols::types::ChatCompletionMessageToolCallChunk>,
     // Optional tool calls for the chat choice, populated *after* fold either
     // by finalizing `tool_call_chunks` above, or by
-    // `try_tool_call_parse_aggregate` running against `text` for producers
+    // `try_tool_call_parse_aggregate_finalize` running against `text` for producers
     // that put tool calls in content rather than as structured chunks.
     tool_calls: Option<Vec<dynamo_protocols::types::ChatCompletionMessageToolCall>>,
 
@@ -240,6 +249,7 @@ impl DeltaAggregator {
 
                     // Aggregate choices incrementally.
                     for choice in delta.inner.choices {
+                        let choice_role = choice.delta.role;
                         let state_choice =
                             aggregator
                                 .choices
@@ -247,7 +257,7 @@ impl DeltaAggregator {
                                 .or_insert(DeltaChoice {
                                     index: choice.index,
                                     text: "".to_string(),
-                                    role: choice.delta.role,
+                                    role: choice_role,
                                     finish_reason: None,
                                     logprobs: None,
                                     tool_call_chunks: BTreeMap::new(),
@@ -255,6 +265,11 @@ impl DeltaAggregator {
                                     reasoning_content: None,
                                     content_parts: Vec::new(),
                                 });
+
+                        if state_choice.role.is_none() {
+                            state_choice.role = choice_role;
+                        }
+
                         // Handle content based on type
                         if let Some(content) = &choice.delta.content {
                             match content {
@@ -347,8 +362,8 @@ impl DeltaAggregator {
                 .filter_map(finalize_merged_tool_chunk)
                 .collect();
             // choice.tool_calls is always None at this point: or_insert
-            // initializes it to None, try_tool_call_parse_aggregate runs
-            // strictly after this loop. Unconditional assign is the only
+            // initializes it to None, try_tool_call_parse_aggregate_finalize
+            // runs strictly after this loop. Unconditional assign is the only
             // reachable path; no merge-with-existing needed.
             if !finalized.is_empty() {
                 choice.tool_calls = Some(finalized);
@@ -366,21 +381,43 @@ impl DeltaAggregator {
                     continue;
                 }
 
-                let (tool_calls, content) =
-                    match try_tool_call_parse_aggregate(&choice.text, Some(parser), None).await {
-                        Ok(result) => result,
-                        Err(error) => {
-                            tracing::debug!(
-                                error = %error,
-                                parser,
-                                "failed to parse aggregated chat tool calls"
-                            );
-                            continue;
-                        }
-                    };
+                // With DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, supported families use the
+                // v2 parser for batch too (no jail / no aggregate-finalize):
+                // parse_complete drops a value truncated at EOF instead of guessing it.
+                // Other families, the flag off, and guided-decoded requests
+                // (tool_choice=required/named or structural-tag, gated by
+                // experimental_v2_batch_eligible — see tool_parser_v2::batch_tool_choice_eligible)
+                // keep the v1 finalize path.
+                let parse_result = if super::tool_parser_v2::enabled()
+                    && super::tool_parser_v2::supports_family(parser)
+                    && parsing_options.experimental_v2_batch_eligible
+                {
+                    super::tool_parser_v2::parse_complete(&choice.text, None, parser)
+                        .map(|(calls, normal)| (calls, Some(normal)))
+                } else {
+                    try_tool_call_parse_aggregate_finalize(&choice.text, Some(parser), None).await
+                };
+                let (tool_calls, content) = match parse_result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            parser,
+                            "failed to parse aggregated chat tool calls"
+                        );
+                        continue;
+                    }
+                };
 
                 if !tool_calls.is_empty() {
-                    choice.tool_calls = Some(tool_calls);
+                    choice.tool_calls = Some(
+                        tool_calls
+                            .into_iter()
+                            .map(super::tool_call_response_to_protocol)
+                            .collect(),
+                    );
+                    choice.text = content.unwrap_or_default();
+                } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
                     choice.text = content.unwrap_or_default();
                 }
             }
@@ -445,7 +482,9 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
 
         dynamo_protocols::types::ChatChoice {
             message: dynamo_protocols::types::ChatCompletionResponseMessage {
-                role: delta.role.expect("delta should have a Role"),
+                role: delta
+                    .role
+                    .unwrap_or(dynamo_protocols::types::Role::Assistant),
                 content,
                 tool_calls: delta.tool_calls,
                 refusal: None,
@@ -584,6 +623,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            llm_metrics: None,
         };
 
         Annotated {
@@ -632,6 +672,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            llm_metrics: None,
         };
         Annotated {
             data: Some(data),
@@ -976,6 +1017,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_missing_stream_role_defaults_to_assistant_without_panic() {
+        let deltas = vec![
+            create_test_delta(0, "Hello,", None, None, None, None),
+            create_test_delta(
+                0,
+                " world!",
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                None,
+                None,
+            ),
+        ];
+        let stream = Box::pin(stream::iter(deltas));
+
+        let response = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .expect("aggregation should not panic or error when stream role is missing");
+
+        assert_eq!(response.inner.choices.len(), 1);
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.message.role,
+            dynamo_protocols::types::Role::Assistant
+        );
+        assert_eq!(
+            choice.message.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Hello, world!".to_string())
+        );
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
     async fn test_preserves_intermediate_whitespace_chunks() {
         // This validates behavior before/after removing trim_end():
         // If a whitespace-only chunk (" ") arrives between tokens, it must be preserved.
@@ -1112,6 +1188,7 @@ mod tests {
                 object: "chat.completion".to_string(),
             },
             nvext: None,
+            llm_metrics: None,
         };
 
         // Wrap it in Annotated and create a stream
@@ -1564,6 +1641,65 @@ mod tests {
             choice.message.tool_calls.as_ref().unwrap()[0].r#type,
             dynamo_protocols::types::FunctionType::Function
         );
+    }
+
+    #[tokio::test]
+    async fn test_harmony_aggregate_zero_call_drops_internal_analysis() {
+        let annotated_delta = create_test_delta(
+            0,
+            r#"<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"Hidden City"}"#,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let result = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("harmony".to_string()), None),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        let choice = &response.inner.choices[0];
+        assert_eq!(choice.message.content, None);
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_harmony_aggregate_plain_text_without_markers_stays_plain_text() {
+        let annotated_delta = create_test_delta(
+            0,
+            "plain response",
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let result = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("harmony".to_string()), None),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(
+                "plain response".to_string()
+            ))
+        );
+        assert!(choice.message.tool_calls.is_none());
     }
 
     #[test]

@@ -10,6 +10,7 @@
 //! Object-safety: every instance method takes `&self`. `Arc<dyn LLMEngine>` is
 //! the handle `Worker` drives the lifecycle through.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -21,14 +22,16 @@ use tokio::sync::watch;
 use crate::error::DynamoError;
 
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
-pub use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
+pub use dynamo_llm::protocols::common::llm_backend::{
+    LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
+};
 pub use dynamo_llm::protocols::common::preprocessor::{
     BootstrapInfo, PrefillResult, PreprocessedRequest,
 };
 pub use dynamo_llm::protocols::common::{
-    FinishReason, OutputOptions, SamplingOptions, StopConditions,
+    FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
 };
-pub use dynamo_protocols::types::CompletionUsage;
+pub use dynamo_protocols::types::{CompletionUsage, StopReason};
 pub use dynamo_runtime::engine::AsyncEngineContext;
 
 /// Per-request handle wrapping the runtime context. `Deref`s to
@@ -38,6 +41,7 @@ pub struct GenerateContext {
     /// Decode-mode first-token signal. `Some` only on decode-mode requests;
     /// `None` otherwise.
     first_token: Option<watch::Sender<bool>>,
+    metadata: BTreeMap<String, String>,
 }
 
 impl GenerateContext {
@@ -45,7 +49,23 @@ impl GenerateContext {
         inner: Arc<dyn AsyncEngineContext>,
         first_token: Option<watch::Sender<bool>>,
     ) -> Self {
-        Self { inner, first_token }
+        Self {
+            inner,
+            first_token,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_metadata(
+        inner: Arc<dyn AsyncEngineContext>,
+        first_token: Option<watch::Sender<bool>>,
+        metadata: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            inner,
+            first_token,
+            metadata,
+        }
     }
 
     /// Clone the underlying runtime context Arc — for spawned tasks
@@ -71,6 +91,10 @@ impl GenerateContext {
     pub fn first_token_sender(&self) -> Option<&watch::Sender<bool>> {
         self.first_token.as_ref()
     }
+
+    pub fn metadata(&self) -> &BTreeMap<String, String> {
+        &self.metadata
+    }
 }
 
 impl Deref for GenerateContext {
@@ -80,19 +104,12 @@ impl Deref for GenerateContext {
     }
 }
 
-/// Registration metadata returned by [`LLMEngine::start`].
-///
-/// `Worker` consumes this to build a `ModelDeploymentCard` and register the
-/// model with discovery. `None` on an optional field means "don't advertise":
-/// the router sees no value and falls back to round-robin (for scheduling
-/// hints) or its configured defaults. Engines without a traditional KV cache
-/// can leave `kv_cache_block_size` and `total_kv_blocks` unset.
+/// Token-pipeline registration metadata (KV cache, data-parallel layout,
+/// disaggregation bootstrap). Set by [`LLMEngine`]s; [`RawEngine`]s leave
+/// [`EngineConfig::llm`] `None`. A `None` field isn't advertised — the router
+/// falls back to round-robin / its configured defaults.
 #[derive(Clone, Debug, Default)]
-pub struct EngineConfig {
-    /// Canonical model identifier (e.g. HF repo name).
-    pub model: String,
-    /// Public-facing model name advertised to clients. Defaults to `model`.
-    pub served_model_name: Option<String>,
+pub struct LlmRegistration {
     /// Maximum context length the engine supports, in tokens.
     pub context_length: Option<u32>,
     /// KV cache block size, in tokens. Used by KV-aware routing. `None`
@@ -107,36 +124,40 @@ pub struct EngineConfig {
     pub max_num_seqs: Option<u64>,
     /// Maximum tokens the engine will process in a single batched step.
     pub max_num_batched_tokens: Option<u64>,
-    /// Number of data-parallel ranks this worker hosts. Defaults to 1.
-    /// The router uses this to enumerate per-rank load when scoring.
+    /// DP ranks this worker hosts (default 1); the router enumerates per-rank
+    /// load from it.
     pub data_parallel_size: Option<u32>,
-    /// Global index of the first DP rank this worker hosts. Defaults to 0.
-    /// Non-zero only under multi-worker DP layouts where each worker owns a
-    /// sub-range (e.g. vLLM hybrid/external LB, SGLang DP-attention across
-    /// multiple nodes). The router enumerates ranks
-    /// `[data_parallel_start_rank, data_parallel_start_rank + data_parallel_size)`.
+    /// First DP rank this worker hosts (default 0). Non-zero only when a worker
+    /// owns a sub-range (vLLM hybrid/external LB, multi-node SGLang
+    /// DP-attention); the router enumerates `[start, start + data_parallel_size)`.
     pub data_parallel_start_rank: Option<u32>,
-    /// Bootstrap host this prefill worker advertises to decode peers.
-    ///
-    /// Only meaningful for backends with a Dynamo-level host/port
-    /// handshake (today: SGLang). Backends whose KV transport is
-    /// internal — TRT-LLM uses TRT-LLM's transceiver, vLLM uses vLLM's
-    /// `NixlConnector` — should leave this `None`.
-    ///
-    /// Engines that do use it set this in `start()` after the engine
-    /// has resolved its bootstrap address (SGLang reads
-    /// `tokenizer_manager.server_args.disaggregation_bootstrap_port`).
-    /// When both `bootstrap_host` and `bootstrap_port` are `Some`,
-    /// `Worker` publishes them via
-    /// `ModelRuntimeConfig::disaggregated_endpoint` so the frontend's
-    /// `PrefillRouter` can take its optimised "Bootstrap path" (route
-    /// decode concurrent with prefill instead of waiting for prefill
-    /// to drain).
+    /// Bootstrap host advertised to decode peers — only for Dynamo-handshake
+    /// backends (SGLang); internal-KV-transport backends (TRT-LLM, vLLM
+    /// `NixlConnector`) leave it `None`. When host+port are set, `Worker`
+    /// publishes them for the frontend's `PrefillRouter` Bootstrap path.
     pub bootstrap_host: Option<String>,
     /// Bootstrap port for disaggregated KV transfer. See `bootstrap_host`.
     pub bootstrap_port: Option<u16>,
+}
+
+/// Registration metadata returned by an engine's `start()`.
+///
+/// `Worker` consumes this to build a `ModelDeploymentCard` and register the
+/// model with discovery. The neutral fields (`model`, `served_model_name`,
+/// `runtime_data`) apply to every modality; the token-pipeline metadata lives
+/// in the optional [`llm`](Self::llm) sub-record, which raw media engines
+/// leave `None`.
+#[derive(Clone, Debug, Default)]
+pub struct EngineConfig {
+    /// Canonical model identifier (e.g. HF repo name).
+    pub model: String,
+    /// Public-facing model name advertised to clients. Defaults to `model`.
+    pub served_model_name: Option<String>,
     /// Engine-specific metadata copied into `ModelRuntimeConfig.runtime_data`.
     pub runtime_data: HashMap<String, serde_json::Value>,
+    /// Token-pipeline registration metadata (KV cache, DP, bootstrap).
+    /// `Some` for [`LLMEngine`]s; `None` for [`RawEngine`]s.
+    pub llm: Option<LlmRegistration>,
 }
 
 /// Inference engine trait.
@@ -220,19 +241,20 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// scheduler to cancel compute early).
     async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
 
-    /// Drain in-flight engine work before shutdown (optional, default no-op).
+    /// Whether in-flight KV transfers are done, so `cleanup` may release GPU
+    /// memory. The `Worker` polls this on prefill workers between the grace
+    /// period and [`cleanup`](LLMEngine::cleanup):
     ///
-    /// Called once during graceful shutdown after the discovery unregister
-    /// + grace-period sleep, but before [`cleanup`](LLMEngine::cleanup).
-    /// Use it for backend-side draining that must complete while the
-    /// distributed runtime (NATS / etcd) is still alive — e.g. waiting for
-    /// in-flight NIXL KV transfers on prefill workers (issue #7319), so
-    /// downstream decode workers don't observe a use-after-free on freed
-    /// GPU memory.
+    /// - `Ok(Some(true))`  — quiescent; exit the drain loop now.
+    /// - `Ok(Some(false))` — busy; poll again next tick.
+    /// - `Ok(None)`        — no introspection (default); poll until the drain
+    ///   budget expires, then cleanup. Never frees KV early.
+    /// - `Err(_)`          — logged and treated as `Ok(None)`.
     ///
-    /// Failures are logged and swallowed; shutdown proceeds regardless.
-    async fn drain(&self) -> Result<(), DynamoError> {
-        Ok(())
+    /// Aggregated/decode workers are never polled. Override only if the engine
+    /// can observe transfer completion (e.g. a connector or scheduler).
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        Ok(None)
     }
 
     /// Release all engine resources. Called exactly once.
@@ -264,19 +286,177 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
-    /// Metrics snapshot sources, one per dp_rank. Empty by default.
-    async fn metrics_sources(&self) -> Result<Vec<MetricsSource>, DynamoError> {
+    /// Wire up Prometheus surfaces. Called once by `Worker` after
+    /// [`start`](LLMEngine::start) succeeds. Default returns an empty
+    /// [`MetricsBindings`] (no per-rank gauges, no foreign callbacks).
+    ///
+    /// Two things an engine can produce here:
+    /// 1. Bridge a vendor-prefixed registry (`vllm:*`, `sglang:*`,
+    ///    `trtllm_*`, `lmcache:*`) into the runtime's `/metrics` output
+    ///    via [`EngineMetrics::add_expfmt_callback`](crate::metrics::EngineMetrics::add_expfmt_callback)
+    ///    on `ctx.metrics`. Side-effect only.
+    /// 2. Declare `dp_ranks` in [`MetricsBindings`] to opt into the
+    ///    per-rank `dynamo_component_*` gauges + KV router signal. The
+    ///    framework constructs a
+    ///    [`SnapshotPublisher`](crate::snapshot_publisher::SnapshotPublisher)
+    ///    sized to those ranks and hands it back via
+    ///    [`MetricsBindings::on_publisher_ready`]. Stash the `Arc` and
+    ///    call `publisher.publish(rank, snap)` from your stat-logger
+    ///    thread thereafter — event-driven, no polling.
+    ///
+    /// Framework-owned lifecycle gauges (cleanup_time, drain_time,
+    /// model_load_time) are emitted by `Worker` independent of this
+    /// method — they do NOT require the engine to opt in.
+    ///
+    /// Errors abort startup; `cleanup` runs on the partial state. Do not
+    /// retain `ctx.metrics` past return.
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        Ok(MetricsBindings::default())
+    }
+
+    /// Canary payload registered with the runtime's `HealthCheckManager`.
+    /// `Worker` calls this once after [`start`](LLMEngine::start). Returning
+    /// `Ok(None)` (default) disables active probing — the endpoint then
+    /// relies on the activity-driven notifier. Operator overrides
+    /// (`DYN_HEALTH_CHECK_PAYLOAD` env / `WorkerConfig`) take precedence
+    /// and fully replace this value when set.
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        Ok(None)
+    }
+
+    /// Semantic engine controls this engine supports. Empty by default.
+    ///
+    /// Engines advertise control keys and implement them via
+    /// [`LLMEngine::engine_control`]. Mapping those keys onto runtime routes is
+    /// owned by the unified backend layer.
+    async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
         Ok(Vec::new())
     }
+
+    /// Handle one semantic engine-control request.
+    async fn engine_control(
+        &self,
+        control: String,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        Ok(serde_json::json!({
+            "status": "error",
+            "message": format!("unsupported engine control: {control}"),
+        }))
+    }
+
+    /// Semantic engine updates this engine supports. Empty by default.
+    ///
+    /// Updates are a sibling surface to [`supported_controls`](LLMEngine::supported_controls)
+    /// for operations that mutate engine-managed assets (e.g. vLLM dynamic
+    /// LoRA load/unload/list) rather than the engine's serving lifecycle.
+    /// Keeping them separate avoids inflating the control surface. Engines
+    /// advertise update keys and implement them via [`LLMEngine::engine_update`];
+    /// the unified backend maps each key onto an `/engine/update/{key}` route.
+    async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
+        Ok(Vec::new())
+    }
+
+    /// Handle one semantic engine-update request.
+    async fn engine_update(
+        &self,
+        update: String,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, DynamoError> {
+        Ok(serde_json::json!({
+            "status": "error",
+            "message": format!("unsupported engine update: {update}"),
+        }))
+    }
+
+    /// Hand the engine its runtime serving [`Endpoint`](dynamo_runtime::component::Endpoint),
+    /// exactly once, after it exists and before serving begins. Default no-op.
+    ///
+    /// Engines that publish their own discovery records (e.g. vLLM dynamic
+    /// LoRA via `register_model`) stash it here for later use from
+    /// [`engine_update`](LLMEngine::engine_update). Mirrors the
+    /// [`on_publisher_ready`](MetricsBindings::on_publisher_ready) handoff idiom.
+    /// Errors abort startup; `cleanup` runs on the partial state.
+    async fn on_endpoint_ready(
+        &self,
+        _endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Result<(), DynamoError> {
+        Ok(())
+    }
 }
+
+/// Raw media-generation engine trait — the non-token sibling of [`LLMEngine`].
+///
+/// Where [`LLMEngine`] sits behind the tokenizer/detokenizer pipeline
+/// (`PreprocessedRequest` → `LLMEngineOutput`), `RawEngine` serves modalities
+/// the frontend forwards verbatim (image/video/audio): request and response
+/// are plain [`serde_json::Value`]s. The contract is modality-neutral, so a
+/// new media modality is a new engine, not a new framework path.
+///
+/// Lifecycle is identical to [`LLMEngine`] (same `Worker` orchestrator); the
+/// only differences are `generate`'s request/response shape and the absence of
+/// `kv_event_sources` (no KV cache to route on).
+#[async_trait]
+pub trait RawEngine: Send + Sync + 'static {
+    /// Start the engine and return registration metadata. See
+    /// [`LLMEngine::start`] — same contract. Media engines typically leave
+    /// the KV-related `EngineConfig` fields unset.
+    async fn start(&self, worker_id: u64) -> Result<EngineConfig, DynamoError>;
+
+    /// Yield response object(s) for a single media-generation request.
+    ///
+    /// `request` is the raw OpenAI-shaped request body. Yield the response
+    /// body as JSON: exactly one (terminal) object for non-streaming
+    /// modalities, or intermediate progress objects ending with a terminal
+    /// one for streaming modalities (e.g. video progress).
+    ///
+    /// As with [`LLMEngine::generate`], poll `ctx.is_stopped()` between
+    /// yields and stop promptly on cancellation. A mid-stream `Err` is
+    /// terminal and forwarded as `Annotated::error`.
+    async fn generate(
+        &self,
+        request: serde_json::Value,
+        ctx: GenerateContext,
+    ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError>;
+
+    /// Abort an in-flight request (optional, default no-op). See
+    /// [`LLMEngine::abort`].
+    async fn abort(&self, _ctx: Arc<dyn AsyncEngineContext>) {}
+
+    /// See [`LLMEngine::is_quiescent`]. Raw engines are aggregated, so the
+    /// `Worker` never polls this; the default suffices.
+    async fn is_quiescent(&self) -> Result<Option<bool>, DynamoError> {
+        Ok(None)
+    }
+
+    /// Release all engine resources. Called exactly once; must be null-safe
+    /// against partial state and idempotent. See [`LLMEngine::cleanup`].
+    async fn cleanup(&self) -> Result<(), DynamoError>;
+
+    /// Wire up Prometheus surfaces (optional, default empty). See
+    /// [`LLMEngine::setup_metrics`]. Media engines that expose per-rank
+    /// gauges use the same `MetricsBindings` handoff.
+    async fn setup_metrics(&self, _ctx: MetricsCtx<'_>) -> Result<MetricsBindings, DynamoError> {
+        Ok(MetricsBindings::default())
+    }
+
+    /// Canary payload for the runtime's `HealthCheckManager` (optional,
+    /// default `None`). See [`LLMEngine::health_check_payload`].
+    async fn health_check_payload(&self) -> Result<Option<serde_json::Value>, DynamoError> {
+        Ok(None)
+    }
+}
+
+/// Marker key stamped on canary payloads. Handlers may inspect it to branch
+/// probe-specific behavior (e.g. skip a synthetic first-yield that would
+/// mask a hung engine rank). Re-exported to Python via
+/// `lib/bindings/python/src/dynamo/health_check.py`.
+pub const HEALTH_CHECK_KEY: &str = "_HEALTH_CHECK";
 
 /// Invoked once with a freshly-built publisher; engine drives `publish`
 /// from its own thread thereafter.
 pub type OnPublisherReady =
     Box<dyn FnOnce(Arc<KvEventPublisher>) -> Result<(), DynamoError> + Send + 'static>;
-
-/// Worker reads this on a fixed interval. MUST be a cheap member-field read.
-pub type SnapshotFn = Arc<dyn Fn() -> Option<Metrics> + Send + Sync>;
 
 /// KV event source descriptor. Two flavors: subscribe to an engine-provided
 /// ZMQ PUB, or hand a publisher to the engine and let it drive `publish`
@@ -302,15 +482,6 @@ impl KvEventSource {
     }
 }
 
-/// One metrics-snapshot source per data-parallel rank.
-pub struct MetricsSource {
-    /// Worker polls this on a fixed interval. MUST be a cheap member-field
-    /// read — engine-internal calls land in the 10s of ms and stall the
-    /// publish loop. Conformance kit enforces a 1 ms ceiling.
-    pub snapshot: SnapshotFn,
-    pub dp_rank: u32,
-}
-
 /// Worker-level metrics snapshot consumed by the KV router.
 ///
 /// `kv_used_blocks` is the primary load signal the router scores against.
@@ -320,6 +491,75 @@ pub struct MetricsSource {
 pub struct Metrics {
     /// Number of KV blocks currently occupied across all in-flight requests.
     pub kv_used_blocks: Option<u64>,
+}
+
+/// Rich per-rank snapshot driving both the router-input signal and the
+/// per-rank `dynamo_component_*` gauges.
+///
+/// Engines call
+/// [`SnapshotPublisher::publish`](crate::snapshot_publisher::SnapshotPublisher::publish)
+/// with a fresh `ComponentSnapshot` from their stat-logger thread —
+/// event-driven, no polling. The publisher atomically updates both
+/// consumers inline (Rust gauges + NATS router signal).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ComponentSnapshot {
+    pub kv_used_blocks: u64,
+    pub kv_total_blocks: u64,
+    /// Fractional cache usage, 0.0..1.0.
+    pub gpu_cache_usage: f32,
+    /// Fractional prefix cache hit rate, 0.0..1.0.
+    ///
+    /// Tri-state:
+    /// - `Some(x)`: engine measured a hit rate this interval (publish as gauge).
+    /// - `None`: no data yet OR engine has no prefix cache. The
+    ///   gauge is NOT updated — distinguishes "0% hits" (which is a
+    ///   legitimate measurement) from "we never measured."
+    ///
+    /// Each backend computes from its native counters
+    /// (vLLM: `PrefixCacheStats.hits/queries`,
+    ///  SGLang: `kv_metrics.cache_hit_rate_perc`,
+    ///  TRT-LLM: `kv_stats["cacheHitRate"]`).
+    pub kv_cache_hit_rate: Option<f32>,
+    pub dp_rank: u32,
+}
+
+/// Context handed to [`LLMEngine::setup_metrics`].
+pub struct MetricsCtx<'a> {
+    pub model: &'a str,
+    pub component: &'a str,
+    pub model_load_time_seconds: f64,
+    /// Use this to bridge a vendor-prefixed Prometheus registry into the
+    /// runtime's `/metrics` output via `add_expfmt_callback`. Do NOT
+    /// retain past the call's return.
+    pub metrics: &'a crate::metrics::EngineMetrics,
+}
+
+/// Invoked once with a freshly-built [`SnapshotPublisher`]; engine drives
+/// `publish(rank, snapshot)` from its own stat-logger threads thereafter.
+///
+/// Mirror of [`OnPublisherReady`] for the KV-event Push flavor — same
+/// "framework constructs, engine writes" handoff pattern.
+pub type OnSnapshotPublisherReady = Box<
+    dyn FnOnce(Arc<crate::snapshot_publisher::SnapshotPublisher>) -> Result<(), DynamoError>
+        + Send
+        + 'static,
+>;
+
+/// What an engine returns from [`LLMEngine::setup_metrics`].
+///
+/// - `dp_ranks`: the data-parallel ranks this engine will publish
+///   snapshots for. Stable for the engine's lifetime. Empty = opt out.
+/// - `on_publisher_ready`: invoked exactly once with the constructed
+///   `SnapshotPublisher`. Engine stashes it and calls
+///   `publisher.publish(rank, snap)` from its stat-logger thereafter.
+///
+/// Foreign-registry expfmt callbacks (vLLM/SGLang/TRT-LLM vendor metrics)
+/// are wired as a side effect on `ctx.metrics` in `setup_metrics` — they
+/// don't flow through this struct.
+#[derive(Default)]
+pub struct MetricsBindings {
+    pub dp_ranks: Vec<u32>,
+    pub on_publisher_ready: Option<OnSnapshotPublisherReady>,
 }
 
 /// Non-terminal chunk constructor. Terminal chunks come from upstream
@@ -352,6 +592,17 @@ pub trait LLMEngineOutputExt: Sized {
     fn with_tokens(self, tokens: Vec<u32>) -> Self;
     /// Attach usage stats.
     fn with_usage(self, usage: CompletionUsage) -> Self;
+    /// Attach an `encoder_result` handoff payload.
+    ///
+    /// Signature takes `serde_json::Map<String, serde_json::Value>` (not
+    /// bare `Value`) so the object-only Wire Shape invariant is
+    /// type-enforced and the setter stays infallible -- there is no way
+    /// to pass an array or scalar through this API. The setter wraps the
+    /// `Map` in `Value::Object(...)` internally.
+    fn with_encoder_result(
+        self,
+        encoder_result: serde_json::Map<String, serde_json::Value>,
+    ) -> Self;
 }
 
 impl LLMEngineOutputExt for LLMEngineOutput {
@@ -361,6 +612,13 @@ impl LLMEngineOutputExt for LLMEngineOutput {
     }
     fn with_usage(mut self, usage: CompletionUsage) -> Self {
         self.completion_usage = Some(usage);
+        self
+    }
+    fn with_encoder_result(
+        mut self,
+        encoder_result: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        self.encoder_result = Some(serde_json::Value::Object(encoder_result));
         self
     }
 }
@@ -410,5 +668,27 @@ mod tests {
     fn usage_saturates_on_overflow() {
         let u = usage(u32::MAX, 10);
         assert_eq!(u.total_tokens, u32::MAX);
+    }
+
+    /// `with_encoder_result` takes `Map<String, Value>` (object-only by
+    /// type) and stores it as `Value::Object(_)` so the Wire Shape
+    /// invariant holds end-to-end. Round-trip: input Map -> stored
+    /// Value::Object -> as_object() returns the same Map.
+    #[test]
+    fn ext_with_encoder_result_round_trips_map() {
+        let mut input = serde_json::Map::new();
+        input.insert(
+            "embedding_handle".into(),
+            serde_json::json!({"uri": "nixl://encoder/0", "shape": [1, 1024]}),
+        );
+        input.insert("aux".into(), serde_json::Value::String("extra".into()));
+
+        let chunk = LLMEngineOutput::stop().with_encoder_result(input.clone());
+        let stored = chunk
+            .encoder_result
+            .as_ref()
+            .expect("encoder_result must be set after with_encoder_result");
+        assert!(stored.is_object(), "encoder_result must be Value::Object");
+        assert_eq!(stored.as_object().unwrap(), &input);
     }
 }

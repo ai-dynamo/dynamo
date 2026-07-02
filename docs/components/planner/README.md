@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Planner
+subtitle: Autoscaler that adjusts prefill and decode replicas using engine performance models and traffic prediction to meet TTFT and ITL SLAs.
 ---
 
 ## Why LLM Inference Needs a Different Autoscaler
@@ -25,9 +26,9 @@ The planner offers three `optimization_target` settings that control how scaling
 |--------|-------------|:-------------:|:-------------------:|
 | **`throughput`** (default) | Maximizes throughput by scaling based on queue depth and KV cache utilization. Scales up when engines are saturated, scales down when utilization drops. | No | No |
 | **`latency`** | Minimizes latency by scaling aggressively to keep queues short. Scales up at lower utilization thresholds. | No | No |
-| **`sla`** | Targets specific TTFT/ITL SLA values using regression-based performance models. Most precise, but requires configuration. | Yes (`ttft_ms`, `itl_ms`) | Recommended |
+| **`sla`** | Targets specific TTFT/ITL SLA values using the Rust engine perf shim: native AIC estimates when available, online FPM tuning, and FPM regression fallback. | Yes (`ttft_ms`, `itl_ms`) | Recommended |
 
-**We recommend starting with the default `throughput` target** — it works out of the box with zero configuration. Switch to `latency` if your workload is latency-sensitive, or to `sla` when you need precise SLA targeting with pre-deployment profiling.
+**We recommend starting with the default `throughput` target** — it works out of the box with zero configuration. Switch to `latency` if your workload is latency-sensitive, or to `sla` when you need precise SLA targeting with native AIC or FPM-based performance modeling.
 
 > **New to the Planner?** Start with the [Planner Guide](planner-guide.md) for a complete workflow including profiling and deployment.
 
@@ -37,8 +38,8 @@ The planner offers three `optimization_target` settings that control how scaling
 
 The Planner supports two scaling modes that can run independently or together:
 
-- **Throughput-based scaling**: Uses pre-deployment engine performance data (from self-benchmark or profiler) and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. Adjusts on a longer interval (default 180s). This is the primary mode for production deployments.
-- **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and fits an online linear regression to make scaling decisions. No pre-deployment data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
+- **Throughput-based scaling**: Uses the engine perf shim and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. The shim can use native AIC estimates, self-benchmark/profiler FPM bootstrap data, and live FPM tuning. Adjusts on a longer interval (default 180s). This is the primary mode for production deployments.
+- **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and queries the same perf shim for short-term TTFT/ITL estimates. No pre-deployment data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
 
 When both modes are enabled, throughput-based scaling provides a capacity floor (long-term planning) while load-based scaling handles real-time adjustments above that floor.
 
@@ -53,7 +54,7 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 | SGLang | Supported | Supported |
 | TensorRT-LLM | Supported | Supported |
 | vLLM | Supported | Supported |
-| **Requires Pre-deployment Data** | Yes (self-benchmark or profiler) | No |
+| **Requires Pre-deployment Data** | No; recommended for faster warmup when native AIC is unavailable | No |
 | **Load Predictors** | ARIMA, Prophet, Kalman, Constant | N/A |
 | **Router** | | |
 | Any (round-robin, random, etc.) | Supported | Not supported |
@@ -64,9 +65,9 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 
 ## When to Use Which Mode
 
-- **Throughput-based scaling** should be enabled whenever engine performance data is available (through self-benchmark or pre-deployment profiling). It provides stable, prediction-based capacity planning.
+- **Throughput-based scaling** should be enabled for SLA mode when you want stable, prediction-based capacity planning. Native AIC or bootstrap FPMs make it ready sooner; otherwise it warms from live FPMs.
 - **Load-based scaling** should be enabled when traffic is bursty or hard to predict. It reacts quickly to real-time load changes without requiring pre-deployment data.
-- **Both modes together**: For the best of both worlds, enable both. Throughput-based scaling provides a lower bound (long-term capacity), while load-based scaling handles bursts above that floor. When both are enabled, use a longer `--adjustment-interval` for throughput-based scaling.
+- **Both modes together**: For the best of both worlds, enable both. Throughput-based scaling provides a lower bound (long-term capacity), while load-based scaling handles bursts above that floor. When both are enabled, use a longer `throughput_adjustment_interval_seconds` than `load_adjustment_interval_seconds`.
 
 ## Quick Start
 
@@ -99,7 +100,7 @@ features:
 
 ### SLA-Based Scaling (advanced)
 
-For precise SLA targeting with pre-deployment profiling, set `optimization_target: sla`:
+For precise SLA targeting with native AIC estimates, optional bootstrap profiling data, or live FPM warmup, set `optimization_target: sla`:
 
 ```yaml
 features:
@@ -113,8 +114,8 @@ features:
 ```
 
 The fastest path to SLA-based scaling is through a DynamoGraphDeploymentRequest,
-which automatically profiles your model. See [Planner Examples](planner-examples.md)
-for copyable DGDR manifests.
+which automatically profiles your model. See
+[DGDR Examples](../../kubernetes/dgdr-examples.md) for copyable DGDR manifests.
 
 See [Planner Guide](planner-guide.md) for the full workflow.
 
@@ -124,11 +125,15 @@ See [Planner Guide](planner-guide.md) for the full workflow.
 
 Load-based scaling has the following known limitations. Throughput-based scaling is not affected by any of these.
 
-**Requires ForwardPassMetrics (FPM).** Load-based scaling uses per-engine per-iteration metrics delivered via the Dynamo event plane (ForwardPassMetrics). FPM is currently only available for vllm and is automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set. The KV Router is **not** required for load-based scaling.
+**Requires ForwardPassMetrics (FPM).** Load-based scaling uses per-engine per-iteration metrics delivered via the Dynamo event plane (ForwardPassMetrics). The KV Router is **not** required for load-based scaling. FPM availability by backend:
+
+- **vLLM** — supported. Automatically enabled when the engine uses `InstrumentedScheduler` and `DYN_FORWARDPASS_METRIC_PORT` is set.
+- **TensorRT-LLM** — supported for non-attention-DP workers (`attention_dp_size == 1`); gated off when `attention_dp_size > 1` pending per-rank FPM emission.
+- **SGLang** — supported. Enabled when `DYN_FORWARDPASS_METRIC_PORT` is set; requires the upstream FPM module, which ships in the SGLang runtime as of `sglang==0.5.13.post1` (SGLang >= v0.5.13). See the [SGLang FPM section](../../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm).
 
 ### General
 
-**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** Set `--min-endpoint` to a value that avoids scaling below your steady-state traffic floor, and use a lower `--loadbased-scaling-down-sensitivity` value to reduce the frequency of scale-down events.
+**In-flight requests during scale-down.** When the Planner scales down a worker, the worker is terminated without waiting for in-flight requests to complete. Requests that were mid-prefill on the terminated worker will fail. In disaggregated deployments, this can also affect decode workers that were waiting on KV cache transfers from the terminated prefill worker. **Workaround:** Set `min_endpoint` to a value that avoids scaling below your steady-state traffic floor, and use a lower `load_scaling_down_sensitivity` value to reduce the frequency of scale-down events.
 
 ## Documentation
 
@@ -136,41 +141,51 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 |----------|-------------|
 | [Planner Guide](planner-guide.md) | Deployment, configuration, integration |
 | [Planner Design](../../design-docs/planner-design.md) | Architecture and algorithm internals |
-| [Planner Examples](planner-examples.md) | DGDR YAML examples, sample configurations, advanced patterns |
+| [Planner Examples](planner-examples.md) | Planner-specific configuration examples |
+| [DGDR Examples](../../kubernetes/dgdr-examples.md) | DGDR YAML examples, sample configurations, advanced patterns |
 | [Global Planner Guide](global-planner.md) | Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments |
 
 ## Configuration Reference
 
-### Key Arguments
+### Key PlannerConfig Fields
 
-| Argument | Default | Description |
-|----------|---------|-------------|
+The planner process is launched with `--config /path/to/planner_config.json`.
+DGDR planner features and generated ConfigMaps are materialized into these
+`PlannerConfig` fields.
+
+| Field | Default | Description |
+|-------|---------|-------------|
 | **Common** | | |
-| `--namespace` | `$DYN_NAMESPACE` or `dynamo` | Dynamo logical namespace |
-| `--backend` | `vllm` | Backend framework (`sglang`, `trtllm`, `vllm`) |
-| `--mode` | `disagg` | Planner mode (`disagg`, `prefill`, `decode`, `agg`) |
-| `--optimization-target` | `throughput` | Scaling target: `throughput` (queue/util thresholds), `latency` (aggressive low-latency), `sla` (regression-based SLA targeting) |
-| `--environment` | `kubernetes` | Deployment environment |
+| `namespace` | `$DYN_NAMESPACE` or `dynamo` | Dynamo logical namespace |
+| `backend` | `vllm` | Backend framework (`sglang`, `trtllm`, `vllm`) |
+| `mode` | `disagg` | Planner mode (`disagg`, `prefill`, `decode`, `agg`) |
+| `optimization_target` | `throughput` | Scaling target: `throughput` (queue/util thresholds), `latency` (aggressive low-latency), `sla` (Rust engine perf model SLA targeting) |
+| `environment` | `kubernetes` | Deployment environment |
 | `ttft_ms` | `500.0` | Target Time To First Token (ms) |
 | `itl_ms` | `50.0` | Target Inter-Token Latency (ms) |
-| `--max-gpu-budget` | `8` | Maximum GPUs across all workers |
-| `--min-endpoint` | `1` | Minimum replicas per worker type |
-| `--decode-engine-num-gpu` | `1` | GPUs per decode engine |
-| `--prefill-engine-num-gpu` | `1` | GPUs per prefill engine |
+| `max_gpu_budget` | `8` | Maximum GPUs across all workers |
+| `min_endpoint` | `1` | Minimum replicas per worker type |
+| `decode_engine_num_gpu` | `1` | GPUs per decode engine |
+| `prefill_engine_num_gpu` | `1` | GPUs per prefill engine |
 | `advisory` | `false` | Suggestion-only mode. The Planner computes and reports recommended replica counts, but does not execute scaling actions or change the deployment. |
 | **Throughput-based scaling** | | |
-| `--enable-throughput-scaling` | `true` | Enable throughput-based scaling |
-| `--adjustment-interval` | `180` | Seconds between throughput-based scaling decisions |
-| `--profile-results-dir` | `profiling_results` | Path to profiling data (NPZ/JSON) |
-| `--load-predictor` | `arima` | Prediction model (`arima`, `prophet`, `kalman`, `constant`) |
+| `enable_throughput_scaling` | `true` | Enable throughput-based scaling |
+| `throughput_adjustment_interval_seconds` | `180` | Seconds between throughput-based scaling decisions |
+| `profile_results_dir` | `profiling_results` | Path to profiling data (NPZ/JSON) |
+| `load_predictor` | `arima` | Prediction model (`arima`, `prophet`, `kalman`, `constant`) |
 | **Load-based scaling** | | |
-| `--enable-loadbased-scaling` | `false` | Enable load-based scaling |
-| `--loadbased-adjustment-interval` | `5` | Seconds between FPM regression updates and load-based scaling decisions |
-| `--max-num-fpm-samples` | `64` | Maximum retained FPM observations for regression |
-| `--fpm-sample-bucket-size` | `16` | Number of buckets for observation retirement (must be perfect square) |
-| `--loadbased-scaling-down-sensitivity` | `80` | Scale-down sensitivity 0-100 (0=never, 100=aggressive) |
-| `--loadbased-metric-samples` | `10` | Number of metric samples per adjustment interval |
-| `--loadbased-min-observations` | `5` | Minimum observations before regression activates |
+| `enable_load_scaling` | `false` | Enable load-based scaling |
+| `load_adjustment_interval_seconds` | `5` | Seconds between FPM tuning updates and load-based scaling decisions |
+| `max_num_fpm_samples` | `64` | Maximum retained FPM observations for online tuning or regression |
+| `fpm_sample_bucket_size` | `16` | Number of buckets for observation retirement (must be perfect square) |
+| `load_scaling_down_sensitivity` | `80` | Scale-down sensitivity 0-100 (0=never, 100=aggressive) |
+| `load_min_observations` | `5` | Minimum observations before regression activates |
+| `prefill_scale_up_queue_tokens` / `prefill_scale_down_queue_tokens` | `null` | Queue token thresholds for `optimization_target: load` prefill scaling. |
+| `decode_scale_up_kv_rate` / `decode_scale_down_kv_rate` | `null` | Decode KV utilization thresholds for `optimization_target: load` decode scaling. |
+| **Plugin pipeline** | | |
+| `scheduling.scale_interval_seconds` | gcd of enabled builtin intervals | Base pipeline cadence. Plugins fire according to their own execution intervals. |
+| `scheduling.tick_max_duration_seconds` | `30.0` | Deadline for one full plugin pipeline tick. |
+| `plugin_registration.transport.request_timeout_seconds` | `5.0` | Per-plugin RPC timeout. |
 
 ### Environment Variables
 
@@ -188,14 +203,14 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 Deploy the planner dashboard:
 
 ```bash
-kubectl apply -n monitoring -f deploy/observability/k8s/grafana-planner-dashboard-configmap.yaml
+kubectl apply -n monitoring -f deploy/observability/grafana-planner-dashboard-configmap.yaml
 ```
 
 The dashboard shows:
 - Worker counts and GPU usage over time
 - Observed TTFT, ITL, request rate, sequence lengths
 - Predicted load and recommended replica counts
-- FPM regression model status
+- Engine perf model status
 
 ### Prometheus Metrics
 
@@ -241,7 +256,7 @@ In advisory mode, the Planner still observes traffic and FPM data, computes reco
 
 Additional series support dashboards and offline analysis:
 
-- **Regression-based latency estimates:** `dynamo_planner_estimated_ttft_ms` and `dynamo_planner_estimated_itl_ms` reflect the maximum estimated TTFT and ITL from the online regression across engines.
+- **Perf-model latency estimates:** `dynamo_planner_estimated_ttft_ms` and `dynamo_planner_estimated_itl_ms` reflect the maximum estimated TTFT and ITL from the engine perf model across engines.
 - **Engine capacity:** `dynamo_planner_engine_prefill_requests_per_second` and `dynamo_planner_engine_decode_requests_per_second` report single-engine prefill and decode capacity under the configured SLA.
 - **Scaling decision reasons:** `dynamo_planner_load_scaling_decision` and `dynamo_planner_throughput_scaling_decision` are Enum gauges whose state labels encode why each mode chose to scale, hold, or skip (for example `scale_up`, `no_fpm_data`, `set_lower_bound`).
 - **Per-engine FPM queue depths:** `dynamo_planner_engine_queued_prefill_tokens`, `dynamo_planner_engine_queued_decode_kv_tokens`, and `dynamo_planner_engine_inflight_decode_kv_tokens` are labeled with `worker_id` and `dp_rank` for each engine.

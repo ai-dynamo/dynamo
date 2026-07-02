@@ -4,8 +4,6 @@
 title: RDMA / InfiniBand on AKS
 ---
 
-# RDMA / InfiniBand on AKS
-
 This guide covers setting up RDMA over InfiniBand on AKS for high-performance disaggregated inference with Dynamo. RDMA enables direct memory access between GPUs across nodes, bypassing CPU and kernel overhead — critical for low-latency KV cache transfer between prefill and decode workers.
 
 Without RDMA, disaggregated inference falls back to TCP with severe performance degradation (~98s TTFT vs ~200-500ms with RDMA). See the [Disaggregated Communication Guide](../../disagg-communication-guide.md) for details on transport options and performance expectations.
@@ -44,7 +42,7 @@ The RDMA setup involves five components installed in this order:
 
 ## Step 1: Install the NVIDIA Network Operator
 
-The [NVIDIA Network Operator](https://docs.nvidia.com/networking/display/cokan10/network+operator) automates deployment of networking components including Mellanox OFED drivers for InfiniBand support.
+The [NVIDIA Network Operator](https://docs.nvidia.com/networking/display/kubernetes25100/index.html) automates deployment of networking components including Mellanox OFED drivers for InfiniBand support.
 
 Create the namespace and label it for privileged workloads:
 
@@ -418,6 +416,5 @@ kubectl rollout restart daemonset/nvidia-driver-daemonset -n gpu-operator
 - [Azure AKS RDMA InfiniBand — GitHub](https://github.com/Azure/aks-rdma-infiniband)
 - [Set up InfiniBand on Azure HPC VMs — Microsoft Learn](https://learn.microsoft.com/en-us/azure/virtual-machines/setup-infiniband)
 - [Enable InfiniBand VM extension — Microsoft Learn](https://learn.microsoft.com/en-us/azure/virtual-machines/extensions/enable-infiniband)
-- [NVIDIA Network Operator Documentation](https://docs.nvidia.com/networking/display/cokan10/network+operator)
+- [NVIDIA Network Operator Documentation](https://docs.nvidia.com/networking/display/kubernetes25100/index.html)
 - [Disaggregated Communication Guide](../../disagg-communication-guide.md) — transport options, UCX configuration, performance expectations
-

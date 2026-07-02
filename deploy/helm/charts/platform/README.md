@@ -19,7 +19,7 @@ limitations under the License.
 
 A Helm chart for NVIDIA Dynamo Platform.
 
-![Version: 1.2.0](https://img.shields.io/badge/Version-1.2.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+![Version: 1.3.0](https://img.shields.io/badge/Version-1.3.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 
 ## 🚀 Overview
 
@@ -97,7 +97,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 
 | Repository | Name | Version |
 |------------|------|---------|
-| file://components/operator | dynamo-operator | 1.2.0 |
+| file://components/operator | dynamo-operator | 1.3.0 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.8 |
@@ -152,15 +152,19 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.dynamo.virtualServiceSupportsHTTPS | bool | `false` | Whether VirtualServices should support HTTPS routing |
 | dynamo-operator.dynamo.serviceMesh.enabled | bool | `false` | Whether to enable service mesh resource generation for EPP |
 | dynamo-operator.dynamo.serviceMesh.provider | string | `"istio"` | Service mesh provider. Supported: "istio" |
-| dynamo-operator.dynamo.serviceMesh.istio | object | `{"insecureSkipVerify":true,"tlsMode":"SIMPLE"}` | Istio-specific settings (only used when provider is "istio") |
+| dynamo-operator.dynamo.serviceMesh.istio | object | `{"caCertificates":"","clientCertificate":"","insecureSkipVerify":true,"privateKey":"","tlsMode":"SIMPLE"}` | Istio-specific settings (only used when provider is "istio") |
 | dynamo-operator.dynamo.serviceMesh.istio.tlsMode | string | `"SIMPLE"` | TLS mode for DestinationRules: "SIMPLE", "DISABLE", "ISTIO_MUTUAL", "MUTUAL" |
 | dynamo-operator.dynamo.serviceMesh.istio.insecureSkipVerify | bool | `true` | Skip TLS certificate verification (for self-signed EPP certs) |
+| dynamo-operator.dynamo.serviceMesh.istio.clientCertificate | string | `""` | Path (in the istio-proxy sidecar's filesystem) to the client TLS certificate used for mTLS. REQUIRED when tlsMode is "MUTUAL"; ignored for other modes. |
+| dynamo-operator.dynamo.serviceMesh.istio.privateKey | string | `""` | Path (in the istio-proxy sidecar's filesystem) to the client TLS private key used for mTLS. REQUIRED when tlsMode is "MUTUAL"; ignored for other modes. |
+| dynamo-operator.dynamo.serviceMesh.istio.caCertificates | string | `""` | Optional path (in the istio-proxy sidecar's filesystem) to CA certificates used to verify the EPP server certificate. Used only when tlsMode is "MUTUAL". |
 | dynamo-operator.dynamo.metrics.prometheusEndpoint | string | `""` | Endpoint that services can use to retrieve metrics. If set, dynamo operator will automatically inject the PROMETHEUS_ENDPOINT environment variable into services it manages. Users can override the value of the PROMETHEUS_ENDPOINT environment variable by modifying the corresponding deployment's environment variables |
 | dynamo-operator.dynamo.mpiRun.secretName | string | `"mpi-run-ssh-secret"` | Name of the secret containing the SSH key for MPI Run |
 | dynamo-operator.webhook.certificateSecret.name | string | `"webhook-server-cert"` | Name of the Kubernetes secret containing webhook TLS certificates. The secret must contain three keys: tls.crt (server certificate), tls.key (server private key), and ca.crt (Certificate Authority certificate). |
 | dynamo-operator.webhook.certificateSecret.external | bool | `false` | Whether to manage the certificate secret externally. When false (default), the operator's built-in cert-controller generates and rotates certificates automatically. When true, you must create the secret manually before installing the chart. |
 | dynamo-operator.webhook.caBundle | string | `""` | CA bundle (base64 encoded) for webhook validation. Only used when certificateSecret.external=true. For automatic certificate generation or cert-manager integration, leave this empty as it will be injected automatically. |
 | dynamo-operator.webhook.failurePolicy | string | `"Fail"` | Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees. |
+| dynamo-operator.webhook.podCheckpointRestoreFailurePolicy | string | `"Ignore"` | Failure policy for the Pod CREATE checkpoint-restore mutating webhook. Defaults to Ignore so a webhook outage falls back to cold-start instead of blocking workload Pods. |
 | dynamo-operator.webhook.timeoutSeconds | int | `10` | Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy. |
 | dynamo-operator.webhook.namespaceSelector | object | `{}` | Custom namespace selector for webhook validation. Use this to include or exclude specific namespaces from webhook validation. For CLUSTER-WIDE operators, you can exclude namespaces managed by namespace-restricted operators by using: matchExpressions: [{ key: "dynamo-operator", operator: "NotIn", values: ["namespace-restricted"] }]. For NAMESPACE-RESTRICTED operators, leave empty as it will be auto-configured to match only the operator's namespace. |
 | dynamo-operator.webhook.certManager.enabled | bool | `false` | Whether to use cert-manager for automatic certificate management. Requires cert-manager to be installed in the cluster. When enabled, cert-manager will provision and rotate certificates instead of the operator's built-in cert-controller. |
@@ -169,6 +173,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.webhook.certManager.certificate.rootCA.duration | string | `"87600h"` | Duration for the root CA certificate (e.g., "87600h" for 10 years). The root CA typically has a much longer lifetime than the leaf certificates it signs. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
 | dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality |
+| dynamo-operator.checkpoint.cleanupImage | string | `"busybox:1.36"` | Image used by best-effort artifact cleanup Jobs for automatically-created checkpoints. The image must provide /bin/sh and rm. |
 | dynamo-operator.checkpoint.storage | object | `{}` | Optional PVC storage used when the snapshot-agent is installed outside workload namespaces with snapshot.storage.accessMode=podMount. Set create=true for operator-managed namespace PVCs, or omit/create=false to require an already-present PVC with the configured name. ReadWriteOnce can be used with podMount for sequential checkpoint/restore on suitable storage backends; use ReadWriteMany for concurrent multi-node access. |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity for Grove pods |

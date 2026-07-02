@@ -5,6 +5,11 @@ description: Update Dynamo Enhancement Proposal lifecycle state in GitHub, inclu
 
 # Skill: Update DEP Lifecycle
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: CC-BY-4.0
+-->
+
 ## Purpose
 
 Update DEP status through its lifecycle — triage, review, approve,

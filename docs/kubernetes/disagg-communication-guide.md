@@ -1,11 +1,10 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Disaggregated Inference Communication Guide
 sidebar-title: Disagg Communication
 subtitle: Best practices for prefill/decode worker communication on Kubernetes
 ---
-
-# Disaggregated Inference Communication Guide
 
 This guide explains how prefill and decode workers communicate in Dynamo's disaggregated inference architecture on Kubernetes. It answers the frequently asked question: **Why can't prefill and decode workers use NVLink to communicate on the same node?**
 
@@ -15,6 +14,7 @@ This guide explains how prefill and decode workers communicate in Dynamo's disag
 - **RDMA (InfiniBand, RoCE, or AWS EFA) is required** for production disaggregated deployments
 - **Without RDMA, expect 200-500x performance degradation** in Time To First Token (TTFT) — observed ~98s TTFT with TCP vs ~200-500ms with RDMA
 - **UCX or libfabric** are the communication layers that NIXL uses to transfer KV cache between workers
+- **Topology-aware KV transfer** can constrain or bias decode routing so KV transfers stay within a selected topology domain such as zone or rack. See [Topology-Aware KV Transfer](topology-aware-kv-transfer.md).
 
 ---
 
@@ -301,7 +301,7 @@ NIXL supports **libfabric** as the backend for AWS EFA deployments. This is the 
 - EFA installer version **1.47.0** or later
 - Libfabric (installed via EFA installer at `/opt/amazon/efa`)
 - GDRCopy for GPU Direct RDMA operations (GPU Operator v26.x installs this automatically)
-- EFA-enabled container image (e.g., `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64`)
+- EFA-enabled container image (e.g., `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1-efa-amd64`)
 
 **Kernel Compatibility:**
 

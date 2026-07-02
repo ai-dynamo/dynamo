@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Torch integration coverage for GMS-backed tensors and modules.
@@ -16,23 +16,31 @@ import time
 from typing import cast
 
 import pytest
+from _deps import HAS_CUDA, HAS_GMS, HAS_TORCH
 
-try:
-    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
-    from gpu_memory_service.client.torch.module import (
-        materialize_module_from_gms,
-        register_module_tensors,
-    )
-    from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
-    from gpu_memory_service.common.locks import RequestedLockType
-    from gpu_memory_service.server.rpc import GMSRPCServer
-except ModuleNotFoundError:
+if not HAS_GMS:
     pytest.skip(
         "gpu_memory_service package is not available in this test image",
         allow_module_level=True,
     )
 
-torch = pytest.importorskip("torch", reason="torch is required")
+if not HAS_TORCH:
+    pytest.skip("torch is required", allow_module_level=True)
+
+if not HAS_CUDA:
+    pytest.skip(
+        "CUDA is required for torch GMS integration tests", allow_module_level=True
+    )
+
+import torch
+from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
+from gpu_memory_service.client.torch.module import (
+    materialize_module_from_gms,
+    register_module_tensors,
+)
+from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
+from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -44,12 +52,6 @@ pytestmark = [
 _SERVER_START_TIMEOUT_SECONDS = 5.0
 _SERVER_STOP_TIMEOUT_SECONDS = 5.0
 _POLL_INTERVAL_SECONDS = 0.01
-
-
-if not torch.cuda.is_available():
-    pytest.skip(
-        "CUDA is required for torch GMS integration tests", allow_module_level=True
-    )
 
 
 class _TinyModule(torch.nn.Module):
@@ -197,6 +199,63 @@ def test_gms_tensor_matches_plain_torch_ops(running_gms):
     )
 
     reader.close()
+
+
+def test_finalize_gms_write_prunes_unreferenced_allocations(running_gms):
+    from gpu_memory_service.integrations.common.utils import finalize_gms_write
+
+    socket_path = running_gms
+    torch.manual_seed(11)
+    baseline = _TinyModule().cuda()
+    gms_model = _TinyModule().cuda()
+    gms_model.load_state_dict(baseline.state_dict())
+    inputs = torch.randn(3, 8, device="cuda", dtype=torch.float32)
+    expected = baseline(inputs).detach().clone()
+
+    writer = GMSClientMemoryManager(socket_path, device=0)
+    writer.connect(RequestedLockType.RW)
+
+    baseline_weight = cast(torch.Tensor, baseline.linear.weight)
+    baseline_scale = cast(torch.Tensor, baseline.scale)
+    baseline_extra = cast(torch.Tensor, baseline.extra)
+
+    _, gms_weight = _make_gms_tensor(writer, baseline_weight, tag="weights")
+    gms_model.linear.weight = torch.nn.Parameter(
+        gms_weight, requires_grad=baseline_weight.requires_grad
+    )
+    _, gms_scale = _make_gms_tensor(writer, baseline_scale, tag="weights")
+    gms_model._buffers["scale"] = gms_scale
+    _, gms_extra = _make_gms_tensor(writer, baseline_extra, tag="weights")
+    gms_model.extra = gms_extra
+
+    unreferenced_va = writer.create_mapping(size=1024 * 1024, tag="weights")
+    unreferenced_allocation_id = writer.mappings[unreferenced_va].allocation_id
+
+    committed_bytes = finalize_gms_write(writer, gms_model).committed_bytes
+    assert committed_bytes == sum(m.aligned_size for m in writer.mappings.values())
+    assert all(
+        mapping.allocation_id != unreferenced_allocation_id
+        for mapping in writer.mappings.values()
+    )
+
+    del gms_weight
+    del gms_scale
+    del gms_extra
+    del gms_model
+    writer.close()
+
+    reader = GMSClientMemoryManager(socket_path, device=0)
+    reader.connect(RequestedLockType.RO)
+    try:
+        handles = reader.list_handles()
+        assert len(handles) == 3
+        assert all(info.allocation_id != unreferenced_allocation_id for info in handles)
+
+        materialized = _TinyModule().cuda()
+        materialize_module_from_gms(reader, materialized, device_index=0)
+        _assert_exact_tensor_equal(expected, materialized(inputs))
+    finally:
+        reader.close()
 
 
 def test_live_gms_tensor_survives_unmap_and_remap(running_gms):

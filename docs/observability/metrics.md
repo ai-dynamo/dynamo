@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Metrics
+subtitle: Reference for the Prometheus metrics Dynamo's runtime, frontend, and workers expose on the local system metrics endpoint.
 ---
 
 ## Overview
@@ -173,10 +174,8 @@ Values you will see in the `dynamo_component` label on `dynamo_component_*` seri
 | `router` | The standalone KV router (`python -m dynamo.router`). |
 | `Planner` | The planner component (`python -m dynamo.planner`). Note the capital `P`. |
 | `prefill` | The prefill worker in disaggregated serving (all backends). |
-| `backend` | The decode worker in disaggregated serving for vLLM, SGLang, and the mocker, **and** the combined worker for vLLM in aggregated mode. |
-| `tensorrt_llm` | The decode worker in disaggregated serving for TRT-LLM. |
-| `tensorrt_llm_encode` | The encode worker for TRT-LLM. |
-| `encode` | The encode worker for vLLM. |
+| `backend` | The decode worker in disaggregated serving for all backends, **and** the combined worker for vLLM in aggregated mode. |
+| `encode` | The encode worker for vLLM, SGLang, and TRT-LLM. |
 | `diffusion` | The diffusion worker for TRT-LLM. |
 
 Internal subsystems (e.g. `kvbm` from the block manager, `sequences` from the KV router) also create components and may appear in `dynamo_component_*` series. The default for vLLM/SGLang can be overridden by passing `--endpoint dyn://<ns>.<component>.<endpoint>` on the worker command line.
@@ -403,13 +402,16 @@ Histograms (in milliseconds) tracking the time spent in each phase of the routin
 
 #### Router Queue Metrics (`dynamo_frontend_router_queue_*`)
 
-Gauge tracking the number of requests pending in the router's scheduler queue. Only registered when `--router-queue-threshold` is set. Labeled by `worker_type` to distinguish prefill vs. decode queues in disaggregated mode.
+Gauges track pending work in each router policy class. They are registered by the frontend and are populated when queueing is enabled through either `--router-queue-threshold` or `--router-policy-config`.
 
 | Metric | Type | Description |
 |--------|------|-------------|
 | `dynamo_frontend_router_queue_pending_requests` | Gauge | Requests pending in the router scheduler queue |
+| `dynamo_frontend_router_queue_pending_isl_tokens` | Gauge | Raw input tokens pending in the router scheduler queue |
+| `dynamo_frontend_router_queue_pending_cached_tokens` | Gauge | Cached-token estimate snapshotted when each request is enqueued |
+| `dynamo_frontend_router_queue_backpressure_total` | Counter | Queue rejections by configured limit reason |
 
-**Labels:** `worker_type` (`prefill` or `decode`)
+**Labels:** `model`, `worker_type` (`prefill` or `decode`), and `policy_class`. With policy-family/cache-bucket YAML, `policy_class` is the resolved physical queue, not the family requested by the client. The rejection counter also has `reason`.
 
 #### KV Indexer Metrics
 
@@ -471,5 +473,5 @@ For the full list of metrics, configuration options, and architecture details, s
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
 - [Dynamo Architecture Overview](../design-docs/architecture.md)
 - [Backend Guide](../development/backend-guide.md)
-- [Forward Pass Metrics (SGLang)](../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) - Per-iteration scheduler telemetry via ZMQ/NATS for planner-driven scaling
+- [Forward Pass Metrics (SGLang)](../backends/sglang/sglang-observability.md#forward-pass-metrics-fpm) — Per-iteration scheduler telemetry via ZMQ/NATS for planner-driven scaling (requires the SGLang runtime to ship the upstream FPM module; available as of `sglang==0.5.13.post1`)
 - [Forward Pass Metrics RFC](../proposals/vllm-rfc-forward-pass-metrics.md) - Design rationale for per-iteration metrics

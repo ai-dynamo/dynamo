@@ -69,6 +69,7 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           ref: ${{ env.SOURCE_REF }}
+          lfs: true
 
       - name: Generate Dockerfile
         shell: bash
@@ -163,7 +164,7 @@ jobs:
         run: |
           echo "Running sanity check on image: ${{ env.IMAGE_TAG }}"
           set +e
-          docker run --rm "${{ env.IMAGE_TAG }}" python /workspace/deploy/sanity_check.py --runtime-check --no-gpu-check
+          docker run --rm "${{ env.IMAGE_TAG }}" python /workspace/dev/sanity_check.py --runtime-check --no-gpu-check
           SANITY_CHECK_EXIT_CODE=$?
           set -e
           if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then

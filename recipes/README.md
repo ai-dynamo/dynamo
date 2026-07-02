@@ -42,11 +42,15 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/)** | TensorRT-LLM | Disaggregated (Blackwell) | 16x B100/B200 | ✅ | ✅ | MoE model, Prefill + Decode, DEEPGEMM backend | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 5x Blackwell (GB200/B200) | ✅ | ✅ | Prefill/Decode split | ❌ |
+| **[GLM-5-NVFP4](glm-5-nvfp4/sglang/disagg/)** | SGLang | Disagg Prefill/Decode | 20x GB200 | ✅ | ✅ | NVFP4, EAGLE speculative decoding, TP16 decode + TP4 prefill, stable SGLang runtime image | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | TP=8, single-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅ | ❌ | TP=16, multi-node. Use `model-download-sglang.yaml` | ❌ |
 | **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 36x GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
 | **[DeepSeek-R1](deepseek-r1/)** | vLLM | Disagg DEP16 | 32x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
-| **[Kimi-K2.5](kimi-k2.5/trtllm/disagg-eagle-kv-router/)** | TensorRT-LLM | Disaggregated | 24x GB200 | ✅ | ✅ | TEP4 prefill+decode, TRTLLM-native KV host offload | ❌ |
+| **[Kimi-K2.5](kimi-k2.5/trtllm/disagg-eagle-kv-router/)** | TensorRT-LLM | Disaggregated | 24x GB200 | ✅ | ✅ | DEP4 prefill + TEP4 decode, TRTLLM-native KV host offload | ❌ |
+| **[Kimi-K2.6](kimi-k2.6/vllm/)** | vLLM | Aggregated | 4x B200 / 8x H200 | ✅ | ✅ | MoE, NVFP4+FP8 KV (B200) / INT4 (H200), TP4/TP8, EAGLE3 MLA spec decode, LMCache CPU offload; text+image, chat + agentic profiles | ❌ |
+| **[Nemotron-3-Super](nemotron-3-super/vllm/)** | vLLM | Aggregated | 4x B200 / 4x H200 | ✅ | ✅ | ~120B hybrid Mamba/Attention/MoE (~12B active), NVFP4 (B200) / FP8 (H200) + FP8 KV, TP4+EP, MTP, KV-aware routing; chat + agentic profiles | ❌ |
+| **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | 4x B200 / 8x H200 | ✅ | ✅ | ~550B hybrid Mamba/Attention/MoE (~55B active), NVFP4 + FP8, TP4 (B200) / TP8 (H200) + EP, MTP, KV-aware routing; chat + agentic, plus 1P1D disagg on B200 | ❌ |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available
@@ -69,7 +73,7 @@ These recipes are under active development and may require additional setup step
 
 | Model | Framework | Mode | GPUs | Deployment | Notes |
 |-------|-----------|------|------|------------|-------|
-| **[GLM-5-NVFP4](glm-5-nvfp4/sglang/disagg/)** | SGLang | Disagg Prefill/Decode | 20x GB200 | ✅ | NVFP4, EAGLE speculative decoding, TP16 decode + TP4 prefill. Requires [custom container build](glm-5-nvfp4/). |
+| **[GLM-5-NVFP4 (EFA)](glm-5-nvfp4/sglang/disagg/efa/)** | SGLang | Disagg Prefill/Decode over AWS EFA | 20x GB200 | ✅ | KV transfer over AWS EFA via NIXL LIBFABRIC instead of UCX. Patched libfabric baked into image. Requires [custom container build](glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa). |
 | **[Nemotron-3-Nano-Omni-NVFP4](nemotron-3-nano-omni/vllm/agg/)** | vLLM | Aggregated | 1x GPU | ✅ | Multimodal text/image/video/audio serving. Requires [custom container build](nemotron-3-nano-omni/). |
 | **[nvidia/Kimi-K2.5-NVFP4](kimi-k2.5/tokenspeed/agg/nvidia/)** | TokenSpeed | Aggregated | 4x B200 | ✅ | Text only — MoE model, TP4×EP4, reasoning + tool calling. Requires [custom container build](kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile) (no public Dynamo+TokenSpeed image yet) and raw `Deployment`s/`Service`s instead of `DynamoGraphDeployment` (operator backend support pending). |
 | **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/vllm/agg_b200/)** | vLLM | Aggregated | 4x B200 | ✅ | Text only — MoE model (284B / 13B active), DP=4 + EP, FP8 KV cache, reasoning + tool calling. Requires [custom container build](deepseek-v4/container/). |

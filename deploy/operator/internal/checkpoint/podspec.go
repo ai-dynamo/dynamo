@@ -22,7 +22,9 @@ import (
 	"fmt"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -71,6 +73,9 @@ func ApplyRestorePodMetadataWithStorageConfig(
 		delete(annotations, snapshotprotocol.TargetContainersAnnotation)
 		delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
 		delete(annotations, snapshotprotocol.CheckpointStorageBasePathAnnotation)
+		delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
+		delete(annotations, commonconsts.CheckpointNameAnnotation)
+		delete(annotations, commonconsts.CheckpointStartupPolicyAnnotation)
 	}
 	if !enabled {
 		return nil
@@ -87,16 +92,41 @@ func ApplyRestorePodMetadataWithStorageConfig(
 	return nil
 }
 
-func RequireMainContainer(podSpec *corev1.PodSpec) (*corev1.Container, error) {
-	if podSpec == nil {
-		return nil, fmt.Errorf("pod spec is nil")
+func ApplyRestoreCandidateMetadata(labels map[string]string, annotations map[string]string, checkpointInfo *CheckpointInfo) error {
+	if labels == nil {
+		return fmt.Errorf("checkpoint restore candidate labels map is required")
 	}
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == commonconsts.MainContainerName {
-			return &podSpec.Containers[i], nil
-		}
+	if annotations == nil {
+		return fmt.Errorf("checkpoint restore candidate annotations map is required")
 	}
-	return nil, fmt.Errorf("pod spec has no container named %q", commonconsts.MainContainerName)
+	delete(labels, snapshotprotocol.CheckpointIDLabel)
+	delete(labels, snapshotprotocol.RestoreTargetLabel)
+	delete(labels, snapshotprotocol.CheckpointSourceLabel)
+	delete(annotations, snapshotprotocol.CheckpointArtifactVersionAnnotation)
+	delete(annotations, snapshotprotocol.CheckpointStatusAnnotation)
+	delete(annotations, snapshotprotocol.CheckpointStorageTypeAnnotation)
+	delete(annotations, snapshotprotocol.CheckpointStorageBasePathAnnotation)
+	delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
+	delete(annotations, commonconsts.CheckpointNameAnnotation)
+	delete(annotations, commonconsts.CheckpointStartupPolicyAnnotation)
+	delete(annotations, snapshotprotocol.TargetContainersAnnotation)
+	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Exists || checkpointInfo.CheckpointName == "" {
+		return nil
+	}
+
+	targets := checkpointInfo.RestoreTargetContainers
+	if len(targets) == 0 {
+		targets = []string{commonconsts.MainContainerName}
+	}
+	annotations[commonconsts.CheckpointRestoreCandidateAnnotation] = commonconsts.KubeLabelValueTrue
+	annotations[commonconsts.CheckpointNameAnnotation] = checkpointInfo.CheckpointName
+	startupPolicy := checkpointInfo.StartupPolicy
+	if startupPolicy == "" {
+		startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+	}
+	annotations[commonconsts.CheckpointStartupPolicyAnnotation] = string(startupPolicy)
+	annotations[snapshotprotocol.TargetContainersAnnotation] = snapshotprotocol.FormatTargetContainers(targets)
+	return nil
 }
 
 func InjectCheckpointIntoPodSpec(
@@ -138,6 +168,7 @@ func InjectCheckpointIntoPodSpecWithStorageConfig(
 	)
 }
 
+//nolint:gocyclo
 func injectCheckpointIntoPodSpec(
 	ctx context.Context,
 	reader ctrlclient.Reader,
@@ -154,23 +185,49 @@ func injectCheckpointIntoPodSpec(
 	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Ready {
 		return nil
 	}
-
-	info := checkpointInfo
-	if info.Hash == "" {
-		if info.Identity == nil {
-			return fmt.Errorf("checkpoint enabled but identity is nil and hash is not set")
-		}
-
-		hash, err := ComputeIdentityHash(*info.Identity)
-		if err != nil {
-			return fmt.Errorf("failed to compute identity hash: %w", err)
-		}
-		info.Hash = hash
-	}
-
 	if reader == nil {
 		return fmt.Errorf("checkpoint client is required")
 	}
+
+	info := *checkpointInfo
+	if info.Hash == "" {
+		if info.CheckpointName == "" {
+			if info.Identity == nil {
+				return fmt.Errorf("checkpoint enabled but identity is nil and hash is not set")
+			}
+
+			hash, err := ComputeIdentityHash(*info.Identity)
+			if err != nil {
+				return fmt.Errorf("failed to compute identity hash: %w", err)
+			}
+			info.Hash = hash
+		} else {
+			ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{}
+			if err := reader.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: info.CheckpointName}, ckpt); err != nil {
+				return fmt.Errorf("failed to get checkpoint %s/%s: %w", namespace, info.CheckpointName, err)
+			}
+			hash, err := CheckpointID(ckpt)
+			if err != nil {
+				return err
+			}
+			info.Hash = hash
+			if info.ArtifactVersion == "" {
+				info.ArtifactVersion = checkpointArtifactVersion(ckpt)
+			}
+			if info.GPUMemoryService == nil {
+				info.GPUMemoryService = ckpt.Spec.GPUMemoryService
+			}
+		}
+	}
+
+	if info.ArtifactVersion == "" {
+		info.ArtifactVersion = snapshotprotocol.DefaultCheckpointArtifactVersion
+	}
+
+	if info.Hash == "" {
+		return fmt.Errorf("checkpoint enabled but hash is not set")
+	}
+
 	targets := info.RestoreTargetContainers
 	if len(targets) == 0 {
 		targets = []string{commonconsts.MainContainerName}
@@ -200,33 +257,59 @@ func injectCheckpointIntoPodSpec(
 		return err
 	}
 
-	EnsurePodInfoVolume(podSpec)
+	targetContainers := make([]*corev1.Container, 0, len(targets))
 	for _, name := range targets {
-		container := findPodSpecContainer(podSpec, name)
+		var container *corev1.Container
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name == name {
+				container = &podSpec.Containers[i]
+				break
+			}
+		}
 		if container == nil {
 			return fmt.Errorf("checkpoint restore target %q does not exist in pod spec", name)
 		}
-		EnsurePodInfoMount(container)
+		targetContainers = append(targetContainers, container)
 	}
 	if info.Ready && info.GPUMemoryService != nil && info.GPUMemoryService.Enabled {
-		mainContainer, err := RequireMainContainer(podSpec)
-		if err != nil {
-			return fmt.Errorf("gpuMemoryService enabled: %w", err)
+		switch info.GPUMemoryService.Mode {
+		case "", nvidiacomv1alpha1.GMSModeIntraPod:
+			EnsureIntraPodGPUMemoryService(podSpec, targetContainers, info.GPUMemoryService.ExtraClientContainers)
+		case nvidiacomv1alpha1.GMSModeInterPod:
+			return fmt.Errorf("gpuMemoryService checkpoint restore for mode %q is not implemented", info.GPUMemoryService.Mode)
+		default:
+			return fmt.Errorf("gpuMemoryService checkpoint restore has unsupported mode %q", info.GPUMemoryService.Mode)
 		}
-		EnsureGMSRestoreSidecars(podSpec, mainContainer, storage)
 	}
 
 	return nil
 }
 
-func findPodSpecContainer(podSpec *corev1.PodSpec, name string) *corev1.Container {
-	if podSpec == nil {
-		return nil
+// EnsureIntraPodGPUMemoryService wires the in-pod GMS server sidecar and
+// socket clients for checkpoint create/restore pod specs.
+func EnsureIntraPodGPUMemoryService(
+	podSpec *corev1.PodSpec,
+	targetContainers []*corev1.Container,
+	extraClientContainerNames []string,
+) {
+	if len(targetContainers) == 0 {
+		return
 	}
-	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == name {
-			return &podSpec.Containers[i]
+	gms.EnsureServerSidecar(podSpec, targetContainers[0])
+	for _, container := range targetContainers {
+		gms.EnsureClient(podSpec, container)
+	}
+	for _, name := range extraClientContainerNames {
+		var container *corev1.Container
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name == name {
+				container = &podSpec.Containers[i]
+				break
+			}
 		}
+		if container == nil {
+			continue
+		}
+		gms.EnsureClient(podSpec, container)
 	}
-	return nil
 }

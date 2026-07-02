@@ -4,7 +4,7 @@
 """End-to-end test for MM-aware KV routing with frontend image decoding.
 
 Architecture:
-  Frontend (Rust preprocessor + lightseek + KV router + MediaLoader)
+  Frontend (Rust preprocessor + KV router + MediaLoader)
        ├─ DOWNLOADS the image bytes (because the worker registered a
        │  `media_decoder` via `--frontend-decoding`)
        ├─ DECODES into RGB bytes via the in-process MediaDecoder
@@ -93,7 +93,8 @@ def _prepare_log_dir(request, suffix: str) -> str:
 
 
 _COMMON_PROCESS_KWARGS: dict[str, Any] = {
-    "display_output": True,
+    # Keep logs file-only; live tee can lag under GPU-parallel CI while tests poll files.
+    "display_output": False,
     "terminate_all_matching_process_names": False,
 }
 
@@ -369,7 +370,7 @@ def test_frontend_decode_logs_decoded_bytes_source(
     http_image_server_with_alias,
 ):
     """Smoke check: the frontend-decode path must emit the
-    `source=decoded_bytes` lightseek log line, proving we took the
+    `source=decoded_bytes` MM-routing log line, proving we took the
     content-hash branch and not the url_fallback branch."""
     frontend_port, router_proc = start_frontend_decode_services
     _send(

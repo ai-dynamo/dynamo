@@ -152,6 +152,7 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
+	dst.MinAvailable = src.MinAvailable
 
 	if src.Multinode != nil {
 		dst.Multinode = &v1beta1.MultinodeSpec{}
@@ -257,7 +258,7 @@ func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, p
 	if dst.ExtraPodMetadata == nil && extraPodMetadataNeedsPreservation(preserved.ExtraPodMetadata) {
 		dst.ExtraPodMetadata = preserved.ExtraPodMetadata.DeepCopy()
 	}
-	if dst.ExtraPodSpec == nil && extraPodSpecNeedsPreservation(preserved.ExtraPodSpec) {
+	if dst.ExtraPodSpec == nil && shouldRestorePreservedExtraPodSpec(dst, preserved) {
 		cp := *preserved.ExtraPodSpec.DeepCopy()
 		dst.ExtraPodSpec = &cp
 	}
@@ -334,7 +335,8 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 		save.ExtraPodMetadata = src.ExtraPodMetadata.DeepCopy()
 		hasSave = true
 	}
-	if extraPodSpecNeedsPreservation(src.ExtraPodSpec) {
+	if extraPodSpecNeedsPreservation(src.ExtraPodSpec) ||
+		alphaFrontendSidecarConflictNeedsPreservation(src.FrontendSidecar, src.ExtraPodSpec) {
 		save.ExtraPodSpec = src.ExtraPodSpec.DeepCopy()
 		hasSave = true
 	}
@@ -352,10 +354,6 @@ func saveSharedAlphaOnlySpec(src, save *DynamoComponentDeploymentSharedSpec, inc
 	}
 	if src.Failover != nil && !src.Failover.Enabled {
 		save.Failover = src.Failover.DeepCopy()
-		hasSave = true
-	}
-	if src.Checkpoint != nil && !src.Checkpoint.Enabled {
-		save.Checkpoint = src.Checkpoint.DeepCopy()
 		hasSave = true
 	}
 	if includeOriginSplits || hasSave || sharedMainContainerFieldOriginsNeedSave(src) {
@@ -503,6 +501,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 	dst.ComponentType, dst.SubComponentType = sharedComponentTypeFromHub(src.ComponentType)
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
+	dst.MinAvailable = src.MinAvailable
 
 	if src.Multinode != nil {
 		dst.Multinode = &MultinodeSpec{}
@@ -1054,13 +1053,67 @@ func checkpointModeFromV1beta1(mode v1beta1.CheckpointMode) CheckpointMode {
 	}
 }
 
+func checkpointStartupPolicyToV1beta1(policy CheckpointStartupPolicy) v1beta1.CheckpointStartupPolicy {
+	switch policy {
+	case CheckpointStartupPolicyImmediate:
+		return v1beta1.CheckpointStartupPolicyImmediate
+	case CheckpointStartupPolicyWaitForCheckpoint:
+		return v1beta1.CheckpointStartupPolicyWaitForCheckpoint
+	default:
+		return v1beta1.CheckpointStartupPolicy(policy)
+	}
+}
+
+func checkpointStartupPolicyFromV1beta1(policy v1beta1.CheckpointStartupPolicy) CheckpointStartupPolicy {
+	switch policy {
+	case v1beta1.CheckpointStartupPolicyImmediate:
+		return CheckpointStartupPolicyImmediate
+	case v1beta1.CheckpointStartupPolicyWaitForCheckpoint:
+		return CheckpointStartupPolicyWaitForCheckpoint
+	default:
+		return CheckpointStartupPolicy(policy)
+	}
+}
+
+func checkpointDeletionPolicyToV1beta1(policy CheckpointDeletionPolicy) v1beta1.CheckpointDeletionPolicy {
+	switch policy {
+	case CheckpointDeletionPolicyDelete:
+		return v1beta1.CheckpointDeletionPolicyDelete
+	case CheckpointDeletionPolicyRetain:
+		return v1beta1.CheckpointDeletionPolicyRetain
+	default:
+		return v1beta1.CheckpointDeletionPolicy(policy)
+	}
+}
+
+func checkpointDeletionPolicyFromV1beta1(policy v1beta1.CheckpointDeletionPolicy) CheckpointDeletionPolicy {
+	switch policy {
+	case v1beta1.CheckpointDeletionPolicyDelete:
+		return CheckpointDeletionPolicyDelete
+	case v1beta1.CheckpointDeletionPolicyRetain:
+		return CheckpointDeletionPolicyRetain
+	default:
+		return CheckpointDeletionPolicy(policy)
+	}
+}
+
 // ConvertFromGPUMemoryServiceSpec converts an enabled GMS config into the
 // v1beta1 experimental GMS config. Disabled configs are represented by absence
 // in v1beta1 and are skipped by the caller.
 func ConvertFromGPUMemoryServiceSpec(src *GPUMemoryServiceSpec, dst *v1beta1.GPUMemoryServiceSpec) {
 	*dst = v1beta1.GPUMemoryServiceSpec{
-		Mode:            gmsModeToV1beta1(src.Mode),
-		DeviceClassName: src.DeviceClassName,
+		Mode:                  gmsModeToV1beta1(src.Mode),
+		DeviceClassName:       src.DeviceClassName,
+		ExtraClientContainers: slices.Clone(src.ExtraClientContainers),
+	}
+	if len(src.ExtraClientPods) > 0 {
+		dst.ExtraClientPods = make([]v1beta1.GMSClientPodSpec, len(src.ExtraClientPods))
+		for i := range src.ExtraClientPods {
+			dst.ExtraClientPods[i] = v1beta1.GMSClientPodSpec{
+				Name:        src.ExtraClientPods[i].Name,
+				PodTemplate: *src.ExtraClientPods[i].PodTemplate.DeepCopy(),
+			}
+		}
 	}
 }
 
@@ -1068,9 +1121,19 @@ func ConvertFromGPUMemoryServiceSpec(src *GPUMemoryServiceSpec, dst *v1beta1.GPU
 // into the GMS config.
 func ConvertToGPUMemoryServiceSpec(src *v1beta1.GPUMemoryServiceSpec, dst *GPUMemoryServiceSpec) {
 	*dst = GPUMemoryServiceSpec{
-		Enabled:         true,
-		Mode:            gmsModeFromV1beta1(src.Mode),
-		DeviceClassName: src.DeviceClassName,
+		Enabled:               true,
+		Mode:                  gmsModeFromV1beta1(src.Mode),
+		DeviceClassName:       src.DeviceClassName,
+		ExtraClientContainers: slices.Clone(src.ExtraClientContainers),
+	}
+	if len(src.ExtraClientPods) > 0 {
+		dst.ExtraClientPods = make([]GMSClientPodSpec, len(src.ExtraClientPods))
+		for i := range src.ExtraClientPods {
+			dst.ExtraClientPods[i] = GMSClientPodSpec{
+				Name:        src.ExtraClientPods[i].Name,
+				PodTemplate: *src.ExtraClientPods[i].PodTemplate.DeepCopy(),
+			}
+		}
 	}
 }
 
@@ -1094,12 +1157,15 @@ func ConvertToFailoverSpec(src *v1beta1.FailoverSpec, dst *FailoverSpec) {
 	}
 }
 
-// ConvertFromServiceCheckpointConfig converts an enabled checkpoint config into
-// the v1beta1 experimental checkpoint config. Disabled configs are represented
-// by absence in v1beta1 and are skipped by the caller.
+// ConvertFromServiceCheckpointConfig converts a checkpoint config into the
+// v1beta1 experimental checkpoint config.
 func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1beta1.ComponentCheckpointConfig) {
 	*dst = v1beta1.ComponentCheckpointConfig{
-		Mode: checkpointModeToV1beta1(src.Mode),
+		Enabled:             src.Enabled,
+		Mode:                checkpointModeToV1beta1(src.Mode),
+		StartupPolicy:       checkpointStartupPolicyToV1beta1(src.StartupPolicy),
+		DeletionPolicy:      checkpointDeletionPolicyToV1beta1(src.DeletionPolicy),
+		TargetContainerName: src.TargetContainerName,
 	}
 	if src.CheckpointRef != nil {
 		dst.CheckpointRef = src.CheckpointRef
@@ -1108,14 +1174,25 @@ func ConvertFromServiceCheckpointConfig(src *ServiceCheckpointConfig, dst *v1bet
 		dst.Identity = &v1beta1.DynamoCheckpointIdentity{}
 		ConvertFromDynamoCheckpointIdentity(src.Identity, dst.Identity)
 	}
+	if src.Job != nil {
+		dst.Job = &v1beta1.ComponentCheckpointJobConfig{
+			GMSClientContainers: slices.Clone(src.Job.GMSClientContainers),
+		}
+		if src.Job.PodTemplate != nil {
+			dst.Job.PodTemplate = src.Job.PodTemplate.DeepCopy()
+		}
+	}
 }
 
 // ConvertToServiceCheckpointConfig converts the v1beta1 experimental checkpoint
 // config into the checkpoint config.
 func ConvertToServiceCheckpointConfig(src *v1beta1.ComponentCheckpointConfig, dst *ServiceCheckpointConfig) {
 	*dst = ServiceCheckpointConfig{
-		Enabled: true,
-		Mode:    checkpointModeFromV1beta1(src.Mode),
+		Enabled:             src.Enabled,
+		Mode:                checkpointModeFromV1beta1(src.Mode),
+		StartupPolicy:       checkpointStartupPolicyFromV1beta1(src.StartupPolicy),
+		DeletionPolicy:      checkpointDeletionPolicyFromV1beta1(src.DeletionPolicy),
+		TargetContainerName: src.TargetContainerName,
 	}
 	if src.CheckpointRef != nil {
 		dst.CheckpointRef = src.CheckpointRef
@@ -1123,6 +1200,14 @@ func ConvertToServiceCheckpointConfig(src *v1beta1.ComponentCheckpointConfig, ds
 	if src.Identity != nil {
 		dst.Identity = &DynamoCheckpointIdentity{}
 		ConvertToDynamoCheckpointIdentity(src.Identity, dst.Identity)
+	}
+	if src.Job != nil {
+		dst.Job = &ServiceCheckpointJobConfig{
+			GMSClientContainers: slices.Clone(src.Job.GMSClientContainers),
+		}
+		if src.Job.PodTemplate != nil {
+			dst.Job.PodTemplate = src.Job.PodTemplate.DeepCopy()
+		}
 	}
 }
 
@@ -1175,7 +1260,7 @@ func convertExperimentalToHub(src *DynamoComponentDeploymentSharedSpec, dst *v1b
 		ConvertFromFailoverSpec(src.Failover, exp.Failover)
 	}
 
-	if src.Checkpoint != nil && src.Checkpoint.Enabled {
+	if src.Checkpoint != nil {
 		ensureExp().Checkpoint = &v1beta1.ComponentCheckpointConfig{}
 		ConvertFromServiceCheckpointConfig(src.Checkpoint, exp.Checkpoint)
 	}
@@ -1997,6 +2082,33 @@ func extraPodSpecIsZero(eps *ExtraPodSpec) bool {
 
 func extraPodSpecNeedsPreservation(eps *ExtraPodSpec) bool {
 	return eps != nil && (extraPodSpecIsZero(eps) || extraPodSpecOnlyPreservesMainContainerName(eps))
+}
+
+func shouldRestorePreservedExtraPodSpec(dst, preserved *DynamoComponentDeploymentSharedSpec) bool {
+	return dst != nil &&
+		preserved != nil &&
+		preserved.ExtraPodSpec != nil &&
+		(extraPodSpecNeedsPreservation(preserved.ExtraPodSpec) ||
+			alphaFrontendSidecarConflictNeedsPreservation(preserved.FrontendSidecar, preserved.ExtraPodSpec))
+}
+
+func alphaFrontendSidecarConflictNeedsPreservation(frontendSidecar *FrontendSidecarSpec, eps *ExtraPodSpec) bool {
+	// Keep enough origin data for admission to preserve the v1alpha1 rule that
+	// rejects frontendSidecar when extraPodSpec already declares the generated
+	// sidecar container name.
+	return frontendSidecar != nil && extraPodSpecHasContainer(eps, defaultFrontendSidecarContainerName)
+}
+
+func extraPodSpecHasContainer(eps *ExtraPodSpec, name string) bool {
+	if eps == nil || eps.PodSpec == nil {
+		return false
+	}
+	for _, container := range eps.PodSpec.Containers {
+		if container.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func extraPodSpecOnlyPreservesMainContainerName(eps *ExtraPodSpec) bool {

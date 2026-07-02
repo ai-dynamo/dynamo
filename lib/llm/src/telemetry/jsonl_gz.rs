@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Generic rotating gzip JSONL sink shared by audit and agent trace.
+//! Generic rotating gzip JSONL sink shared by audit and request trace.
 //!
 //! Records published on the caller's bus are forwarded into an internal mpsc,
 //! batched into uncompressed bytes, and appended as gzip members. Segments roll

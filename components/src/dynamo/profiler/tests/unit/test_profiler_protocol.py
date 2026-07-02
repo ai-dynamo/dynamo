@@ -26,7 +26,7 @@ try:
         BaseConfigModifier,
         apply_dgd_overrides,
     )
-    from dynamo.profiler.utils.defaults import SearchStrategy
+    from dynamo.profiler.utils.defaults import EngineType, SearchStrategy
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         OverridesSpec,
@@ -65,6 +65,212 @@ def test_build_dgd_config_shapes_multinode_worker_resources() -> None:
     )
     assert decode_service["resources"]["limits"]["gpu"] == "8"
     assert decode_service.get("multinode") is None
+
+
+def test_build_dgd_config_sglang_prefill_mrr_one_sets_dp_safe_cuda_graph_bs() -> None:
+    """SGLang prefill capture bs must remain valid with DP attention."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="Qwen/Qwen3-30B-A3B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1",
+        prefill_cli_args=[
+            "--tensor-parallel-size",
+            "2",
+            "--data-parallel-size",
+            "2",
+            "--max-running-requests",
+            "1",
+            "--max-prefill-tokens",
+            "5500",
+            "--enable-dp-attention",
+        ],
+        prefill_replicas=2,
+        prefill_gpus=4,
+        decode_cli_args=[
+            "--max-running-requests",
+            "512",
+            "--cuda-graph-bs",
+            "1",
+        ],
+        decode_replicas=2,
+        decode_gpus=8,
+        num_gpus_per_node=8,
+    )
+
+    prefill_service = next(
+        service
+        for service in dgd_config["spec"]["services"].values()
+        if service.get("subComponentType") == "prefill"
+    )
+    prefill_args = prefill_service["extraPodSpec"]["mainContainer"]["args"]
+
+    assert prefill_args.count("--cuda-graph-bs") == 1
+    assert prefill_args[prefill_args.index("--cuda-graph-bs") + 1] == "2"
+
+
+def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
+    """Do not duplicate an explicit CUDA graph batch-size setting."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    dgd_config = modifier.build_dgd_config(
+        mode="disagg",
+        model_name="Qwen/Qwen3-30B-A3B",
+        image="nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-post.1",
+        prefill_cli_args=[
+            "--max-running-requests",
+            "1",
+            "--cuda-graph-bs=1",
+        ],
+        prefill_replicas=2,
+        prefill_gpus=4,
+        decode_cli_args=["--max-running-requests", "512"],
+        decode_replicas=2,
+        decode_gpus=8,
+        num_gpus_per_node=8,
+    )
+
+    prefill_service = next(
+        service
+        for service in dgd_config["spec"]["services"].values()
+        if service.get("subComponentType") == "prefill"
+    )
+    prefill_args = prefill_service["extraPodSpec"]["mainContainer"]["args"]
+
+    cuda_graph_bs_args = [
+        arg
+        for arg in prefill_args
+        if arg == "--cuda-graph-bs" or arg.startswith("--cuda-graph-bs=")
+    ]
+    assert cuda_graph_bs_args == ["--cuda-graph-bs=1"]
+
+
+def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
+    """Later MRR overrides must drive CUDA graph batch-size safety."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    config = modifier.convert_config(
+        modifier.load_default_config(mode="disagg"),
+        target=EngineType.PREFILL,
+    )
+    service = next(
+        service
+        for service in config["spec"]["services"].values()
+        if service.get("subComponentType") == "decode"
+    )
+    service["extraPodSpec"]["mainContainer"]["args"] = [
+        "--max-running-requests=512",
+        "--dp=2",
+    ]
+
+    result = modifier.set_prefill_config(
+        config,
+        max_batch_size=1,
+        max_num_tokens=5500,
+    )
+    worker = next(
+        service
+        for service in result["spec"]["services"].values()
+        if service.get("subComponentType") == "decode"
+    )
+    args = worker["extraPodSpec"]["mainContainer"]["args"]
+
+    assert args[args.index("--max-running-requests") + 1] == "1"
+    assert args.count("--cuda-graph-bs") == 1
+    assert args[args.index("--cuda-graph-bs") + 1] == "2"
+
+
+def test_vllm_mamba_align_raises_max_num_batched_tokens() -> None:
+    """vLLM Mamba align requires the scheduler token cap to cover block size."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    args = [
+        "--enable-prefix-caching",
+        "--mamba-cache-mode",
+        "align",
+        "--max-num-batched-tokens",
+        "1024",
+    ]
+
+    with patch(
+        "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size",
+        return_value=8320,
+    ):
+        result = modifier._apply_mamba_cache_align_token_floor(args, "nemotron")
+
+    assert result[result.index("--max-num-batched-tokens") + 1] == "8320"
+
+
+def test_vllm_mamba_align_skips_without_explicit_align_mode() -> None:
+    """Do not probe model metadata for ordinary prefix-caching decode workers."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    args = [
+        "--enable-prefix-caching",
+        "--max-num-batched-tokens",
+        "1024",
+    ]
+
+    with patch(
+        "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size"
+    ) as mock_floor:
+        result = modifier._apply_mamba_cache_align_token_floor(args, "llama")
+
+    mock_floor.assert_not_called()
+    assert result == args
+
+
+def test_vllm_model_runtime_constraints_update_decode_config() -> None:
+    """Candidate-level vLLM postprocessing fixes generated decode worker args."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    config = {
+        "metadata": {"name": "test"},
+        "spec": {
+            "services": {
+                "Frontend": {},
+                "VllmDecodeWorker": {
+                    "subComponentType": "decode",
+                    "extraPodSpec": {
+                        "mainContainer": {
+                            "args": [
+                                "--mamba-cache-mode",
+                                "align",
+                                "--max-num-batched-tokens",
+                                "1024",
+                            ]
+                        }
+                    },
+                },
+            }
+        },
+    }
+
+    with patch(
+        "dynamo.profiler.utils.config_modifiers.vllm.get_mamba_cache_align_block_size",
+        return_value=8320,
+    ):
+        result = modifier.apply_model_runtime_constraints(config, "nemotron")
+
+    args = result["spec"]["services"]["VllmDecodeWorker"]["extraPodSpec"][
+        "mainContainer"
+    ]["args"]
+    assert args[args.index("--max-num-batched-tokens") + 1] == "8320"
+
+
+def test_vllm_model_runtime_constraints_skip_partial_decode_config() -> None:
+    """Final DGD postprocessing should tolerate partial mocked configs."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    config = {
+        "metadata": {"name": "test"},
+        "spec": {
+            "services": {
+                "Frontend": {},
+                "VllmDecodeWorker": {"subComponentType": "decode"},
+            }
+        },
+    }
+
+    result = modifier.apply_model_runtime_constraints(config, "nemotron")
+
+    decode_service = result["spec"]["services"]["VllmDecodeWorker"]
+    assert decode_service["subComponentType"] == "decode"
+    assert decode_service["extraPodSpec"] is None
 
 
 def test_build_dgd_config_multinode_when_tp_exceeds_node() -> None:
@@ -537,10 +743,9 @@ def test_build_dgd_config_pvc_with_model_path_uses_pvc_path(backend) -> None:
             continue
         args = svc.get("extraPodSpec", {}).get("mainContainer", {}).get("args", [])
         flat_args = " ".join(args) if args else ""
-        assert model_path in flat_args, (
-            f"Worker '{svc_name}' should use PVC model path '{model_path}'. "
-            f"args={args}"
-        )
+        assert (
+            model_path in flat_args
+        ), f"Worker '{svc_name}' should use PVC model path '{model_path}'. args={args}"
 
 
 def test_build_dgd_config_pvc_without_model_path_sets_hf_home() -> None:

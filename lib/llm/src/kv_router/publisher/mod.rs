@@ -28,6 +28,7 @@ use crate::kv_router::{
 mod batching;
 mod dedup;
 mod event_processor;
+mod multimodal_embedding_cache;
 mod sinks;
 #[cfg(test)]
 mod tests;
@@ -41,6 +42,10 @@ use dedup::EventDedupFilter;
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
 use event_processor::{start_event_processor, start_event_processor_jetstream};
+pub use multimodal_embedding_cache::{
+    MultimodalEmbeddingCacheEvent, MultimodalEmbeddingCachePublisher,
+    MultimodalEmbeddingCacheUpdate,
+};
 use sinks::EventPlanePublisher;
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
@@ -67,7 +72,14 @@ fn create_kv_stream_name(component: &Component, subject: &str) -> String {
 /// Configure the source of KV events.
 /// Currently, only ZMQ is supported.
 pub enum KvEventSourceConfig {
-    Zmq { endpoint: String, topic: String },
+    Zmq {
+        endpoint: String,
+        topic: String,
+        /// Model image-placeholder token id, used by the normalizer to rewrite
+        /// vLLM BlockStored events to the canonical pad_value scheme. `None`
+        /// for text-only / non-MM deployments (normalization is a no-op).
+        image_token_id: Option<u32>,
+    },
 }
 
 enum KvEventSource {
@@ -87,7 +99,11 @@ impl KvEventSource {
         next_event_id: Arc<AtomicU64>,
     ) -> Result<Self> {
         match source_config {
-            KvEventSourceConfig::Zmq { endpoint, topic } => {
+            KvEventSourceConfig::Zmq {
+                endpoint,
+                topic,
+                image_token_id,
+            } => {
                 let zmq_handle = component
                     .drt()
                     .runtime()
@@ -100,6 +116,7 @@ impl KvEventSource {
                         cancellation_token.clone(),
                         kv_block_size,
                         next_event_id,
+                        image_token_id,
                     ));
 
                 Ok(KvEventSource::Zmq { zmq_handle })

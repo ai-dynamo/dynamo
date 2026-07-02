@@ -17,13 +17,20 @@ from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
-from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.configuration.utils import (
+    add_argument,
+    add_negatable_bool_argument,
+    nullable_float,
+)
 
 # Authoritative field list — used by kv_router_kwargs() to extract values.
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_weight",
     "overlap_score_credit",
+    "overlap_score_credit_decay",
     "prefill_load_scale",
+    "host_cache_hit_weight",
+    "disk_cache_hit_weight",
     "router_temperature",
     "use_kv_events",
     "durable_kv_events",
@@ -37,6 +44,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_reset_states",
     "router_ttl_secs",
     "router_queue_threshold",
+    "router_policy_config",
     "router_event_threads",
     "router_queue_policy",
     "use_remote_indexer",
@@ -102,7 +110,10 @@ class KvRouterConfigBase(ConfigBase):
 
     overlap_score_weight: Optional[float] = None
     overlap_score_credit: float
+    overlap_score_credit_decay: float
     prefill_load_scale: float
+    host_cache_hit_weight: float
+    disk_cache_hit_weight: float
     router_temperature: float
     use_kv_events: bool
     durable_kv_events: bool
@@ -116,6 +127,7 @@ class KvRouterConfigBase(ConfigBase):
     router_reset_states: bool
     router_ttl_secs: float
     router_queue_threshold: Optional[float]
+    router_policy_config: Optional[str] = None
     router_event_threads: int
     router_queue_policy: str
     use_remote_indexer: bool = False
@@ -171,6 +183,20 @@ class KvRouterArgGroup(ArgGroup):
             arg_type=float,
             dest="overlap_score_credit",
         )
+        add_argument(
+            g,
+            flag_name="--router-kv-overlap-score-credit-decay",
+            env_var="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
+            default=0.0,
+            help=(
+                "KV Router: Decay rate for device-local overlap credit as active "
+                "prefill load rises above the least-loaded eligible worker. "
+                "0 disables decay; 1 halves credit at one request-equivalent "
+                "of excess active prefill load."
+            ),
+            arg_type=float,
+            dest="overlap_score_credit_decay",
+        )
         g.add_argument(
             "--router-kv-overlap-score-weight",
             "--kv-overlap-score-weight",
@@ -191,6 +217,33 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="prefill_load_scale",
+        )
+        add_argument(
+            g,
+            flag_name="--router-host-cache-hit-weight",
+            env_var="DYN_ROUTER_HOST_CACHE_HIT_WEIGHT",
+            default=0.75,
+            help=(
+                "KV Router: Credit multiplier for host-pinned (CPU offload) prefix overlap. "
+                "Range: 0.0 to 1.0; higher values more strongly prefer workers holding the "
+                "prefix in CPU-tier KV cache. Symmetric to --router-kv-overlap-score-credit "
+                "but applied to host_pinned tier overlap."
+            ),
+            arg_type=float,
+            dest="host_cache_hit_weight",
+        )
+        add_argument(
+            g,
+            flag_name="--router-disk-cache-hit-weight",
+            env_var="DYN_ROUTER_DISK_CACHE_HIT_WEIGHT",
+            default=0.25,
+            help=(
+                "KV Router: Credit multiplier for disk/lower-tier (e.g. NVMe-backed) prefix overlap. "
+                "Range: 0.0 to 1.0. Same semantics as --router-host-cache-hit-weight applied to "
+                "the disk tier."
+            ),
+            arg_type=float,
+            dest="disk_cache_hit_weight",
         )
         add_argument(
             g,
@@ -341,13 +394,27 @@ class KvRouterArgGroup(ArgGroup):
                 "Requests are queued if all workers exceed this fraction of "
                 "max_num_batched_tokens. Must be >= 0. Use 0.0 for maximum "
                 "queueing sensitivity (queue as soon as any tokens are active). "
+                "Pass 'None' to disable router queueing. "
                 "Note (SGLang backend): when --max-prefill-tokens is not set, MDC's "
                 "max_num_batched_tokens falls back to max_total_num_tokens (the KV "
                 "cache pool size), not the per-step prefill window, which inflates "
                 "the threshold's effective denominator. Set --max-prefill-tokens "
                 "explicitly for predictable semantics, or use a smaller threshold."
             ),
-            arg_type=float,
+            arg_type=nullable_float,
+        )
+        add_argument(
+            g,
+            flag_name="--router-policy-config",
+            env_var="DYN_ROUTER_POLICY_CONFIG",
+            default=None,
+            help=(
+                "KV Router: Startup-only YAML policy-family and cache-bucket "
+                "queue configuration. "
+                "When omitted, router_queue_threshold and router_queue_policy define "
+                "the existing single default queue."
+            ),
+            arg_type=str,
         )
         add_argument(
             g,

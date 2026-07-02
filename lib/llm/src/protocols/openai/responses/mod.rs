@@ -24,8 +24,8 @@ use dynamo_protocols::types::{
     ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
     ChatCompletionTool, ChatCompletionToolChoiceOption, ChatCompletionToolType,
     CreateChatCompletionRequest, FunctionName, FunctionObject, FunctionType,
-    ImageDetail as ChatImageDetail, ImageUrl, ReasoningContent, ResponseFormat,
-    ServiceTier as ChatServiceTier,
+    ImageDetail as ChatImageDetail, ImageUrl, ReasoningContent,
+    ReasoningEffort as ChatReasoningEffort, ResponseFormat, ServiceTier as ChatServiceTier,
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -34,13 +34,13 @@ use uuid::Uuid;
 use validator::Validate;
 
 use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse};
-use super::nvext::{NvExt, NvExtProvider};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
+use crate::protocols::common::extensions::{NvExt, NvExtProvider};
 
 /// Request body for `POST /v1/responses`. Uses a plain
 /// `#[derive(Deserialize)]` — the relaxed input shapes are handled by
-/// Dynamo-owning the input chain in `dynamo_protocols::types::responses`
-/// (see that crate's `CLAUDE.md`), not by a custom pre-parse JSON patcher.
+/// Dynamo-owning the input chain in `dynamo_protocols::types::responses`,
+/// not by a custom pre-parse JSON patcher.
 /// An earlier iteration of this type carried a hand-written `impl Deserialize`
 /// that walked `serde_json::Value` to inject synthetic defaults for missing
 /// `id` / `status` / `annotations`; that was replaced by typed ownership for
@@ -61,6 +61,7 @@ pub struct NvCreateResponse {
     pub inner: dynamo_protocols::types::responses::CreateResponse,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
 }
 
@@ -101,8 +102,8 @@ pub struct NvResponse {
 ///     `store`) that are absent from upstream `Response` entirely.
 ///
 /// Rather than fork the upstream output chain (which would cascade into
-/// `OutputItem`, streaming events, and a long tail of sub-types, per
-/// `lib/protocols/CLAUDE.md`), we patch the serialized JSON. Adds a
+/// `OutputItem`, streaming events, and a long tail of sub-types), we patch
+/// the serialized JSON. Adds a
 /// single `serde_json::to_value` round-trip per response, which is
 /// negligible next to tokenization/inference cost.
 pub(crate) fn patch_response_for_spec(
@@ -318,9 +319,10 @@ fn convert_input_content_to_text(content: &[InputContent]) -> String {
 }
 
 /// Counterpart to `convert_input_content_to_text` for upstream's
-/// `InputContent`. Upstream's enum appears inside `FunctionCallOutput::Content`
-/// and `EasyInputContent::ContentList`, neither of which is Dynamo-owned, so
-/// payloads deserialized through those paths land as upstream variants.
+/// `InputContent`. Reachable only via `FunctionCallOutput::Content`, which is
+/// not Dynamo-owned and therefore carries upstream variants. The sibling
+/// `EasyInputContent::ContentList` is Dynamo-owned and routed through
+/// `convert_input_content_to_text` / `convert_input_content_to_user_content`.
 fn convert_upstream_input_content_to_text(
     content: &[dynamo_protocols::types::responses::UpstreamInputContent],
 ) -> String {
@@ -532,39 +534,62 @@ fn convert_input_items_to_messages(
                 }
             },
             InputItem::EasyMessage(easy) => {
-                let content_text = match &easy.content {
-                    dynamo_protocols::types::responses::EasyInputContent::Text(text) => {
-                        text.clone()
-                    }
-                    dynamo_protocols::types::responses::EasyInputContent::ContentList(parts) => {
-                        convert_upstream_input_content_to_text(parts)
-                    }
-                };
+                use dynamo_protocols::types::responses::EasyInputContent;
                 match easy.role {
+                    // Chat-completions system / developer messages only accept
+                    // a plain string content; collapse any structured content
+                    // to text (drops images/files — matching the strict
+                    // `Item::Message(Input)` system/developer path above).
                     ResponseRole::System | ResponseRole::Developer => {
+                        let text = match &easy.content {
+                            EasyInputContent::Text(t) => t.clone(),
+                            EasyInputContent::ContentList(parts) => {
+                                convert_input_content_to_text(parts)
+                            }
+                        };
                         std::mem::take(&mut pending).flush_into(&mut messages);
                         messages.push(ChatCompletionRequestMessage::System(
                             ChatCompletionRequestSystemMessage {
-                                content: ChatCompletionRequestSystemMessageContent::Text(
-                                    content_text,
-                                ),
+                                content: ChatCompletionRequestSystemMessageContent::Text(text),
                                 name: None,
                             },
                         ));
                     }
+                    // User messages can carry multimodal content. Route a
+                    // `ContentList` through `convert_input_content_to_user_content`
+                    // so `input_image` / `input_text` parts survive into the
+                    // chat-completions message instead of being silently
+                    // dropped (mirrors the strict `Item::Message(Input::User)`
+                    // path). Issue #9468.
                     ResponseRole::User => {
+                        let content = match &easy.content {
+                            EasyInputContent::Text(t) => {
+                                ChatCompletionRequestUserMessageContent::Text(t.clone())
+                            }
+                            EasyInputContent::ContentList(parts) => {
+                                convert_input_content_to_user_content(parts)?
+                            }
+                        };
                         std::mem::take(&mut pending).flush_into(&mut messages);
                         messages.push(ChatCompletionRequestMessage::User(
                             ChatCompletionRequestUserMessage {
-                                content: ChatCompletionRequestUserMessageContent::Text(
-                                    content_text,
-                                ),
+                                content,
                                 name: None,
                             },
                         ));
                     }
+                    // Prior assistant turn echoed back as input. Chat
+                    // completions has no multimodal assistant slot, so collapse
+                    // any structured content to text — same as the strict
+                    // `MessageItem::Output` path.
                     ResponseRole::Assistant => {
-                        pending.push_text(&content_text);
+                        let text = match &easy.content {
+                            EasyInputContent::Text(t) => t.clone(),
+                            EasyInputContent::ContentList(parts) => {
+                                convert_input_content_to_text(parts)
+                            }
+                        };
+                        pending.push_text(&text);
                     }
                 }
             }
@@ -680,6 +705,51 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             }
         }
 
+        // Merge any run of leading system messages into one.
+        //
+        // Some chat templates (e.g. Qwen's tool_use template) reject requests
+        // that have more than one system message at the start.  A Codex CLI
+        // first-turn request commonly produces two: one from `instructions` and
+        // one from a `developer`-role input item.  Concatenate them here with a
+        // newline separator so the backend sees exactly one system message.
+        {
+            let leading_system_count = messages
+                .iter()
+                .take_while(|m| matches!(m, ChatCompletionRequestMessage::System(_)))
+                .count();
+            if leading_system_count > 1 {
+                let combined: String = messages[..leading_system_count]
+                    .iter()
+                    .map(|m| match m {
+                        ChatCompletionRequestMessage::System(s) => match &s.content {
+                            ChatCompletionRequestSystemMessageContent::Text(t) => t.as_str(),
+                            // Today this converter only ever builds `Text` system
+                            // content, so the merge is lossless.  Log loudly if a
+                            // non-text variant (e.g. `Array`, should async-openai
+                            // start emitting it) reaches here so the dropped
+                            // content is diagnosable instead of silently lost.
+                            other => {
+                                tracing::debug!(
+                                    "dropping non-text system message content during leading-system merge: {other:?}"
+                                );
+                                ""
+                            }
+                        },
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                messages.drain(0..leading_system_count);
+                messages.insert(
+                    0,
+                    ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
+                        content: ChatCompletionRequestSystemMessageContent::Text(combined),
+                        name: None,
+                    }),
+                );
+            }
+        }
+
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
 
         // Convert tools if present
@@ -696,8 +766,15 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
 
-        // Map reasoning.effort to reasoning_effort
-        let reasoning_effort = resp.inner.reasoning.as_ref().and_then(|r| r.effort.clone());
+        // Map reasoning.effort to reasoning_effort. The upstream responses
+        // `effort` is the same `async_openai` enum the Chat field is built on,
+        // so the local `From` impl converts it directly and exhaustively.
+        let reasoning_effort = resp
+            .inner
+            .reasoning
+            .as_ref()
+            .and_then(|r| r.effort.clone())
+            .map(ChatReasoningEffort::from);
 
         // Map text.format to response_format
         let response_format = resp.inner.text.as_ref().and_then(convert_text_format);
@@ -730,6 +807,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             common: Default::default(),
             nvext: resp.nvext,
             chat_template_args: None,
+            thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -1083,10 +1161,11 @@ pub fn chat_completion_to_response(
 #[cfg(test)]
 mod tests {
     use dynamo_protocols::types::responses::{
-        CreateResponse, FunctionCallOutput, FunctionCallOutputItemParam, FunctionTool,
-        FunctionToolCall, InputContent, InputImageContent, InputItem, InputMessage,
-        InputOutputMessage, InputOutputMessageContent, InputOutputTextContent, InputParam,
-        InputRole, InputTextContent, Item, MessageItem, Tool,
+        CreateResponse, EasyInputContent, EasyInputMessage, FunctionCallOutput,
+        FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputContent,
+        InputImageContent, InputItem, InputMessage, InputOutputMessage, InputOutputMessageContent,
+        InputOutputTextContent, InputParam, InputRole, InputTextContent, Item, MessageItem,
+        Role as ResponseRole, Tool,
     };
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
@@ -1168,6 +1247,16 @@ mod tests {
     }
 
     #[test]
+    fn test_into_chat_completion_preserves_omitted_max_output_tokens() {
+        let mut response_req = make_response_with_input("hi there");
+        response_req.inner.max_output_tokens = None;
+
+        let nv_req: NvCreateChatCompletionRequest = response_req.try_into().unwrap();
+
+        assert_eq!(nv_req.inner.max_completion_tokens, None);
+    }
+
+    #[test]
     fn test_store_mapped_to_chat_completion_request() {
         let mut req = make_response_with_input("audit me");
         req.inner.store = Some(true);
@@ -1201,6 +1290,68 @@ mod tests {
             },
             _ => panic!("expected system message first"),
         }
+    }
+
+    #[test]
+    fn test_instructions_and_developer_role_merged_into_single_system_message() {
+        // Codex CLI sends `instructions` + a `developer`-role input item.
+        // Both convert to System messages; backends like Qwen reject more than one.
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                instructions: Some("You are a coding agent.".into()),
+                input: InputParam::Items(vec![
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "Follow safety guidelines.".into(),
+                        })],
+                        role: InputRole::Developer,
+                        status: None,
+                    }))),
+                    InputItem::Item(Item::Message(MessageItem::Input(InputMessage {
+                        content: vec![InputContent::InputText(InputTextContent {
+                            text: "What is 2+2?".into(),
+                        })],
+                        role: InputRole::User,
+                        status: None,
+                    }))),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+
+        // Must be exactly 2 messages: one merged System + one User
+        assert_eq!(
+            messages.len(),
+            2,
+            "expected merged system + user, got {messages:?}"
+        );
+
+        match &messages[0] {
+            ChatCompletionRequestMessage::System(sys) => match &sys.content {
+                ChatCompletionRequestSystemMessageContent::Text(t) => {
+                    assert!(
+                        t.contains("You are a coding agent."),
+                        "merged text missing instructions: {t}"
+                    );
+                    assert!(
+                        t.contains("Follow safety guidelines."),
+                        "merged text missing developer content: {t}"
+                    );
+                }
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected system message at index 0"),
+        }
+
+        assert!(
+            matches!(messages[1], ChatCompletionRequestMessage::User(_)),
+            "expected user message at index 1"
+        );
     }
 
     #[test]
@@ -1302,6 +1453,165 @@ mod tests {
             },
             _ => panic!("expected user message"),
         }
+    }
+
+    /// EasyMessage path (no `type: "message"`) with user role + multimodal
+    /// content must preserve image parts all the way to the chat request.
+    /// Regression for issue #9468 review feedback: previously the EasyMessage
+    /// handler text-flattened the ContentList before dispatching on role, so
+    /// `input_image` parts were silently dropped on a no-type user payload.
+    #[test]
+    fn test_easy_message_user_multimodal_preserves_images() {
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![InputItem::EasyMessage(EasyInputMessage {
+                    role: ResponseRole::User,
+                    content: EasyInputContent::ContentList(vec![
+                        InputContent::InputText(InputTextContent {
+                            text: "What is in this image?".into(),
+                        }),
+                        InputContent::InputImage(InputImageContent {
+                            detail: Default::default(),
+                            file_id: None,
+                            image_url: Some("https://example.com/cat.jpg".into()),
+                        }),
+                    ]),
+                    ..Default::default()
+                })]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let messages = &chat_req.inner.messages;
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            ChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Array(parts) => {
+                    assert_eq!(parts.len(), 2, "expected text + image parts to survive");
+                    let has_text = parts.iter().any(|p| {
+                        matches!(
+                            p,
+                            dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart::Text(_)
+                        )
+                    });
+                    let has_image = parts.iter().any(|p| {
+                        matches!(
+                            p,
+                            dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+                        )
+                    });
+                    assert!(has_text, "text part missing");
+                    assert!(has_image, "image part dropped — regression of #9468 review");
+                }
+                ChatCompletionRequestUserMessageContent::Text(t) => panic!(
+                    "expected Array content with image preserved, got Text({t:?}) — images were dropped",
+                ),
+            },
+            _ => panic!("expected user message"),
+        }
+    }
+
+    /// EasyMessage path text-only user payload still produces a plain-text
+    /// content (single-text-part short-circuit in
+    /// `convert_input_content_to_user_content`).
+    #[test]
+    fn test_easy_message_user_text_only_stays_text() {
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![InputItem::EasyMessage(EasyInputMessage {
+                    role: ResponseRole::User,
+                    content: EasyInputContent::Text("hello".into()),
+                    ..Default::default()
+                })]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        match &chat_req.inner.messages[0] {
+            ChatCompletionRequestMessage::User(u) => match &u.content {
+                ChatCompletionRequestUserMessageContent::Text(t) => assert_eq!(t, "hello"),
+                other => panic!("expected Text user content, got {other:?}"),
+            },
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    /// EasyMessage with role=system carrying a `ContentList` text part still
+    /// produces a `System` chat message — chat-completions has no multimodal
+    /// system slot, so collapsing to text is the right thing.
+    #[test]
+    fn test_easy_message_system_contentlist_collapses_to_text() {
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::System,
+                        content: EasyInputContent::ContentList(vec![InputContent::InputText(
+                            InputTextContent {
+                                text: "You are helpful.".into(),
+                            },
+                        )]),
+                        ..Default::default()
+                    }),
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::User,
+                        content: EasyInputContent::Text("hi".into()),
+                        ..Default::default()
+                    }),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert!(matches!(
+            chat_req.inner.messages[0],
+            ChatCompletionRequestMessage::System(_)
+        ));
+    }
+
+    /// EasyMessage prior-assistant turn with a `ContentList` (text part) still
+    /// coalesces into the pending assistant accumulator and emits an
+    /// assistant chat message, preserving the turn boundary.
+    #[test]
+    fn test_easy_message_assistant_contentlist_collapses_to_text() {
+        let req = NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::Assistant,
+                        content: EasyInputContent::ContentList(vec![InputContent::InputText(
+                            InputTextContent { text: "ok".into() },
+                        )]),
+                        ..Default::default()
+                    }),
+                    InputItem::EasyMessage(EasyInputMessage {
+                        role: ResponseRole::User,
+                        content: EasyInputContent::Text("next".into()),
+                        ..Default::default()
+                    }),
+                ]),
+                model: Some("test-model".into()),
+                ..Default::default()
+            },
+            nvext: None,
+        };
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let msgs = &chat_req.inner.messages;
+        assert!(matches!(
+            msgs[0],
+            ChatCompletionRequestMessage::Assistant(_)
+        ));
+        assert!(matches!(msgs[1], ChatCompletionRequestMessage::User(_)));
     }
 
     #[test]
@@ -1650,7 +1960,9 @@ mod tests {
         // Regression: Codex / Agents SDK round-trip Item::Reasoning mid-turn.
         // The converter must route the reasoning summary into the coalesced
         // assistant message's `reasoning_content`, not silently drop it.
-        use dynamo_protocols::types::responses::{ReasoningItem, SummaryPart, SummaryTextContent};
+        use dynamo_protocols::types::responses::{
+            InputReasoningItem, SummaryPart, SummaryTextContent,
+        };
 
         let req = NvCreateResponse {
             inner: CreateResponse {
@@ -1662,8 +1974,8 @@ mod tests {
                         role: InputRole::User,
                         status: None,
                     }))),
-                    InputItem::Item(Item::Reasoning(ReasoningItem {
-                        id: "rs_1".into(),
+                    InputItem::Item(Item::Reasoning(InputReasoningItem {
+                        id: Some("rs_1".into()),
                         summary: vec![SummaryPart::SummaryText(SummaryTextContent {
                             text: "thinking step 1".into(),
                         })],
@@ -2251,17 +2563,19 @@ thinking
 
     #[test]
     fn test_reasoning_effort_mapped_to_chat_completion() {
-        use dynamo_protocols::types::ReasoningEffort;
         use dynamo_protocols::types::responses::Reasoning;
 
         let mut req = make_response_with_input("think hard");
         req.inner.reasoning = Some(Reasoning {
-            effort: Some(ReasoningEffort::Medium),
+            effort: Some(serde_json::from_value(serde_json::json!("medium")).unwrap()),
             ..Default::default()
         });
 
         let chat: NvCreateChatCompletionRequest = req.try_into().unwrap();
-        assert_eq!(chat.inner.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert_eq!(
+            chat.inner.reasoning_effort,
+            Some(ChatReasoningEffort::Medium)
+        );
     }
 
     #[test]
@@ -2355,12 +2669,11 @@ thinking
 
     #[test]
     fn test_response_echoes_reasoning() {
-        use dynamo_protocols::types::ReasoningEffort;
         use dynamo_protocols::types::responses::Reasoning;
 
         let params = ResponseParams {
             reasoning: Some(Reasoning {
-                effort: Some(ReasoningEffort::High),
+                effort: Some(serde_json::from_value(serde_json::json!("high")).unwrap()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -2382,7 +2695,10 @@ thinking
 
         let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
         let reasoning = resp.inner.reasoning.unwrap();
-        assert_eq!(reasoning.effort, Some(ReasoningEffort::High));
+        assert_eq!(
+            serde_json::to_value(reasoning.effort).unwrap(),
+            serde_json::json!("high")
+        );
     }
 
     #[test]

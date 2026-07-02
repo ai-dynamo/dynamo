@@ -7,7 +7,8 @@ use rand::Rng;
 use rustc_hash::FxHashMap;
 
 use super::config::KvRouterConfig;
-use super::types::{KvSchedulerError, SchedulingRequest, pinned_worker_config};
+use super::filter::{RoutingEligibility, WorkerEligibilityError};
+use super::types::{KvSchedulerError, SchedulingRequest};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
 /// A trait that users can implement to define custom selection logic.
@@ -18,6 +19,7 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         &self,
         workers: &HashMap<WorkerId, C>,
         request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
@@ -92,6 +94,7 @@ pub struct DefaultWorkerSelector {
 #[derive(Debug, Clone, Copy)]
 struct LogitWeights {
     overlap_score_credit: f64,
+    overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
     shared_cache_multiplier: f64,
 }
@@ -109,15 +112,17 @@ impl DefaultWorkerSelector {
         request: &SchedulingRequest,
         worker: WorkerWithDpRank,
         block_size: u32,
+        min_active_prefill_tokens: usize,
         weights: LogitWeights,
         formula_name: &'static str,
     ) -> f64 {
         let block_size_f64 = block_size as f64;
         let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
-        let has_tier_overlap_blocks = !request.tier_overlap_blocks.device.is_empty()
-            || !request.tier_overlap_blocks.host_pinned.is_empty()
-            || !request.tier_overlap_blocks.disk.is_empty();
+        let has_tier_overlap_blocks = !request.overlap.tier_overlap_blocks.device.is_empty()
+            || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
+            || !request.overlap.tier_overlap_blocks.disk.is_empty();
         let device_overlap_blocks = request
+            .overlap
             .tier_overlap_blocks
             .device
             .get(&worker)
@@ -133,15 +138,34 @@ impl DefaultWorkerSelector {
         // `shared_cache_hits::hits_beyond` expects an integer block count, so
         // use the unweighted device prefix depth for this comparison.
         let device_overlap_blocks_u32 = device_overlap_blocks.round().max(0.0) as u32;
-        let raw_prefill_tokens = request.raw_prefill_tokens_for(worker) as f64;
+        let worker_load = request.worker_loads.get(&worker).copied();
+        let raw_prefill_tokens = if request.track_prefill_tokens {
+            match worker_load {
+                Some(load) => {
+                    let cached_tokens = request.effective_cached_tokens_for(worker);
+                    // Preserve the legacy operation order when overlap exceeds the prompt.
+                    let uncached_tokens = super::prefill_load::effective_prefill_tokens(
+                        request.isl_tokens,
+                        cached_tokens,
+                    );
+                    let projected_tokens = load.active_prefill_tokens + uncached_tokens;
+                    projected_tokens.saturating_add(cached_tokens)
+                }
+                None => request.isl_tokens,
+            }
+        } else {
+            0
+        } as f64;
 
         let host_overlap_blocks = request
+            .overlap
             .tier_overlap_blocks
             .host_pinned
             .get(&worker)
             .copied()
             .unwrap_or(0) as f64;
         let disk_overlap_blocks = request
+            .overlap
             .tier_overlap_blocks
             .disk
             .get(&worker)
@@ -158,13 +182,30 @@ impl DefaultWorkerSelector {
             };
 
         let raw_prefill_blocks = raw_prefill_tokens / block_size_f64;
-        let overlap_credit_blocks = weights.overlap_score_credit * device_overlap_blocks
+        // Normalize backlog above the least-loaded eligible worker by this request's
+        // size. The rational decay softly trades cache locality for prefill balance,
+        // while leaving workers at the load floor with their full device credit.
+        let overlap_credit_decay =
+            if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
+                let active_prefill_tokens = worker_load.unwrap_or_default().active_prefill_tokens;
+                let excess_active_prefill_blocks =
+                    active_prefill_tokens.saturating_sub(min_active_prefill_tokens) as f64
+                        / block_size_f64;
+                let normalized_prefill_load =
+                    excess_active_prefill_blocks / request.request_blocks(block_size) as f64;
+                1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
+            } else {
+                1.0
+            };
+        let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
+        let overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
             + self.kv_router_config.host_cache_hit_weight * host_overlap_blocks
             + self.kv_router_config.disk_cache_hit_weight * disk_overlap_blocks
             + shared_overlap_blocks;
         let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
-        let decode_cost_blocks = request.decode_blocks.get(&worker).copied().unwrap_or(0) as f64;
+        let worker_load = worker_load.unwrap_or_default();
+        let decode_cost_blocks = worker_load.potential_decode_blocks() as f64;
         let logit = prefill_cost_blocks + decode_cost_blocks;
 
         if shared_beyond > 0 {
@@ -173,7 +214,8 @@ impl DefaultWorkerSelector {
                  {shared_beyond} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks \
                  = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} \
-                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3})",
+                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
+                 overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
                 shared_cache_multiplier = weights.shared_cache_multiplier,
@@ -184,7 +226,8 @@ impl DefaultWorkerSelector {
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks \
                  = {prefill_load_scale:.3} * {adjusted_prefill_blocks:.3} + {decode_cost_blocks:.3} \
-                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3})",
+                 (raw_prefill_blocks: {raw_prefill_blocks:.3}, overlap_credit_blocks: {overlap_credit_blocks:.3}, \
+                 overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
                 prefill_load_scale = weights.prefill_load_scale
@@ -200,11 +243,11 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         &self,
         workers: &HashMap<WorkerId, C>,
         request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
-        let eligibility = request.eligibility();
-        eligibility.validate_pinned_worker()?;
+        eligibility.validate_pinned_worker_allowed()?;
 
         let pinned_worker = eligibility.pinned_worker();
 
@@ -215,6 +258,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                     .map(|(&worker_id, config)| (worker_id, config)),
             )
         {
+            if eligibility.has_eligible_worker_ignoring_overload(
+                workers
+                    .iter()
+                    .map(|(&worker_id, config)| (worker_id, config)),
+            ) {
+                return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
+            }
+
             return Err(KvSchedulerError::NoEndpoints);
         }
 
@@ -226,6 +277,7 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                 .as_ref()
                 .and_then(|cfg| cfg.overlap_score_credit)
                 .unwrap_or(self.kv_router_config.overlap_score_credit),
+            overlap_score_credit_decay: self.kv_router_config.overlap_score_credit_decay,
             prefill_load_scale: request
                 .router_config_override
                 .as_ref()
@@ -239,15 +291,25 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         };
 
         if let Some(worker) = pinned_worker {
-            pinned_worker_config(workers, worker)?;
-            if workers
-                .get(&worker.worker_id)
-                .is_some_and(|config| !eligibility.allows_worker(worker.worker_id, config))
-            {
-                return Err(KvSchedulerError::NoEndpoints);
+            match eligibility.validate_worker_rank(workers, worker) {
+                Ok(_) => {}
+                Err(WorkerEligibilityError::WorkerOverloaded { .. }) => {
+                    return Err(KvSchedulerError::PinnedWorkerOverloaded {
+                        worker_id: worker.worker_id,
+                    });
+                }
+                Err(_) => return Err(KvSchedulerError::NoEndpoints),
             }
 
-            let logit = self.worker_logit(request, worker, block_size, weights, "Pinned formula");
+            let min_active_prefill_tokens = request.worker_load_for(worker).active_prefill_tokens;
+            let logit = self.worker_logit(
+                request,
+                worker,
+                block_size,
+                min_active_prefill_tokens,
+                weights,
+                "Pinned formula",
+            );
             let effective_overlap_blocks = request.effective_overlap_blocks_for(worker);
             let cached_tokens = request.effective_cached_tokens_for(worker);
 
@@ -273,8 +335,26 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             .as_ref()
             .and_then(|cfg| cfg.router_temperature)
             .unwrap_or(self.kv_router_config.router_temperature);
+        let min_active_prefill_tokens =
+            if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
+                let mut minimum = usize::MAX;
+                eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                    minimum = minimum.min(request.worker_load_for(worker).active_prefill_tokens);
+                });
+                debug_assert_ne!(minimum, usize::MAX);
+                minimum
+            } else {
+                0
+            };
         let get_score = |worker: WorkerWithDpRank| -> f64 {
-            let base_score = self.worker_logit(request, worker, block_size, weights, "Formula");
+            let base_score = self.worker_logit(
+                request,
+                worker,
+                block_size,
+                min_active_prefill_tokens,
+                weights,
+                "Formula",
+            );
             let Some(config) = workers.get(&worker.worker_id) else {
                 return base_score;
             };
@@ -287,28 +367,18 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
             }
         };
 
-        let worker_iter = workers
-            .iter()
-            .filter(move |(worker_id, config)| eligibility.allows_worker(**worker_id, *config))
-            .flat_map(|(worker_id, config)| {
-                let data_parallel_size = config.data_parallel_size();
-                let data_parallel_start_rank = config.data_parallel_start_rank();
-                (data_parallel_start_rank..(data_parallel_start_rank + data_parallel_size))
-                    .map(move |dp_rank| WorkerWithDpRank::new(*worker_id, dp_rank))
-            });
-
         let (best_worker, best_logit) = if temperature == 0.0 {
             let mut best_worker = None;
             let mut best_logit = f64::INFINITY;
             let mut tie_count = 0usize;
             let mut rng = rand::rng();
-            for worker in worker_iter {
+            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 let score = get_score(worker);
                 if score < best_logit {
                     best_worker = Some(worker);
                     best_logit = score;
                     tie_count = 1;
-                    continue;
+                    return;
                 }
 
                 if score == best_logit {
@@ -318,26 +388,31 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
                         best_worker = Some(worker);
                     }
                 }
-            }
+            });
 
-            (best_worker.expect("worker_iter non-empty"), best_logit)
+            (
+                best_worker.expect("eligible worker rank non-empty"),
+                best_logit,
+            )
         } else {
             let mut worker_logits = FxHashMap::default();
-            for worker in worker_iter {
+            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
                 let score = get_score(worker);
                 worker_logits.insert(worker, score);
-            }
+            });
 
             softmax_sample(&worker_logits, temperature)
         };
 
         let best_host_pinned_overlap_blocks = request
+            .overlap
             .tier_overlap_blocks
             .host_pinned
             .get(&best_worker)
             .copied()
             .unwrap_or(0);
         let best_disk_overlap_blocks = request
+            .overlap
             .tier_overlap_blocks
             .disk
             .get(&best_worker)
@@ -346,13 +421,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
 
         if self.worker_type == "decode" {
             tracing::info!(
-                "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, host_pinned blocks: {}, disk blocks: {}",
-                self.worker_type,
-                best_worker.worker_id,
-                best_worker.dp_rank,
-                best_logit,
-                best_host_pinned_overlap_blocks,
-                best_disk_overlap_blocks,
+                router_mode = "kv",
+                worker_id = best_worker.worker_id,
+                worker_type = %self.worker_type,
+                dp_rank = ?best_worker.dp_rank,
+                logit = best_logit,
+                host_pinned_blocks = best_host_pinned_overlap_blocks,
+                disk_blocks = best_disk_overlap_blocks,
+                "Selected worker"
             );
             let effective_overlap_blocks = request.effective_overlap_blocks_for(best_worker);
             let cached_tokens = request.effective_cached_tokens_for(best_worker);
@@ -368,22 +444,21 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
         let best_overlap = request.effective_overlap_blocks_for(best_worker);
         let best_cached_tokens = request.effective_cached_tokens_for(best_worker);
 
-        let total_blocks_info = workers
+        let total_kv_blocks = workers
             .get(&best_worker.worker_id)
-            .and_then(|cfg| cfg.total_kv_blocks())
-            .map(|blocks| format!(", total blocks: {}", blocks))
-            .unwrap_or_default();
+            .and_then(|cfg| cfg.total_kv_blocks());
 
         tracing::info!(
-            "Selected worker: worker_type={}, worker_id={} dp_rank={:?}, logit: {:.3}, effective cached blocks: {:.2}, host_pinned blocks: {}, disk blocks: {}{}",
-            self.worker_type,
-            best_worker.worker_id,
-            best_worker.dp_rank,
-            best_logit,
-            best_overlap,
-            best_host_pinned_overlap_blocks,
-            best_disk_overlap_blocks,
-            total_blocks_info
+            router_mode = "kv",
+            worker_id = best_worker.worker_id,
+            worker_type = %self.worker_type,
+            dp_rank = ?best_worker.dp_rank,
+            logit = best_logit,
+            effective_cached_blocks = best_overlap,
+            host_pinned_blocks = best_host_pinned_overlap_blocks,
+            disk_blocks = best_disk_overlap_blocks,
+            total_kv_blocks = ?total_kv_blocks,
+            "Selected worker"
         );
 
         Ok(WorkerSelectionResult {
@@ -401,6 +476,7 @@ mod tests {
 
     use super::*;
     use crate::protocols::{SharedCacheHits, WorkerConfigLike};
+    use crate::scheduling::{OverlapSignals, ScheduleMode};
 
     #[derive(Clone, Default)]
     struct TaintedWorkerConfig {
@@ -427,6 +503,51 @@ mod tests {
         fn taints(&self) -> &HashSet<String> {
             &self.taints
         }
+    }
+
+    fn base_request(isl_tokens: usize) -> SchedulingRequest {
+        SchedulingRequest {
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
+            token_seq: None,
+            isl_tokens,
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
+            worker_loads: FxHashMap::default(),
+            track_prefill_tokens: true,
+            router_config_override: None,
+            lora_name: None,
+            priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
+            expected_output_tokens: None,
+            pinned_worker: None,
+            allowed_worker_ids: None,
+            routing_constraints: crate::protocols::RoutingConstraints::default(),
+            shared_cache_hits: None,
+            resp_tx: None,
+        }
+    }
+
+    fn worker_loads_with_active_decode(
+        decode_blocks: FxHashMap<WorkerWithDpRank, usize>,
+    ) -> FxHashMap<WorkerWithDpRank, crate::sequences::WorkerLoadProjection> {
+        decode_blocks
+            .into_iter()
+            .map(|(worker, active_decode_blocks)| {
+                (
+                    worker,
+                    crate::sequences::WorkerLoadProjection {
+                        active_decode_blocks,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -553,19 +674,23 @@ mod tests {
             (30, SimpleWorkerConfig::default()),
         ]);
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: 16,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::default(),
-            effective_cached_tokens: HashMap::default(),
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
+            worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -576,7 +701,9 @@ mod tests {
         let mut selected = [false; 3];
 
         for _ in 0..120 {
-            let result = selector.select_worker(&workers, &request, 16).unwrap();
+            let result = selector
+                .select_worker(&workers, &request, request.eligibility(), 16)
+                .unwrap();
             match result.worker.worker_id {
                 10 => selected[0] = true,
                 20 => selected[1] = true,
@@ -593,6 +720,94 @@ mod tests {
     }
 
     #[test]
+    fn test_overloaded_high_overlap_worker_is_skipped() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit: 1.0,
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(64);
+        request
+            .overlap
+            .effective_overlap_blocks
+            .insert(worker0, 4.0);
+        request.overlap.effective_cached_tokens.insert(worker0, 64);
+
+        let overloaded_worker_ids = HashSet::from([0]);
+        let result = selector
+            .select_worker(
+                &workers,
+                &request,
+                request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
+                16,
+            )
+            .unwrap();
+
+        assert_eq!(result.worker.worker_id, 1);
+    }
+
+    #[test]
+    fn test_all_eligible_workers_overloaded_returns_overload_error() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let request = base_request(16);
+        let overloaded_worker_ids = HashSet::from([0, 1]);
+
+        let result = selector.select_worker(
+            &workers,
+            &request,
+            request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
+            16,
+        );
+
+        assert!(matches!(
+            result,
+            Err(KvSchedulerError::AllEligibleWorkersOverloaded)
+        ));
+    }
+
+    #[test]
+    fn test_overloaded_pinned_worker_is_not_rerouted() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let mut request = base_request(16);
+        request.pinned_worker = Some(WorkerWithDpRank::from_worker_id(0));
+        let overloaded_worker_ids = HashSet::from([0]);
+
+        let result = selector.select_worker(
+            &workers,
+            &request,
+            request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
+            16,
+        );
+
+        assert!(matches!(
+            result,
+            Err(KvSchedulerError::PinnedWorkerOverloaded { worker_id: 0 })
+        ));
+    }
+
+    #[test]
     fn test_required_taints_return_no_endpoints_when_no_worker_matches() {
         let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
         let workers = HashMap::from([(
@@ -602,19 +817,23 @@ mod tests {
             },
         )]);
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: 16,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::default(),
-            effective_cached_tokens: HashMap::default(),
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
+            worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -626,7 +845,7 @@ mod tests {
             resp_tx: None,
         };
 
-        let result = selector.select_worker(&workers, &request, 16);
+        let result = selector.select_worker(&workers, &request, request.eligibility(), 16);
         assert!(matches!(result, Err(KvSchedulerError::NoEndpoints)));
     }
 
@@ -648,19 +867,23 @@ mod tests {
             ),
         ]);
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: 16,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::default(),
-            effective_cached_tokens: HashMap::default(),
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
+            worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -672,7 +895,9 @@ mod tests {
             resp_tx: None,
         };
 
-        let result = selector.select_worker(&workers, &request, 16).unwrap();
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
         assert_eq!(result.worker.worker_id, 20);
     }
 
@@ -710,19 +935,23 @@ mod tests {
             decode_blocks.insert(WorkerWithDpRank::from_worker_id(noisy_worker_id), 400_000);
 
             let request = SchedulingRequest {
-                maybe_request_id: Some("test".into()),
+                mode: ScheduleMode::QueryOnly {
+                    request_id: Some("test".into()),
+                },
                 token_seq: None,
                 isl_tokens: 16,
-                tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
-                decode_blocks,
-                prefill_tokens: FxHashMap::default(),
+                overlap: OverlapSignals {
+                    tier_overlap_blocks: Default::default(),
+                    effective_overlap_blocks: HashMap::default(),
+                    effective_cached_tokens: HashMap::default(),
+                },
+                worker_loads: worker_loads_with_active_decode(decode_blocks),
                 track_prefill_tokens: true,
                 router_config_override: None,
-                update_states: false,
                 lora_name: None,
                 priority_jump: 0.0,
+                strict_priority: 0,
+                policy_class: None,
                 expected_output_tokens: None,
                 pinned_worker: None,
                 allowed_worker_ids: None,
@@ -734,7 +963,9 @@ mod tests {
                 resp_tx: None,
             };
 
-            let result = selector.select_worker(&workers, &request, 16).unwrap();
+            let result = selector
+                .select_worker(&workers, &request, request.eligibility(), 16)
+                .unwrap();
             assert_eq!(
                 result.worker.worker_id, expected_worker_id,
                 "required taint {required_taint} should route only within its compatible worker set"
@@ -770,19 +1001,23 @@ mod tests {
         decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 90);
 
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: 16,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::default(),
-            effective_cached_tokens: HashMap::default(),
-            decode_blocks,
-            prefill_tokens: FxHashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
+            worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -794,7 +1029,9 @@ mod tests {
             resp_tx: None,
         };
 
-        let result = selector.select_worker(&workers, &request, 16).unwrap();
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
         assert_eq!(result.worker.worker_id, 10);
     }
 
@@ -826,19 +1063,23 @@ mod tests {
         decode_blocks.insert(WorkerWithDpRank::from_worker_id(20), 100);
 
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: 16,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks: HashMap::default(),
-            effective_cached_tokens: HashMap::default(),
-            decode_blocks,
-            prefill_tokens: FxHashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks: HashMap::default(),
+                effective_cached_tokens: HashMap::default(),
+            },
+            worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -850,7 +1091,9 @@ mod tests {
             resp_tx: None,
         };
 
-        let result = selector.select_worker(&workers, &request, 16).unwrap();
+        let result = selector
+            .select_worker(&workers, &request, request.eligibility(), 16)
+            .unwrap();
         assert_eq!(result.worker.worker_id, 20);
     }
 
@@ -898,19 +1141,23 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: isl,
-            tier_overlap_blocks,
-            effective_overlap_blocks,
-            effective_cached_tokens,
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks,
+                effective_overlap_blocks,
+                effective_cached_tokens,
+            },
+            worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -920,7 +1167,7 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, block_size)
+            .select_worker(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         // Worker 0 should win: logit 1.0 < 2.0
@@ -963,19 +1210,23 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: isl,
-            tier_overlap_blocks,
-            effective_overlap_blocks: HashMap::new(),
-            effective_cached_tokens,
-            decode_blocks,
-            prefill_tokens: FxHashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks,
+                effective_overlap_blocks: HashMap::new(),
+                effective_cached_tokens,
+            },
+            worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -985,12 +1236,107 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, block_size)
+            .select_worker(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         assert_eq!(
             result.worker, worker0,
             "prefill load scale should apply before adding decode block load"
+        );
+    }
+
+    #[test]
+    fn test_worker_logit_preserves_prefill_accounting_edges() {
+        let worker = WorkerWithDpRank::from_worker_id(0);
+        let mut request = base_request(64);
+        request.overlap.effective_cached_tokens.insert(worker, 96);
+        request.overlap.tier_overlap_blocks.device.insert(worker, 6);
+        request.worker_loads.insert(
+            worker,
+            crate::sequences::WorkerLoadProjection {
+                active_prefill_tokens: 16,
+                active_decode_blocks: 2,
+                additional_active_blocks: 3,
+            },
+        );
+        let selector = DefaultWorkerSelector::new(Some(KvRouterConfig::default()), "test");
+        let weights = LogitWeights {
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            prefill_load_scale: 2.0,
+            shared_cache_multiplier: 0.0,
+        };
+
+        assert_eq!(
+            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
+            7.0
+        );
+
+        request.track_prefill_tokens = false;
+        assert_eq!(
+            selector.worker_logit(&request, worker, 16, 0, weights, "test"),
+            5.0
+        );
+    }
+
+    #[test]
+    fn test_overlap_credit_decay_can_prefer_less_loaded_cold_worker() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let block_size = 16u32;
+        let warm_worker = WorkerWithDpRank::from_worker_id(0);
+        let cold_worker = WorkerWithDpRank::from_worker_id(1);
+        let workers = HashMap::from([
+            (warm_worker.worker_id, SimpleWorkerConfig::default()),
+            (cold_worker.worker_id, SimpleWorkerConfig::default()),
+        ]);
+
+        let mut request = base_request(64);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(warm_worker, 4);
+        request
+            .overlap
+            .effective_cached_tokens
+            .insert(warm_worker, 64);
+        request.worker_loads.insert(
+            warm_worker,
+            crate::sequences::WorkerLoadProjection {
+                active_prefill_tokens: 48,
+                ..Default::default()
+            },
+        );
+
+        let no_decay = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit_decay: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let with_decay = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit_decay: 1.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+
+        assert_eq!(
+            no_decay
+                .select_worker(&workers, &request, request.eligibility(), block_size)
+                .unwrap()
+                .worker,
+            warm_worker
+        );
+        assert_eq!(
+            with_decay
+                .select_worker(&workers, &request, request.eligibility(), block_size)
+                .unwrap()
+                .worker,
+            cold_worker
         );
     }
 
@@ -1023,19 +1369,23 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: isl,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks,
-            effective_cached_tokens: HashMap::new(),
-            decode_blocks,
-            prefill_tokens: FxHashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks,
+                effective_cached_tokens: HashMap::new(),
+            },
+            worker_loads: worker_loads_with_active_decode(decode_blocks),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1045,7 +1395,7 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, block_size)
+            .select_worker(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         assert_eq!(
@@ -1073,19 +1423,23 @@ mod tests {
 
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
-            maybe_request_id: Some("test".into()),
+            mode: ScheduleMode::QueryOnly {
+                request_id: Some("test".into()),
+            },
             token_seq: None,
             isl_tokens: isl,
-            tier_overlap_blocks: Default::default(),
-            effective_overlap_blocks,
-            effective_cached_tokens: HashMap::new(),
-            decode_blocks: FxHashMap::default(),
-            prefill_tokens: FxHashMap::default(),
+            overlap: OverlapSignals {
+                tier_overlap_blocks: Default::default(),
+                effective_overlap_blocks,
+                effective_cached_tokens: HashMap::new(),
+            },
+            worker_loads: FxHashMap::default(),
             track_prefill_tokens: true,
             router_config_override: None,
-            update_states: false,
             lora_name: None,
             priority_jump: 0.0,
+            strict_priority: 0,
+            policy_class: None,
             expected_output_tokens: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1095,7 +1449,7 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, block_size)
+            .select_worker(&workers, &request, request.eligibility(), block_size)
             .unwrap();
 
         assert_eq!(result.worker, worker0);

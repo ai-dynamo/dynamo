@@ -261,6 +261,8 @@ const (
 // DestinationRules) for EPP components so that sidecar proxies connect
 // correctly without double-TLS issues.
 type ServiceMeshConfiguration struct {
+	// Enabled overrides service mesh auto-detection. nil = auto-detect.
+	Enabled *bool `json:"enabled,omitempty"`
 	// Provider selects the service mesh implementation. Supported: "istio", "".
 	// Empty string disables service mesh resource generation.
 	Provider string `json:"provider"`
@@ -268,19 +270,37 @@ type ServiceMeshConfiguration struct {
 	Istio *IstioMeshConfiguration `json:"istio,omitempty"`
 }
 
-// IsEnabled returns true if a supported service mesh provider is configured.
+// IsEnabled returns true if service mesh resources should be created or updated.
+// Cleanup of previously owned resources is handled separately during reconcile.
 func (s *ServiceMeshConfiguration) IsEnabled() bool {
+	if s.Enabled != nil && !*s.Enabled {
+		return false
+	}
 	return ServiceMeshProvider(s.Provider) == ServiceMeshProviderIstio
 }
 
 // IstioMeshConfiguration holds Istio-specific mesh settings.
 type IstioMeshConfiguration struct {
-	// TLSMode is the Istio TLS mode for DestinationRules (e.g., "DISABLE", "SIMPLE", "ISTIO_MUTUAL").
+	// TLSMode is the Istio TLS mode for DestinationRules.
+	// Supported values: "DISABLE", "SIMPLE", "ISTIO_MUTUAL", "MUTUAL".
 	// Defaults to "SIMPLE".
 	TLSMode string `json:"tlsMode"`
 	// InsecureSkipVerify skips TLS certificate verification in DestinationRules.
 	// Defaults to true (matching upstream GAIE behavior with self-signed certs).
 	InsecureSkipVerify *bool `json:"insecureSkipVerify,omitempty"`
+	// ClientCertificate is the path (in the istio-proxy sidecar's filesystem)
+	// to the file holding the client-side TLS certificate used for mTLS.
+	// REQUIRED when TLSMode is "MUTUAL"; ignored for other modes.
+	ClientCertificate string `json:"clientCertificate,omitempty"`
+	// PrivateKey is the path (in the istio-proxy sidecar's filesystem) to the
+	// file holding the client-side TLS private key used for mTLS.
+	// REQUIRED when TLSMode is "MUTUAL"; ignored for other modes.
+	PrivateKey string `json:"privateKey,omitempty"`
+	// CaCertificates is the optional path (in the istio-proxy sidecar's
+	// filesystem) to the file holding CA certificates used to verify the
+	// server certificate. Used only when TLSMode is "MUTUAL"; for other modes
+	// the field is ignored.
+	CaCertificates string `json:"caCertificates,omitempty"`
 }
 
 // RBACConfiguration holds RBAC settings for cluster-wide mode.
@@ -318,6 +338,10 @@ type CheckpointConfiguration struct {
 	// behavior of discovering storage from a snapshot-agent DaemonSet in the
 	// workload namespace.
 	Storage CheckpointStorageConfiguration `json:"storage"`
+	// CleanupImage is the image used by best-effort artifact cleanup Jobs for
+	// automatically-created checkpoints. It must provide a POSIX shell and `rm`.
+	// +kubebuilder:default="busybox:1.36"
+	CleanupImage string `json:"cleanupImage,omitempty"`
 }
 
 // CheckpointSeccompConfiguration controls the localhost seccomp profile applied

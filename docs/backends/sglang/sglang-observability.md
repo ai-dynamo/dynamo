@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Observability
+subtitle: Prometheus metrics, forward pass telemetry, distributed tracing, and Grafana dashboards for SGLang workers in Dynamo.
 ---
 
 This guide covers metrics, tracing, and visualization for SGLang deployments running through Dynamo.
@@ -112,6 +113,8 @@ For the complete and authoritative list of all SGLang metrics, see the [official
 ---
 
 ## Forward Pass Metrics (FPM)
+
+> **Availability.** Forward Pass Metrics require SGLang's upstream `sglang.srt.observability.forward_pass_metrics` module and the `ServerArgs` fields (`enable_forward_pass_metrics`, `forward_pass_metrics_worker_id`, `forward_pass_metrics_ipc_name`). These landed in **SGLang v0.5.13** and ship in the current Dynamo runtime (`sglang==0.5.14`), so setting `DYN_FORWARDPASS_METRIC_PORT` enables SGLang-side FPM emission to the NATS event plane via `FpmEventRelay`. The wire-format contract is guarded by `dynamo/sglang/tests/test_fpm_contract.py`. On runtimes older than v0.5.13 the module is absent: the Dynamo-side relay still starts and the worker serves normally, but no SGLang-side FPM payloads are emitted.
 
 Forward Pass Metrics provide **per-iteration scheduler telemetry** pushed over ZMQ, giving the [Planner](../../components/planner/README.md) real-time visibility into batch composition, queue depth, and GPU forward pass duration. Unlike Prometheus metrics (which are scraped asynchronously and reflect only the latest gauge value), FPM emits a structured message after every scheduler iteration with the exact batch state.
 
@@ -289,8 +292,8 @@ The disaggregated launch script supports `--enable-otel` to enable tracing acros
 
 ```bash
 # Start observability stack first
-docker compose -f deploy/docker-compose.yml up -d
-docker compose -f deploy/docker-observability.yml up -d
+docker compose -f dev/docker-compose.yml up -d
+docker compose -f dev/docker-observability.yml up -d
 
 # Launch SGLang disaggregated with tracing
 cd examples/backends/sglang/launch
@@ -378,7 +381,7 @@ For more details on the Tempo/Grafana tracing infrastructure, see the [Dynamo Tr
 
 ## SGLang Grafana Dashboard
 
-Dynamo ships a pre-provisioned Grafana dashboard for SGLang at `deploy/observability/grafana_dashboards/sglang.json`. It is automatically loaded when the observability stack starts.
+Dynamo ships a pre-provisioned Grafana dashboard for SGLang at `dev/observability/grafana_dashboards/sglang.json`. It is automatically loaded when the observability stack starts.
 
 ### Dashboard Panels
 

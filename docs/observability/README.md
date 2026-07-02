@@ -42,10 +42,10 @@ From the Dynamo root directory:
 
 ```bash
 # Start infrastructure (NATS, etcd)
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d
 
 # Start observability stack (Prometheus, Grafana, Tempo, DCGM GPU exporter, NATS exporter)
-docker compose -f deploy/docker-observability.yml up -d
+docker compose -f dev/docker-observability.yml up -d
 ```
 
 For detailed setup instructions and configuration, see [Prometheus + Grafana Setup](prometheus-grafana.md).
@@ -58,6 +58,7 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 | [Operator Metrics (Kubernetes)](../kubernetes/observability/operator-metrics.md) | Operator controller and webhook metrics for Kubernetes | N/A (configured via Helm) |
 | [Health Checks](health-checks.md) | Component health monitoring and readiness probes | `DYN_SYSTEM_PORT`†, `DYN_SYSTEM_STARTING_HEALTH_STATUS`, `DYN_SYSTEM_HEALTH_PATH`, `DYN_SYSTEM_LIVE_PATH`, `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` |
 | [Tracing](tracing.md) | Distributed tracing with OpenTelemetry and Tempo | `DYN_LOGGING_JSONL`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_SERVICE_NAME`† |
+| [Request Replay Tracing](request-tracing.md) | Per-request JSONL capture for direct DynoSim replay | `DYN_REQUEST_TRACE`, `DYN_REQUEST_TRACE_OUTPUT_PATH` |
 | [Logging](logging.md) | Structured logging and OTLP log export to Loki | `DYN_LOGGING_JSONL`†, `DYN_LOG`, `DYN_LOG_USE_LOCAL_TZ`, `DYN_LOGGING_CONFIG_PATH`, `OTEL_SERVICE_NAME`†, `OTEL_EXPORT_ENABLED`†, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`†, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`† |
 
 **Variables marked with † are shared across multiple observability systems.**
@@ -67,6 +68,7 @@ For detailed setup instructions and configuration, see [Prometheus + Grafana Set
 | Guide | Description | Environment Variables to Control |
 |-------|-------------|----------------------------------|
 | [Metrics Developer Guide](metrics-developer-guide.md) | Creating custom metrics in Rust and Python | `DYN_SYSTEM_PORT`† |
+| [Local Resource Monitor](local-resource-monitor.md) | Per-process VRAM / PCIe / CPU exporter for engine-startup profiling (200 ms scrape, profile-gated) | N/A (host-side script) |
 
 ## Kubernetes
 
@@ -113,15 +115,15 @@ The dcgm-exporter service in the Docker Compose network is configured to use por
 
 ### Configuration Files
 
-The following configuration files are located in the `deploy/observability/` directory:
-- [docker-compose.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-compose.yml): Defines NATS and etcd services
-- [docker-observability.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/docker-observability.yml): Defines Prometheus, Grafana, Tempo, and exporters
-- [prometheus.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/prometheus.yml): Contains Prometheus scraping configuration
-- [grafana-datasources.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/grafana-datasources.yml): Contains Grafana datasource configuration
-- [otel-collector.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/observability/otel-collector.yaml): OpenTelemetry Collector configuration (routes traces to Tempo, logs to Loki)
-- [loki.yaml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/observability/loki.yaml): Loki log aggregation configuration
-- [loki-datasource.yml](https://github.com/ai-dynamo/dynamo/blob/main/deploy/observability/loki-datasource.yml): Grafana Loki datasource with trace ID linking to Tempo
-- [grafana_dashboards/dashboard-providers.yml](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/grafana_dashboards/dashboard-providers.yml): Contains Grafana dashboard provider configuration
-- [grafana_dashboards/dynamo.json](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/grafana_dashboards/dynamo.json): A general Dynamo Dashboard for both SW and HW metrics
-- [grafana_dashboards/dcgm-metrics.json](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/grafana_dashboards/dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
-- [grafana_dashboards/kvbm.json](https://github.com/ai-dynamo/dynamo/tree/main/deploy/observability/grafana_dashboards/kvbm.json): Contains Grafana dashboard configuration for KVBM metrics
+The following configuration files are located in the `dev/observability/` directory:
+- [docker-compose.yml](../../dev/docker-compose.yml): Defines NATS and etcd services
+- [docker-observability.yml](../../dev/docker-observability.yml): Defines Prometheus, Grafana, Tempo, and exporters
+- [prometheus.yml](../../dev/observability/prometheus.yml): Contains Prometheus scraping configuration
+- [grafana-datasources.yml](../../dev/observability/grafana-datasources.yml): Contains Grafana datasource configuration
+- [otel-collector.yaml](../../dev/observability/otel-collector.yaml): OpenTelemetry Collector configuration (routes traces to Tempo, logs to Loki)
+- [loki.yaml](../../dev/observability/loki.yaml): Loki log aggregation configuration
+- [loki-datasource.yml](../../dev/observability/loki-datasource.yml): Grafana Loki datasource with trace ID linking to Tempo
+- [grafana_dashboards/dashboard-providers.yml](../../dev/observability/grafana_dashboards/dashboard-providers.yml): Contains Grafana dashboard provider configuration
+- [grafana_dashboards/dynamo.json](../../dev/observability/grafana_dashboards/dynamo.json): Engine-agnostic per-model dashboard covering frontend, KV-router, and worker metrics. Filterable by `model`. See the [per-model dashboard guide](prometheus-grafana.md#per-model-dynamo-dashboard) for details.
+- [grafana_dashboards/dcgm-metrics.json](../../dev/observability/grafana_dashboards/dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
+- [grafana_dashboards/kvbm.json](../../dev/observability/grafana_dashboards/kvbm.json): Contains Grafana dashboard configuration for KVBM metrics

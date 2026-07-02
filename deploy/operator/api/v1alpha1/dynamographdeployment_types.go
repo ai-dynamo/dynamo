@@ -55,6 +55,7 @@ const (
 )
 
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
+// +kubebuilder:validation:XValidation:rule="oldSelf.hasValue() || !has(self.restart)",message="spec.restart must be unset on create; set spec.restart.id after creation to request a restart",optionalOldSelf=true
 type DynamoGraphDeploymentSpec struct {
 	// Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
 	// Service-level annotations take precedence over these values.
@@ -64,6 +65,10 @@ type DynamoGraphDeploymentSpec struct {
 	// Service-level labels take precedence over these values.
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
+	// PriorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.
+	// Requires the Grove pathway.
+	// +optional
+	PriorityClassName string `json:"priorityClassName,omitempty"`
 	// PVCs defines a list of persistent volume claims that can be referenced by components.
 	// Each PVC must have a unique name that can be referenced in component specifications.
 	// +kubebuilder:validation:Optional
@@ -91,6 +96,21 @@ type DynamoGraphDeploymentSpec struct {
 	// Services without their own topologyConstraint inherit from this value.
 	// +optional
 	TopologyConstraint *SpecTopologyConstraint `json:"topologyConstraint,omitempty"`
+
+	// Experimental groups graph-level preview features whose API shape and
+	// behavior may change in breaking ways between releases.
+	// +optional
+	Experimental *DynamoGraphDeploymentExperimentalSpec `json:"experimental,omitempty"`
+}
+
+// DynamoGraphDeploymentExperimentalSpec groups graph-level opt-in preview
+// features. Component-level experimental features are represented separately
+// on component specs.
+type DynamoGraphDeploymentExperimentalSpec struct {
+	// KvTransferPolicy configures topology-aware routing for KV-cache
+	// transfers between prefill and decode workers.
+	// +optional
+	KvTransferPolicy *KvTransferPolicy `json:"kvTransferPolicy,omitempty"`
 }
 
 type Restart struct {
@@ -156,10 +176,15 @@ type ServiceCheckpointStatus struct {
 	// CheckpointName is the name of the associated Checkpoint CR
 	// +optional
 	CheckpointName string `json:"checkpointName,omitempty"`
+	// CheckpointID is the artifact ID used by the snapshot protocol
+	// +optional
+	CheckpointID string `json:"checkpointID,omitempty"`
 	// IdentityHash is the computed hash of the checkpoint identity
+	// Deprecated: automatic checkpoints use CheckpointID. This field is retained
+	// for older status consumers.
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
-	// Ready indicates if the checkpoint was visible to the worker at startup
+	// Ready indicates the checkpoint artifact is ready for future pods to restore.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 }

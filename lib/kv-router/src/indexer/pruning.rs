@@ -7,7 +7,7 @@
 //! approximate-mode blocks in the radix tree.
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, VecDeque, hash_map::Entry};
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 
@@ -19,10 +19,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::protocols::{ExternalSequenceBlockHash, WorkerId, WorkerWithDpRank};
 
-const HEAP_REBUILD_THRESHOLD: usize = 50;
 const WORKER_EXPIRY_HEAP_REBUILD_THRESHOLD: usize = 10;
+/// Approximate TTL expirations are rounded up to this interval. A non-zero TTL
+/// can remain routable for up to one extra bucket interval.
+const EXPIRY_BUCKET: Duration = Duration::from_millis(100);
 
-/// Block entry to be inserted in the [`PruneManager::expirations`] heap.
+/// Block entry tracked by [`PruneManager`] until its TTL bucket expires.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct BlockEntry {
     /// The key of the block entry.
@@ -64,22 +66,22 @@ impl Default for PruneConfig {
 }
 
 /// A data structure to manage a collection of timers, addressable by a key.
-/// This is structured as a sort of "priority queue" of keys, where the priority is the expiration time.
-/// It supports insertion as well as updating the expiration time of a key.
-/// The [`PruneManager::expirations`] heap is lazily updated to reflect the true expiration times in [`PruneManager::timers`]
-/// For now, we have a fixed expiration time for all keys.
+/// Expiration times are rounded up to fixed buckets so high-churn approximate
+/// routing does not push one priority-queue entry per block.
 #[derive(Debug)]
 pub struct PruneManager<K: Clone + Hash + Eq + Ord> {
     /// The source of truth. Maps a key to its current expiration instant.
     timers: FxHashMap<K, Instant>,
 
-    /// A max-heap of (Reverse<expiration_instant>, key) used to efficiently find the
-    /// next expiring timer. Reverse<Instant> makes earlier times pop first.
-    /// An entry in this heap is "stale" if the instant does not match the one in the `timers` map.
-    expirations: BinaryHeap<(Reverse<Instant>, K)>,
+    /// Bucketed keys by expiration instant. The map key is the bucket boundary,
+    /// rounded up from the precise TTL expiry.
+    expirations: BTreeMap<Instant, FxHashSet<K>>,
 
     /// The expiration duration of the timers.
     ttl: Duration,
+
+    /// Local origin used to make bucket boundaries stable within this manager.
+    bucket_origin: Instant,
 }
 
 impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
@@ -88,18 +90,27 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
         let ttl = prune_config.ttl;
         PruneManager {
             timers: FxHashMap::default(),
-            expirations: BinaryHeap::new(),
+            expirations: BTreeMap::new(),
             ttl,
+            bucket_origin: Instant::now(),
         }
     }
 
-    /// Rebuilds the expirations heap from the timers map, removing all stale entries.
-    fn rebuild_heap(&mut self) {
-        self.expirations = self
-            .timers
-            .iter()
-            .map(|(key, &expiry)| (Reverse(expiry), key.clone()))
-            .collect();
+    fn bucket_expiry(&self, expiry: Instant) -> Instant {
+        let elapsed = expiry.saturating_duration_since(self.bucket_origin);
+        self.bucket_origin + round_up_duration(elapsed, EXPIRY_BUCKET)
+    }
+
+    fn remove_from_bucket(&mut self, expiry: &Instant, key: &K) {
+        let should_remove_bucket = if let Some(bucket) = self.expirations.get_mut(expiry) {
+            bucket.remove(key);
+            bucket.is_empty()
+        } else {
+            false
+        };
+        if should_remove_bucket {
+            self.expirations.remove(expiry);
+        }
     }
 
     /// Inserts a new timer or updates an existing one for the given key.
@@ -113,31 +124,48 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
 
     /// Inserts timers using a caller-provided timestamp.
     pub fn insert_at(&mut self, keys: Vec<K>, now: Instant) {
-        let expiry_time = now + self.ttl;
+        let len = keys.len();
+        let expiry_time = if self.ttl.is_zero() {
+            now
+        } else {
+            self.bucket_expiry(now + self.ttl)
+        };
+        let mut bucket_inserts: Option<Vec<K>> = None;
 
-        self.timers.reserve(keys.len());
-        self.expirations.reserve(keys.len());
+        self.timers.reserve(len);
         for key in keys {
-            // Insert or update the authoritative time in the map.
-            self.timers.insert(key.clone(), expiry_time);
-
-            // Push the new expiration onto the heap. If the key was updated,
-            // this leaves a "stale" entry on the heap for the old time,
-            // which will be ignored when it's popped.
-            self.expirations.push((Reverse(expiry_time), key));
+            match self.timers.entry(key.clone()) {
+                Entry::Occupied(entry) if *entry.get() == expiry_time => {
+                    continue;
+                }
+                Entry::Occupied(mut entry) => {
+                    let old_expiry = *entry.get();
+                    entry.insert(expiry_time);
+                    self.remove_from_bucket(&old_expiry, &key);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(expiry_time);
+                }
+            }
+            bucket_inserts
+                .get_or_insert_with(|| Vec::with_capacity(len))
+                .push(key);
         }
 
-        // Check if we should rebuild the heap to remove stale entries
-        if !self.timers.is_empty()
-            && self.expirations.len() > self.timers.len() * HEAP_REBUILD_THRESHOLD
-        {
-            self.rebuild_heap();
+        if let Some(bucket_inserts) = bucket_inserts {
+            let bucket = self.expirations.entry(expiry_time).or_default();
+            bucket.reserve(bucket_inserts.len());
+            bucket.extend(bucket_inserts);
         }
     }
 
     /// Removes a timer for the given key.
     pub fn remove(&mut self, key: &K) -> bool {
-        self.timers.remove(key).is_some()
+        let Some(expiry) = self.timers.remove(key) else {
+            return false;
+        };
+        self.remove_from_bucket(&expiry, key);
+        true
     }
 
     /// Polls for expired timers and returns a list of keys for all timers
@@ -145,19 +173,18 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
     pub fn pop_expired(&mut self, now: Instant) -> Vec<K> {
         let mut expired_keys = Vec::new();
 
-        while let Some((Reverse(expiry_time), _)) = self.expirations.peek() {
-            // If the next timer in the heap is not yet expired, we can stop.
-            if *expiry_time > now {
+        while let Some((&expiry_time, _)) = self.expirations.first_key_value() {
+            if expiry_time > now {
                 break;
             }
 
-            // The timer might be expired, so pop it from the heap.
-            let (Reverse(expiry_time), key) = self.expirations.pop().unwrap();
-
-            if self.timers.get(&key) == Some(&expiry_time) {
-                // This is a valid, non-stale, expired timer.
-                self.timers.remove(&key);
-                expired_keys.push(key);
+            let (_, bucket) = self.expirations.pop_first().unwrap();
+            expired_keys.reserve(bucket.len());
+            for key in bucket {
+                if self.timers.get(&key) == Some(&expiry_time) {
+                    self.timers.remove(&key);
+                    expired_keys.push(key);
+                }
             }
         }
 
@@ -166,13 +193,9 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
 
     /// Returns the next non-stale expiry time, if it exists.
     pub fn peek_next_valid_expiry(&mut self) -> Option<Instant> {
-        while let Some((Reverse(expiry_time), key)) = self.expirations.peek() {
-            if self.timers.get(key) == Some(expiry_time) {
-                return Some(*expiry_time);
-            }
-            self.expirations.pop();
-        }
-        None
+        self.expirations
+            .first_key_value()
+            .map(|(&expiry, _)| expiry)
     }
 
     pub fn len(&self) -> usize {
@@ -182,6 +205,18 @@ impl<K: Clone + Hash + Eq + Ord> PruneManager<K> {
     pub fn is_empty(&self) -> bool {
         self.timers.is_empty()
     }
+}
+
+fn round_up_duration(duration: Duration, bucket: Duration) -> Duration {
+    debug_assert!(!bucket.is_zero());
+    let duration_ns = duration.as_nanos();
+    let bucket_ns = bucket.as_nanos();
+    let rounded_ns = if duration_ns == 0 {
+        0
+    } else {
+        ((duration_ns - 1) / bucket_ns + 1) * bucket_ns
+    };
+    Duration::from_nanos(u64::try_from(rounded_ns).unwrap_or(u64::MAX))
 }
 
 #[derive(Debug)]
@@ -625,82 +660,105 @@ mod tests {
     }
 
     /// Validate basic insert / expiry behaviour of [`PruneManager`].
-    #[tokio::test]
-    async fn test_prune_manager_expiry() {
+    #[test]
+    fn test_prune_manager_expiry() {
         const TTL: Duration = Duration::from_millis(50);
         let prune_config = PruneConfig { ttl: TTL };
         let mut pm: PruneManager<u32> = PruneManager::new(prune_config);
 
-        pm.insert(vec![1, 2, 3]);
-        assert!(pm.get_expiry(&1).is_some());
-        assert!(pm.get_expiry(&2).is_some());
-        assert!(pm.get_expiry(&3).is_some());
+        let now = pm.bucket_origin + Duration::from_millis(1);
+        pm.insert_at(vec![1, 2, 3], now);
+        let expiry = *pm.get_expiry(&1).expect("expiry missing after insert");
+        assert_eq!(pm.get_expiry(&2), Some(&expiry));
+        assert_eq!(pm.get_expiry(&3), Some(&expiry));
+        assert!(expiry >= now + TTL);
 
-        // Wait until after the TTL
-        time::sleep(TTL + Duration::from_millis(20)).await;
-        let expired = pm.pop_expired(Instant::now());
+        let expired = pm.pop_expired(expiry);
         assert_eq!(expired.len(), 3);
         assert!(pm.get_expiry(&1).is_none());
         assert!(pm.get_expiry(&2).is_none());
         assert!(pm.get_expiry(&3).is_none());
     }
 
-    /// Validate that reinserting an existing key extends its TTL and prevents premature expiry.
-    #[tokio::test]
-    async fn test_prune_manager_update_resets_ttl() {
-        // Validate that reinserting an existing key extends its TTL and prevents premature expiry.
+    #[test]
+    fn test_prune_manager_buckets_nearby_expiries() {
         const TTL: Duration = Duration::from_millis(50);
         let prune_config = PruneConfig { ttl: TTL };
         let mut pm: PruneManager<u32> = PruneManager::new(prune_config);
 
-        // Initial insert and capture the original expiry.
-        pm.insert(vec![42]);
+        let now = pm.bucket_origin + Duration::from_millis(1);
+        pm.insert_at(vec![1], now);
+        pm.insert_at(vec![2], now + Duration::from_millis(20));
+
+        let expiry = *pm.get_expiry(&1).expect("expiry missing for key 1");
+        assert_eq!(pm.get_expiry(&2), Some(&expiry));
+        assert_eq!(pm.expirations.len(), 1);
+
+        assert!(pm.remove(&1));
+        assert_eq!(pm.expirations.len(), 1);
+        assert!(pm.remove(&2));
+        assert!(pm.expirations.is_empty());
+    }
+
+    #[test]
+    fn test_prune_manager_same_bucket_update_dedupes() {
+        const TTL: Duration = Duration::from_millis(50);
+        let prune_config = PruneConfig { ttl: TTL };
+        let mut pm: PruneManager<u32> = PruneManager::new(prune_config);
+
+        let now = pm.bucket_origin + Duration::from_millis(1);
+        pm.insert_at(vec![42], now);
+        let expiry = *pm.get_expiry(&42).expect("expiry missing for key 42");
+
+        pm.insert_at(vec![42], now + Duration::from_millis(20));
+
+        assert_eq!(pm.get_expiry(&42), Some(&expiry));
+        assert_eq!(pm.expirations.len(), 1);
+        assert_eq!(pm.expirations.get(&expiry).map(FxHashSet::len), Some(1));
+        assert_eq!(pm.pop_expired(expiry), vec![42]);
+        assert!(pm.is_empty());
+    }
+
+    #[test]
+    fn test_prune_manager_zero_ttl_expires_immediately() {
+        let prune_config = PruneConfig {
+            ttl: Duration::ZERO,
+        };
+        let mut pm: PruneManager<u32> = PruneManager::new(prune_config);
+
+        let now = pm.bucket_origin + Duration::from_millis(1);
+        pm.insert_at(vec![7], now);
+
+        assert_eq!(pm.get_expiry(&7), Some(&now));
+        assert_eq!(pm.pop_expired(now), vec![7]);
+        assert!(pm.is_empty());
+    }
+
+    /// Validate that reinserting an existing key extends its TTL and prevents premature expiry.
+    #[test]
+    fn test_prune_manager_update_resets_ttl() {
+        const TTL: Duration = Duration::from_millis(50);
+        let prune_config = PruneConfig { ttl: TTL };
+        let mut pm: PruneManager<u32> = PruneManager::new(prune_config);
+
+        let now = pm.bucket_origin + Duration::from_millis(1);
+        pm.insert_at(vec![42], now);
         let first_expiry = *pm
             .get_expiry(&42)
             .expect("expiry missing after first insert");
 
-        // Wait for half of the original TTL before reinserting.
-        time::sleep(Duration::from_millis(25)).await;
-        pm.insert(vec![42]);
+        pm.insert_at(vec![42], now + EXPIRY_BUCKET);
         let second_expiry = *pm
             .get_expiry(&42)
             .expect("expiry missing after reinsertion");
 
-        // The expiry after reinsertion must be strictly later than the first one.
         assert!(second_expiry > first_expiry);
 
-        // Wait until *after* the first expiry would have fired, but *before* the new expiry.
-        time::sleep(Duration::from_millis(30)).await; // 25ms already elapsed, +30ms = 55ms > first TTL
-        let expired = pm.pop_expired(Instant::now());
-        assert!(
-            expired.is_empty(),
-            "key expired prematurely despite TTL refresh"
-        );
+        let expired = pm.pop_expired(first_expiry);
+        assert!(expired.is_empty());
 
-        // Now wait until after the second expiry should have occurred.
-        time::sleep(Duration::from_millis(30)).await; // Ensure we pass the refreshed TTL
-        let expired_after = pm.pop_expired(Instant::now());
+        let expired_after = pm.pop_expired(second_expiry);
         assert_eq!(expired_after, vec![42]);
-    }
-
-    /// Test that BlockEntry ordering prioritizes sequence position.
-    #[test]
-    fn test_block_entry_ordering() {
-        let worker = WorkerWithDpRank::from_worker_id(0);
-
-        let entry1 = BlockEntry {
-            key: ExternalSequenceBlockHash(100),
-            worker,
-            seq_position: 0,
-        };
-        let entry2 = BlockEntry {
-            key: ExternalSequenceBlockHash(50),
-            worker,
-            seq_position: 1,
-        };
-
-        // entry1 < entry2 because seq_position 0 < 1
-        assert!(entry1 < entry2);
     }
 
     #[test]

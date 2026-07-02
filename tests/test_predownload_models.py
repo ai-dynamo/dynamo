@@ -27,16 +27,29 @@ import pytest
                 pytest.mark.core,
                 pytest.mark.e2e,
                 pytest.mark.gpu_1,
+                pytest.mark.xpu_1,
                 pytest.mark.profiled_vram_gib(0),
             ],
         ),
         pytest.param(
             "predownload_models_sglang_gpu1",
-            marks=[pytest.mark.sglang, pytest.mark.e2e, pytest.mark.gpu_1],
+            marks=[
+                pytest.mark.sglang,
+                pytest.mark.core,
+                pytest.mark.e2e,
+                pytest.mark.gpu_1,
+                pytest.mark.profiled_vram_gib(0),
+            ],
         ),
         pytest.param(
             "predownload_models_trtllm_gpu1",
-            marks=[pytest.mark.trtllm, pytest.mark.e2e, pytest.mark.gpu_1],
+            marks=[
+                pytest.mark.trtllm,
+                pytest.mark.core,
+                pytest.mark.e2e,
+                pytest.mark.gpu_1,
+                pytest.mark.profiled_vram_gib(0),
+            ],
         ),
         pytest.param(
             "predownload_models_vllm_gpu2",
@@ -49,11 +62,21 @@ import pytest
         ),
         pytest.param(
             "predownload_models_sglang_gpu2",
-            marks=[pytest.mark.sglang, pytest.mark.e2e, pytest.mark.gpu_2],
+            marks=[
+                pytest.mark.sglang,
+                pytest.mark.core,
+                pytest.mark.e2e,
+                pytest.mark.gpu_2,
+            ],
         ),
         pytest.param(
             "predownload_models_trtllm_gpu2",
-            marks=[pytest.mark.trtllm, pytest.mark.e2e, pytest.mark.gpu_2],
+            marks=[
+                pytest.mark.trtllm,
+                pytest.mark.core,
+                pytest.mark.e2e,
+                pytest.mark.gpu_2,
+            ],
         ),
     ],
 )

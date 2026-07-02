@@ -110,7 +110,10 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
             engine_data: None,
+            routing_data: None,
         },
         BackendOutput {
             token_ids: vec![1917],
@@ -124,7 +127,10 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
             engine_data: None,
+            routing_data: None,
         },
         BackendOutput {
             token_ids: vec![0],
@@ -147,7 +153,10 @@ fn build_backend_outputs_with_cached_tokens(cached_tokens: Option<u32>) -> Vec<B
                 completion_tokens_details: None,
             }),
             disaggregated_params: None,
+            encoder_result: None,
+            worker_trace_link: None,
             engine_data: None,
+            routing_data: None,
         },
     ]
 }
@@ -193,6 +202,7 @@ fn create_chat_request(
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
@@ -216,6 +226,7 @@ async fn test_streaming_without_usage() {
         response_generator,
         ctx.clone(),
         false,
+        None,
     );
 
     // Collect all chunks
@@ -276,6 +287,7 @@ async fn test_streaming_with_usage_compliance() {
         response_generator,
         ctx.clone(),
         false,
+        None,
     );
 
     // Collect all chunks
@@ -350,6 +362,7 @@ async fn test_streaming_with_continuous_usage() {
         response_generator,
         ctx.clone(),
         false,
+        None,
     );
 
     // Collect all chunks
@@ -442,6 +455,7 @@ async fn test_streaming_with_usage_false() {
         response_generator,
         ctx.clone(),
         false,
+        None,
     );
 
     // Collect all chunks
@@ -529,6 +543,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
         unsupported_fields: Default::default(),
@@ -567,6 +582,7 @@ async fn test_nonstreaming_has_usage_field() {
         response_generator,
         ctx.clone(),
         false,
+        None,
     );
 
     // Aggregate the streaming chunks into a single non-streaming response
@@ -624,6 +640,7 @@ async fn test_cmpl_streaming_with_usage_true_no_backend_usage() {
         response_generator,
         ctx.clone(),
         false,
+        None,
     );
 
     let chunks: Vec<_> = transformed_stream.collect().await;
@@ -689,6 +706,7 @@ async fn test_cmpl_streaming_with_cached_tokens_propagation() {
         response_generator,
         ctx.clone(),
         false,
+        None,
     );
     let chunks: Vec<_> = transformed_stream.collect().await;
 
@@ -734,6 +752,7 @@ async fn test_chat_streaming_with_cached_tokens_propagation() {
         response_generator,
         ctx.clone(),
         false,
+        None,
     );
     let chunks: Vec<_> = transformed_stream.collect().await;
 
@@ -779,6 +798,7 @@ async fn test_cmpl_nonstreaming_has_usage_and_cached_tokens() {
         response_generator,
         ctx.clone(),
         false,
+        None,
     );
 
     // Aggregate into a single non-streaming response

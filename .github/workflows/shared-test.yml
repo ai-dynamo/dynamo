@@ -93,6 +93,16 @@ on:
         required: false
         type: string
         default: ''
+      dd_env:
+        description: 'Datadog env tag for test sessions (DD_ENV). Datadog Test Optimization settings (auto test retries, PR comments, etc.) are scoped per (service, env), so use a distinct value (e.g. "nightly", "post-merge") to configure those workflows independently of PR/pre-merge.'
+        required: false
+        type: string
+        default: 'ci'
+      dd_flaky_retry_enabled:
+        description: 'Datadog Auto Test Retries (DD_CIVISIBILITY_FLAKY_RETRY_ENABLED). Set "false" to disable client-side flaky-test reruns regardless of the Datadog UI setting.'
+        required: false
+        type: string
+        default: 'true'
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -106,6 +116,8 @@ on:
         required: true
       HF_TOKEN:
         required: false
+      DD_API_KEY:
+        required: true
 
 jobs:
   test:
@@ -117,7 +129,7 @@ jobs:
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ matrix.cuda_version != '' && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || startsWith(matrix.cuda_version, '13.') && '13' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -126,6 +138,9 @@ jobs:
         #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
+        # Datadog Test Optimization scoping (settings are per service+env).
+        DD_ENV: ${{ inputs.dd_env }}
+        DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
     permissions:
       contents: read
     services:
@@ -144,6 +159,14 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+      # Experimental: trialing Datadog Test Visibility. Remove if not kept.
+      - name: Configure Datadog Test Visibility
+        continue-on-error: true
+        uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
+        with:
+          languages: python
+          api_key: ${{ secrets.DD_API_KEY }}
+          site: us3.datadoghq.com
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash
@@ -152,7 +175,7 @@ jobs:
         working-directory: /workspace
         run: |
           set +e
-          python ./deploy/sanity_check.py --runtime-check --no-gpu-check
+          python ./dev/sanity_check.py --runtime-check --no-gpu-check
           SANITY_CHECK_EXIT_CODE=$?
           if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
             echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"

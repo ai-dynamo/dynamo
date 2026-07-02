@@ -25,13 +25,15 @@ use derive_builder::Builder;
 use futures::StreamExt;
 // io::Cursor, TryStreamExt
 use super::{AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, ResponseStream};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
-    AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO, SegmentSource,
-    ServiceBackend, ServiceEngine, SingleIn, Source, context,
+    AsyncTransportEngine, Context, Data, Error, ManyIn, ManyOut, PipelineError, PipelineIO,
+    SegmentSource, ServiceBackend, ServiceEngine, SingleIn, Source, context,
 };
 use crate::metrics::MetricsHierarchy;
+use crate::metrics::prometheus_names::work_handler;
+use crate::protocols::maybe_error::MaybeError;
 use ingress::push_handler::WorkHandlerMetrics;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
@@ -39,6 +41,7 @@ use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
 static TCP_MAX_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
+static REQUEST_PLANE_PAYLOAD_CODEC: OnceLock<RequestPlanePayloadCodec> = OnceLock::new();
 
 /// Read the configured TCP max message size once and share it across client,
 /// server, and zero-copy decoder code paths.
@@ -51,6 +54,62 @@ pub(crate) fn get_tcp_max_message_size() -> usize {
     })
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RequestPlanePayloadCodec {
+    // TODO(jthomson04): Migrate the default to Msgpack after the 1.3 release.
+    #[default]
+    Json,
+    Msgpack,
+}
+
+impl RequestPlanePayloadCodec {
+    pub(crate) fn configured() -> Self {
+        *REQUEST_PLANE_PAYLOAD_CODEC.get_or_init(Self::from_env)
+    }
+
+    fn from_env() -> Self {
+        match std::env::var(
+            crate::config::environment_names::request_plane::DYN_REQUEST_PLANE_CODEC,
+        )
+        .as_deref()
+        {
+            Err(_) | Ok("") | Ok("json") => Self::Json,
+            Ok("msgpack") => Self::Msgpack,
+            Ok(other) => {
+                tracing::warn!(
+                    env_var =
+                        crate::config::environment_names::request_plane::DYN_REQUEST_PLANE_CODEC,
+                    value = other,
+                    "invalid request plane payload codec, defaulting to json"
+                );
+                Self::Json
+            }
+        }
+    }
+
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Msgpack => "msgpack",
+        }
+    }
+
+    pub(crate) fn encode<T: Serialize>(&self, value: &T) -> Result<Vec<u8>> {
+        match self {
+            Self::Json => Ok(serde_json::to_vec(value)?),
+            Self::Msgpack => Ok(rmp_serde::to_vec_named(value)?),
+        }
+    }
+
+    pub(crate) fn decode<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T> {
+        match self {
+            Self::Json => Ok(serde_json::from_slice(bytes)?),
+            Self::Msgpack => Ok(rmp_serde::from_slice(bytes)?),
+        }
+    }
+}
+
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
 impl<T: PipelineIO + Serialize + for<'de> Deserialize<'de>> Codable for T {}
 
@@ -60,11 +119,47 @@ pub trait WorkQueueConsumer {
     async fn dequeue(&self) -> Result<Bytes, String>;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamType {
     Request,
     Response,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RequestType {
+    SingleIn,
+    ManyIn,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ResponseType {
+    SingleOut,
+    ManyOut,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RequestControlMessage {
+    pub(crate) id: String,
+    pub(crate) request_type: RequestType,
+    pub(crate) response_type: ResponseType,
+    #[serde(default)]
+    pub(crate) payload_codec: RequestPlanePayloadCodec,
+    pub(crate) connection_info: ConnectionInfo,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) metadata: std::collections::BTreeMap<String, String>,
+    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
+    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
+    /// Reliable for single-machine profiling; treat cross-host values as approximate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) frontend_send_ts_ns: Option<u64>,
+    /// For bidirectional dispatch (`request_type == ManyIn`): connection info the
+    /// worker dials back to in order to receive subsequent request frames. `None`
+    /// for the unary path, which is the wire-compatible default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) request_stream_connection_info: Option<ConnectionInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -321,6 +416,11 @@ pub struct ConnectionInfo {
     pub info: String,
 }
 
+/// Default number of frames buffered between the data-plane socket task and the
+/// engine consumer/producer for a single stream. Preserves the historically
+/// hard-coded mpsc channel capacity used by the TCP transport.
+pub const DEFAULT_SEND_BUFFER_COUNT: usize = 64;
+
 /// When registering a new TransportStream on the server, the caller specifies if the
 /// stream is a sender, receiver or both.
 ///
@@ -333,17 +433,19 @@ pub struct StreamOptions {
     pub context: Arc<dyn AsyncEngineContext>,
 
     /// Register with the server that this connection will have a server-side Sender
-    /// that can be picked up by the Request/Forward pipeline
-    ///
-    /// TODO - note, this option is currently not implemented and will cause a panic
+    /// that can be picked up by the Request/Forward pipeline. The downstream side
+    /// dials in via [`crate::pipeline::network::tcp::client::TcpClient::create_request_stream`]
+    /// to receive the frames the server pushes.
     pub enable_request_stream: bool,
 
     /// Register with the server that this connection will have a server-side Receiver
     /// that can be picked up by the Response/Reverse pipeline
     pub enable_response_stream: bool,
 
-    /// The number of messages to buffer before blocking
-    #[builder(default = "8")]
+    /// The number of frames buffered between the data-plane socket task and the
+    /// engine consumer/producer before backpressure kicks in. Drives the mpsc
+    /// channel capacity for the per-stream buffer in the TCP transport.
+    #[builder(default = "DEFAULT_SEND_BUFFER_COUNT")]
     pub send_buffer_count: usize,
 
     /// The number of messages to buffer before blocking
@@ -361,6 +463,118 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
     transport_engine: Arc<dyn AsyncTransportEngine<Req, Resp>>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEFAULT_SEND_BUFFER_COUNT, NetworkStreamWrapper, RequestControlMessage,
+        RequestPlanePayloadCodec, RequestType, ResponseType, StreamOptions,
+    };
+    use crate::engine::AsyncEngineContextProvider;
+    use crate::pipeline::Context;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    struct TestPayload {
+        id: u64,
+        text: String,
+        tokens: Vec<u32>,
+    }
+
+    #[test]
+    fn stream_options_send_buffer_count_defaults_to_64() {
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .build()
+            .expect("stream options should build");
+
+        assert_eq!(DEFAULT_SEND_BUFFER_COUNT, 64);
+        assert_eq!(options.send_buffer_count, DEFAULT_SEND_BUFFER_COUNT);
+    }
+
+    #[test]
+    fn stream_options_send_buffer_count_overrides_default() {
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(true)
+            .enable_response_stream(true)
+            .send_buffer_count(128)
+            .build()
+            .expect("stream options should build");
+
+        assert_eq!(options.send_buffer_count, 128);
+    }
+
+    #[test]
+    fn request_control_message_defaults_missing_metadata() {
+        let json = r#"{
+            "id": "request-123",
+            "request_type": "single_in",
+            "response_type": "many_out",
+            "connection_info": {
+                "transport": "tcp",
+                "info": "{}"
+            }
+        }"#;
+
+        let message: RequestControlMessage =
+            serde_json::from_str(json).expect("control message should deserialize");
+
+        assert_eq!(message.id, "request-123");
+        assert!(matches!(message.request_type, RequestType::SingleIn));
+        assert!(matches!(message.response_type, ResponseType::ManyOut));
+        assert_eq!(message.payload_codec, RequestPlanePayloadCodec::Json);
+        assert_eq!(message.connection_info.transport, "tcp");
+        assert_eq!(message.connection_info.info, "{}");
+        assert!(message.metadata.is_empty());
+        assert!(message.frontend_send_ts_ns.is_none());
+    }
+
+    #[test]
+    fn request_control_message_decodes_msgpack_payload_codec() {
+        let json = r#"{
+            "id": "request-123",
+            "request_type": "single_in",
+            "response_type": "many_out",
+            "payload_codec": "msgpack",
+            "connection_info": {
+                "transport": "tcp",
+                "info": "{}"
+            }
+        }"#;
+
+        let message: RequestControlMessage =
+            serde_json::from_str(json).expect("control message should deserialize");
+
+        assert_eq!(message.payload_codec, RequestPlanePayloadCodec::Msgpack);
+    }
+
+    #[test]
+    fn request_plane_payload_codec_round_trips_response_wrapper_json_and_msgpack() {
+        let wrapper = NetworkStreamWrapper {
+            data: Some(TestPayload {
+                id: 42,
+                text: "line\nquote\"slash\\unicode 中".to_string(),
+                tokens: vec![1, 2, 3, 65535],
+            }),
+            complete_final: false,
+        };
+
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let encoded = codec.encode(&wrapper).expect("wrapper should encode");
+            let decoded: NetworkStreamWrapper<TestPayload> =
+                codec.decode(&encoded).expect("wrapper should decode");
+            assert_eq!(decoded, wrapper);
+        }
+    }
+}
+
 #[async_trait]
 impl<T: Data, U: Data> AsyncEngine<SingleIn<T>, ManyOut<U>, Error>
     for Egress<SingleIn<T>, ManyOut<U>>
@@ -371,33 +585,6 @@ where
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
         self.transport_engine.generate(request).await
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RequestType {
-    SingleIn,
-    ManyIn,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ResponseType {
-    SingleOut,
-    ManyOut,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RequestControlMessage {
-    id: String,
-    request_type: RequestType,
-    response_type: ResponseType,
-    connection_info: ConnectionInfo,
-    /// Wall-clock send timestamp (nanos since UNIX epoch) for transport latency breakdown.
-    /// Uses `SystemTime` so accuracy depends on NTP sync between frontend and backend hosts.
-    /// Reliable for single-machine profiling; treat cross-host values as approximate.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    frontend_send_ts_ns: Option<u64>,
 }
 
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
@@ -547,7 +734,7 @@ pub trait PushWorkHandler: Send + Sync {
 /// can be due to network issues that only the egress component can detect.
 */
 /// TODO: Detect end-of-stream using Server-Sent Events (SSE). This will be removed.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct NetworkStreamWrapper<U> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<U>,

@@ -12,6 +12,7 @@ from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,
     params_with_model_mark,
+    run_prefill_drain_deployment,
     run_serve_deployment,
 )
 from tests.utils.constants import DefaultPort
@@ -22,7 +23,6 @@ from tests.utils.payload_builder import (
     chat_payload_default,
     completion_payload,
     completion_payload_default,
-    kv_events_metrics_payload,
     metric_payload_default,
     multimodal_payload_default,
     router_selection_chat_payload_default,
@@ -52,6 +52,7 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg_metrics.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,  # 1 GPU(s) used, peak 3.9 GiB
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
@@ -60,7 +61,7 @@ trtllm_configs = {
                 2592
             ),  # KV cache cap (2x safety over min=1296)
             pytest.mark.timeout(
-                300
+                650
             ),  # 3x measured time (44.66s) + download time (150s)
         ],
         model="Qwen/Qwen3-0.6B",
@@ -89,11 +90,12 @@ trtllm_configs = {
         script_name="agg.sh",
         script_args=["--unified"],
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.profiled_vram_gib(3.9),
             pytest.mark.requested_trtllm_kv_tokens(2592),
-            pytest.mark.timeout(300),
+            pytest.mark.timeout(600),  # 3x ~200s (trtllm gpu_1 log)
             pytest.mark.pre_merge,
             pytest.mark.unified,
         ],
@@ -109,7 +111,12 @@ trtllm_configs = {
         name="disaggregated",
         directory=trtllm_dir,
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_2,
+            pytest.mark.trtllm,
+            pytest.mark.pre_merge,
+        ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -122,6 +129,7 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="disagg_same_gpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.skip(
                 reason="Nightly CI failure: https://linear.app/nvidia/issue/OPS-4450"
             ),
@@ -154,6 +162,7 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,  # 1 GPU(s) used, peak 3.8 GiB
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
@@ -161,7 +170,7 @@ trtllm_configs = {
             pytest.mark.requested_trtllm_kv_tokens(
                 2592
             ),  # KV cache cap (2x safety over min=1296)
-            pytest.mark.timeout(300),  # 3x measured time (~44s) + download time (150s)
+            pytest.mark.timeout(440),  # 3x ~145s (trtllm gpu_1 log)
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -178,6 +187,7 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="disagg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
@@ -196,26 +206,63 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg_router.sh",
         marks=[
+            pytest.mark.router,
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
+            pytest.mark.profiled_vram_gib(3.9),
+            pytest.mark.requested_trtllm_kv_tokens(2592),
             pytest.mark.timeout(
-                300
+                360
             ),  # 3x measured time (37.91s) + download time (180s)
         ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            router_selection_chat_payload_default(),
-            kv_events_metrics_payload(),
+            router_selection_chat_payload_default(
+                expected_log=[
+                    r"Event processor for worker_id \d+ processing event: Stored\(",
+                    r"Selected worker .*worker_id=\d+ worker_type=\w+ dp_rank=\d+ logit=",
+                ]
+            ),
         ],
-        env={},
+        env={
+            "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_kv_router::scheduling::selector=info",
+            # Disable ANSI so structured tracing fields render as plain
+            # `key=value` (color codes otherwise split `worker_id`/`=`/value and
+            # break the expected_log regex).
+            "DYN_SDK_DISABLE_ANSI_LOGGING": "1",
+        },
+    ),
+    "aggregated_router_approx": TRTLLMConfig(
+        name="aggregated_router_approx",
+        directory=trtllm_dir,
+        script_name="agg_router_approx.sh",
+        marks=[
+            pytest.mark.router,
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.nightly,
+            pytest.mark.profiled_vram_gib(3.6),  # actual nvidia-smi peak
+            pytest.mark.requested_trtllm_kv_tokens(
+                2592
+            ),  # KV cache cap (2x safety over min=1296)
+            pytest.mark.timeout(300),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[chat_payload_default()],
     ),
     "disaggregated_router": TRTLLMConfig(
         name="disaggregated_router",
         directory=trtllm_dir,
         script_name="disagg_router.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.trtllm, pytest.mark.nightly],
+        marks=[
+            pytest.mark.router,
+            pytest.mark.gpu_2,
+            pytest.mark.trtllm,
+            pytest.mark.nightly,
+        ],
         model="Qwen/Qwen3-0.6B",
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -277,12 +324,8 @@ trtllm_configs = {
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.pre_merge,
-            # E/P/D inference bug: chat-completion reaches encode+prefill+decode
-            # workers but never progresses (0 output_tokens, cancelled after 180s,
-            # both -n 1 and -n auto). Re-enable + restore VRAM markers once fixed.
-            # Bisected cap (for re-enable): profiled_vram_gib(22.9),
-            # requested_trtllm_kv_tokens(4224).
-            pytest.mark.skip(reason="E/P/D inference bug: chat-completion stalls"),
+            pytest.mark.profiled_vram_gib(15.0),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -300,8 +343,33 @@ trtllm_configs = {
             "ENCODE_CUDA_VISIBLE_DEVICES": "0",
         },
     ),
-    # Test Encoder with Aggregated PD worker on same GPU
-    # Make this pre-merge after TRTLLM #5938603 is fixed
+    "pd_multimodal": TRTLLMConfig(
+        name="pd_multimodal",
+        directory=trtllm_dir,
+        script_name="disagg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.pre_merge,
+            pytest.mark.profiled_vram_gib(15.0),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=120,
+        request_payloads=[
+            multimodal_payload_default(
+                text="Describe what you see in this image.",
+                expected_response=["mountain", "rock", "trees", "road"],
+            )
+        ],
+        env={
+            "PREFILL_CUDA_VISIBLE_DEVICES": "0",
+            "DECODE_CUDA_VISIBLE_DEVICES": "0",
+        },
+    ),
     "e_pd_multimodal": TRTLLMConfig(
         name="e_pd_multimodal",
         directory=trtllm_dir,
@@ -310,7 +378,9 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
-            pytest.mark.nightly,
+            pytest.mark.pre_merge,
+            pytest.mark.profiled_vram_gib(15.0),
+            pytest.mark.requested_trtllm_kv_tokens(1056),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
@@ -358,10 +428,17 @@ trtllm_configs = {
         # Embeddings generation + worker startup takes longer than normal
         delayed_start=180,
         request_payloads=[
-            multimodal_payload_default(
-                image_url="file:///tmp/llava_embeddings.safetensors",
-                text="Describe what this image shows.",
-                expected_response=["bench", "person", "image", "picture"],
+            chat_payload(
+                content=[
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "file:///tmp/llava_embeddings.safetensors"
+                        },
+                    },
+                    {"type": "text", "text": "Describe what this image shows."},
+                ],
+                expected_response=["mountain", "road", "trees", "vegetation"],
             )
         ],
         env={
@@ -389,6 +466,7 @@ trtllm_configs = {
             "17",
         ],
         marks=[
+            pytest.mark.multimodal,
             pytest.mark.gpu_1,  # 1 GPU(s) used, peak 17.1 GiB
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
@@ -448,6 +526,7 @@ trtllm_configs = {
             "1",
         ],
         marks=[
+            pytest.mark.multimodal,
             pytest.mark.gpu_1,  # 1 GPU(s) used, peak 20.0 GiB
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
@@ -498,7 +577,17 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
-            pytest.mark.pre_merge,
+            # TODO: --frontend-decoding triggers OpenAIPreprocessor.new_with_parts
+            # which constructs a real NixlAgent in the frontend. ai-dynamo-runtime
+            # is built in runtime_wheel_builder before NIXL is installed, so
+            # nixl-sys links against stubs and NixlAgent::new() returns "NIXL is
+            # not supported in stub mode" at runtime. Moving the maturin build
+            # to wheel_builder fixes nixl-sys but then dynamo._core.abi3.so has
+            # NEEDED libnixl.so, which breaks import on every runtime image
+            # without libnixl on the system load path (sglang, planner, vllm).
+            # Either patch every runtime to expose libnixl, or add a runtime
+            # fallback to nixl-sys's stub check.
+            pytest.mark.nightly,
             pytest.mark.timeout(900),
             # Bisected with tests/utils/profile_pytest.py: minimum = 528 tokens,
             # 2x safety = 1056. Peak 8.1 GiB at 1056 tokens. Override threads
@@ -526,19 +615,22 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.post_merge,
             pytest.mark.skip(reason="DIS-1566"),
             pytest.mark.timeout(
-                480
-            ),  # 3x measured time (83.85s) + download time (210s) for 7B model
+                300
+            ),  # 1.1B loads quickly; margin covers CI model download
         ],
-        model="deepseek-ai/deepseek-llm-7b-base",
+        # Base model with NO chat template (the point of completions_only),
+        # matching the vllm/sglang configs. Replaces deepseek-llm-7b-base (7B).
+        model="TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
         script_args=["--dyn-endpoint-types", "completions"],
         env={
-            "MODEL_PATH": "deepseek-ai/deepseek-llm-7b-base",
-            "SERVED_MODEL_NAME": "deepseek-ai/deepseek-llm-7b-base",
+            "MODEL_PATH": "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+            "SERVED_MODEL_NAME": "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
         },
         request_payloads=[
             completion_payload_default(),
@@ -587,11 +679,77 @@ def test_deployment(
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
+# ---------------------------------------------------------------------------
+# Prefill drain on graceful shutdown, unified entry point. A concurrent burst
+# keeps the prefill worker busy; it's then SIGTERMed mid-flight, and the test
+# asserts the Rust Worker drove a graceful shutdown (drain -> cleanup). TRT-LLM's
+# llm.shutdown() aborts the MPI job if it races pending KV transfers, so the
+# burst is sized small (see the call site) for the drain budget to clear them.
+# ---------------------------------------------------------------------------
+_PREFILL_DRAIN_CONFIG = TRTLLMConfig(
+    name="prefill_drain_unified",
+    directory=trtllm_dir,
+    script_name="disagg_same_gpu.sh",
+    script_args=["--unified"],
+    marks=[],  # applied on the test function below
+    model="Qwen/Qwen3-0.6B",
+    delayed_start=10,
+    health_check_workers=True,
+    env={
+        "MODEL_PATH": "Qwen/Qwen3-0.6B",
+        "SERVED_MODEL_NAME": "Qwen/Qwen3-0.6B",
+        "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "0",
+        "DYN_PREFILL_DRAIN_TIMEOUT_S": "30",
+        "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "60",
+        "DYN_SYSTEM_STARTING_HEALTH_STATUS": "ready",
+    },
+    request_payloads=[chat_payload_default()],
+)
+
+
+@pytest.mark.trtllm
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.profiled_vram_gib(6.6)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
+@pytest.mark.timeout(432)
+@pytest.mark.post_merge
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+def test_prefill_drain_unified(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    num_system_ports,
+    predownload_models,
+):
+    """Burst + mid-flight prefill SIGTERM; assert the Rust Worker drove
+    graceful shutdown (drain -> cleanup) to completion without the engine
+    teardown aborting."""
+    config = dataclasses.replace(
+        _PREFILL_DRAIN_CONFIG, frontend_port=dynamo_dynamic_ports.frontend_port
+    )
+    # Keep the burst small with short decode: TRT-LLM has no quiescence signal
+    # so it waits the full drain budget, and a small burst lets decode clear the
+    # KV before cleanup — otherwise llm.shutdown() racing pending transfers can
+    # abort the MPI job. Still large enough (vs the in-flight gate) to engage.
+    run_prefill_drain_deployment(
+        config,
+        request,
+        ports=dynamo_dynamic_ports,
+        burst_size=12,
+        burst_max_tokens=16,
+    )
+
+
 # TODO make this a normal guy
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
+@pytest.mark.core
 @pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(3.9)
+@pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(660)  # 3x measured time (159.68s) + download time (180s)
 def test_chat_only_aggregated_with_test_logits_processor(
     request,
@@ -606,7 +764,7 @@ def test_chat_only_aggregated_with_test_logits_processor(
     """
 
     # Enable HelloWorld logits processor only for this test
-    monkeypatch.setenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR", "1")
+    monkeypatch.setenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR", "1")
 
     base = trtllm_configs["aggregated"]
     config = TRTLLMConfig(
@@ -637,6 +795,7 @@ def test_chat_only_aggregated_with_test_logits_processor(
 @pytest.mark.e2e
 @pytest.mark.gpu_1
 @pytest.mark.trtllm
+@pytest.mark.core
 @pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(3.9)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
