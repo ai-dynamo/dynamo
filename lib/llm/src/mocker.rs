@@ -663,6 +663,20 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             if is_prefill
                                 && let Some(delay_ms) = signal.handoff_delay_ms
                             {
+                                if let Some(threshold_ms) =
+                                    dynamo_mocker::common::utils::mock_kv_wait_timeout_ms()
+                                {
+                                    if delay_ms as u64 >= threshold_ms {
+                                        tracing::warn!(
+                                            target: "dynamo_stall_op",
+                                            op = "mock_kv_timeout",
+                                            uuid = %signal.uuid,
+                                            wait_ms = delay_ms as u64,
+                                            worker_type = "Prefill",
+                                            "mock KV transfer timeout: handoff delay exceeded budget"
+                                        );
+                                    }
+                                }
                                 sleep_precise(Duration::from_secs_f64(delay_ms / 1000.0)).await;
                             }
 
