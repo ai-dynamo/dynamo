@@ -85,22 +85,28 @@ impl Decoder for ImageDecoder {
 
     fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
         let bytes = data.into_bytes()?;
+        self.warn_if_unavailable_backend();
 
         if self.backend == ImageDecoderBackend::LibjpegTurbo
             && jpeg_turbo::is_jpeg(&bytes)
-            && let Some(jpeg) = jpeg_turbo::decode_jpeg_rgb(
+            && let Some(jpeg) = jpeg_turbo::decode_jpeg(
                 &bytes,
                 self.limits.max_image_width,
                 self.limits.max_image_height,
                 self.limits.max_alloc,
             )?
         {
-            let shape = (jpeg.height as usize, jpeg.width as usize, 3_usize);
+            let color_type = match jpeg.channels {
+                1 => ColorType::L8,
+                3 => ColorType::Rgb8,
+                other => anyhow::bail!("Unsupported TurboJPEG channel count {other}"),
+            };
+            let shape = (jpeg.height as usize, jpeg.width as usize, jpeg.channels);
             let array = Array3::from_shape_vec(shape, jpeg.data)?;
             let mut decoded: DecodedMediaData = array.try_into()?;
             decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
                 format: Some(ImageFormat::Jpeg),
-                color_type: ColorType::Rgb8,
+                color_type,
                 layout: ImageLayout::HWC,
             }));
             return Ok(decoded);
@@ -449,11 +455,12 @@ mod tests {
 
         let (jpeg_bytes, expected_rgb, width, height) = pil_parity_fixture();
 
-        let decoded = jpeg_turbo::decode_jpeg_rgb(&jpeg_bytes, None, None, Some(DEFAULT_MAX_ALLOC))
+        let decoded = jpeg_turbo::decode_jpeg(&jpeg_bytes, None, None, Some(DEFAULT_MAX_ALLOC))
             .unwrap()
             .expect("libjpeg-turbo should decode the generated JPEG");
 
         assert_eq!((decoded.width, decoded.height), (width, height));
+        assert_eq!(decoded.channels, 3);
         assert_eq!(decoded.data, expected_rgb);
 
         let decoder = ImageDecoder {
@@ -471,6 +478,35 @@ mod tests {
             Some(DecodedMediaMetadata::Image(metadata)) => {
                 assert_eq!(metadata.format, Some(ImageFormat::Jpeg));
                 assert_eq!(metadata.color_type, ColorType::Rgb8);
+            }
+            other => panic!("expected image metadata, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_libjpeg_turbo_gray_jpeg_shape() {
+        let require = std::env::var_os("DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST").is_some();
+        if !jpeg_turbo::available() {
+            if require {
+                panic!("DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST is set but libturbojpeg is unavailable");
+            }
+            eprintln!("skipping grayscale JPEG test: libturbojpeg not available");
+            return;
+        }
+
+        let decoder = ImageDecoder {
+            backend: ImageDecoderBackend::LibjpegTurbo,
+            ..Default::default()
+        };
+        let image_bytes = create_test_image(8, 9, 1, ImageFormat::Jpeg);
+        let decoded = decoder
+            .decode(create_encoded_media_data(image_bytes))
+            .unwrap();
+        assert_eq!(decoded.tensor_info.shape, vec![9, 8, 1]);
+        match decoded.tensor_info.metadata {
+            Some(DecodedMediaMetadata::Image(metadata)) => {
+                assert_eq!(metadata.format, Some(ImageFormat::Jpeg));
+                assert_eq!(metadata.color_type, ColorType::L8);
             }
             other => panic!("expected image metadata, got {other:?}"),
         }

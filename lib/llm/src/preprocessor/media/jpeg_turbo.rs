@@ -19,7 +19,9 @@ use anyhow::{Result, bail};
 use libloading::{Library, Symbol};
 
 type TjHandle = *mut c_void;
+const TJCS_GRAY: c_int = 2;
 const TJPF_RGB: c_int = 0;
+const TJPF_GRAY: c_int = 6;
 
 type TjInitDecompress = unsafe extern "C" fn() -> TjHandle;
 type TjDecompressHeader3 = unsafe extern "C" fn(
@@ -58,9 +60,10 @@ unsafe impl Send for TurboJpeg {}
 unsafe impl Sync for TurboJpeg {}
 
 #[derive(Debug)]
-pub(crate) struct DecodedJpegRgb {
+pub(crate) struct DecodedJpeg {
     pub(crate) width: u32,
     pub(crate) height: u32,
+    pub(crate) channels: usize,
     pub(crate) data: Vec<u8>,
 }
 
@@ -110,18 +113,18 @@ pub(crate) fn is_jpeg(bytes: &[u8]) -> bool {
     bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF
 }
 
-/// Decode JPEG bytes to HWC RGB8 using libjpeg-turbo defaults.
+/// Decode JPEG bytes to HWC UINT8 using libjpeg-turbo defaults.
 ///
 /// Returns `Ok(None)` for non-JPEG inputs, missing libturbojpeg, or decoder
 /// failures that the caller should pass to the standard `image` fallback.
 /// Configured resource limits return `Err` because falling back should not
 /// bypass them.
-pub(crate) fn decode_jpeg_rgb(
+pub(crate) fn decode_jpeg(
     bytes: &[u8],
     max_width: Option<u32>,
     max_height: Option<u32>,
     max_alloc: Option<u64>,
-) -> Result<Option<DecodedJpegRgb>> {
+) -> Result<Option<DecodedJpeg>> {
     if !is_jpeg(bytes) {
         return Ok(None);
     }
@@ -132,9 +135,9 @@ pub(crate) fn decode_jpeg_rgb(
     // SAFETY:
     // - The handle is null-checked and destroyed on every exit path below.
     // - `bytes` is a valid immutable input buffer for the duration of each C call.
-    // - `buf` is allocated to exactly width * height * 3 after checked
-    //   arithmetic and configured allocation limits; `TJPF_RGB` with pitch 0
-    //   writes that layout.
+    // - `buf` is allocated to exactly width * height * channels after checked
+    //   arithmetic and configured allocation limits; the selected TurboJPEG
+    //   pixel format with pitch 0 writes that layout.
     unsafe {
         let handle = (tj.init)();
         if handle.is_null() {
@@ -164,9 +167,14 @@ pub(crate) fn decode_jpeg_rgb(
             bail!("Image dimensions exceed configured limits: {width}x{height}");
         }
 
+        let (pixel_format, channels) = if colorspace == TJCS_GRAY {
+            (TJPF_GRAY, 1_usize)
+        } else {
+            (TJPF_RGB, 3_usize)
+        };
         let nbytes = match u64::from(width)
             .checked_mul(u64::from(height))
-            .and_then(|p| p.checked_mul(3))
+            .and_then(|p| p.checked_mul(channels as u64))
         {
             Some(n) => n,
             None => {
@@ -181,7 +189,19 @@ pub(crate) fn decode_jpeg_rgb(
             bail!("Image allocation {nbytes} bytes exceeds configured limit {limit} bytes");
         }
 
-        let mut buf = vec![0_u8; nbytes as usize];
+        let nbytes = match usize::try_from(nbytes) {
+            Ok(n) => n,
+            Err(_) => {
+                (tj.destroy)(handle);
+                bail!("Image allocation size does not fit in usize: {nbytes} bytes");
+            }
+        };
+        let mut buf = Vec::new();
+        if let Err(err) = buf.try_reserve_exact(nbytes) {
+            (tj.destroy)(handle);
+            bail!("Image allocation {nbytes} bytes could not be reserved: {err:?}");
+        }
+        buf.resize(nbytes, 0);
         let rc = (tj.decompress)(
             handle,
             bytes.as_ptr(),
@@ -190,7 +210,7 @@ pub(crate) fn decode_jpeg_rgb(
             w,
             0,
             h,
-            TJPF_RGB,
+            pixel_format,
             0,
         );
         (tj.destroy)(handle);
@@ -198,9 +218,10 @@ pub(crate) fn decode_jpeg_rgb(
             return Ok(None);
         }
 
-        Ok(Some(DecodedJpegRgb {
+        Ok(Some(DecodedJpeg {
             width,
             height,
+            channels,
             data: buf,
         }))
     }

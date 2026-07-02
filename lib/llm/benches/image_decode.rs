@@ -1,30 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(unsafe_code)]
-
-use std::io::Cursor;
+use std::{hint::black_box, io::Cursor};
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
-use dynamo_llm::preprocessor::media::{Decoder, EncodedMediaData, ImageDecoder};
+use dynamo_llm::preprocessor::media::{
+    Decoder, EncodedMediaData, ImageDecoder, libjpeg_turbo_available,
+};
 use image::{ImageBuffer, Rgb, codecs::jpeg::JpegEncoder};
-use libloading::Library;
-
-fn has_libturbojpeg() -> bool {
-    const CANDIDATES: &[&str] = &[
-        "libturbojpeg.so.0",
-        "libturbojpeg.so",
-        "libturbojpeg.0.dylib",
-        "libturbojpeg.dylib",
-    ];
-
-    CANDIDATES
-        .iter()
-        .any(|name| unsafe { Library::new(name) }.is_ok())
-}
 
 fn bench_jpeg_decode(c: &mut Criterion) {
-    if !has_libturbojpeg() {
+    if !libjpeg_turbo_available() {
         eprintln!("skipping image_decode benchmark: libturbojpeg is not available");
         return;
     }
@@ -44,7 +30,7 @@ fn bench_jpeg_decode(c: &mut Criterion) {
         group.bench_function(name, |b| {
             b.iter_batched(
                 || EncodedMediaData::from_bytes(jpeg.clone()),
-                |data| criterion::black_box(decoder.decode(data).unwrap()),
+                |data| black_box(decoder.decode(data).unwrap()),
                 BatchSize::SmallInput,
             )
         });

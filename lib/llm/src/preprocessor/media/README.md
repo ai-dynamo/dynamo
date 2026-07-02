@@ -59,7 +59,7 @@ register_model(
 
 ### Backend
 - **backend** (`"image_reader"` or `"libjpeg_turbo"`): Selects the image decoder implementation. The default is `"image_reader"`, which preserves the original Rust `image::ImageReader` path.
-- **libjpeg_turbo**: JPEG inputs are decoded through libjpeg-turbo's TurboJPEG API when `libturbojpeg.so.0` is available at runtime. Dynamo runtime images include `libturbojpeg`; custom images must provide the shared library. The implementation loads the shared library dynamically and falls back to `image::ImageReader` for non-JPEG inputs or when TurboJPEG cannot decode the image.
+- **libjpeg_turbo**: JPEG inputs are decoded through libjpeg-turbo's TurboJPEG API when `libturbojpeg.so.0` is available at runtime. Dynamo runtime images include `libturbojpeg`; custom images must provide the shared library or Dynamo logs a one-time warning and falls back to `image::ImageReader`. The implementation loads the shared library dynamically and falls back to `image::ImageReader` for non-JPEG inputs or when TurboJPEG cannot decode the image.
 
 ### Limits (not overridable at runtime via `media_io_kwargs`)
 - **limits.max_image_width** (uint32, > 0): If the image width exceeds this value, abort the decoding.
