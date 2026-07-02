@@ -32,7 +32,7 @@ For more background on the snapshot architecture and startup improvements, see
 - Checkpoint storage. `ReadWriteMany` is the safest default for cross-node or
   concurrent multi-node access, but `podMount` mode can also use suitable
   `ReadWriteOnce` storage for sequential checkpoint/restore workflows.
-- **CRI-O / OpenShift:** set `runtime.type=crio` on the snapshot chart (and `openshift.enabled=true` on OpenShift). Defaults are for containerd; see the chart README for sockets and Helm flags.
+- **CRI-O / OpenShift:** set `runtime.type=crio` on the snapshot chart (and `openshift.enabled=true` on OpenShift). Defaults are for containerd; see the chart README for socket and storage path overrides.
 
 ## Quick Start via `DynamoCheckpoint` CR
 
@@ -121,7 +121,7 @@ a default storage class, also set `storage.pvc.storageClass`.
 
 If you are reusing an existing checkpoint PVC, do not set `storage.pvc.create=true`; install the chart with `storage.pvc.create=false` and set `storage.pvc.name` instead.
 
-CRI-O or OpenShift: append for example `--set runtime.type=crio` and, on OpenShift, `--set openshift.enabled=true` (see `deploy/helm/charts/snapshot/README.md`).
+CRI-O or OpenShift: append for example `--set runtime.type=crio` and, on OpenShift, `--set openshift.enabled=true` (see `deploy/helm/charts/snapshot/README.md`). If the CRI socket or storage root is not in the default location, also set `runtime.socketPath` or `runtime.storagePath`.
 
 For clusters that prefer one privileged snapshot agent instead of one DaemonSet
 per workload namespace, install the chart once in an infrastructure namespace.
