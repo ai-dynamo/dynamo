@@ -56,7 +56,7 @@ type dgdRequestValidator struct {
 	celValidator    apitest.CELValidateFunc
 }
 
-func TestDynamoGraphDeploymentAdmissionCompatibility(t *testing.T) {
+func TestDynamoGraphDeploymentAdmissionChain(t *testing.T) {
 	requestValidators := dgdAdmissionRequestValidators(t)
 
 	tests := []struct {
