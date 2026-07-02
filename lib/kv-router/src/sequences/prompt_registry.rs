@@ -28,6 +28,11 @@ use crate::protocols::WorkerWithDpRank;
 pub struct WorkerLoadProjection {
     pub active_prefill_tokens: usize,
     pub active_decode_blocks: usize,
+    /// Estimated decode work that has not been generated yet, in KV blocks.
+    ///
+    /// This is booked at admission from `expected_output_tokens`, so short
+    /// prompts cannot appear idle until their first streamed output arrives.
+    pub reserved_decode_blocks: usize,
     /// Request blocks not already shared with active sequences on this worker.
     ///
     /// These blocks may still exist in an inactive cache; this field describes
@@ -37,7 +42,7 @@ pub struct WorkerLoadProjection {
 
 impl WorkerLoadProjection {
     pub fn potential_decode_blocks(self) -> usize {
-        self.active_decode_blocks + self.additional_active_blocks
+        (self.active_decode_blocks + self.additional_active_blocks).max(self.reserved_decode_blocks)
     }
 }
 
@@ -50,6 +55,7 @@ impl WorkerLoadProjection {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct WorkerLoadSnapshot {
     pub(super) active_blocks: usize,
+    pub(super) reserved_decode_blocks: usize,
     pub(super) prefill: PrefillLoadSnapshot,
 }
 
@@ -207,6 +213,7 @@ impl PromptRegistry {
                 WorkerLoadProjection {
                     active_prefill_tokens: load.active_tokens(decay_now),
                     active_decode_blocks: load.active_blocks,
+                    reserved_decode_blocks: load.reserved_decode_blocks,
                     additional_active_blocks: query_len.saturating_sub(overlap_depth),
                 },
             );
@@ -334,6 +341,7 @@ mod tests {
     fn worker_load_snapshot(active_blocks: usize) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks,
+            reserved_decode_blocks: 0,
             prefill: PrefillLoadSnapshot::default(),
         }
     }
@@ -347,6 +355,7 @@ mod tests {
     ) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks,
+            reserved_decode_blocks: 0,
             prefill: PrefillLoadSnapshot {
                 prefill_full_tokens_sum,
                 anchored_prefill: Some(AnchoredPrefillSnapshot {

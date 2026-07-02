@@ -765,6 +765,7 @@ impl OpenAIPreprocessor {
 
         // apply ignore eos if not already set
         stop_conditions.apply_ignore_eos();
+        let requested_output_tokens = stop_conditions.max_tokens;
 
         if !stop_conditions.ignore_eos.unwrap_or(false) {
             builder.eos_token_ids(eos_token_ids);
@@ -825,7 +826,7 @@ impl OpenAIPreprocessor {
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: nvext.dp_rank,
                 prefill_dp_rank: nvext.prefill_dp_rank,
-                expected_output_tokens: hints.and_then(|h| h.osl),
+                expected_output_tokens: hints.and_then(|h| h.osl).or(requested_output_tokens),
                 priority_jump: hints.and_then(|h| {
                     h.priority
                         .map(|priority| priority.max(0) as f64)

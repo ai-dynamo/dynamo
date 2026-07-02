@@ -210,6 +210,7 @@ impl RequestObservability {
 }
 
 struct OutputBlockUpdate {
+    new_blocks: usize,
     decay_fraction: Option<f64>,
 }
 
@@ -249,11 +250,15 @@ impl OutputBlockTracker {
         }
 
         // Advance before returning so a failed scheduler update preserves existing no-retry behavior.
+        let new_blocks = new_total_blocks - self.current_total_blocks;
         self.current_total_blocks = new_total_blocks;
         let decay_fraction = self
             .expected_output_tokens
             .map(|expected| (1.0 - cumulative_osl as f64 / expected.max(1) as f64).max(0.0));
-        Some(OutputBlockUpdate { decay_fraction })
+        Some(OutputBlockUpdate {
+            new_blocks,
+            decay_fraction,
+        })
     }
 }
 
@@ -353,16 +358,19 @@ impl RequestGuard {
             return;
         };
 
-        if let Err(error) = self
-            .cleanup
-            .chooser
-            .add_output_block(&self.cleanup.context_id, update.decay_fraction)
-        {
-            tracing::warn!(
-                request_id = %self.cleanup.context_id,
-                %error,
-                "Failed to add output block"
-            );
+        for _ in 0..update.new_blocks {
+            if let Err(error) = self
+                .cleanup
+                .chooser
+                .add_output_block(&self.cleanup.context_id, update.decay_fraction)
+            {
+                tracing::warn!(
+                    request_id = %self.cleanup.context_id,
+                    %error,
+                    "Failed to add output block"
+                );
+                break;
+            }
         }
 
         self.observability.observe_output_block_boundary();
@@ -379,5 +387,27 @@ impl Drop for RequestGuard {
     fn drop(&mut self) {
         // RequestCleanup drops immediately afterward and performs resource cleanup.
         self.observability.record_metrics();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_tracker_reports_every_crossed_block_boundary() {
+        let mut tracker = OutputBlockTracker::new(true, 1, 16, Some(1024));
+
+        let first = tracker
+            .observe(50)
+            .expect("50 output tokens cross boundaries");
+        assert_eq!(first.new_blocks, 3);
+        assert_eq!(first.decay_fraction, Some(1.0 - 50.0 / 1024.0));
+        assert!(tracker.observe(60).is_none());
+
+        let second = tracker
+            .observe(80)
+            .expect("80 output tokens cross more boundaries");
+        assert_eq!(second.new_blocks, 2);
     }
 }

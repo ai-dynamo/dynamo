@@ -107,6 +107,7 @@ pub struct ActiveSequences {
     requests: HashMap<RequestId, RequestState>,
     prefill: PrefillLoadTracker,
     blocks: BlockTracker,
+    block_size: usize,
     last_expiry_check_time: Instant,
 }
 
@@ -119,6 +120,7 @@ impl ActiveSequences {
             requests: HashMap::new(),
             prefill: PrefillLoadTracker::default(),
             blocks: BlockTracker::default(),
+            block_size,
             last_expiry_check_time: Instant::now(),
         }
     }
@@ -149,6 +151,23 @@ impl ActiveSequences {
 
     pub(super) fn active_blocks(&self) -> usize {
         self.blocks.active_blocks()
+    }
+
+    /// Decode work still expected for tracked requests, normalized to KV blocks.
+    ///
+    /// Output blocks are subtracted as they cross block boundaries. Requests
+    /// without an output-length hint retain the legacy materialized-block load.
+    pub(super) fn reserved_decode_blocks(&self) -> usize {
+        self.requests
+            .values()
+            .filter_map(|request| {
+                request.expected_output_tokens.map(|expected| {
+                    (expected as usize)
+                        .div_ceil(self.block_size)
+                        .saturating_sub(request.output_blocks.len())
+                })
+            })
+            .sum()
     }
 
     #[cfg(test)]
@@ -375,6 +394,7 @@ impl ActiveSequences {
     pub(super) fn worker_load_snapshot(&self) -> WorkerLoadSnapshot {
         WorkerLoadSnapshot {
             active_blocks: self.active_blocks(),
+            reserved_decode_blocks: self.reserved_decode_blocks(),
             prefill: self.prefill.snapshot(),
         }
     }
@@ -410,6 +430,42 @@ mod tests {
             initial_effective_prefill_tokens: tokens,
             expected_prefill_duration: None,
         })
+    }
+
+    #[test]
+    fn expected_output_reserves_decode_work_before_first_token() {
+        let mut sequences = ActiveSequences::new(16);
+        let now = Instant::now();
+
+        sequences.add_request_with_prefill_tracking(
+            "reserved".to_string(),
+            Some(Vec::new()),
+            Some(1024),
+            false,
+            None,
+            now,
+        );
+        assert_eq!(sequences.active_blocks(), 0);
+        assert_eq!(sequences.reserved_decode_blocks(), 64);
+        assert_eq!(sequences.worker_load_snapshot().reserved_decode_blocks, 64);
+        assert_eq!(
+            crate::sequences::WorkerLoadProjection {
+                active_prefill_tokens: 0,
+                active_decode_blocks: 0,
+                reserved_decode_blocks: 64,
+                additional_active_blocks: 0,
+            }
+            .potential_decode_blocks(),
+            64
+        );
+
+        for _ in 0..4 {
+            sequences.add_output_block(&"reserved".to_string(), None);
+        }
+        assert_eq!(sequences.reserved_decode_blocks(), 60);
+
+        sequences.free(&"reserved".to_string(), now);
+        assert_eq!(sequences.reserved_decode_blocks(), 0);
     }
 
     #[test]
