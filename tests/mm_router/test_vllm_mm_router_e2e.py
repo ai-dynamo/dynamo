@@ -108,7 +108,7 @@ def _vllm_gpu_mem_args(default_utilization: str) -> list[str]:
 class VLLMWorkerProcess(ManagedProcess):
     """vLLM backend worker that emits KV events."""
 
-    def __init__(self, request, *, system_port: int, kv_event_port: int):
+    def __init__(self, request, *, system_port: int, kv_event_port: int, fpm_port: int):
         super().__init__(
             command=[
                 "python3",
@@ -130,7 +130,12 @@ class VLLMWorkerProcess(ManagedProcess):
                     f'"enable_kv_cache_events": true}}'
                 ),
             ],
-            env=_make_process_env(DYN_SYSTEM_PORT=str(system_port)),
+            # Forward-pass metrics: unique port for this worker's
+            # InstrumentedScheduler ZMQ PUB (single worker, so no DP block).
+            env=_make_process_env(
+                DYN_SYSTEM_PORT=str(system_port),
+                DYN_FORWARDPASS_METRIC_PORT=str(fpm_port),
+            ),
             health_check_urls=[
                 (f"http://localhost:{system_port}/health", _check_ready)
             ],
@@ -197,9 +202,13 @@ def start_vllm_mm_services(
     request, mm_runtime_services
 ) -> Generator[tuple[int, ManagedProcess], None, None]:
     transfer_mode = request.param
-    frontend_port, vllm_port, kv_event_port = allocate_ports(count=3, start_port=10000)
+    frontend_port, vllm_port, kv_event_port, fpm_port = allocate_ports(
+        count=4, start_port=10000
+    )
 
-    with VLLMWorkerProcess(request, system_port=vllm_port, kv_event_port=kv_event_port):
+    with VLLMWorkerProcess(
+        request, system_port=vllm_port, kv_event_port=kv_event_port, fpm_port=fpm_port
+    ):
         # Worker health check passed; wait briefly for ZMQ publisher to bind.
         time.sleep(2)
         with FrontendProcess(

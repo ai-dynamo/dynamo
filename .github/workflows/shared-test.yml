@@ -93,6 +93,16 @@ on:
         required: false
         type: string
         default: ''
+      dd_env:
+        description: 'Datadog env tag for test sessions (DD_ENV). Datadog Test Optimization settings (auto test retries, PR comments, etc.) are scoped per (service, env), so use a distinct value (e.g. "nightly", "post-merge") to configure those workflows independently of PR/pre-merge.'
+        required: false
+        type: string
+        default: 'ci'
+      dd_flaky_retry_enabled:
+        description: 'Datadog Auto Test Retries (DD_CIVISIBILITY_FLAKY_RETRY_ENABLED). Set "false" to disable client-side flaky-test reruns regardless of the Datadog UI setting.'
+        required: false
+        type: string
+        default: 'true'
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -128,6 +138,9 @@ jobs:
         #   * torch._inductor calling getpass.getuser() -> pwd.getpwuid(1001) -> KeyError
         HOME: /__w/dynamo/dynamo
         USER: dynamo
+        # Datadog Test Optimization scoping (settings are per service+env).
+        DD_ENV: ${{ inputs.dd_env }}
+        DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
     permissions:
       contents: read
     services:

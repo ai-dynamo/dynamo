@@ -93,10 +93,9 @@ class LocalPlannerOrchestrator:
         # max_kv_tokens / etc. ``None`` is allowed for early pipelines
         # that don't run those builtins.
         self._capabilities = capabilities
-        # Cross-plugin shared state: PSM tracks ``_throughput_lower_bound_p/d``
-        # on the state machine; in the plugin decomposition the throughput-
-        # propose builtin writes these and the load-propose builtin reads
-        # them. A later refactor can swap this for AT_LEAST-merge semantics.
+        # Cross-plugin shared state: throughput-propose writes these
+        # lower bounds and load-propose reads them. A later refactor can
+        # swap this for AT_LEAST-merge semantics.
         self._throughput_lower_bound: dict[str, int] = {"prefill": 1, "decode": 1}
 
     # ------------------------------------------------------------------
@@ -133,7 +132,11 @@ class LocalPlannerOrchestrator:
         capabilities (e.g. early skeleton tests)."""
         return self._capabilities
 
-    # Cross-plugin throughput lower bound (PSM's ``_throughput_lower_bound_p/d``).
+    def update_capabilities(self, capabilities: WorkerCapabilities) -> None:
+        """Replace static per-engine capabilities after late MDC discovery."""
+        self._capabilities = capabilities
+
+    # Cross-plugin throughput lower bound shared by builtin propose plugins.
     def set_throughput_lower_bound(self, component: str, value: int) -> None:
         self._throughput_lower_bound[component] = value
 
@@ -318,10 +321,8 @@ class LocalPlannerOrchestrator:
         them via ``get_regression``.
 
         This is **orchestrator-owned state** (not a plugin concern) —
-        the caller constructs regressions (typically via
-        ``PSM.load_benchmark_fpms`` on a throwaway PSM) and hands them
-        here for shared access across builtins. ``None`` for any kind
-        skips that slot.
+        the caller constructs regressions and hands them here for shared
+        access. ``None`` for any kind skips that slot.
 
         Distinct from ``bootstrap_plugins`` on purpose — regressions
         must be installed **before** ``bootstrap_plugins`` is called
@@ -345,9 +346,7 @@ class LocalPlannerOrchestrator:
         Two things happen in order:
 
         1. **Warm predictors** via Python-level helpers on any
-           registered plugin exposing ``warm_from_observations``
-           (currently ``BuiltinLoadPredictor``). Matches
-           ``PSM.warm_load_predictors``.
+           registered plugin exposing ``warm_from_observations``.
         2. **Dispatch Bootstrap RPC** to every registered plugin so
            any side effects in concrete plugin implementations fire.
            Plugins that don't implement Bootstrap have the

@@ -18,13 +18,12 @@
 instances:
   - url: dynamo.docs.buildwithfern.com/dynamo
     custom-domain: [docs.nvidia.com/dynamo, docs.dynamo.nvidia.com/dynamo]
+    multi-source: true
 
 title: NVIDIA Dynamo Documentation
 
-global-theme: nvidia
-
 agents:
-  page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/llms.txt. For full content including API reference and SDK examples, see https://docs.nvidia.com/dynamo/llms-full.txt."
+  page-directive: "For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.nvidia.com/dynamo/latest/llms.txt. For section-specific indexes, append /llms.txt to any section URL."
 
 
 products:
@@ -95,6 +94,14 @@ redirects:
     destination: "/dynamo/latest/resources/release-artifacts"
   - source: "/dynamo/latest/getting-started/examples"
     destination: "/dynamo/latest/resources/examples"
+  # Documentation section: style guide moved out of getting-started, and the
+  # docs-system guide ("Dynamo Docs Guide") was renamed. Dev-only (main).
+  - source: "/dynamo/dev/getting-started/documentation-style-guide"
+    destination: "/dynamo/dev/documentation/style-guide"
+  - source: "/dynamo/dev/documentation/dynamo-docs-guide"
+    destination: "/dynamo/dev/documentation/building-and-publishing"
+  - source: "/dynamo/dev/agents/priority-scheduling"
+    destination: "/dynamo/dev/components/router/priority-scheduling"
   - source: "/dynamo/dev/user-guides/multimodal-model-serving/diffusion-experimental/:slug*"
     destination: "/dynamo/dev/user-guides/diffusion/:slug*"
   - source: "/dynamo/dev/user-guides/multimodal-model-serving/diffusion-experimental"
@@ -173,7 +180,9 @@ redirects:
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/developing-with-tilt"
     destination: "/dynamo/dev/kubernetes-deployment/advanced-platform/developing-with-tilt"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/inference-gateway-gaie"
-    destination: "/dynamo/dev/integrations/kubernetes-integrations/gateway-api-inference-extension-gaie"
+    destination: "/dynamo/dev/kubernetes-deployment/request-routing/gateway-api-inference-extension/overview"
+  - source: "/dynamo/dev/integrations/kubernetes-integrations/gateway-api-inference-extension-gaie"
+    destination: "/dynamo/dev/kubernetes-deployment/request-routing/gateway-api-inference-extension/overview"
   # SGLang HiCache doc: canonical URL under Integrations > KV Cache Integrations.
   - source: "/dynamo/dev/backends/sg-lang/hi-cache"
     destination: "/dynamo/dev/integrations/kv-cache-integrations/hi-cache"
@@ -233,7 +242,6 @@ metadata:
 experimental:
   mdx-components:
     - ./components
-  basepath-aware: true
 
 colors:
   accentPrimary:

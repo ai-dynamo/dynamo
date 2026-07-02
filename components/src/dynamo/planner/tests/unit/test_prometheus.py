@@ -318,6 +318,86 @@ def test_get_avg_request_count_falls_back_to_completed_when_started_missing():
     assert "dynamo_frontend_requests_total" in queries[1]
 
 
+def test_vllm_spec_decode_accept_length_query_derives_from_counters():
+    client = PrometheusAPIClient("http://localhost:9090", "test-ns")
+    client.prom = MagicMock()
+    client.prom.custom_query.return_value = [{"value": [0, "2.5"]}]
+
+    result = client.get_avg_spec_decode_accept_length(
+        "60s", "vllm", "backend", "Qwen/Qwen3"
+    )
+
+    assert result == 2.5
+    query = client.prom.custom_query.call_args.kwargs["query"]
+    assert "vllm:spec_decode_num_accepted_tokens_total" in query
+    assert "vllm:spec_decode_num_drafts_total" in query
+    assert 'dynamo_namespace="test-ns"' in query
+    assert 'dynamo_component="backend"' in query
+    assert 'model="Qwen/Qwen3"' in query
+
+
+def test_spec_decode_accept_length_query_can_use_worker_runtime_namespace():
+    client = PrometheusAPIClient("http://localhost:9090", "base-ns")
+    client.prom = MagicMock()
+    client.prom.custom_query.return_value = [{"value": [0, "2.5"]}]
+
+    result = client.get_avg_spec_decode_accept_length(
+        "60s",
+        "vllm",
+        "backend",
+        "Qwen/Qwen3",
+        namespace="base-ns-workerhash",
+        endpoint_name="serve",
+    )
+
+    assert result == 2.5
+    query = client.prom.custom_query.call_args.kwargs["query"]
+    assert 'dynamo_namespace="base-ns-workerhash"' in query
+    assert 'dynamo_endpoint="serve"' in query
+
+
+def test_sglang_spec_decode_accept_length_query_uses_gauge():
+    client = PrometheusAPIClient("http://localhost:9090", "test-ns")
+    client.prom = MagicMock()
+    client.prom.custom_query.return_value = [{"value": [0, "1.8"]}]
+
+    result = client.get_avg_spec_decode_accept_length(
+        "30s", "sglang", "decode", "model"
+    )
+
+    assert result == 1.8
+    query = client.prom.custom_query.call_args.kwargs["query"]
+    assert "sglang:spec_accept_length" in query
+    assert "avg_over_time" in query
+
+
+def test_trtllm_spec_decode_accept_length_query_uses_gauge():
+    client = PrometheusAPIClient("http://localhost:9090", "test-ns")
+    client.prom = MagicMock()
+    client.prom.custom_query.return_value = [{"value": [0, "2.0"]}]
+
+    result = client.get_avg_spec_decode_accept_length(
+        "30s", "trtllm", "tensorrt_llm", "model"
+    )
+
+    assert result == 2.0
+    query = client.prom.custom_query.call_args.kwargs["query"]
+    assert "trtllm_spec_decode_acceptance_length" in query
+    assert "avg_over_time" in query
+
+
+@pytest.mark.parametrize("value", ["NaN", "+Inf", "-Inf"])
+def test_spec_decode_accept_length_returns_none_for_invalid_values(value):
+    client = PrometheusAPIClient("http://localhost:9090", "test-ns")
+    client.prom = MagicMock()
+    client.prom.custom_query.return_value = [{"value": [0, value]}]
+
+    assert (
+        client.get_avg_spec_decode_accept_length("30s", "vllm", "backend", "model")
+        is None
+    )
+
+
 # ---------------------------------------------------------------------------
 # Router metrics source tests
 # ---------------------------------------------------------------------------
@@ -394,17 +474,20 @@ class TestPrometheusAPIClientRouterSource:
         expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.KV_HIT_RATE}"
         assert expected_metric in call_args
 
-    def test_get_avg_kv_hit_rate_returns_none_for_frontend_source(self):
-        """Frontend source doesn't publish an aggregate kv_hit_rate, so the
-        client should short-circuit to None rather than issue a PromQL query."""
+    def test_get_avg_kv_hit_rate_frontend_source_queries_router_histogram(self):
+        """Frontend source can expose router component metrics, so kv_hit_rate
+        should still query dynamo_component_router_kv_hit_rate."""
         client = PrometheusAPIClient(
             "http://localhost:9090", "test-fe-namespace", metrics_source="frontend"
         )
         client.prom = MagicMock()
-        client.prom.custom_query.return_value = [{"value": [0, "42.0"]}]
+        client.prom.custom_query.return_value = [{"value": [0, "0.42"]}]
         result = client.get_avg_kv_hit_rate("60s", "mymodel")
-        assert result is None
-        client.prom.custom_query.assert_not_called()
+        assert result == 0.42
+
+        call_args = str(client.prom.custom_query.call_args)
+        expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.KV_HIT_RATE}"
+        assert expected_metric in call_args
 
     def test_get_avg_request_count_uses_router_requests_total(self, router_client):
         """get_avg_request_count with router source queries dynamo_component_router_requests_total."""

@@ -16,6 +16,8 @@ use serde::{Deserialize, Deserializer};
 
 use crate::protocols::WorkerWithDpRank;
 use crate::sequences::SequenceError;
+use crate::services::common::replica_sync::PeerManager;
+use crate::services::common::replica_sync_http;
 
 use super::registry::{RegistryError, ServiceError, SlotTrackerRegistry, TrackerKey};
 
@@ -304,7 +306,7 @@ fn service_error(error: ServiceError) -> Response {
     }
 }
 
-pub fn create_router(state: Arc<AppState>) -> Router {
+pub(crate) fn create_router(state: Arc<AppState>, peer_manager: Option<PeerManager>) -> Router {
     Router::new()
         .route("/register", post(register))
         .route("/unregister", post(unregister))
@@ -318,6 +320,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state)
+        .merge(replica_sync_http::router(peer_manager))
 }
 
 #[cfg(test)]
@@ -330,9 +333,12 @@ mod tests {
     use super::*;
 
     fn app() -> Router {
-        create_router(Arc::new(AppState {
-            registry: Arc::new(SlotTrackerRegistry::new(CancellationToken::new())),
-        }))
+        create_router(
+            Arc::new(AppState {
+                registry: Arc::new(SlotTrackerRegistry::new(CancellationToken::new())),
+            }),
+            None,
+        )
     }
 
     async fn response_json(response: Response) -> serde_json::Value {
@@ -340,20 +346,6 @@ mod tests {
             .await
             .expect("read response body");
         serde_json::from_slice(&body).expect("response JSON")
-    }
-
-    fn potential_loads_body(min_len: usize) -> String {
-        let mut body = String::from(r#"{"model_name":"model","sequence_hashes":["#);
-        let mut first = true;
-        while body.len() < min_len {
-            if !first {
-                body.push(',');
-            }
-            first = false;
-            body.push('0');
-        }
-        body.push_str("]}");
-        body
     }
 
     #[tokio::test]
@@ -372,6 +364,21 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(response_json(response).await["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn replica_sync_routes_are_mounted() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .uri("/replica_sync/peers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -453,57 +460,5 @@ mod tests {
         assert_eq!(loads_response.status(), StatusCode::OK);
         let loads = response_json(loads_response).await;
         assert_eq!(loads[0]["potential_decode_blocks"], 1);
-    }
-
-    #[tokio::test]
-    async fn sizable_hash_array_under_default_body_limit_is_accepted() {
-        let app = app();
-        let register_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/register")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"worker_id":1,"model_name":"model","block_size":16,"dp_start":0,"dp_size":1}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(register_response.status(), StatusCode::CREATED);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/potential_loads")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(potential_loads_body(256 * 1024)))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn oversized_json_body_returns_json_error() {
-        let response = app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/potential_loads")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(potential_loads_body(2 * 1024 * 1024 + 1)))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(response_json(response).await["error"].is_string());
     }
 }

@@ -59,12 +59,13 @@ class _StubPlugin:
         return self._responses.pop(0)
 
 
-def _pd(num_req=None, isl=None, osl=None, kv=None, source=""):
+def _pd(num_req=None, isl=None, osl=None, kv=None, accept=None, source=""):
     return PredictionData(
         predicted_num_req=num_req,
         predicted_isl=isl,
         predicted_osl=osl,
         predicted_kv_hit_rate=kv,
+        predicted_accept_length=accept,
         source=source,
     )
 
@@ -125,6 +126,36 @@ async def test_predicted_kv_hit_rate_fills_from_later_plugin_when_unset():
     out = await chain_augment([high, low], PipelineContext())
     assert out.prediction is not None
     assert out.prediction.predicted_kv_hit_rate == 0.7
+
+
+@pytest.mark.asyncio
+async def test_predicted_accept_length_merges_across_chain():
+    high = _StubPlugin(
+        "high",
+        10,
+        [PredictStageResponse(predictions=_pd(num_req=1200, accept=2.0))],
+    )
+    low = _StubPlugin(
+        "low",
+        100,
+        [PredictStageResponse(predictions=_pd(isl=3000, osl=150, accept=3.0))],
+    )
+    out = await chain_augment([high, low], PipelineContext())
+    assert out.prediction is not None
+    assert out.prediction.predicted_accept_length == 2.0
+    assert out.prediction.predicted_isl == 3000
+    assert out.prediction.predicted_osl == 150
+
+
+@pytest.mark.asyncio
+async def test_predicted_accept_length_fills_from_later_plugin_when_unset():
+    high = _StubPlugin(
+        "high", 10, [PredictStageResponse(predictions=_pd(num_req=1200))]
+    )
+    low = _StubPlugin("low", 100, [PredictStageResponse(predictions=_pd(accept=2.5))])
+    out = await chain_augment([high, low], PipelineContext())
+    assert out.prediction is not None
+    assert out.prediction.predicted_accept_length == 2.5
 
 
 @pytest.mark.asyncio

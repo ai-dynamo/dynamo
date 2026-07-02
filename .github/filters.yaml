@@ -4,6 +4,7 @@
 #   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm)
 #   operator -> operator build and test
 #   snapshot -> snapshot-agent build and test
+#   power_agent -> power-agent image build
 #   deploy   -> deploy tests
 #   planner  -> dynamo build-test
 #   vllm     -> vllm build and test
@@ -34,7 +35,7 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
-  # Canonical agent skills directory (post-flip); .agents/skills is a symlink here.
+  # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
   - 'skills/**'
 
 examples:
@@ -54,6 +55,11 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
+  # Standalone CRD apiVersion converter: classification-only so it satisfies
+  # the changed-files coverage check without triggering the operator deploy
+  # pipeline (it is excluded from the `deploy` filter below).
+  - 'deploy/utils/convert_api_version.py'
+  - 'deploy/utils/tests/**'
   - 'dev/*'
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
@@ -91,6 +97,7 @@ core:
   - 'container/templates/args.Dockerfile'
   - 'container/templates/dynamo_*'
   - 'container/templates/wheel_builder.Dockerfile'
+  - 'container/templates/compliance.Dockerfile'
   - '.dockerignore'
   - 'container/deps/*'
   - 'container/compliance/**'
@@ -134,6 +141,13 @@ snapshot:
   - 'deploy/snapshot/**'
   - 'deploy/snapshot/.*'
 
+power_agent:
+  - *ci
+  - 'deploy/power-agent/**'
+  - 'deploy/helm/charts/power-agent/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+
 deploy:
   - *ci
   - 'deploy/helm/**'
@@ -141,6 +155,10 @@ deploy:
   - 'deploy/snapshot/**'
   - 'tests/deploy/**'
   - 'tests/utils/managed_deployment.py'
+  # Standalone CRD apiVersion converter: not used by the deploy-test harness and
+  # has no CI test wiring, so it should not trigger the operator deploy pipeline.
+  - '!deploy/utils/convert_api_version.py'
+  - '!deploy/utils/tests/**'
   - '!**/*.md'
   - '!**/*.rst'
 
@@ -150,6 +168,9 @@ planner:
   - 'components/src/dynamo/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
+  # Power-aware planner (PR #9369): per-node power agent component
+  - 'deploy/power-agent/**'
+  - 'deploy/helm/charts/power-agent/**'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'
@@ -161,6 +182,7 @@ vllm:
   - '!**/*.rst'
 
 sglang:
+  - 'container/deps/sglang/**'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
   - 'container/templates/sglang_*'

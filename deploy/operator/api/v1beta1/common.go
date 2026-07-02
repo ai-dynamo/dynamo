@@ -184,11 +184,13 @@ type ExperimentalSpec struct {
 	Failover *FailoverSpec `json:"failover,omitempty"`
 
 	// checkpoint configures container-image snapshotting and restore for
-	// this component. When set, the DGD controller can produce a DGD-scoped
-	// DynamoCheckpoint CR and later restore pods in the same DGD generation
-	// from that checkpoint for faster cold start. The user-facing shape of
-	// this field is still settling, which is why it lives under `experimental`
-	// in v1beta1 instead of at the top level.
+	// this component. Set `checkpoint.enabled: true` to opt in. Without
+	// checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint
+	// CR and later restores pods in the same DGD generation from that
+	// checkpoint. With checkpointRef, the DGD restores from that existing
+	// checkpoint instead. The user-facing shape of this field is still settling,
+	// which is why it lives under `experimental` in v1beta1 instead of at the
+	// top level.
 	// +optional
 	Checkpoint *ComponentCheckpointConfig `json:"checkpoint,omitempty"`
 }
@@ -272,14 +274,16 @@ type FailoverSpec struct {
 	NumShadows int32 `json:"numShadows,omitempty"`
 }
 
-// CheckpointMode defines how checkpoint creation is handled.
+// Deprecated: use checkpoint.enabled instead.
+// enabled=true without checkpointRef creates a DGD-managed automatic
+// checkpoint; checkpointRef restores the named checkpoint.
 // +kubebuilder:validation:Enum=Auto;Manual
 type CheckpointMode string
 
 const (
-	// CheckpointModeAuto means the DGD controller creates the DynamoCheckpoint CR automatically.
+	// Deprecated: use checkpoint.enabled=true and omit checkpointRef.
 	CheckpointModeAuto CheckpointMode = "Auto"
-	// CheckpointModeManual means the user creates the DynamoCheckpoint CR themselves.
+	// Deprecated: use checkpointRef to restore an existing checkpoint.
 	CheckpointModeManual CheckpointMode = "Manual"
 )
 
@@ -314,13 +318,18 @@ const (
 
 // ComponentCheckpointConfig configures checkpointing for a DGD component.
 // +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0",message="checkpoint.job cannot be set when checkpointRef is specified"
-// +kubebuilder:validation:XValidation:rule="!has(self.job) || !has(self.mode) || self.mode == 'Auto'",message="checkpoint.job can only be set in Auto mode"
 type ComponentCheckpointConfig struct {
-	// mode defines how checkpoint creation is handled.
-	// `Auto`: DGD controller creates the DynamoCheckpoint CR automatically.
-	// `Manual`: user must create the DynamoCheckpoint CR.
+	// enabled indicates whether checkpointing is enabled for this component.
+	// When true, omit checkpointRef for a DGD-managed automatic checkpoint or
+	// set checkpointRef to restore an existing checkpoint. Omit the checkpoint
+	// block, or set enabled=false, to disable checkpointing.
+	// +kubebuilder:validation:Required
+	Enabled bool `json:"enabled"`
+
+	// Deprecated: omit mode. Use enabled=true without checkpointRef for a
+	// DGD-managed automatic checkpoint, or use checkpointRef to restore the
+	// named checkpoint.
 	// +optional
-	// +kubebuilder:default=Auto
 	Mode CheckpointMode `json:"mode,omitempty"`
 
 	// startupPolicy defines when normal worker replicas are started relative to
@@ -346,9 +355,8 @@ type ComponentCheckpointConfig struct {
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
-	// Deprecated: identity is ignored by DGD-managed automatic checkpoints.
-	// Automatic checkpoints are scoped to the owning DGD/component generation and
-	// are never reused across DGDs.
+	// Deprecated: omit for DGD-managed checkpoints; no action is needed.
+	// Use checkpointRef to restore an existing checkpoint.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
 
@@ -360,7 +368,7 @@ type ComponentCheckpointConfig struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	TargetContainerName string `json:"targetContainerName,omitempty"`
 
-	// job customizes the checkpoint Job that is created in Auto mode.
+	// job customizes the DGD-managed checkpoint Job.
 	// +optional
 	Job *ComponentCheckpointJobConfig `json:"job,omitempty"`
 }
@@ -386,61 +394,54 @@ type ComponentCheckpointJobConfig struct {
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
-// DynamoCheckpointIdentity is legacy compatibility metadata retained for the
-// v1alpha1 standalone DynamoCheckpoint shape. DGD-managed automatic checkpoints
-// do not use this as a reuse boundary.
-// Duplicated from v1alpha1 to keep the v1beta1 type graph self-contained. The
-// DynamoCheckpoint resource itself is not graduating in this MR; this type is
-// only used as a sub-field of `ComponentCheckpointConfig`.
+// Deprecated: omit in DGD component checkpoint configs. Auto needs no
+// replacement; use checkpointRef for explicit restores.
+// Duplicated from v1alpha1; DynamoCheckpoint itself remains v1alpha1.
 type DynamoCheckpointIdentity struct {
 	// model is the model identifier (e.g. "meta-llama/Llama-3-70B").
+	// Deprecated: legacy identity only.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Model string `json:"model"`
 
 	// backendFramework is the runtime framework (`vllm`, `sglang`, `trtllm`).
+	// Deprecated: legacy identity only.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
 	BackendFramework string `json:"backendFramework"`
 
-	// dynamoVersion is the Dynamo platform version. Deprecated for DGD-managed
-	// automatic checkpoints; it only participates in the legacy identity hash
-	// fallback for standalone objects.
+	// dynamoVersion is the Dynamo platform version.
+	// Deprecated: legacy identity only.
 	// +optional
 	DynamoVersion string `json:"dynamoVersion,omitempty"`
 
 	// tensorParallelSize is the tensor parallel configuration.
-	// Deprecated for DGD-managed automatic checkpoints; it only participates in
-	// the legacy identity hash fallback for standalone objects.
+	// Deprecated: checkpoint launch uses the pod template instead.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	TensorParallelSize int32 `json:"tensorParallelSize,omitempty"`
 
 	// pipelineParallelSize is the pipeline parallel configuration.
-	// Deprecated for DGD-managed automatic checkpoints; it only participates in
-	// the legacy identity hash fallback for standalone objects.
+	// Deprecated: checkpoint launch uses the pod template instead.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:default=1
 	PipelineParallelSize int32 `json:"pipelineParallelSize,omitempty"`
 
 	// dtype is the data type (`fp16`, `bf16`, `fp8`, etc.).
-	// Deprecated for DGD-managed automatic checkpoints; it only participates in
-	// the legacy identity hash fallback for standalone objects.
+	// Deprecated: legacy identity only.
 	// +optional
 	Dtype string `json:"dtype,omitempty"`
 
 	// maxModelLen is the maximum sequence length.
-	// Deprecated for DGD-managed automatic checkpoints; it only participates in
-	// the legacy identity hash fallback for standalone objects.
+	// Deprecated: legacy identity only.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MaxModelLen int32 `json:"maxModelLen,omitempty"`
 
 	// extraParameters are additional parameters that affect the checkpoint hash.
-	// Deprecated for DGD-managed automatic checkpoints; it only participates in
-	// the legacy identity hash fallback for standalone objects.
+	// Deprecated: legacy identity only.
 	// +optional
 	ExtraParameters map[string]string `json:"extraParameters,omitempty"`
 }
@@ -492,10 +493,17 @@ const (
 // KvTransferPolicy configures topology-aware routing for KV-cache transfers
 // between prefill and decode workers. This is a graph-wide concern placed
 // under `spec.experimental` while the API is incubating.
-// +kubebuilder:validation:XValidation:rule="has(self.labelKey)",message="labelKey is required until alternate topology sources are supported"
+// +kubebuilder:validation:XValidation:rule="(has(self.labelKey) && !has(self.clusterTopologyName)) || (!has(self.labelKey) && has(self.clusterTopologyName))",message="exactly one of labelKey or clusterTopologyName is required"
 // +kubebuilder:validation:XValidation:rule="!has(self.enforcement) || self.enforcement != 'preferred' || has(self.preferredWeight)",message="preferredWeight is required when enforcement is preferred"
 // +kubebuilder:validation:XValidation:rule="!has(self.preferredWeight) || (has(self.enforcement) && self.enforcement == 'preferred')",message="preferredWeight may only be set when enforcement is preferred"
 type KvTransferPolicy struct {
+	// clusterTopologyName references a Grove ClusterTopology CR. The operator
+	// reads the CR's topology levels and projects them through Dynamo-owned pod
+	// labels for worker topology metadata.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	ClusterTopologyName string `json:"clusterTopologyName,omitempty"`
+
 	// labelKey is a Kubernetes node label key (e.g.
 	// "topology.kubernetes.io/zone") whose value identifies the topology
 	// domain for each worker. The operator copies the node label onto worker

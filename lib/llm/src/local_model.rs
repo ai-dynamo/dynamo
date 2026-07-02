@@ -16,6 +16,7 @@ use modelexpress_common::providers::{HuggingFaceProvider, ModelProviderTrait as 
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
+use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
@@ -23,7 +24,7 @@ use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
 
-use runtime_config::ModelRuntimeConfig;
+use runtime_config::{ModelRuntimeConfig, TokenizerBackend};
 
 /// What we call a model if the user didn't provide a name. Usually this means the name
 /// is invisible, for example in a text chat.
@@ -40,13 +41,17 @@ pub const DEFAULT_HTTP_PORT: u16 = 8080;
 pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
 
 fn env_self_host_metadata_default() -> bool {
-    match std::env::var(ENV_SELF_HOST_METADATA) {
-        Ok(v) => matches!(
-            v.trim().to_lowercase().as_str(),
+    let value = std::env::var(ENV_SELF_HOST_METADATA).ok();
+    self_host_metadata_default(value.as_deref())
+}
+
+fn self_host_metadata_default(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => false,
-    }
+        )
+    })
 }
 
 pub struct LocalModelBuilder {
@@ -54,13 +59,14 @@ pub struct LocalModelBuilder {
     source_path: Option<PathBuf>,
     model_name: Option<String>,
     endpoint_id: Option<EndpointId>,
-    context_length: Option<u32>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: u32,
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    metrics_config: MetricsConfig,
+    frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     migration_limit: u32,
@@ -84,13 +90,14 @@ impl Default for LocalModelBuilder {
             http_host: Default::default(),
             http_port: DEFAULT_HTTP_PORT,
             http_metrics_port: None,
+            metrics_config: Default::default(),
+            frontend_api_config: Default::default(),
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
             model_path: Default::default(),
             source_path: Default::default(),
             model_name: Default::default(),
             endpoint_id: Default::default(),
-            context_length: Default::default(),
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
@@ -134,11 +141,6 @@ impl LocalModelBuilder {
         self
     }
 
-    pub fn context_length(&mut self, context_length: Option<u32>) -> &mut Self {
-        self.context_length = context_length;
-        self
-    }
-
     /// Passing None resets it to default
     pub fn kv_cache_block_size(&mut self, kv_cache_block_size: Option<u32>) -> &mut Self {
         self.kv_cache_block_size = kv_cache_block_size.unwrap_or(DEFAULT_KV_CACHE_BLOCK_SIZE);
@@ -157,6 +159,49 @@ impl LocalModelBuilder {
 
     pub fn http_metrics_port(&mut self, port: Option<u16>) -> &mut Self {
         self.http_metrics_port = port;
+        self
+    }
+
+    pub fn metrics_prefix(&mut self, prefix: Option<String>) -> &mut Self {
+        self.metrics_config.set_prefix(prefix);
+        self
+    }
+
+    pub fn metrics_config(&mut self, metrics_config: MetricsConfig) -> &mut Self {
+        self.metrics_config = metrics_config;
+        self
+    }
+
+    pub fn frontend_api_config(&mut self, frontend_api_config: FrontendApiConfig) -> &mut Self {
+        self.frontend_api_config = frontend_api_config;
+        self
+    }
+
+    pub fn enable_anthropic_api(&mut self, enabled: bool) -> &mut Self {
+        self.frontend_api_config
+            .anthropic_mut()
+            .set_enabled(enabled);
+        self
+    }
+
+    pub fn strip_anthropic_preamble(&mut self, enabled: bool) -> &mut Self {
+        self.frontend_api_config
+            .anthropic_mut()
+            .set_strip_preamble(enabled);
+        self
+    }
+
+    pub fn enable_streaming_tool_dispatch(&mut self, enabled: bool) -> &mut Self {
+        self.frontend_api_config
+            .streaming_dispatch_mut()
+            .set_tool_dispatch(enabled);
+        self
+    }
+
+    pub fn enable_streaming_reasoning_dispatch(&mut self, enabled: bool) -> &mut Self {
+        self.frontend_api_config
+            .streaming_dispatch_mut()
+            .set_reasoning_dispatch(enabled);
         self
     }
 
@@ -224,6 +269,13 @@ impl LocalModelBuilder {
 
     pub fn runtime_config(&mut self, runtime_config: ModelRuntimeConfig) -> &mut Self {
         self.runtime_config = runtime_config;
+        self
+    }
+
+    pub fn tokenizer_backend(&mut self, tokenizer_backend: Option<TokenizerBackend>) -> &mut Self {
+        if let Some(tokenizer_backend) = tokenizer_backend {
+            self.runtime_config.tokenizer_backend = Some(tokenizer_backend);
+        }
         self
     }
 
@@ -295,6 +347,8 @@ impl LocalModelBuilder {
                 http_host: self.http_host.take(),
                 http_port: self.http_port,
                 http_metrics_port: self.http_metrics_port,
+                metrics_config: self.metrics_config.clone(),
+                frontend_api_config: self.frontend_api_config.clone(),
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
@@ -304,7 +358,6 @@ impl LocalModelBuilder {
                 migration_limit: self.migration_limit,
                 migration_max_seq_len: self.migration_max_seq_len,
                 self_host_metadata: self.self_host_metadata,
-                attached_self_host_suffix: None,
             });
         }
 
@@ -332,11 +385,6 @@ impl LocalModelBuilder {
 
         card.kv_cache_block_size = self.kv_cache_block_size;
 
-        // Override max number of tokens in context. We usually only do this to limit kv cache allocation.
-        if let Some(context_length) = self.context_length {
-            card.context_length = context_length;
-        }
-
         card.migration_limit = self.migration_limit;
         card.user_data = self.user_data.take();
         card.runtime_config = self.runtime_config.clone();
@@ -352,6 +400,8 @@ impl LocalModelBuilder {
             http_host: self.http_host.take(),
             http_port: self.http_port,
             http_metrics_port: self.http_metrics_port,
+            metrics_config: self.metrics_config.clone(),
+            frontend_api_config: self.frontend_api_config.clone(),
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
@@ -361,7 +411,6 @@ impl LocalModelBuilder {
             migration_limit: self.migration_limit,
             migration_max_seq_len: self.migration_max_seq_len,
             self_host_metadata: self.self_host_metadata,
-            attached_self_host_suffix: None,
         })
     }
 }
@@ -375,6 +424,8 @@ pub struct LocalModel {
     http_host: Option<String>,
     http_port: u16,
     http_metrics_port: Option<u16>,
+    metrics_config: MetricsConfig,
+    frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
     router_config: RouterConfig,
@@ -384,9 +435,6 @@ pub struct LocalModel {
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     self_host_metadata: bool,
-    /// Set by `move_to_self_host` so `clear_self_hosted_artifacts`
-    /// scopes its unregister to this model's `(slug, suffix)` only.
-    attached_self_host_suffix: Option<String>,
 }
 
 impl LocalModel {
@@ -432,6 +480,38 @@ impl LocalModel {
 
     pub fn http_metrics_port(&self) -> Option<u16> {
         self.http_metrics_port
+    }
+
+    pub fn metrics_prefix(&self) -> Option<String> {
+        self.metrics_config.prefix()
+    }
+
+    pub fn metrics_config(&self) -> &MetricsConfig {
+        &self.metrics_config
+    }
+
+    pub fn frontend_api_config(&self) -> &FrontendApiConfig {
+        &self.frontend_api_config
+    }
+
+    pub fn enable_anthropic_api(&self) -> bool {
+        self.frontend_api_config.anthropic().enabled()
+    }
+
+    pub fn strip_anthropic_preamble(&self) -> bool {
+        self.frontend_api_config.anthropic().strip_preamble()
+    }
+
+    pub fn enable_streaming_tool_dispatch(&self) -> bool {
+        self.frontend_api_config
+            .streaming_dispatch()
+            .tool_dispatch()
+    }
+
+    pub fn enable_streaming_reasoning_dispatch(&self) -> bool {
+        self.frontend_api_config
+            .streaming_dispatch()
+            .reasoning_dispatch()
     }
 
     pub fn tls_cert_path(&self) -> Option<&Path> {
@@ -520,7 +600,7 @@ impl LocalModel {
         );
 
         if self.self_host_metadata {
-            self.move_to_self_host(endpoint.drt(), model_suffix.as_deref())
+            self.move_to_self_host(endpoint, model_suffix.as_deref())
                 .context("move_to_self_host")?;
         }
 
@@ -563,9 +643,13 @@ impl LocalModel {
     /// (recorded as `BASE_SUFFIX` in the registry).
     fn move_to_self_host(
         &mut self,
-        drt: &dynamo_runtime::DistributedRuntime,
+        endpoint: &Endpoint,
         model_suffix: Option<&str>,
     ) -> anyhow::Result<()> {
+        let drt = endpoint.drt();
+        let namespace = endpoint.component().namespace().name().to_string();
+        let component = endpoint.component().name().to_string();
+        let endpoint_name = endpoint.name().to_string();
         let Some(base_url) = self_host_base_url(drt)? else {
             tracing::warn!(
                 model_slug = %self.card.slug(),
@@ -578,6 +662,8 @@ impl LocalModel {
         let model_slug = self.card.slug().to_string();
         let suffix = model_suffix.unwrap_or(dynamo_runtime::metadata_registry::BASE_SUFFIX);
         let registry = drt.metadata_artifacts();
+        let instance_id = drt.connection_id();
+        let owner = (instance_id, model_suffix.map(str::to_string));
 
         // Advertise non-typed siblings (preprocessor_config.json,
         // special_tokens_map.json, …) so external preprocessors that load
@@ -627,14 +713,24 @@ impl LocalModel {
             };
 
             let url = url::Url::parse(&format!(
-                "{base_url}/v1/metadata/{model_slug}/{suffix}/{filename}"
+                "{base_url}/v1/metadata/{namespace}/{component}/{endpoint_name}/{model_slug}/{suffix}/{filename}"
             ))?;
-            registry.register(&model_slug, suffix, &filename, absolute);
+            registry
+                .register(
+                    &owner,
+                    &namespace,
+                    &component,
+                    &endpoint_name,
+                    &model_slug,
+                    suffix,
+                    &filename,
+                    absolute,
+                )
+                .context("registering metadata artifact")?;
             cf.move_to_url(url);
             rewritten += 1;
         }
 
-        self.attached_self_host_suffix = Some(suffix.to_string());
         tracing::debug!(
             model_slug,
             suffix,
@@ -643,15 +739,6 @@ impl LocalModel {
             "self-hosting model metadata artifacts"
         );
         Ok(())
-    }
-
-    /// Idempotent. Call before detach/hot-reload; otherwise the
-    /// runtime drops the registry entries with the worker process.
-    pub fn clear_self_hosted_artifacts(&self, drt: &dynamo_runtime::DistributedRuntime) {
-        if let Some(suffix) = self.attached_self_host_suffix.as_deref() {
-            drt.metadata_artifacts()
-                .unregister(self.card.slug().as_ref(), suffix);
-        }
     }
 
     /// Helper associated function to detach a model from an endpoint
@@ -666,8 +753,8 @@ impl LocalModel {
         let instance_id = drt.connection_id();
         let endpoint_id = endpoint.id();
 
-        // Compute model_suffix from lora_name if present
         let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+        let registry_owner = (instance_id, model_suffix.clone());
 
         let instance = DiscoveryInstance::Model {
             namespace: endpoint_id.namespace,
@@ -680,6 +767,8 @@ impl LocalModel {
 
         let discovery = drt.discovery();
         discovery.unregister(instance).await?;
+        drt.metadata_artifacts()
+            .unregister_for_owner(&registry_owner);
 
         if let Some(lora_name) = lora_name {
             tracing::info!(
@@ -766,24 +855,21 @@ fn harvest_extra_files(
 mod env_self_host_metadata_tests {
     use super::*;
 
-    #[serial_test::serial]
     #[test]
     fn env_default_parsing() {
-        // SAFETY: all env mutations are serialized via serial_test.
-        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
-        assert!(!env_self_host_metadata_default(), "unset → default OFF");
+        assert!(!self_host_metadata_default(None), "unset → default OFF");
 
         for v in [
             "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "garbage",
         ] {
-            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
-            assert!(!env_self_host_metadata_default(), "expected OFF for {v:?}");
+            assert!(
+                !self_host_metadata_default(Some(v)),
+                "expected OFF for {v:?}"
+            );
         }
         for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
-            unsafe { std::env::set_var(ENV_SELF_HOST_METADATA, v) };
-            assert!(env_self_host_metadata_default(), "expected ON for {v:?}");
+            assert!(self_host_metadata_default(Some(v)), "expected ON for {v:?}");
         }
-        unsafe { std::env::remove_var(ENV_SELF_HOST_METADATA) };
     }
 }
 

@@ -854,6 +854,23 @@ func TestAppendMissingPVCVolumesForMountsAddsMissingPVCs(t *testing.T) {
 	assert.Equal(t, "config", got[2].Name)
 }
 
+func TestAppendMissingPVCVolumesForMountsKeepsRepeatedVolumeMountsUnique(t *testing.T) {
+	volumes := []corev1.Volume{
+		{Name: "shared-model", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-cache-pvc"}}},
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: "shared-model", MountPath: "/model-store", SubPath: "models/glm"},
+		{Name: "shared-model", MountPath: "/cache/sglang", SubPath: "cache/sglang/glm"},
+	}
+
+	got := appendMissingPVCVolumesForMounts(volumes, mounts)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "shared-model", got[0].Name)
+	require.NotNil(t, got[0].PersistentVolumeClaim)
+	assert.Equal(t, "model-cache-pvc", got[0].PersistentVolumeClaim.ClaimName)
+}
+
 func TestGenerateDynamoComponentsDeployments_PropagatesPreservedAlphaServiceAnnotations(t *testing.T) {
 	className := "nginx"
 	alpha := &v1alpha1.DynamoGraphDeployment{
@@ -933,6 +950,44 @@ func TestGenerateDynamoComponentsDeployments_AddsTopologyLabelAnnotationToWorker
 	require.NotNil(t, frontend)
 	assert.NotContains(t, frontend.Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
 	assert.NotContains(t, GetDCDKubeAnnotations(frontend), commonconsts.KubeAnnotationTopologyLabelKey)
+}
+
+func TestGenerateDynamoComponentsDeployments_AddsClusterTopologyAnnotationToWorkers(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+			},
+			Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
+					ClusterTopologyName: "grove-topology",
+					Domain:              "rack",
+					Enforcement:         v1beta1.KvTransferEnforcementRequired,
+				},
+			},
+		},
+	}
+
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	require.NoError(t, err)
+
+	worker := dcds["worker"]
+	require.NotNil(t, worker)
+	assert.Equal(t, "grove-topology", worker.Annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName])
+	assert.Equal(t, "grove-topology", GetDCDKubeAnnotations(worker)[commonconsts.KubeAnnotationTopologyClusterTopologyName])
+	assert.NotContains(t, worker.Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+	assert.NotContains(t, GetDCDKubeAnnotations(worker), commonconsts.KubeAnnotationTopologyLabelKey)
+
+	frontend := dcds["frontend"]
+	require.NotNil(t, frontend)
+	assert.NotContains(t, frontend.Annotations, commonconsts.KubeAnnotationTopologyClusterTopologyName)
+	assert.NotContains(t, GetDCDKubeAnnotations(frontend), commonconsts.KubeAnnotationTopologyClusterTopologyName)
 }
 
 func TestTopologyLabelMetadataFromConvertedAlphaDGD(t *testing.T) {
@@ -1100,6 +1155,88 @@ func TestGenerateGrovePodCliqueSet_AddsTopologyLabelAnnotationToWorkerCliques(t 
 	require.Contains(t, cliques, "frontend")
 	assert.Equal(t, labelKey, cliques["worker"].Annotations[commonconsts.KubeAnnotationTopologyLabelKey])
 	assert.NotContains(t, cliques["frontend"].Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+}
+
+func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, grovev1alpha1.AddToScheme(scheme))
+	clusterTopology := &grovev1alpha1.ClusterTopology{
+		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
+		Spec: grovev1alpha1.ClusterTopologySpec{
+			Levels: []grovev1alpha1.TopologyLevel{
+				{Domain: grovev1alpha1.TopologyDomainZone, Key: "topology.kubernetes.io/zone"},
+				{Domain: grovev1alpha1.TopologyDomainRack, Key: "nvidia.com/rack"},
+			},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(clusterTopology).Build()
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker},
+				{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+			},
+			Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+				KvTransferPolicy: &v1beta1.KvTransferPolicy{
+					ClusterTopologyName: "grove-topology",
+					Domain:              "rack",
+					Enforcement:         v1beta1.KvTransferEnforcementRequired,
+				},
+			},
+		},
+	}
+
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		kubeClient,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	cliques := make(map[string]*grovev1alpha1.PodCliqueTemplateSpec)
+	for _, clique := range got.Spec.Template.Cliques {
+		cliques[clique.Name] = clique
+	}
+
+	require.Contains(t, cliques, "worker")
+	require.Contains(t, cliques, "frontend")
+	worker := cliques["worker"]
+	assert.Equal(t, "grove-topology", worker.Annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName])
+	assert.NotContains(t, worker.Annotations, commonconsts.KubeAnnotationTopologyLabelKey)
+
+	envMap := envVarsToMap(worker.Spec.PodSpec.Containers[0].Env)
+	assert.Equal(t, "rack", envMap[commonconsts.EnvKvTransferDomain])
+	assert.Equal(t, "true", envMap[commonconsts.EnvTopologyEnabled])
+	assert.NotContains(t, envMap, "DYN_TOPOLOGY_DOMAIN")
+
+	topologyItems := map[string]string{}
+	for _, volume := range worker.Spec.PodSpec.Volumes {
+		if volume.Name != topologyVolumeName {
+			continue
+		}
+		require.NotNil(t, volume.DownwardAPI)
+		for _, item := range volume.DownwardAPI.Items {
+			topologyItems[item.Path] = item.FieldRef.FieldPath
+		}
+	}
+	assert.Equal(t, map[string]string{
+		"zone": "metadata.labels['" + commonconsts.DynamoTopologyLabelKey("zone") + "']",
+		"rack": "metadata.labels['" + commonconsts.DynamoTopologyLabelKey("rack") + "']",
+	}, topologyItems)
+	assert.NotContains(t, cliques["frontend"].Annotations, commonconsts.KubeAnnotationTopologyClusterTopologyName)
+	assert.False(t, hasTopologyLabelVolume(cliques["frontend"].Spec.PodSpec.Volumes))
 }
 
 func TestGenerateLabelsAndAnnotations_UsePreservedAlphaDGDServiceMetadata(t *testing.T) {
@@ -8087,14 +8224,112 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointGatesPodCliqueScalingGroup(t
 	require.NotNil(t, pcsg.Replicas)
 	assert.EqualValues(t, 0, *pcsg.Replicas)
 	require.NotNil(t, pcsg.MinAvailable)
-	assert.EqualValues(t, 0, *pcsg.MinAvailable)
+	assert.EqualValues(t, 1, *pcsg.MinAvailable)
 	for _, clique := range got.Spec.Template.Cliques {
 		if strings.Contains(clique.Name, "gms") {
 			continue
 		}
 		assert.EqualValues(t, 0, clique.Spec.Replicas, "clique %q should be gated", clique.Name)
 		require.NotNil(t, clique.Spec.MinAvailable)
-		assert.EqualValues(t, 0, *clique.Spec.MinAvailable, "clique %q should be gated", clique.Name)
+		assert.EqualValues(t, 1, *clique.Spec.MinAvailable, "clique %q should keep its configured minAvailable", clique.Name)
+	}
+}
+
+func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
+	tests := []struct {
+		name             string
+		service          *v1alpha1.DynamoComponentDeploymentSharedSpec
+		wantClique       bool
+		wantScalingGroup bool
+		wantMinAvailable int32
+	}{
+		{
+			name: "standalone pod clique",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(4)),
+				MinAvailable:  ptr.To(int32(2)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+			},
+			wantClique:       true,
+			wantMinAvailable: int32(2),
+		},
+		{
+			name: "standalone pod clique defaults minAvailable to 1",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(4)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+			},
+			wantClique:       true,
+			wantMinAvailable: int32(1),
+		},
+		{
+			name: "pod clique scaling group",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(4)),
+				MinAvailable:  ptr.To(int32(2)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+				Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+			},
+			wantScalingGroup: true,
+			wantMinAvailable: int32(2),
+		},
+		{
+			name: "pod clique scaling group defaults minAvailable to 1",
+			service: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(4)),
+				Resources: &v1alpha1.Resources{
+					Limits: &v1alpha1.ResourceItem{GPU: "1"},
+				},
+				Multinode: &v1alpha1.MultinodeSpec{NodeCount: 2},
+			},
+			wantScalingGroup: true,
+			wantMinAvailable: int32(1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "test-ns"},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"worker": tt.service,
+					},
+				},
+			}
+
+			got, err := GenerateGrovePodCliqueSet(
+				context.Background(),
+				betaDGD(t, dgd),
+				&configv1alpha1.OperatorConfiguration{},
+				&controller_common.RuntimeConfig{},
+				nil, nil, nil, nil, nil,
+			)
+			require.NoError(t, err)
+			require.NotNil(t, got)
+
+			if tt.wantClique {
+				require.Len(t, got.Spec.Template.Cliques, 1)
+				require.NotNil(t, got.Spec.Template.Cliques[0].Spec.MinAvailable)
+				assert.EqualValues(t, tt.wantMinAvailable, *got.Spec.Template.Cliques[0].Spec.MinAvailable)
+			}
+			if tt.wantScalingGroup {
+				require.Len(t, got.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+				require.NotNil(t, got.Spec.Template.PodCliqueScalingGroupConfigs[0].MinAvailable)
+				assert.EqualValues(t, tt.wantMinAvailable, *got.Spec.Template.PodCliqueScalingGroupConfigs[0].MinAvailable)
+			}
+		})
 	}
 }
 

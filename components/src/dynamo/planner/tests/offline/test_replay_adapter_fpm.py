@@ -5,14 +5,12 @@
 
 ``ReplayPlannerAdapter._feed_extra_fpm_to_regression`` feeds accumulated
 intra-tick FPM snapshots into the regression model. The regression slots
-hold ``PlannerEnginePerfModel`` (built by the PSM in SLA mode), which
-exposes only ``add_observations(dict)`` — the pre-fix singular
-``add_observation(fpm)`` raised ``AttributeError`` and crashed the
-*default* (``use_orchestrator=False``) SLA-mode replay on any tick that
-carried more than one FPM snapshot per worker. No test covered this
-method, so the crash shipped silently.
+hold ``PlannerEnginePerfModel``, which exposes only
+``add_observations(dict)``. The pre-fix singular ``add_observation(fpm)``
+raised ``AttributeError`` on replay ticks that carried more than one FPM
+snapshot per worker.
 
-This test drives the method against a real PSM-built regression and
+This test drives the method against a real orchestrator-owned regression and
 asserts it does not raise.
 """
 
@@ -20,14 +18,20 @@ from __future__ import annotations
 
 import pytest
 
+from dynamo.mocker import MockEngineArgs
 from dynamo.planner.config.planner_config import PlannerConfig
-from dynamo.planner.core.state_machine import PlannerStateMachine
-from dynamo.planner.core.types import EngineCapabilities, WorkerCapabilities
+from dynamo.planner.core.types import (
+    EngineCapabilities,
+    ScheduledTick,
+    WorkerCapabilities,
+)
 from dynamo.planner.offline.replay_adapter import (
     ReplayPlannerAdapter,
     _build_fpm_from_dict,
+    _merge_traffic,
 )
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
+from dynamo.replay.main import _engine_caps
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -76,43 +80,8 @@ def _snap(worker_id: str, wall_time: float) -> dict:
     }
 
 
-def _adapter_for_psm(
-    cfg: PlannerConfig, caps: WorkerCapabilities
-) -> ReplayPlannerAdapter:
-    """Build just enough of a ReplayPlannerAdapter to exercise
-    ``_feed_extra_fpm_to_regression`` without a full replay harness.
-
-    The method only touches ``_config`` (mode / optimization_target via
-    ``_is_easy_mode``) and ``_get_regression`` (which on the PSM path reads
-    ``_use_orchestrator`` + ``_sm``)."""
-    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
-    adapter._config = cfg
-    adapter._use_orchestrator = False
-    adapter._sm = PlannerStateMachine(cfg, caps)
-    return adapter
-
-
-def test_feed_extra_fpm_to_regression_does_not_crash_psm_sla():
-    """Two decode snapshots for the same worker → one is non-excluded and
-    flows into the regression. Pre-fix this raised AttributeError on the
-    PlannerEnginePerfModel slot."""
-    cfg = _agg_config_sla()
-    adapter = _adapter_for_psm(cfg, _agg_caps())
-
-    decode_snaps = [
-        _snap("w1", wall_time=1.0),
-        _snap("w1", wall_time=2.0),  # last-per-worker → excluded; the first feeds
-    ]
-    # Pre-fix:
-    #   AttributeError: 'PlannerEnginePerfModel' object has no attribute
-    #   'add_observation'
-    adapter._feed_extra_fpm_to_regression(decode_snaps=decode_snaps, prefill_snaps=[])
-
-
 def _orch_agg_config_sla() -> PlannerConfig:
-    cfg = _agg_config_sla()
-    cfg.scheduling.use_orchestrator = True
-    return cfg
+    return _agg_config_sla()
 
 
 def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
@@ -120,13 +89,11 @@ def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
     regressions. ``ReplayPlannerAdapter.install_benchmark_fpms`` routes to
     ``OrchestratorEngineAdapter.install_regressions_from_fpms`` so
     ``get_regression`` is non-None afterwards. Pre-fix, replay/main.py only
-    fed ``adapter._sm`` (None under use_orchestrator), so the orchestrator
-    regression stayed empty and replay diverged from PSM."""
+    bypassed the orchestrator engine, so the orchestrator regression stayed empty and
+    replay diverged from live planner behavior."""
     cfg = _orch_agg_config_sla()
     adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
     adapter._config = cfg
-    adapter._use_orchestrator = True
-    adapter._sm = None
     adapter._engine = OrchestratorEngineAdapter(cfg, _agg_caps())
 
     # Before: no regression installed on the orchestrator path.
@@ -136,3 +103,152 @@ def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
 
     # After: the agg regression is installed (non-None).
     assert adapter._engine._orchestrator.get_regression("agg") is not None
+
+
+def test_get_regression_uses_orchestrator_scaling_state_without_aic_install():
+    """Replay without AIC benchmark FPMs still needs the live regression slot.
+
+    The orchestrator's public regression store is populated during benchmark
+    bootstrap for external-plugin access. No-AIC replay instead starts from
+    the adapter's ``PlannerScalingState`` regression and feeds intra-tick FPMs
+    into it.
+    """
+    cfg = _orch_agg_config_sla()
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+    adapter._config = cfg
+    adapter._engine = OrchestratorEngineAdapter(cfg, _agg_caps())
+
+    assert adapter._engine._orchestrator.get_regression("agg") is None
+    assert adapter._get_regression("agg") is not None
+
+    decode_snaps = [
+        _snap("1", wall_time=1.0),
+        _snap("1", wall_time=2.0),  # last-per-worker -> excluded
+    ]
+    adapter._feed_extra_fpm_to_regression(
+        decode_snaps=decode_snaps,
+        prefill_snaps=[],
+    )
+
+
+def test_build_tick_input_maps_replay_accept_length():
+    # The Rust simulation drains the per-tick traffic window into
+    # ``result["traffic"]``; a need_traffic_metrics tick maps it onto
+    # ``TickInput.traffic`` (accept_length, isl/osl, kv-hit, latency).
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+
+    tick = ScheduledTick(at_s=60.0, need_traffic_metrics=True)
+    result = {
+        "now_ms": 1_000.0,
+        "traffic": {
+            "duration_s": 60.0,
+            "num_req": 4,
+            "avg_isl": 512.0,
+            "avg_osl": 128.0,
+            "avg_kv_hit_rate": 0.25,
+            "avg_accept_length": 2.5,
+            "avg_ttft_ms": 10.0,
+            "avg_itl_ms": 5.0,
+        },
+    }
+    ti = adapter._build_tick_input(tick, result)
+
+    assert ti.now_s == 60.0
+    assert ti.traffic is not None
+    assert ti.traffic.accept_length == 2.5
+    assert adapter._last_traffic.accept_length == 2.5
+
+
+def test_build_tick_input_buffers_fpm_until_fpm_tick():
+    cfg = PlannerConfig(mode="agg", optimization_target="throughput")
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+    adapter._config = cfg
+    adapter._is_disagg = False
+    adapter._prefill_fpm_cache = {}
+    adapter._decode_fpm_cache = {}
+    adapter._pending_prefill_fpm_snaps = []
+    adapter._pending_decode_fpm_snaps = []
+    adapter._scaling_target_prefill = None
+    adapter._scaling_target_decode = None
+
+    no_fpm_tick = ScheduledTick(
+        at_s=1.0,
+        need_worker_states=True,
+        need_worker_fpm=False,
+    )
+    snap = _snap("1", wall_time=1.0)
+    first = adapter._build_tick_input(
+        no_fpm_tick,
+        {
+            "now_ms": 1_000.0,
+            "active_prefill_count": 0,
+            "active_decode_count": 1,
+            "decode_fpm_snapshots": [snap],
+            "prefill_fpm_snapshots": [],
+        },
+    )
+    assert first.fpm_observations is None
+
+    fpm_tick = ScheduledTick(
+        at_s=7.0,
+        need_worker_states=True,
+        need_worker_fpm=True,
+    )
+    second = adapter._build_tick_input(
+        fpm_tick,
+        {
+            "now_ms": 7_000.0,
+            "active_prefill_count": 0,
+            "active_decode_count": 1,
+            "decode_fpm_snapshots": [],
+            "prefill_fpm_snapshots": [],
+        },
+    )
+
+    assert second.fpm_observations is not None
+    assert ("1", 0) in second.fpm_observations.decode
+
+
+def test_replay_engine_caps_exposes_aic_nextn():
+    caps = _engine_caps(MockEngineArgs(aic_nextn=2))
+
+    assert caps.speculative_nextn == 2
+
+
+def test_merge_traffic_weights_ratio_fields_by_native_counts():
+    # kv_hit_rate and accept_length must merge by their true denominators
+    # (hit_rate_count / accept_length_forward_count), not num_req, so a window
+    # whose ratio-sample count is disproportionate to its request count still
+    # contributes its exact share. Here num_req-weighting would give the wrong
+    # answer (0.9 and 1.2); count-weighting reconstructs the exact mean.
+    a = {
+        "num_req": 1,
+        "duration_s": 1.0,
+        "avg_isl": 100.0,
+        "avg_osl": 50.0,
+        "avg_kv_hit_rate": 0.0,
+        "hit_rate_count": 90,
+        "avg_accept_length": 3.0,
+        "accept_length_forward_count": 90,
+    }
+    b = {
+        "num_req": 9,
+        "duration_s": 1.0,
+        "avg_isl": 100.0,
+        "avg_osl": 50.0,
+        "avg_kv_hit_rate": 1.0,
+        "hit_rate_count": 10,
+        "avg_accept_length": 1.0,
+        "accept_length_forward_count": 10,
+    }
+    merged = _merge_traffic(a, b)
+    assert merged["avg_kv_hit_rate"] == pytest.approx(
+        (0.0 * 90 + 1.0 * 10) / 100
+    )  # 0.1
+    assert merged["avg_accept_length"] == pytest.approx(
+        (3.0 * 90 + 1.0 * 10) / 100
+    )  # 2.8
+    assert merged["num_req"] == 10
+    assert merged["hit_rate_count"] == 100
+    assert merged["accept_length_forward_count"] == 100
+    assert merged["avg_isl"] == pytest.approx(100.0)

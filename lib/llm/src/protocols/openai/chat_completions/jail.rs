@@ -13,16 +13,16 @@ use dynamo_parsers::tool_calling::json::try_tool_call_parse_basic_json;
 use dynamo_parsers::tool_calling::parsers::get_tool_parser_map;
 use dynamo_parsers::tool_calling::{
     detect_tool_call_start, find_tool_call_end_position, try_tool_call_parse_aggregate,
-    try_tool_call_parse_aggregate_stream_finalize,
+    try_tool_call_parse_aggregate_finalize,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::utils::{MarkerMatcher, MatchResult};
 
-use super::NvCreateChatCompletionStreamResponse;
+use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_template};
 
 fn is_harmony_parser(parser: Option<&str>) -> bool {
     parser == Some("harmony")
@@ -847,6 +847,7 @@ impl JailedStream {
                     system_fingerprint: None,
                     },
                     nvext: None,
+                    llm_metrics: None,
                 };
 
                 let final_metadata = (last_annotated_id, last_annotated_event, last_annotated_comment);
@@ -912,6 +913,26 @@ impl JailedStream {
             return split_partial_call_prefix_gemma4(content);
         }
         None
+    }
+
+    /// Whether this parser must never surface tool-call markup to the user, so
+    /// finalize strips residual markers rather than releasing the raw buffer.
+    ///
+    /// The real source of truth is `dynamo-parsers`'
+    /// `JsonParserConfig::discard_unparseable_wrapper`, set by that crate's
+    /// `hermes()` / `qwen25()` / `jamba()` configs (ai-dynamo/frontend-crates,
+    /// `parsers/src/tool_calling/config.rs`) and already honored by the batch
+    /// parser. We allowlist by name here only because the pinned `dynamo-parsers`
+    /// version predates that exported field, so it can't be read yet; extend the
+    /// list when a new family opts into the never-leak contract.
+    // TODO: read `discard_unparseable_wrapper` from the parser config and drop
+    // this name allowlist (hermes/qwen25/jamba) once the `dynamo-parsers`
+    // dependency is bumped to a version that exports the field.
+    fn suppresses_tool_call_markup(&self) -> bool {
+        matches!(
+            self.tool_call_parser.as_deref(),
+            Some("hermes") | Some("qwen25") | Some("jamba")
+        )
     }
 
     fn should_start_jail(&self, content: &str) -> bool {
@@ -1048,7 +1069,7 @@ impl JailedStream {
                 // Traditional marker-based tool call parsing
                 let tools_slice = self.tool_definitions.as_deref();
                 let parse_result = if is_finalize {
-                    try_tool_call_parse_aggregate_stream_finalize(
+                    try_tool_call_parse_aggregate_finalize(
                         accumulated_content,
                         self.tool_call_parser.as_deref(),
                         tools_slice,
@@ -1137,7 +1158,7 @@ impl JailedStream {
                         // stripping Harmony envelopes when no reasoning parser is configured.
                         // In zero-call Harmony marker cases, emit the stripped normal_text rather
                         // than accumulated_content, which still contains raw protocol markers.
-                        let content = if is_finalize
+                        let content: String = if is_finalize
                             && self.tool_call_parser.as_deref() == Some("minimax_m2")
                             && self
                                 .prefix_before_first_tool_call_marker(accumulated_content)
@@ -1148,19 +1169,46 @@ impl JailedStream {
                             // still protocol markup, so keep only pre-call prose at stream end.
                             self.prefix_before_first_tool_call_marker(accumulated_content)
                                 .unwrap_or("")
+                                .to_string()
                         } else if normal_text.as_deref() == Some("") {
-                            ""
+                            String::new()
                         } else if is_harmony_parser(self.tool_call_parser.as_deref())
                             && contains_harmony_protocol(accumulated_content)
                         {
-                            normal_text.as_deref().unwrap_or("")
+                            normal_text.as_deref().unwrap_or("").to_string()
+                        } else if self.suppresses_tool_call_markup() {
+                            // No call parsed out of a jailed buffer: strip the markers rather
+                            // than leak the raw text. Handled in the jail so it holds regardless
+                            // of the installed parser version.
+                            if let Some(prefix) =
+                                self.prefix_before_first_tool_call_marker(accumulated_content)
+                            {
+                                // Truncated / unparseable wrapper: keep the prose before the
+                                // opening marker, drop the rest.
+                                prefix.trim_end().to_string()
+                            } else if self.jail_end_sequences.iter().any(|seq| {
+                                !seq.is_empty() && accumulated_content.contains(seq.as_str())
+                            }) {
+                                // Orphan close marker(s) with no opener: remove every occurrence
+                                // (not just trailing) so a mid-buffer marker can't leak.
+                                let mut cleaned = accumulated_content.to_string();
+                                for seq in self.jail_end_sequences.iter().filter(|s| !s.is_empty())
+                                {
+                                    cleaned = cleaned.replace(seq.as_str(), "");
+                                }
+                                cleaned.trim().to_string()
+                            } else {
+                                // No markers: false-positive jail entry on prose, pass through.
+                                accumulated_content.to_string()
+                            }
                         } else {
-                            accumulated_content
+                            // Other parsers / generic jails: release the buffer verbatim.
+                            accumulated_content.to_string()
                         };
                         create_choice_stream(
                             choice_index,
                             Some(Role::Assistant),
-                            content,
+                            &content,
                             None,
                             base_choice.finish_reason,
                             base_choice.logprobs.clone(),
@@ -1413,17 +1461,37 @@ impl JailedStream {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        let _ = named_tool_active;
+        let _ = &jail_mode;
         stream! {
             tokio::pin!(input_stream);
             let mut has_tool_calls_per_choice: HashMap<u32, bool> = HashMap::new();
+            // Choices that already received a finish_reason during the stream — used by
+            // the backstop below to avoid synthesizing a duplicate.
+            let mut terminated: HashSet<u32> = HashSet::new();
+            // Last response, kept (with choices cleared) as a template for a synthesized
+            // finish_reason chunk when the stream ended without one.
+            let mut template: Option<NvCreateChatCompletionStreamResponse> = None;
+            // Choices for which this post-processor has already emitted a synthetic
+            // terminal chunk. Tracking this per choice allows a later tool-call choice
+            // to terminate even if an earlier empty-choices chunk emitted nothing.
+            let mut synthesized: HashSet<u32> = HashSet::new();
 
             while let Some(mut response) = input_stream.next().await {
-                // Track if any choice emitted tool calls
+                // Track if any choice emitted tool calls, and which already terminated.
                 if let Some(ref data) = response.data {
                     for choice in &data.inner.choices {
                         if choice.delta.tool_calls.is_some() {
                             has_tool_calls_per_choice.insert(choice.index, true);
                         }
+                        if choice.finish_reason.is_some() {
+                            terminated.insert(choice.index);
+                        }
+                    }
+                    {
+                        let mut t = data.clone();
+                        t.inner.choices.clear();
+                        template = Some(t);
                     }
                 }
 
@@ -1439,7 +1507,6 @@ impl JailedStream {
                                 // choice, finish_reason MUST be "tool_calls" — regardless of
                                 // whether tool_choice was "auto", "required", or a named
                                 // function.
-                                let _ = named_tool_active;
                                 match &jail_mode {
                                     JailMode::MarkerBased => {
                                         if has_tool_calls {
@@ -1458,7 +1525,67 @@ impl JailedStream {
                     }
                 }
 
+                // OpenAI stream ordering: the terminal finish_reason chunk must precede
+                // the usage-only chunk. When a chunk with no choices arrives (the
+                // frontend's compliance usage chunk, or any other empty-choices chunk)
+                // and tool-call choices are still missing a finish_reason, synthesize
+                // their terminal `ToolCalls` chunks *before* yielding this one.
+                let is_empty_choices = response
+                    .data
+                    .as_ref()
+                    .is_some_and(|d| d.inner.choices.is_empty());
+                if is_empty_choices && let Some(template) = &template {
+                    let mut indices: Vec<_> = has_tool_calls_per_choice
+                        .iter()
+                        .filter_map(|(index, has)| {
+                            (*has && !terminated.contains(index) && !synthesized.contains(index))
+                                .then_some(*index)
+                        })
+                        .collect();
+                    indices.sort_unstable();
+                    for index in indices {
+                        yield stream_choice_chunk_from_template(
+                            template,
+                            index,
+                            None,
+                            None,
+                            Some(FinishReason::ToolCalls),
+                        );
+                        synthesized.insert(index);
+                    }
+                }
+
                 yield response;
+            }
+
+            // Backstop: the stream ended without a finish_reason AND without an
+            // empty-choices/usage chunk to anchor the synthesized terminal chunks
+            // before (e.g. the engine dropped the terminal signal and the frontend
+            // never emitted a usage chunk). Emit one trailing `ToolCalls` chunk per
+            // tool-call choice that never received a finish_reason. Strict OpenAI
+            // clients wait for a non-null finish_reason before considering a tool call
+            // complete; without this they hang until their client-side timeout.
+            // Choices that never emitted tool calls are left alone — there
+            // is no signal to invent a finish_reason from for text-only output.
+            if let Some(template) = template {
+                let mut indices: Vec<_> = has_tool_calls_per_choice
+                    .iter()
+                    .filter_map(|(index, has)| {
+                        (*has && !terminated.contains(index) && !synthesized.contains(index))
+                            .then_some(*index)
+                    })
+                    .collect();
+                indices.sort_unstable();
+                for index in indices {
+                    yield stream_choice_chunk_from_template(
+                        &template,
+                        index,
+                        None,
+                        None,
+                        Some(FinishReason::ToolCalls),
+                    );
+                    synthesized.insert(index);
+                }
             }
         }
     }
@@ -1718,10 +1845,101 @@ mod tests {
                     system_fingerprint: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: None,
             event: None,
             comment: None,
+            error: None,
+        }
+    }
+
+    /// A usage-only chunk (empty `choices`, a usage object) — the frontend's
+    /// OpenAI-compliance terminal chunk. Used to test that the synthesized
+    /// `ToolCalls` finish_reason chunk is emitted *before* this one.
+    fn usage_only_chunk() -> Annotated<NvCreateChatCompletionStreamResponse> {
+        Annotated {
+            data: Some(NvCreateChatCompletionStreamResponse {
+                inner: CreateChatCompletionStreamResponse {
+                    id: "id-42".to_string(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: 0,
+                    model: "test-model".to_string(),
+                    choices: vec![],
+                    usage: Some(dynamo_protocols::types::CompletionUsage {
+                        prompt_tokens: 10,
+                        completion_tokens: 5,
+                        total_tokens: 15,
+                        prompt_tokens_details: None,
+                        completion_tokens_details: None,
+                    }),
+                    service_tier: None,
+                    system_fingerprint: None,
+                },
+                nvext: None,
+                llm_metrics: Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    chunk_tokens: 0,
+                    cached_tokens: None,
+                    prefill_worker_id: None,
+                    prefill_dp_rank: None,
+                    prefill_worker_type: None,
+                    decode_worker_id: None,
+                    decode_dp_rank: None,
+                    decode_worker_type: None,
+                    tokenize_latency: None,
+                    detokenize_total_latency: None,
+                    detokenize_count: None,
+                }),
+            }),
+            id: None,
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    /// Build one data chunk whose choices have already emitted tool-call deltas.
+    fn tool_call_choices_chunk(indices: &[u32]) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = text_chunk("");
+        let data = chunk.data.as_mut().expect("tool-call response data");
+        #[allow(deprecated)]
+        {
+            data.inner.choices = indices
+                .iter()
+                .map(|index| ChatChoiceStream {
+                    index: *index,
+                    delta: ChatCompletionStreamResponseDelta {
+                        role: Some(Role::Assistant),
+                        content: None,
+                        tool_calls: Some(vec![ChatCompletionMessageToolCallChunk {
+                            index: 0,
+                            id: Some(format!("call-{index}")),
+                            r#type: Some(FunctionType::Function),
+                            function: Some(FunctionCallStream {
+                                name: Some(format!("tool_{index}")),
+                                arguments: Some("{}".to_string()),
+                            }),
+                        }]),
+                        function_call: None,
+                        refusal: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                })
+                .collect();
+        }
+        chunk
+    }
+
+    fn heartbeat() -> Annotated<NvCreateChatCompletionStreamResponse> {
+        Annotated {
+            data: None,
+            id: None,
+            event: None,
+            comment: Some(vec!["heartbeat".to_string()]),
             error: None,
         }
     }
@@ -1818,6 +2036,7 @@ mod tests {
                     system_fingerprint: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             }),
             id: None,
             event: None,
@@ -2027,6 +2246,211 @@ mod tests {
             all_text.contains("Done!"),
             "Trailing text 'Done!' should appear in output. Got text: {:?}",
             all_text
+        );
+    }
+
+    /// The last `finish_reason` a client sees across the stream. `None` if the
+    /// stream never carried one (the missing-finish-reason hang condition).
+    fn final_finish_reason(
+        responses: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> Option<FinishReason> {
+        responses
+            .iter()
+            .filter_map(|r| r.data.as_ref())
+            .flat_map(|d| d.inner.choices.iter())
+            .filter_map(|c| c.finish_reason)
+            .next_back()
+    }
+
+    // Missing-finish-reason regression: when the engine emits a complete tool call
+    // but the stream ends without any finish_reason chunk (speculative decoding
+    // folded EOS into content, or the terminal signal was dropped), a strict
+    // OpenAI client waits for a non-null finish_reason and hangs until its timeout.
+    // The jail path's finalize() emits the tool call with the absent upstream
+    // finish_reason; fix_finish_reason's end-of-stream path must synthesize
+    // `ToolCalls` so the client gets a terminal signal.
+    #[tokio::test]
+    async fn jail_synthesizes_tool_calls_finish_reason_when_stream_lacks_one() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![text_chunk(
+            "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"SF\"}}\n</tool_call>",
+        )];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+        assert!(
+            !tool_calls.is_empty(),
+            "expected the hermes tool call to be parsed: {tool_calls:?}"
+        );
+        assert_eq!(tool_calls[0].0, "get_weather");
+        assert_eq!(
+            final_finish_reason(&responses),
+            Some(FinishReason::ToolCalls),
+            "backstop must synthesize ToolCalls when the stream ended without a finish_reason"
+        );
+    }
+
+    // Text-only corollary: a text-only stream that ends without a finish_reason
+    // must not get a synthesized one. There is no signal to invent a
+    // finish_reason from when no tool call was emitted.
+    #[tokio::test]
+    async fn jail_does_not_synthesize_finish_reason_for_text_only_stream() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![text_chunk("hello world"), text_chunk("")];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        let tool_calls = collect_tool_calls(&responses);
+        assert!(
+            tool_calls.is_empty(),
+            "no tool calls expected: {tool_calls:?}"
+        );
+        assert_eq!(
+            final_finish_reason(&responses),
+            None,
+            "text-only stream with no upstream finish_reason must not get a synthetic one"
+        );
+    }
+
+    // Usage-ordering regression: a tool call is followed by a usage-only chunk,
+    // with no finish_reason chunk from the engine. The
+    // synthesized `ToolCalls` terminal chunk must be emitted *before* the
+    // usage-only chunk (OpenAI stream ordering — the terminal finish_reason
+    // precedes usage). This mirrors the production stream ordering.
+    #[tokio::test]
+    async fn jail_synthesizes_tool_calls_before_usage_only_chunk() {
+        let jail = JailedStream::builder().tool_call_parser("hermes").build();
+
+        let chunks = vec![
+            heartbeat(),
+            text_chunk(
+                "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"location\": \"SF\"}}\n</tool_call>",
+            ),
+            usage_only_chunk(),
+        ];
+
+        let input_stream = Box::pin(stream::iter(chunks));
+        let output_stream = jail.apply_with_finish_reason(input_stream);
+
+        let responses: Vec<_> = output_stream.collect().await;
+        assert_eq!(
+            responses
+                .first()
+                .and_then(|response| response.comment.clone()),
+            Some(vec!["heartbeat".to_string()]),
+            "leading non-data annotations must pass through unchanged"
+        );
+        let tool_calls = collect_tool_calls(&responses);
+        assert!(
+            !tool_calls.is_empty(),
+            "expected the hermes tool call: {tool_calls:?}"
+        );
+        assert_eq!(tool_calls[0].0, "get_weather");
+        assert_eq!(
+            final_finish_reason(&responses),
+            Some(FinishReason::ToolCalls),
+            "a synthesized ToolCalls terminal chunk must be present"
+        );
+
+        // The ToolCalls terminal chunk must precede the usage-only chunk.
+        let finish_pos = responses.iter().position(|r| {
+            r.data.as_ref().is_some_and(|d| {
+                d.inner
+                    .choices
+                    .iter()
+                    .any(|c| c.finish_reason == Some(FinishReason::ToolCalls))
+            })
+        });
+        let usage_pos = responses.iter().position(|r| {
+            r.data
+                .as_ref()
+                .is_some_and(|d| d.inner.usage.is_some() && d.inner.choices.is_empty())
+        });
+        let finish_pos = finish_pos.expect("no ToolCalls chunk emitted");
+        let usage_pos = usage_pos.expect("no usage-only chunk in output");
+        assert!(
+            finish_pos < usage_pos,
+            "ToolCalls chunk at {finish_pos} must precede the usage chunk at {usage_pos}"
+        );
+        let finish_data = responses[finish_pos]
+            .data
+            .as_ref()
+            .expect("ToolCalls chunk has no response data");
+        assert!(
+            finish_data.inner.usage.is_none(),
+            "synthesized ToolCalls chunk must not repeat usage data"
+        );
+        assert!(
+            finish_data.llm_metrics.is_none(),
+            "synthesized ToolCalls chunk must not repeat LLM metrics"
+        );
+    }
+
+    // An empty-choices chunk can precede tool deltas (for example, a metadata
+    // response). It must not disable later synthesis. When several choices then
+    // emit tool calls, their terminal chunks must be ordered by choice index.
+    #[tokio::test]
+    async fn jail_synthesizes_late_tool_choices_in_index_order() {
+        let chunks = vec![
+            usage_only_chunk(),
+            tool_call_choices_chunk(&[2, 0, 1]),
+            usage_only_chunk(),
+        ];
+
+        let responses: Vec<_> =
+            JailedStream::fix_finish_reason(stream::iter(chunks), JailMode::MarkerBased, false)
+                .collect()
+                .await;
+
+        let usage_positions: Vec<_> = responses
+            .iter()
+            .enumerate()
+            .filter_map(|(position, response)| {
+                response
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.inner.choices.is_empty() && data.inner.usage.is_some())
+                    .then_some(position)
+            })
+            .collect();
+        assert_eq!(
+            usage_positions.len(),
+            2,
+            "both empty-choices chunks must pass through"
+        );
+
+        let terminals: Vec<_> = responses
+            .iter()
+            .enumerate()
+            .flat_map(|(position, response)| {
+                response.data.iter().flat_map(move |data| {
+                    data.inner.choices.iter().filter_map(move |choice| {
+                        (choice.finish_reason == Some(FinishReason::ToolCalls))
+                            .then_some((position, choice.index))
+                    })
+                })
+            })
+            .collect();
+        assert_eq!(
+            terminals
+                .iter()
+                .map(|(_, index)| *index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "synthetic terminal chunks must be deterministic"
+        );
+        assert!(
+            terminals.iter().all(|(position, _)| {
+                usage_positions[0] < *position && *position < usage_positions[1]
+            }),
+            "terminal chunks must follow the early empty response and precede the final usage response"
         );
     }
 }

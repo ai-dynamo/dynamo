@@ -9,8 +9,8 @@ Usage:
         --router-block-size 64
 
 Serves ``{namespace}.thunderagent_router.generate``. Pause/resume is
-opt-in per-request via ``nvext.agent_context.trajectory_id``; requests
-without it are routed via plain KvRouter with no lifecycle.
+opt-in per-request via header-derived ``session_id``; requests without it
+are routed via plain KvRouter with no lifecycle.
 """
 
 from __future__ import annotations
@@ -47,10 +47,16 @@ def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
     ctx = request.get("agent_context")
     if not isinstance(ctx, dict):
         return None
-    pid = ctx.get("trajectory_id")
+    pid = ctx.get("session_id")
     if isinstance(pid, str) and pid:
         return pid
     return None
+
+
+def _is_session_final(request: dict[str, Any]) -> bool:
+    """``x-dynamo-session-final`` marks a session's last turn internally."""
+    ctx = request.get("agent_context")
+    return isinstance(ctx, dict) and bool(ctx.get("session_final"))
 
 
 def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
@@ -128,8 +134,13 @@ class ThunderAgentRouterHandler:
             )
         program_id = _extract_program_id(request)
 
+        # A request marked session_final just releases the program from the
+        # table and is NOT forwarded to the engine (short-circuit).
+        if program_id is not None and _is_session_final(request):
+            await self._scheduler.end_program(program_id)
+            return
+
         # Path A: no program_id -> behave like the standalone router.
-        # Backward compat for clients that don't send agent_context.
         if program_id is None:
             preprocessed = _wrap_preprocessed_request(request)
             async for chunk in await self._kv_router.generate_from_request(
@@ -207,19 +218,27 @@ class ThunderAgentRouterHandler:
             )
 
     def _extract_worker_id(self, chunk: Any) -> Optional[int]:
-        # Expects the shape set by ``inject_worker_id_from_tracker`` in the
-        # Python bindings. Log once if the shape no longer matches; silent
-        # extraction failure here means we lose worker-affinity on pin.
+        # Expects the shape set by ``inject_worker_id_from_tracker`` in the Python
+        # bindings: worker attribution rides ``routing_data.worker_id``. Log once if the
+        # shape no longer matches; silent extraction failure here means we lose
+        # worker-affinity on pin.
         if not isinstance(chunk, dict):
             self._warn_unexpected_chunk_shape("not a dict")
             return None
-        dp = chunk.get("disaggregated_params")
-        if not isinstance(dp, dict):
-            self._warn_unexpected_chunk_shape("no disaggregated_params dict")
+        routing_data = chunk.get("routing_data")
+        if not isinstance(routing_data, dict):
+            self._warn_unexpected_chunk_shape("no routing_data dict")
             return None
-        info = dp.get("worker_id")
+        info = routing_data.get("worker_id")
         if isinstance(info, dict):
-            worker_id = info.get("worker_id")
+            # ``WorkerIdInfo`` carries prefill/decode IDs (and DP ranks); there is no
+            # nested ``worker_id`` key. The sticky pin is applied as
+            # ``backend_instance_id``, which the frontend resolves to the decode/backend
+            # worker, so prefer ``decode_worker_id`` and fall back to ``prefill_worker_id``
+            # (identical in aggregated mode).
+            worker_id = info.get("decode_worker_id")
+            if not isinstance(worker_id, int):
+                worker_id = info.get("prefill_worker_id")
             if isinstance(worker_id, int):
                 return worker_id
         self._warn_unexpected_chunk_shape("worker_id payload shape changed")

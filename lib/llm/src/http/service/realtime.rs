@@ -40,7 +40,7 @@ use axum::{
         ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade, close_code},
     },
     http::Method,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::get,
 };
 use dynamo_runtime::engine::AsyncEngineContextProvider;
@@ -59,7 +59,7 @@ const REQUEST_CHANNEL_CAPACITY: usize = 64;
 /// half-broken peer from parking the connection indefinitely.
 const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-use super::{RouteDoc, service_v2};
+use super::{RouteDoc, error::SanitizedError, service_v2};
 use crate::discovery::ModelManagerError;
 use crate::types::RealtimeBidirectionalEngine;
 use dynamo_protocols::types::realtime::{
@@ -84,10 +84,26 @@ async fn realtime_ws_handler(
     State(state): State<Arc<service_v2::State>>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    upgrade.on_upgrade(move |socket| handle_socket(socket, state))
+    let permit = state.acquire_inflight();
+    // Count the upgrade attempt before the readiness gate so shutdown cannot
+    // observe zero inflight while this WebSocket admission is in progress.
+    if !state.is_ready() {
+        drop(permit);
+        return super::openai::ErrorMessage::_service_unavailable().into_response();
+    }
+
+    upgrade
+        .on_upgrade(move |socket| handle_socket(socket, state, permit))
+        .into_response()
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<service_v2::State>) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<service_v2::State>,
+    // Held for the full WebSocket task lifetime so realtime sessions are
+    // visible to graceful shutdown after the 101 upgrade response completes.
+    _permit: service_v2::InflightPermit,
+) {
     // Inbound writes a non-NORMAL close message to `close_reason` on protocol errors
     // before cancelling the engine; the ScopedWsWriter takes it on Drop.
     // Empty slot ⇒ NORMAL completion.
@@ -153,7 +169,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<service_v2::State>) {
             tracing::error!(%err, "/v1/realtime engine.generate() failed");
             *close_reason.lock() = Some(close_message(
                 close_code::ERROR,
-                &format!("engine error: {err}"),
+                &SanitizedError::Internal.to_string(),
             ));
             return;
         }
@@ -171,12 +187,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<service_v2::State>) {
             let event = if let Some(event) = annotated.data {
                 event
             } else if let Some(err) = annotated.error {
+                tracing::error!("/v1/realtime engine error: {err}");
+                let sanitized = SanitizedError::Internal;
                 RealtimeServerEvent::Error(RealtimeServerEventError {
                     event_id: format!("event_{}", Uuid::new_v4()),
                     error: RealtimeAPIError {
                         r#type: "server_error".to_string(),
                         code: None,
-                        message: err.to_string(),
+                        message: sanitized.to_string(),
                         param: None,
                         event_id: None,
                     },
@@ -469,7 +487,7 @@ where
                 send_error_event(
                     ws_tx,
                     "server_error",
-                    &err.to_string(),
+                    &SanitizedError::Internal.to_string(),
                     Some("session.model"),
                 )
                 .await;

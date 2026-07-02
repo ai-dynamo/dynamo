@@ -253,10 +253,15 @@ message TrafficMetrics
   // KV cache hit rate over the window, derived from prefill prompt-cache
   // hit metrics emitted by the engine.  ``optional`` distinguishes
   // "Prometheus returned no hit-rate datapoint" (unset) from
-  // "all-cold cache, 0.0 hit rate" (set to 0.0).  PSM throughput
-  // scaling consumes this — external throughput-propose plugins
-  // replicating PSM behaviour need it for parity.
+  // "all-cold cache, 0.0 hit rate" (set to 0.0). Builtin and external
+  // throughput-propose plugins consume this.
   optional double kv_hit_rate = 5;
+
+  // Speculative decode accept length over the window: visible output tokens
+  // per decode request-forward, including the base token. ``optional``
+  // distinguishes "no datapoint" from a real 1.0 "no speculative benefit"
+  // observation. Builtin throughput/load scaling consumes this for MTP.
+  optional double accept_length = 6;
 }
 
 // Mirrors FpmObservations (types.py).
@@ -291,10 +296,9 @@ message WorkerState
 
   // Scaling-in-progress flags.  ``true`` when the planner has issued
   // a scale operation that the connector has not yet observed as
-  // stable (ready == expected).  PSM load-scaling uses these to
+  // stable (ready == expected). Builtin load-scaling uses these to
   // suppress further scale-up while a previous request is mid-flight
-  // and to explain "held" decisions in audit logs — external plugins
-  // replicating PSM load-scaling behaviour need parity access.
+  // and to explain "held" decisions in audit logs.
   // ``optional`` (proto3 presence) distinguishes "not reported" from
   // an explicit ``false`` value.
   optional bool prefill_scaling_in_progress = 5;
@@ -303,7 +307,7 @@ message WorkerState
 
 // Prediction data flows through PREDICT chain-augment.
 //
-// **v11 critical**: All three prediction fields MUST be `optional float`.
+// **v11 critical**: All numeric prediction fields MUST be `optional double`.
 // chain-augment partial-merge (PR 4) uses `HasField()` to distinguish:
 //   - field set → plugin actively asserts this value (even if 0.0)
 //   - field unset → plugin has no opinion; preserve previous chain plugin's value
@@ -323,10 +327,15 @@ message PredictionData
   // first-writer-wins partial-merge semantic as the other predicted_*
   // fields — ``unset`` means "no opinion, preserve previous chain
   // plugin's value", ``set`` means "I assert this value (even 0.0)".
-  // PSM ``TickDiagnostics.predicted_kv_hit_rate`` mirrors this; external
-  // throughput-propose plugins replicating PSM behaviour need it on the
-  // wire schema for parity.
+  // External throughput-propose plugins replicating builtin behaviour need it
+  // on the wire schema for parity.
   optional double predicted_kv_hit_rate = 5;
+
+  // Speculative decode accept length passed through PREDICT so downstream
+  // throughput/load stages can consume the same runtime metadata without
+  // sharing predictor-owned state. ``unset`` means "no datapoint"; set 1.0
+  // means no speculative benefit observed.
+  optional double predicted_accept_length = 6;
 }
 
 // Aligns wire format with existing ScaleRequest.target_replicas
@@ -447,8 +456,8 @@ message ProposeStageResponse
   // (preserving observability / metrics / audit), but their outputs are
   // discarded for the merge. Multiple plugins with final=true: priority
   // number smallest wins.
-  // Does NOT skip CONSTRAIN—the CONSTRAIN stage still runs as the safety
-  // net (with builtin-budget-constrain providing min_endpoint / max_gpu_budget).
+  // Does NOT skip CONSTRAIN—the CONSTRAIN stage still runs, and the planner
+  // adapter applies final min_endpoint / GPU-budget invariants after CONSTRAIN.
   // **REJECT is HIGHER priority than final** (v11 G-2): if any plugin returns
   // RejectResult, the entire stage short-circuits regardless of final flags.
   bool final = 4;
@@ -536,8 +545,9 @@ message ConstrainStageResponse
   // final is SILENTLY IGNORED in CONSTRAIN stage. CONSTRAIN allows only
   // AT_LEAST / AT_MOST, which are accumulated via max/min — there is no
   // SET-priority competition for final to influence. Allowing final to
-  // "completely override" in CONSTRAIN would let a user plugin bypass
-  // builtin-budget-constrain, breaking the safety guarantee. To make
+  // "completely override" in CONSTRAIN would bypass other constrain plugins.
+  // Final planner min_endpoint / GPU-budget invariants are still applied by
+  // the adapter after CONSTRAIN. To make
   // your constrain win, simply tighten the bound (larger AT_LEAST or
   // smaller AT_MOST) — max/min monotonicity will let you win automatically.
   bool final = 4;

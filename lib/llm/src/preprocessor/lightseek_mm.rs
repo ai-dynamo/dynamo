@@ -9,9 +9,8 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow};
-use llm_multimodal::{
-    ImagePreProcessor, ImageProcessorRegistry, ModelMetadata, ModelRegistry, PreProcessorConfig,
-};
+use llm_multimodal::vision::{PreProcessorConfig, VisionPreProcessor, VisionProcessorRegistry};
+use llm_multimodal::{ModelMetadata, ModelRegistry};
 use llm_tokenizer::traits::Tokenizer;
 use llm_tokenizer::{Decoder, Encoder, Encoding, HuggingFaceTokenizer, SpecialTokens};
 
@@ -24,7 +23,7 @@ use crate::protocols::TokenIdType;
 /// some `ModelProcessorSpec` impls — Kimi-K2.5 in particular — read the
 /// image-placeholder token id straight out of `config.json` and never call
 /// the tokenizer. Passing `NullTokenizer` lets those specs run; specs that
-/// do need vocab access (Phi-3, LLaVA) just get `None` from
+/// do need vocab access (LLaVA) just get `None` from
 /// `token_to_id` and the resolver returns `None` gracefully.
 struct NullTokenizer;
 
@@ -68,14 +67,14 @@ impl Tokenizer for NullTokenizer {
 
 // Both registries borrow processor refs that callers hold across requests,
 // so they must outlive every consumer — `LazyLock` gives them `'static`.
-static REGISTRY: LazyLock<ImageProcessorRegistry> =
-    LazyLock::new(ImageProcessorRegistry::with_defaults);
+static REGISTRY: LazyLock<VisionProcessorRegistry> =
+    LazyLock::new(VisionProcessorRegistry::with_defaults);
 static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
 
 /// Maps `(width, height) → num_image_tokens` for a single model using the
 /// model's HF `preprocessor_config.json`.
 pub struct LightseekMmCounter {
-    processor: &'static dyn ImagePreProcessor,
+    processor: &'static dyn VisionPreProcessor,
     config: PreProcessorConfig,
     model_id: String,
 }
@@ -134,7 +133,7 @@ impl LightseekMmCounter {
 
 /// Resolve the image-placeholder token id by delegating to a per-model
 /// `ModelProcessorSpec` from the registry. Each registered model (Qwen3-VL,
-/// Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Phi-3-vision, Llama-4,
+/// Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Llama-4,
 /// Kimi-K2.5) reads the right field of `config.json` (`image_token_id`,
 /// `image_token_index`, `media_placeholder_token_id`) and falls back to the
 /// tokenizer's vocab when only the placeholder string is known.
@@ -310,7 +309,7 @@ fn extract_chat_placeholder_from_config(config: &serde_json::Value) -> Option<To
 
 /// Return the `bos_token` string from a pre-parsed `tokenizer_config.json`
 /// when `add_bos_token: true`. The routing-side sequence must prepend it to
-/// match the backend's HF-processor output (Phi-3-vision and other
+/// match the backend's HF-processor output (LLaVA-1.5 and other
 /// `LlamaTokenizer`-family models). Returns `None` otherwise.
 fn extract_bos_token_from_tokenizer_config(cfg: &serde_json::Value) -> Option<String> {
     if !cfg
@@ -383,13 +382,11 @@ mod tests {
                 "llava_next",
             ),
             ("LLaVA-1.5", "llava-hf/llava-1.5-7b-hf", "llava"),
-            (
-                "Phi-3-vision",
-                "microsoft/Phi-3-vision-128k-instruct",
-                "phi3_v",
-            ),
             ("Llama-4", "meta-llama/Llama-4-Scout-17B-16E", "llama4"),
             ("Kimi-K2.5", "moonshotai/Kimi-K2.5-Instruct", "kimi_k2_5"),
+            ("Kimi-K2.6", "moonshotai/Kimi-K2.6-Instruct", "kimi_k2_6"),
+            ("Qwen3.5", "Qwen/Qwen3.5-0.8B", "qwen3_5"),
+            ("Qwen3.6", "Qwen/Qwen3.6-35B-A3B", "qwen3_6"),
         ];
 
         let mut missing: Vec<&str> = Vec::new();

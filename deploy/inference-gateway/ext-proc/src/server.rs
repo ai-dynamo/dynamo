@@ -50,7 +50,7 @@ struct RequestContext {
     response_size: usize,
     response_complete: bool,
     model_server_streaming: bool,
-    is_disaggregated: bool,
+    body_routed: bool,
     prefill_complete_signaled: bool,
 
     /// Set once we've validated the gateway's `ProtocolConfiguration`.
@@ -83,7 +83,7 @@ impl RequestContext {
             response_size: 0,
             response_complete: false,
             model_server_streaming: false,
-            is_disaggregated: false,
+            body_routed: false,
             prefill_complete_signaled: false,
             protocol_validated: false,
             request_headers: Vec::new(),
@@ -284,14 +284,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             .await
             .map_err(ExtProcError::from_pick_error)?;
 
+        ctx.body_routed = true;
         ctx.target_endpoint = result.endpoint.clone();
         ctx.incoming_model_name = model;
         ctx.target_model_name = ctx.incoming_model_name.clone();
-        ctx.is_disaggregated = result
-            .headers
-            .iter()
-            .any(|(k, v)| k == "x-dynamo-routing-mode" && v == "disaggregated");
-
         tracing::info!(
             request_id = %ctx.request_id,
             endpoint = %result.endpoint,
@@ -491,7 +487,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             // bookkeeping before decode actually starts. The
                             // first non-empty body chunk is the earliest signal
                             // that prefill produced output and decode is underway.
-                            if ctx.is_disaggregated
+                            if ctx.body_routed
                                 && !ctx.prefill_complete_signaled
                                 && !body.body.is_empty()
                             {
@@ -499,6 +495,8 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                                 picker.on_prefill_complete(&ctx.request_id).await;
                             }
 
+                            // TODO(epp-output-tracking): Parse generated-token progress and
+                            // update router output blocks instead of tracking only phase changes.
                             if ctx.model_server_streaming {
                                 ExtProcServer::<P>::handle_response_body(&mut ctx, body);
                             } else {
@@ -553,9 +551,11 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                 let _ = tx.send(Err(e)).await;
             }
 
-            // Notify the picker that this request is complete so it can
-            // free router bookkeeping state (mirrors Go EPP PostResponse).
-            if !ctx.request_id.is_empty() {
+            // TODO(epp-disconnect-semantics): Define how Envoy retries and backend
+            // work continuing after an ext_proc disconnect affect booking ownership.
+            // Notify the picker that this request is complete so it can free router
+            // bookkeeping state (mirrors Go EPP PostResponse).
+            if ctx.body_routed && !ctx.request_id.is_empty() {
                 picker.on_request_complete(&ctx.request_id).await;
             }
         });
@@ -576,7 +576,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 ///   * The body holds the chat-completion prompt.
 ///   * We tokenize it.
 ///   * We feed those tokens to the KV-aware router to choose a worker.
-///   * The chosen worker becomes the value of `x-worker-instance-id` /
+///   * The chosen worker becomes the value of `x-dynamo-worker-instance-id` /
 ///     `x-gateway-destination-endpoint` in the `RequestHeaders` response.
 ///
 /// That ordering — header response *after* body — is only legal under
@@ -855,6 +855,45 @@ mod tests {
             },
             ProcessingRequest {
                 request: Some(ProcReq::ResponseBody(HttpBody {
+                    body: b"{".to_vec(),
+                    end_of_stream: false,
+                })),
+                ..Default::default()
+            },
+            ProcessingRequest {
+                request: Some(ProcReq::ResponseBody(HttpBody {
+                    body: b"}".to_vec(),
+                    end_of_stream: true,
+                })),
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn header_only_stream() -> Vec<ProcessingRequest> {
+        vec![
+            ProcessingRequest {
+                request: Some(ProcReq::RequestHeaders(HttpHeaders {
+                    headers: Some(HeaderMap {
+                        headers: vec![HeaderValue {
+                            key: "x-request-id".into(),
+                            value: "r1".into(),
+                            raw_value: vec![],
+                        }],
+                    }),
+                    end_of_stream: true,
+                })),
+                ..Default::default()
+            },
+            ProcessingRequest {
+                request: Some(ProcReq::ResponseHeaders(HttpHeaders {
+                    headers: Some(HeaderMap { headers: vec![] }),
+                    end_of_stream: false,
+                })),
+                ..Default::default()
+            },
+            ProcessingRequest {
+                request: Some(ProcReq::ResponseBody(HttpBody {
                     body: b"{}".to_vec(),
                     end_of_stream: true,
                 })),
@@ -863,14 +902,21 @@ mod tests {
         ]
     }
 
-    async fn run(c: &mut ExternalProcessorClient<tonic::transport::Channel>) {
+    async fn run_stream(
+        c: &mut ExternalProcessorClient<tonic::transport::Channel>,
+        requests: Vec<ProcessingRequest>,
+    ) {
         let mut r = c
-            .process(tokio_stream::iter(stream()))
+            .process(tokio_stream::iter(requests))
             .await
             .unwrap()
             .into_inner();
         while r.message().await.unwrap().is_some() {}
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    async fn run(c: &mut ExternalProcessorClient<tonic::transport::Channel>) {
+        run_stream(c, stream()).await;
     }
 
     /// add_request: pick() is invoked → registers request with the slot tracker.
@@ -881,13 +927,15 @@ mod tests {
         assert_eq!(t.add.load(Ordering::SeqCst), 1);
     }
 
-    /// mark_prefill_complete: on_prefill_complete() fires on the first non-empty
-    /// ResponseBody chunk (the first generated token) in disagg mode.
+    /// mark_prefill_complete: on_prefill_complete() fires exactly once on the first
+    /// non-empty ResponseBody chunk (the first generated token) in both routing modes.
     #[tokio::test]
-    async fn test_mark_prefill_complete_called() {
-        let t = Arc::new(Tracker::disagg());
-        run(&mut connect(t.clone()).await).await;
-        assert_eq!(t.prefill_complete.load(Ordering::SeqCst), 1);
+    async fn test_mark_prefill_complete_called_once_for_both_routing_modes() {
+        for tracker in [Tracker::agg(), Tracker::disagg()] {
+            let tracker = Arc::new(tracker);
+            run(&mut connect(tracker.clone()).await).await;
+            assert_eq!(tracker.prefill_complete.load(Ordering::SeqCst), 1);
+        }
     }
 
     /// free_request: on_request_complete() fires when the stream ends.
@@ -896,5 +944,15 @@ mod tests {
         let t = Arc::new(Tracker::agg());
         run(&mut connect(t.clone()).await).await;
         assert_eq!(t.free.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_header_only_response_skips_router_lifecycle_callbacks() {
+        let t = Arc::new(Tracker::agg());
+        run_stream(&mut connect(t.clone()).await, header_only_stream()).await;
+
+        assert_eq!(t.add.load(Ordering::SeqCst), 1);
+        assert_eq!(t.prefill_complete.load(Ordering::SeqCst), 0);
+        assert_eq!(t.free.load(Ordering::SeqCst), 0);
     }
 }

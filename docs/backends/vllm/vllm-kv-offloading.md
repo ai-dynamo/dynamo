@@ -5,8 +5,6 @@ title: KV Cache Offloading
 subtitle: CPU and disk offloading integrations for vLLM in Dynamo
 ---
 
-# KV Cache Offloading
-
 Dynamo supports multiple KV cache offloading backends for vLLM, allowing you to extend effective KV cache capacity beyond GPU memory using CPU RAM and disk storage. Each backend integrates through vLLM's connector interface and works with both aggregated and disaggregated serving.
 
 

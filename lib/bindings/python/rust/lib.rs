@@ -40,7 +40,7 @@ use dynamo_llm::{self as llm_rs};
 
 use crate::llm::entrypoint::RouterConfig as PyRouterConfig;
 
-use crate::llm::local_model::{ModelRuntimeConfig, RoutingConstraints};
+use crate::llm::local_model::{ModelRuntimeConfig, RoutingConstraints, parse_tensor_model_config};
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 
 #[pyclass(eq, eq_int)]
@@ -84,6 +84,9 @@ mod prometheus_metrics;
 
 type JsonServerStreamingIngress =
     Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
+
+type JsonBidirectionalIngress =
+    Ingress<rs::pipeline::ManyIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
 
 static INIT: OnceCell<()> = OnceCell::new();
 
@@ -165,6 +168,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(run_kv_indexer, m)?)?;
     m.add_function(wrap_pyfunction!(run_slot_tracker, m)?)?;
+    m.add_function(wrap_pyfunction!(run_select_service, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::replay::run_mocker_trace_replay, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -178,6 +182,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
     m.add_class::<AsyncResponseStream>()?;
+    m.add_class::<PyAsyncRequestStream>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
@@ -199,7 +204,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<llm::engine_perf::RustEnginePerfOptions>()?;
     }
     m.add_class::<llm::replay::PlannerReplayBridge>()?;
+    #[cfg(feature = "select-service")]
+    m.add_class::<llm::kv::SelectionService>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
+    m.add_class::<llm::kv::MultimodalEmbeddingCachePublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?; // Internal: only in _internal, not public API
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
     m.add_class::<RoutingConstraints>()?;
@@ -247,7 +255,11 @@ where
 }
 
 fn standalone_to_pyerr(err: anyhow::Error) -> PyErr {
-    #[cfg(any(feature = "kv-indexer", feature = "slot-tracker"))]
+    #[cfg(any(
+        feature = "kv-indexer",
+        feature = "slot-tracker",
+        feature = "select-service"
+    ))]
     if let Some(clap_error) = err.downcast_ref::<clap::Error>() {
         let _ = clap_error.print();
         return pyo3::exceptions::PySystemExit::new_err(clap_error.exit_code());
@@ -283,6 +295,14 @@ fn run_kv_indexer(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
 fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || llm::kv::run_slot_tracker_cli(argv))
+        .map_err(standalone_to_pyerr)
+}
+
+#[pyfunction(name = "run_select_service")]
+#[pyo3(signature = (argv=None))]
+fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let argv = argv.unwrap_or_default();
+    py.allow_threads(move || llm::kv::run_select_service_cli(argv))
         .map_err(standalone_to_pyerr)
 }
 
@@ -328,7 +348,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -337,7 +357,6 @@ fn register_model<'p>(
     endpoint: Endpoint,
     model_path: &str,
     model_name: Option<&str>,
-    context_length: Option<u32>,
     kv_cache_block_size: Option<u32>,
     router_config: Option<PyRouterConfig>,
     runtime_config: Option<ModelRuntimeConfig>,
@@ -350,6 +369,9 @@ fn register_model<'p>(
     worker_type: Option<WorkerType>,
     needs: Option<Vec<Vec<WorkerType>>>,
     self_host_metadata: Option<bool>,
+    tensor_model_config: Option<&Bound<'p, PyDict>>,
+    ignore_weights: bool,
+    max_gpu_lora_count: Option<u32>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -408,8 +430,15 @@ fn register_model<'p>(
     let is_tensor_based = model_type.inner.supports_tensor();
     let is_images = model_type.inner.supports_images();
     let is_videos = model_type.inner.supports_videos();
+    let is_realtime = model_type.inner.supports_realtime();
 
     let model_type_obj = model_type.inner;
+    let tensor_model_config = parse_tensor_model_config(tensor_model_config)?;
+    if tensor_model_config.is_some() && !is_tensor_based {
+        return Err(PyValueError::new_err(
+            "tensor_model_config is only valid for TensorBased models",
+        ));
+    }
 
     // Model-serving-readiness fields on the MDC. `worker_type` is required
     // (see the check above). Non-Aggregated workers must declare their peers
@@ -492,9 +521,13 @@ fn register_model<'p>(
     }
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        // For TensorBased, Images, and Videos models, skip HuggingFace downloads and register directly
-        // These model types handle model loading internally, no tokenizer extraction needed
-        if is_tensor_based || is_images || is_videos {
+        let runtime_config = runtime_config.unwrap_or_default();
+
+        // For TensorBased, Images, Videos, and Realtime models, skip
+        // HuggingFace downloads and register directly. These model types
+        // handle model loading internally; no tokenizer extraction is
+        // needed and the source path is not required to be a HF repo.
+        if is_tensor_based || is_images || is_videos || is_realtime {
             let model_name = model_name.unwrap_or_else(|| source_path.clone());
             let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
             card.model_type = model_type_obj;
@@ -503,9 +536,8 @@ fn register_model<'p>(
             card.needs = needs_value.clone();
             card.user_data = user_data_json;
 
-            if let Some(cfg) = runtime_config {
-                card.runtime_config = cfg.inner;
-            }
+            card.runtime_config = runtime_config.inner;
+            card.tensor_model_config = tensor_model_config;
             card.router_config = explicit_router_config.clone();
 
             // Register the Model Deployment Card via discovery interface
@@ -523,16 +555,12 @@ fn register_model<'p>(
         }
 
         // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace).
-        // Pass ignore_weights=true: register_model only consumes metadata (config.json,
-        // tokenizer*, generation_config.json, chat template) when building the MDC, so any
-        // weight files would be downloaded and discarded. Engines load weights independently
-        // before register_model runs — SGLang and vLLM via an explicit fetch_model pre-flight,
-        // TRT-LLM via a pre-staged local path (which takes the fs::exists branch above) or
-        // via its own runtime resolving the HF repo.
+        // ModelExpress load paths pass ignore_weights=true because the engine already owns
+        // weight acquisition; other load paths keep the default full-fetch behavior.
         let model_path = if fs::exists(&source_path)? {
             PathBuf::from(&source_path)
         } else {
-            LocalModel::fetch(&source_path, true)
+            LocalModel::fetch(&source_path, ignore_weights)
                 .await
                 .map_err(to_pyerr)?
         };
@@ -546,10 +574,18 @@ fn register_model<'p>(
             .source_path(source_path.clone().into())
             // --served_model_name
             .model_name(model_name.clone())
-            .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(explicit_router_config.clone())
-            .runtime_config(runtime_config.unwrap_or_default().inner)
+            .runtime_config({
+                let mut rc = runtime_config.inner;
+                // The base worker registration carries the worker's LoRA slot capacity so the
+                // frontend allocator sees idle-but-LoRA-capable workers before any adapter is
+                // loaded. Adapter registrations (lora_name set) carry it via LoraInfo instead.
+                if lora_identifier.is_none() {
+                    rc.max_gpu_lora_count = max_gpu_lora_count;
+                }
+                rc
+            })
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
             .media_decoder(media_decoder.map(|m| m.inner))
@@ -566,7 +602,7 @@ fn register_model<'p>(
             .as_ref()
             .map(|name| llm_rs::model_card::LoraInfo {
                 name: name.clone(),
-                max_gpu_lora_count: None,
+                max_gpu_lora_count,
             });
 
         local_model
@@ -984,7 +1020,7 @@ impl DistributedRuntime {
     /// Register an async Python callback for /engine/{route_name}
     ///
     /// Args:
-    ///     route_name: Route path (e.g., "start_profile" → /engine/start_profile)
+    ///     route_name: Route path (e.g., "control/start_profile" → /engine/control/start_profile)
     ///     callback: Async function with signature: async def(body: dict) -> dict
     ///
     /// Example:
@@ -993,7 +1029,7 @@ impl DistributedRuntime {
     ///     await engine.start_profile(**body)
     ///     return {"status": "ok"}
     ///
-    /// runtime.register_engine_route("start_profile", start_profile)
+    /// runtime.register_engine_route("control/start_profile", start_profile)
     /// ```
     #[pyo3(signature = (route_name, callback))]
     fn register_engine_route(
@@ -1135,6 +1171,78 @@ impl Endpoint {
 
         // Register the engine in the local endpoint registry for in-process calls
         builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
+
+        let graceful_shutdown = graceful_shutdown.unwrap_or(true);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            builder
+                .graceful_shutdown(graceful_shutdown)
+                .start()
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    /// Serve a bidirectional (streaming-input, streaming-output) endpoint.
+    ///
+    /// The handler is a Python `async def generate(request_stream)` or
+    /// `async def generate(request_stream, context)` coroutine that
+    /// returns an async generator. `request_stream` is a
+    /// [`PyAsyncRequestStream`] yielding inbound frames as plain Python
+    /// objects (dicts/lists/etc., the depythonization of
+    /// `serde_json::Value`). The generator yields response frames as
+    /// plain Python objects that are then pythonized back to JSON values
+    /// on the wire.
+    ///
+    /// Request-stream end (when `__anext__` raises `StopAsyncIteration`)
+    /// is *not* a cancellation signal: the caller has merely stopped
+    /// sending input. The engine must keep yielding response chunks until
+    /// it chooses to return or observes `context.is_stopped()`.
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None))]
+    fn serve_bidirectional_endpoint<'p>(
+        &self,
+        py: Python<'p>,
+        generator: PyObject,
+        graceful_shutdown: Option<bool>,
+        metrics_labels: Option<Vec<(String, String)>>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let engine = Arc::new(engine::PythonBidirectionalEngine::new(
+            generator,
+            self.event_loop.clone(),
+        )?);
+        let ingress: Arc<JsonBidirectionalIngress> =
+            Ingress::for_engine(engine).map_err(to_pyerr)?;
+
+        let builder = self
+            .inner
+            .endpoint_builder()
+            .metrics_labels(metrics_labels)
+            .handler(ingress);
+
+        // [gluo FIXME] skipping health check for now:
+        // both `health_check_payload` and local in-process engine registration
+        // are needed and that requires proper implementation of the bidirectional
+        // engine type which is too much for this PR.
+        //
+        // Enabling them for bidirectional engines would require:
+        //   1. A `ManyIn`-typed local-registry slot (e.g. a
+        //      `LocalBidirectionalEngine` alias plus a
+        //      `register_local_bidirectional_engine` builder method).
+        //   2. A canary path that wraps the payload as a single-frame input
+        //      stream and reads the first response (the current canary builds
+        //      `SingleIn::new(payload)`).
+        //   3. A `health_check_payload` that can be handled by the model
+        //      (e.g. a realtime `session.update`); otherwise the engine yields
+        //      an `error` frame and the probe is marked unhealthy.
+        //      This needs extra caring because the bidirectional engine is likely
+        //      to be stateful.
+
+        // if let Some(payload) = health_payload_json {
+        //     builder = builder.health_check_payload(payload);
+        // }
+
+        // // Register the engine in the local endpoint registry for in-process calls
+        // builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1563,6 +1671,54 @@ impl AsyncResponseStream {
                     }
                     None => return Err(PyStopAsyncIteration::new_err("Stream exhausted")),
                 }
+            }
+        })
+    }
+}
+
+/// Python-visible inbound iterator for bidirectional engines. Wraps an
+/// mpsc receiver of pre-pythonized request frames; `__anext__` is a thin
+/// `.recv()` that returns the next `PyObject` directly, with no per-frame
+/// GIL acquisition on the consumer side. The producer (the forwarder
+/// spawned by `PythonBidirectionalEngine::generate`) acquires the GIL
+/// once per frame and pushes the converted `PyObject` onto the channel.
+///
+/// Termination follows the same shape as `AsyncResponseStream`: when the
+/// channel returns `None`, `__anext__` raises `PyStopAsyncIteration` and
+/// the iterator is exhausted. Note that input-stream end is *not* a
+/// cancellation signal — engines must keep yielding response chunks until
+/// they decide to return or observe `context.is_stopped()`.
+#[pyclass]
+pub(crate) struct PyAsyncRequestStream {
+    rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PyObject>>>,
+}
+
+impl PyAsyncRequestStream {
+    pub(crate) fn new(rx: tokio::sync::mpsc::Receiver<PyObject>) -> Self {
+        Self {
+            rx: Arc::new(Mutex::new(rx)),
+        }
+    }
+}
+
+#[pymethods]
+impl PyAsyncRequestStream {
+    /// Required by the `AsyncIterator` protocol.
+    #[pyo3(name = "__aiter__")]
+    fn aiter(slf: PyRef<Self>, py: Python) -> PyResult<Py<PyAny>> {
+        slf.into_py_any(py)
+    }
+
+    /// Required by the `AsyncIterator` protocol. Returns an awaitable
+    /// resolving to the next pre-pythonized frame, or raises
+    /// `StopAsyncIteration` when the inbound channel is closed.
+    #[pyo3(name = "__anext__")]
+    fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let rx = self.rx.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            match rx.lock().await.recv().await {
+                Some(pyobj) => Ok(pyobj),
+                None => Err(PyStopAsyncIteration::new_err("Request stream exhausted")),
             }
         })
     }

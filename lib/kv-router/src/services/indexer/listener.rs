@@ -13,7 +13,7 @@ use crate::zmq_wire::{ZmqEventNormalizer, decode_event_batch};
 
 use super::backend::Indexer;
 use super::registry::ListenerRecord;
-use super::zmq::{
+use crate::services::common::zmq::{
     MultipartMessage, SharedSocket, connect_dealer_socket, connect_sub_socket, recv_multipart,
     send_multipart,
 };
@@ -534,124 +534,5 @@ async fn connect_replay_socket(
             );
             None
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{WATERMARK_UNSET, cursor_from_watermark};
-    use crate::recovery::CursorObservation;
-    use crate::services::indexer::zmq::{
-        SharedSocket, bind_pub_socket, connect_sub_socket, recv_multipart, send_multipart,
-    };
-
-    #[test]
-    fn initial_gap_replays_from_zero_and_replayed_seq_becomes_stale() {
-        let replay_start = match cursor_from_watermark(WATERMARK_UNSET).observe(5) {
-            CursorObservation::Initial { got } if got > 0 => Some(0),
-            CursorObservation::Gap { expected, .. } => Some(expected),
-            _ => None,
-        };
-        assert_eq!(replay_start, Some(0));
-        assert!(matches!(
-            cursor_from_watermark(5).observe(5),
-            CursorObservation::Stale {
-                got: 5,
-                last_applied: Some(5),
-            }
-        ));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn zmq_buffers_messages_during_brief_delay() {
-        let reserved_listener = reserve_open_port();
-        let endpoint = format!(
-            "tcp://127.0.0.1:{}",
-            reserved_listener
-                .local_addr()
-                .expect("failed to read reserved listener address")
-                .port()
-        );
-        drop(reserved_listener);
-        let pub_socket = bind_pub_socket(&endpoint).unwrap();
-        let mut sub_socket = connect_sub_socket(&endpoint).unwrap();
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<SharedSocket>(1);
-        tokio::spawn(async move {
-            let _ = recv_multipart(&sub_socket).await.unwrap();
-            let _ = tx.send(sub_socket).await;
-        });
-        loop {
-            send_multipart(&pub_socket, vec![b"probe".to_vec()])
-                .await
-                .unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if let Ok(sub) = rx.try_recv() {
-                sub_socket = sub;
-                break;
-            }
-        }
-
-        let num_messages = 10u64;
-
-        for i in 0..num_messages {
-            send_multipart(&pub_socket, vec![i.to_le_bytes().to_vec()])
-                .await
-                .unwrap();
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        for i in 0u64..num_messages {
-            let msg = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                recv_multipart(&sub_socket),
-            )
-            .await
-            .expect("timed out waiting for ZMQ message")
-            .unwrap();
-
-            let payload = msg.first().unwrap();
-            let received = u64::from_le_bytes(payload[..8].try_into().unwrap());
-            assert_eq!(received, i, "message {i} arrived out of order");
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn zmq_subscriber_connects_before_publisher_bind() {
-        let reserved_listener = reserve_open_port();
-        let endpoint = format!(
-            "tcp://127.0.0.1:{}",
-            reserved_listener
-                .local_addr()
-                .expect("failed to read reserved listener address")
-                .port()
-        );
-        drop(reserved_listener);
-        let sub_socket = connect_sub_socket(&endpoint).unwrap();
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let pub_socket = bind_pub_socket(&endpoint).unwrap();
-        for _ in 0..5 {
-            send_multipart(&pub_socket, vec![b"probe".to_vec()])
-                .await
-                .unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-
-        let msg = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            recv_multipart(&sub_socket),
-        )
-        .await
-        .expect("timed out waiting for ZMQ message")
-        .unwrap();
-
-        assert_eq!(msg, vec![b"probe".to_vec()]);
-    }
-
-    fn reserve_open_port() -> std::net::TcpListener {
-        std::net::TcpListener::bind("127.0.0.1:0").expect("failed to bind probe listener")
     }
 }

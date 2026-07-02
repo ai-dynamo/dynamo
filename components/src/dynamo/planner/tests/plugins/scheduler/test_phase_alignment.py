@@ -14,9 +14,9 @@ The mechanism: at registration time, ``registered_at`` is snapped to
 the nearest scale_interval boundary (``floor(now / scale_interval) *
 scale_interval``) instead of using the raw monotonic clock value.
 
-Disabled when ``scale_interval_seconds`` is 0 (default for the PSM
-path; the orchestrator path constructs ``PluginRegistryServer`` with
-the real value from ``SchedulingConfig.scale_interval_seconds``).
+Disabled when ``scale_interval_seconds`` is 0. The orchestrator path
+constructs ``PluginRegistryServer`` with the real value from
+``SchedulingConfig.scale_interval_seconds``.
 """
 
 from __future__ import annotations
@@ -102,8 +102,8 @@ def test_aligned_anchor_snaps_to_floor_boundary():
 
 def test_disabled_when_scale_interval_zero():
     """``scale_interval_seconds=0.0`` (default) bypasses alignment —
-    raw clock value comes through.  Preserves the legacy behaviour for
-    the PSM path and for tests that don't explicitly enable alignment.
+    raw clock value comes through for tests that don't explicitly enable
+    alignment.
     """
     clock = VirtualClock()
     server = _make_server(clock, scale_interval_seconds=0.0)

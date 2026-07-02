@@ -41,6 +41,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
@@ -85,6 +86,7 @@ type DynamoGraphDeploymentReconciler struct {
 	client.Client
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
+	RestConfig            *rest.Config
 	Recorder              record.EventRecorder
 	DockerSecretRetriever dockerSecretRetriever
 	ScaleClient           scale.ScalesGetter
@@ -455,15 +457,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 }
 
 func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	// Orchestrator selection via single boolean annotation: nvidia.com/enable-grove
-	// Unset or not "false": Grove if available; else component mode
-	// "false": component mode (multinode -> LWS; single-node -> standard)
-	enableGrove := true
-	if dgd.Annotations != nil && strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) == consts.KubeLabelValueFalse {
-		enableGrove = false
-	}
-
-	return enableGrove && r.RuntimeConfig.GroveEnabled
+	return r.RuntimeConfig.GroveEnabled && (dgd.Annotations == nil ||
+		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
 }
 
 func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgress(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
@@ -1068,6 +1063,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				DynamoNamespace: dynamoNamespace,
 				ComponentName:   componentName,
 				Labels:          dynamo.GetDGDComponentResourceLabels(renderDeployment, componentName, component),
+				Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component),
 				IsK8sDiscovery:  isK8sDiscoveryEnabled,
 			})
 			if err != nil {
@@ -1082,6 +1078,25 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				return ReconcileResult{}, fmt.Errorf("failed to sync the main component service: %w", err)
 			}
 			if syncedMainComponentService != nil {
+				if syncedMainComponentService.Annotations == nil {
+					syncedMainComponentService.Annotations = make(map[string]string)
+				}
+				desiredAnnotations := dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component)
+				var updateAnnotations bool
+				for key, value := range desiredAnnotations {
+					if val, ok := syncedMainComponentService.Annotations[key]; !ok || val != value {
+						syncedMainComponentService.Annotations[key] = value
+						updateAnnotations = true
+					}
+				}
+				if updateAnnotations {
+					err = r.Update(ctx, syncedMainComponentService)
+					if err != nil {
+						logger.Error(err, fmt.Sprintf("Failed to update main component service %s.", componentName))
+						r.GetRecorder().Eventf(dynamoDeployment, corev1.EventTypeWarning, "UpdateService", "Failed to update Service %s: %s", componentName, err)
+						return ReconcileResult{}, fmt.Errorf("failed to update main component service %s: %w", componentName, err)
+					}
+				}
 				mainComponentServiceAsResource, err := commoncontroller.NewResource(syncedMainComponentService,
 					func() (bool, string) {
 						return true, ""
@@ -1623,6 +1638,7 @@ func applyDCDCheckpointStartupPolicy(
 			dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{}
 		}
 		checkpointName := checkpointInfo.CheckpointName
+		dcd.Spec.Experimental.Checkpoint.Enabled = true
 		dcd.Spec.Experimental.Checkpoint.CheckpointRef = &checkpointName
 		dcd.Spec.Experimental.Checkpoint.Identity = nil
 		dcd.Spec.Experimental.Checkpoint.Job = nil
@@ -1812,8 +1828,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dyn
 	return nil
 }
 
-// reconcileCheckpoints reconciles Checkpoint CRs for components with checkpointing enabled.
-// For Auto mode, it creates Checkpoint CRs if they do not exist.
+// reconcileCheckpoints reconciles checkpoint state for checkpoint-enabled components.
+// Without checkpointRef, it creates DGD-managed DynamoCheckpoint CRs when they
+// do not exist. With checkpointRef, it resolves the referenced checkpoint only.
 // Returns per-component checkpoint status and resolved checkpoint info.
 func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 	ctx context.Context,
@@ -1850,9 +1867,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 
 		var info *checkpoint.CheckpointInfo
 		var err error
-		isAutoCheckpoint := checkpointConfig.Mode == "" || checkpointConfig.Mode == nvidiacomv1beta1.CheckpointModeAuto
 		hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
-		if isAutoCheckpoint && !hasCheckpointRef {
+		if !hasCheckpointRef {
 			workerHash, err := r.checkpointWorkerHashForComponent(dynamoDeployment, componentName)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
@@ -1900,11 +1916,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 		// Store checkpoint info for later use in pod spec generation
 		checkpointInfos[componentName] = info
 
-		// checkpointRef is authoritative. Auto mode creates a DGD-scoped checkpoint
-		// for this component generation without looking for reusable checkpoints.
-		if isAutoCheckpoint && !hasCheckpointRef {
+		// Without checkpointRef, the DGD creates a scoped automatic checkpoint for
+		// this component generation without looking for reusable checkpoints.
+		if !hasCheckpointRef {
 			if !info.Exists {
-				logger.Info("Creating DynamoCheckpoint CR in Auto mode", "component", componentName)
+				logger.Info("Creating DGD-managed DynamoCheckpoint CR", "component", componentName)
 			}
 
 			ckpt, err := r.createCheckpointCR(ctx, dynamoDeployment, componentName, component)
@@ -1935,7 +1951,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(
 	return checkpointStatuses, checkpointInfos, nil
 }
 
-// createCheckpointCR creates a DynamoCheckpoint CR for a component in Auto mode.
+// createCheckpointCR creates a DGD-managed DynamoCheckpoint CR for a component.
 //
 //nolint:gocyclo
 func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
@@ -1946,7 +1962,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
 	checkpointConfig := dynamo.GetCheckpoint(component)
 	if checkpointConfig == nil {
-		return nil, fmt.Errorf("checkpoint config is required for Auto mode")
+		return nil, fmt.Errorf("checkpoint config is required")
 	}
 
 	workerHash, err := r.checkpointWorkerHashForComponent(dynamoDeployment, componentName)
@@ -2562,8 +2578,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	// Only attempt DestinationRule reconciliation when the Istio CRDs are
 	// present on the cluster; otherwise the API call would fail on every
 	// reconcile for Istio-less clusters.
-	if r.RuntimeConfig.IstioAvailable {
-		meshEnabled := r.Config.ServiceMesh.IsEnabled()
+	// IsEnabled controls service mesh creation/update. When disabled, still
+	// best-effort clean up previously owned DestinationRules if the API exists.
+	meshEnabled := r.Config.ServiceMesh.IsEnabled()
+	istioAvailable := r.RuntimeConfig.IstioEnabled
+	if !meshEnabled && !istioAvailable {
+		istioAvailable = commoncontroller.DetectIstioDestinationRuleAvailabilityFromConfig(ctx, r.RestConfig)
+	}
+	if istioAvailable {
 		destinationRule := dynamo.GenerateEPPDestinationRule(eppServiceName, dgd.Namespace, r.Config.ServiceMesh)
 		_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*networkingv1beta1.DestinationRule, bool, error) {
 			return destinationRule, !meshEnabled, nil
@@ -2574,6 +2596,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		}
 		if meshEnabled {
 			logger.Info("Synced EPP DestinationRule", "name", eppServiceName)
+		} else {
+			logger.Info("Cleaned up EPP DestinationRule", "name", eppServiceName)
 		}
 	} else if r.Config.ServiceMesh.IsEnabled() {
 		logger.Error(nil, "Service mesh is enabled but networking.istio.io CRDs are not installed; skipping DestinationRule reconciliation")
@@ -2641,7 +2665,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig))
-	if r.RuntimeConfig.IstioAvailable {
+	if r.RuntimeConfig.IstioEnabled {
 		ctrlBuilder = ctrlBuilder.Owns(&networkingv1beta1.DestinationRule{}, builder.WithPredicates(predicate.Funcs{
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },

@@ -225,14 +225,6 @@ def update_dynamo_config_with_engine(
     # Clear connector list (no longer used for vLLM)
     dynamo_config.connector = []  # type: ignore[assignment]
 
-    # Validate ModelExpress P2P server URL
-    if getattr(engine_config, "load_format", None) in ("mx-source", "mx-target"):
-        if not dynamo_config.model_express_url:
-            raise ValueError(
-                f"--model-express-url or MODEL_EXPRESS_URL env var is required "
-                f"when using --load-format={engine_config.load_format}"
-            )
-
 
 def update_engine_config_with_dynamo(
     dynamo_config: Config, engine_config: AsyncEngineArgs

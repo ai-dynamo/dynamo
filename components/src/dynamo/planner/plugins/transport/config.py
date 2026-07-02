@@ -28,9 +28,7 @@ from dynamo.planner.plugins.transport.base import PluginTransport
 # ``GrpcTransport`` import deferred to ``make_transport_for_endpoint``
 # where it's actually constructed.  Module-top import would pull in
 # ``_grpc_base`` → ``_proto_bridge`` → ``plugin_pb2``, which is generated
-# at install time and absent from the source tree — that would break
-# ``PlannerConfig`` parsing in PSM-only deployments (where
-# ``use_orchestrator=False`` never reaches the gRPC path).
+# at install time and absent from the source tree before proto generation.
 
 
 # ----------------------------------------------------------------------------

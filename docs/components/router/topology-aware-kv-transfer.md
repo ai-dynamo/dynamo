@@ -5,8 +5,6 @@ title: Topology-Aware KV Transfer
 subtitle: Runtime metadata and decode routing semantics for topology-aware prefill/decode handoff
 ---
 
-# Topology-Aware KV Transfer
-
 Topology-aware KV transfer constrains or biases decode worker selection after a prefill worker has been selected. The router derives standard `RoutingConstraints` from the selected prefill worker's published topology metadata, then merges those constraints into the decode request.
 
 Use the Kubernetes operator path when possible.

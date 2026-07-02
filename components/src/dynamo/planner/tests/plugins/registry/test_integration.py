@@ -76,8 +76,7 @@ def stub_transport(monkeypatch):
         return _Stub(plugin_id, endpoint)
 
     # ``registry.config`` defers its ``make_transport_for_endpoint`` import
-    # to call time (so PSM-only deployments don't need the generated proto
-    # stubs at module load), so we monkeypatch at the *source* module.
+    # to call time, so we monkeypatch at the *source* module.
     monkeypatch.setattr(
         "dynamo.planner.plugins.transport.config.make_transport_for_endpoint",
         _factory,
@@ -140,8 +139,7 @@ async def test_full_lifecycle_register_tick_unregister(stub_transport):
     assert info.is_builtin is False
 
     # 2. First fire happens after interval elapses since registration
-    # (PSM-parity anchor on registered_at — see
-    # test_first_fire_anchored_on_registration_time in test_active_set).
+    # (see test_first_fire_anchored_on_registration_time in test_active_set).
     clock.advance(10.0)
     active = scheduler.compute_active_set(clock.monotonic(), "propose")
     assert [p.plugin_id for p in active.triggered] == ["load-scaler"]

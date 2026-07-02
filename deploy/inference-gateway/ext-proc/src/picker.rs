@@ -80,8 +80,8 @@ pub trait EndpointPicker: Send + Sync + 'static {
         endpoints: &[Endpoint],
     ) -> Result<PickResult, PickError>;
 
-    /// Called when response headers arrive from the backend in disaggregated
-    /// mode. This signals that prefill is done and decode has started.
+    /// Called when the first response body arrives from the backend. This
+    /// signals that prefill is done and decode has started.
     /// Mirrors Go EPP's PostResponse → MarkPrefillComplete.
     async fn on_prefill_complete(&self, _request_id: &str) {}
 

@@ -204,6 +204,22 @@ jobs:
           # Restore the preserved products[0] block
           yq -i '.products[0] = load("/tmp/preserved_product.yml")' docs.yml
 
+          # Inject the private NVIDIA global theme for production builds only.
+          # It is intentionally absent from the source repo's docs.yml so that
+          # external contributors can run `fern docs dev` without an nvidia-org
+          # FERN_TOKEN (otherwise the CLI 403s fetching the private theme and the
+          # local preview renders blank). See https://github.com/ai-dynamo/dynamo/issues/10073
+          #
+          # PR previews skip the theme: applying it masks the project `css:`
+          # stylesheet in hosted builds, so previews of any fern/main.css change
+          # render unstyled. The repo main.css already carries the NVIDIA
+          # branding rules, so unthemed previews stay visually faithful.
+          if [ "${{ steps.ctx.outputs.is_main }}" = "true" ]; then
+            yq -i '.global-theme = "nvidia"' docs.yml
+          else
+            yq -i 'del(.global-theme)' docs.yml
+          fi
+
           echo "Updated docs.yml:"
           cat docs.yml
 

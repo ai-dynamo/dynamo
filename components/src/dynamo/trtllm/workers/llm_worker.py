@@ -65,10 +65,11 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
-from dynamo.trtllm.utils.trtllm_utils import deep_update
+from dynamo.trtllm.utils.trtllm_utils import deep_update, get_spec_decode_runtime_data
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 100_000
+SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 
 
 def build_kv_connector_config(config: Config):
@@ -134,16 +135,16 @@ def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
 
 def _register_memory_routes(runtime, handler) -> None:
     runtime.register_engine_route(
-        "release_memory_occupation",
+        "control/release_memory_occupation",
         handler.release_memory_occupation,
     )
     runtime.register_engine_route(
-        "resume_memory_occupation",
+        "control/resume_memory_occupation",
         handler.resume_memory_occupation,
     )
     logging.info(
         "Registered engine routes: "
-        "/engine/release_memory_occupation, /engine/resume_memory_occupation"
+        "/engine/control/release_memory_occupation, /engine/control/resume_memory_occupation"
     )
 
 
@@ -430,7 +431,7 @@ async def init_llm_worker(
 
     multimodal_processor = None
 
-    if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
+    if os.getenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
         # We need to initialize the tokenizer for the test logits processor
         # But detokenizing still happens in the rust engine, so we do _not_ want
         # to set default_sampling_params.detokenize to True.
@@ -500,10 +501,19 @@ async def init_llm_worker(
         config.disaggregation_mode,
         component_gauges=component_gauges,
     ) as engine:
-        # Expose engine to the drain callback installed by main.py (#7319).
+        # Expose engine to the drain callback installed by main.py.
         # The callback uses this to poll active request count during shutdown.
         if engine_holder is not None:
             engine_holder.append(engine)
+
+        # Snapshot mode must capture the initialized TRT-LLM/CUDA state before
+        # Dynamo runtime endpoints, health routes, or discovery sockets exist.
+        # The snapshot runtime proxy waits here for capture/restore and creates
+        # the real runtime only after restore; normal runtimes skip this hook.
+        snapshot_before_endpoint = getattr(runtime, "snapshot_before_endpoint", None)
+        if snapshot_before_endpoint is not None:
+            await snapshot_before_endpoint(engine, config)
+
         engine.start_health_monitor(runtime=runtime, shutdown_event=shutdown_event)
 
         endpoint = runtime.endpoint(
@@ -520,6 +530,7 @@ async def init_llm_worker(
         # So for now, we just set the parsers from the config
         # TODO: fix this once we have a better way to get total_kv_blocks
         runtime_config = ModelRuntimeConfig()
+        runtime_config.context_length = config.max_seq_len
 
         # Set values from config that are available immediately
         # Note: We populate max_num_seqs and max_num_batched_tokens from config
@@ -557,6 +568,17 @@ async def init_llm_worker(
 
         # Set topology and KV transfer policy for topology-aware routing
         apply_topology_config(runtime_config)
+
+        spec_decode_runtime_data = get_spec_decode_runtime_data(engine_args)
+        if spec_decode_runtime_data is not None:
+            runtime_config.set_engine_specific(
+                SPEC_DECODE_RUNTIME_KEY,
+                json.dumps(spec_decode_runtime_data),
+            )
+            logging.info(
+                "Published TRT-LLM spec decode runtime metadata: %s",
+                spec_decode_runtime_data,
+            )
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
@@ -703,7 +725,6 @@ async def init_llm_worker(
             endpoint,
             config.model,
             config.served_model_name,
-            context_length=config.max_seq_len,
             kv_cache_block_size=config.kv_block_size,
             runtime_config=runtime_config,
             custom_template_path=config.custom_jinja_template,

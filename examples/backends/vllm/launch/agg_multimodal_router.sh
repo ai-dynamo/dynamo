@@ -9,7 +9,7 @@
 #     -> Rust frontend
 #          - resolves the image-placeholder token id from the per-model
 #            ModelProcessorSpec registry (Qwen3-VL, Qwen2.5-VL, Qwen2-VL,
-#            LLaVA-NeXT, LLaVA-1.5, Phi-3-vision, Llama-4, Kimi-K2.5);
+#            LLaVA-NeXT, LLaVA-1.5, Llama-4, Kimi-K2.5);
 #            each spec reads the appropriate config.json field
 #          - per-image token-count math (header-only fetch for W,H)
 #          - expands placeholder -> N copies in routing_token_ids

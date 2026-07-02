@@ -51,6 +51,26 @@ func testIdentity() nvidiacomv1alpha1.DynamoCheckpointIdentity {
 	}
 }
 
+func assertRestoreStandbyMode(
+	t *testing.T,
+	container *corev1.Container,
+	command []string,
+	args []string,
+) {
+	t.Helper()
+	assert.Equal(t, command, container.Command)
+	assert.Equal(t, args, container.Args)
+
+	found := false
+	for _, env := range container.Env {
+		if env.Name == snapshotprotocol.RestoreStandbyModeEnv {
+			found = true
+			assert.Equal(t, "1", env.Value)
+		}
+	}
+	assert.True(t, found, "restore standby mode env should be injected")
+}
+
 func testPodSpec() *corev1.PodSpec {
 	return &corev1.PodSpec{
 		Containers: []corev1.Container{{
@@ -556,45 +576,19 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		for _, volume := range podSpec.Volumes {
 			assert.NotEqual(t, snapshotprotocol.SnapshotControlVolumeName, volume.Name)
 			assert.NotEqual(t, snapshotprotocol.CheckpointVolumeName, volume.Name)
-			assert.NotEqual(t, consts.PodInfoVolumeName, volume.Name)
 		}
 		for _, env := range podSpec.Containers[0].Env {
 			assert.NotEqual(t, snapshotprotocol.SnapshotControlDirEnv, env.Name)
 		}
 	})
 
-	t.Run("ready checkpoint injects podinfo and overrides command", func(t *testing.T) {
+	t.Run("ready checkpoint enables restore standby mode", func(t *testing.T) {
 		podSpec := testPodSpec()
 		info := &CheckpointInfo{Enabled: true, Ready: true, Identity: ptr.To(testIdentity())}
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
-		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
-		assert.Nil(t, podSpec.Containers[0].Args)
+		assertRestoreStandbyMode(t, &podSpec.Containers[0], []string{"python3"}, []string{"-m", "dynamo.vllm"})
 
-		volumes := map[string]corev1.Volume{}
-		for _, volume := range podSpec.Volumes {
-			volumes[volume.Name] = volume
-		}
-		require.Contains(t, volumes, consts.PodInfoVolumeName)
-		require.NotNil(t, volumes[consts.PodInfoVolumeName].DownwardAPI)
-
-		fields := map[string]string{}
-		for _, item := range volumes[consts.PodInfoVolumeName].DownwardAPI.Items {
-			if item.FieldRef != nil {
-				fields[item.Path] = item.FieldRef.FieldPath
-			}
-		}
-		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoNamespace+"']", fields[consts.PodInfoFileDynNamespace])
-		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoWorkerHash+"']", fields[consts.PodInfoFileDynNamespaceWorkerSuffix])
-		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoComponentType+"']", fields[consts.PodInfoFileDynComponent])
-		assert.Equal(t, "metadata.labels['"+consts.KubeLabelDynamoGraphDeploymentName+"']", fields[consts.PodInfoFileDynParentDGDName])
-		assert.Equal(t, consts.PodInfoFieldPodNamespace, fields[consts.PodInfoFileDynParentDGDNamespace])
-
-		mountPaths := map[string]string{}
-		for _, mount := range podSpec.Containers[0].VolumeMounts {
-			mountPaths[mount.Name] = mount.MountPath
-		}
-		assert.Equal(t, consts.PodInfoMountPath, mountPaths[consts.PodInfoVolumeName])
 	})
 
 	t.Run("ready checkpoint targets the container named main", func(t *testing.T) {
@@ -608,8 +602,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		reader := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(testSnapshotAgentDaemonSet()).Build()
 
 		require.NoError(t, InjectCheckpointIntoPodSpec(context.Background(), reader, testNamespace, podSpec, info, snapshotprotocol.DefaultSeccompLocalhostProfile))
-		assert.Equal(t, []string{"sleep", "infinity"}, podSpec.Containers[0].Command)
-		assert.Nil(t, podSpec.Containers[0].Args)
+		assertRestoreStandbyMode(t, &podSpec.Containers[0], []string{"python3"}, []string{"-m", "dynamo.vllm"})
 		assert.Equal(t, []string{"sidecar"}, podSpec.Containers[1].Command)
 		assert.Equal(t, []string{"run"}, podSpec.Containers[1].Args)
 	})
@@ -634,8 +627,7 @@ func TestInjectCheckpointIntoPodSpec(t *testing.T) {
 		for _, name := range []string{"engine-0", "engine-1"} {
 			c := findContainer(podSpec, name)
 			require.NotNil(t, c, "container %q not found", name)
-			assert.Equal(t, []string{"sleep", "infinity"}, c.Command, "engine %s command", name)
-			assert.Nil(t, c.Args, "engine %s args", name)
+			assertRestoreStandbyMode(t, c, []string{"python3"}, []string{"-m", "dynamo.vllm"})
 			gotSubPath := ""
 			for _, m := range c.VolumeMounts {
 				if m.Name == snapshotprotocol.SnapshotControlVolumeName {
@@ -776,22 +768,20 @@ func TestResolveCheckpointForService(t *testing.T) {
 		}
 	})
 
-	t.Run("Manual mode without checkpointRef or identity errors", func(t *testing.T) {
-		c := fake.NewClientBuilder().WithScheme(s).Build()
-		_, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
-			Enabled: true,
-			Mode:    nvidiacomv1alpha1.CheckpointModeManual,
-		})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "Manual mode requires checkpointRef or identity")
-	})
-
-	t.Run("Auto mode without identity resolves enabled without error", func(t *testing.T) {
+	t.Run("deprecated Manual value without checkpointRef is ignored", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithScheme(s).Build()
 		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{
 			Enabled: true,
-			Mode:    nvidiacomv1alpha1.CheckpointModeAuto,
+			Mode:    nvidiacomv1alpha1.CheckpointModeManual,
 		})
+		require.NoError(t, err)
+		assert.True(t, info.Enabled)
+		assert.False(t, info.Exists)
+	})
+
+	t.Run("config without ref or identity resolves enabled without error", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithScheme(s).Build()
+		info, err := ResolveCheckpointForService(ctx, c, testNamespace, &nvidiacomv1alpha1.ServiceCheckpointConfig{Enabled: true})
 		require.NoError(t, err)
 		assert.True(t, info.Enabled)
 		assert.False(t, info.Exists)

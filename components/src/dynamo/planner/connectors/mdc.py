@@ -93,6 +93,22 @@ def select_entry(
     return None
 
 
+def _parse_speculative_nextn(runtime_cfg: dict) -> Optional[int]:
+    runtime_data = runtime_cfg.get("runtime_data")
+    if not isinstance(runtime_data, dict):
+        return None
+
+    spec_decode = runtime_data.get("spec_decode")
+    if not isinstance(spec_decode, dict):
+        return None
+
+    try:
+        nextn = int(spec_decode.get("nextn", 0))
+    except (TypeError, ValueError):
+        return None
+    return nextn if nextn > 0 else None
+
+
 def worker_info_from_mdc(
     entry: MdcEntry,
     sub_component_type: SubComponentType,
@@ -125,6 +141,9 @@ def worker_info_from_mdc(
             model_name = None
 
     k8s_name = k8s_name_override if k8s_name_override is not None else defaults.k8s_name
+    context_length = runtime_cfg.get("context_length")
+    if context_length is None:
+        context_length = card.get("architectural_max_context_length")
 
     return WorkerInfo(
         k8s_name=k8s_name,
@@ -135,5 +154,6 @@ def worker_info_from_mdc(
         kv_cache_block_size=card.get("kv_cache_block_size"),
         max_num_seqs=runtime_cfg.get("max_num_seqs"),
         max_num_batched_tokens=runtime_cfg.get("max_num_batched_tokens"),
-        context_length=card.get("context_length"),
+        context_length=context_length,
+        speculative_nextn=_parse_speculative_nextn(runtime_cfg),
     )

@@ -149,8 +149,8 @@ class PluginScheduler:
           - otherwise → skipped (treat as ACCEPT)
 
         ``ctx`` is optional for backward-compat with callers that don't
-        thread the PipelineContext through (e.g. test fixtures and the
-        PSM path). When ``ctx`` is None, plugins with
+        thread the PipelineContext through (e.g. test fixtures). When
+        ``ctx`` is None, plugins with
         ``requires_produced_fields`` are treated as "requires
         unsatisfied" and skipped — conservative default that prevents
         firing a plugin without the data it declared dependence on.
@@ -280,16 +280,15 @@ class PluginScheduler:
             return True
         # Anchor: ``registered_at`` for the first-ever call,
         # ``last_call_at`` for every call after.  Pre-fix the first-
-        # ever branch returned True unconditionally, which broke PSM
-        # cadence parity: PSM's ``initial_tick(start_s)`` schedules the
-        # first throughput-cadence fire at ``start_s + interval`` (not
-        # at ``start_s``).  A builtin throughput plugin (``interval=
+        # ever branch returned True unconditionally, which broke cadence:
+        # the first throughput-cadence fire should happen at
+        # ``start_s + interval`` (not at ``start_s``). A builtin
+        # throughput plugin (``interval=
         # 180s``) firing on the first pipeline tick at T=5 would then
         # bump ``last_call_at`` to 5, so the *next* due moment becomes
-        # T=185 — permanently 5s ahead of PSM's T=180/360/540 cadence.
+        # T=185 — permanently 5s ahead of the intended 180/360/540 cadence.
         # Anchoring on ``registered_at`` makes "fire every N seconds"
-        # mean "first fire N seconds after registration" — matching
-        # PSM and aligning with what most operators intuitively expect.
+        # mean "first fire N seconds after registration".
         anchor = (
             plugin.registered_at
             if plugin.last_call_at == -math.inf

@@ -95,6 +95,10 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     decode_scale_up_kv_rate = None
     decode_scale_down_kv_rate = None
 
+    # Speculative decoding. 0 disables planner-side spec decode discounts unless
+    # worker MDC publishes a positive runtime_config.runtime_data.spec_decode.nextn.
+    speculative_nextn = 0
+
     # Advisory mode: compute and log decisions without executing scaling
     advisory = False
 

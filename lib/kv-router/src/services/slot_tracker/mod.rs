@@ -15,11 +15,14 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use crate::services::common::replica_sync::{PeerManager, setup_replica_sync};
 use registry::SlotTrackerRegistry;
 use server::{AppState, create_router};
 
 pub struct SlotTrackerConfig {
     pub port: u16,
+    pub replica_sync_port: Option<u16>,
+    pub replica_sync_peers: Vec<String>,
 }
 
 pub async fn run_server(config: SlotTrackerConfig) -> anyhow::Result<()> {
@@ -31,13 +34,42 @@ pub async fn run_server(config: SlotTrackerConfig) -> anyhow::Result<()> {
         shutdown_token.cancel();
     });
 
-    tracing::info!(
-        port = config.port,
-        "Starting standalone slot tracker (HTTP-only mode)"
-    );
+    let replica_config = setup_replica_sync(
+        config.replica_sync_port,
+        &config.replica_sync_peers,
+        cancel_token.child_token(),
+    )?;
+    let (registry, peer_manager) = if let Some(replica_config) = replica_config {
+        let process_id = replica_config.process_id();
+        let registry = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
+            cancel_token.clone(),
+            replica_config,
+        ));
+        let dispatch_registry = Arc::clone(&registry);
+        let peer_manager = PeerManager::start(
+            config.replica_sync_peers,
+            cancel_token.child_token(),
+            move |event| dispatch_registry.dispatch_replica_event(event),
+        )?;
+        tracing::info!(
+            port = config.port,
+            replica_sync_port = config.replica_sync_port,
+            process_id,
+            "Starting standalone slot tracker with replica sync"
+        );
+        (registry, Some(peer_manager))
+    } else {
+        tracing::info!(
+            port = config.port,
+            "Starting standalone slot tracker (HTTP-only mode)"
+        );
+        (
+            Arc::new(SlotTrackerRegistry::new(cancel_token.clone())),
+            None,
+        )
+    };
 
-    let registry = Arc::new(SlotTrackerRegistry::new(cancel_token.clone()));
-    let app = create_router(Arc::new(AppState { registry }));
+    let app = create_router(Arc::new(AppState { registry }), peer_manager);
     let listener = TcpListener::bind(("0.0.0.0", config.port)).await?;
     tracing::info!("HTTP server listening on 0.0.0.0:{}", config.port);
     axum::serve(listener, app)

@@ -11,7 +11,7 @@ in Rust (``dynamo_backend_common::Worker``). This module only:
     ``from_runtime_config`` helper, and
   * drives the Rust ``Worker`` for a given ``LLMEngine`` instance.
 
-Engine semantics (``start``/``generate``/``abort``/``drain``/``cleanup``)
+Engine semantics (``start``/``generate``/``abort``/``is_quiescent``/``cleanup``)
 remain the only thing engine authors implement.
 """
 
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import warnings
 from dataclasses import dataclass, field
 from enum import Enum
@@ -29,19 +30,46 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.llm import ModelInput
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .engine import LLMEngine
+from .engine import BaseEngine, RawEngine
 from .health_check import parse_health_check_payload_cli
 
 logger = logging.getLogger(__name__)
 
-# Map the user-facing `dynamo.common.constants.DisaggregationMode` (which
-# carries 4 modes including ENCODE) to the 3-mode Rust enum. ENCODE is not
-# supported by the unified abstraction yet — multimodal encode workers stay
-# on the legacy main.py path until they migrate.
+
+def _guard_loop_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
+    """Suppress engine ``loop.add_signal_handler`` calls for SIGTERM/SIGINT.
+
+    The Rust ``Worker`` owns graceful shutdown via its own OS signal handlers;
+    engines must do teardown in ``cleanup()``, not a signal handler. Some
+    engines register loop handlers during ``start()`` anyway (e.g. SGLang's
+    tokenizer manager), which would reinstall the process ``sigaction`` and
+    override the Worker. Only SIGTERM/SIGINT are suppressed — other signals
+    (e.g. SGLang's SIGQUIT watchdog) pass through.
+    """
+    orig_add_signal_handler = loop.add_signal_handler
+    owned = frozenset({signal.SIGINT, signal.SIGTERM})
+
+    def add_signal_handler(sig, callback, *args):
+        if sig in owned:
+            logger.info(
+                "Suppressed engine loop.add_signal_handler(%s); the Rust Worker "
+                "owns graceful shutdown.",
+                sig,
+            )
+            return None
+        return orig_add_signal_handler(sig, callback, *args)
+
+    loop.add_signal_handler = add_signal_handler  # type: ignore[assignment]
+
+
+# Map the user-facing `dynamo.common.constants.DisaggregationMode` to the
+# Rust enum. All four modes (AGGREGATED, PREFILL, DECODE, ENCODE) are
+# supported by the unified abstraction.
 _DISAGG_MODE_TO_RUST = {
     DisaggregationMode.AGGREGATED: _backend.DisaggregationMode.Aggregated,
     DisaggregationMode.PREFILL: _backend.DisaggregationMode.Prefill,
     DisaggregationMode.DECODE: _backend.DisaggregationMode.Decode,
+    DisaggregationMode.ENCODE: _backend.DisaggregationMode.Encode,
 }
 
 
@@ -92,7 +120,7 @@ class WorkerConfig:
     exclude_tools_when_tool_choice_none: bool = True
     enable_local_indexer: bool = True
     # Operator-level kill switch for KV-aware-routing publishers. When False,
-    # Worker skips engine.kv_event_sources() and engine.metrics_sources() so
+    # Worker skips engine.kv_event_sources() and SnapshotPublisher setup so
     # the worker ships no KV events or worker-load metrics.
     enable_kv_routing: bool = True
     metrics_labels: list[tuple[str, str]] = field(default_factory=list)
@@ -108,6 +136,12 @@ class WorkerConfig:
     structural_tag_mode: str = "off"
     structural_tag_scope: str = "auto"
     structural_tag_schema: str = "auto"
+    # When True, this worker declares an upstream Encode peer in its
+    # topology `needs`. Meaningful only on AGGREGATED/PREFILL roles;
+    # the Rust validator rejects DECODE/ENCODE + True with InvalidArgument.
+    # Appended at the END of the dataclass to keep positional callers
+    # working -- inserting mid-class would silently shift downstream args.
+    route_to_encoder: bool = False
 
     @classmethod
     def from_runtime_config(
@@ -157,6 +191,10 @@ class WorkerConfig:
             "structural_tag_schema": getattr(
                 runtime_cfg, "dyn_structural_tag_schema", "auto"
             ),
+            # vLLM exposes `route_to_encoder` on its backend_args today;
+            # SGLang/TRT-LLM don't yet, so the getattr default keeps them at
+            # False until they add the field on their own runtime config.
+            "route_to_encoder": getattr(runtime_cfg, "route_to_encoder", False),
         }
         # vLLM/TRT-LLM expose `disaggregation_mode`; SGLang exposes
         # `serving_mode`. Skip the probe when an override is supplied so
@@ -179,9 +217,14 @@ class WorkerConfig:
 
 
 class Worker:
-    """Drive the Rust ``Worker`` for a single ``LLMEngine`` instance."""
+    """Drive the Rust ``Worker`` for a single engine instance.
 
-    def __init__(self, engine: LLMEngine, config: WorkerConfig):
+    Accepts any :class:`BaseEngine` — an :class:`LLMEngine` (token pipeline)
+    or a :class:`DiffusionEngine` (raw media pipeline). The request adapter is
+    selected from the engine kind (``raw=isinstance(engine, RawEngine)``);
+    ``WorkerConfig.model_input`` is validated against that kind."""
+
+    def __init__(self, engine: BaseEngine, config: WorkerConfig):
         self.engine = engine
         self.config = config
 
@@ -231,8 +274,14 @@ class Worker:
             structural_tag_scope=self.config.structural_tag_scope,
             structural_tag_schema=self.config.structural_tag_schema,
             runtime=runtime_cfg,
+            route_to_encoder=self.config.route_to_encoder,
         )
 
         loop = asyncio.get_running_loop()
-        worker = _backend.Worker(self.engine, worker_cfg, loop)
+        _guard_loop_signal_handlers(loop)
+        # A RawEngine (e.g. DiffusionEngine) drives the raw media pipeline
+        # (JSON request adapter); everything else is a token-pipeline
+        # LLMEngine. The Rust Worker validates model_input against the kind.
+        is_raw = isinstance(self.engine, RawEngine)
+        worker = _backend.Worker(self.engine, worker_cfg, loop, raw=is_raw)
         await worker.run()
