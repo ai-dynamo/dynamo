@@ -31,8 +31,8 @@ from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
-from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
 from dynamo.profiler.utils.defaults import SearchStrategy
+from dynamo.profiler.utils.dgd_override import apply_dgd_overrides
 from dynamo.profiler.utils.dgd_generation import (
     assemble_final_config,
     build_aic_interpolation_spec,
@@ -74,6 +74,17 @@ def _apply_tolerations_to_final_config(final_config: Any, tolerations: list) -> 
         result[-1] = inject_tolerations_into_dgd(result[-1], tolerations)
         return result
     return inject_tolerations_into_dgd(final_config, tolerations)
+
+
+def _apply_dgd_override_to_final_config(final_config: Any, override: dict) -> Any:
+    """Apply an override to the DGD document in the final profiler output."""
+    if isinstance(final_config, list):
+        result = list(final_config)
+        result[-1] = apply_dgd_overrides(result[-1], override)
+        return result
+    if isinstance(final_config, dict):
+        return apply_dgd_overrides(final_config, override)
+    return final_config
 
 
 def _apply_model_runtime_constraints_to_final_config(
@@ -434,15 +445,24 @@ async def run_profile(
             search_strategy,
         )
 
-        dgd_config = pick_result.get("dgd_config") if not ops.dry_run else None
+        base_dgd_config = pick_result.get("dgd_config") if not ops.dry_run else None
         resolved_backend = pick_result.get("resolved_backend", backend)
 
-        if dgd_config and dgdr.overrides and dgdr.overrides.dgd:
-            dgd_config = apply_dgd_overrides(dgd_config, dgdr.overrides.dgd)
-            logger.info("Applied DGD overrides to the picked DGD config.")
+        # Keep the picked DGD clean for final assembly. v1alpha1 worker args use
+        # append semantics, so applying the same override twice is not idempotent.
+        interpolation_dgd_config = base_dgd_config
+        if interpolation_dgd_config and dgdr.overrides and dgdr.overrides.dgd:
+            interpolation_dgd_config = apply_dgd_overrides(
+                interpolation_dgd_config,
+                dgdr.overrides.dgd,
+            )
+            logger.info("Applied DGD overrides to the interpolation DGD config.")
         job_tolerations = get_profiling_job_tolerations(dgdr)
-        if job_tolerations and dgd_config:
-            dgd_config = inject_tolerations_into_dgd(dgd_config, job_tolerations)
+        if job_tolerations and interpolation_dgd_config:
+            interpolation_dgd_config = inject_tolerations_into_dgd(
+                interpolation_dgd_config,
+                job_tolerations,
+            )
             logger.debug(
                 "Propagated %d profiling-job toleration(s) to the picked DGD config.",
                 len(job_tolerations),
@@ -468,7 +488,11 @@ async def run_profile(
         if not sweep_max_context_length:
             sweep_max_context_length = isl * 2 if isl > 0 else 8192
 
-        if not ops.dry_run and dgd_config and needs_profile_data(dgdr):
+        if (
+            not ops.dry_run
+            and interpolation_dgd_config
+            and needs_profile_data(dgdr)
+        ):
             ops.current_phase = ProfilingPhase.BuildingCurves
             write_profiler_status(
                 ops.output_dir,
@@ -494,7 +518,7 @@ async def run_profile(
                 await run_interpolation(
                     dgdr,
                     ops,
-                    dgd_config,
+                    interpolation_dgd_config,
                     best_prefill_config,
                     best_decode_config,
                     resolved_backend,
@@ -543,7 +567,7 @@ async def run_profile(
         final_config = assemble_final_config(
             dgdr,
             ops,
-            dgd_config,
+            base_dgd_config,
             best_prefill_config,
             best_decode_config,
             aic_spec=aic_spec,
@@ -551,14 +575,11 @@ async def run_profile(
             resolved_backend=resolved_backend,
         )
 
-        # --- Apply DGD overrides (user-supplied partial DGD) ---
         if final_config and dgdr.overrides and dgdr.overrides.dgd:
-            if isinstance(final_config, list):
-                final_config[-1] = apply_dgd_overrides(
-                    final_config[-1], dgdr.overrides.dgd
-                )
-            elif isinstance(final_config, dict):
-                final_config = apply_dgd_overrides(final_config, dgdr.overrides.dgd)
+            final_config = _apply_dgd_override_to_final_config(
+                final_config,
+                dgdr.overrides.dgd,
+            )
             logger.info("Applied DGD overrides to the final config.")
 
         final_config = _apply_model_runtime_constraints_to_final_config(

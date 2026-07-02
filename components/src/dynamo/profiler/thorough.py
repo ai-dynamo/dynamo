@@ -37,7 +37,7 @@ from dynamo.profiler.utils.aiperf import (
     get_prefill_ttft,
 )
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-from dynamo.profiler.utils.config_modifiers.protocol import apply_dgd_overrides
+from dynamo.profiler.utils.dgd_override import apply_dgd_overrides
 from dynamo.profiler.utils.dgdr_v1beta1_types import (
     DynamoGraphDeploymentRequestSpec,
     ModelCacheSpec,

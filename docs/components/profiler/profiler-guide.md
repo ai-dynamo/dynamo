@@ -267,6 +267,25 @@ curl http://localhost:8000/v1/models
 > [!NOTE]
 > DGDRs are **immutable**. To update SLAs or configuration, delete the existing DGDR and create a new one.
 
+### Local Runs with DGD Overrides
+
+The operator supplies `dgd-apply-overrides` to Kubernetes profiling jobs when
+`overrides.dgd` is present. To run the profiler directly with a DGD override,
+install the matching binary on `PATH` or set `DYNAMO_DGD_APPLY_OVERRIDES_BIN` to
+its absolute path. The profiler does not download the binary at runtime.
+
+To build the binary from the same Dynamo checkout:
+
+```bash
+mkdir -p .build
+go -C deploy/operator build -o ../../.build/dgd-apply-overrides ./cmd/dgd-apply-overrides
+export DYNAMO_DGD_APPLY_OVERRIDES_BIN="$PWD/.build/dgd-apply-overrides"
+python -m dynamo.profiler --config /path/to/dgdr-spec.yaml
+```
+
+Use a binary from the same Dynamo release as the profiler. The profiler checks
+the binary protocol before applying an override and rejects incompatible versions.
+
 ## Profiling Method
 
 The profiler follows a 5-step process:

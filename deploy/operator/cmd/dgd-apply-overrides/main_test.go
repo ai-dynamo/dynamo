@@ -24,13 +24,15 @@ func TestRunAppliesVersionedOverride(t *testing.T) {
 	overridePath := writeTestFile(t, directory, "override.json", alphaOverrideDGDJSON)
 	outputPath := filepath.Join(directory, "effective.yaml")
 	stderr := &bytes.Buffer{}
+	stdout := &bytes.Buffer{}
 
 	err := run([]string{
 		"--blueprint", blueprintPath,
 		"--override", overridePath,
 		"--output", outputPath,
-	}, stderr)
+	}, stdout, stderr)
 	require.NoError(t, err)
+	assert.Empty(t, stdout.String())
 	assert.Empty(t, stderr.String())
 
 	effective := mustReadDGD(t, outputPath)
@@ -56,7 +58,7 @@ kind: DynamoGraphDeployment
 		"--blueprint", blueprintPath,
 		"--override", overridePath,
 		"--output", outputPath,
-	}, stderr)
+	}, &bytes.Buffer{}, stderr)
 	require.NoError(t, err)
 	assert.Empty(t, stderr.String())
 	assert.Equal(t, mustReadDGD(t, blueprintPath), mustReadDGD(t, outputPath))
@@ -82,7 +84,7 @@ spec:
 		"--blueprint", blueprintPath,
 		"--override", overridePath,
 		"--output", outputPath,
-	}, stderr)
+	}, &bytes.Buffer{}, stderr)
 	require.NoError(t, err)
 	assert.Contains(
 		t,
@@ -107,7 +109,7 @@ kind: DynamoGraphDeployment
 		"--blueprint", blueprintPath,
 		"--override", overridePath,
 		"--output", outputPath,
-	}, &bytes.Buffer{})
+	}, &bytes.Buffer{}, &bytes.Buffer{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "apply DGD override")
 	content, readErr := os.ReadFile(outputPath)
@@ -120,7 +122,7 @@ func TestRunInstallsExecutable(t *testing.T) {
 
 	installPath := filepath.Join(t.TempDir(), "dgd-apply-overrides")
 	stderr := &bytes.Buffer{}
-	require.NoError(t, run([]string{"--install-to", installPath}, stderr))
+	require.NoError(t, run([]string{"--install-to", installPath}, &bytes.Buffer{}, stderr))
 	assert.Empty(t, stderr.String())
 
 	installed, err := os.Stat(installPath)
@@ -133,25 +135,47 @@ func TestRunInstallsExecutable(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o755), installed.Mode().Perm())
 }
 
+func TestRunPrintsProtocolVersion(t *testing.T) {
+	t.Parallel()
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	require.NoError(t, run([]string{"--protocol-version"}, stdout, stderr))
+	assert.Equal(t, protocolVersion+"\n", stdout.String())
+	assert.Empty(t, stderr.String())
+}
+
 func TestRunRejectsInvalidArgumentsAndInput(t *testing.T) {
 	t.Parallel()
 
 	t.Run("missing flags", func(t *testing.T) {
-		err := run(nil, &bytes.Buffer{})
+		err := run(nil, &bytes.Buffer{}, &bytes.Buffer{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "--blueprint, --override, --output")
 	})
 
 	t.Run("unexpected positional argument", func(t *testing.T) {
-		err := run([]string{"extra"}, &bytes.Buffer{})
+		err := run([]string{"extra"}, &bytes.Buffer{}, &bytes.Buffer{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "unexpected positional arguments")
 	})
 
 	t.Run("install mixed with merge flags", func(t *testing.T) {
-		err := run([]string{"--install-to", "/tmp/tool", "--blueprint", "/tmp/blueprint"}, &bytes.Buffer{})
+		err := run([]string{"--install-to", "/tmp/tool", "--blueprint", "/tmp/blueprint"}, &bytes.Buffer{}, &bytes.Buffer{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "--install-to cannot be combined")
+	})
+
+	t.Run("protocol version mixed with merge flags", func(t *testing.T) {
+		err := run([]string{"--protocol-version", "--blueprint", "/tmp/blueprint"}, &bytes.Buffer{}, &bytes.Buffer{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--protocol-version cannot be combined")
+	})
+
+	t.Run("protocol version mixed with install mode", func(t *testing.T) {
+		err := run([]string{"--protocol-version", "--install-to", "/tmp/tool"}, &bytes.Buffer{}, &bytes.Buffer{})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--install-to and --protocol-version are mutually exclusive")
 	})
 
 	t.Run("malformed blueprint", func(t *testing.T) {
@@ -162,7 +186,7 @@ func TestRunRejectsInvalidArgumentsAndInput(t *testing.T) {
 			"--blueprint", blueprintPath,
 			"--override", overridePath,
 			"--output", filepath.Join(directory, "effective.yaml"),
-		}, &bytes.Buffer{})
+		}, &bytes.Buffer{}, &bytes.Buffer{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "decode blueprint YAML")
 	})
@@ -175,7 +199,7 @@ func TestRunRejectsInvalidArgumentsAndInput(t *testing.T) {
 			"--blueprint", blueprintPath,
 			"--override", overridePath,
 			"--output", filepath.Join(directory, "effective.yaml"),
-		}, &bytes.Buffer{})
+		}, &bytes.Buffer{}, &bytes.Buffer{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "decode override YAML")
 	})
@@ -192,7 +216,7 @@ spec: {}
 			"--blueprint", blueprintPath,
 			"--override", overridePath,
 			"--output", filepath.Join(directory, "effective.yaml"),
-		}, &bytes.Buffer{})
+		}, &bytes.Buffer{}, &bytes.Buffer{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "apply DGD override")
 		assert.Contains(t, err.Error(), `kind "DynamoGraphDeploymentRequest"`)

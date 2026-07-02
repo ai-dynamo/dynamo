@@ -20,14 +20,17 @@ import (
 )
 
 type options struct {
-	blueprintPath string
-	overridePath  string
-	outputPath    string
-	installPath   string
+	blueprintPath        string
+	overridePath         string
+	outputPath           string
+	installPath          string
+	printProtocolVersion bool
 }
 
+const protocolVersion = "1"
+
 func main() {
-	if err := run(os.Args[1:], os.Stderr); err != nil {
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
@@ -36,9 +39,13 @@ func main() {
 	}
 }
 
-func run(args []string, stderr io.Writer) error {
+func run(args []string, stdout io.Writer, stderr io.Writer) error {
 	opts, err := parseOptions(args, stderr)
 	if err != nil {
+		return err
+	}
+	if opts.printProtocolVersion {
+		_, err := fmt.Fprintln(stdout, protocolVersion)
 		return err
 	}
 	if opts.installPath != "" {
@@ -85,15 +92,23 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	flags.StringVar(&opts.overridePath, "override", "", "Path to the partial DGD override JSON or YAML")
 	flags.StringVar(&opts.outputPath, "output", "", "Path for the effective DGD YAML")
 	flags.StringVar(&opts.installPath, "install-to", "", "Copy this executable to the given path and exit")
+	flags.BoolVar(&opts.printProtocolVersion, "protocol-version", false, "Print the CLI protocol version and exit")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
 	if flags.NArg() != 0 {
 		return options{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(flags.Args(), " "))
 	}
-	if opts.installPath != "" {
+	if opts.installPath != "" || opts.printProtocolVersion {
+		if opts.installPath != "" && opts.printProtocolVersion {
+			return options{}, fmt.Errorf("--install-to and --protocol-version are mutually exclusive")
+		}
 		if opts.blueprintPath != "" || opts.overridePath != "" || opts.outputPath != "" {
-			return options{}, fmt.Errorf("--install-to cannot be combined with --blueprint, --override, or --output")
+			mode := "--install-to"
+			if opts.printProtocolVersion {
+				mode = "--protocol-version"
+			}
+			return options{}, fmt.Errorf("%s cannot be combined with --blueprint, --override, or --output", mode)
 		}
 		return opts, nil
 	}
