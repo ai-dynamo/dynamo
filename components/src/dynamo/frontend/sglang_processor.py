@@ -41,6 +41,7 @@ from .utils import (
     make_internal_error,
     nvext_extra_field_requested,
     random_uuid,
+    read_jinja_chat_template,
     resolve_chat_template,
     worker_warmup,
 )
@@ -63,7 +64,7 @@ def _load_tokenizer(source_path: str, trust_remote_code: bool):
     (e.g. chat_template.json) when the tokenizer defines none."""
     tokenizer = get_tokenizer(source_path, trust_remote_code=trust_remote_code)
     if getattr(tokenizer, "chat_template", None) is None:
-        tokenizer.chat_template = resolve_chat_template(source_path)
+        tokenizer.chat_template = resolve_chat_template(source_path, backend="sglang")
     return tokenizer
 
 
@@ -142,8 +143,7 @@ def _load_chat_template(chat_template: str | None) -> str | None:
             "Dynamo's SGLang chat processor supports only .jinja chat template "
             f"files, got: {expanded_template}"
         )
-    with open(expanded_template, encoding="utf-8") as f:
-        return f.read().strip("\n").replace("\\n", "\n")
+    return read_jinja_chat_template(expanded_template, backend="sglang")
 
 
 @dataclass
