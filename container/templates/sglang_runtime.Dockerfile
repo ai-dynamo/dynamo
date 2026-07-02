@@ -35,7 +35,11 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-RUN chmod -R 775 /usr/local/lib/python3.12/dist-packages/flashinfer_cubin/cubins || true
+RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    CUBINS_DIR="$SITE_PACKAGES/flashinfer_cubin/cubins" && \
+    if [ -d "$CUBINS_DIR" ]; then \
+        find "$CUBINS_DIR" -type d -exec chmod g+rwx {} + ; \
+    fi
 
 {% if device == "xpu" %}
 {# XPU runtime: NIXL + UCX are needed for P2P transport on Intel GPUs.
