@@ -253,7 +253,6 @@ def _get_replacement_id(model_path: str) -> int:
     """
 
     try:
-        # get_config_dict reads config.json without executing repo code.
         config_dict, _ = PretrainedConfig.get_config_dict(model_path)
         # Some models (e.g. Qwen3-VL) store vocab_size in text_config, not top-level.
         vocab_size = config_dict.get("vocab_size")

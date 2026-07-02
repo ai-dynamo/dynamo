@@ -208,7 +208,6 @@ class TensorRTLLMEngine:
         """Return True if *model_path*'s architecture is not supported by
         TRT-LLM's standalone MultimodalEncoder."""
         try:
-            # get_config_dict reads config.json without executing repo code.
             config_dict, _ = PretrainedConfig.get_config_dict(model_path)
             archs = config_dict.get("architectures") or []
             return any(a in _UNSUPPORTED_STANDALONE_ENCODER_ARCHS for a in archs)
