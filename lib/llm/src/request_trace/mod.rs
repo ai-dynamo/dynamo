@@ -72,7 +72,7 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
         destinations = ?policy.destination_names(),
         file_format = policy.file_format.as_str(),
         file_compression = policy.file_compression.as_str(),
-        force_logging = policy.force_logging,
+        include_request_response = policy.include_request_response,
         "Request trace initialized"
     );
     Ok(())

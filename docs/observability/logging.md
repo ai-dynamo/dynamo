@@ -347,10 +347,10 @@ the response. The same `DYN_REQUEST_TRACE_DESTINATIONS` setting controls local
 files, stderr, NATS, and OTLP log export.
 
 Request payload logging is opt-in and independent of `OTEL_EXPORT_ENABLED`
-(which controls application log and trace export). By default, Dynamo emits
-payload rows only when the OpenAI request sets `store=true`; set
-`DYN_REQUEST_TRACE_FORCE_LOGGING=true` to emit payload rows for every eligible
-chat request.
+(which controls application log and trace export). By default, Dynamo does not
+emit request or response payload rows, even when the OpenAI request sets
+`store=true`. Set `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE=true` to emit
+payload rows for every eligible chat request.
 
 > [!IMPORTANT]
 > The OTLP payload path is enabled by `DYN_REQUEST_TRACE_DESTINATIONS=otel`, or
@@ -379,7 +379,7 @@ Payload-related request trace variables:
 |----------|-------------|---------|
 | `DYN_REQUEST_TRACE` | Master switch for request trace and request payload logging. | unset (disabled) |
 | `DYN_REQUEST_TRACE_DESTINATIONS` | Comma-separated destinations: `file`, `stderr`, `nats`, `otel`. | `file` when enabled |
-| `DYN_REQUEST_TRACE_FORCE_LOGGING` | Emit `request_payload` rows regardless of the OpenAI `store` flag. Without it, only `store=true` requests emit payload rows. | `false` |
+| `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE` | Include request and response payload bodies by emitting `request_payload` rows for all eligible chat requests. When `false`, no payload rows are emitted, even if `store=true`. | `false` |
 | `DYN_REQUEST_TRACE_NATS_SUBJECT` | Subject used by the `nats` destination. | `dynamo.request_trace.v1` |
 | `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | Max serialized OTLP payload size. Oversized payload rows emit a marker with `payload_complete=false` and `payload_drop_reason`. | `4194304` (4 MiB) |
 
@@ -418,7 +418,7 @@ request:
 ```bash
 export DYN_REQUEST_TRACE=1
 export DYN_REQUEST_TRACE_DESTINATIONS=otel
-export DYN_REQUEST_TRACE_FORCE_LOGGING=true
+export DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE=true
 export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4317
 export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=grpc
 ```

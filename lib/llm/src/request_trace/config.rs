@@ -75,7 +75,7 @@ impl RequestTraceFileCompression {
 #[derive(Clone, Debug)]
 pub struct RequestTracePolicy {
     pub enabled: bool,
-    pub force_logging: bool,
+    pub include_request_response: bool,
     pub destinations: Vec<RequestTraceDestination>,
     pub file_path: Option<String>,
     pub file_format: RequestTraceFileFormat,
@@ -153,8 +153,8 @@ fn load_from_env() -> RequestTracePolicy {
         env_audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
     ])
     .filter(|value| *value > 0);
-    let force_logging = env_bool(&[
-        env_request_trace::DYN_REQUEST_TRACE_FORCE_LOGGING,
+    let include_request_response = env_bool(&[
+        env_request_trace::DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE,
         env_audit::DYN_AUDIT_FORCE_LOGGING,
     ])
     .unwrap_or(false);
@@ -182,7 +182,7 @@ fn load_from_env() -> RequestTracePolicy {
 
     RequestTracePolicy {
         enabled,
-        force_logging,
+        include_request_response,
         destinations,
         file_path,
         file_format,
@@ -362,7 +362,7 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
         env_request_trace::DYN_REQUEST_TRACE_FILE_COMPRESSION,
         env_request_trace::DYN_REQUEST_TRACE_CAPACITY,
-        env_request_trace::DYN_REQUEST_TRACE_FORCE_LOGGING,
+        env_request_trace::DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE,
         env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
         env_request_trace::DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES,
         env_request_trace::DYN_REQUEST_TRACE_FILE_BUFFER_BYTES,
@@ -416,7 +416,7 @@ mod tests {
             assert_eq!(policy.file_path.as_deref(), Some(DEFAULT_FILE_PATH));
             assert_eq!(policy.file_format, RequestTraceFileFormat::Jsonl);
             assert_eq!(policy.file_compression, RequestTraceFileCompression::Gzip);
-            assert!(!policy.force_logging);
+            assert!(!policy.include_request_response);
             assert_eq!(policy.nats_subject, DEFAULT_NATS_SUBJECT);
             assert_eq!(
                 policy.otel_max_payload_bytes,
@@ -444,7 +444,10 @@ mod tests {
                     "none",
                 ),
                 (env_request_trace::DYN_REQUEST_TRACE_FILE_ROLL_LINES, "10"),
-                (env_request_trace::DYN_REQUEST_TRACE_FORCE_LOGGING, "true"),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE,
+                    "true",
+                ),
                 (
                     env_request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
                     "custom.request.trace",
@@ -475,7 +478,7 @@ mod tests {
                 );
                 assert_eq!(policy.file_compression, RequestTraceFileCompression::None);
                 assert_eq!(policy.file_roll_lines, Some(10));
-                assert!(policy.force_logging);
+                assert!(policy.include_request_response);
                 assert_eq!(policy.nats_subject, "custom.request.trace");
                 assert_eq!(policy.otel_max_payload_bytes, 1234);
                 assert_eq!(
@@ -588,7 +591,7 @@ mod tests {
                 assert_eq!(policy.destinations, vec![RequestTraceDestination::File]);
                 assert_eq!(policy.file_path.as_deref(), Some("/tmp/legacy-audit"));
                 assert_eq!(policy.file_compression, RequestTraceFileCompression::Gzip);
-                assert!(policy.force_logging);
+                assert!(policy.include_request_response);
                 assert_eq!(policy.file_buffer_bytes, 64);
                 assert_eq!(policy.file_flush_interval_ms, 5);
                 assert_eq!(policy.file_roll_bytes, 100);

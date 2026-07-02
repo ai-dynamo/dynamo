@@ -14,9 +14,10 @@ Session identity enriches traces only. Its presence does not enable sticky sessi
 
 Request trace can also emit `request_payload` rows for OpenAI
 `/v1/chat/completions` requests. Payload rows include the client request and,
-when the response completes, the response. By default, Dynamo emits payload rows
-only for requests with `store=true`; set `DYN_REQUEST_TRACE_FORCE_LOGGING=true`
-to emit payload rows for every eligible chat request.
+when the response completes, the response. By default, Dynamo does not emit
+request or response payload rows, even when `store=true`. Set
+`DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE=true` to emit payload rows for every
+eligible chat request.
 
 Enable the default rotating gzip file destination:
 
@@ -42,7 +43,7 @@ export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 | `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl` | `jsonl` | File record format. |
 | `DYN_REQUEST_TRACE_FILE_COMPRESSION` | `gzip` | `gzip`, `none` | File compression. `gzip` writes `<prefix>.<index>.jsonl.gz`; `none` writes a literal JSONL path. |
 | `DYN_REQUEST_TRACE_CAPACITY` | `1024` | Positive integer | Best-effort in-process broadcast capacity. |
-| `DYN_REQUEST_TRACE_FORCE_LOGGING` | `false` | `true`, `false` | Emit `request_payload` rows even when the OpenAI `store` flag is `false`. |
+| `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE` | `false` | `true`, `false` | Include request and response payload bodies by emitting `request_payload` rows for all eligible chat requests. When `false`, no payload rows are emitted, even if `store=true`. |
 | `DYN_REQUEST_TRACE_NATS_SUBJECT` | `dynamo.request_trace.v1` | NATS subject | Subject used when `DYN_REQUEST_TRACE_DESTINATIONS` includes `nats`. |
 | `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | `4194304` | Positive integer bytes | Max serialized OTEL payload attribute size. Oversized `request_payload` rows emit a marker with `payload_complete=false` and `payload_drop_reason`. |
 | `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES` | `1048576` | Integer bytes | File batching threshold. |

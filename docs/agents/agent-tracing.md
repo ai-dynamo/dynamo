@@ -131,15 +131,15 @@ Optional top-level key: `parent_session_id`. Optional `tool` keys: `output_token
 
 Request traces do not save input or output payloads unless payload logging is
 enabled. To include chat-completion payload rows in the same request trace
-stream, enable request trace and set `DYN_REQUEST_TRACE_FORCE_LOGGING=true` when
-you need payloads for requests that do not set `store=true`.
+stream, enable request trace and set
+`DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE=true`.
 
 ```bash
 export DYN_REQUEST_TRACE=1
 export DYN_REQUEST_TRACE_DESTINATIONS=file
 export DYN_REQUEST_TRACE_FILE_PATH=/tmp/dynamo-trace
 export DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip
-export DYN_REQUEST_TRACE_FORCE_LOGGING=true
+export DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE=true
 ```
 
 After the run, split metadata and payload rows by `event_type`:

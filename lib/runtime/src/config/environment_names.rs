@@ -428,7 +428,7 @@ pub mod llm {
         /// `jsonl` and `jsonl_gz` map to the request trace `file` destination.
         pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
 
-        /// Deprecated alias for `DYN_REQUEST_TRACE_FORCE_LOGGING`.
+        /// Deprecated alias for `DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE`.
         pub const DYN_AUDIT_FORCE_LOGGING: &str = "DYN_AUDIT_FORCE_LOGGING";
 
         /// Deprecated alias for `DYN_REQUEST_TRACE_CAPACITY`.
@@ -490,8 +490,9 @@ pub mod llm {
         /// In-process trace bus capacity.
         pub const DYN_REQUEST_TRACE_CAPACITY: &str = "DYN_REQUEST_TRACE_CAPACITY";
 
-        /// Force request payload emission even when the OpenAI `store` flag is `false`.
-        pub const DYN_REQUEST_TRACE_FORCE_LOGGING: &str = "DYN_REQUEST_TRACE_FORCE_LOGGING";
+        /// Include request and response payload bodies in request trace output.
+        pub const DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE: &str =
+            "DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE";
 
         /// NATS subject the request trace sink publishes to.
         pub const DYN_REQUEST_TRACE_NATS_SUBJECT: &str = "DYN_REQUEST_TRACE_NATS_SUBJECT";
@@ -817,7 +818,7 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
             llm::request_trace::DYN_REQUEST_TRACE_FILE_COMPRESSION,
             llm::request_trace::DYN_REQUEST_TRACE_CAPACITY,
-            llm::request_trace::DYN_REQUEST_TRACE_FORCE_LOGGING,
+            llm::request_trace::DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE,
             llm::request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
             llm::request_trace::DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_FILE_BUFFER_BYTES,

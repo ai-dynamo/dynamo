@@ -147,6 +147,7 @@ mod tests {
             [
                 ("DYN_REQUEST_TRACE", Some("1")),
                 ("DYN_REQUEST_TRACE_DESTINATIONS", Some("nats")),
+                ("DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE", Some("true")),
                 ("DYN_REQUEST_TRACE_NATS_SUBJECT", Some(TEST_SUBJECT)),
             ],
             async {
@@ -164,7 +165,7 @@ mod tests {
                 // Emit a single combined request+response payload record.
                 let request = create_test_request("nemotron", true);
                 let handle = handle::create_handle(&request, "test-req-1")
-                    .expect("Failed to create audit handle");
+                    .expect("Failed to create payload handle");
                 handle.emit(Some(Arc::new(create_test_response(
                     "nemotron",
                     "test response",
@@ -205,18 +206,19 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // Manual testing only - requires NATS on localhost:4222
-    async fn test_audit_nats_store_flag() {
-        // Test that store flag controls whether payload records are emitted
-        const TEST_SUBJECT: &str = "test.request_trace.store";
+    async fn test_audit_nats_include_request_response_ignores_store_flag() {
+        // Test that the explicit include flag emits payloads regardless of store.
+        const TEST_SUBJECT: &str = "test.request_trace.include_request_response";
 
         async_with_vars(
             [
                 ("DYN_REQUEST_TRACE", Some("1")),
                 ("DYN_REQUEST_TRACE_DESTINATIONS", Some("nats")),
+                ("DYN_REQUEST_TRACE_INCLUDE_REQUEST_RESPONSE", Some("true")),
                 ("DYN_REQUEST_TRACE_NATS_SUBJECT", Some(TEST_SUBJECT)),
             ],
             async {
-                let stream_name = format!("test_store_{}", Uuid::new_v4());
+                let stream_name = format!("test_include_{}", Uuid::new_v4());
 
                 let client = create_test_nats_client().await;
                 setup_test_stream(&client, &stream_name, TEST_SUBJECT).await;
@@ -227,18 +229,15 @@ mod tests {
                 init_from_env_with_shutdown(shutdown.clone()).await.unwrap();
                 time::sleep(Duration::from_millis(100)).await;
 
-                // Request with store=true (should be audited)
                 let request_true = create_test_request("nemotron", true);
-                if let Some(handle) = handle::create_handle(&request_true, "store-true") {
-                    handle.emit(None);
-                }
+                handle::create_handle(&request_true, "store-true")
+                    .expect("store=true handle")
+                    .emit(None);
 
-                // Request with store=false (should NOT be audited)
                 let request_false = create_test_request("nemotron", false);
-                assert!(
-                    handle::create_handle(&request_false, "store-false").is_none(),
-                    "Should not create handle when store=false"
-                );
+                handle::create_handle(&request_false, "store-false")
+                    .expect("store=false handle")
+                    .emit(None);
 
                 time::sleep(Duration::from_millis(200)).await;
 
@@ -252,13 +251,20 @@ mod tests {
                 .await;
                 assert_eq!(
                     messages.len(),
-                    1,
-                    "Should only emit the record for the store=true case"
+                    2,
+                    "Should emit records for store=true and store=false when include is enabled"
                 );
-                assert_eq!(messages[0]["schema"], "dynamo.request.trace.v1");
-                assert_eq!(messages[0]["event_type"], "request_payload");
-                assert_eq!(messages[0]["payload"]["request_id"], "store-true");
-                assert!(messages[0]["payload"]["request"].is_object());
+                let request_ids: std::collections::HashSet<_> = messages
+                    .iter()
+                    .map(|message| message["payload"]["request_id"].as_str().unwrap())
+                    .collect();
+                assert!(request_ids.contains("store-true"));
+                assert!(request_ids.contains("store-false"));
+                for message in &messages {
+                    assert_eq!(message["schema"], "dynamo.request.trace.v1");
+                    assert_eq!(message["event_type"], "request_payload");
+                    assert!(message["payload"]["request"].is_object());
+                }
 
                 client.jetstream().delete_stream(&stream_name).await.ok();
                 shutdown.cancel();

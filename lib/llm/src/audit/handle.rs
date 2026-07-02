@@ -84,7 +84,7 @@ pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> O
         req,
         request_id,
         crate::request_trace::capture_enabled(),
-        policy.force_logging,
+        policy.include_request_response,
     )
 }
 
@@ -98,13 +98,9 @@ fn create_handle_with_config(
     req: &NvCreateChatCompletionRequest,
     request_id: &str,
     enabled: bool,
-    force_logging: bool,
+    include_request_response: bool,
 ) -> Option<AuditHandle> {
-    if !enabled {
-        return None;
-    }
-    // If force_logging is enabled, ignore the store flag
-    if !force_logging && !req.inner.store.unwrap_or(false) {
+    if !enabled || !include_request_response {
         return None;
     }
     let requested_streaming = req.inner.stream.unwrap_or(false);
@@ -168,15 +164,25 @@ mod tests {
         serde_json::from_value(json).expect("Failed to create test response")
     }
 
-    /// Test that force logging bypasses store=false.
     #[test]
-    fn test_force_logging_bypasses_store() {
+    fn include_request_response_emits_even_when_store_is_false() {
         let request = create_test_request("test-model", false);
         let handle = create_handle_with_config(&request, "test-id", true, true);
 
         assert!(
             handle.is_some(),
-            "force_logging=true should create a handle even with store=false"
+            "include_request_response=true should create a handle even with store=false"
+        );
+    }
+
+    #[test]
+    fn include_request_response_false_skips_store_true_payloads() {
+        let request = create_test_request("test-model", true);
+        let handle = create_handle_with_config(&request, "test-id", true, false);
+
+        assert!(
+            handle.is_none(),
+            "include_request_response=false should skip payloads even with store=true"
         );
     }
 
