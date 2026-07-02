@@ -1,4 +1,5 @@
-# Dynamo + TensorRT-LLM for Vera Rubin (VR200, sbsa/arm64).
+# Dynamo + TensorRT-LLM for Vera Rubin. Builds for BOTH arm64 (VR200, sbsa) and
+# amd64 (x86_64); pass --platform + the matching BASE / TRTLLM_WHEEL_URL build-args.
 #
 # Build approach (per Ishan Dhanani's bringup guidance): install Dynamo FROM SOURCE
 # inside the Rubin framework image instead of using render.py — the render.py trtllm
@@ -6,30 +7,45 @@
 # Rubin build base. The pytorch-rubin base has NO tensorrt_llm installed, so we add the
 # prebuilt trtllm wheel first, then build Dynamo on top.
 #
-# Build on a NATIVE arm64 Docker host (e.g. computelab-armbuild-1):
-#   docker build --platform linux/arm64 -t <registry>/<you>-trtllm-rubin:<tag> -f Dockerfile.trtllm .
-# Validated image: nvcr.io/nvidian/dynamo-dev/tzulingk-trtllm-rubin:sbsa-fromsrc-main-7c8b4b19
+# Build on a NATIVE host of the target arch (emulation is slow for the Rust/maturin
+# build). BASE and TRTLLM_WHEEL_URL are arch-specific — there is no combined
+# multi-arch pytorch-rubin tag, so select the manifest matching the target arch:
+#   arm64: pytorch-rubin-py3-sbsa-...   + RubinBringup-...-VR200-CUDA13.4.tar.gz
+#   amd64: pytorch-rubin-py3-x86_64-... + TensorRT-LLM.tar.gz
+# e.g. on an arm64 host (computelab-armbuild-1):
+#   docker build --platform linux/arm64 \
+#     --build-arg BASE=urm.nvidia.com/sw-tensorrt-docker/tensorrt-llm:pytorch-rubin-py3-sbsa-ubuntu24.04-trt10.15.1.29-20260512 \
+#     --build-arg TRTLLM_WHEEL_URL=https://urm.nvidia.com/artifactory/sw-tensorrt-generic/llm-artifacts/LLM/feat-rubin-bringup/L0_PostMerge/24/RubinBringup-TensorRT-LLM-VR200-CUDA13.4.tar.gz \
+#     -t <registry>/<you>-trtllm-rubin:<tag> -f Dockerfile.trtllm .
+# The dynamo-ci pipeline resolves the latest build's BASE + wheel automatically
+# (scripts/resolve_rubin_trtllm_base.sh) and passes them per arch.
+# Validated arm64 image: nvcr.io/nvidian/dynamo-dev/tzulingk-trtllm-rubin:sbsa-fromsrc-main-7c8b4b19
 
+# This needs to be the pytorch container which trtllm is building against. We need to track this somehow.
 ARG BASE=urm.nvidia.com/sw-tensorrt-docker/tensorrt-llm:pytorch-rubin-py3-sbsa-ubuntu24.04-trt10.15.1.29-20260512
 FROM ${BASE}
 SHELL ["/bin/bash","-c"]
 ENV DEBIAN_FRONTEND=noninteractive
 
-# (1) Prebuilt TRT-LLM wheel (VR200/sbsa). Installed WITH deps (base lacks trtllm's
-#     pure-python deps); the rubin-tuned torch/tensorrt are unpinned/satisfied so pip
-#     leaves them untouched.
-ARG TRTLLM_WHEEL_URL=https://urm.nvidia.com/artifactory/sw-tensorrt-generic/llm-artifacts/LLM/feat-rubin-bringup/L0_PostMerge/23/RubinBringup-TensorRT-LLM-VR200-CUDA13.4.tar.gz
+# (1) Prebuilt TRT-LLM wheel for the target arch. Installed WITH deps (base lacks
+#     trtllm's pure-python deps); the rubin-tuned torch/tensorrt are unpinned/satisfied
+#     so pip leaves them untouched. The tarball carries a single arch-matching wheel,
+#     so the glob resolves unambiguously. The default below is only a fallback for
+#     manual arm64 builds — dynamo-ci overrides it per arch with the latest build.
+ARG TRTLLM_WHEEL_URL=https://urm.nvidia.com/artifactory/sw-tensorrt-generic/llm-artifacts/LLM/feat-rubin-bringup/L0_PostMerge/24/RubinBringup-TensorRT-LLM-VR200-CUDA13.4.tar.gz
 RUN cd /tmp \
  && curl -fSL --retry 3 -o t.tgz "${TRTLLM_WHEEL_URL}" \
  && tar xzf t.tgz --wildcards 'TensorRT-LLM/tensorrt_llm-*.whl' \
  && pip install --break-system-packages --no-cache-dir TensorRT-LLM/tensorrt_llm-*.whl \
  && rm -rf t.tgz TensorRT-LLM
 
-# (2) nats + etcd (arm64)
+# (2) nats + etcd. TARGETARCH is set automatically by buildkit from --platform
+#     (amd64|arm64) and matches the nats/etcd release asset suffixes directly.
+ARG TARGETARCH
 RUN cd /tmp \
- && curl -fSL https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-linux-arm64.tar.gz | tar xz \
+ && curl -fSL https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-linux-${TARGETARCH}.tar.gz | tar xz \
  && install -m755 nats-server-*/nats-server /usr/local/bin/nats-server \
- && curl -fSL https://github.com/etcd-io/etcd/releases/download/v3.5.30/etcd-v3.5.30-linux-arm64.tar.gz | tar xz \
+ && curl -fSL https://github.com/etcd-io/etcd/releases/download/v3.5.30/etcd-v3.5.30-linux-${TARGETARCH}.tar.gz | tar xz \
  && install -m755 etcd-*/etcd etcd-*/etcdctl /usr/local/bin/ \
  && rm -rf nats-server-* etcd-*
 
