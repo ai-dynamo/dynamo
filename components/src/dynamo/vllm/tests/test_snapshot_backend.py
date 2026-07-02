@@ -163,16 +163,16 @@ def test_failed_suspend_retries_failed_allocator_rollback():
         patch(
             "vllm.distributed.parallel_state.checkpoint_restore_distributed_state"
         ) as restore,
-        pytest.raises(RuntimeError, match="sleep failed"),
     ):
-        backend.suspend()
+        with pytest.raises(RuntimeError, match="sleep failed"):
+            backend.suspend()
 
-    assert backend.state() == "SUSPENDED"
-    backend.resume()
+        assert backend.state() == "SUSPENDED"
+        backend.resume()
 
-    assert backend._allocator.resume.call_count == 2
-    restore.assert_called_once_with()
-    assert backend.state() == "RUNNING"
+        assert backend._allocator.resume.call_count == 2
+        restore.assert_called_once_with()
+        assert backend.state() == "RUNNING"
 
 
 def test_gms_suspend_orders_checkpoint_before_unmap():
