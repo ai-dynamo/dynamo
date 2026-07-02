@@ -164,6 +164,9 @@ The frontend exposes the following HTTP endpoints:
 | `GET` | `/docs` | Swagger UI |
 | `POST` | `/busy_threshold` | Set busy thresholds (gated by `DYN_DISABLE_FRONTEND_ADMIN_API`, see below) |
 | `GET` | `/busy_threshold` | Get current busy thresholds (gated by `DYN_DISABLE_FRONTEND_ADMIN_API`, see below) |
+| `GET` | `/workers` | List worker serving state, including overloaded and draining workers (gated by `DYN_DISABLE_FRONTEND_ADMIN_API`, see below) |
+| `POST` | `/workers/{worker_id}/drain` | Stop routing new requests to a worker (gated by `DYN_DISABLE_FRONTEND_ADMIN_API`, see below) |
+| `POST` | `/workers/{worker_id}/resume` | Resume routing new requests to a drained worker (gated by `DYN_DISABLE_FRONTEND_ADMIN_API`, see below) |
 
 ### Frontend feature switches
 
@@ -174,7 +177,15 @@ Set an env value of `1` / `true` / `yes` / `on` (case-insensitive) to disable th
 | Env Var | Default | Behavior when set (disabled) |
 |---------|---------|------------------------------|
 | `DYN_DISABLE_FRONTEND_NVEXT` | unset (enabled) | Frontend drops `request.nvext` at handler entry on `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/messages`; ignores Dynamo routing headers (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`, `x-dynamo-prefill-dp-rank`, `x-dynamo-request-priority`, `x-dynamo-request-strict-priority`) and their compatibility aliases; silently ignores the response-side `nvext.extra_fields` opt-in. Note: disabling this breaks EPP / GAIE serving, Prime-RL-style training that uses `nvext.cache_salt`, multi-tenant agent platforms that forward `nvext.agent_hints`, and clients that opt into response disclosure via `nvext.extra_fields`. |
-| `DYN_DISABLE_FRONTEND_ADMIN_API` | unset (enabled) | `GET /busy_threshold` and `POST /busy_threshold` are not registered (404 instead of 503). Inference, metrics, models, health, and liveness routes are unaffected. |
+| `DYN_DISABLE_FRONTEND_ADMIN_API` | unset (enabled) | Frontend admin routes such as `GET /busy_threshold`, `POST /busy_threshold`, `GET /workers`, `POST /workers/{worker_id}/drain`, and `POST /workers/{worker_id}/resume` are not registered (404 instead of 503). Inference, metrics, models, health, and liveness routes are unaffected. |
+
+The admin API does not add an HTTP authentication layer. Expose these routes only on a trusted
+network or behind an external access-control boundary. Manual worker drain state is stored in the
+frontend process and is not persisted across frontend restarts.
+
+Worker drain/resume requests require a JSON body with `model`. When the same worker ID appears in
+multiple worker sets, include `namespace` and/or `worker_type` to select exactly one worker set;
+otherwise the request is rejected with `409 Conflict` and no drain state is changed.
 
 ### Endpoint Path Customization
 

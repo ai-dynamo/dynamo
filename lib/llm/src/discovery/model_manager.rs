@@ -15,7 +15,9 @@ use dynamo_kv_router::{
 use tokio::sync::oneshot;
 
 use super::worker_monitor::LoadThresholdConfig;
-use super::{Model, RuntimeConfigWatch, WorkerSet, runtime_config_watch};
+use super::{
+    Model, RuntimeConfigWatch, WorkerDrainSelector, WorkerSet, WorkerStatus, runtime_config_watch,
+};
 
 use dynamo_runtime::{
     component::{Endpoint, build_transport_type},
@@ -73,6 +75,9 @@ pub enum ModelManagerError {
 
     #[error("Model unavailable: {0}")]
     ModelUnavailable(String),
+
+    #[error("Ambiguous worker selection: {0}")]
+    WorkerSelectionConflict(String),
 
     #[error("Model already exists: {0}")]
     ModelAlreadyExists(String),
@@ -1281,6 +1286,42 @@ impl ModelManager {
             }
         }
         result
+    }
+
+    pub fn worker_statuses(&self, model: Option<&str>) -> Vec<WorkerStatus> {
+        let mut statuses: Vec<WorkerStatus> = match model {
+            Some(model_name) => self
+                .models
+                .get(model_name)
+                .map(|entry| entry.worker_statuses())
+                .unwrap_or_default(),
+            None => self
+                .models
+                .iter()
+                .flat_map(|entry| entry.value().worker_statuses())
+                .collect(),
+        };
+        statuses.sort_by(|a, b| {
+            a.model
+                .cmp(&b.model)
+                .then_with(|| a.namespace.cmp(&b.namespace))
+                .then_with(|| a.worker_type.cmp(&b.worker_type))
+                .then_with(|| a.worker_id.cmp(&b.worker_id))
+        });
+        statuses
+    }
+
+    pub fn set_worker_drained(
+        &self,
+        model: &str,
+        worker_id: u64,
+        selector: &WorkerDrainSelector,
+        drained: bool,
+    ) -> Result<(), ModelManagerError> {
+        self.models
+            .get(model)
+            .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
+            .set_worker_drained(worker_id, selector, drained)
     }
 
     // -- Runtime configs --

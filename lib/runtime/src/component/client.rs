@@ -186,8 +186,18 @@ pub struct RoutingInstanceCounts {
     pub discovered: usize,
     pub routable: usize,
     pub overloaded: usize,
-    /// IDs not currently reported overloaded, derived from `discovered - overloaded`.
+    pub drained: usize,
+    /// IDs currently eligible for automatic routing, derived from routable minus excluded workers.
     pub free: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RoutingInstanceSnapshot {
+    pub discovered_ids: Vec<u64>,
+    pub routable_ids: Vec<u64>,
+    pub overloaded_ids: HashSet<u64>,
+    pub drained_ids: HashSet<u64>,
+    pub free_ids: Vec<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -195,24 +205,32 @@ pub(crate) struct RoutingInstances {
     discovered_ids: Vec<u64>,
     routable_ids: Vec<u64>,
     overloaded_ids: HashSet<u64>,
+    drained_ids: HashSet<u64>,
     free_ids: Vec<u64>,
 }
 
 impl RoutingInstances {
     fn new(discovered_ids: Vec<u64>) -> Self {
-        Self::from_parts(discovered_ids.clone(), discovered_ids, HashSet::new())
+        Self::from_parts(
+            discovered_ids.clone(),
+            discovered_ids,
+            HashSet::new(),
+            HashSet::new(),
+        )
     }
 
     fn from_parts(
         discovered_ids: Vec<u64>,
         routable_ids: Vec<u64>,
         overloaded_ids: HashSet<u64>,
+        drained_ids: HashSet<u64>,
     ) -> Self {
-        let free_ids = Self::derive_free_ids(&routable_ids, &overloaded_ids);
+        let free_ids = Self::derive_free_ids(&routable_ids, &overloaded_ids, &drained_ids);
         Self {
             discovered_ids,
             routable_ids,
             overloaded_ids,
+            drained_ids,
             free_ids,
         }
     }
@@ -234,12 +252,17 @@ impl RoutingInstances {
             discovered: self.discovered_ids.len(),
             routable: self.routable_ids.len(),
             overloaded: self.overloaded_ids.len(),
+            drained: self.drained_ids.len(),
             free: self.free_ids.len(),
         }
     }
 
     pub(crate) fn is_overloaded(&self, instance_id: u64) -> bool {
         self.overloaded_ids.contains(&instance_id)
+    }
+
+    pub(crate) fn is_drained(&self, instance_id: u64) -> bool {
+        self.drained_ids.contains(&instance_id)
     }
 
     fn overloaded_ids(&self) -> Option<HashSet<u64>> {
@@ -250,14 +273,49 @@ impl RoutingInstances {
         Some(self.overloaded_ids.clone())
     }
 
+    fn excluded_ids(&self) -> Option<HashSet<u64>> {
+        let excluded_ids = self
+            .overloaded_ids
+            .union(&self.drained_ids)
+            .copied()
+            .collect::<HashSet<_>>();
+        if excluded_ids.is_empty() {
+            return None;
+        }
+
+        Some(excluded_ids)
+    }
+
+    fn drained_ids(&self) -> HashSet<u64> {
+        self.drained_ids.clone()
+    }
+
+    fn snapshot(&self) -> RoutingInstanceSnapshot {
+        RoutingInstanceSnapshot {
+            discovered_ids: self.discovered_ids.clone(),
+            routable_ids: self.routable_ids.clone(),
+            overloaded_ids: self.overloaded_ids.clone(),
+            drained_ids: self.drained_ids.clone(),
+            free_ids: self.free_ids.clone(),
+        }
+    }
+
     fn reconcile_discovered(&self, discovered_ids: Vec<u64>) -> Self {
         let old_discovered_ids = self.discovered_ids.iter().copied().collect::<HashSet<_>>();
         let new_discovered_ids = discovered_ids.iter().copied().collect::<HashSet<_>>();
         let mut overloaded_ids = self.overloaded_ids.clone();
         overloaded_ids
             .retain(|id| !old_discovered_ids.contains(id) || new_discovered_ids.contains(id));
+        let mut drained_ids = self.drained_ids.clone();
+        drained_ids
+            .retain(|id| !old_discovered_ids.contains(id) || new_discovered_ids.contains(id));
 
-        Self::from_parts(discovered_ids.clone(), discovered_ids, overloaded_ids)
+        Self::from_parts(
+            discovered_ids.clone(),
+            discovered_ids,
+            overloaded_ids,
+            drained_ids,
+        )
     }
 
     fn report_instance_down(&self, instance_id: u64) -> Self {
@@ -272,6 +330,7 @@ impl RoutingInstances {
             self.discovered_ids.clone(),
             routable_ids,
             self.overloaded_ids.clone(),
+            self.drained_ids.clone(),
         )
     }
 
@@ -283,6 +342,7 @@ impl RoutingInstances {
             self.discovered_ids.clone(),
             routable_ids,
             self.overloaded_ids.clone(),
+            self.drained_ids.clone(),
         )
     }
 
@@ -291,6 +351,7 @@ impl RoutingInstances {
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
             overloaded_ids,
+            self.drained_ids.clone(),
         )
     }
 
@@ -304,6 +365,7 @@ impl RoutingInstances {
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
             overloaded_ids,
+            self.drained_ids.clone(),
         )
     }
 
@@ -314,18 +376,38 @@ impl RoutingInstances {
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
             overloaded_ids,
+            self.drained_ids.clone(),
         )
     }
 
-    fn derive_free_ids(routable_ids: &[u64], overloaded_ids: &HashSet<u64>) -> Vec<u64> {
-        if overloaded_ids.is_empty() {
+    fn set_drained(&self, instance_id: u64, drained: bool) -> Self {
+        let mut drained_ids = self.drained_ids.clone();
+        if drained {
+            drained_ids.insert(instance_id);
+        } else {
+            drained_ids.remove(&instance_id);
+        }
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            self.routable_ids.clone(),
+            self.overloaded_ids.clone(),
+            drained_ids,
+        )
+    }
+
+    fn derive_free_ids(
+        routable_ids: &[u64],
+        overloaded_ids: &HashSet<u64>,
+        drained_ids: &HashSet<u64>,
+    ) -> Vec<u64> {
+        if overloaded_ids.is_empty() && drained_ids.is_empty() {
             return routable_ids.to_vec();
         }
 
         routable_ids
             .iter()
             .copied()
-            .filter(|id| !overloaded_ids.contains(id))
+            .filter(|id| !overloaded_ids.contains(id) && !drained_ids.contains(id))
             .collect()
     }
 }
@@ -392,6 +474,18 @@ impl RoutingInstancesState {
         self.snapshot().overloaded_ids()
     }
 
+    fn excluded_ids(&self) -> Option<HashSet<u64>> {
+        self.snapshot().excluded_ids()
+    }
+
+    fn drained_ids(&self) -> HashSet<u64> {
+        self.snapshot().drained_ids()
+    }
+
+    fn routing_snapshot(&self) -> RoutingInstanceSnapshot {
+        self.snapshot().snapshot()
+    }
+
     fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
         self.instance_avail_rx.clone()
     }
@@ -433,6 +527,13 @@ impl RoutingInstancesState {
         let removed_ids = removed_instance_ids.iter().copied().collect::<HashSet<_>>();
         self.update(
             move |current| current.clear_overloaded_for_removed(&removed_ids),
+            false,
+        );
+    }
+
+    fn set_drained_instance(&self, instance_id: u64, drained: bool) {
+        self.update(
+            move |current| current.set_drained(instance_id, drained),
             false,
         );
     }
@@ -519,7 +620,7 @@ impl Client {
         self.routing_instances.routable_ids()
     }
 
-    /// Routable instance ids excluding those currently flagged overloaded — the set used
+    /// Routable instance ids excluding those currently flagged overloaded or drained — the set used
     /// for load-aware (random / round-robin) worker selection.
     pub fn instance_ids_free(&self) -> Vec<u64> {
         self.routing_instances.free_ids()
@@ -531,6 +632,10 @@ impl Client {
 
     pub fn routing_instance_counts(&self) -> RoutingInstanceCounts {
         self.routing_instances.counts()
+    }
+
+    pub fn routing_instance_snapshot(&self) -> RoutingInstanceSnapshot {
+        self.routing_instances.routing_snapshot()
     }
 
     /// Get a watcher for available instance IDs
@@ -606,6 +711,29 @@ impl Client {
 
     pub fn overloaded_instance_ids(&self) -> Option<HashSet<u64>> {
         self.routing_instances.overloaded_ids()
+    }
+
+    /// Worker IDs excluded from scheduler eligibility.
+    ///
+    /// This is the union of metric-overloaded and manually drained workers.
+    pub fn excluded_instance_ids(&self) -> Option<HashSet<u64>> {
+        self.routing_instances.excluded_ids()
+    }
+
+    pub fn drained_instance_ids(&self) -> HashSet<u64> {
+        self.routing_instances.drained_ids()
+    }
+
+    pub fn drain_instance(&self, instance_id: u64) {
+        self.routing_instances
+            .set_drained_instance(instance_id, true);
+        tracing::info!(instance_id, "manually drained instance");
+    }
+
+    pub fn resume_instance(&self, instance_id: u64) {
+        self.routing_instances
+            .set_drained_instance(instance_id, false);
+        tracing::info!(instance_id, "manually resumed instance");
     }
 
     /// Monitor the key-value instance source and update instance_avail.
@@ -857,6 +985,72 @@ mod tests {
         assert!(client.set_overloaded_instances(&[]));
         assert_eq!(client.overloaded_instance_ids(), None);
         assert!(!client.set_overloaded_instances(&[]));
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_drained_instance_excluded_from_free_ids() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt.namespace("test_drained_ids".to_string()).unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        client.override_instance_avail(vec![1, 2, 3]);
+        client.drain_instance(2);
+
+        assert_eq!(client.drained_instance_ids(), HashSet::from([2]));
+        assert_eq!(client.instance_ids_avail(), vec![1u64, 2, 3]);
+        assert_eq!(client.instance_ids_free(), vec![1u64, 3]);
+        assert_eq!(
+            client.excluded_instance_ids(),
+            Some(HashSet::from([2])),
+            "scheduler-facing exclusion set should include drained workers"
+        );
+        assert_eq!(client.overloaded_instance_ids(), None);
+
+        client.resume_instance(2);
+        assert_eq!(client.drained_instance_ids(), HashSet::new());
+        assert_eq!(client.instance_ids_free(), vec![1u64, 2, 3]);
+        assert_eq!(client.excluded_instance_ids(), None);
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_metric_overload_update_preserves_manual_drain() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_overload_preserves_drain".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        client.override_instance_avail(vec![1, 2, 3]);
+        client.drain_instance(2);
+        assert!(client.set_overloaded_instances(&[1]));
+
+        assert_eq!(client.drained_instance_ids(), HashSet::from([2]));
+        assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([1])));
+        assert_eq!(client.excluded_instance_ids(), Some(HashSet::from([1, 2])));
+        assert_eq!(client.instance_ids_free(), vec![3u64]);
+
+        assert!(client.set_overloaded_instances(&[]));
+        assert_eq!(client.overloaded_instance_ids(), None);
+        assert_eq!(
+            client.excluded_instance_ids(),
+            Some(HashSet::from([2])),
+            "clearing metric overload must not clear manual drain"
+        );
+        assert_eq!(client.instance_ids_free(), vec![1u64, 3]);
 
         rt.shutdown();
     }

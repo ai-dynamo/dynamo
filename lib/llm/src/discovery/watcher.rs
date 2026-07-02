@@ -938,6 +938,7 @@ impl ModelWatcher {
             // No engine on the worker set — just lifecycle tracking so the
             // prefill router can be activated/deactivated as workers come
             // and go.
+            worker_set.routing_client = Some(client.clone());
             self.manager
                 .add_worker_set(card.name(), &ws_key, worker_set);
 
@@ -1040,6 +1041,7 @@ impl ModelWatcher {
                     .as_ref()
                     .map(|chooser| chooser.client().clone())
                     .unwrap_or_else(|| client.clone());
+                worker_set.routing_client = Some(monitor_client.clone());
                 Some(KvWorkerMonitor::new(
                     monitor_client,
                     router_config.load_threshold_config.clone(),
@@ -1087,6 +1089,9 @@ impl ModelWatcher {
             // The prefill router is stored so the watcher can deactivate/reactivate it
             // when prefill workers die or rejoin.
             worker_set.kv_router = kv_chooser.clone();
+            if worker_set.routing_client.is_none() {
+                worker_set.routing_client = Some(client.clone());
+            }
             worker_set.worker_monitor = worker_monitor.clone();
             worker_set.prefill_router = prefill_chooser.clone();
 
@@ -1207,9 +1212,10 @@ impl ModelWatcher {
                 NvCreateEmbeddingRequest,
                 Annotated<NvCreateEmbeddingResponse>,
             >::from_client_with_monitor(
-                client, router_config.router_mode, None
+                client.clone(), router_config.router_mode, None
             )
             .await?;
+            worker_set.routing_client = Some(client);
             worker_set.embeddings_engine = Some(Arc::new(push_router));
         }
         // Case: Text + (Images, Audio, Videos)
@@ -1261,6 +1267,7 @@ impl ModelWatcher {
                 .await?;
                 worker_set.audios_engine = Some(Arc::new(audios_router));
             }
+            worker_set.routing_client = Some(client);
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case: Text + Chat (pure text-to-text, no diffusion)
             let push_router =
@@ -1269,6 +1276,7 @@ impl ModelWatcher {
                     Annotated<NvCreateChatCompletionStreamResponse>,
                 >::from_client_with_monitor(client, router_config.router_mode, None)
                 .await?;
+            worker_set.routing_client = Some(push_router.client.clone());
             worker_set.chat_engine = Some(Arc::new(push_router));
         } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
             // Case: Text + Completions
@@ -1276,9 +1284,10 @@ impl ModelWatcher {
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,
             >::from_client_with_monitor(
-                client, router_config.router_mode, None
+                client.clone(), router_config.router_mode, None
             )
             .await?;
+            worker_set.routing_client = Some(client);
             worker_set.completions_engine = Some(Arc::new(push_router));
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
             // Case 4: Tokens + Embeddings
@@ -1298,6 +1307,7 @@ impl ModelWatcher {
                 client, router_config.router_mode, None
             )
             .await?;
+            worker_set.routing_client = Some(router.client.clone());
 
             // Note: Embeddings don't need KV routing complexity or load monitoring
             let service_backend = ServiceBackend::from_engine(Arc::new(router));
@@ -1322,6 +1332,7 @@ impl ModelWatcher {
                 client, router_config.router_mode, None
             )
             .await?;
+            worker_set.routing_client = Some(push_router.client.clone());
             worker_set.tensor_engine = Some(Arc::new(push_router));
         } else if card.model_input == ModelInput::Text && card.model_type.supports_realtime() {
             // Case 7: Text + Realtime
@@ -1333,6 +1344,7 @@ impl ModelWatcher {
                 client, router_config.router_mode, None
             )
             .await?;
+            worker_set.routing_client = Some(realtime_router.client.clone());
             worker_set.realtime_engine = Some(Arc::new(realtime_router));
         } else if card.model_type.is_empty() {
             // No OpenAI surface declared: a topology-only worker that exists

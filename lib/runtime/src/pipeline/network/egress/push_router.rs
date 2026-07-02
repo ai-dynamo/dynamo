@@ -1260,16 +1260,17 @@ where
         self.wrap_with_fault_detection(stream, instance_id)
     }
 
-    /// Reject early if the selected worker is overloaded and fault detection
-    /// is enabled. The request_id is only used for the debug-level "checked
-    /// worker overload state" trace; pass an empty string from callers that
-    /// don't have one handy.
+    /// Reject early if the selected worker is excluded from serving and fault
+    /// detection is enabled. The request_id is only used for the debug-level
+    /// "checked worker availability state" trace; pass an empty string from
+    /// callers that don't have one handy.
     fn check_workers_available(&self, instance_id: u64, request_id: &str) -> anyhow::Result<()> {
         if !self.fault_detection_enabled {
             return Ok(());
         }
         let routing_instances = self.client.routing_instances();
         let selected_worker_overloaded = routing_instances.is_overloaded(instance_id);
+        let selected_worker_drained = routing_instances.is_drained(instance_id);
         let counts = routing_instances.counts();
         if tracing::enabled!(tracing::Level::DEBUG) {
             tracing::debug!(
@@ -1278,13 +1279,32 @@ where
                 router_mode = ?self.router_mode,
                 free_workers = counts.free,
                 overloaded_workers = counts.overloaded,
+                drained_workers = counts.drained,
                 total_workers = counts.discovered,
                 selected_worker_overloaded,
-                "checked worker overload state"
+                selected_worker_drained,
+                "checked worker availability state"
             );
         }
-        if !selected_worker_overloaded {
+        if !selected_worker_overloaded && !selected_worker_drained {
             return Ok(());
+        }
+        if selected_worker_drained {
+            tracing::warn!(
+                instance_id,
+                drained_workers = counts.drained,
+                total_workers = counts.discovered,
+                "Rejecting request: selected worker is drained"
+            );
+            let cause = PipelineError::ServiceOverloaded(
+                "Selected worker is drained, please retry later".into(),
+            );
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::ResourceExhausted)
+                .message("Selected worker is drained, please retry later")
+                .cause(cause)
+                .build()
+                .into());
         }
         tracing::warn!(
             instance_id,
@@ -2144,6 +2164,49 @@ mod tests {
         assert!(
             error.to_string().contains("Selected worker is overloaded"),
             "expected overload rejection, got: {error}"
+        );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn direct_within_rejects_drained_constrained_target() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_direct_within_drain_rejection".to_string())
+            .unwrap();
+        let component = ns.component("test_component".to_string()).unwrap();
+        let endpoint = component.endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        client.drain_instance(worker_id);
+
+        let router = PushRouter::<u64, TestResponse>::from_client(client, RouterMode::RoundRobin)
+            .await
+            .unwrap();
+        let allowed = HashSet::from([worker_id]);
+        let error = router
+            .direct_within(SingleIn::new(42), worker_id, Some(&allowed))
+            .await
+            .unwrap_err();
+
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::ResourceExhausted],
+            &[]
+        ));
+        assert!(
+            error.to_string().contains("Selected worker is drained"),
+            "expected drain rejection, got: {error}"
         );
 
         rt.shutdown();

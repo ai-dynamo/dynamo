@@ -31,6 +31,7 @@ pub mod metrics;
 pub mod openapi_docs;
 pub mod realtime;
 pub mod service_v2;
+pub mod worker_admin;
 
 pub use axum;
 pub use metrics::Metrics;
