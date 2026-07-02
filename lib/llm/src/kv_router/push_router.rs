@@ -40,6 +40,13 @@ use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
 
+fn request_session_id(request: &PreprocessedRequest) -> Option<String> {
+    request
+        .agent_context
+        .as_ref()
+        .map(|context| context.session_id.clone())
+}
+
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
@@ -83,10 +90,7 @@ impl KvPushRouter {
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
-        let session_id = request
-            .agent_context
-            .as_ref()
-            .map(|context| context.session_id.clone());
+        let session_id = request_session_id(request);
         let routing_parts = RoutingRequestParts::new(request);
         let request_context = request.context().clone();
         let mut selection_future = Box::pin(async {
@@ -590,7 +594,9 @@ mod tests {
     use super::*;
     use crate::{
         local_model::runtime_config::ModelRuntimeConfig,
-        protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        protocols::common::extensions::{
+            AgentContext, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+        },
     };
 
     fn request() -> PreprocessedRequest {
@@ -602,6 +608,19 @@ mod tests {
             .output_options(Default::default())
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn request_session_id_uses_agent_context() {
+        let mut request = request();
+        request.agent_context = Some(
+            AgentContext::builder()
+                .session_id("session-a".to_string())
+                .build()
+                .unwrap(),
+        );
+
+        assert_eq!(request_session_id(&request).as_deref(), Some("session-a"));
     }
 
     async fn router(session_affinity_ttl: Option<Duration>) -> (KvPushRouter, Runtime) {
