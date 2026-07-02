@@ -127,26 +127,27 @@ Optional top-level key: `parent_session_id`. Optional `tool` keys: `output_token
 
 </details>
 
-## Audit Payloads
+## Request Payloads
 
-Request traces do not save input or output payloads by default. To view payloads, enable Dynamo audit sinks next to request tracing.
+Request traces do not save input or output payloads unless payload logging is
+enabled. To include chat-completion payload rows in the same request trace
+stream, enable request trace and set `DYN_REQUEST_TRACE_FORCE_LOGGING=true` when
+you need payloads for requests that do not set `store=true`.
 
 ```bash
 export DYN_REQUEST_TRACE=1
 export DYN_REQUEST_TRACE_DESTINATIONS=file
 export DYN_REQUEST_TRACE_FILE_PATH=/tmp/dynamo-trace
 export DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip
-export DYN_AUDIT_SINKS=jsonl_gz
-export DYN_AUDIT_OUTPUT_PATH=/tmp/dynamo-audit
-export DYN_AUDIT_FORCE_LOGGING=true
+export DYN_REQUEST_TRACE_FORCE_LOGGING=true
 ```
 
-After the run, correlate trace and audit records by request ID:
+After the run, split metadata and payload rows by `event_type`:
 
 ```bash
-gzip -cd /tmp/dynamo-audit.*.jsonl.gz | jq -c '.event' > /tmp/audit.jsonl
 gzip -cd /tmp/dynamo-trace.*.jsonl.gz | jq -c '.event // .' > /tmp/trace.jsonl
-jq -s 'group_by(.request_id // .request.request_id)' /tmp/audit.jsonl /tmp/trace.jsonl
+jq -c 'select(.event_type == "request_end")' /tmp/trace.jsonl > /tmp/request-end.jsonl
+jq -c 'select(.event_type == "request_payload")' /tmp/trace.jsonl > /tmp/request-payload.jsonl
 ```
 
 Each JSONL line wraps the record:
@@ -158,7 +159,8 @@ Each JSONL line wraps the record:
 }
 ```
 
-`timestamp` is sink-relative elapsed time in milliseconds. Use `event.event_time_unix_ms` for wall-clock ordering.
+`timestamp` is sink-relative elapsed time in milliseconds. Use
+`event.event_time_unix_ms` for wall-clock ordering.
 
 ## View Traces in Perfetto
 

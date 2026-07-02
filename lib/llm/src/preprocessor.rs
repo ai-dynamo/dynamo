@@ -3004,7 +3004,7 @@ impl
         let request_id = context.id().to_string();
         let original_stream_flag = request.inner.stream.unwrap_or(false);
 
-        // Build audit handle (None if no DYN_AUDIT_SINKS / not audit-eligible).
+        // Build request payload handle (None if request trace is disabled / not eligible).
         // The handle snapshots the pristine request and its arrival time here;
         // the single combined record is published once at stream completion
         // (or with an empty response on cancel/timeout), off the request path.

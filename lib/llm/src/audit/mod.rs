@@ -10,24 +10,13 @@ pub mod stream;
 
 use tokio_util::sync::CancellationToken;
 
-pub use config::{AuditPolicy, policy};
+pub use config::AuditPolicy;
+pub use config::policy;
 
 pub async fn init_from_env() -> anyhow::Result<()> {
     init_from_env_with_shutdown(CancellationToken::new()).await
 }
 
 pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow::Result<()> {
-    let policy = policy();
-    if !policy.enabled {
-        config::mark_capture_inactive();
-        return Ok(());
-    }
-
-    config::mark_capture_inactive();
-    bus::init(policy.capacity);
-    sink::spawn_workers_from_env(shutdown).await?;
-    config::mark_capture_active();
-
-    tracing::info!(capacity = policy.capacity, "Audit initialized");
-    Ok(())
+    crate::request_trace::init_from_env_with_shutdown(shutdown).await
 }

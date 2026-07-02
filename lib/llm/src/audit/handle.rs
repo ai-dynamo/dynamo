@@ -3,16 +3,14 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{bus, config};
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
 };
 
-/// One combined audit record per chat completion: the request, plus the response
-/// when it completed (`response = None` on client cancel / timeout / aggregation
-/// failure, so those stay auditable).
+/// Legacy wire type retained for old unit tests and downstream docs references.
+/// New runtime emission uses `dynamo.request.trace.v1` `request_payload` records.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AuditRecord {
     pub schema_version: u32,
@@ -56,37 +54,44 @@ impl AuditHandle {
         &self.request_id
     }
 
-    /// Publish the combined audit record on the bus. Consumes the handle to
-    /// enforce exactly one record per request. `response` is `None` on client
-    /// cancel / gateway timeout / aggregation failure — the record still
-    /// carries the request so those cases remain auditable.
+    /// Publish one request trace payload record. Consumes the handle to enforce
+    /// exactly one payload record per request. `response` is `None` on client
+    /// cancel / gateway timeout / aggregation failure; the record still carries
+    /// the request so those cases remain inspectable.
     pub fn emit(self, response: Option<Arc<NvCreateChatCompletionResponse>>) {
-        let rec = AuditRecord {
-            schema_version: 1,
-            request_id: self.request_id,
-            requested_streaming: self.requested_streaming,
-            model: self.model,
-            event_time: self.event_time,
-            request: Some(self.request),
-            response,
-            audit_complete: true,
-            audit_drop_reason: None,
-        };
-        bus::publish(rec);
+        crate::request_trace::emit_request_payload(
+            crate::request_trace::RequestTracePayload {
+                request_id: self.request_id,
+                endpoint: "openai.chat_completion".to_string(),
+                requested_streaming: self.requested_streaming,
+                model: self.model,
+                request: Some(self.request),
+                response,
+                payload_complete: true,
+                payload_drop_reason: None,
+            },
+            unix_time_ms(self.event_time),
+        );
     }
 }
 
 pub fn create_handle(req: &NvCreateChatCompletionRequest, request_id: &str) -> Option<AuditHandle> {
-    let policy = config::policy();
+    let policy = crate::request_trace::policy();
     // `capture_enabled()` is `policy.enabled && CAPTURE_ACTIVE`: it additionally
-    // requires the audit subsystem to have been initialized, so a stale handle
-    // can't be created before/after the audit lifecycle.
+    // requires request trace initialization, so a stale payload handle cannot be
+    // created before/after the request trace lifecycle.
     create_handle_with_config(
         req,
         request_id,
-        config::capture_enabled(),
+        crate::request_trace::capture_enabled(),
         policy.force_logging,
     )
+}
+
+fn unix_time_ms(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 fn create_handle_with_config(
@@ -163,37 +168,15 @@ mod tests {
         serde_json::from_value(json).expect("Failed to create test response")
     }
 
-    struct AuditPolicyResetGuard;
-
-    impl Drop for AuditPolicyResetGuard {
-        fn drop(&mut self) {
-            crate::audit::config::clear_policy_override_for_test();
-        }
-    }
-
-    /// Test that DYN_AUDIT_FORCE_LOGGING=true bypasses store=false
-    /// When force logging is enabled, audit handle should be created even when store=false
+    /// Test that force logging bypasses store=false.
     #[test]
-    #[serial_test::serial]
     fn test_force_logging_bypasses_store() {
-        temp_env::with_vars(
-            [
-                ("DYN_AUDIT_SINKS", Some("stderr")),
-                ("DYN_AUDIT_FORCE_LOGGING", Some("true")),
-            ],
-            || {
-                crate::audit::config::override_policy_from_env_for_test();
-                crate::audit::config::mark_capture_active();
-                let _reset_guard = AuditPolicyResetGuard;
+        let request = create_test_request("test-model", false);
+        let handle = create_handle_with_config(&request, "test-id", true, true);
 
-                let request = create_test_request("test-model", false);
-                let handle = create_handle(&request, "test-id");
-
-                assert!(
-                    handle.is_some(),
-                    "When DYN_AUDIT_FORCE_LOGGING=true, handle should be created even with store=false"
-                );
-            },
+        assert!(
+            handle.is_some(),
+            "force_logging=true should create a handle even with store=false"
         );
     }
 
@@ -260,11 +243,11 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn emit_publishes_one_combined_record_with_and_without_response() {
-        // Exercises the contract: `emit` publishes exactly one record. With a
-        // response present the record carries both request and response; with
-        // `None` (cancel/timeout) it carries the request only.
-        bus::init(8);
-        let mut rx = bus::subscribe();
+        // Exercises the contract: `emit` publishes exactly one request trace
+        // payload record. With a response present the record carries both
+        // request and response; with `None` it carries the request only.
+        crate::request_trace::init_bus_for_test(8);
+        let mut rx = crate::request_trace::subscribe();
 
         AuditHandle::for_test("req-ok", "test-model", true)
             .emit(Some(Arc::new(create_test_response("hello"))));
@@ -279,12 +262,22 @@ mod tests {
             .expect("second record arrives before timeout")
             .expect("second record receives ok");
 
-        assert_eq!(first.request_id, "req-ok");
-        assert!(first.request.is_some());
-        assert!(first.response.is_some());
+        assert_eq!(
+            first.event_type,
+            crate::request_trace::RequestTraceEventType::RequestPayload
+        );
+        let first_payload = first.payload.as_ref().expect("first payload");
+        assert_eq!(first_payload.request_id, "req-ok");
+        assert!(first_payload.request.is_some());
+        assert!(first_payload.response.is_some());
 
-        assert_eq!(second.request_id, "req-cancel");
-        assert!(second.request.is_some());
-        assert!(second.response.is_none());
+        assert_eq!(
+            second.event_type,
+            crate::request_trace::RequestTraceEventType::RequestPayload
+        );
+        let second_payload = second.payload.as_ref().expect("second payload");
+        assert_eq!(second_payload.request_id, "req-cancel");
+        assert!(second_payload.request.is_some());
+        assert!(second_payload.response.is_none());
     }
 }

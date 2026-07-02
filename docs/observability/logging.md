@@ -339,59 +339,101 @@ Alternatively, pass the `--log-level` argument to the SGLang worker
 command to set the SGLang engine's log level directly (e.g.
 `--log-level DEBUG`). This is independent of `DYN_LOG`.
 
-## Audit Payload Logging (OTLP)
+## Request Payload Logging (OTLP)
 
-Dynamo's **audit** subsystem captures per-request `/v1/chat/completions` payloads (the request, and the response when one completes) and fans them out to configured sinks. The `otel` sink exports each audit record as an OTLP **log record** under the instrumentation scope `dynamo.payload`, so payloads can flow through the same OpenTelemetry Collector pipeline as application logs.
+Dynamo emits per-request `/v1/chat/completions` payloads through request trace.
+The `request_payload` row carries the client request and, when one completes,
+the response. The same `DYN_REQUEST_TRACE_DESTINATIONS` setting controls local
+files, stderr, NATS, and OTLP log export.
 
-Audit is **opt-in** and independent of `OTEL_EXPORT_ENABLED` (which controls application log/trace export). It is enabled only by listing sinks in `DYN_AUDIT_SINKS`.
+Request payload logging is opt-in and independent of `OTEL_EXPORT_ENABLED`
+(which controls application log and trace export). By default, Dynamo emits
+payload rows only when the OpenAI request sets `store=true`; set
+`DYN_REQUEST_TRACE_FORCE_LOGGING=true` to emit payload rows for every eligible
+chat request.
 
 > [!IMPORTANT]
-> The OTLP audit sink is enabled by `DYN_AUDIT_SINKS=otel` (or e.g. `DYN_AUDIT_SINKS=stderr,otel`). Setting `DYN_AUDIT_SINKS=stderr` together with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` only writes audit JSON to the process's **stderr** — it does **not** export audit records over OTLP. Only the `otel` sink exports over OTLP.
+> The OTLP payload path is enabled by `DYN_REQUEST_TRACE_DESTINATIONS=otel`, or
+> by combining destinations such as `DYN_REQUEST_TRACE_DESTINATIONS=file,otel`.
+> Setting `DYN_REQUEST_TRACE_DESTINATIONS=stderr` together with
+> `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` writes request trace JSON to the process
+> logger only; it does not export payload records over OTLP.
 
 ### How records are emitted
 
-- **One** audit record is published per request, carrying the request and — when the response completes — the response.
-- On client cancellation, gateway timeout, or aggregation failure, the record is still emitted with the **`response` field omitted** (not an empty placeholder), so those cases remain auditable. A hard process crash before emission is the only case that loses a record.
-- Each record maps to one OTLP `LogRecord`: scope `dynamo.payload`, body `openai.chat_completion`, with attributes `rid`, `endpoint`, `model`, `streaming`, `audit_complete`, and `payload` (the audit record serialized as a JSON string).
+- One `dynamo.request.trace.v1` record with `event_type=request_payload` is
+  published per eligible chat request.
+- On client cancellation, gateway timeout, or aggregation failure, the record is
+  still emitted with `payload.response` omitted, so those cases remain
+  inspectable. A hard process crash before emission can lose a record.
+- Each `otel` destination record maps to one OTLP `LogRecord`: scope
+  `dynamo.request_trace`, body `request_payload`, with attributes `schema`,
+  `event_type`, `rid`, `endpoint`, `model`, `streaming`, `payload_complete`,
+  and `payload` (the request trace row serialized as a JSON string).
 
 ### Configuration
 
-Audit-specific variables:
+Payload-related request trace variables:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DYN_AUDIT_SINKS` | Comma-separated sinks: `stderr`, `nats`, `jsonl`, `jsonl_gz`, `otel`. Audit is enabled when non-empty. Leave **unset** to disable (do not use an empty string). | unset (disabled) |
-| `DYN_AUDIT_FORCE_LOGGING` | Audit every request regardless of the OpenAI `store` flag. Without it, only `store=true` requests are audited. | `false` |
-| `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` | Max serialized OTLP payload size. Oversized records emit a marker with `audit_complete=false` and `audit_drop_reason` instead of being silently dropped. | `4194304` (4 MiB) |
+| `DYN_REQUEST_TRACE` | Master switch for request trace and request payload logging. | unset (disabled) |
+| `DYN_REQUEST_TRACE_DESTINATIONS` | Comma-separated destinations: `file`, `stderr`, `nats`, `otel`. | `file` when enabled |
+| `DYN_REQUEST_TRACE_FORCE_LOGGING` | Emit `request_payload` rows regardless of the OpenAI `store` flag. Without it, only `store=true` requests emit payload rows. | `false` |
+| `DYN_REQUEST_TRACE_NATS_SUBJECT` | Subject used by the `nats` destination. | `dynamo.request_trace.v1` |
+| `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES` | Max serialized OTLP payload size. Oversized payload rows emit a marker with `payload_complete=false` and `payload_drop_reason`. | `4194304` (4 MiB) |
 
-The `otel` sink ships over OTLP using the **standard** `OTEL_EXPORTER_OTLP_*` variables — the same ones the runtime log/trace exporter uses, resolved identically:
+> [!WARNING]
+> Deprecated. `DYN_AUDIT_SINKS`, `DYN_AUDIT_FORCE_LOGGING`,
+> `DYN_AUDIT_NATS_SUBJECT`, and `DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES` remain
+> accepted as aliases. Prefer the `DYN_REQUEST_TRACE_*` variables for new
+> deployments.
 
-- **Protocol**: `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` → `OTEL_EXPORTER_OTLP_PROTOCOL` → **`grpc`** (matches the runtime default).
-- **Endpoint**: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (used as-is) → `OTEL_EXPORTER_OTLP_ENDPOINT` (`/v1/logs` appended only for `http/protobuf`) → default (`http://localhost:4317` for `grpc`, `http://localhost:4318/v1/logs` for `http/protobuf`).
-- `OTEL_SERVICE_NAME` sets the service name on exported records (default `dynamo`).
+The `otel` destination ships over OTLP using the standard
+`OTEL_EXPORTER_OTLP_*` variables, resolved the same way as the runtime log and
+trace exporter:
+
+- **Protocol**: `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` →
+  `OTEL_EXPORTER_OTLP_PROTOCOL` → `grpc`.
+- **Endpoint**: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (used as-is) →
+  `OTEL_EXPORTER_OTLP_ENDPOINT` (`/v1/logs` appended only for
+  `http/protobuf`) → default (`http://localhost:4317` for `grpc`,
+  `http://localhost:4318/v1/logs` for `http/protobuf`).
+- `OTEL_SERVICE_NAME` sets the service name on exported records (default
+  `dynamo`).
 
 > [!NOTE]
-> Keep the endpoint consistent with the protocol: a `grpc` endpoint is used verbatim (no path), while `http/protobuf` expects an HTTP URL and gets `/v1/logs` appended. Because the audit sink and the runtime exporter share these variables and the same `grpc` default, audit logs and application telemetry resolve to the same destination unless you override the logs signal explicitly.
+> Keep the endpoint consistent with the protocol: a `grpc` endpoint is used
+> verbatim, while `http/protobuf` expects an HTTP URL and gets `/v1/logs`
+> appended. Because the request trace OTLP destination and the runtime exporter
+> share these variables and the same `grpc` default, request payload records and
+> application telemetry resolve to the same destination unless you override the
+> logs signal explicitly.
 
 ### Example
 
-Export chat-completion audit payloads over OTLP gRPC to a collector, auditing every request:
+Export chat-completion payload rows over OTLP gRPC to a collector, logging every
+request:
 
 ```bash
-export DYN_AUDIT_SINKS=otel
-export DYN_AUDIT_FORCE_LOGGING=true
+export DYN_REQUEST_TRACE=1
+export DYN_REQUEST_TRACE_DESTINATIONS=otel
+export DYN_REQUEST_TRACE_FORCE_LOGGING=true
 export OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4317
 export OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=grpc
 ```
 
-To also write audit JSON to the process's stderr:
+To also write request trace JSON to stderr:
 
 ```bash
-export DYN_AUDIT_SINKS=stderr,otel
+export DYN_REQUEST_TRACE_DESTINATIONS=stderr,otel
 ```
 
-> [!NOTE]
-> The `stderr` sink writes each audit record as a raw JSON line directly to stderr (one record per line), not through the application `tracing` logger. This keeps the stderr copy a clean JSONL audit stream and, importantly, prevents a **duplicate OTLP export**: routing audit records through `tracing` would re-export them via the runtime's OTLP log bridge in addition to the `otel` sink. With the direct write, the `otel` sink is the only path that exports audit payloads over OTLP.
+For local files, set `DYN_REQUEST_TRACE_DESTINATIONS=file` and configure
+`DYN_REQUEST_TRACE_FILE_PATH`, `DYN_REQUEST_TRACE_FILE_FORMAT`, and
+`DYN_REQUEST_TRACE_FILE_COMPRESSION`. See
+[Request Replay Tracing](request-tracing.md) for the full request trace
+configuration and record schema.
 
 ## Related Documentation
 

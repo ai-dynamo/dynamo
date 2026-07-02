@@ -8,8 +8,10 @@ use std::sync::{
 use std::time::Duration;
 
 use anyhow::{Context as _, anyhow};
+use async_nats::jetstream;
 use async_trait::async_trait;
 use dynamo_runtime::config::environment_names::llm::request_trace as env_request_trace;
+use dynamo_runtime::transports::nats;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -18,7 +20,7 @@ use crate::telemetry::jsonl_gz::{JsonlGzipSinkOptions, JsonlGzipWriter};
 
 use super::{
     RequestTraceDestination, RequestTraceFileCompression, RequestTraceFileFormat,
-    RequestTracePolicy, RequestTraceRecord, config,
+    RequestTracePolicy, RequestTraceRecord, config, otel_sink::OtelRequestTraceSink,
 };
 
 static WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
@@ -27,6 +29,7 @@ static WORKERS_STARTED: AtomicBool = AtomicBool::new(false);
 pub trait RequestTraceSink: Send + Sync {
     fn name(&self) -> &'static str;
     async fn emit(&self, record: &RequestTraceRecord);
+    async fn shutdown(&self) {}
 }
 
 pub struct StderrRequestTraceSink;
@@ -46,6 +49,47 @@ impl RequestTraceSink for StderrRequestTraceSink {
                 "request_trace"
             ),
             Err(error) => tracing::warn!("request trace serialization failed: {error}"),
+        }
+    }
+}
+
+pub struct NatsRequestTraceSink {
+    js: jetstream::Context,
+    subject: String,
+}
+
+impl NatsRequestTraceSink {
+    async fn from_policy(policy: &RequestTracePolicy) -> anyhow::Result<Self> {
+        let nats_client = nats::ClientOptions::default()
+            .connect()
+            .await
+            .with_context(|| {
+                format!(
+                    "Attempting to connect NATS request trace sink from env var {}",
+                    env_request_trace::DYN_REQUEST_TRACE_DESTINATIONS
+                )
+            })?;
+        Ok(Self {
+            js: nats_client.jetstream().clone(),
+            subject: policy.nats_subject.clone(),
+        })
+    }
+}
+
+#[async_trait]
+impl RequestTraceSink for NatsRequestTraceSink {
+    fn name(&self) -> &'static str {
+        "nats"
+    }
+
+    async fn emit(&self, record: &RequestTraceRecord) {
+        match serde_json::to_vec(record) {
+            Ok(bytes) => {
+                if let Err(error) = self.js.publish(self.subject.clone(), bytes.into()).await {
+                    tracing::warn!("request trace nats: publish failed: {error}");
+                }
+            }
+            Err(error) => tracing::warn!("request trace nats: serialize failed: {error}"),
         }
     }
 }
@@ -147,6 +191,12 @@ async fn parse_destinations_from_env() -> anyhow::Result<Vec<Arc<dyn RequestTrac
     for destination in &policy.destinations {
         match destination {
             RequestTraceDestination::Stderr => sinks.push(Arc::new(StderrRequestTraceSink)),
+            RequestTraceDestination::Nats => {
+                sinks.push(Arc::new(NatsRequestTraceSink::from_policy(policy).await?))
+            }
+            RequestTraceDestination::Otel => {
+                sinks.push(Arc::new(OtelRequestTraceSink::from_policy(policy).await?))
+            }
             RequestTraceDestination::File => match policy.file_format {
                 RequestTraceFileFormat::Jsonl => match policy.file_compression {
                     RequestTraceFileCompression::None => {
@@ -203,7 +253,7 @@ async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
                                 ) => break,
                             }
                         }
-                        return;
+                        break;
                     }
                     message = receiver.recv() => {
                         match message {
@@ -218,6 +268,7 @@ async fn spawn_workers(shutdown: CancellationToken) -> anyhow::Result<()> {
                     }
                 }
             }
+            sink.shutdown().await;
         });
     }
 
@@ -244,7 +295,9 @@ mod tests {
     use crate::telemetry::jsonl_gz::segment_path;
 
     use super::*;
-    use crate::request_trace::{RequestTraceEventType, RequestTraceMetrics, RequestTraceSchema};
+    use crate::request_trace::RequestTraceEventType;
+    use crate::request_trace::RequestTraceMetrics;
+    use crate::request_trace::RequestTraceSchema;
 
     fn sample_record() -> RequestTraceRecord {
         RequestTraceRecord {
@@ -278,6 +331,7 @@ mod tests {
                 finish_reason_metadata: None,
             }),
             tool: None,
+            payload: None,
         }
     }
 

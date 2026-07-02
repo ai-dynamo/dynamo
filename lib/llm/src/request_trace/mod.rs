@@ -4,6 +4,7 @@
 mod agent_context;
 pub mod config;
 mod integration;
+mod otel_sink;
 mod record;
 mod replay;
 pub mod sink;
@@ -24,6 +25,7 @@ pub(crate) use agent_context::{
     record_completion_finish_reason_metadata, record_llm_metric_tokens, request_metrics,
     request_metrics_from_agent_state, start_request_trace_tool_event_ingest,
 };
+pub(crate) use config::capture_enabled;
 pub use config::{
     RequestTraceDestination, RequestTraceFileCompression, RequestTraceFileFormat,
     RequestTracePolicy, is_enabled, policy,
@@ -32,12 +34,12 @@ pub(crate) use integration::{
     build_request_end_trace_state, finish_reason_metadata_handle, wrap_chat_request_end_stream,
     wrap_completion_request_end_stream,
 };
-pub(crate) use record::{publish_tool_record, validate_tool_record};
+pub(crate) use record::{emit_request_payload, publish_tool_record, validate_tool_record};
 pub(crate) use replay::replay_metrics;
 pub use types::{
     ChoiceFinishReasonMetadata, FinishReasonMetadata, RequestReplayMetrics,
-    RequestTraceEventSource, RequestTraceEventType, RequestTraceMetrics, RequestTraceRecord,
-    RequestTraceSchema, RequestTraceToolEvent, RequestTraceToolEventIngress,
+    RequestTraceEventSource, RequestTraceEventType, RequestTraceMetrics, RequestTracePayload,
+    RequestTraceRecord, RequestTraceSchema, RequestTraceToolEvent, RequestTraceToolEventIngress,
     RequestTraceToolStatus, RequestTraceWorkerInfo, ToolCallMetadata,
 };
 
@@ -49,8 +51,11 @@ pub(crate) const X_REQUEST_ID_CONTEXT_KEY: &str = "request_trace.x_request_id";
 pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow::Result<()> {
     let policy = policy();
     if !policy.enabled {
+        config::mark_capture_inactive();
         return Ok(());
     }
+
+    config::mark_capture_inactive();
 
     if policy.tool_events_zmq_endpoint.is_some() && policy.destinations.is_empty() {
         tracing::warn!(
@@ -61,11 +66,13 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
 
     BUS.init(policy.capacity);
     sink::spawn_workers_from_env(shutdown).await?;
+    config::mark_capture_active();
     tracing::info!(
         capacity = policy.capacity,
         destinations = ?policy.destination_names(),
         file_format = policy.file_format.as_str(),
         file_compression = policy.file_compression.as_str(),
+        force_logging = policy.force_logging,
         "Request trace initialized"
     );
     Ok(())
@@ -95,4 +102,9 @@ pub fn publish(record: RequestTraceRecord) {
 
 pub fn subscribe() -> tokio::sync::broadcast::Receiver<RequestTraceRecord> {
     BUS.subscribe()
+}
+
+#[cfg(test)]
+pub(crate) fn init_bus_for_test(capacity: usize) {
+    BUS.init(capacity);
 }

@@ -422,56 +422,53 @@ pub mod llm {
         pub const DYN_FPM_MAX_SEGMENTS: &str = "DYN_FPM_MAX_SEGMENTS";
     }
 
-    /// Audit sink configuration
+    /// Deprecated audit payload logging aliases. Prefer `llm::request_trace`.
     pub mod audit {
-        /// Audit sink selection. Comma-separated values: `stderr`, `nats`,
-        /// `jsonl`, `jsonl_gz`, `otel`. Unset disables audit recording.
+        /// Deprecated alias for `DYN_REQUEST_TRACE_DESTINATIONS`. Legacy values
+        /// `jsonl` and `jsonl_gz` map to the request trace `file` destination.
         pub const DYN_AUDIT_SINKS: &str = "DYN_AUDIT_SINKS";
 
-        /// Force audit emission even when the request `store` flag is `false`.
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FORCE_LOGGING`.
         pub const DYN_AUDIT_FORCE_LOGGING: &str = "DYN_AUDIT_FORCE_LOGGING";
 
-        /// In-process audit bus capacity.
+        /// Deprecated alias for `DYN_REQUEST_TRACE_CAPACITY`.
         pub const DYN_AUDIT_CAPACITY: &str = "DYN_AUDIT_CAPACITY";
 
-        /// NATS subject the JetStream audit sink publishes to.
+        /// Deprecated alias for `DYN_REQUEST_TRACE_NATS_SUBJECT`.
         pub const DYN_AUDIT_NATS_SUBJECT: &str = "DYN_AUDIT_NATS_SUBJECT";
 
-        /// Local output path for audit records.
-        ///
-        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is
-        /// the segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_PATH`.
         pub const DYN_AUDIT_OUTPUT_PATH: &str = "DYN_AUDIT_OUTPUT_PATH";
 
-        /// JSONL audit sink buffer size in bytes.
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES`.
         pub const DYN_AUDIT_JSONL_BUFFER_BYTES: &str = "DYN_AUDIT_JSONL_BUFFER_BYTES";
 
-        /// JSONL audit sink periodic flush interval in milliseconds.
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS`.
         pub const DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS: &str = "DYN_AUDIT_JSONL_FLUSH_INTERVAL_MS";
 
-        /// Rotating gzip JSONL audit sink roll threshold in uncompressed bytes.
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_ROLL_BYTES`.
         pub const DYN_AUDIT_JSONL_GZ_ROLL_BYTES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_BYTES";
 
-        /// Rotating gzip JSONL audit sink roll threshold in record lines.
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_ROLL_LINES`.
         pub const DYN_AUDIT_JSONL_GZ_ROLL_LINES: &str = "DYN_AUDIT_JSONL_GZ_ROLL_LINES";
 
-        /// Maximum serialized OTEL audit payload bytes. Oversized records emit
-        /// an incomplete marker payload instead of the full request/response.
+        /// Deprecated alias for `DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES`.
         pub const DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES: &str = "DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES";
     }
 
-    /// Per-request replay trace configuration
+    /// Request trace and request payload logging configuration.
     pub mod request_trace {
-        /// Master switch. Truthy enables per-request replay tracing.
+        /// Master switch. Truthy enables request trace emission.
         pub const DYN_REQUEST_TRACE: &str = "DYN_REQUEST_TRACE";
 
-        /// Request trace destination selection. Comma-separated values: `file`, `stderr`.
+        /// Request trace destination selection. Comma-separated values: `file`, `stderr`, `nats`, `otel`.
         pub const DYN_REQUEST_TRACE_DESTINATIONS: &str = "DYN_REQUEST_TRACE_DESTINATIONS";
 
         /// Deprecated alias for request trace destination and file codec selection.
         ///
         /// Legacy values map as follows: `jsonl` => `file` with no compression,
-        /// `jsonl_gz` => `file` with gzip compression, `stderr` => `stderr`.
+        /// `jsonl_gz` => `file` with gzip compression, `stderr` => `stderr`,
+        /// `nats` => `nats`, and `otel` => `otel`.
         pub const DYN_REQUEST_TRACE_SINKS: &str = "DYN_REQUEST_TRACE_SINKS";
 
         /// Local output path for request trace file records.
@@ -492,6 +489,17 @@ pub mod llm {
 
         /// In-process trace bus capacity.
         pub const DYN_REQUEST_TRACE_CAPACITY: &str = "DYN_REQUEST_TRACE_CAPACITY";
+
+        /// Force request payload emission even when the OpenAI `store` flag is `false`.
+        pub const DYN_REQUEST_TRACE_FORCE_LOGGING: &str = "DYN_REQUEST_TRACE_FORCE_LOGGING";
+
+        /// NATS subject the request trace sink publishes to.
+        pub const DYN_REQUEST_TRACE_NATS_SUBJECT: &str = "DYN_REQUEST_TRACE_NATS_SUBJECT";
+
+        /// Maximum serialized OTEL payload bytes. Oversized request payload
+        /// records emit an incomplete marker payload instead of the full request/response.
+        pub const DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES: &str =
+            "DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES";
 
         /// Request trace file sink buffer size in bytes.
         pub const DYN_REQUEST_TRACE_FILE_BUFFER_BYTES: &str = "DYN_REQUEST_TRACE_FILE_BUFFER_BYTES";
@@ -809,6 +817,9 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
             llm::request_trace::DYN_REQUEST_TRACE_FILE_COMPRESSION,
             llm::request_trace::DYN_REQUEST_TRACE_CAPACITY,
+            llm::request_trace::DYN_REQUEST_TRACE_FORCE_LOGGING,
+            llm::request_trace::DYN_REQUEST_TRACE_NATS_SUBJECT,
+            llm::request_trace::DYN_REQUEST_TRACE_OTEL_MAX_PAYLOAD_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_FILE_BUFFER_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS,

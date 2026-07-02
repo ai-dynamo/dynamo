@@ -7,10 +7,16 @@
 
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Read;
+use std::path::Path;
+use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 use flate2::read::MultiGzDecoder;
 use serde::Deserialize;
 use serde_json::Value;
@@ -167,8 +173,8 @@ impl LoadedAgentTrace {
     }
 }
 
-/// Records other than `request_end` / `tool_end` / `tool_error` are skipped.
-/// Errors if no `request_end` rows were found.
+/// `request_payload` records are skipped; replay consumes `request_end` and
+/// terminal tool events only. Errors if no `request_end` rows were found.
 pub fn load_request_trace_records(paths: &[PathBuf]) -> Result<LoadedAgentTrace> {
     let mut loaded = LoadedAgentTrace::default();
     let mut request_ids = HashSet::new();
@@ -188,12 +194,15 @@ pub fn load_request_trace_records(paths: &[PathBuf]) -> Result<LoadedAgentTrace>
                 continue;
             };
             let _schema = record.schema;
+            if record.event_type == "request_payload" {
+                continue;
+            }
             if !matches!(
                 record.event_type.as_str(),
                 "request_end" | "tool_start" | "tool_end" | "tool_error"
             ) {
                 bail!(
-                    "request trace schema only supports request_end/tool_* events, got {} at {}:{}",
+                    "request trace schema only supports request_end/tool_* and request_payload events, got {} at {}:{}",
                     record.event_type,
                     path.display(),
                     line_index + 1
@@ -392,6 +401,25 @@ mod tests {
         assert!(loaded.requests[0].agent_context.is_none());
         assert_eq!(loaded.requests[0].start_ms, 1_000);
         assert_eq!(loaded.requests[0].end_ms, 1_100);
+    }
+
+    #[test]
+    fn skips_request_payload_records() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"request_payload","event_time_unix_ms":1050,"payload":{{"request_id":"req-1","endpoint":"openai.chat_completion","requested_streaming":false,"model":"test","request":{{"model":"test","messages":[{{"role":"user","content":"hi"}}]}},"payload_complete":true}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"schema":"dynamo.request.trace.v1","event_type":"request_end","event_time_unix_ms":1100,"request":{{"request_id":"req-1","request_received_ms":1000,"output_tokens":4,"replay":{{"trace_block_size":2,"input_length":3,"input_sequence_hashes":[11,22]}}}}}}"#
+        )
+        .unwrap();
+
+        let loaded = load_request_trace_records(&[file.path().to_path_buf()]).unwrap();
+        assert_eq!(loaded.requests.len(), 1);
+        assert_eq!(loaded.requests[0].request.request_id, "req-1");
     }
 
     #[test]
