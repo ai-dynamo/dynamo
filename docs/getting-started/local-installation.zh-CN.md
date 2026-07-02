@@ -200,8 +200,8 @@ curl localhost:8000/v1/chat/completions \
 
 **TensorRT-LLM 与 Python 3.11**
 
-TensorRT-LLM 不支持 Python 3.11。请使用 Python 3.10 或 3.12，或使用
-`tensorrtllm-runtime` 容器（选项 A）。
+TensorRT-LLM 仅支持容器路径。请使用 `tensorrtllm-runtime`
+容器（选项 A）。
 
 **容器运行但未检测到 GPU**
 
