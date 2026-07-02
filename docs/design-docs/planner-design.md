@@ -4,9 +4,7 @@
 title: Planner Design
 ---
 
-<p align="left">
-  <a href="./planner-design.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
+[简体中文](./planner-design.zh-CN.md)
 
 > **Tier 3 design documentation** for contributors and architects. For user-facing docs, see [docs/components/planner/](../components/planner/README.md).
 

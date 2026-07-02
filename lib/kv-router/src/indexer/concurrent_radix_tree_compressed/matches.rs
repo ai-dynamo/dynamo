@@ -142,6 +142,8 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
+    // NOTE(perf): A reusable compact result sink reduced result-map work in
+    // profiles but did not improve end-to-end throughput under contention.
     #[cfg_attr(feature = "profile", inline(never))]
     pub fn find_matches_impl(
         &self,

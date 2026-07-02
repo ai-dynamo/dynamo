@@ -28,7 +28,7 @@ from sglang.srt.parser.jinja_template_utils import (
 )
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
-from .utils import random_call_id
+from .utils import PreprocessError, random_call_id
 
 logger = logging.getLogger(__name__)
 
@@ -593,6 +593,46 @@ def build_tool_call_guided_decoding(
     return None
 
 
+def build_response_format_guided_decoding(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build Dynamo guided decoding from OpenAI chat response_format."""
+    response_format = request.get("response_format")
+    if not isinstance(response_format, dict):
+        return None
+
+    response_format_type = response_format.get("type")
+    if response_format_type == "json_object":
+        return {"json": {"type": "object"}}
+    if response_format_type == "structural_tag":
+        return {"structural_tag": response_format}
+    if response_format_type != "json_schema":
+        return None
+
+    json_schema = response_format.get("json_schema")
+    if isinstance(json_schema, dict):
+        schema = json_schema.get("schema")
+    else:
+        schema = response_format.get("schema")
+    if schema is None:
+        raise PreprocessError(
+            "schema is required for json_schema response format request."
+        )
+    if not isinstance(schema, dict):
+        raise PreprocessError(
+            "schema must be a JSON object for json_schema response format request."
+        )
+    if not isinstance(json_schema, dict):
+        # This only the effective schema mutation from SGLang's
+        # ChatCompletionRequest.set_json_schema(), not the full response_format
+        # normalization into {"json_schema": {"name", "schema", "strict"}}.
+        schema = copy.deepcopy(schema)
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            properties.pop("strict", None)
+    return {"json": schema}
+
+
 def _normalize_prompt_token_ids(prompt_token_ids: Any) -> list[int]:
     """Flatten ``apply_chat_template`` output to ``list[int]``.
 
@@ -741,11 +781,20 @@ def preprocess_chat_request(
         sglang_tools=sglang_tools,
         force_reasoning=force_reasoning,
     )
-    guided_decoding = build_tool_call_guided_decoding(
+    response_format_guided_decoding = build_response_format_guided_decoding(request)
+    tool_call_guided_decoding = build_tool_call_guided_decoding(
         request,
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
+    if (
+        response_format_guided_decoding is not None
+        and tool_call_guided_decoding is not None
+    ):
+        logger.warning(
+            "Tool-call guided decoding will be ignored because of response_format already exists."
+        )
+    guided_decoding = response_format_guided_decoding or tool_call_guided_decoding
 
     return SglangPreprocessResult(
         prompt_token_ids=prompt_token_ids,

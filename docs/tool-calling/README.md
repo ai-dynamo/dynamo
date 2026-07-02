@@ -5,9 +5,7 @@ title: Tool Call Parsing (Dynamo)
 subtitle: Connect Dynamo to external tools and services using Dynamo's built-in tool call parsers
 ---
 
-<p align="left">
-  <a href="./README.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
+[简体中文](./README.zh-CN.md)
 
 You can connect Dynamo to external tools and services using tool calling. By
 providing a list of available functions, Dynamo can choose to output function

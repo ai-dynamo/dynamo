@@ -58,3 +58,22 @@ def test_register_global_registry_splits_on_multiprocesscollector_conflict(
             multiproc_only_prefixes=["lmcache:"],
         )
     assert len(metrics.callbacks) == 2
+
+
+def test_register_global_registry_conflict_without_multiproc_only_prefixes(
+    monkeypatch, tmp_path
+):
+    """Conflict path should not add a duplicate multiprocess callback when
+    the engine has no multiprocess-only metric families."""
+    multiproc_dir = tmp_path / "mp"
+    multiproc_dir.mkdir()
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(multiproc_dir))
+
+    metrics = _StubMetrics()
+    with patch(
+        "prometheus_client.multiprocess.MultiProcessCollector",
+        side_effect=ValueError("metric already registered"),
+    ):
+        register_global_registry(metrics, engine_prefix="trtllm_")
+
+    assert len(metrics.callbacks) == 1

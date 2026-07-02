@@ -287,6 +287,30 @@ fn build_log_exporter(
     }
 }
 
+fn span_events_for_logging() -> FmtSpan {
+    if span_events_enabled() {
+        FmtSpan::CLOSE
+    } else {
+        FmtSpan::NONE
+    }
+}
+
+fn log_otel_init_status(service_name: &str, endpoint_opt: Option<(OtlpProtocol, String)>) {
+    if let Some((protocol, endpoint)) = endpoint_opt {
+        tracing::info!(
+            endpoint = %endpoint,
+            protocol = %protocol.as_str(),
+            service = %service_name,
+            "OpenTelemetry OTLP export enabled (traces and logs)"
+        );
+    } else {
+        tracing::info!(
+            service = %service_name,
+            "OpenTelemetry OTLP export disabled, traces local only"
+        );
+    }
+}
+
 /// Validate a given trace ID according to W3C Trace Context specifications.
 /// A valid trace ID is a 32-character hexadecimal string (lowercase).
 pub fn is_valid_trace_id(trace_id: &str) -> bool {
@@ -1234,26 +1258,15 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let trace_filter_layer = filters(load_config());
     let otel_filter_layer = filters(load_config());
     let otel_logs_filter_layer = filters(load_config());
+    let jsonl_enabled = jsonl_logging_enabled();
+    let otlp_enabled = otlp_exporter_enabled();
 
-    if jsonl_logging_enabled() {
-        let span_events = if span_events_enabled() {
-            FmtSpan::CLOSE
-        } else {
-            FmtSpan::NONE
-        };
-        let l = fmt::layer()
-            .with_ansi(false)
-            .with_span_events(span_events)
-            .event_format(CustomJsonFormatter::new())
-            .with_writer(std::io::stderr)
-            .with_filter(fmt_filter_layer);
-
-        // Create OpenTelemetry tracer - conditionally export to OTLP based on env var
+    if jsonl_enabled || otlp_enabled {
         let service_name = get_service_name();
         let sample_ratio = trace_sample_ratio_from_env();
 
         // Build tracer and logger providers - with or without OTLP export
-        let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_exporter_enabled() {
+        let (tracer_provider, logger_provider_opt, endpoint_opt) = if otlp_enabled {
             // Export enabled: create OTLP exporters with batch processors
             let protocol = otlp_protocol_from_env();
             let traces_protocol = resolve_signal_otlp_protocol(
@@ -1344,50 +1357,45 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         // Cheap — `SdkTracerProvider` is Arc-shared internally.
         opentelemetry::global::set_tracer_provider(tracer_provider.clone());
 
-        // Get a tracer from the provider
-        let tracer = tracer_provider.tracer(service_name.clone());
-
-        // Build the OTLP logs bridge layer (only when export is enabled)
+        let tracer = tracer_provider.tracer(service_name.to_string());
         let otel_logs_layer = logger_provider_opt
             .as_ref()
             .map(|lp| OpenTelemetryTracingBridge::new(lp).with_filter(otel_logs_filter_layer));
 
-        tracing_subscriber::registry()
-            .with(
-                tracing_opentelemetry::layer()
-                    .with_tracer(tracer)
-                    .with_filter(otel_filter_layer),
-            )
-            .with(otel_logs_layer)
-            .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
-            .with(l)
-            .init();
+        macro_rules! init_otel_subscriber {
+            ($fmt_layer:expr) => {
+                tracing_subscriber::registry()
+                    .with(
+                        tracing_opentelemetry::layer()
+                            .with_tracer(tracer)
+                            .with_filter(otel_filter_layer),
+                    )
+                    .with(otel_logs_layer)
+                    .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
+                    .with($fmt_layer)
+                    .init();
+            };
+        }
 
-        // Log initialization status after subscriber is ready
-        if let Some((protocol, endpoint)) = endpoint_opt {
-            tracing::info!(
-                endpoint = %endpoint,
-                protocol = %protocol.as_str(),
-                service = %service_name,
-                "OpenTelemetry OTLP export enabled (traces and logs)"
-            );
+        if jsonl_enabled {
+            let l = fmt::layer()
+                .with_ansi(false)
+                .with_span_events(span_events_for_logging())
+                .event_format(CustomJsonFormatter::new())
+                .with_writer(std::io::stderr)
+                .with_filter(fmt_filter_layer);
+            init_otel_subscriber!(l);
         } else {
-            tracing::info!(
-                service = %service_name,
-                "OpenTelemetry OTLP export disabled, traces local only"
-            );
+            let l = fmt::layer()
+                .with_ansi(!disable_ansi_logging())
+                .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
+                .with_writer(std::io::stderr)
+                .with_filter(fmt_filter_layer);
+            init_otel_subscriber!(l);
         }
+
+        log_otel_init_status(&service_name, endpoint_opt);
     } else {
-        // Caller asked for OTLP export but the OTel layer is only installed on
-        // the JSONL path — surface the misconfig instead of silently dropping
-        // traces.
-        if otlp_exporter_enabled() {
-            eprintln!(
-                "WARNING: OTEL_EXPORT_ENABLED=1 has no effect without DYN_LOGGING_JSONL=1. \
-                 OTel layers and OTLP exporter are not installed. Set DYN_LOGGING_JSONL=1 \
-                 to enable trace/log export."
-            );
-        }
         let l = fmt::layer()
             .with_ansi(!disable_ansi_logging())
             .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
@@ -2434,6 +2442,59 @@ pub mod tests {
         )
         .await;
         Ok(())
+    }
+
+    #[test]
+    fn test_otlp_export_works_without_json_logging() {
+        use std::process::Command;
+
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "logging::tests::test_otlp_export_without_json_logging_subprocess",
+                "--",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("OTEL_EXPORT_ENABLED", "1")
+            .env_remove("DYN_LOGGING_JSONL")
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            eprintln!(
+                "=== STDOUT ===\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!("=== STDERR ===\n{}", stderr);
+        }
+
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code: {:?}",
+            output.status.code()
+        );
+        assert!(
+            !stderr.contains("has no effect without DYN_LOGGING_JSONL"),
+            "OTLP export should not depend on JSONL logging: {stderr}"
+        );
+        assert!(
+            stderr.contains("OpenTelemetry OTLP export enabled"),
+            "OTLP export should initialize with readable logging: {stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_otlp_export_without_json_logging_subprocess() {
+        if std::env::var("OTEL_EXPORT_ENABLED").is_err() {
+            return;
+        }
+
+        init();
+        tracing::info!("readable log with OTLP export");
     }
 
     // Test functions at different log levels for filtering tests

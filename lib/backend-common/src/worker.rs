@@ -147,7 +147,7 @@ pub struct WorkerConfig {
     /// Whether this worker should keep an in-process KV indexer.
     pub enable_local_indexer: bool,
     /// Kill switch for KV-aware-routing publishers. When `false`, skip
-    /// `engine.kv_event_sources()` / `metrics_sources()` entirely.
+    /// `engine.kv_event_sources()` and `SnapshotPublisher` setup.
     pub enable_kv_routing: bool,
     /// Per-endpoint Prometheus metric labels appended to every metric.
     /// Common labels: `("model", "<served-name>")`.

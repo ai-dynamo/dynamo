@@ -459,6 +459,9 @@ pub enum Endpoint {
 
     /// Tensor
     Tensor,
+
+    /// Generate (token-in/token-out)
+    Generate,
 }
 
 /// Metrics for the HTTP service
@@ -1412,6 +1415,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Responses => write!(f, "responses"),
             Endpoint::AnthropicMessages => write!(f, "anthropic_messages"),
             Endpoint::Tensor => write!(f, "tensor"),
+            Endpoint::Generate => write!(f, "generate"),
         }
     }
 }
@@ -1428,6 +1432,7 @@ impl Endpoint {
             Endpoint::Responses => "responses",
             Endpoint::AnthropicMessages => "anthropic_messages",
             Endpoint::Tensor => "tensor",
+            Endpoint::Generate => "generate",
         }
     }
 }

@@ -20,13 +20,32 @@ on:
 jobs:
   pr_reminder:
     if: ${{ github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name }}
+    environment: external_collaborator
     permissions:
-      actions: read
       issues: write
-      pull-requests: write
     runs-on: ubuntu-latest
     steps:
+      - name: Check for trusted contributor
+        id: contributor_check
+        env:
+          APPROVED_EXTERNAL_CONTRIBUTORS: ${{ secrets.APPROVED_EXTERNAL_CONTRIBUTORS }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          if ! echo "$APPROVED_EXTERNAL_CONTRIBUTORS" | jq -e 'if type == "array" then . else error("not an array") end' > /dev/null 2>&1; then
+            echo "Warning: APPROVED_EXTERNAL_CONTRIBUTORS is not a valid JSON array." >&2
+            echo "is_trusted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if echo "$APPROVED_EXTERNAL_CONTRIBUTORS" | jq -e --arg author "$PR_AUTHOR" 'any(.[]; . == $author)' > /dev/null; then
+            echo "Author $PR_AUTHOR is a trusted contributor."
+            echo "is_trusted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Author $PR_AUTHOR is not a trusted contributor."
+            echo "is_trusted=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Reminder to run full CI on PR
+        if: steps.contributor_check.outputs.is_trusted != 'true'
         uses: actions/github-script@v7
         env:
           REPOSITORY: ${{ github.repository }}
@@ -45,19 +64,22 @@ jobs:
                 'Your PR reviewers may elect to test the changes comprehensively before approving your changes.\n\n' +
                 '🚀'
             })
-      - name: Adding Label to PR
+      - name: Add contribution labels to PR
         uses: actions/github-script@v7
         env:
-          REPOSITORY: ${{ github.repository }}
-          CONTRIBUTOR: ${{ github.actor }}
+          IS_TRUSTED: ${{ steps.contributor_check.outputs.is_trusted }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           script: |
-            const { REPOSITORY, CONTRIBUTOR } = process.env
+            const labels = ['external-contribution']
 
-            github.rest.issues.addLabels({
+            if (process.env.IS_TRUSTED === 'true') {
+              labels.push('trusted-contributor')
+            }
+
+            await github.rest.issues.addLabels({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              labels: ["external-contribution"]
-            });
+              labels
+            })

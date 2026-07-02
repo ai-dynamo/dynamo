@@ -9,8 +9,6 @@ subtitle: Dynamo 推理运行时的架构与组件
   <a href="./architecture.md" hreflang="en">English</a> | <strong>简体中文</strong>
 </p>
 
-# Dynamo 架构
-
 Dynamo 是面向生成式 AI 系统的分布式推理运行时，适用于必须在变化的流量条件下保持高吞吐、低延迟和高可靠性的场景。它不绑定具体后端（SGLang、TRT-LLM、vLLM 等），并围绕三个相互协作的关注点构建：
 
 - 用于 token 生成的快速 **request path**

@@ -266,19 +266,21 @@ async fn anthropic_messages(
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
-    // Check if the Anthropic request explicitly disabled thinking.
-    let thinking_explicitly_disabled = orig_request
-        .thinking
-        .as_ref()
-        .is_some_and(|t| t.thinking_type == "disabled");
-
-    // Estimate input tokens before consuming the request via try_into().
-    // Only used in the streaming path to populate message_start.
+    // Anthropic exposes input usage in `message_start`, before the backend's
+    // authoritative count is available. Seed the stream with the same
+    // best-effort estimate as `/count_tokens`; the converter replaces it when
+    // the backend reports final usage.
     let estimated_input_tokens = if streaming {
         estimate_input_tokens(&orig_request)
     } else {
         0
     };
+
+    // Check if the Anthropic request explicitly disabled thinking.
+    let thinking_explicitly_disabled = orig_request
+        .thinking
+        .as_ref()
+        .is_some_and(|t| t.thinking_type == "disabled");
 
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
@@ -771,21 +773,18 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
     }
 }
 
-/// Estimate input token count for an Anthropic request.
+/// Estimate input usage for a streaming `message_start` event.
 ///
-/// Uses the same heuristic as `AnthropicCountTokensRequest::estimate_tokens()`
-/// (sum character lengths / 3). This populates `input_tokens` in the streaming
-/// `message_start` event, since the engine only reports prompt token counts on
-/// the final chunk.
+/// The backend's rendered prompt and cache-hit split are not available when
+/// the event is emitted. Final `message_delta` usage replaces this estimate.
 fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
-    // Build a temporary count-tokens request to reuse the existing estimator.
-    let count_req = AnthropicCountTokensRequest {
+    AnthropicCountTokensRequest {
         model: req.model.clone(),
         messages: req.messages.clone(),
         system: req.system.clone(),
         tools: req.tools.clone(),
-    };
-    count_req.estimate_tokens()
+    }
+    .estimate_tokens()
 }
 
 fn gate_anthropic_nvext(request: &mut AnthropicCreateMessageRequest, nvext_enabled: bool) {

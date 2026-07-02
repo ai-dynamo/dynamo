@@ -120,7 +120,7 @@ class WorkerConfig:
     exclude_tools_when_tool_choice_none: bool = True
     enable_local_indexer: bool = True
     # Operator-level kill switch for KV-aware-routing publishers. When False,
-    # Worker skips engine.kv_event_sources() and engine.metrics_sources() so
+    # Worker skips engine.kv_event_sources() and SnapshotPublisher setup so
     # the worker ships no KV events or worker-load metrics.
     enable_kv_routing: bool = True
     metrics_labels: list[tuple[str, str]] = field(default_factory=list)

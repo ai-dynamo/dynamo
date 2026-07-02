@@ -25,6 +25,7 @@ mod openai;
 pub mod busy_threshold;
 pub mod disconnect;
 pub mod error;
+pub mod generate;
 pub mod health;
 pub mod metrics;
 pub mod openapi_docs;
