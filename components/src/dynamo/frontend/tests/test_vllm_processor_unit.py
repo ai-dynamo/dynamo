@@ -8,12 +8,19 @@ tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
 import json
+import importlib.util
 from types import SimpleNamespace
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
-from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
+HAS_QWEN3_TOOL_PARSER = (
+    importlib.util.find_spec("vllm.tool_parsers.qwen3_engine_tool_parser") is not None
+)
+
+if HAS_QWEN3_TOOL_PARSER:
+    from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
 from dynamo.frontend.prepost import _prepare_request
 
@@ -26,6 +33,10 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.timeout(180),  # 0-GiB unit tests, floor 180s
+    pytest.mark.skipif(
+        not HAS_QWEN3_TOOL_PARSER,
+        reason="requires vllm qwen3 tool parser",
+    ),
 ]
 
 MODEL = "Qwen/Qwen3-0.6B"

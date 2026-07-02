@@ -398,7 +398,6 @@ def test_self_benchmark_agg_serves_after_bench(
 
 
 @pytest.mark.gpu_2
-@pytest.mark.xpu_2
 @pytest.mark.timeout(900)
 def test_self_benchmark_disagg_serves_after_bench(
     request,

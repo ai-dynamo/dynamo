@@ -13,6 +13,9 @@ import pytest
 from .common import check_module_available
 
 HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
+HAS_QWEN3_REASONING = check_module_available(
+    "vllm.reasoning.qwen3_engine_reasoning_parser"
+)
 if HAS_VLLM:
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
@@ -20,10 +23,14 @@ if HAS_VLLM:
     )
     from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
     from vllm.outputs import CompletionOutput
-    from vllm.reasoning.qwen3_engine_reasoning_parser import Qwen3ParserReasoningAdapter
     from vllm.sampling_params import SamplingParams
     from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
-    from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
+
+    if HAS_QWEN3_REASONING:
+        from vllm.reasoning.qwen3_engine_reasoning_parser import (
+            Qwen3ParserReasoningAdapter,
+        )
+        from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 
     from dynamo.frontend.prepost import StreamingPostProcessor
 else:
@@ -39,7 +46,10 @@ pytestmark = [
     pytest.mark.gpu_0,  # "Hardware"
     pytest.mark.pre_merge,  # "Lifecyle"
     pytest.mark.unit,  # "Test Type"
-    pytest.mark.skipif(not HAS_VLLM, reason="requires vllm"),
+    pytest.mark.skipif(
+        not (HAS_VLLM and HAS_QWEN3_REASONING),
+        reason="requires vllm qwen3 reasoning parser",
+    ),
 ]
 
 
