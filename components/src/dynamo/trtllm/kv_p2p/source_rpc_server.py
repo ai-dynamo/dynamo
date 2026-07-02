@@ -43,12 +43,13 @@ REMOTE_G2_DIRECT_CONTROL_ADVERTISE_HOST_ENV = "DYN_REMOTE_G2_DIRECT_CONTROL_ADVE
 
 
 class RemoteG2DirectControlServer:
-    """Small source-side direct control endpoint for remote-G2.
+    """Source-side direct control endpoint for remote-G2.
 
-    Stage 1 only exposes ``identify`` so targets can validate that a
-    discovered TCP endpoint belongs to the intended source worker before
-    any side-effecting resolve/lease call is moved off Dynamo
-    ``client.direct``.
+    The endpoint is intentionally narrow: target workers discover its
+    address through Dynamo, then send the hot remote-G2 control RPCs
+    directly over ZMQ/TCP. The actual cache lookup, lease, metadata, and
+    release behavior stays in the engine subprocess and is reached
+    through ``_ZmqReqWrapper``.
     """
 
     def __init__(
@@ -59,6 +60,7 @@ class RemoteG2DirectControlServer:
         tp_rank: int = 0,
         process_generation: str,
         source_generation: int | str,
+        req_wrapper: Optional[Any] = None,
         bind_host: str = "127.0.0.1",
         advertise_host: str = "127.0.0.1",
         bind_port: int | None = None,
@@ -72,6 +74,7 @@ class RemoteG2DirectControlServer:
             "source_generation": str(source_generation),
             "protocol_version": 1,
         }
+        self._req_wrapper = req_wrapper
         self._bind_host = bind_host
         self._advertise_host = advertise_host
         self._bind_port = (
@@ -164,10 +167,13 @@ class RemoteG2DirectControlServer:
             try:
                 request = pickle.loads(self._socket.recv())
                 method = request.get("method") if isinstance(request, dict) else None
-                if method == "identify":
-                    response = {"ok": True, "result": dict(self._identity)}
-                else:
-                    response = {"ok": False, "error": f"unknown method: {method!r}"}
+                payload = request.get("payload", {}) if isinstance(request, dict) else {}
+                expected = (
+                    request.get("expected_identity")
+                    if isinstance(request, dict)
+                    else None
+                )
+                response = self._handle_request(method, payload, expected)
             except Exception as exc:
                 logging.exception("remote_g2: direct control handler failed")
                 response = {"ok": False, "error": repr(exc)}
@@ -177,6 +183,96 @@ class RemoteG2DirectControlServer:
                 if not self._stop.is_set():
                     logging.exception("remote_g2: direct control send failed")
                 return
+
+    def _handle_request(
+        self, method: Optional[str], payload: Any, expected_identity: Any = None
+    ) -> dict:
+        mismatch = self._identity_mismatch(expected_identity)
+        if mismatch is not None:
+            return mismatch
+        if not isinstance(payload, dict):
+            return {"ok": False, "error": "request payload must be a dict"}
+        if method == "resolve_and_lease":
+            plan = payload.get("plan")
+            if plan is None:
+                return {"ok": False, "error": "missing 'plan' in request"}
+            return self._forward_to_engine("resolve_and_lease", {"plan": plan})
+        if method == "get_metadata":
+            forwarded: dict = {}
+            peer_name = payload.get("peer_name")
+            peer_conn = payload.get("peer_connection_info")
+            if peer_name:
+                forwarded["peer_name"] = peer_name
+            if peer_conn:
+                forwarded["peer_connection_info"] = peer_conn
+            return self._forward_to_engine("get_metadata", forwarded)
+        if method == "release_lease":
+            lease_id = payload.get("lease_id")
+            if lease_id is None:
+                return {"ok": False, "error": "missing 'lease_id' in request"}
+            return self._forward_to_engine(
+                "release_lease",
+                {"lease_id": lease_id, "reason": payload.get("reason", "ack")},
+            )
+        return {"ok": False, "error": f"unknown method: {method!r}"}
+
+    def _identity_mismatch(self, expected_identity: Any) -> Optional[dict]:
+        if expected_identity is None:
+            return None
+        if not isinstance(expected_identity, dict):
+            return {"ok": False, "error": "expected_identity must be a dict"}
+
+        expected_worker_id = expected_identity.get("worker_id")
+        if expected_worker_id is not None and str(expected_worker_id) != str(
+            self._identity["worker_id"]
+        ):
+            logging.warning(
+                "remote_g2: rejecting direct request for wrong source worker "
+                "expected=%s actual=%s identity=%s",
+                expected_worker_id,
+                self._identity["worker_id"],
+                self._identity,
+            )
+            return {
+                "ok": False,
+                "error": "wrong_source_worker",
+                "expected_worker_id": str(expected_worker_id),
+                "actual_worker_id": self._identity["worker_id"],
+            }
+
+        for key in ("dp_rank", "tp_rank", "process_generation", "source_generation"):
+            expected = expected_identity.get(key)
+            if expected is None:
+                continue
+            actual = self._identity.get(key)
+            if str(expected) != str(actual):
+                logging.warning(
+                    "remote_g2: rejecting direct request for stale source "
+                    "identity field=%s expected=%s actual=%s identity=%s",
+                    key,
+                    expected,
+                    actual,
+                    self._identity,
+                )
+                return {
+                    "ok": False,
+                    "error": "wrong_source_identity",
+                    "field": key,
+                    "expected": str(expected),
+                    "actual": str(actual),
+                }
+        return None
+
+    def _forward_to_engine(self, method: str, payload: dict) -> dict:
+        if self._req_wrapper is None:
+            return {
+                "ok": False,
+                "error": "remote-G2 source engine RPC is not configured",
+            }
+        response = self._req_wrapper.request(method, payload)
+        if isinstance(response, dict):
+            return response
+        return {"ok": False, "error": "invalid engine response"}
 
 
 class _ZmqReqWrapper:
@@ -428,6 +524,7 @@ async def setup_source_rpc_endpoints(
         tp_rank=0,
         process_generation=process_generation,
         source_generation=process_generation,
+        req_wrapper=req_wrapper,
         bind_host=_direct_control_bind_host(),
         advertise_host=_direct_control_advertise_host(),
     ).start()
