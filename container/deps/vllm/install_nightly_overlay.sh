@@ -152,7 +152,7 @@ python3 /usr/local/lib/validate_nightly_overlay.py capture
 
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    ca-certificates git
+    ca-certificates cuda-nvrtc-dev-13-0 git
 rm -rf /var/lib/apt/lists/*
 
 clone_source \

@@ -195,6 +195,10 @@ def verify_overlay_files(package_dir: Path) -> None:
 
 
 def verify_flashinfer() -> None:
+    nvrtc_header = Path("/usr/local/cuda/include/nvrtc.h")
+    if not nvrtc_header.is_file():
+        raise RuntimeError(f"FlashInfer runtime JIT header is missing: {nvrtc_header}")
+
     flashinfer_dist = distribution("flashinfer-python")
     if flashinfer_dist.version != EXPECTED_FLASHINFER_VERSION:
         raise RuntimeError(
