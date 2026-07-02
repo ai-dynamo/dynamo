@@ -207,6 +207,8 @@ Dynamo was validated against this commit through a temporary local `[patch.crate
 | vLLM frontend/backend changed suites | **340 passed, 9 pre-existing skips** |
 | Rust postprocessor stream suite | **51 passed** |
 | Rust full test compile plus focused request-control units | **`cargo check --tests` passed; 7 passed** |
+| CPU-only real-HTTP mock-worker matrix | **clean main 2/17; fixed stack 17/17** in both unary and streaming modes |
+| Focused Rust tool/terminal suites | **36/36 tool-choice, 12/12 jail, 6/6 finish-reason tests passed** |
 | frontend-crates parser suite for commit `1da1b02` | **633 passed, 4 ignored; doctest ignored** |
 | Static validation | **isort, Black, flake8, Ruff lint, Python compileall, Cargo fmt, and `git diff --check` passed** |
 
@@ -225,6 +227,8 @@ The user-requested review loop was run iteratively across Rust, vLLM Python, SGL
 - Nemotron `force_nonempty_content` on SGLang;
 - Harmony/Mistral special parser lifecycle and reasoning-disable behavior;
 - special-token stripping, finish ordering, whitespace leakage, and truncated JSON recovery.
+
+A final four-round review loop over the CPU HTTP suite and terminal-state changes also caught and fixed incomplete forced-JSON leakage, duplicate/missing finish chunks, usage-before-finish ordering, copied usage metrics, incomplete delta payload detection, weak schema/field oracles, and missing prompt-injected/non-force/MiniMax coverage. One broad shared-test-harness refactor was declined because it would expand the behavior surface of established tests for roughly 60 lines of lifecycle duplication; the raw worker pipeline remains intentionally isolated.
 
 The final review criterion is behavioral, not just test cleanliness: every live matrix below must show correct field ownership and no reasoning/tool syntax in any OpenAI output field.
 
@@ -651,6 +655,39 @@ cargo check -p dynamo-llm --tests
 cargo test -p dynamo-llm --lib test_reasoning_effort --no-fail-fast
 cargo test -p dynamo-llm --lib test_openai_thinking --no-fail-fast
 cargo fmt --package dynamo-llm -- --check
+
+# CPU-only baseline on clean main: expected result before the fix is 2/17.
+TMPDIR=/dev/shm/dynamo-tmp \
+CARGO_TARGET_DIR=/dev/shm/dynamo-reasoning-target \
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 \
+cargo test -p dynamo-llm --no-default-features \
+  --test tool_calling_cpu_e2e -- --nocapture
+
+# Fixed Dynamo stack with the local frontend-crates MiniMax parser patch: 17/17.
+TMPDIR=/dev/shm/dynamo-tmp \
+CARGO_TARGET_DIR=/dev/shm/dynamo-reasoning-target \
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 \
+cargo --config \
+  'patch.crates-io.dynamo-parsers.path="/home/rmccormick/dynamo/codex/frontend-crates-reasoning/parsers"' \
+  test --locked -p dynamo-llm --no-default-features \
+  --test tool_calling_cpu_e2e -- --nocapture
+
+TMPDIR=/dev/shm/dynamo-tmp \
+CARGO_TARGET_DIR=/dev/shm/dynamo-reasoning-target \
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 \
+cargo test -p dynamo-llm --no-default-features --test tool_choice
+
+TMPDIR=/dev/shm/dynamo-tmp \
+CARGO_TARGET_DIR=/dev/shm/dynamo-reasoning-target \
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 \
+cargo test -p dynamo-llm --no-default-features \
+  --test tool_choice_finish_reasons
+
+TMPDIR=/dev/shm/dynamo-tmp \
+CARGO_TARGET_DIR=/dev/shm/dynamo-reasoning-target \
+CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 \
+cargo test -p dynamo-llm --no-default-features --lib \
+  'protocols::openai::chat_completions::jail::tests::'
 
 BASE=$(git merge-base origin/main HEAD)
 mapfile -t PY_FILES < <(git diff --name-only "$BASE"...HEAD -- '*.py')
