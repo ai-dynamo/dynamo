@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import asyncio
 import json
 import logging
@@ -39,8 +38,6 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
     KvEventPublisher,
-    MediaDecoder,
-    MediaFetcher,
     ModelInput,
     ModelRuntimeConfig,
     ModelType,
@@ -61,8 +58,10 @@ from .capacity import (
 )
 from .constants import DisaggregationMode
 from .handlers import get_dp_range_for_worker
+from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
+from .multimodal_utils.media_config import create_frontend_media_config
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
 
@@ -108,54 +107,6 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     if getattr(vllm_config.model_config, "model_weights", ""):
         return vllm_config.model_config.model
     return config.model
-
-
-def build_headless_namespace(config: Config) -> argparse.Namespace:
-    """Build an argparse Namespace from engine_args for vLLM's run_headless().
-
-    run_headless() expects the raw CLI namespace. We reconstruct it from
-    the already-parsed AsyncEngineArgs so parse_args() doesn't need to
-    leak transport details.
-    """
-    ns = argparse.Namespace(**vars(config.engine_args))
-    # run_headless() reads api_server_count; default to 0 (no API server)
-    if not hasattr(ns, "api_server_count"):
-        ns.api_server_count = 0
-    return ns
-
-
-def run_dynamo_headless(config: Config) -> None:
-    """Run in headless mode for multi-node TP/PP.
-
-    Secondary nodes spawn vLLM workers only — no engine core, no scheduler,
-    no Dynamo endpoints. Bypasses DistributedRuntime entirely (no NATS/etcd).
-    """
-    # Propagate worker_cls for custom load formats so headless workers use
-    # the same model loader settings as the leader node.
-    if config.engine_args.load_format == "gms":
-        config.engine_args.worker_cls = (
-            "gpu_memory_service.integrations.vllm.worker.GMSWorker"
-        )
-
-        if config.gms_shadow_mode:
-            from gpu_memory_service.integrations.vllm.utils import (
-                configure_gms_lock_mode,
-                configure_mx_ports,
-            )
-
-            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
-            configure_gms_lock_mode(config.engine_args)
-            configure_mx_ports(config.engine_args)
-
-    # ModelExpress uses vLLM's plugin path with --load-format=modelexpress.
-    # Dynamo does not set a custom worker class here.
-
-    # Keep the upstream CLI import local so tests that only exercise
-    # build_headless_namespace() do not pull in vLLM's full CLI import graph.
-    from vllm.entrypoints.cli.serve import run_headless
-
-    args = build_headless_namespace(config)
-    run_headless(args)
 
 
 async def worker(argv: list[str] | None = None) -> None:
@@ -782,18 +733,9 @@ async def register_vllm_model(
 
     # Configure media decoder for frontend image decoding when enabled
     # This enables frontend to decode images and transfer via NIXL RDMA
-    media_decoder = None
-    media_fetcher = None
-    if config.frontend_decoding:
-        media_decoder = MediaDecoder()
-        media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
-        # media_decoder.enable_video({})
-
-        media_fetcher = MediaFetcher()
-        media_fetcher.timeout_ms(30000)
-        allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
-        media_fetcher.allow_direct_ip(allow_internal)
-        media_fetcher.allow_direct_port(allow_internal)
+    media_decoder, media_fetcher = create_frontend_media_config(
+        config.frontend_decoding
+    )
 
     await register_model(
         model_input,

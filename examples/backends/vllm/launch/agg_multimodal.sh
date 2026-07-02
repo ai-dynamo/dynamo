@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-trap 'echo Cleaning up...; kill 0' EXIT
+trap dynamo_exit_trap EXIT
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 

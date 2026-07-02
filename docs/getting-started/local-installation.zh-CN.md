@@ -10,8 +10,6 @@ description: 使用容器或 PyPI 在本地机器或 VM 上安装并运行 Dynam
   <a href="./local-installation.md" hreflang="en">English</a> | <strong>简体中文</strong>
 </p>
 
-# 本地安装
-
 本指南介绍如何在配备一个或多个 GPU 的本地机器或 VM 上安装并运行 Dynamo。完成后，你将拥有一个可工作的 OpenAI 兼容端点，用于提供模型服务。
 
 对于生产环境的多节点集群，请参阅 [Kubernetes 部署指南](../kubernetes/README.md)。如需为开发从源码构建，请参阅[从源码构建](building-from-source.zh-CN.md)。
@@ -59,6 +57,8 @@ docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runt
 
 ### 选项 B：从 PyPI 安装
 
+仅支持 vLLM 和 SGLang。TensorRT-LLM 请使用选项 A。
+
 ```bash
 # Install uv (recommended Python package manager)
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -80,18 +80,6 @@ uv pip install --prerelease=allow "ai-dynamo[sglang]"
 
 对于 CUDA 13（B300/GB300），推荐使用容器。详情请参阅
 [SGLang 安装文档](https://docs.sglang.io/get_started/install.html)。
-
-**TensorRT-LLM**
-
-```bash
-sudo apt install python3-dev
-pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
-pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
-```
-
-由于传递性 Git URL 依赖项 `uv` 无法解析，TensorRT-LLM 需要使用 `pip`。
-为获得更广泛的兼容性，我们建议使用 TensorRT-LLM 容器。
-详情请参阅 [TRT-LLM 后端指南](../backends/trtllm/README.md)。
 
 **vLLM**
 
@@ -211,7 +199,8 @@ curl localhost:8000/v1/chat/completions \
 
 **TensorRT-LLM 与 Python 3.11**
 
-TensorRT-LLM 不支持 Python 3.11。如果你在安装 TensorRT-LLM 时看到失败，请使用 `python3 --version` 检查 Python 版本。请改用 Python 3.10 或 3.12。
+TensorRT-LLM 仅支持容器路径。请使用 `tensorrtllm-runtime`
+容器（选项 A）。
 
 **容器运行但未检测到 GPU**
 

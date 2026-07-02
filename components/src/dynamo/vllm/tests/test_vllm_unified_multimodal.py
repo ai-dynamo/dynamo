@@ -74,13 +74,18 @@ async def test_generate_submits_prepared_multimodal_prompt(monkeypatch):
         "prompt_token_ids": [1, 2, 3],
         "multi_modal_data": {"image": object(), "video": object()},
     }
+    effective_request = {"token_ids": [1, 99, 2]}
     processor = SimpleNamespace(
-        prepare_prompt=AsyncMock(return_value=PreparedMultimodalPrompt(prompt=prompt))
+        prepare_prompt=AsyncMock(
+            return_value=PreparedMultimodalPrompt(
+                prompt=prompt,
+                request=effective_request,
+            )
+        )
     )
     engine._multimodal_request_processor = processor
-    monkeypatch.setattr(
-        mod, "build_sampling_params", lambda *args, **kwargs: _sampling_params()
-    )
+    build_sampling_params = MagicMock(return_value=_sampling_params())
+    monkeypatch.setattr(mod, "build_sampling_params", build_sampling_params)
 
     chunks = [
         chunk
@@ -97,6 +102,7 @@ async def test_generate_submits_prepared_multimodal_prompt(monkeypatch):
 
     assert chunks == []
     assert engine.engine_client.calls[0][0][0] is prompt
+    assert build_sampling_params.call_args.args[0] is effective_request
     processor.prepare_prompt.assert_awaited_once()
 
 
@@ -127,6 +133,7 @@ async def test_prefill_terminal_adds_embedding_handoff(monkeypatch):
         prepare_prompt=AsyncMock(
             return_value=PreparedMultimodalPrompt(
                 prompt={"prompt_token_ids": [1, 2]},
+                request={"token_ids": [1, 2]},
                 multi_modal_data={"image": image},
                 mm_processor_kwargs={"max_pixels": 1003520},
             )
@@ -181,6 +188,7 @@ async def test_from_args_rejects_unsupported_multimodal_topologies(
     config = SimpleNamespace(
         disaggregation_mode=mode,
         route_to_encoder=route_to_encoder,
+        headless=False,
     )
     monkeypatch.setattr(mod, "parse_args", lambda argv: config)
 
@@ -195,6 +203,7 @@ async def test_from_args_retains_multimodal_runtime_configuration(monkeypatch):
     config = SimpleNamespace(
         disaggregation_mode=DisaggregationMode.AGGREGATED,
         route_to_encoder=False,
+        headless=False,
         served_model_name="model",
         model="model",
         component="backend",
@@ -210,11 +219,12 @@ async def test_from_args_retains_multimodal_runtime_configuration(monkeypatch):
         ),
     )
     worker_config = object()
+    from_runtime_config = MagicMock(return_value=worker_config)
     monkeypatch.setattr(mod, "parse_args", lambda argv: config)
     monkeypatch.setattr(
         mod.WorkerConfig,
         "from_runtime_config",
-        lambda *args, **kwargs: worker_config,
+        from_runtime_config,
     )
 
     engine, actual_worker_config = await mod.VllmLLMEngine.from_args([])
@@ -224,3 +234,6 @@ async def test_from_args_retains_multimodal_runtime_configuration(monkeypatch):
     assert engine.frontend_decoding is True
     assert engine.multimodal_embedding_cache_capacity_gb == 2.5
     assert engine._namespace == "deployment"
+    worker_overrides = from_runtime_config.call_args.kwargs
+    assert worker_overrides["media_decoder"] is not None
+    assert worker_overrides["media_fetcher"] is not None

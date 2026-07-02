@@ -119,6 +119,17 @@ def test_worker_config_accepts_parser_runtime_settings():
     )
 
 
+def test_worker_config_accepts_media_configuration():
+    """Unified registration can advertise frontend media decoding."""
+    from dynamo.llm import MediaDecoder, MediaFetcher
+
+    backend.WorkerConfig(
+        namespace="dynamo",
+        media_decoder=MediaDecoder(),
+        media_fetcher=MediaFetcher(),
+    )
+
+
 def test_worker_config_accepts_disaggregation_mode():
     """The Rust binding must accept a DisaggregationMode kwarg so the
     Python shim can plumb the field through. Each variant must construct."""

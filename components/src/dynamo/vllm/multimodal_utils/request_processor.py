@@ -16,6 +16,7 @@ import pickle
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import torch
 from vllm.inputs import TokensPrompt
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 
@@ -56,22 +57,120 @@ def pad_mm_hashes_to_64(mm_hashes: list[str]) -> list[str]:
     ]
 
 
+def _normalize_forwarded_mm_modality(
+    modality: str,
+    use_unified_vision_chunk: bool,
+) -> str:
+    """Map frontend modality names to the names expected by the model."""
+    if use_unified_vision_chunk and modality == "image":
+        return "vision_chunk"
+    return modality
+
+
+def _build_forwarded_mm_uuids(
+    extra_args: dict[str, Any],
+    use_unified_vision_chunk: bool,
+) -> Optional[dict[str, Any]]:
+    """Preserve frontend cache identities, including mixed modalities."""
+    grouped_hashes = extra_args.get("mm_hashes_by_modality")
+    if isinstance(grouped_hashes, dict):
+        mm_uuids: dict[str, Any] = {}
+        for modality, hashes in grouped_hashes.items():
+            if not hashes:
+                continue
+            modality_key = _normalize_forwarded_mm_modality(
+                str(modality),
+                use_unified_vision_chunk,
+            )
+            mm_uuids.setdefault(modality_key, []).extend(
+                pad_mm_hashes_to_64(list(hashes))
+            )
+        if mm_uuids:
+            return mm_uuids
+
+    forwarded_hashes = extra_args.get("mm_hashes")
+    if forwarded_hashes:
+        modality_key = _normalize_forwarded_mm_modality(
+            "image",
+            use_unified_vision_chunk,
+        )
+        return {modality_key: pad_mm_hashes_to_64(list(forwarded_hashes))}
+
+    return None
+
+
+def _get_modality_extra_values(
+    extra_args: dict[str, Any],
+    grouped_key: str,
+    flat_key: str,
+    metadata_modality: str,
+    backend_modality: str,
+) -> Any:
+    """Read grouped transfer metadata with the legacy image-only fallback."""
+    grouped_values = extra_args.get(grouped_key)
+    if isinstance(grouped_values, dict):
+        for key in (metadata_modality, backend_modality):
+            values = grouped_values.get(key)
+            if values:
+                return values
+    if metadata_modality != "image":
+        return None
+    return extra_args.get(flat_key)
+
+
+def _placeholder_range_from_extra_arg(value: Any) -> PlaceholderRange:
+    """Restore placeholder ranges and optional partial-embedding masks."""
+    if isinstance(value, dict):
+        offset = int(value["offset"])
+        length = int(value["length"])
+        is_embed_raw = value.get("is_embed")
+        is_embed = (
+            None
+            if is_embed_raw is None
+            else torch.as_tensor(is_embed_raw, dtype=torch.bool)
+        )
+        if is_embed is not None and is_embed.numel() != length:
+            raise ValueError(
+                "forwarded mm placeholder is_embed length "
+                f"{is_embed.numel()} does not match placeholder length {length}"
+            )
+        return PlaceholderRange(offset=offset, length=length, is_embed=is_embed)
+
+    offset, length = value
+    return PlaceholderRange(offset=offset, length=length)
+
+
 def compute_mm_uuids(
     multi_modal_data: Optional[dict[str, Any]],
 ) -> Optional[dict[str, list[str]]]:
     """Compute image UUIDs when the frontend did not provide canonical hashes."""
-    if not multi_modal_data or "image" not in multi_modal_data:
+    if not multi_modal_data:
         return None
-    images = multi_modal_data["image"]
-    # Pre-computed embedding dictionaries do not have a stable raw-image
-    # preimage here. Their identity is carried by the upstream encoder/cache.
-    if isinstance(images, dict):
+
+    modality = "image"
+    images = multi_modal_data.get(modality)
+    if images is None and "vision_chunk" in multi_modal_data:
+        modality = "vision_chunk"
+        chunks = multi_modal_data[modality]
+        if not isinstance(chunks, list):
+            chunks = [chunks]
+        images = [
+            chunk.get("image")
+            for chunk in chunks
+            if isinstance(chunk, dict) and chunk.get("image") is not None
+        ]
+    elif isinstance(images, dict):
+        # Pre-computed embedding dictionaries do not have a stable raw-image
+        # preimage here. Their identity is carried by the upstream encoder/cache.
+        return None
+
+    if images is None:
         return None
     if not isinstance(images, list):
         images = [images]
     if not images:
         return None
-    return {"image": compute_mm_uuids_from_images(images)}
+    return {modality: compute_mm_uuids_from_images(images)}
 
 
 def get_mm_processor_kwargs(request: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -89,6 +188,7 @@ class PreparedMultimodalPrompt:
     """Engine-ready prompt plus data needed for a prefill handoff."""
 
     prompt: Any
+    request: dict[str, Any]
     multi_modal_data: Optional[dict[str, Any]] = None
     mm_processor_kwargs: Optional[dict[str, Any]] = None
 
@@ -178,7 +278,7 @@ class VllmMultimodalRequestProcessor:
             return
         self._qwen_grid_params = load_qwen_grid_params(self.model)
         if self._qwen_grid_params is None and self.embedding_loader is None:
-            logger.error(
+            raise RuntimeError(
                 "Qwen-VL grid parameters could not be loaded and no encode "
                 "worker is configured. Multimodal P/D requests cannot "
                 "initialize decode mRoPE."
@@ -289,10 +389,10 @@ class VllmMultimodalRequestProcessor:
                         video_audios.append(await self.audio_loader.load_audio(url))
                     except Exception:
                         logger.error(
-                            "Failed to extract audio from video %s. "
+                            "Request %s failed to extract audio from video. "
                             "use_audio_in_video requires every video to "
                             "contain an audio stream.",
-                            url[:80],
+                            request_id,
                         )
                         raise
                 if video_audios:
@@ -318,18 +418,23 @@ class VllmMultimodalRequestProcessor:
         extra_args = request.get("extra_args") or {}
         shm_meta_raw = extra_args.get("mm_kwargs_shm")
         nixl_meta_raw = extra_args.get("mm_kwargs_nixl")
-        if shm_meta_raw:
-            metadata = MmKwargsShmTransferMetadata.model_validate(shm_meta_raw)
-            return await self._receive_mm_kwargs(
-                extra_args, "shm", MmKwargsShmReceiver(), metadata
-            )
+        try:
+            if shm_meta_raw:
+                shm_metadata = MmKwargsShmTransferMetadata.model_validate(shm_meta_raw)
+                return await self._receive_mm_kwargs(
+                    extra_args, "shm", MmKwargsShmReceiver(), shm_metadata
+                )
 
-        if nixl_meta_raw:
-            metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
-            if self._mm_kwargs_receiver is None:
-                self._mm_kwargs_receiver = MmKwargsNixlReceiver()
-            return await self._receive_mm_kwargs(
-                extra_args, "nixl", self._mm_kwargs_receiver, metadata
+            if nixl_meta_raw:
+                nixl_metadata = MmKwargsTransferMetadata.model_validate(nixl_meta_raw)
+                if self._mm_kwargs_receiver is None:
+                    self._mm_kwargs_receiver = MmKwargsNixlReceiver()
+                return await self._receive_mm_kwargs(
+                    extra_args, "nixl", self._mm_kwargs_receiver, nixl_metadata
+                )
+        except Exception:
+            logger.exception(
+                "Multimodal transfer setup failed; falling back to raw media"
             )
         return None
 
@@ -338,13 +443,32 @@ class VllmMultimodalRequestProcessor:
         extra_args: dict[str, Any],
         transport: str,
         receiver: MmKwargsReceiver,
-        metadata: Any,
+        metadata: MmKwargsShmTransferMetadata | MmKwargsTransferMetadata,
     ) -> Optional[dict[str, Any]]:
         color = "magenta" if transport == "nixl" else "cyan"
         rng = _nvtx.start_range(f"mm_backend:{transport}_receive", color=color)
         try:
-            mm_hashes = extra_args.get("mm_hashes")
-            mm_placeholders = extra_args.get("mm_placeholders")
+            backend_modality = _normalize_forwarded_mm_modality(
+                metadata.modality,
+                self.use_unified_vision_chunk,
+            )
+            mm_hashes = (
+                _get_modality_extra_values(
+                    extra_args,
+                    "mm_hashes_by_modality",
+                    "mm_hashes",
+                    metadata.modality,
+                    backend_modality,
+                )
+                or metadata.mm_hashes
+            )
+            mm_placeholders = _get_modality_extra_values(
+                extra_args,
+                "mm_placeholders_by_modality",
+                "mm_placeholders",
+                metadata.modality,
+                backend_modality,
+            )
             expanded_token_ids = extra_args.get("expanded_token_ids")
             if not mm_hashes or not mm_placeholders or not expanded_token_ids:
                 logger.warning(
@@ -360,6 +484,9 @@ class VllmMultimodalRequestProcessor:
 
             kwargs_items = []
             for payload in pickled_items:
+                # The sender is Dynamo's internal frontend transfer service,
+                # which deliberately serializes vLLM's Python-only kwargs
+                # objects. External request payloads never supply these bytes.
                 item = pickle.loads(payload)
                 if not isinstance(item, MultiModalKwargsItem):
                     logger.warning(
@@ -370,19 +497,26 @@ class VllmMultimodalRequestProcessor:
                     return None
                 kwargs_items.append(item)
 
-            padded_hashes = pad_mm_hashes_to_64(mm_hashes)
-            modality = metadata.modality
-            mm_hashes_dict = {modality: padded_hashes}
-            mm_kwargs_dict = {modality: kwargs_items}
+            if not (len(kwargs_items) == len(mm_hashes) == len(mm_placeholders)):
+                logger.warning(
+                    "%s multimodal transfer item/hash/placeholder counts differ; "
+                    "falling back",
+                    transport,
+                )
+                return None
+
+            padded_hashes = pad_mm_hashes_to_64(list(mm_hashes))
+            mm_hashes_dict = {backend_modality: padded_hashes}
+            mm_kwargs_dict = {backend_modality: kwargs_items}
             engine_input = {
                 "type": "multimodal",
                 "prompt_token_ids": expanded_token_ids,
                 "mm_kwargs": mm_kwargs_dict,
                 "mm_hashes": mm_hashes_dict,
                 "mm_placeholders": {
-                    modality: [
-                        PlaceholderRange(offset=offset, length=length)
-                        for offset, length in mm_placeholders
+                    backend_modality: [
+                        _placeholder_range_from_extra_arg(placeholder)
+                        for placeholder in mm_placeholders
                     ]
                 },
             }
@@ -411,12 +545,11 @@ class VllmMultimodalRequestProcessor:
     ) -> TokensPrompt:
         """Create a TokensPrompt with stable multimodal UUIDs."""
         extra_args = request.get("extra_args") or {}
-        forwarded_hashes = extra_args.get("mm_hashes")
-        mm_uuids: Optional[dict[str, Any]] = None
-        if forwarded_hashes:
-            modality = "vision_chunk" if self.use_unified_vision_chunk else "image"
-            mm_uuids = {modality: pad_mm_hashes_to_64(forwarded_hashes)}
-        elif self.embedding_loader is None:
+        mm_uuids = _build_forwarded_mm_uuids(
+            extra_args,
+            self.use_unified_vision_chunk,
+        )
+        if mm_uuids is None and self.embedding_loader is None:
             mm_uuids = compute_mm_uuids(multi_modal_data)
             if mm_uuids is not None:
                 logger.warning(
@@ -538,6 +671,7 @@ class VllmMultimodalRequestProcessor:
         )
         return PreparedMultimodalPrompt(
             prompt=prompt,
+            request=prepared.request,
             multi_modal_data=prepared.multi_modal_data,
             mm_processor_kwargs=prepared.mm_processor_kwargs,
         )

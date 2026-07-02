@@ -694,9 +694,16 @@ class TestDecodeWorkerMultimodalBranching:
         async for chunk in handler._generate_token_mode(request, context, "req-1"):
             chunks.append(chunk)
 
-        assert len(chunks) == 1
-        assert chunks[0]["status"] == "error"
-        assert "without prefill result" in chunks[0]["message"]
+        assert chunks == [
+            {
+                "finish_reason": (
+                    "error: Decode worker received multimodal request without "
+                    "prefill result"
+                ),
+                "index": 0,
+                "token_ids": [],
+            }
+        ]
 
     async def test_decode_only_qwen_missing_embedding_params_errors(self):
         """Decode-only Qwen VL with prefill_result but no embedding_params -> error."""
@@ -723,8 +730,8 @@ class TestDecodeWorkerMultimodalBranching:
             chunks.append(chunk)
 
         assert len(chunks) == 1
-        assert chunks[0]["status"] == "error"
-        assert "embedding metadata" in chunks[0]["message"]
+        assert chunks[0]["token_ids"] == []
+        assert "embedding metadata" in chunks[0]["finish_reason"]
 
     async def test_decode_only_non_qwen_proceeds_without_embedding_params(self):
         """Decode-only non-Qwen with prefill_result but no embedding_params -> proceeds.
@@ -859,6 +866,29 @@ async def test_prefill_delegates_mode_policy_to_shared_processor():
         log_prefix="Prefill ",
         mm_processor_kwargs=mm_processor_kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_prefill_returns_structured_error_when_multimodal_is_disabled():
+    handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
+    processor = SimpleNamespace(
+        validate_multimodal_request=MagicMock(
+            side_effect=ValueError("use --enable-multimodal")
+        )
+    )
+    handler._multimodal_request_processor = processor
+    context = MagicMock()
+    context.id.return_value = "request-prefill-disabled"
+
+    chunks = [chunk async for chunk in handler.generate({}, context)]
+
+    assert chunks == [
+        {
+            "status": "error",
+            "message": "use --enable-multimodal",
+            "disaggregated_params": None,
+        }
+    ]
 
 
 # ── Deferred abort (disagg decode KV-transfer safety) tests ────────

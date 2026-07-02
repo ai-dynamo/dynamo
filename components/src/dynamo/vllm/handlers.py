@@ -24,6 +24,7 @@ from typing import (
     NoReturn,
     Optional,
     TypeVar,
+    cast,
 )
 
 import torch
@@ -2765,15 +2766,20 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
         try:
+            mode = cast(DisaggregationMode, self.config.disaggregation_mode)
             prepared_input = await self._multimodal_request_processor.prepare_input(
                 request,
                 request_id,
                 context,
-                self.config.disaggregation_mode,
+                mode,
             )
         except MissingMultimodalHandoffError as exc:
             logger.error("Request %s: %s", request_id, exc)
-            yield {"status": "error", "message": str(exc)}
+            yield {
+                "finish_reason": f"error: {exc}",
+                "index": 0,
+                "token_ids": [],
+            }
             return
 
         request = prepared_input.request
@@ -3067,8 +3073,17 @@ class PrefillWorkerHandler(BaseWorkerHandler):
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation with decode phase
         request_id = context.id()
-        logger.debug(f"Prefill Request ID: {request_id}")
-        self._multimodal_request_processor.validate_multimodal_request(request)
+        logger.debug("Prefill Request ID: %s", request_id)
+        try:
+            self._multimodal_request_processor.validate_multimodal_request(request)
+        except ValueError as exc:
+            logger.error("Request %s: %s", request_id, exc)
+            yield {
+                "status": "error",
+                "message": str(exc),
+                "disaggregated_params": None,
+            }
+            return
 
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
@@ -3177,7 +3192,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 embedding_params = (
                     self._multimodal_request_processor.build_prefill_handoff(
                         multi_modal_data=multi_modal_data,
-                        prompt_token_ids=res.prompt_token_ids,
+                        prompt_token_ids=list(res.prompt_token_ids or []),
                         mm_processor_kwargs=mm_processor_kwargs,
                     )
                 )

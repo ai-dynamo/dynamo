@@ -155,7 +155,7 @@ the same model-specific limitations as the legacy vLLM path.
 
 Pass `--unified` to the aggregated or P/D launchers to run
 `python -m dynamo.vllm.unified_main`. The unified path supports HTTP URLs,
-data URLs, frontend-decoded media, `mm_processor_kwargs`, frontend-provided
+data URLs, frontend-decoded images, `mm_processor_kwargs`, frontend-provided
 multimodal hashes, and Kimi-style `vision_chunk` inputs.
 
 The Python vLLM frontend can pre-render multimodal processor inputs and send

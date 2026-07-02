@@ -286,6 +286,106 @@ def test_build_tokens_prompt_forwards_hashes_kwargs_and_vision_chunk():
     assert prompt["mm_processor_kwargs"] == {"num_crops": 4}
 
 
+def test_build_tokens_prompt_preserves_grouped_forwarded_hashes():
+    processor = _processor()
+
+    prompt = processor.build_tokens_prompt(
+        {
+            "token_ids": [1, 2, 3],
+            "extra_args": {
+                "mm_hashes": ["legacy_image_hash", "legacy_audio_hash"],
+                "mm_hashes_by_modality": {
+                    "image": ["image_hash"],
+                    "audio": ["audio_hash"],
+                },
+            },
+        },
+        {"image": object(), "audio": object()},
+        None,
+    )
+
+    assert prompt["multi_modal_uuids"] == {
+        "image": ["image_hash".ljust(64, "0")],
+        "audio": ["audio_hash".ljust(64, "0")],
+    }
+
+
+def test_build_tokens_prompt_remaps_grouped_image_hashes_to_vision_chunk():
+    processor = _processor(unified_vision_chunk=True)
+
+    prompt = processor.build_tokens_prompt(
+        {
+            "token_ids": [1, 2, 3],
+            "extra_args": {
+                "mm_hashes_by_modality": {"image": ["image_hash"]},
+            },
+        },
+        {"vision_chunk": object()},
+        None,
+    )
+
+    assert prompt["multi_modal_uuids"] == {
+        "vision_chunk": ["image_hash".ljust(64, "0")]
+    }
+
+
+def test_build_tokens_prompt_computes_vision_chunk_uuid_without_forwarded_hash():
+    processor = _processor(unified_vision_chunk=True)
+    image = Image.new("RGB", (1, 1))
+
+    prompt = processor.build_tokens_prompt(
+        {"token_ids": [1, 2, 3]},
+        {
+            "vision_chunk": {
+                "type": "image",
+                "image": image,
+                "uuid": None,
+            }
+        },
+        None,
+    )
+
+    assert prompt["multi_modal_uuids"] == {
+        "vision_chunk": mod.compute_mm_uuids_from_images([image])
+    }
+
+
+def test_flat_transfer_metadata_fallback_is_image_only():
+    extra_args = {
+        "mm_hashes": ["image_hash"],
+        "mm_placeholders": [(4, 8)],
+    }
+
+    assert mod._get_modality_extra_values(
+        extra_args,
+        "mm_hashes_by_modality",
+        "mm_hashes",
+        "image",
+        "image",
+    ) == ["image_hash"]
+    assert (
+        mod._get_modality_extra_values(
+            extra_args,
+            "mm_hashes_by_modality",
+            "mm_hashes",
+            "audio",
+            "audio",
+        )
+        is None
+    )
+
+
+def test_forwarded_placeholder_preserves_is_embed_mask():
+    placeholder = mod._placeholder_range_from_extra_arg(
+        {"offset": 4, "length": 4, "is_embed": [False, True, True, False]}
+    )
+
+    assert placeholder.offset == 4
+    assert placeholder.length == 4
+    assert placeholder.get_num_embeds() == 2
+    assert placeholder.extract_embeds_range() == [(5, 6)]
+
+
 @pytest.mark.parametrize(
     ("hashes", "expected"),
     [
@@ -341,6 +441,43 @@ async def test_aggregated_uses_transferred_prompt_and_falls_back_to_urls():
     )
 
     assert prepared.prompt["multi_modal_data"] == {"image": image}
+
+
+@pytest.mark.asyncio
+async def test_transfer_setup_failure_falls_back_to_raw_media(monkeypatch):
+    processor = _processor()
+    validate = MagicMock(side_effect=ValueError("invalid metadata"))
+    monkeypatch.setattr(mod.MmKwargsShmTransferMetadata, "model_validate", validate)
+
+    assert (
+        await processor.try_receive_mm_kwargs(
+            {"extra_args": {"mm_kwargs_shm": {"invalid": True}}}
+        )
+        is None
+    )
+    validate.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_nixl_receiver_initialization_failure_falls_back(monkeypatch):
+    processor = _processor()
+    monkeypatch.setattr(
+        mod.MmKwargsTransferMetadata,
+        "model_validate",
+        MagicMock(return_value=SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        mod,
+        "MmKwargsNixlReceiver",
+        MagicMock(side_effect=RuntimeError("nixl unavailable")),
+    )
+
+    assert (
+        await processor.try_receive_mm_kwargs(
+            {"extra_args": {"mm_kwargs_nixl": {"modality": "image"}}}
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -456,7 +593,7 @@ async def test_receive_transferred_kwargs_injects_vllm_cache(monkeypatch):
     receiver = SimpleNamespace(
         receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
     )
-    metadata = SimpleNamespace(modality="image")
+    metadata = SimpleNamespace(modality="image", mm_hashes=[])
 
     result = await processor._receive_mm_kwargs(
         {
@@ -476,6 +613,98 @@ async def test_receive_transferred_kwargs_injects_vllm_cache(monkeypatch):
     input_processor.inject_into_mm_cache.assert_called_once_with(
         {"image": [padded_hash]}, {"image": [item]}
     )
+
+
+@pytest.mark.asyncio
+async def test_receive_transferred_kwargs_uses_grouped_metadata_and_vision_chunk(
+    monkeypatch,
+):
+    input_processor = SimpleNamespace(inject_into_mm_cache=MagicMock())
+    processor = _processor(unified_vision_chunk=True)
+    processor.engine_client = SimpleNamespace(input_processor=input_processor)
+    item = MagicMock(spec=mod.MultiModalKwargsItem)
+    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
+    )
+    metadata = SimpleNamespace(modality="image", mm_hashes=["metadata_hash"])
+
+    result = await processor._receive_mm_kwargs(
+        {
+            "mm_hashes_by_modality": {"image": ["grouped_hash"]},
+            "mm_placeholders_by_modality": {
+                "image": [
+                    {
+                        "offset": 1,
+                        "length": 2,
+                        "is_embed": [True, False],
+                    }
+                ]
+            },
+            "expanded_token_ids": [10, 11, 12],
+        },
+        "shm",
+        receiver,
+        metadata,
+    )
+
+    padded_hash = "grouped_hash".ljust(64, "0")
+    assert result is not None
+    assert result["mm_hashes"] == {"vision_chunk": [padded_hash]}
+    placeholder = result["mm_placeholders"]["vision_chunk"][0]
+    assert placeholder.get_num_embeds() == 1
+    input_processor.inject_into_mm_cache.assert_called_once_with(
+        {"vision_chunk": [padded_hash]}, {"vision_chunk": [item]}
+    )
+
+
+@pytest.mark.asyncio
+async def test_receive_transferred_kwargs_falls_back_to_metadata_hashes(monkeypatch):
+    processor = _processor()
+    item = MagicMock(spec=mod.MultiModalKwargsItem)
+    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
+    )
+
+    result = await processor._receive_mm_kwargs(
+        {
+            "mm_placeholders_by_modality": {"video": [(1, 2)]},
+            "expanded_token_ids": [10, 11, 12],
+        },
+        "nixl",
+        receiver,
+        SimpleNamespace(modality="video", mm_hashes=["metadata_hash"]),
+    )
+
+    assert result is not None
+    assert result["mm_hashes"] == {"video": ["metadata_hash".ljust(64, "0")]}
+
+
+@pytest.mark.asyncio
+async def test_receive_transferred_kwargs_rejects_partial_feature_transfer(monkeypatch):
+    input_processor = SimpleNamespace(inject_into_mm_cache=MagicMock())
+    processor = _processor()
+    processor.engine_client = SimpleNamespace(input_processor=input_processor)
+    item = MagicMock(spec=mod.MultiModalKwargsItem)
+    monkeypatch.setattr(mod.pickle, "loads", lambda payload: item)
+    receiver = SimpleNamespace(
+        receive=AsyncMock(return_value={"__pickled_kwargs_item__": [b"payload"]})
+    )
+
+    result = await processor._receive_mm_kwargs(
+        {
+            "mm_hashes": ["cached_hash", "transferred_hash"],
+            "mm_placeholders": [(1, 2), (4, 2)],
+            "expanded_token_ids": [10, 11, 12, 13, 14, 15],
+        },
+        "shm",
+        receiver,
+        SimpleNamespace(modality="image", mm_hashes=[]),
+    )
+
+    assert result is None
+    input_processor.inject_into_mm_cache.assert_not_called()
 
 
 def test_build_prefill_handoff_dispatches_by_model_and_forwards_processor_kwargs(
@@ -539,6 +768,14 @@ def test_qwen_handoff_applies_per_request_pixel_overrides(monkeypatch):
     }
     assert captured["params"].min_pixels == 1024
     assert captured["params"].max_pixels == 4096
+
+
+def test_qwen_prefill_handoff_fails_fast_without_grid_metadata(monkeypatch):
+    processor = _processor()
+    monkeypatch.setattr(mod, "load_qwen_grid_params", lambda model: None)
+
+    with pytest.raises(RuntimeError, match="cannot initialize decode mRoPE"):
+        processor.initialize_prefill_handoff()
 
 
 def test_qwen_handoff_computes_grid_for_pil_images():

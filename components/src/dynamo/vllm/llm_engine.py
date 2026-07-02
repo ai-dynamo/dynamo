@@ -63,7 +63,7 @@ from dynamo.llm import (
     unregister_model,
 )
 from dynamo.runtime import Endpoint
-from dynamo.vllm.args import configure_rl_logprobs_mode, parse_args
+from dynamo.vllm.args import Config, configure_rl_logprobs_mode, parse_args
 from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
@@ -80,6 +80,7 @@ from .logits_processing import (
     register_dynamo_logits_processor,
 )
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
+from .multimodal_utils.media_config import create_frontend_media_config
 from .multimodal_utils.request_processor import VllmMultimodalRequestProcessor
 
 if TYPE_CHECKING:
@@ -239,15 +240,31 @@ class VllmLLMEngine(LLMEngine):
 
     @classmethod
     async def from_args(
-        cls, argv: list[str] | None = None
+        cls, argv: list[str] | None = None, config: Config | None = None
     ) -> tuple[VllmLLMEngine, WorkerConfig]:
-        config = parse_args(argv)
+        # `config` lets unified_main thread its already-parsed args through so we
+        # don't re-parse (idempotent, but avoids a duplicate argparse + doubled
+        # vLLM deprecation warnings at startup).
+        if config is None:
+            config = parse_args(argv)
 
         if config.disaggregation_mode == DisaggregationMode.ENCODE:
             raise NotImplementedError(
                 "ENCODE is not supported by the unified vLLM entry point; "
                 "use `python -m dynamo.vllm` for multimodal encode workers"
             )
+
+        # Headless is handled by unified_main before engine construction; a
+        # headless config reaching here means run() was driven directly,
+        # bypassing the entry point. Fail loud rather than booting a full
+        # backend on what should be a vLLM-workers-only secondary node.
+        if config.headless:
+            raise NotImplementedError(
+                "--headless must be launched via `python -m dynamo.vllm.unified_main` "
+                "(or the legacy `python -m dynamo.vllm`); it is not supported when "
+                "driving the unified Worker directly"
+            )
+
         if config.route_to_encoder:
             raise NotImplementedError(
                 "--route-to-encoder is not supported by the unified vLLM entry "
@@ -282,11 +299,16 @@ class VllmLLMEngine(LLMEngine):
             ),
             namespace=config.namespace,
         )
+        media_decoder, media_fetcher = create_frontend_media_config(
+            config.frontend_decoding
+        )
         worker_config = WorkerConfig.from_runtime_config(
             config,
             model_name=config.model,
             served_model_name=config.served_model_name,
             model_input=ModelInput.Tokens,
+            media_decoder=media_decoder,
+            media_fetcher=media_fetcher,
         )
         return engine, worker_config
 
@@ -400,9 +422,10 @@ class VllmLLMEngine(LLMEngine):
         )
         prompt = prepared_prompt.prompt
 
-        # TODO: remove dict() once build_sampling_params accepts GenerateRequest
+        # Multimodal decode may replace token_ids with the expanded prefill
+        # sequence. Sampling limits must use that same effective request.
         sampling_params = build_sampling_params(
-            dict(request),
+            prepared_prompt.request,
             self._default_sampling_params,
             self._model_max_len,
             enable_rl=self.enable_rl,
@@ -567,20 +590,18 @@ class VllmLLMEngine(LLMEngine):
                     # prefill terminal so PrefillRouter can forward it.
                     if is_prefill:
                         kv_transfer_params = getattr(res, "kv_transfer_params", None)
-                        disaggregated_params: dict[str, Any] = {}
+                        handoff_params: dict[str, Any] = {}
                         if kv_transfer_params is not None:
-                            disaggregated_params[
-                                "kv_transfer_params"
-                            ] = kv_transfer_params
+                            handoff_params["kv_transfer_params"] = kv_transfer_params
                         embedding_params = multimodal_processor.build_prefill_handoff(
                             multi_modal_data=prepared_prompt.multi_modal_data,
                             prompt_token_ids=list(res.prompt_token_ids or []),
                             mm_processor_kwargs=prepared_prompt.mm_processor_kwargs,
                         )
                         if embedding_params is not None:
-                            disaggregated_params["embedding_params"] = embedding_params
-                        if disaggregated_params:
-                            out["disaggregated_params"] = disaggregated_params
+                            handoff_params["embedding_params"] = embedding_params
+                        if handoff_params:
+                            out["disaggregated_params"] = handoff_params
 
                 yield out
 

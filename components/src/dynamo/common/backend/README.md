@@ -532,6 +532,32 @@ Lifecycle and runtime:
     unchanged.
   - Loaded adapters appear in `GET /v1/models`; inference selects an
     adapter by sending `"model": "<lora_name>"`.
+- **Sleep/wake (vLLM)** — `sleep` / `wake_up` controls via
+  `VllmEnginePauseController` (discovery unregister before sleep,
+  re-register after wake; `worker.rs` `engine_control_policy`)
+- **Elastic EP scaling (vLLM)** — `scale_elastic_ep` control at parity
+  with the legacy handler: `new_data_parallel_size` validation, a
+  single-flight lock (concurrent scales rejected, not queued), and the
+  `ray.util.state.list_nodes` → GCS shim for ray `--minimal`. Served at
+  `/engine/control/scale_elastic_ep` on the system port (the unified
+  Worker namespaces controls under `/engine/control/<name>`, matching the
+  legacy backend). Requires the Ray DP backend
+  (`--data-parallel-backend ray`, `nnodes == 1`) **and `ray` installed**
+  (the vLLM runtime image does not ship it). The single head-node backend
+  drives `add_dp_placement_groups` to place DP-worker Ray actors across
+  the Ray cluster, so multi-node is a Ray-cluster-membership concern
+  (operator-managed `ray start`), not a per-node backend concern.
+  Locally GPU-validated on H200 GPUs with vLLM 0.24.0: scale-**up** (2→4)
+  and scale-**down** (4→2) return `status:ok`, and serving continues after
+  each transition. The integration test remains skipped in CI because each
+  unquantized Qwen3-30B-A3B replica needs about 57 GiB for weights at TP=1,
+  while CI's four-GPU runner has only 24 GiB per GPU; the test requires at
+  least 80 GiB per GPU for weights and runtime headroom.
+- **Headless multi-node (vLLM)** — `--headless` secondary nodes run
+  vLLM workers only (multi-node TP/PP with `--data-parallel-backend mp`),
+  bypassing DistributedRuntime; `unified_main` routes them to
+  `run_dynamo_headless` before the Worker/engine path. Distinct from
+  elastic EP, which uses the Ray backend above.
 - **Disaggregated serving** (`agg`/`prefill`/`decode`) — KV transfer
   uses NIXL across all three engines; SGLang exchanges a Dynamo-level
   bootstrap address, vLLM and TRT-LLM use an engine-internal handshake.
@@ -602,15 +628,12 @@ Request handling:
 
 | Feature | Description |
 |---------|-------------|
-| Sleep/wake | 3-level vLLM engine lifecycle control (`VllmEnginePauseController`) with shutdown-delay tags |
-| Elastic EP scaling | `scale_elastic_ep` endpoint with Ray node management |
 | GMS shadow mode | GPU Memory Service integration with failover lock (`--gms-shadow-mode`, `configure_gms_lock_mode`) |
 | ModelExpress P2P | Distributed model loading via P2P (`--model-express-url`, `register_modelexpress_loaders`, `mx-source` / `mx-target` load formats) |
 | KV block clearing | Prefix cache reset endpoint |
 | `VllmEngineMonitor` | Background `EngineDeadError` detection task |
 | Instrumented scheduler + FPM relay | Per-forward-pass `ForwardPassMetrics` ZMQ telemetry |
 | `KvConnectorProtocol` abstraction | Legacy abstracts NIXL pull / Mooncake push; unified uses vLLM's internal connector only |
-| `--headless` multi-node mode | Secondary-node TP/PP worker mode (`run_dynamo_headless`); unified requires every node to run the backend |
 | `--benchmark-mode` family | The `--benchmark-*` flag family (mode, prefill/decode granularities, warmup, output path, timeout) injects into `vllm_config.additional_config` |
 | "Omni" alternative entry point | `dynamo.vllm.omni.*` parallel mode for alternative tensor workflows |
 | Separate multimodal encode worker | The unified entry point rejects `--disaggregation-mode encode` and `--route-to-encoder`. Encoder-managed embedding transfer remains on the legacy worker path. P/D video requests also reload raw media on decode because the handoff carries image metadata only. |
@@ -663,9 +686,10 @@ For users picking what to land next on the unified path:
    (engine updates `/engine/update/load_lora|unload_lora|list_loras` + a
    `/v1/loras` compatibility alias; see [What works today](#what-works-today)).
    Remaining: SGLang and TRT-LLM, which advertise no LoRA updates yet.
-3. **Engine routes / lifecycle endpoints** — sleep/wake, profile
-   start/stop, weight updates, KV block clearing, prefix cache
-   reset. Visible in operator workflows.
+3. **Engine routes / lifecycle endpoints** — weight updates, KV block
+   clearing, prefix cache reset. (Profiling, sleep/wake, elastic-EP
+   scaling, and headless multi-node already landed.) Visible in operator
+   workflows.
 4. **Snapshot / CRIU** — production checkpoint support.
 5. **Multimodal / diffusion / video / DLLM** — biggest functional
    gap, but largest scope. Best parallelized across modality leads.
