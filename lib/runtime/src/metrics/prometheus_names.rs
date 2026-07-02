@@ -627,6 +627,13 @@ pub mod frontend_perf {
     pub const TOKENIZE_SECONDS: &str = "tokenize_seconds";
     /// Template application time in preprocessor
     pub const TEMPLATE_SECONDS: &str = "template_seconds";
+    /// Actual tokenizer CPU encode time (tokenizer.encode call only, excludes null-byte
+    /// stripping and tracker bookkeeping). Fair A/B CPU comparison across tokenizer backends.
+    pub const TOKENIZE_ENCODE_MS: &str = "tokenize_encode_ms";
+    /// Time between the chat-completions preprocessor operator receiving a request and
+    /// calling into preprocess_request_with_options (tokenize). Detects task scheduling /
+    /// operator setup delay ahead of tokenize, distinct from tokenize itself.
+    pub const REQUEST_PREPROCESS_WAIT_MS: &str = "request_preprocess_wait_ms";
     /// L1 tokenizer cache hits (cumulative); only incremented when DYN_TOKENIZER_CACHE is enabled
     pub const TOKENIZER_CACHE_HITS_TOTAL: &str = "tokenizer_cache_hits_total";
     /// L1 tokenizer cache misses (cumulative); only incremented when DYN_TOKENIZER_CACHE is enabled

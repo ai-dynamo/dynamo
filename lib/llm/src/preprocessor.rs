@@ -35,8 +35,9 @@ use std::time::{Duration, Instant};
 
 use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::metrics::frontend_perf::{
-    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, STAGE_DURATION_SECONDS, STAGE_PREPROCESS,
-    StageGuard, TEMPLATE_SECONDS, TOKENIZE_SECONDS,
+    DETOKENIZE_TOKEN_COUNT, DETOKENIZE_TOTAL_US, REQUEST_PREPROCESS_WAIT_MS,
+    STAGE_DURATION_SECONDS, STAGE_PREPROCESS, StageGuard, TEMPLATE_SECONDS, TOKENIZE_ENCODE_MS,
+    TOKENIZE_SECONDS,
 };
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 use tracing;
@@ -1778,7 +1779,9 @@ impl OpenAIPreprocessor {
             prompt.to_string()
         };
         let tokenizer = self.tokenizer.clone();
+        let tokenizer_call_start = Instant::now();
         let encoding = tokio::task::spawn_blocking(move || tokenizer.encode(&owned)).await??;
+        TOKENIZE_ENCODE_MS.observe(tokenizer_call_start.elapsed().as_secs_f64() * 1000.0);
         if let Some(t) = tracker {
             t.record_tokenize_latency(encode_start.elapsed());
         }
@@ -2848,6 +2851,8 @@ impl
             dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let operator_entered_at = Instant::now();
+
         // unpack the request
         let (mut request, context) = request.into_parts();
 
@@ -2879,6 +2884,8 @@ impl
                 .ok()
                 .is_some_and(|flag| *flag),
         };
+
+        REQUEST_PREPROCESS_WAIT_MS.observe(operator_entered_at.elapsed().as_secs_f64() * 1000.0);
 
         // convert the chat completion request to a common completion request
         let (mut common_request, annotations, prompt_injected_reasoning) = self

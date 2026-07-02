@@ -69,10 +69,24 @@ enum AdmissionCommand {
         request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
         ack_tx: oneshot::Sender<()>,
+        #[cfg(feature = "metrics")]
+        sent_at: Instant,
     },
     Update {
         ack_tx: oneshot::Sender<()>,
+        #[cfg(feature = "metrics")]
+        sent_at: Instant,
     },
+}
+
+#[cfg(feature = "metrics")]
+impl AdmissionCommand {
+    fn sent_at(&self) -> Instant {
+        match self {
+            AdmissionCommand::Enqueue { sent_at, .. } => *sent_at,
+            AdmissionCommand::Update { sent_at, .. } => *sent_at,
+        }
+    }
 }
 
 struct SchedulerQueueActor<
@@ -327,6 +341,8 @@ impl<
             request,
             block_hashes: self.prepare_block_hashes_for_refresh(block_hashes),
             ack_tx,
+            #[cfg(feature = "metrics")]
+            sent_at: Instant::now(),
         };
 
         if let Err(error) = self.admission_tx.send(command).await {
@@ -353,7 +369,11 @@ impl<
         let (ack_tx, ack_rx) = oneshot::channel();
         if self
             .admission_tx
-            .send(AdmissionCommand::Update { ack_tx })
+            .send(AdmissionCommand::Update {
+                ack_tx,
+                #[cfg(feature = "metrics")]
+                sent_at: Instant::now(),
+            })
             .await
             .is_ok()
         {
@@ -395,17 +415,37 @@ impl<
 > SchedulerQueueActor<P, C, S, Sel, RF>
 {
     async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
+        #[cfg(feature = "metrics")]
+        let mut last_received_at: Option<Instant> = None;
         while let Some(command) = rx.recv().await {
+            #[cfg(feature = "metrics")]
+            {
+                let received_at = Instant::now();
+                let metrics = super::metrics::SchedulingMetrics::get_or_init();
+                metrics.observe_actor_mailbox_wait(
+                    self.worker_type,
+                    received_at.saturating_duration_since(command.sent_at()).as_secs_f64() * 1000.0,
+                );
+                if let Some(prev) = last_received_at {
+                    metrics.observe_actor_poll_gap(
+                        self.worker_type,
+                        received_at.saturating_duration_since(prev).as_secs_f64() * 1000.0,
+                    );
+                }
+                last_received_at = Some(received_at);
+            }
+
             match command {
                 AdmissionCommand::Enqueue {
                     request,
                     block_hashes,
                     ack_tx,
+                    ..
                 } => {
                     self.handle_enqueue(request, block_hashes);
                     let _ = ack_tx.send(());
                 }
-                AdmissionCommand::Update { ack_tx } => {
+                AdmissionCommand::Update { ack_tx, .. } => {
                     self.handle_update().await;
                     let _ = ack_tx.send(());
                 }
@@ -517,6 +557,13 @@ impl<
             // otherwise constrained request can temporarily stall later
             // schedulable entries until we adopt a cheaper non-HOL strategy.
             if self.all_workers_prefill_busy(threshold, front.request.eligibility(), decay_now) {
+                // Still genuinely capacity-blocked (not just waiting on the actor to be
+                // scheduled) -- sample its current age before breaking out of the drain loop.
+                #[cfg(feature = "metrics")]
+                super::metrics::SchedulingMetrics::get_or_init().observe_pending_queue_age(
+                    self.worker_type,
+                    front.enqueue_at.elapsed().as_millis() as u64,
+                );
                 break;
             }
             let entry = self.pending.pop().expect("heap front vanished before pop");
@@ -565,6 +612,11 @@ impl<
             }
             let admit_now = Instant::now();
             if self.all_workers_prefill_busy(threshold, request.eligibility(), admit_now) {
+                #[cfg(feature = "metrics")]
+                super::metrics::SchedulingMetrics::get_or_init().observe_pending_queue_age(
+                    self.worker_type,
+                    entry.enqueue_at.elapsed().as_millis() as u64,
+                );
                 let isl_tokens = request.isl_tokens;
                 self.pending.push(QueueEntry {
                     key: entry.key,
@@ -585,6 +637,29 @@ impl<
     /// Run the full scheduling pipeline for a single request:
     /// compute projected load -> select worker -> book tracked state -> respond.
     fn admit_one(&self, mut request: SchedulingRequest, decay_now: Instant) {
+        // Covers the entire admit_one body (project_worker_loads + select_worker + booking)
+        // regardless of which early-return path is taken -- a superset of admission_compute_ms,
+        // which only times through select_worker.
+        #[cfg(feature = "metrics")]
+        struct ScheduleComputeGuard {
+            start: Instant,
+            worker_type: &'static str,
+        }
+        #[cfg(feature = "metrics")]
+        impl Drop for ScheduleComputeGuard {
+            fn drop(&mut self) {
+                super::metrics::SchedulingMetrics::get_or_init().observe_schedule_compute(
+                    self.worker_type,
+                    self.start.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+        }
+        #[cfg(feature = "metrics")]
+        let _schedule_compute_guard = ScheduleComputeGuard {
+            start: Instant::now(),
+            worker_type: self.worker_type,
+        };
+
         let op_start = Instant::now();
         request.worker_loads = self
             .slots

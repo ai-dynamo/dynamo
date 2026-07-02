@@ -101,6 +101,36 @@ pub static TEMPLATE_SECONDS: Lazy<Histogram> = Lazy::new(|| {
     .expect("template_seconds histogram")
 });
 
+/// Actual tokenizer.encode() CPU time in milliseconds (subset of TOKENIZE_SECONDS,
+/// which also covers null-byte stripping and tracker bookkeeping around the call).
+pub static TOKENIZE_ENCODE_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            frontend_metric_name(frontend_perf::TOKENIZE_ENCODE_MS),
+            "Tokenizer encode() CPU time (milliseconds)",
+        )
+        .buckets(vec![
+            0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0,
+        ]),
+    )
+    .expect("tokenize_encode_ms histogram")
+});
+
+/// Time between the chat-completions preprocessor operator receiving a request and
+/// calling into preprocess_request_with_options, in milliseconds.
+pub static REQUEST_PREPROCESS_WAIT_MS: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            frontend_metric_name(frontend_perf::REQUEST_PREPROCESS_WAIT_MS),
+            "Time from preprocessor operator entry to preprocess_request_with_options call (milliseconds)",
+        )
+        .buckets(vec![
+            0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0,
+        ]),
+    )
+    .expect("request_preprocess_wait_ms histogram")
+});
+
 /// Cumulative detokenization time across all tokens (microseconds).
 /// Use `rate(total) / rate(count)` in Prometheus to derive per-token average.
 pub static DETOKENIZE_TOTAL_US: Lazy<Counter> = Lazy::new(|| {
@@ -156,6 +186,12 @@ pub fn ensure_frontend_perf_metrics_registered(registry: &MetricsRegistry) {
         registry.add_metric(Box::new(TOKENIZE_SECONDS.clone())).ok();
         registry.add_metric(Box::new(TEMPLATE_SECONDS.clone())).ok();
         registry
+            .add_metric(Box::new(TOKENIZE_ENCODE_MS.clone()))
+            .ok();
+        registry
+            .add_metric(Box::new(REQUEST_PREPROCESS_WAIT_MS.clone()))
+            .ok();
+        registry
             .add_metric(Box::new(DETOKENIZE_TOTAL_US.clone()))
             .ok();
         registry
@@ -182,6 +218,8 @@ pub fn ensure_frontend_perf_metrics_registered_prometheus(
     registry.register(Box::new(STAGE_DURATION_SECONDS.clone()))?;
     registry.register(Box::new(TOKENIZE_SECONDS.clone()))?;
     registry.register(Box::new(TEMPLATE_SECONDS.clone()))?;
+    registry.register(Box::new(TOKENIZE_ENCODE_MS.clone()))?;
+    registry.register(Box::new(REQUEST_PREPROCESS_WAIT_MS.clone()))?;
     registry.register(Box::new(DETOKENIZE_TOTAL_US.clone()))?;
     registry.register(Box::new(DETOKENIZE_TOKEN_COUNT.clone()))?;
     registry.register(Box::new(TOKENIZER_CACHE_HITS_TOTAL.clone()))?;
