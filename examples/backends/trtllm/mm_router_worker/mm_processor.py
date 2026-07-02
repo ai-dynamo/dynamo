@@ -253,11 +253,11 @@ def _get_replacement_id(model_path: str) -> int:
     """
 
     try:
-        config_dict, _ = PretrainedConfig.get_config_dict(model_path)
+        config, _ = PretrainedConfig.get_config_dict(model_path)
         # Some models (e.g. Qwen3-VL) store vocab_size in text_config, not top-level.
-        vocab_size = config_dict.get("vocab_size")
+        vocab_size = config.get("vocab_size")
         if vocab_size is None:
-            vocab_size = config_dict.get("text_config", {}).get("vocab_size")
+            vocab_size = config.get("text_config", {}).get("vocab_size")
         if vocab_size is None:
             raise AttributeError("vocab_size not found in config or config.text_config")
         replacement_id = vocab_size + 1

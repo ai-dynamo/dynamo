@@ -208,8 +208,8 @@ class TensorRTLLMEngine:
         """Return True if *model_path*'s architecture is not supported by
         TRT-LLM's standalone MultimodalEncoder."""
         try:
-            config_dict, _ = PretrainedConfig.get_config_dict(model_path)
-            archs = config_dict.get("architectures") or []
+            config, _ = PretrainedConfig.get_config_dict(model_path)
+            archs = config.get("architectures") or []
             return any(a in _UNSUPPORTED_STANDALONE_ENCODER_ARCHS for a in archs)
         except Exception:
             return False
