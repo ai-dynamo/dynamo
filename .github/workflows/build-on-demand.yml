@@ -158,6 +158,7 @@ jobs:
         VLLM_PRECOMPILED_WHEEL_COMMIT=${{ inputs.vllm_precompiled_wheel_commit }}
         VLLM_PRECOMPILED_WHEEL_VARIANT=${{ inputs.vllm_precompiled_wheel_variant }}
         NCCL_CHECKPOINT_VERSION=${{ inputs.nccl_checkpoint_version }}
+        BASELINE_SBOM_FILE=${{ inputs.vllm_install_mode == 'python-overlay' && 'vllm-openai@7c5a10e9' || 'cuda@2ab6381d' }}
     secrets: inherit
 
   sglang-build:

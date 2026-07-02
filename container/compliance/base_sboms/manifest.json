@@ -2,6 +2,17 @@
   "description": "Maps (from_image:tag, baseline_image:tag) pairs to slim CycloneDX SBOMs of the baseline. Each entry records the engineer-specified compliance boundary: NGC (or other upstream) owns everything in the baseline; we own everything from_image adds on top. The captured SBOM is the BASELINE -- runtime licenses stages subtract its components from final-image NOTICES to filter out NGC-owned content. CI runs container/compliance/base_sboms/check_drift.py on every PR/post-merge; if either digest moved or the from_image's layer prefix no longer matches the recorded baseline, CI fails and a refresh PR is required.",
   "entries": [
     {
+      "baseline_digest": "sha256:7c5a10e9a8b3c8642f4d0463a41215176c0dd834b4f0967287c7e3e517cf1be9",
+      "baseline_image": "vllm/vllm-openai",
+      "baseline_sbom": "vllm-openai@7c5a10e9-amd64.cdx.json",
+      "baseline_tag": "nightly-93d8f834dd8acf33eb0e2a75b2711b628cb6e226",
+      "capture_note": "Exact immutable external base for the dedicated Python-overlay mode; runtime compliance attributes the Dynamo, FlashInfer, and Python-overlay delta added above this nightly",
+      "from_digest": "sha256:7c5a10e9a8b3c8642f4d0463a41215176c0dd834b4f0967287c7e3e517cf1be9",
+      "from_image": "vllm/vllm-openai",
+      "from_tag": "nightly-93d8f834dd8acf33eb0e2a75b2711b628cb6e226",
+      "platform": "linux/amd64"
+    },
+    {
       "baseline_digest": "sha256:2ab6381d970b211fb93853796dc6707eb8a72575a375c422b17cf4d8b2641701",
       "baseline_image": "nvidia/cuda",
       "baseline_sbom": "cuda@2ab6381d-amd64.cdx.json",
