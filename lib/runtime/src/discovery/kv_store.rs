@@ -526,17 +526,17 @@ impl KVStoreDiscovery {
                 }
 
                 let mut events = Vec::new();
+                for id in known_instances.keys() {
+                    if !next_instances.contains_key(id) {
+                        events.push(DiscoveryEvent::Removed(id.clone()));
+                    }
+                }
+
                 for (id, instance) in &next_instances {
                     if known_instances.get(id) != Some(instance) {
                         // Added is an upsert event here: a resync can discover
                         // either a new instance or changed data for an existing id.
                         events.push(DiscoveryEvent::Added(instance.clone()));
-                    }
-                }
-
-                for id in known_instances.keys() {
-                    if !next_instances.contains_key(id) {
-                        events.push(DiscoveryEvent::Removed(id.clone()));
                     }
                 }
 
@@ -976,8 +976,13 @@ mod tests {
         );
 
         assert!(!events.contains(&DiscoveryEvent::Added(second)));
-        assert!(events.contains(&DiscoveryEvent::Added(third)));
-        assert!(events.contains(&DiscoveryEvent::Removed(endpoint_instance(1).id())));
+        assert_eq!(
+            events,
+            vec![
+                DiscoveryEvent::Removed(endpoint_instance(1).id()),
+                DiscoveryEvent::Added(third),
+            ]
+        );
         assert_eq!(known_instances.len(), 2);
         assert!(known_instances.contains_key(&endpoint_instance(2).id()));
         assert!(known_instances.contains_key(&endpoint_instance(3).id()));

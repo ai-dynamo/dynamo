@@ -38,6 +38,7 @@ const STARTUP_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const WATCH_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const WATCH_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
+const WATCH_RESYNC_GET_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// ETCD Client
 #[derive(Clone)]
@@ -425,6 +426,7 @@ impl Client {
             let mut reconnect = true;
             while reconnect {
                 if !first_connect {
+                    let mut retry_attempt = 0u64;
                     let mut retry_backoff = WATCH_RETRY_INITIAL_BACKOFF;
                     while let Err(err) = Self::resync_watch_prefix(
                         &connector,
@@ -439,11 +441,22 @@ impl Client {
                             return;
                         }
 
-                        tracing::warn!(
-                            error = %err,
-                            prefix = %prefix_str,
-                            "failed to resync etcd watch prefix after reconnect; retrying"
-                        );
+                        retry_attempt = retry_attempt.saturating_add(1);
+                        if retry_attempt == 1 {
+                            tracing::warn!(
+                                error = %err,
+                                prefix = %prefix_str,
+                                "failed to resync etcd watch prefix after reconnect; retrying"
+                            );
+                        } else {
+                            tracing::info!(
+                                error = %err,
+                                prefix = %prefix_str,
+                                retry_attempt,
+                                backoff_ms = retry_backoff.as_millis(),
+                                "still failing to resync etcd watch prefix after reconnect; retrying"
+                            );
+                        }
 
                         if Self::is_etcd_connection_error(&err) {
                             let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -524,11 +537,16 @@ impl Client {
         tx: &mpsc::Sender<WatchEvent>,
         cancel_token: &CancellationToken,
     ) -> Result<()> {
-        let mut response = connector
-            .get_client()
-            .kv_client()
-            .get(prefix, Some(GetOptions::new().with_prefix()))
-            .await
+        let mut kv_client = connector.get_client().kv_client();
+        let get_result = tokio::select! {
+            _ = cancel_token.cancelled() => anyhow::bail!("watch resync cancelled"),
+            result = tokio::time::timeout(
+                WATCH_RESYNC_GET_TIMEOUT,
+                kv_client.get(prefix, Some(GetOptions::new().with_prefix())),
+            ) => result,
+        };
+        let mut response = get_result
+            .with_context(|| format!("timed out fetching etcd prefix snapshot for '{prefix}'"))?
             .with_context(|| format!("failed to fetch etcd prefix snapshot for '{prefix}'"))?;
 
         let header = response
