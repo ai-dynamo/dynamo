@@ -51,13 +51,17 @@ ARG DOCKER_PROXY=
 #   - DcgmActuator uses `dcgm_structs.c_dcgmDeviceConfig_v2`, which only exists
 #     in DCGM 4.x (no 3.x fallback path), so this MUST stay on a 4.x tag;
 #   - keep it >= the deployed hostengine version.
-# The vendor image's OS only supplies the extracted libdcgm.so.4 + pydcgm .py;
-# it is independent of the runtime base (python:3.12-slim-bookworm). The
-# ubuntu24.04 libdcgm.so.4 loads cleanly on bookworm (glibc 2.36) — verified via
-# `ctypes.CDLL` + `import pydcgm` inside the shipped runtime image.
-# NGC publishes newer 4.x tags over time (e.g. 4.6.0-1-ubuntu24.04); override
-# DCGM_IMAGE to match your operator. Validate any new tag resolves before merge:
+# The vendor image's OS does not set the runtime OS (that stays bookworm), but
+# the extracted libdcgm.so.4 must stay ABI-compatible with bookworm's glibc.
+# The 4.5.3-1-ubuntu24.04 lib was validated on bookworm (glibc 2.36) via
+# `ctypes.CDLL("libdcgm.so.4")` + `import pydcgm` inside the shipped runtime
+# image. NGC publishes newer 4.x tags over time (e.g. 4.6.0-1-ubuntu24.04);
+# override DCGM_IMAGE to match your operator, and for any override validate BOTH
+# that the tag resolves AND that the extracted lib loads on the runtime base:
 #   docker manifest inspect nvcr.io/nvidia/cloud-native/dcgm:<tag>
+#   docker build --target runtime ... -t <img> && docker run --rm \
+#     --entrypoint python <img> -c \
+#     "import ctypes, pydcgm; ctypes.CDLL('/opt/dcgm/lib/libdcgm.so.4')"
 ARG DCGM_IMAGE=nvcr.io/nvidia/cloud-native/dcgm:4.5.3-1-ubuntu24.04
 FROM ${DCGM_IMAGE} AS dcgm-vendor
 
@@ -105,18 +109,6 @@ RUN pip install --no-cache-dir \
 
 COPY --from=dcgm-vendor /vendor/dcgm-python /opt/dcgm/python
 COPY --from=dcgm-vendor /vendor/dcgm-lib    /opt/dcgm/lib
-
-# Logger shim: the upstream NGC DCGM runtime image's pydcgm bindings
-# (`DcgmGroup.py:20`) `import logger` and call `logger.debug(...)` /
-# `logger.warning(...)`. The `logger.py` module that satisfies those
-# imports lives in DCGM's source tree under
-# `datacenter-gpu-manager-4/testing/python3/logger.py` and is NOT
-# packaged into the runtime image. Without this shim every DcgmGroup
-# construction fails with `ModuleNotFoundError: No module named 'logger'`.
-# `deploy/power-agent/logger.py` is a 10-line stdlib-logging adapter.
-# Tracked in ai-dynamo/dynamo#11192 — drop this shim once the upstream NGC
-# DCGM runtime image packages `logger.py` alongside its pydcgm bindings.
-COPY logger.py /opt/dcgm/python/logger.py
 
 WORKDIR /app
 # managed_state.py holds the single source of truth for managed-GPU state.
