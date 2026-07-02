@@ -7,13 +7,15 @@ Tests for the tool-stripping behaviour of _prepare_request when
 tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
-import json
 import importlib.util
+import json
 from types import SimpleNamespace
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
 from transformers import AutoTokenizer
+
+from dynamo.frontend.prepost import _prepare_request
 
 HAS_QWEN3_TOOL_PARSER = (
     importlib.util.find_spec("vllm.tool_parsers.qwen3_engine_tool_parser") is not None
@@ -21,8 +23,6 @@ HAS_QWEN3_TOOL_PARSER = (
 
 if HAS_QWEN3_TOOL_PARSER:
     from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
-
-from dynamo.frontend.prepost import _prepare_request
 
 # Needs vllm packages (gpu_1 container), but does not allocate GPU VRAM.
 pytestmark = [
