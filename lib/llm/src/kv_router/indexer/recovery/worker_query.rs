@@ -16,8 +16,10 @@ use tokio::sync::{Mutex, Semaphore};
 use super::worker_query_directory::{DiscoveredQueryEndpoint, WorkerQueryEndpointDirectory};
 #[cfg(test)]
 use super::worker_query_endpoint::WorkerKvQueryEngine;
+use super::worker_query_health::spawn_kv_event_source_health_monitor;
 use super::worker_query_state::{LiveEventAction, PendingDrainAction, RecoveryKey, WorkerState};
 use super::worker_query_transport::{RuntimeWorkerQueryTransport, WorkerQueryTransport};
+use crate::discovery::RuntimeConfigWatch;
 use crate::kv_router::Indexer;
 use dynamo_kv_router::{
     indexer::WorkerKvQueryResponse,
@@ -62,7 +64,7 @@ pub struct WorkerQueryClient {
     /// Indexer for applying recovered events and worker removals.
     indexer: Indexer,
     worker_states: DashMap<WorkerId, Arc<Mutex<WorkerState>>>,
-    query_endpoints: WorkerQueryEndpointDirectory,
+    query_endpoints: Arc<WorkerQueryEndpointDirectory>,
     recovery_semaphore: Arc<Semaphore>,
     /// Per-rank cancellation for in-flight recovery tasks; cancelled on rank
     /// removal so retry backoff stops polling workers that no longer exist.
@@ -80,7 +82,7 @@ impl WorkerQueryClient {
             transport,
             indexer,
             worker_states: DashMap::new(),
-            query_endpoints: WorkerQueryEndpointDirectory::default(),
+            query_endpoints: Arc::new(WorkerQueryEndpointDirectory::default()),
             recovery_semaphore: Arc::new(Semaphore::new(RECOVERY_CONCURRENCY_LIMIT)),
             recovery_cancels: DashMap::new(),
         })
@@ -91,9 +93,19 @@ impl WorkerQueryClient {
     /// The background loop watches `ComponentEndpoints` discovery for query endpoints,
     /// recovers each `(worker_id, dp_rank)` as it appears, and sends worker removal
     /// events when all dp_ranks for a worker disappear.
-    pub async fn spawn(component: Component, indexer: Indexer) -> Result<Arc<Self>> {
+    pub async fn spawn(
+        component: Component,
+        indexer: Indexer,
+        workers_with_configs: RuntimeConfigWatch,
+    ) -> Result<Arc<Self>> {
         let transport = Arc::new(RuntimeWorkerQueryTransport::new(&component).await?);
         let client = Self::new(component.clone(), indexer, transport);
+
+        spawn_kv_event_source_health_monitor(
+            component.clone(),
+            workers_with_configs,
+            client.query_endpoints.clone(),
+        );
 
         let client_bg = client.clone();
         let cancel_token = component.drt().primary_token();

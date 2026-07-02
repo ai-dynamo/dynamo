@@ -603,6 +603,9 @@ pub mod router {
     pub const REMOTE_INDEXER_WRITE_FAILURES_TOTAL: &str =
         "router_remote_indexer_write_failures_total";
 
+    /// Number of workers expected to publish KV events but missing query endpoints
+    pub const KV_EVENT_SOURCE_MISMATCH_WORKERS: &str = "router_kv_event_source_mismatch_workers";
+
     /// Time to first token observed at the router (seconds)
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "router_time_to_first_token_seconds";
 

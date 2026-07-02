@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::worker_query::WorkerQueryClient;
+use crate::discovery::RuntimeConfigWatch;
 use crate::kv_router::Indexer;
 use anyhow::Result;
 use dynamo_kv_router::{
@@ -27,6 +28,7 @@ async fn start_kv_router_background_event_plane(
     component: Component,
     indexer: Indexer,
     transport_kind: EventTransportKind,
+    workers_with_configs: RuntimeConfigWatch,
 ) -> Result<()> {
     let cancellation_token = component.drt().primary_token();
 
@@ -45,7 +47,8 @@ async fn start_kv_router_background_event_plane(
 
     // WorkerQueryClient handles its own discovery loop for lifecycle + initial recovery.
     // No blocking wait — recovery happens asynchronously as endpoints are discovered.
-    let worker_query_client = WorkerQueryClient::spawn(component.clone(), indexer).await?;
+    let worker_query_client =
+        WorkerQueryClient::spawn(component.clone(), indexer, workers_with_configs).await?;
     let kv_event_subject = format!(
         "namespace.{}.component.{}.{}",
         component.namespace().name(),
@@ -116,6 +119,7 @@ pub async fn start_subscriber(
     component: Component,
     kv_router_config: &KvRouterConfig,
     indexer: Indexer,
+    workers_with_configs: RuntimeConfigWatch,
 ) -> Result<()> {
     let transport_kind = component.drt().default_event_transport_kind();
 
@@ -156,6 +160,12 @@ pub async fn start_subscriber(
             tracing::info!("Using NATS Core subscription (local_indexer mode)");
         }
 
-        start_kv_router_background_event_plane(component, indexer, transport_kind).await
+        start_kv_router_background_event_plane(
+            component,
+            indexer,
+            transport_kind,
+            workers_with_configs,
+        )
+        .await
     }
 }
