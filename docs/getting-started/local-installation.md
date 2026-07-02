@@ -53,6 +53,8 @@ versions and backend guides for run instructions: [SGLang](../backends/sglang/RE
 
 ### Option B: Install from PyPI
 
+Supported for vLLM and SGLang only. Use Option A for TensorRT-LLM.
+
 ```bash
 # Install uv (recommended Python package manager)
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -74,19 +76,6 @@ uv pip install --prerelease=allow "ai-dynamo[sglang]"
 
 For CUDA 13 (B300/GB300), the container is recommended. See
 [SGLang install docs](https://docs.sglang.io/get_started/install.html) for details.
-
-**TensorRT-LLM**
-
-```bash
-sudo apt install python3-dev
-pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
-pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
-```
-
-TensorRT-LLM requires `pip` due to a transitive Git URL dependency that
-`uv` doesn't resolve. We recommend using the TensorRT-LLM container for
-broader compatibility. See the [TRT-LLM backend guide](../backends/trtllm/README.md)
-for details.
 
 **vLLM**
 
@@ -205,9 +194,10 @@ The default model `Qwen/Qwen3-0.6B` requires ~2GB of GPU memory. Larger models n
 
 Start with a small model and scale up based on your hardware.
 
-**Python 3.11 with TensorRT-LLM**
+**TensorRT-LLM**
 
-TensorRT-LLM does not support Python 3.11. If you see installation failures with TensorRT-LLM, check your Python version with `python3 --version`. Use Python 3.10 or 3.12 instead.
+TensorRT-LLM is not supported via a local PyPI install. Use the
+`tensorrtllm-runtime` container (Option A).
 
 **Container runs but GPU not detected**
 
