@@ -374,19 +374,14 @@ impl ModelWatcher {
         });
     }
 
-    fn seed_lora_state_for_put(
-        &self,
-        mcid: &ModelCardInstanceId,
-        card: &ModelDeploymentCard,
-    ) {
+    fn seed_lora_state_for_put(&self, mcid: &ModelCardInstanceId, card: &ModelDeploymentCard) {
         use crate::kv_router::protocols::WorkerWithDpRank;
 
         let worker = WorkerWithDpRank::new(mcid.instance_id, 0);
         if let Some(adapter_name) =
             seed_lora_state_from_card(self.manager.lora_state_tracker(), worker, card)
         {
-            self.pending_lora_adds
-                .insert(mcid.to_path(), adapter_name);
+            self.pending_lora_adds.insert(mcid.to_path(), adapter_name);
         }
     }
 
@@ -553,8 +548,7 @@ impl ModelWatcher {
                     // order if this task is scheduled after a later operation.
                     let instance_key = mcid.to_path();
                     let task_key = instance_key.clone();
-                    let (operation, generation) =
-                        self.begin_instance_operation(&instance_key);
+                    let (operation, generation) = self.begin_instance_operation(&instance_key);
                     let watcher = Arc::clone(&self);
                     let handle = tokio::spawn(async move {
                         match watcher
@@ -603,13 +597,8 @@ impl ModelWatcher {
                     if let Some((_, old_put)) = self.pending_puts.remove(&instance_key) {
                         old_put.handle.abort();
                     }
-                    self.pending_puts.insert(
-                        instance_key,
-                        PendingPut {
-                            generation,
-                            handle,
-                        },
-                    );
+                    self.pending_puts
+                        .insert(instance_key, PendingPut { generation, handle });
                 }
                 DiscoveryEvent::Removed(id) => {
                     // Extract ModelCardInstanceId from the removal event
@@ -624,8 +613,7 @@ impl ModelWatcher {
                     };
 
                     let instance_key = model_card_instance_id.to_path();
-                    let (operation, generation) =
-                        self.begin_instance_operation(&instance_key);
+                    let (operation, generation) = self.begin_instance_operation(&instance_key);
                     match self
                         .handle_delete(
                             model_card_instance_id,
@@ -753,12 +741,7 @@ impl ModelWatcher {
                 continue;
             };
             match self
-                .handle_delete(
-                    &mcid,
-                    namespace_filter,
-                    operation,
-                    delete_generation,
-                )
+                .handle_delete(&mcid, namespace_filter, operation, delete_generation)
                 .await
             {
                 Ok(DeleteOutcome::Processed(_)) => removed_stale_count += 1,
@@ -778,8 +761,8 @@ impl ModelWatcher {
             retried_model_cards = retry_count,
             removed_stale_model_cards = removed_stale_count,
             superseded_stale_model_cards = superseded_stale_count,
-            failed_stale_model_cards = stale_entry_count
-                .saturating_sub(removed_stale_count + superseded_stale_count),
+            failed_stale_model_cards =
+                stale_entry_count.saturating_sub(removed_stale_count + superseded_stale_count),
             "Completed frontend model registration reconciliation"
         );
         Ok(())
@@ -861,13 +844,8 @@ impl ModelWatcher {
         if let Some((_, old_put)) = self.pending_puts.remove(&instance_key) {
             old_put.handle.abort();
         }
-        self.pending_puts.insert(
-            instance_key,
-            PendingPut {
-                generation,
-                handle,
-            },
-        );
+        self.pending_puts
+            .insert(instance_key, PendingPut { generation, handle });
         true
     }
 
@@ -895,9 +873,10 @@ impl ModelWatcher {
                     return Ok(DeleteOutcome::Superseded);
                 }
 
-                if let Some((_, pending)) = self.pending_puts.remove_if(&key, |_, pending| {
-                    pending.generation < generation
-                }) {
+                if let Some((_, pending)) = self
+                    .pending_puts
+                    .remove_if(&key, |_, pending| pending.generation < generation)
+                {
                     pending.handle.abort();
                     let _ = pending.handle.await;
                 }
@@ -932,9 +911,7 @@ impl ModelWatcher {
             let _ = pending.handle.await;
         }
 
-        let result = self
-            .handle_delete_serialized(mcid, namespace_filter)
-            .await;
+        let result = self.handle_delete_serialized(mcid, namespace_filter).await;
         drop(operation_guard);
         self.prune_instance_operation(&key, &operation);
         result.map(DeleteOutcome::Processed)
