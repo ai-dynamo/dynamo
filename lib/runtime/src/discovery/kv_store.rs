@@ -417,6 +417,24 @@ impl KVStoreDiscovery {
                 .is_some_and(|suffix| suffix.starts_with('/'))
     }
 
+    fn bucket_for_prefix(prefix: &str) -> &'static str {
+        if prefix == INSTANCES_BUCKET
+            || prefix
+                .strip_prefix(INSTANCES_BUCKET)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            INSTANCES_BUCKET
+        } else if prefix == EVENT_CHANNELS_BUCKET
+            || prefix
+                .strip_prefix(EVENT_CHANNELS_BUCKET)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            EVENT_CHANNELS_BUCKET
+        } else {
+            MODELS_BUCKET
+        }
+    }
+
     /// Parse and deserialize a discovery instance from KV store entry
     fn parse_instance(value: &[u8]) -> Result<DiscoveryInstance> {
         let instance: DiscoveryInstance = serde_json::from_slice(value)?;
@@ -779,13 +797,7 @@ impl Discovery for KVStoreDiscovery {
 
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
         let prefix = Self::query_prefix(&query);
-        let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
-            INSTANCES_BUCKET
-        } else if prefix.starts_with(EVENT_CHANNELS_BUCKET) {
-            EVENT_CHANNELS_BUCKET
-        } else {
-            MODELS_BUCKET
-        };
+        let bucket_name = Self::bucket_for_prefix(&prefix);
 
         // Get bucket - if it doesn't exist, return empty list
         let Some(bucket) = self.store.get_bucket(bucket_name).await? else {
@@ -830,13 +842,7 @@ impl Discovery for KVStoreDiscovery {
         cancel_token: Option<CancellationToken>,
     ) -> Result<DiscoveryStream> {
         let prefix = Self::query_prefix(&query);
-        let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
-            INSTANCES_BUCKET
-        } else if prefix.starts_with(EVENT_CHANNELS_BUCKET) {
-            EVENT_CHANNELS_BUCKET
-        } else {
-            MODELS_BUCKET
-        };
+        let bucket_name = Self::bucket_for_prefix(&prefix);
 
         tracing::trace!(
             "KVStoreDiscovery::list_and_watch: Starting watch for query={:?}, prefix={}, bucket={}",
@@ -1007,6 +1013,22 @@ mod tests {
             &prefix,
             INSTANCES_BUCKET
         ));
+    }
+
+    #[test]
+    fn test_bucket_for_prefix_requires_path_boundary() {
+        assert_eq!(
+            KVStoreDiscovery::bucket_for_prefix("v1/instances/ns/component"),
+            INSTANCES_BUCKET
+        );
+        assert_eq!(
+            KVStoreDiscovery::bucket_for_prefix("v1/event_channels/ns/component/topic"),
+            EVENT_CHANNELS_BUCKET
+        );
+        assert_eq!(
+            KVStoreDiscovery::bucket_for_prefix("v1/instances2/ns/component"),
+            MODELS_BUCKET
+        );
     }
 
     #[test]
