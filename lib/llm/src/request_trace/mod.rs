@@ -24,7 +24,10 @@ pub(crate) use agent_context::{
     record_completion_finish_reason_metadata, record_llm_metric_tokens, request_metrics,
     request_metrics_from_agent_state, start_request_trace_tool_event_ingest,
 };
-pub use config::{RequestTracePolicy, is_enabled, policy};
+pub use config::{
+    RequestTraceDestination, RequestTraceFileCompression, RequestTraceFileFormat,
+    RequestTracePolicy, is_enabled, policy,
+};
 pub(crate) use integration::{
     build_request_end_trace_state, finish_reason_metadata_handle, wrap_chat_request_end_stream,
     wrap_completion_request_end_stream,
@@ -49,10 +52,10 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
         return Ok(());
     }
 
-    if policy.tool_events_zmq_endpoint.is_some() && policy.sinks.is_empty() {
+    if policy.tool_events_zmq_endpoint.is_some() && policy.destinations.is_empty() {
         tracing::warn!(
             tool_events_zmq_endpoint = ?policy.tool_events_zmq_endpoint,
-            "request trace tool events are enabled but no local trace sinks are configured; set DYN_REQUEST_TRACE_SINKS to write local trace records"
+            "request trace tool events are enabled but no local trace destinations are configured; set DYN_REQUEST_TRACE_DESTINATIONS to write local trace records"
         );
     }
 
@@ -60,7 +63,9 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
     sink::spawn_workers_from_env(shutdown).await?;
     tracing::info!(
         capacity = policy.capacity,
-        sinks = ?policy.sinks,
+        destinations = ?policy.destination_names(),
+        file_format = policy.file_format.as_str(),
+        file_compression = policy.file_compression.as_str(),
         "Request trace initialized"
     );
     Ok(())

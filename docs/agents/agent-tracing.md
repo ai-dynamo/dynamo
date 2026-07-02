@@ -17,13 +17,13 @@ The fast path is one environment variable:
 export DYN_REQUEST_TRACE=1
 ```
 
-That selects `jsonl_gz` output at `/tmp/dynamo-request-trace.*.jsonl.gz`. Tool-call understanding works immediately from `request_end` finish metadata: no harness tooling required. The optional ZMQ tool-event ingress is opt-in; see [Tool Call Observability](#tool-call-observability).
+That selects gzip-compressed JSONL file output at `/tmp/dynamo-request-trace.*.jsonl.gz`. Tool-call understanding works immediately from `request_end` finish metadata: no harness tooling required. The optional ZMQ tool-event ingress is opt-in; see [Tool Call Observability](#tool-call-observability).
 
 To relocate captures, set an output path:
 
 ```bash
 export DYN_REQUEST_TRACE=1
-export DYN_REQUEST_TRACE_OUTPUT_PATH=/mnt/captures/run-42/request-trace
+export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 ```
 
 `DYN_REQUEST_TRACE` is the only trace switch. The same request trace stream contains compact replay rows when no session identity is present and enriched agent rows when it is. All request trace variables are documented in [Request Replay Tracing](../observability/request-tracing.md).
@@ -133,8 +133,9 @@ Request traces do not save input or output payloads by default. To view payloads
 
 ```bash
 export DYN_REQUEST_TRACE=1
-export DYN_REQUEST_TRACE_SINKS=jsonl_gz
-export DYN_REQUEST_TRACE_OUTPUT_PATH=/tmp/dynamo-trace
+export DYN_REQUEST_TRACE_DESTINATIONS=file
+export DYN_REQUEST_TRACE_FILE_PATH=/tmp/dynamo-trace
+export DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip
 export DYN_AUDIT_SINKS=jsonl_gz
 export DYN_AUDIT_OUTPUT_PATH=/tmp/dynamo-audit
 export DYN_AUDIT_FORCE_LOGGING=true
@@ -165,8 +166,8 @@ Convert request trace JSONL files into a [Perfetto](https://ui.perfetto.dev/) tr
 
 ```bash
 uv run --no-project python benchmarks/request_trace/convert_to_perfetto.py \
-  "${DYN_REQUEST_TRACE_OUTPUT_PATH}".*.jsonl.gz \
-  --output "${DYN_REQUEST_TRACE_OUTPUT_PATH}.perfetto.json"
+  "${DYN_REQUEST_TRACE_FILE_PATH}".*.jsonl.gz \
+  --output "${DYN_REQUEST_TRACE_FILE_PATH}.perfetto.json"
 ```
 
 Open the output in [Perfetto UI](https://ui.perfetto.dev/). The default view shows the normal request stack for LLM requests, backend stages, and tool spans when present.

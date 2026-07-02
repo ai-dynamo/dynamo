@@ -465,31 +465,60 @@ pub mod llm {
         /// Master switch. Truthy enables per-request replay tracing.
         pub const DYN_REQUEST_TRACE: &str = "DYN_REQUEST_TRACE";
 
-        /// Request trace sink selection. Comma-separated values: stderr,jsonl,jsonl_gz.
+        /// Request trace destination selection. Comma-separated values: `file`, `stderr`.
+        pub const DYN_REQUEST_TRACE_DESTINATIONS: &str = "DYN_REQUEST_TRACE_DESTINATIONS";
+
+        /// Deprecated alias for request trace destination and file codec selection.
+        ///
+        /// Legacy values map as follows: `jsonl` => `file` with no compression,
+        /// `jsonl_gz` => `file` with gzip compression, `stderr` => `stderr`.
         pub const DYN_REQUEST_TRACE_SINKS: &str = "DYN_REQUEST_TRACE_SINKS";
 
-        /// Local output path for request trace records.
+        /// Local output path for request trace file records.
         ///
-        /// For `jsonl`, this is the literal file path. For `jsonl_gz`, this is the
-        /// segment prefix used to derive `<prefix>.<index>.jsonl.gz` files.
+        /// With `DYN_REQUEST_TRACE_FILE_COMPRESSION=none`, this is the literal JSONL
+        /// path. With `gzip`, this is the segment prefix used to derive
+        /// `<prefix>.<index>.jsonl.gz` files.
+        pub const DYN_REQUEST_TRACE_FILE_PATH: &str = "DYN_REQUEST_TRACE_FILE_PATH";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_PATH`.
         pub const DYN_REQUEST_TRACE_OUTPUT_PATH: &str = "DYN_REQUEST_TRACE_OUTPUT_PATH";
+
+        /// Request trace file record format. Supported value: `jsonl`.
+        pub const DYN_REQUEST_TRACE_FILE_FORMAT: &str = "DYN_REQUEST_TRACE_FILE_FORMAT";
+
+        /// Request trace file compression. Supported values: `gzip`, `none`.
+        pub const DYN_REQUEST_TRACE_FILE_COMPRESSION: &str = "DYN_REQUEST_TRACE_FILE_COMPRESSION";
 
         /// In-process trace bus capacity.
         pub const DYN_REQUEST_TRACE_CAPACITY: &str = "DYN_REQUEST_TRACE_CAPACITY";
 
-        /// JSONL sink buffer size in bytes.
+        /// Request trace file sink buffer size in bytes.
+        pub const DYN_REQUEST_TRACE_FILE_BUFFER_BYTES: &str = "DYN_REQUEST_TRACE_FILE_BUFFER_BYTES";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES`.
         pub const DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES: &str =
             "DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES";
 
-        /// JSONL sink periodic flush interval in milliseconds.
+        /// Request trace file sink periodic flush interval in milliseconds.
+        pub const DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS: &str =
+            "DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS`.
         pub const DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS: &str =
             "DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS";
 
-        /// Rotating gzip JSONL sink roll threshold in uncompressed bytes.
+        /// Gzip file sink roll threshold in uncompressed bytes.
+        pub const DYN_REQUEST_TRACE_FILE_ROLL_BYTES: &str = "DYN_REQUEST_TRACE_FILE_ROLL_BYTES";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_ROLL_BYTES`.
         pub const DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES: &str =
             "DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES";
 
-        /// Rotating gzip JSONL sink roll threshold in record lines.
+        /// Gzip file sink roll threshold in record lines.
+        pub const DYN_REQUEST_TRACE_FILE_ROLL_LINES: &str = "DYN_REQUEST_TRACE_FILE_ROLL_LINES";
+
+        /// Deprecated alias for `DYN_REQUEST_TRACE_FILE_ROLL_LINES`.
         pub const DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES: &str =
             "DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES";
 
@@ -773,12 +802,20 @@ mod tests {
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_BYTES,
             llm::audit::DYN_AUDIT_JSONL_GZ_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE,
+            llm::request_trace::DYN_REQUEST_TRACE_DESTINATIONS,
             llm::request_trace::DYN_REQUEST_TRACE_SINKS,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_PATH,
             llm::request_trace::DYN_REQUEST_TRACE_OUTPUT_PATH,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_FORMAT,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_COMPRESSION,
             llm::request_trace::DYN_REQUEST_TRACE_CAPACITY,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_BUFFER_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_ROLL_BYTES,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES,
+            llm::request_trace::DYN_REQUEST_TRACE_FILE_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,

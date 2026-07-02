@@ -16,7 +16,7 @@ Session identity enriches traces only. Its presence does not enable sticky sessi
 Request tracing does not record prompts, responses, or tool arguments. Use the
 audit sink when payload capture is required.
 
-Enable the default rotating gzip sink:
+Enable the default rotating gzip file destination:
 
 ```bash
 export DYN_REQUEST_TRACE=1
@@ -27,23 +27,32 @@ segment prefix:
 
 ```bash
 export DYN_REQUEST_TRACE=1
-export DYN_REQUEST_TRACE_OUTPUT_PATH=/mnt/captures/run-42/request-trace
+export DYN_REQUEST_TRACE_FILE_PATH=/mnt/captures/run-42/request-trace
 ```
 
 ## Configuration
 
-| Variable | Default when enabled | Description |
-| --- | --- | --- |
-| `DYN_REQUEST_TRACE` | unset | Truthy master switch. |
-| `DYN_REQUEST_TRACE_SINKS` | `jsonl_gz` | Comma-separated `jsonl`, `jsonl_gz`, or `stderr`. |
-| `DYN_REQUEST_TRACE_OUTPUT_PATH` | `/tmp/dynamo-request-trace` | Literal JSONL path or gzip segment prefix. |
-| `DYN_REQUEST_TRACE_CAPACITY` | `1024` | Best-effort in-process broadcast capacity. |
-| `DYN_REQUEST_TRACE_JSONL_BUFFER_BYTES` | `1048576` | JSONL or gzip batching threshold. |
-| `DYN_REQUEST_TRACE_JSONL_FLUSH_INTERVAL_MS` | `1000` | Periodic flush interval. |
-| `DYN_REQUEST_TRACE_JSONL_GZ_ROLL_BYTES` | `268435456` | Gzip roll threshold in uncompressed bytes. |
-| `DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES` | unset | Optional gzip roll threshold in records. |
-| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | Optional ZMQ PULL bind address for harness tool events. |
-| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | First-frame ZMQ topic filter when endpoint is configured. |
+| Variable | Default when enabled | Values | Description |
+| --- | --- | --- | --- |
+| `DYN_REQUEST_TRACE` | unset | Truthy value | Master switch. |
+| `DYN_REQUEST_TRACE_DESTINATIONS` | `file` | `file`, `stderr` | Comma-separated record destinations. |
+| `DYN_REQUEST_TRACE_FILE_PATH` | `/tmp/dynamo-request-trace` | File path or segment prefix | Literal path when compression is `none`; gzip segment prefix when compression is `gzip`. |
+| `DYN_REQUEST_TRACE_FILE_FORMAT` | `jsonl` | `jsonl` | File record format. |
+| `DYN_REQUEST_TRACE_FILE_COMPRESSION` | `gzip` | `gzip`, `none` | File compression. `gzip` writes `<prefix>.<index>.jsonl.gz`; `none` writes a literal JSONL path. |
+| `DYN_REQUEST_TRACE_CAPACITY` | `1024` | Positive integer | Best-effort in-process broadcast capacity. |
+| `DYN_REQUEST_TRACE_FILE_BUFFER_BYTES` | `1048576` | Integer bytes | File batching threshold. |
+| `DYN_REQUEST_TRACE_FILE_FLUSH_INTERVAL_MS` | `1000` | Integer milliseconds | Periodic flush interval. |
+| `DYN_REQUEST_TRACE_FILE_ROLL_BYTES` | `268435456` | Positive integer bytes | Gzip roll threshold in uncompressed bytes. |
+| `DYN_REQUEST_TRACE_FILE_ROLL_LINES` | unset | Positive integer records | Optional gzip roll threshold in records. |
+| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | ZMQ bind address | Optional ZMQ PULL bind address for harness tool events. |
+| `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | ZMQ topic | First-frame ZMQ topic filter when endpoint is configured. |
+
+> [!WARNING]
+> Deprecated. `DYN_REQUEST_TRACE_SINKS`, `DYN_REQUEST_TRACE_OUTPUT_PATH`, and
+> `DYN_REQUEST_TRACE_JSONL_*` aliases remain accepted for compatibility. Legacy
+> `DYN_REQUEST_TRACE_SINKS=jsonl` maps to `DYN_REQUEST_TRACE_DESTINATIONS=file`
+> with `DYN_REQUEST_TRACE_FILE_COMPRESSION=none`; `jsonl_gz` maps to `file` with
+> `DYN_REQUEST_TRACE_FILE_COMPRESSION=gzip`.
 
 Set the ZMQ endpoint on the process that should own tool-event ingress, usually
 the frontend process. If the same bind address is exported to multiple Dynamo
@@ -51,8 +60,8 @@ processes, the first process binds it and later processes warn and continue.
 The harness should publish `agent-tool-events` as the first ZMQ frame unless
 `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` is set on Dynamo.
 
-The bus and sinks use best-effort delivery behavior.
-A slow sink can report lag and drop records. Validate captured row counts before
+The bus and destinations use best-effort delivery behavior.
+A slow destination can report lag and drop records. Validate captured row counts before
 using a trace as a complete workload.
 
 ## Record Shape
@@ -123,7 +132,7 @@ Agent-enriched row:
 }
 ```
 
-Optional harness tool events use the `RequestTraceToolEventIngress` payload below. Dynamo normalizes these events into request trace rows before writing them to sinks.
+Optional harness tool events use the `RequestTraceToolEventIngress` payload below. Dynamo normalizes these events into request trace rows before writing them to destinations.
 
 ```json
 {
