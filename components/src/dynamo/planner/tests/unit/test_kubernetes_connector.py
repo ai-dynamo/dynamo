@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, Mock, call, patch
 import pytest
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
+from dynamo.planner.connectors.base import PlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
@@ -794,12 +795,15 @@ def test_get_model_name_both_none_raises_error(kubernetes_connector, mock_kube_a
         _component("component1", "prefill", replicas=1),
         _component("component2", "decode", replicas=2),
     )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
     with pytest.raises(ModelNameNotFoundError):
-        kubernetes_connector.get_model_name(mock_deployment)
+        kubernetes_connector.get_model_name()
 
 
-def test_get_model_name_prefill_none_decode_valid_returns_decode(kubernetes_connector):
+def test_get_model_name_prefill_none_decode_valid_returns_decode(
+    kubernetes_connector, mock_kube_api
+):
     # Arrange
     mock_deployment = _deployment(
         _component("component1", "prefill", replicas=1),
@@ -810,8 +814,9 @@ def test_get_model_name_prefill_none_decode_valid_returns_decode(kubernetes_conn
             args=["--served-model-name", "test-model"],
         ),
     )
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
     # Act
-    result = kubernetes_connector.get_model_name(mock_deployment)
+    result = kubernetes_connector.get_model_name()
 
     # Assert
     assert result == "test-model"
@@ -836,7 +841,7 @@ def test_get_model_name_mismatch_raises_error(kubernetes_connector, mock_kube_ap
 
     # Act & Assert
     with pytest.raises(DeploymentModelNameMismatchError) as exc_info:
-        kubernetes_connector.get_model_name(mock_deployment)
+        kubernetes_connector.get_model_name()
 
     exception = exc_info.value
     assert exception.prefill_model_name == "prefill-model"
@@ -862,10 +867,29 @@ def test_get_model_name_agree_returns_model_name(kubernetes_connector, mock_kube
     mock_kube_api.get_graph_deployment.return_value = mock_deployment
 
     # Act
-    result = kubernetes_connector.get_model_name(mock_deployment)
+    result = kubernetes_connector.get_model_name()
 
     # Assert
     assert result == "agreed-model"
+
+
+def test_protocol_positional_flags_match_kubernetes_connector(
+    kubernetes_connector, mock_kube_api
+):
+    """Protocol-style positional flags must not bind to a deployment argument."""
+    mock_kube_api.get_graph_deployment.return_value = _deployment(
+        _component(
+            "decode-worker",
+            "decode",
+            replicas=1,
+            args=["--served-model-name", "decode-model"],
+            gpu=4,
+        )
+    )
+    connector: PlannerConnector = kubernetes_connector
+
+    assert connector.get_model_name(False, True) == "decode-model"
+    assert connector.get_gpu_counts(False, True) == (0, 4)
 
 
 # Tests for Service.get_gpu_count()

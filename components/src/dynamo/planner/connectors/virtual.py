@@ -28,10 +28,18 @@ SCALING_MAX_RETRIES = SCALING_MAX_WAIT_TIME // SCALING_CHECK_INTERVAL  # 180 ret
 
 
 class VirtualConnector(PlannerConnector):
-    """
-    This is a virtual connector for planner to output scaling decisions to non-native environments
-    This virtual connector does not actually scale the deployment, instead, it communicates with the non-native environment through dynamo-runtime's VirtualConnectorCoordinator.
-    The deployment environment needs to use VirtualConnectorClient (in the Rust/Python bindings) to read from the scaling decisions and update report scaling status.
+    """Coordinate planner scaling decisions for non-native environments.
+
+    The connector does not scale a deployment directly. It publishes decisions
+    through the Dynamo runtime's ``VirtualConnectorCoordinator``; the deployment
+    environment consumes them with ``VirtualConnectorClient`` and reports scaling
+    status back to the coordinator.
+
+    Virtual deployments do not have a Kubernetes API from which to derive worker
+    component and endpoint metadata. They therefore require a
+    ``worker_info_provider`` that resolves ``WorkerInfo`` from runtime MDC. The
+    planner factory normally supplies its ``RuntimeFpmProvider``, sharing the same
+    runtime discovery source used for forward-pass metrics.
     """
 
     def __init__(
@@ -41,6 +49,16 @@ class VirtualConnector(PlannerConnector):
         worker_info_provider: WorkerInfoProvider,
         model_name: Optional[str] = None,
     ):
+        """Initialize a virtual deployment connector.
+
+        Args:
+            runtime: Distributed runtime used for coordination and discovery.
+            dynamo_namespace: Namespace containing the virtual deployment.
+            worker_info_provider: Required source of runtime WorkerInfo/MDC used
+                to locate worker endpoints. ``construct_environment`` normally
+                provides a ``RuntimeFpmProvider``.
+            model_name: Model name reported by the deployment.
+        """
         self.coord = VirtualConnectorCoordinator(
             runtime,
             dynamo_namespace,

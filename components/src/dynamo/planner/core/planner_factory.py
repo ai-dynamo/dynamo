@@ -99,13 +99,14 @@ def construct_environment(
     )
 
     namespace_binding: Optional[RuntimeNamespaceBinding] = None
-    if runtime is not None and hasattr(connector, "get_worker_runtime_namespace"):
+    if callable(getattr(connector, "get_worker_runtime_namespace", None)):
         namespace_binding = RuntimeNamespaceBinding(
             namespace=config.namespace,
-            runtime=runtime,
             resolver=connector,
         )
         environment.runtime_namespace_source = namespace_binding
+
+    if runtime is not None and namespace_binding is not None:
         if fpm_provider is None:
             fpm_provider = RuntimeFpmProvider(
                 require_prefill=require_prefill,

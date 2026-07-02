@@ -88,7 +88,10 @@ from dynamo.planner.plugins.builtins import (
     BuiltinLoadPropose,
     BuiltinThroughputPropose,
 )
-from dynamo.planner.plugins.builtins.observe import ObserveStageRequest
+from dynamo.planner.plugins.builtins.observe import (
+    EnvironmentObserver,
+    ObserveStageRequest,
+)
 from dynamo.planner.plugins.clock import Clock, VirtualClock, WallClock
 from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.orchestrator.orchestrator import LocalPlannerOrchestrator
@@ -130,7 +133,7 @@ class OrchestratorEngineAdapter:
         config,  # PlannerConfig
         capabilities: WorkerCapabilities,
         *,
-        observe_plugin: Optional[Any] = None,
+        observe_plugin: Optional[EnvironmentObserver] = None,
         clock: Optional[Clock] = None,
     ) -> None:
         self._config = config

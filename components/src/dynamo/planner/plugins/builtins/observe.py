@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from dynamo.planner.core.types import ScheduledTick, TickInput, WorkerCounts
 from dynamo.planner.environment.interface import PlannerEnvironment
@@ -20,6 +21,14 @@ class ObserveStageRequest:
 @dataclass
 class ObserveStageResponse:
     tick_input: TickInput
+
+
+class EnvironmentObserver(Protocol):
+    """In-process contract for collecting one tick's environment observations."""
+
+    async def Observe(self, request: ObserveStageRequest) -> ObserveStageResponse:
+        """Collect the observations requested by ``request.scheduled_tick``."""
+        ...
 
 
 class EnvironmentObservePlugin:
@@ -95,6 +104,7 @@ class EnvironmentObservePlugin:
 
 
 __all__ = [
+    "EnvironmentObserver",
     "EnvironmentObservePlugin",
     "ObserveStageRequest",
     "ObserveStageResponse",

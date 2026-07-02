@@ -150,10 +150,10 @@ class NativePlannerBase:
         if self._engine is not None:
             return self._engine
         # Deliberately lazy: importing planner core should not load the plugin stack.
+        from dynamo.planner.plugins.builtins.observe import EnvironmentObservePlugin
         from dynamo.planner.plugins.orchestrator.engine_adapter import (
             OrchestratorEngineAdapter,
         )
-        from dynamo.planner.plugins.builtins.observe import EnvironmentObservePlugin
 
         self._engine = OrchestratorEngineAdapter(
             self.config,
@@ -500,6 +500,40 @@ class NativePlannerBase:
             or bool(diag.short_circuit_reason)
         )
 
+    async def _run_one_tick(
+        self, engine: EngineProtocol, tick: ScheduledTick
+    ) -> ScheduledTick:
+        """Execute one complete environment-to-scaling planner tick."""
+        await self._refresh_and_update_capabilities()
+        tick_input = await self._observe_tick(engine, tick)
+        self._publish_observation_metrics(tick_input)
+        self._publish_inventory_and_gpu_hours(tick_input)
+        if tick_input.worker_counts is not None:
+            self._last_worker_counts = tick_input.worker_counts
+
+        effects = await engine.tick(tick, tick_input)
+        await self._apply_effects(effects)
+        emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
+        if emit_diagnostics:
+            self._report_diagnostics(tick, effects.diagnostics)
+            self._log_decision_summary(effects)
+
+        if self._recorder.enabled and emit_diagnostics:
+            try:
+                self._recorder.record(
+                    tick_input,
+                    effects,
+                    self.environment.metrics_state(),
+                    self._cumulative_gpu_hours,
+                )
+                if self._recorder.should_generate_report(tick_input.now_s):
+                    self._recorder.generate_report()
+            except Exception as exc:
+                logger.error("Diagnostics report failed: %s", exc)
+
+        assert effects.next_tick is not None
+        return effects.next_tick
+
     async def run(self) -> None:
         engine = self._ensure_engine()
         next_tick = engine.initial_tick(time.time())
@@ -512,37 +546,7 @@ class NativePlannerBase:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
                     continue
 
-                await self._refresh_and_update_capabilities()
-                tick_input = await self._observe_tick(engine, next_tick)
-                self._publish_observation_metrics(tick_input)
-                self._publish_inventory_and_gpu_hours(tick_input)
-                if tick_input.worker_counts is not None:
-                    self._last_worker_counts = tick_input.worker_counts
-
-                effects = await engine.tick(next_tick, tick_input)
-                await self._apply_effects(effects)
-                emit_diagnostics = self._should_emit_tick_diagnostics(
-                    next_tick, effects
-                )
-                if emit_diagnostics:
-                    self._report_diagnostics(next_tick, effects.diagnostics)
-                    self._log_decision_summary(effects)
-
-                if self._recorder.enabled and emit_diagnostics:
-                    try:
-                        self._recorder.record(
-                            tick_input,
-                            effects,
-                            self.environment.metrics_state(),
-                            self._cumulative_gpu_hours,
-                        )
-                        if self._recorder.should_generate_report(tick_input.now_s):
-                            self._recorder.generate_report()
-                    except Exception as exc:
-                        logger.error("Diagnostics report failed: %s", exc)
-
-                assert effects.next_tick is not None
-                next_tick = effects.next_tick
+                next_tick = await self._run_one_tick(engine, next_tick)
         finally:
             self._recorder.finalize()
             await self.environment.shutdown()

@@ -10,7 +10,6 @@ from kubernetes.client import ApiException
 from kubernetes.config.config_exception import ConfigException
 
 from dynamo.planner.errors import PlannerError
-from dynamo.runtime import DistributedRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -21,18 +20,16 @@ class RuntimeNamespaceResolver(Protocol):
 
 
 class RuntimeNamespaceBinding:
-    """Optional runtime namespace binding for runtime-backed providers."""
+    """Mutable binding for the worker generation's Dynamo namespace."""
 
     def __init__(
         self,
         *,
         namespace: str,
-        runtime: DistributedRuntime,
         resolver: RuntimeNamespaceResolver,
     ) -> None:
         self.namespace = namespace
         self.runtime_namespace_value = namespace
-        self.runtime = runtime
         self.resolver = resolver
 
     def runtime_namespace(self) -> str:
@@ -54,8 +51,3 @@ class RuntimeNamespaceBinding:
             return False
         self.runtime_namespace_value = runtime_namespace
         return True
-
-    async def get_or_create_client(self, component_name: str, endpoint_name: str):
-        return await self.runtime.endpoint(
-            f"{self.runtime_namespace_value}.{component_name}.{endpoint_name}"
-        ).client()
