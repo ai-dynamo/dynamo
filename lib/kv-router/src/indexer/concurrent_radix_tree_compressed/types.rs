@@ -19,6 +19,8 @@ pub(super) type SharedNode = Arc<Node>;
 pub(super) type WorkerLookup = FxHashMap<ExternalSequenceBlockHash, SharedNode>;
 
 pub(super) struct MatchWalkResult {
+    // NOTE(perf): Replacing this set with a Vec did not improve throughput. Keep
+    // uniqueness by construction unless a new profile justifies changing it.
     pub(super) active: FxHashSet<WorkerWithDpRank>,
     pub(super) matched_depth: u32,
     pub(super) prev_edge_last_hash: Option<ExternalSequenceBlockHash>,
@@ -104,6 +106,11 @@ pub(super) struct FindStepOutcome {
 /// Data returned by a split for deferred lookup updates.
 pub(super) struct SplitLookupData {
     pub(super) suffix: SharedNode,
+}
+
+pub(super) struct RemoveBatchOutcome {
+    pub(super) stale_hashes: Vec<ExternalSequenceBlockHash>,
+    pub(super) unmatched_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
 #[derive(Clone, Copy)]

@@ -24,7 +24,6 @@ use axum::{
     },
     routing::{get, post},
 };
-use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 use tracing::Instrument;
@@ -32,7 +31,10 @@ use tracing::Instrument;
 use super::{
     RouteDoc,
     disconnect::{ConnectionHandle, create_connection_monitor, monitor_for_disconnects},
-    metrics::{CancellationLabels, Endpoint, process_response_and_observe_metrics},
+    metrics::{
+        CancellationLabels, Endpoint,
+        process_chat_response_and_observe_metrics as process_response_and_observe_metrics,
+    },
     service_v2,
 };
 use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
@@ -42,8 +44,8 @@ use crate::protocols::anthropic::types::{
     chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, NvExt, agent_context_from_headers, apply_header_routing_overrides,
-    validate_nvext_semantics,
+    AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
+    apply_header_routing_overrides, session_affinity_from_headers,
 };
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -174,6 +176,9 @@ async fn handler_anthropic_messages(
     if let Some(agent_context) = agent_context_from_headers(&headers) {
         request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
     }
+    if let Some(session_affinity) = session_affinity_from_headers(&headers) {
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity);
+    }
     let context = request.context();
 
     // Create connection handles
@@ -226,7 +231,7 @@ async fn anthropic_messages(
     }
 
     // Strip Claude Code billing preamble from system prompt if enabled
-    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+    if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }
 
@@ -242,16 +247,14 @@ async fn anthropic_messages(
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
         .map_err(|e| match e {
-            // Registered but no complete worker set yet → retryable 503
-            // (mapped to "overloaded_error" by `anthropic_error`), matching the
-            // OpenAI path. Anything else is a genuine missing model → 404.
+            // Registered but not ready to serve yet → retryable 503 (mapped to
+            // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
+            // canonical, customer-facing message so both APIs report the same
+            // text. Anything else is a genuine missing model → 404.
             crate::discovery::ModelManagerError::ModelUnavailable(_) => anthropic_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "overloaded_error",
-                &format!(
-                    "Model '{}' is registered but has no complete worker set",
-                    model
-                ),
+                &super::openai::model_not_ready_message(&model),
             ),
             _ => anthropic_error(
                 StatusCode::NOT_FOUND,
@@ -263,19 +266,21 @@ async fn anthropic_messages(
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
 
-    // Check if the Anthropic request explicitly disabled thinking.
-    let thinking_explicitly_disabled = orig_request
-        .thinking
-        .as_ref()
-        .is_some_and(|t| t.thinking_type == "disabled");
-
-    // Estimate input tokens before consuming the request via try_into().
-    // Only used in the streaming path to populate message_start.
+    // Anthropic exposes input usage in `message_start`, before the backend's
+    // authoritative count is available. Seed the stream with the same
+    // best-effort estimate as `/count_tokens`; the converter replaces it when
+    // the backend reports final usage.
     let estimated_input_tokens = if streaming {
         estimate_input_tokens(&orig_request)
     } else {
         0
     };
+
+    // Check if the Anthropic request explicitly disabled thinking.
+    let thinking_explicitly_disabled = orig_request
+        .thinking
+        .as_ref()
+        .is_some_and(|t| t.thinking_type == "disabled");
 
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
@@ -297,10 +302,6 @@ async fn anthropic_messages(
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
     apply_anthropic_header_routing_overrides(&mut chat_request, &headers, state.nvext_enabled());
-    if let Some(response) = validate_anthropic_nvext(chat_request.nvext.as_ref()) {
-        return Err(response);
-    }
-
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
     //
@@ -338,6 +339,14 @@ async fn anthropic_messages(
 
     let request = context.map(|_req| chat_request);
 
+    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
+    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
+    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
+        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ),
+    );
+
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
     // Create inflight_guard early to ensure all errors are counted
@@ -355,6 +364,18 @@ async fn anthropic_messages(
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
+            inflight_guard.mark_error(super::metrics::ErrorType::Overload);
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Overloaded,
+                format!("{e:#}"),
+            );
+        }
+        if super::metrics::request_was_unavailable(e.as_ref()) {
+            inflight_guard.mark_error(super::metrics::ErrorType::Unavailable);
+            return anthropic_sanitized_error_with_details(
+                SanitizedError::Unavailable,
+                format!("{e:#}"),
+            );
         }
         // Check for cancelled request (client disconnected before response was sent)
         if super::metrics::request_was_cancelled(e.as_ref()) {
@@ -523,10 +544,10 @@ async fn anthropic_messages(
 /// Handler for POST /v1/messages/count_tokens.
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
-    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     Json(mut request): Json<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
-    if env_is_truthy(env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE) {
+    if state.strip_anthropic_preamble_enabled() {
         strip_billing_preamble(&mut request.system);
     }
     let tokens = request.estimate_tokens();
@@ -752,21 +773,18 @@ fn strip_billing_preamble(system: &mut Option<SystemContent>) {
     }
 }
 
-/// Estimate input token count for an Anthropic request.
+/// Estimate input usage for a streaming `message_start` event.
 ///
-/// Uses the same heuristic as `AnthropicCountTokensRequest::estimate_tokens()`
-/// (sum character lengths / 3). This populates `input_tokens` in the streaming
-/// `message_start` event, since the engine only reports prompt token counts on
-/// the final chunk.
+/// The backend's rendered prompt and cache-hit split are not available when
+/// the event is emitted. Final `message_delta` usage replaces this estimate.
 fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
-    // Build a temporary count-tokens request to reuse the existing estimator.
-    let count_req = AnthropicCountTokensRequest {
+    AnthropicCountTokensRequest {
         model: req.model.clone(),
         messages: req.messages.clone(),
         system: req.system.clone(),
         tools: req.tools.clone(),
-    };
-    count_req.estimate_tokens()
+    }
+    .estimate_tokens()
 }
 
 fn gate_anthropic_nvext(request: &mut AnthropicCreateMessageRequest, nvext_enabled: bool) {
@@ -777,7 +795,7 @@ fn gate_anthropic_nvext(request: &mut AnthropicCreateMessageRequest, nvext_enabl
     if request.nvext.is_some() {
         tracing::warn!(
             endpoint = "anthropic_messages",
-            "request carried nvext data but DYN_ENABLE_FRONTEND_NVEXT is disabled; dropping it"
+            "request carried nvext data but the nvext extension is disabled on this frontend; dropping it"
         );
     }
     request.nvext = None;
@@ -791,16 +809,6 @@ fn apply_anthropic_header_routing_overrides(
     if nvext_enabled {
         request.nvext = apply_header_routing_overrides(request.nvext.take(), headers);
     }
-}
-
-fn validate_anthropic_nvext(nvext: Option<&NvExt>) -> Option<Response> {
-    validate_nvext_semantics(nvext).err().map(|e| {
-        anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            &format!("Invalid nvext: {e}"),
-        )
-    })
 }
 
 /// Build an Anthropic-formatted error response from a canonical
@@ -900,7 +908,7 @@ mod tests {
     fn anthropic_nvext_rejects_agent_context() {
         let err = parse_nvext(Some(serde_json::json!({
             "agent_context": {
-                "trajectory_id": "run-123"
+                "session_id": "run-123"
             }
         })))
         .unwrap_err();
@@ -913,9 +921,9 @@ mod tests {
         let request = request_with_nvext();
         let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
         let mut headers = HeaderMap::new();
-        headers.insert("x-worker-instance-id", "42".parse().unwrap());
-        headers.insert("x-prefill-instance-id", "7".parse().unwrap());
-        headers.insert("x-dp-rank", "3".parse().unwrap());
+        headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
+        headers.insert("x-dynamo-prefill-instance-id", "7".parse().unwrap());
+        headers.insert("x-dynamo-dp-rank", "3".parse().unwrap());
 
         apply_anthropic_header_routing_overrides(&mut chat_request, &headers, true);
         let nvext = chat_request.nvext.unwrap();
@@ -931,7 +939,7 @@ mod tests {
         let request = request_with_nvext();
         let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
         let mut headers = HeaderMap::new();
-        headers.insert("x-worker-instance-id", "42".parse().unwrap());
+        headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
 
         apply_anthropic_header_routing_overrides(&mut chat_request, &headers, false);
         let nvext = chat_request.nvext.unwrap();

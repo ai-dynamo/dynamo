@@ -52,6 +52,7 @@ fn request(uuid: u128, token: u32, arrival_timestamp_ms: Option<f64>) -> DirectR
     DirectRequest {
         tokens: vec![token; 64],
         max_output_tokens: 2,
+        output_token_ids: None,
         uuid: Some(Uuid::from_u128(uuid)),
         dp_rank: 0,
         arrival_timestamp_ms,
@@ -79,6 +80,7 @@ fn reject_request(uuid: u128, prompt_tokens: u32, max_output: usize) -> DirectRe
     DirectRequest {
         tokens: (base..base + prompt_tokens).collect(),
         max_output_tokens: max_output,
+        output_token_ids: None,
         uuid: Some(Uuid::from_u128(uuid)),
         dp_rank: 0,
         arrival_timestamp_ms: None,
@@ -217,13 +219,8 @@ async fn test_trace_arrivals_are_not_blocked_by_queued_router_selection() {
         .build()
         .unwrap();
     let start = Instant::now();
-    let router = Arc::new(ReplayRouter::new(
-        ReplayRouterMode::KvRouter,
-        &args,
-        None,
-        None,
-        1,
-    ));
+    let router =
+        Arc::new(ReplayRouter::new(ReplayRouterMode::KvRouter, &args, None, None, 1).unwrap());
     let senders: Arc<[mpsc::UnboundedSender<DirectRequest>]> =
         Arc::from(vec![mpsc::unbounded_channel::<DirectRequest>().0]);
     let requests = Arc::new(DashMap::new());
@@ -290,7 +287,8 @@ async fn test_online_kv_router_prefill_load_estimator_decays_active_tokens() {
             duration: Duration::from_secs(10),
         })),
         1,
-    );
+    )
+    .unwrap();
 
     assert_eq!(
         router
@@ -572,6 +570,7 @@ fn test_online_trace_replay_kv_router_marks_prefill_and_free_once() {
     let requests = vec![DirectRequest {
         tokens: vec![9; 64],
         max_output_tokens: 1,
+        output_token_ids: None,
         uuid: Some(Uuid::from_u128(9)),
         dp_rank: 0,
         arrival_timestamp_ms: Some(0.0),

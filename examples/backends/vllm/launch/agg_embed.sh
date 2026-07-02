@@ -69,6 +69,15 @@ python3 -m dynamo.frontend &
 # unusually long embedding inputs.
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-2048}"
 
+# Qwen3-Embedding supports Matryoshka (flexible output dims 32-1024) but its
+# HF config does not declare it, so vLLM rejects OpenAI `dimensions` requests
+# unless told the model is Matryoshka. Inject the flag only for the default
+# model; other models must declare their own support (or omit `dimensions`).
+HF_OVERRIDES_ARGS=()
+if [[ "$MODEL" == "Qwen/Qwen3-Embedding-0.6B" ]]; then
+    HF_OVERRIDES_ARGS=(--hf-overrides '{"is_matryoshka": true}')
+fi
+
 # run worker
 # --runner pooling: required for embedding models.
 # --pooler-config: MEAN pool, no activation — the Qwen3-Embedding default.
@@ -84,6 +93,7 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     --max-model-len "$MAX_MODEL_LEN" \
     --no-enable-prefix-caching \
     --trust-remote-code \
+    "${HF_OVERRIDES_ARGS[@]}" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Glossary
+subtitle: Definitions of core Dynamo terms covering disaggregated serving, KV cache, components, and the distributed runtime.
 ---
 
 ## B

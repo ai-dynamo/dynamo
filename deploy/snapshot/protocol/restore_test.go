@@ -5,7 +5,6 @@ package protocol
 
 import (
 	"fmt"
-	"math"
 	"strings"
 	"testing"
 
@@ -461,15 +460,17 @@ func TestPrepareRestorePodSpecFallsBackToSentinelWhenNoProbe(t *testing.T) {
 }
 
 // assertRestoreStartupGate verifies the load-bearing invariants every restore
-// StartupProbe must satisfy: effectively infinite retries during CRIU restore
-// and SuccessThreshold=1.
+// StartupProbe must satisfy: 30 minutes at 1s cadence and SuccessThreshold=1.
 func assertRestoreStartupGate(t *testing.T, probe *corev1.Probe) {
 	t.Helper()
 	if probe == nil {
 		t.Fatalf("expected non-nil startup probe")
 	}
-	if got := probe.FailureThreshold; got != math.MaxInt32 {
-		t.Fatalf("expected startup failure threshold %d, got %d", math.MaxInt32, got)
+	if got := probe.FailureThreshold; got != restoreStartupFailureThreshold {
+		t.Fatalf("expected startup failure threshold %d, got %d", restoreStartupFailureThreshold, got)
+	}
+	if got := probe.PeriodSeconds; got != 1 {
+		t.Fatalf("expected startup period 1, got %d", got)
 	}
 	if got := probe.SuccessThreshold; got != 1 {
 		t.Fatalf("expected startup success threshold 1, got %d", got)
@@ -575,7 +576,7 @@ func TestValidateRestorePodSpec(t *testing.T) {
 	okSpec.Containers[0].StartupProbe = &corev1.Probe{
 		ProbeHandler:     corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/livez"}},
 		PeriodSeconds:    5,
-		FailureThreshold: math.MaxInt32,
+		FailureThreshold: restoreStartupFailureThreshold,
 		SuccessThreshold: 1,
 	}
 	if err := ValidateRestorePodSpec(okSpec, annotations, storage, DefaultSeccompLocalhostProfile); err != nil {

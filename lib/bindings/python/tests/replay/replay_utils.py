@@ -83,7 +83,6 @@ def _router_config_payload():
         "router_snapshot_threshold": 1000000,
         "router_reset_states": False,
         "router_ttl_secs": 120.0,
-        "router_enable_cache_control": False,
         "skip_initial_worker_wait": False,
         "use_remote_indexer": False,
     }

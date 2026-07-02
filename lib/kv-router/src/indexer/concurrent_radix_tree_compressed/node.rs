@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use super::types::*;
-use crate::indexer::compressed_radix::{NodeState, RemoveOutcome};
+use crate::indexer::compressed_radix::NodeState;
 use crate::protocols::*;
 
 type NodeChildren = DashMap<LocalBlockHash, SharedNode, FxBuildHasher>;
@@ -33,7 +33,11 @@ fn record_last_matched_hash(
 /// a shared gate.
 #[derive(Debug)]
 pub(super) struct Node {
+    // NOTE(perf): Consolidating the shape gate and version synchronization into
+    // one lock regressed throughput. Re-profile before combining these fields.
     shape_gate: RwLock<()>,
+    /// NOTE(concurrency): This is a post-commit validation token, not a seqlock.
+    /// Node state and children do not share one immutable publication boundary.
     shape_version: AtomicU64,
     /// Sticky logical-internal marker. Once true, this node is treated as
     /// internal even if cleanup removes all physical children later.
@@ -103,6 +107,11 @@ impl Node {
         children: FxHashMap<LocalBlockHash, SharedNode>,
     ) -> Self {
         let internal = !children.is_empty();
+        // NOTE(perf): Reducing child-map sharding substantially lowered memory
+        // usage but regressed throughput. Treat custom sharding as an explicit
+        // memory tradeoff rather than a throughput optimization.
+        // NOTE(perf): Lazily allocating this map only after a node became
+        // internal also saved memory but regressed throughput under contention.
         let children_map = DashMap::with_hasher(FxBuildHasher);
         for (key, child) in children {
             children_map.insert(key, child);
@@ -121,6 +130,9 @@ impl Node {
         &self,
         plan: impl FnOnce(&NodeState, &NodeChildren, u64) -> R,
     ) -> Option<R> {
+        // NOTE(perf): Replacing these shape-gated reads with state-only snapshots
+        // was neutral or regressive, and profiling did not identify the RwLock
+        // as a hotspot. Re-profile before removing this shape read.
         let _gate = self.shape_gate.read();
         let shape_version = self.shape_version.load(Ordering::Acquire);
         let state = self.state.read();
@@ -225,6 +237,8 @@ impl Node {
     }
 
     pub(super) fn promote_worker_to_full_edge(&self, worker: WorkerWithDpRank) -> bool {
+        // NOTE(perf): This path is anchor-only today. Removing its shape read
+        // did not improve throughput; re-evaluate if non-anchor callers appear.
         let _gate = self.shape_gate.read();
         self.state.write().promote_to_full(worker)
     }
@@ -404,6 +418,8 @@ impl Node {
         blocks: &[KvCacheStoredBlockData],
     ) -> ParentEdgeAction {
         match plan.action {
+            // NOTE(perf): Removing this validation did not produce a repeatable
+            // benefit and regressed scaled cumulative workloads.
             ParentEdgePlanAction::InsertFromParent => self
                 .validate_shape_read(plan.shape_version, || {
                     ParentEdgeAction::InsertFromParent(None)
@@ -416,6 +432,9 @@ impl Node {
                     }
                 })
                 .unwrap_or(ParentEdgeAction::Stale),
+            // NOTE(perf): An additional sticky-internal rejection before this
+            // commit did not improve throughput. The check inside the gate
+            // closes the split race.
             ParentEdgePlanAction::ReuseSuffixAndExtendLeaf { append_start } => self
                 .apply_edge_shape_update(plan.shape_version, |state, _children| {
                     if !self.internal.load(Ordering::Acquire) {
@@ -515,6 +534,10 @@ impl Node {
         blocks: &[KvCacheStoredBlockData],
         shape_version: u64,
     ) -> Option<bool> {
+        if self.internal.load(Ordering::Acquire) {
+            return Some(false);
+        }
+
         self.apply_edge_shape_update(shape_version, |state, _children| {
             if self.internal.load(Ordering::Acquire) || blocks.is_empty() || state.edge.is_empty() {
                 return (false, false);
@@ -656,19 +679,36 @@ impl Node {
         SplitLookupData { suffix }
     }
 
-    pub(super) fn remove_worker_for_hash(
+    pub(super) fn remove_worker_for_hashes(
         &self,
         worker: WorkerWithDpRank,
-        block_hash: ExternalSequenceBlockHash,
-    ) -> Option<RemoveOutcome> {
+        block_hashes: &[ExternalSequenceBlockHash],
+    ) -> Option<RemoveBatchOutcome> {
         let _gate = self.shape_gate.write();
         let mut state = self.state.write();
-        let pos = state.edge_index.get(&block_hash).copied()?;
+        let mut min_match = None;
+        let mut unmatched_hashes = Vec::new();
+
+        for &hash in block_hashes {
+            match state.edge_index.get(&hash).copied() {
+                Some(pos) => {
+                    if min_match.is_none_or(|(min_pos, _)| pos < min_pos) {
+                        min_match = Some((pos, hash));
+                    }
+                }
+                None => unmatched_hashes.push(hash),
+            }
+        }
+
+        let (pos, block_hash) = min_match?;
         let outcome = state.remove_worker_at_pos(worker, pos, block_hash);
         let should_clear_children = state.full_edge_workers.is_empty();
         drop(state);
         self.clear_children_if_unreachable(should_clear_children);
-        Some(outcome)
+        Some(RemoveBatchOutcome {
+            stale_hashes: outcome.stale_hashes,
+            unmatched_hashes,
+        })
     }
 
     #[cfg_attr(feature = "profile", inline(never))]

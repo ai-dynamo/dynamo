@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use dynamo_runtime::protocols::annotated::AnnotationsProvider;
+use dynamo_runtime::protocols::annotated::{Annotated, AnnotationsProvider};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::Validate;
@@ -17,20 +17,22 @@ use super::{
     validate,
 };
 use crate::protocols::common::extensions::{
-    NvExt, NvExtProvider, validate_completion_token_ids_single_choice, validate_nvext_semantics,
+    NvExt, NvExtProvider, validate_completion_token_ids_single_choice,
 };
 
 pub mod aggregator;
 mod delta;
 pub mod jail;
+pub mod tool_parser_v2;
 
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
 
 use dynamo_parsers::tool_calling::{ToolCallResponse, ToolCallResponseChunk};
 use dynamo_protocols::types::{
-    ChatCompletionMessageToolCall, ChatCompletionMessageToolCallChunk, FunctionCall,
-    FunctionCallStream, FunctionType,
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
+    ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta, FinishReason,
+    FunctionCall, FunctionCallStream, FunctionType,
 };
 
 /// Map a parser-native [`ToolCallResponse`] onto the protocol/wire
@@ -106,7 +108,7 @@ pub struct NvCreateChatCompletionRequest {
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
 
     /// OpenAI-style thinking control from client request payloads.
-    /// Normalized into `chat_template_args.thinking` before preprocessing.
+    /// Normalized into `chat_template_args` before preprocessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<serde_json::Value>,
 
@@ -130,10 +132,10 @@ impl NvCreateChatCompletionRequest {
     /// Normalize OpenAI-style DS-V4 reasoning controls into the template kwargs
     /// consumed by the SGLang/DeepSeek-V4 prompt formatter.
     pub fn normalize_reasoning_template_args(&mut self) -> anyhow::Result<()> {
-        let thinking_enabled = self
+        let thinking_mode = self
             .thinking
             .as_ref()
-            .map(openai_thinking_enabled)
+            .map(openai_thinking_mode)
             .transpose()?
             .flatten();
         let reasoning_effort = self
@@ -142,17 +144,37 @@ impl NvCreateChatCompletionRequest {
             .as_ref()
             .and_then(|effort| serde_json::to_value(effort).ok());
 
-        if thinking_enabled.is_none() && reasoning_effort.is_none() {
+        if thinking_mode.is_none() && reasoning_effort.is_none() {
             return Ok(());
         }
 
         let args = self.chat_template_args.get_or_insert_with(HashMap::new);
-        if let Some(enabled) = thinking_enabled {
-            args.entry("thinking".to_string())
-                .or_insert(serde_json::Value::Bool(enabled));
+        if let Some(mode) = thinking_mode {
+            match mode {
+                OpenAiThinkingMode::Enabled => {
+                    args.insert("thinking".to_string(), serde_json::Value::Bool(true));
+                    args.insert(
+                        "thinking_mode".to_string(),
+                        serde_json::Value::String("enabled".to_string()),
+                    );
+                }
+                OpenAiThinkingMode::Disabled => {
+                    args.insert("thinking".to_string(), serde_json::Value::Bool(false));
+                    args.insert(
+                        "thinking_mode".to_string(),
+                        serde_json::Value::String("disabled".to_string()),
+                    );
+                }
+                OpenAiThinkingMode::Adaptive => {
+                    args.insert(
+                        "thinking_mode".to_string(),
+                        serde_json::Value::String("adaptive".to_string()),
+                    );
+                }
+            }
         }
         if let Some(effort) = reasoning_effort {
-            args.entry("reasoning_effort".to_string()).or_insert(effort);
+            args.insert("reasoning_effort".to_string(), effort);
         }
 
         // The raw `thinking` payload has been folded into `chat_template_args`;
@@ -163,23 +185,34 @@ impl NvCreateChatCompletionRequest {
     }
 }
 
-fn openai_thinking_enabled(value: &serde_json::Value) -> anyhow::Result<Option<bool>> {
+enum OpenAiThinkingMode {
+    Enabled,
+    Disabled,
+    Adaptive,
+}
+
+fn openai_thinking_mode(value: &serde_json::Value) -> anyhow::Result<Option<OpenAiThinkingMode>> {
     if let Some(enabled) = value.as_bool() {
-        return Ok(Some(enabled));
+        return Ok(Some(if enabled {
+            OpenAiThinkingMode::Enabled
+        } else {
+            OpenAiThinkingMode::Disabled
+        }));
     }
 
     let Some(thinking_object) = value.as_object() else {
         anyhow::bail!(
-            "`thinking` must be a boolean or an object with `type` set to `enabled` or `disabled`"
+            "`thinking` must be a boolean or an object with `type` set to `enabled`, `disabled`, or `adaptive`"
         );
     };
     let Some(thinking_type) = thinking_object.get("type").and_then(|v| v.as_str()) else {
-        anyhow::bail!("`thinking.type` must be `enabled` or `disabled`");
+        anyhow::bail!("`thinking.type` must be `enabled`, `disabled`, or `adaptive`");
     };
     match thinking_type {
-        "enabled" => Ok(Some(true)),
-        "disabled" => Ok(Some(false)),
-        _ => anyhow::bail!("`thinking.type` must be `enabled` or `disabled`"),
+        "enabled" => Ok(Some(OpenAiThinkingMode::Enabled)),
+        "disabled" => Ok(Some(OpenAiThinkingMode::Disabled)),
+        "adaptive" => Ok(Some(OpenAiThinkingMode::Adaptive)),
+        _ => anyhow::bail!("`thinking.type` must be `enabled`, `disabled`, or `adaptive`"),
     }
 }
 
@@ -201,6 +234,49 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
+    /// Internal frontend metrics payload. This must never be serialized to
+    /// client-facing OpenAI-compatible streams.
+    #[serde(skip)]
+    pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
+}
+
+/// Build one synthetic stream choice from an existing response template.
+///
+/// Both streaming tool-call paths use this constructor when an engine omits a
+/// terminal choice. Accounting data belongs only on the usage chunk and must
+/// not be copied onto the synthetic choice.
+pub(super) fn stream_choice_chunk_from_template(
+    template: &NvCreateChatCompletionStreamResponse,
+    index: u32,
+    content: Option<ChatCompletionMessageContent>,
+    tool_calls: Option<Vec<ChatCompletionMessageToolCallChunk>>,
+    finish_reason: Option<FinishReason>,
+) -> Annotated<NvCreateChatCompletionStreamResponse> {
+    let mut response = template.clone();
+    response.inner.usage = None;
+    response.llm_metrics = None;
+    #[allow(deprecated)]
+    let choice = ChatChoiceStream {
+        index,
+        delta: ChatCompletionStreamResponseDelta {
+            role: None,
+            content,
+            tool_calls,
+            function_call: None,
+            refusal: None,
+            reasoning_content: None,
+        },
+        finish_reason,
+        logprobs: None,
+    };
+    response.inner.choices = vec![choice];
+    Annotated {
+        data: Some(response),
+        id: None,
+        event: None,
+        comment: None,
+        error: None,
+    }
 }
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
@@ -470,7 +546,6 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
             self.inner.n.unwrap_or(1) as usize,
             self.nvext.as_ref(),
         )?;
-        validate_nvext_semantics(self.nvext.as_ref())?;
         // none for modalities
         // none for prediction
         // none for audio
@@ -893,6 +968,87 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_messages_rejects_bad_tool_call_arguments() {
+        for arguments in ["{invalid json}", "[]", "null", "\"not an object\""] {
+            let request_json = json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "weather?"},
+                    {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": arguments
+                            }
+                        }]
+                    },
+                    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+                ],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                }]
+            });
+
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(request_json).expect("Failed to deserialize request");
+            let err = ValidateRequest::validate(&request)
+                .expect_err("bad tool_call arguments should fail validation");
+            let err = err.to_string();
+            assert!(
+                err.contains("`messages[1].tool_calls[0].function.arguments`"),
+                "unexpected error for {arguments:?}: {err}"
+            );
+            assert!(
+                err.contains("valid JSON object string"),
+                "unexpected error for {arguments:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_messages_accepts_empty_tool_call_arguments() {
+        for arguments in ["", " \n\t ", "{}"] {
+            let request_json = json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "weather?"},
+                    {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": arguments
+                            }
+                        }]
+                    },
+                    {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+                ],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                }]
+            });
+
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(request_json).expect("Failed to deserialize request");
+            ValidateRequest::validate(&request)
+                .unwrap_or_else(|err| panic!("empty tool_call arguments should validate: {err}"));
+        }
+    }
+
+    #[test]
     fn test_validate_tools_valid_names() {
         fn make_tool(name: &str) -> ChatCompletionTool {
             ChatCompletionTool {
@@ -956,7 +1112,89 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(true)));
+        assert_eq!(args.get("thinking_mode"), Some(&json!("enabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("max")));
+    }
+
+    #[test]
+    fn test_openai_thinking_adaptive_normalizes_to_template_mode() {
+        let json_str = json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "thinking": {"type": "adaptive"}
+        });
+
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+        request
+            .normalize_reasoning_template_args()
+            .expect("adaptive thinking payload should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        assert_eq!(args.get("thinking_mode"), Some(&json!("adaptive")));
+        assert_eq!(args.get("thinking"), None);
+        assert!(request.thinking.is_none());
+    }
+
+    #[test]
+    fn test_openai_thinking_disabled_normalizes_to_template_mode() {
+        let json_str = json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "thinking": {"type": "disabled"}
+        });
+
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+        request
+            .normalize_reasoning_template_args()
+            .expect("disabled thinking payload should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
+    }
+
+    #[test]
+    fn test_openai_thinking_top_level_overrides_stale_template_args() {
+        let json_str = json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "chat_template_args": {
+                "thinking": true,
+                "thinking_mode": "thinking",
+                "reasoning_effort": "high"
+            },
+            "reasoning_effort": "none",
+            "thinking": {"type": "disabled"}
+        });
+
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+        request
+            .normalize_reasoning_template_args()
+            .expect("top-level thinking payload should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
+        assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
+        assert!(request.thinking.is_none());
     }
 
     #[test]

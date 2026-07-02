@@ -24,7 +24,8 @@ use crate::types::{
         audios::OpenAIAudiosStreamingEngine,
         chat_completions::OpenAIChatCompletionsStreamingEngine,
         completions::OpenAICompletionsStreamingEngine, embeddings::OpenAIEmbeddingsStreamingEngine,
-        images::OpenAIImagesStreamingEngine, videos::OpenAIVideosStreamingEngine,
+        generate::GenerateStreamingEngine, images::OpenAIImagesStreamingEngine,
+        videos::OpenAIVideosStreamingEngine,
     },
 };
 
@@ -221,6 +222,13 @@ impl Model {
         self.worker_sets
             .iter()
             .any(|entry| entry.value().has_realtime_engine())
+    }
+
+    /// Check if any WorkerSet has a generate engine.
+    pub fn has_generate_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_generate_engine())
     }
 
     // -- Model serving readiness --
@@ -564,6 +572,11 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_realtime_engine()))
     }
 
+    pub fn get_generate_engine(&self) -> Result<GenerateStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.generate_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_generate_engine()))
+    }
+
     // -- Combined engine + parsing options (atomically from one WorkerSet) --
 
     pub fn get_chat_engine_with_parsing(
@@ -582,6 +595,17 @@ impl Model {
                 .map(|e| (e, ws.parsing_options()))
         })
         .ok_or_else(|| self.engine_error(self.has_completions_engine()))
+    }
+
+    pub fn get_generate_engine_with_parsing(
+        &self,
+    ) -> Result<(GenerateStreamingEngine, ParsingOptions), ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            ws.generate_engine
+                .clone()
+                .map(|e| (e, ws.parsing_options()))
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine()))
     }
 
     // -- Worker monitoring (aggregated across WorkerSets) --
@@ -1016,6 +1040,7 @@ mod tests {
             std::sync::Arc::new(crate::discovery::ModelManager::new()),
             dynamo_runtime::pipeline::RouterMode::RoundRobin,
             enforce_disagg,
+            None,
         );
         pr.mark_active_for_test();
         pr.deactivate();
@@ -1106,6 +1131,79 @@ mod tests {
         assert!(
             !model.is_displayable(),
             "model must be hidden when only the dead prefill set remains"
+        );
+    }
+
+    // -- Encode-set visibility --
+    //
+    // Encode workers are reached through encoder routing, not the public
+    // chat/completions surface. Tests below verify is_displayable correctly
+    // hides Encode-only
+    // deployments from /v1/models and continues to surface mixed
+    // Aggregated+Encode deployments via the Aggregated set only.
+
+    /// Helper: build an Encode-role WorkerSet wrapped in Arc. worker_count=1
+    /// via a live watcher so is_displayable doesn't filter it at the
+    /// worker_count == 0 guard. Dropping the sender is fine: tokio's
+    /// `watch::Receiver::borrow()` returns the current value even after the
+    /// sender closes, which is all `is_displayable` reads.
+    fn make_encode_worker_set(namespace: &str, mdcsum: &str) -> Arc<WorkerSet> {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Encode);
+        let (_tx, rx) = watch::channel(vec![1_u64]);
+        let mut ws = WorkerSet::new(namespace.to_string(), mdcsum.to_string(), card);
+        ws.set_instance_watcher(rx);
+        Arc::new(ws)
+    }
+
+    #[test]
+    fn encode_only_model_is_not_displayable() {
+        // An Encode worker has no serving engines (the watcher's role gate
+        // skips pipeline construction) and is_prefill_set excludes Encode,
+        // so an Encode-only model has no displayable WorkerSet and stays
+        // hidden from /v1/models. The frontend's chat/completions surface
+        // is not where users reach Encode workers; encoder routing is.
+        let model = Model::new("llava".to_string());
+        model.add_worker_set(
+            "dynamo:encode".to_string(),
+            make_encode_worker_set("dynamo", "mdc-e"),
+        );
+
+        assert!(
+            !model.is_displayable(),
+            "Encode-only model must be hidden from /v1/models -- Encode workers \
+             aren't a public serving surface"
+        );
+    }
+
+    #[test]
+    fn aggregated_plus_encode_model_is_displayable_via_aggregated() {
+        // E/Agg topology: an Aggregated worker plus an Encode peer. The
+        // Aggregated set is engineless in this stub but is_prefill_set
+        // remains true for it (legacy classification), so the model is
+        // displayable via the Aggregated WorkerSet's fallback. The Encode
+        // WorkerSet does NOT contribute to displayability -- it's filtered
+        // by is_encode_set excluding it from is_prefill_set.
+        let model = Model::new("llava".to_string());
+        model.add_worker_set("dynamo".to_string(), make_worker_set("dynamo", "mdc-a"));
+        model.add_worker_set(
+            "dynamo:encode".to_string(),
+            make_encode_worker_set("dynamo", "mdc-e"),
+        );
+
+        assert!(
+            model.is_displayable(),
+            "Aggregated+Encode model must be displayable via the Aggregated set"
+        );
+
+        // Removing the Aggregated set leaves only the Encode set -- model
+        // must flip to hidden (the bug we're guarding against would have
+        // kept it displayable via the Encode set being misclassified as
+        // prefill).
+        model.remove_worker_set("dynamo");
+        assert!(
+            !model.is_displayable(),
+            "after Aggregated leaves, Encode-only model must be hidden"
         );
     }
 

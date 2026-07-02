@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_kv_router::indexer::{METRIC_EVENT_REMOVED, METRIC_EVENT_STORED};
 use dynamo_kv_router::protocols::{BlockHashOptions, WorkerId, compute_block_hash_for_seq};
 use rstest::rstest;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use super::config::{SchedulePolicy, SglangConfig, ceil_to_block};
@@ -18,15 +19,19 @@ use super::live::SglangScheduler;
 use super::policy::apply_schedule_policy;
 use super::prefill::get_new_batch_prefill;
 use super::request::SglangRequest;
+use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
     DirectRequest, EngineType, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
     SglangArgs,
 };
 use crate::kv_manager::SglangKvManager;
 use crate::scheduler::test_utils::{
-    RouterIndexerHarness, nth_stored_hashes, removed_event_count, stored_hashes,
+    CapturingFpmSink, RouterIndexerHarness, nth_stored_hashes, removed_event_count, stored_hashes,
 };
-use crate::scheduler::{RouterEventVisibility, SchedulerHandle, capture_router_event_sink};
+use crate::scheduler::{
+    RouterEventVisibility, SchedulerCommand, SchedulerCommandEnvelope, SchedulerCommandResult,
+    SchedulerHandle, SchedulerLifecycleEvent, capture_router_event_sink,
+};
 
 const ROUTER_TEST_WORKER_ID: WorkerId = 17;
 
@@ -72,6 +77,7 @@ fn make_decoded_request(
         uuid: Uuid::new_v4(),
         prompt_tokens,
         max_output_tokens,
+        planned_output_ids: None,
         output_ids: Vec::new(),
         last_node: Some(alloc.last_node),
         kv_indices: alloc.kv_indices,
@@ -82,6 +88,716 @@ fn make_decoded_request(
     let result = simulate_decode_step(&mut running, kv_manager, config, 0.0, false);
     assert_eq!(result.output_signals.len(), 1);
     running.pop().unwrap()
+}
+
+mod source_holds {
+    use super::*;
+
+    fn args() -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(16)
+            .block_size(4)
+            .max_num_seqs(Some(1))
+            .worker_type(crate::common::protocols::WorkerType::Prefill)
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+    }
+
+    fn request(uuid: Uuid) -> DirectRequest {
+        DirectRequest {
+            tokens: (0..8).collect(),
+            max_output_tokens: 2,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        }
+    }
+
+    fn execute(core: &mut SglangCore, now_ms: f64) -> crate::scheduler::EnginePassResult {
+        let mut collector = crate::replay::TraceCollector::default();
+        core.execute_pass(&mut collector, now_ms)
+    }
+
+    fn occupied_tokens(core: &SglangCore) -> usize {
+        core.kv_manager.cache().total_tokens() - core.kv_manager.cache().available_tokens()
+    }
+
+    #[test]
+    fn terminal_completion_holds_source_without_running_cleanup() {
+        let mut core = SglangCore::new(args());
+        let request_id = Uuid::from_u128(301);
+        let handoff_id = HandoffId::from(Uuid::from_u128(401));
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id,
+            request: request(request_id),
+        })
+        .unwrap();
+
+        let first = execute(&mut core, 0.0);
+        assert!(!first.output_signals[0].completed);
+        let terminal = execute(&mut core, first.end_ms);
+        assert!(terminal.output_signals[0].completed);
+        assert!(matches!(
+            terminal.lifecycle_events.as_slice(),
+            [SchedulerLifecycleEvent::SourceHeld {
+                handoff_id: held_handoff,
+                request_id: held_request,
+                ..
+            }] if *held_handoff == handoff_id && *held_request == request_id
+        ));
+        assert!(core.source_is_held(handoff_id));
+        assert!(core.running.is_empty());
+        let held_tokens = occupied_tokens(&core);
+
+        core.apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+            .unwrap();
+        assert!(!core.source_is_held(handoff_id));
+        let released_tokens = occupied_tokens(&core);
+        assert!(released_tokens < held_tokens);
+
+        core.apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+            .unwrap();
+        assert_eq!(occupied_tokens(&core), released_tokens);
+    }
+
+    #[test]
+    fn cancel_and_early_release_cleanup_exactly_once() {
+        let mut core = SglangCore::new(args());
+        let first_id = HandoffId::from(Uuid::from_u128(402));
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id: first_id,
+            request: request(Uuid::from_u128(302)),
+        })
+        .unwrap();
+        let first = execute(&mut core, 0.0);
+        execute(&mut core, first.end_ms);
+        let held_tokens = occupied_tokens(&core);
+
+        core.apply_command(SchedulerCommand::CancelSource {
+            handoff_id: first_id,
+        })
+        .unwrap();
+        let cancelled_tokens = occupied_tokens(&core);
+        assert!(cancelled_tokens < held_tokens);
+        core.apply_command(SchedulerCommand::CancelSource {
+            handoff_id: first_id,
+        })
+        .unwrap();
+        assert_eq!(occupied_tokens(&core), cancelled_tokens);
+
+        core.kv_manager.evict(cancelled_tokens);
+        let second_id = first_id;
+        core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+            handoff_id: second_id,
+            request: request(Uuid::from_u128(303)),
+        })
+        .unwrap();
+        assert!(core.source_is_registered(second_id));
+        core.apply_command(SchedulerCommand::ReleaseSource {
+            handoff_id: second_id,
+        })
+        .unwrap();
+        assert!(!core.source_is_registered(second_id));
+
+        let first = execute(&mut core, 0.0);
+        let terminal = execute(&mut core, first.end_ms);
+        assert!(terminal.output_signals[0].completed);
+        assert!(!core.source_is_held(second_id));
+    }
+
+    #[test]
+    fn ordinary_completion_keeps_default_cleanup() {
+        let mut core = SglangCore::new(args());
+        core.receive(request(Uuid::from_u128(306)));
+
+        let first = execute(&mut core, 0.0);
+        let terminal = execute(&mut core, first.end_ms);
+
+        assert!(terminal.output_signals[0].completed);
+        assert_eq!(occupied_tokens(&core), 8);
+    }
+
+    #[test]
+    fn active_request_id_is_rejected_before_source_hold_registration() {
+        let mut core = SglangCore::new(args());
+        let request_id = Uuid::from_u128(307);
+        let handoff_id = HandoffId::from(Uuid::from_u128(407));
+        core.receive(request(request_id));
+
+        assert!(
+            core.apply_command(SchedulerCommand::Submit(request(request_id)))
+                .is_err()
+        );
+        assert!(
+            core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+                handoff_id,
+                request: request(request_id),
+            })
+            .is_err()
+        );
+        assert!(!core.source_is_registered(handoff_id));
+        assert_eq!(core.num_requests(), 1);
+    }
+}
+
+mod destination_lifecycle {
+    use super::*;
+    use crate::common::protocols::WorkerType;
+
+    fn args(worker_type: WorkerType) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(16)
+            .block_size(4)
+            .max_num_seqs(Some(1))
+            .worker_type(worker_type)
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap()
+    }
+
+    fn request(uuid: Uuid, tokens: Vec<u32>, max_output_tokens: usize) -> DirectRequest {
+        DirectRequest {
+            tokens,
+            max_output_tokens,
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn destination_lifecycle_is_counted_once_as_queued_decode() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(6)
+            .block_size(4)
+            .max_num_seqs(Some(1))
+            .worker_type(WorkerType::Decode)
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(32),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let mut core = SglangCore::new(args);
+        let held_handoff = HandoffId::from(Uuid::from_u128(33_001));
+        let held_uuid = Uuid::from_u128(33_002);
+        let held = core
+            .apply_command_effects(
+                SchedulerCommand::ReserveDestination {
+                    handoff_id: held_handoff,
+                    request: request(held_uuid, vec![1; 4], 1),
+                },
+                true,
+            )
+            .unwrap();
+        assert_eq!(held.lifecycle_events.len(), 1);
+        assert_eq!(core.mocker_metrics().waiting_requests, 1);
+        let held_snapshot = execute(&mut core, 0.0).fpm.unwrap();
+        assert_eq!(held_snapshot.num_queued_decode, 1);
+        assert_eq!(held_snapshot.sum_queued_decode_kv_tokens, 4);
+        assert_eq!(held_snapshot.var_queued_decode_kv_tokens, 0.0);
+
+        let pending_handoff = HandoffId::from(Uuid::from_u128(33_003));
+        let pending = core
+            .apply_command_effects(
+                SchedulerCommand::ReserveDestination {
+                    handoff_id: pending_handoff,
+                    request: request(Uuid::from_u128(33_004), vec![2; 24], 1),
+                },
+                true,
+            )
+            .unwrap();
+        assert!(pending.lifecycle_events.is_empty());
+        assert_eq!(core.mocker_metrics().waiting_requests, 2);
+        let mixed_snapshot = execute(&mut core, 0.0).fpm.unwrap();
+        assert_eq!(mixed_snapshot.num_queued_decode, 2);
+        assert_eq!(mixed_snapshot.sum_queued_decode_kv_tokens, 28);
+        assert_eq!(mixed_snapshot.var_queued_decode_kv_tokens, 100.0);
+
+        assert_eq!(
+            core.apply_command(SchedulerCommand::CancelDestination {
+                handoff_id: pending_handoff,
+            })
+            .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        assert_eq!(core.mocker_metrics().waiting_requests, 1);
+
+        core.receive(request(Uuid::from_u128(33_005), vec![3; 4], 2));
+        let blocker = execute(&mut core, 1.0);
+        assert_eq!(core.mocker_metrics().running_requests, 1);
+        assert_eq!(
+            core.apply_command(SchedulerCommand::ActivateDestination {
+                handoff_id: held_handoff,
+            })
+            .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        assert_eq!(core.mocker_metrics().waiting_requests, 1);
+
+        let activated_pass = execute(&mut core, blocker.end_ms);
+        let activated = activated_pass.fpm.unwrap();
+        assert_eq!(activated.num_queued_prefill, 0);
+        assert_eq!(activated.num_queued_decode, 1);
+        assert_eq!(activated.sum_queued_decode_kv_tokens, 4);
+
+        let completed = execute(&mut core, activated_pass.end_ms).fpm.unwrap();
+        assert_eq!(completed.num_queued_decode, 0);
+        assert_eq!(completed.sum_queued_decode_kv_tokens, 0);
+        assert_eq!(core.mocker_metrics().waiting_requests, 0);
+    }
+
+    #[test]
+    fn destination_transfer_footprint_excludes_decode_headroom() {
+        let footprint = |max_output_tokens| {
+            let mut core = SglangCore::new(args(WorkerType::Decode));
+            let effects = core
+                .apply_command_effects(
+                    SchedulerCommand::ReserveDestination {
+                        handoff_id: HandoffId::new(),
+                        request: request(Uuid::new_v4(), (0..10).collect(), max_output_tokens),
+                    },
+                    true,
+                )
+                .unwrap();
+            let [
+                SchedulerLifecycleEvent::DestinationReserved {
+                    transferable_prompt_tokens,
+                    ..
+                },
+            ] = effects.lifecycle_events.as_slice()
+            else {
+                panic!("destination reservation should complete immediately");
+            };
+            *transferable_prompt_tokens
+        };
+
+        assert_eq!(footprint(1), 12);
+        assert_eq!(footprint(128), 12);
+    }
+
+    async fn send_live_command(
+        scheduler: &SglangScheduler,
+        command: SchedulerCommand,
+    ) -> crate::scheduler::SchedulerCommandEffects {
+        let (reply, reply_rx) = oneshot::channel();
+        scheduler
+            .command_sender()
+            .send(SchedulerCommandEnvelope { command, reply })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), reply_rx)
+            .await
+            .expect("scheduler command reply timed out")
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn kv_blocked_live_scheduler_waits_and_cancel_wakes_it() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(2)
+            .block_size(4)
+            .max_num_seqs(Some(2))
+            .worker_type(WorkerType::Decode)
+            .speedup_ratio(1000.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        let fpm = Arc::new(CapturingFpmSink::default());
+        let mut scheduler = SglangScheduler::new(
+            args,
+            0,
+            Some(output_tx),
+            KvEventPublishers::default(),
+            None,
+            FpmPublisher::new(Some(fpm.clone() as _)),
+        );
+        let mut lifecycle = scheduler.take_lifecycle_receiver().unwrap();
+        let handoff_id = HandoffId::from(Uuid::from_u128(30_001));
+        let reserved_uuid = Uuid::from_u128(30_002);
+        let accepted = send_live_command(
+            &scheduler,
+            SchedulerCommand::ReserveDestination {
+                handoff_id,
+                request: request(reserved_uuid, vec![1; 8], 1),
+            },
+        )
+        .await;
+        assert!(matches!(
+            accepted.result,
+            SchedulerCommandResult::DestinationAccepted { request_id }
+                if request_id == reserved_uuid
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), lifecycle.recv())
+                .await
+                .expect("destination reservation lifecycle timed out"),
+            Some(SchedulerLifecycleEvent::DestinationReserved {
+                handoff_id: observed,
+                ..
+            }) if observed == handoff_id
+        ));
+
+        let blocked_uuid = Uuid::from_u128(30_003);
+        scheduler.receive(request(blocked_uuid, vec![2; 4], 1));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if fpm
+                    .take()
+                    .iter()
+                    .any(|snapshot| snapshot.num_queued_prefill > 0)
+                {
+                    break;
+                }
+                fpm.wait_for_snapshot().await;
+            }
+        })
+        .await
+        .expect("blocked scheduler FPM snapshot timed out");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), fpm.wait_for_snapshot())
+                .await
+                .is_err(),
+            "a blocked scheduler must not publish repeated zero-work passes"
+        );
+
+        let canceled = send_live_command(
+            &scheduler,
+            SchedulerCommand::CancelDestination { handoff_id },
+        )
+        .await;
+        assert_eq!(canceled.result, SchedulerCommandResult::Applied);
+        let output = tokio::time::timeout(Duration::from_secs(1), output_rx.recv())
+            .await
+            .expect("capacity release should wake scheduling")
+            .expect("output channel should remain open");
+        assert!(output.iter().any(|signal| signal.uuid == blocked_uuid));
+    }
+
+    fn execute(core: &mut SglangCore, now_ms: f64) -> crate::scheduler::EnginePassResult {
+        let mut collector = crate::replay::TraceCollector::default();
+        core.execute_pass(&mut collector, now_ms)
+    }
+
+    fn assert_no_republished_stores(
+        activation: &[dynamo_kv_router::protocols::LocalBlockHash],
+        later: &[dynamo_kv_router::protocols::LocalBlockHash],
+    ) {
+        assert!(later.iter().all(|hash| !activation.contains(hash)));
+    }
+
+    fn occupied_tokens(core: &SglangCore) -> usize {
+        core.kv_manager.cache().total_tokens() - core.kv_manager.cache().available_tokens()
+    }
+
+    fn drive_source_to_hold(core: &mut SglangCore, handoff_id: HandoffId, req: DirectRequest) {
+        assert!(matches!(
+            core.apply_command(SchedulerCommand::SubmitHandoffPrefill {
+                handoff_id,
+                request: req,
+            })
+            .unwrap(),
+            SchedulerCommandResult::Submitted(_)
+        ));
+        let mut now_ms = 0.0;
+        for _ in 0..8 {
+            let pass = execute(core, now_ms);
+            now_ms = pass.end_ms;
+            if core.is_empty() {
+                break;
+            }
+        }
+        assert!(core.is_empty());
+        assert!(core.source_is_held(handoff_id));
+        assert!(!core.is_drained());
+    }
+
+    #[test]
+    fn handoff_prefill_to_reserved_decode_owns_kv_until_prebuilt_admission() {
+        let logical_uuid = Uuid::from_u128(20_001);
+        let handoff_id = HandoffId::from(Uuid::from_u128(20_002));
+        let logical_tokens = (0..8).collect::<Vec<_>>();
+
+        let mut source = SglangCore::new_with_kv_capture(args(WorkerType::Prefill), 41);
+        let mut destination = SglangCore::new_with_kv_capture(args(WorkerType::Decode), 42);
+
+        destination.receive(request(Uuid::from_u128(20_003), (0..4).collect(), 1));
+        execute(&mut destination, 0.0);
+        assert!(destination.is_empty());
+        destination.drain_kv_events();
+
+        let blocker_uuid = Uuid::from_u128(20_004);
+        destination.receive(request(blocker_uuid, (100..104).collect(), 3));
+        let blocker_first = execute(&mut destination, 1.0);
+        assert_eq!(destination.running.len(), 1);
+        destination.drain_kv_events();
+
+        drive_source_to_hold(
+            &mut source,
+            handoff_id,
+            request(logical_uuid, logical_tokens.clone(), 2),
+        );
+
+        let usage_before_reservation = occupied_tokens(&destination);
+        let reserved = destination
+            .apply_command_effects(
+                SchedulerCommand::ReserveDestination {
+                    handoff_id,
+                    request: request(logical_uuid, logical_tokens, 2),
+                },
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            reserved.result,
+            SchedulerCommandResult::DestinationAccepted {
+                request_id: logical_uuid
+            }
+        );
+        assert!(matches!(
+            reserved.lifecycle_events.as_slice(),
+            [SchedulerLifecycleEvent::DestinationReserved {
+                handoff_id: reserved_handoff,
+                request_id: reserved_request,
+                transferable_prompt_tokens: 4,
+            }] if *reserved_handoff == handoff_id && *reserved_request == logical_uuid
+        ));
+        assert!(destination.destination_is_held(handoff_id));
+        assert!(!destination.is_drained());
+        assert_eq!(destination.running.len(), 1);
+        assert!(occupied_tokens(&destination) > usage_before_reservation);
+        assert!(stored_hashes(&destination.drain_kv_events()).is_empty());
+
+        let reserved_indices = destination.destination_indices(handoff_id);
+        let protected_before_activation = destination.kv_manager.cache().protected_size;
+        assert!(!reserved_indices.is_empty());
+        assert_eq!(
+            destination
+                .apply_command(SchedulerCommand::ActivateDestination { handoff_id })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        let ready = destination
+            .prebuilt_request(logical_uuid)
+            .expect("activated request must be prebuilt-ready");
+        assert_eq!(ready.kv_indices, reserved_indices);
+        assert_eq!(destination.running.len(), 1);
+        assert!(destination.kv_manager.cache().protected_size >= protected_before_activation);
+        let activation_stores = stored_hashes(&destination.drain_kv_events());
+        assert!(!activation_stores.is_empty());
+
+        assert_eq!(
+            source
+                .apply_command(SchedulerCommand::ReleaseSource { handoff_id })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        assert!(source.is_empty());
+        assert!(source.is_drained());
+
+        let blocked = execute(&mut destination, blocker_first.end_ms);
+        assert!(
+            blocked
+                .admissions
+                .iter()
+                .all(|admission| admission.uuid != logical_uuid)
+        );
+        let ready = destination
+            .prebuilt_request(logical_uuid)
+            .expect("full running batch must keep request ready");
+        assert_eq!(ready.kv_indices, reserved_indices);
+        assert_no_republished_stores(&activation_stores, &stored_hashes(&blocked.kv_events));
+
+        let blocker_terminal = execute(&mut destination, blocked.end_ms);
+        assert!(
+            blocker_terminal
+                .admissions
+                .iter()
+                .all(|admission| admission.uuid != logical_uuid)
+        );
+        assert!(
+            blocker_terminal
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == blocker_uuid && signal.completed)
+        );
+        assert!(destination.prebuilt_request(logical_uuid).is_some());
+
+        let admitted = execute(&mut destination, blocker_terminal.end_ms);
+        let logical_admissions = admitted
+            .admissions
+            .iter()
+            .filter(|admission| admission.uuid == logical_uuid)
+            .collect::<Vec<_>>();
+        assert_eq!(logical_admissions.len(), 1);
+        assert_eq!(logical_admissions[0].reused_input_tokens, 0);
+        let running = destination
+            .running
+            .iter()
+            .find(|request| request.uuid == logical_uuid)
+            .expect("prebuilt request must enter the running batch");
+        assert!(running.kv_indices.starts_with(&reserved_indices));
+        assert_no_republished_stores(&activation_stores, &stored_hashes(&admitted.kv_events));
+
+        let terminal = execute(&mut destination, admitted.end_ms);
+        assert!(
+            terminal
+                .output_signals
+                .iter()
+                .any(|signal| signal.uuid == logical_uuid && signal.completed)
+        );
+        assert!(destination.is_empty());
+        assert!(destination.is_drained());
+        assert!(!destination.destination_is_held(handoff_id));
+        assert_eq!(destination.kv_manager.cache().protected_size, 0);
+    }
+
+    #[test]
+    fn destination_cancel_reaches_activated_request_exactly_once() {
+        let request_id = Uuid::from_u128(20_101);
+        let handoff_id = HandoffId::from(Uuid::from_u128(20_102));
+        let mut core = SglangCore::new_with_kv_capture(args(WorkerType::Decode), 43);
+
+        let reserve = core
+            .apply_command_effects(
+                SchedulerCommand::ReserveDestination {
+                    handoff_id,
+                    request: request(request_id, (0..8).collect(), 4),
+                },
+                true,
+            )
+            .unwrap();
+        assert!(matches!(
+            reserve.lifecycle_events.as_slice(),
+            [SchedulerLifecycleEvent::DestinationReserved { .. }]
+        ));
+        assert_eq!(
+            core.apply_command(SchedulerCommand::ActivateDestination { handoff_id })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        execute(&mut core, 0.0);
+        assert!(
+            core.running
+                .iter()
+                .any(|request| request.uuid == request_id)
+        );
+
+        assert_eq!(
+            core.apply_command(SchedulerCommand::CancelDestination { handoff_id })
+                .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        assert!(core.is_empty());
+        assert!(core.is_drained());
+        assert_eq!(
+            core.apply_command(SchedulerCommand::CancelDestination { handoff_id })
+                .unwrap(),
+            SchedulerCommandResult::Noop
+        );
+    }
+
+    #[test]
+    fn activation_surplus_immediately_retries_pending_head() {
+        let args = MockEngineArgs::builder()
+            .engine_type(EngineType::Sglang)
+            .num_gpu_blocks(3)
+            .block_size(4)
+            .max_num_seqs(Some(1))
+            .worker_type(WorkerType::Decode)
+            .speedup_ratio(0.0)
+            .sglang(Some(SglangArgs {
+                page_size: Some(4),
+                chunked_prefill_size: Some(16),
+                ..Default::default()
+            }))
+            .build()
+            .unwrap();
+        let mut core = SglangCore::new(args);
+        let blocker = core.kv_manager.allocate_decode_token(None).unwrap();
+        let owner_handoff = HandoffId::from(Uuid::from_u128(20_201));
+        let follower_handoff = HandoffId::from(Uuid::from_u128(20_202));
+        let follower_request = Uuid::from_u128(20_203);
+
+        let owner = core
+            .apply_command_effects(
+                SchedulerCommand::ReserveDestination {
+                    handoff_id: owner_handoff,
+                    request: request(Uuid::from_u128(20_204), (0..5).collect(), 2),
+                },
+                true,
+            )
+            .unwrap();
+        assert_eq!(owner.lifecycle_events.len(), 1);
+        let follower = core
+            .apply_command_effects(
+                SchedulerCommand::ReserveDestination {
+                    handoff_id: follower_handoff,
+                    request: request(follower_request, (100..104).collect(), 2),
+                },
+                true,
+            )
+            .unwrap();
+        assert!(follower.lifecycle_events.is_empty());
+
+        let activated = core
+            .apply_command_effects(
+                SchedulerCommand::ActivateDestination {
+                    handoff_id: owner_handoff,
+                },
+                true,
+            )
+            .unwrap();
+        assert!(matches!(
+            activated.lifecycle_events.as_slice(),
+            [SchedulerLifecycleEvent::DestinationReserved {
+                handoff_id,
+                request_id,
+                ..
+            }] if *handoff_id == follower_handoff && *request_id == follower_request
+        ));
+
+        assert_eq!(
+            core.apply_command(SchedulerCommand::CancelDestination {
+                handoff_id: follower_handoff,
+            })
+            .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        assert_eq!(
+            core.apply_command(SchedulerCommand::CancelDestination {
+                handoff_id: owner_handoff,
+            })
+            .unwrap(),
+            SchedulerCommandResult::Applied
+        );
+        core.kv_manager.cache_mut().token_pool.free(&[blocker]);
+    }
 }
 
 mod scheduling {
@@ -112,6 +828,7 @@ mod scheduling {
             scheduler.receive(crate::common::protocols::DirectRequest {
                 tokens: vec![i as u32; 10],
                 max_output_tokens: max_output,
+                output_token_ids: None,
                 uuid: None,
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
@@ -164,6 +881,7 @@ mod scheduling {
                 uuid: no_match_uuid,
                 prompt_tokens: vec![9, 8, 7],
                 max_output_tokens: 1,
+                planned_output_ids: None,
                 output_ids: Vec::new(),
                 last_node: None,
                 kv_indices: Vec::new(),
@@ -175,6 +893,7 @@ mod scheduling {
                 uuid: match_uuid,
                 prompt_tokens: vec![1, 2, 3, 4, 5],
                 max_output_tokens: 1,
+                planned_output_ids: None,
                 output_ids: vec![6, 7],
                 last_node: None,
                 kv_indices: Vec::new(),
@@ -209,6 +928,7 @@ mod scheduling {
                 uuid: Uuid::new_v4(),
                 prompt_tokens: duplicate_prefix.clone(),
                 max_output_tokens: 1,
+                planned_output_ids: None,
                 output_ids: Vec::new(),
                 last_node: None,
                 kv_indices: Vec::new(),
@@ -222,6 +942,7 @@ mod scheduling {
             uuid: unique_uuid,
             prompt_tokens: (100..132).collect(),
             max_output_tokens: 1,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: None,
             kv_indices: Vec::new(),
@@ -242,6 +963,37 @@ mod core_behavior {
     use super::*;
 
     #[test]
+    fn test_planned_output_tokens_are_emitted_exactly() {
+        let mut core = SglangCore::new(test_args(100, 4, 8));
+        let uuid = Uuid::from_u128(0xB0B);
+        let planned = vec![111, 222, 333];
+        core.receive(DirectRequest {
+            tokens: vec![1, 2],
+            max_output_tokens: planned.len(),
+            output_token_ids: Some(planned.clone()),
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let mut emitted = Vec::new();
+        for step in 0..planned.len() {
+            let pass = core.execute_pass(&mut collector, step as f64);
+            emitted.extend(
+                pass.output_signals
+                    .into_iter()
+                    .filter(|signal| signal.uuid == uuid)
+                    .map(|signal| signal.token_id.expect("planned token should be present")),
+            );
+        }
+
+        assert_eq!(emitted, planned);
+        assert!(core.is_empty());
+    }
+
+    #[test]
     fn test_chunked_prefill_budget_is_page_aware() {
         let config = SglangConfig {
             chunked_prefill_size: 8,
@@ -258,6 +1010,7 @@ mod core_behavior {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1; 6],
             max_output_tokens: 3,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: None,
             kv_indices: Vec::new(),
@@ -270,6 +1023,37 @@ mod core_behavior {
         assert_eq!(admit.can_run.len(), 1);
         assert_eq!(admit.can_run[0].materialized_tokens, 6);
         assert_eq!(admit.can_run[0].allocated_tokens, 8);
+    }
+
+    #[test]
+    fn test_chunked_prefill_admits_next_chunk_when_full_prompt_does_not_fit() {
+        let config = SglangConfig {
+            chunked_prefill_size: 8,
+            ..SglangConfig::from_args(
+                &MockEngineArgs::builder()
+                    .block_size(4)
+                    .speedup_ratio(1.0)
+                    .build()
+                    .unwrap(),
+            )
+        };
+        let mut kv_manager = SglangKvManager::new(12, 4, KvEventPublishers::default(), 0);
+        let mut waiting = VecDeque::from([SglangRequest {
+            uuid: Uuid::new_v4(),
+            prompt_tokens: vec![1; 16],
+            max_output_tokens: 2,
+            planned_output_ids: None,
+            output_ids: Vec::new(),
+            last_node: None,
+            kv_indices: Vec::new(),
+            materialized_tokens: 0,
+            cached_tokens: 0,
+            allocated_tokens: 0,
+        }]);
+
+        let admit = get_new_batch_prefill(&mut waiting, &mut kv_manager, &config, 0.7, &[]);
+        assert_eq!(admit.can_run.len(), 1);
+        assert_eq!(admit.can_run[0].materialized_tokens, 8);
     }
 
     #[test]
@@ -293,6 +1077,7 @@ mod core_behavior {
                 uuid: first_uuid,
                 prompt_tokens: vec![1; 7],
                 max_output_tokens: 3,
+                planned_output_ids: None,
                 output_ids: Vec::new(),
                 last_node: None,
                 kv_indices: Vec::new(),
@@ -304,6 +1089,7 @@ mod core_behavior {
                 uuid: second_uuid,
                 prompt_tokens: vec![2; 8],
                 max_output_tokens: 3,
+                planned_output_ids: None,
                 output_ids: Vec::new(),
                 last_node: None,
                 kv_indices: Vec::new(),
@@ -338,6 +1124,7 @@ mod core_behavior {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1, 2, 3, 4, 5, 6],
             max_output_tokens: 4,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: Some(alloc.last_node),
             kv_indices: alloc.kv_indices,
@@ -383,6 +1170,7 @@ mod core_behavior {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1, 2, 3, 4],
             max_output_tokens: 4,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: Some(base_alloc.last_node),
             kv_indices: base_alloc.kv_indices,
@@ -397,6 +1185,7 @@ mod core_behavior {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1, 2, 3, 4],
             max_output_tokens: 4,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: Some(fast_alloc.last_node),
             kv_indices: fast_alloc.kv_indices,
@@ -447,6 +1236,7 @@ mod core_behavior {
                 uuid: Uuid::new_v4(),
                 prompt_tokens: vec![1, 2, 3, 4],
                 max_output_tokens: 10,
+                planned_output_ids: None,
                 output_ids: vec![11, 12, 13],
                 last_node: None,
                 kv_indices: first,
@@ -458,6 +1248,7 @@ mod core_behavior {
                 uuid: Uuid::new_v4(),
                 prompt_tokens: vec![9, 8, 7, 6],
                 max_output_tokens: 10,
+                planned_output_ids: None,
                 output_ids: vec![21],
                 last_node: None,
                 kv_indices: second,
@@ -490,6 +1281,7 @@ mod core_behavior {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1, 2, 3, 4],
             max_output_tokens: 4,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: Some(alloc.last_node),
             kv_indices: alloc.kv_indices,
@@ -521,6 +1313,7 @@ mod core_behavior {
         core.receive(crate::common::protocols::DirectRequest {
             tokens: vec![1; 6],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: None,
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -786,6 +1579,7 @@ mod router_events {
             uuid,
             prompt_tokens: prompt_tokens.iter().map(|&token| token as u64).collect(),
             max_output_tokens: 2,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: None,
             kv_indices: Vec::new(),
@@ -887,6 +1681,7 @@ mod router_events {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1, 2, 3, 4, 5, 6],
             max_output_tokens: 3,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: None,
             kv_indices: Vec::new(),
@@ -1107,6 +1902,7 @@ mod router_events {
         core.receive(DirectRequest {
             tokens: vec![1; 8],
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(91)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1151,6 +1947,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1182,6 +1979,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..4).collect(),
             max_output_tokens: 3,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1199,6 +1997,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (100..104).collect(),
             max_output_tokens: 3,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1225,6 +2024,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1239,6 +2039,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1294,6 +2095,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1302,6 +2104,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1347,6 +2150,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..4).collect(), // prompt_len = 4
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1355,6 +2159,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (100..112).collect(), // prompt_len = 12
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1398,6 +2203,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..16).collect(),
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1461,6 +2267,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..4).collect(),
             max_output_tokens: 20,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1469,6 +2276,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (100..104).collect(),
             max_output_tokens: 20,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1484,6 +2292,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (200..212).collect(), // 12 tokens
             max_output_tokens: 10,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(3)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1552,6 +2361,7 @@ mod forward_pass_metrics {
         scheduler.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,

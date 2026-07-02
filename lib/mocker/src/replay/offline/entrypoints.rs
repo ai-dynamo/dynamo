@@ -17,7 +17,8 @@ use super::disagg::DisaggRuntimeStats;
 use super::disagg::{DisaggRuntime, ReplayMode as DisaggReplayMode};
 use super::normalize_trace_requests;
 use super::single::{SingleReplayMode, SingleRuntime};
-use crate::common::protocols::{DirectRequest, MockEngineArgs};
+use crate::common::handoff::NormalizedHandoffConformance;
+use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, SglangArgs, WorkerType};
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::OfflineDisaggReplayConfig;
 use crate::replay::{
@@ -50,6 +51,57 @@ fn finish_with_replay_wall_time(
 
 fn use_single_runtime(num_workers: usize, router_mode: ReplayRouterMode) -> bool {
     num_workers == 1 && router_mode != ReplayRouterMode::KvRouter
+}
+
+/// Run the deterministic offline half of the live/offline handoff conformance
+/// fixture. This is public only for cross-crate conformance tests.
+#[doc(hidden)]
+pub fn run_offline_handoff_conformance(
+    engine_type: EngineType,
+    transfer_timing_mode: crate::common::protocols::KvTransferTimingMode,
+) -> Result<NormalizedHandoffConformance> {
+    if engine_type == EngineType::Trtllm {
+        anyhow::bail!("TRT-LLM does not support destination handoff");
+    }
+
+    let build_args = |worker_type| {
+        let mut builder = MockEngineArgs::builder()
+            .engine_type(engine_type)
+            .block_size(4)
+            .num_gpu_blocks(64)
+            .max_num_batched_tokens(Some(64))
+            .max_num_seqs(Some(2))
+            .worker_type(worker_type)
+            .speedup_ratio(1000.0)
+            .decode_speedup_ratio(1000.0)
+            .kv_transfer_bandwidth(Some(1.0))
+            .kv_bytes_per_token(Some(1_000_000))
+            .kv_transfer_timing_mode(transfer_timing_mode);
+        if engine_type == EngineType::Sglang {
+            builder = builder.sglang(Some(SglangArgs {
+                page_size: Some(4),
+                ..Default::default()
+            }));
+        }
+        builder.build()
+    };
+    let config = OfflineDisaggReplayConfig {
+        prefill_args: build_args(WorkerType::Prefill)?,
+        decode_args: build_args(WorkerType::Decode)?,
+        num_prefill_workers: 1,
+        num_decode_workers: 1,
+    }
+    .normalized()?;
+    let request = DirectRequest {
+        tokens: (0..8).collect(),
+        max_output_tokens: 2,
+        uuid: Some(uuid::Uuid::from_u128(1)),
+        arrival_timestamp_ms: Some(0.0),
+        ..Default::default()
+    };
+
+    DisaggRuntime::new_handoff_conformance(&config, VecDeque::from([request]))?
+        .run_handoff_conformance(engine_type)
 }
 
 pub(crate) fn generate_trace_worker_artifacts(
@@ -122,8 +174,11 @@ pub(crate) fn generate_trace_worker_artifacts_with_visibility(
 
         let output_timestamp_us = timestamp_us_from_ms(current_time_ms);
         for signal in pass.output_signals {
+            if let Some(token_id) = signal.token_id {
+                driver.on_output_token(signal.uuid, token_id)?;
+            }
             if signal.completed {
-                driver.on_complete(signal.uuid, current_time_ms)?;
+                driver.on_terminal(signal.uuid, current_time_ms, signal.rejected)?;
             }
             artifacts.output_signals.push(ReplayTimedOutputSignal {
                 signal,
@@ -931,14 +986,22 @@ pub(super) fn run_trace_workload_multi_collect_with_stats(
     trace: Trace,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    accumulate_session_deltas: bool,
 ) -> (TraceCollector, AggRuntimeStats) {
+    let driver = if accumulate_session_deltas {
+        trace
+            .into_delta_accumulating_trace_driver_with_block_size(args.block_size)
+            .unwrap()
+    } else {
+        trace
+            .into_trace_driver_with_block_size(args.block_size)
+            .unwrap()
+    };
     AggRuntime::new_workload(
         args,
         None,
         None,
-        trace
-            .into_trace_driver_with_block_size(args.block_size)
-            .unwrap(),
+        driver,
         num_workers,
         AggReplayMode::Trace,
         router_mode,
@@ -1085,10 +1148,18 @@ pub(super) fn run_concurrency_workload_collect(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "kvbm-offload")]
+    use super::simulate_trace_disagg;
     use super::{generate_trace_worker_artifacts, use_single_runtime};
     use crate::common::protocols::MockEngineArgs;
+    #[cfg(feature = "kvbm-offload")]
+    use crate::common::protocols::{DirectRequest, WorkerType};
     use crate::loadgen::{SessionTrace, Trace, TurnTrace};
     use crate::replay::ReplayRouterMode;
+    #[cfg(feature = "kvbm-offload")]
+    use crate::replay::{OfflineDisaggReplayConfig, SlaThresholds};
+    #[cfg(feature = "kvbm-offload")]
+    use uuid::Uuid;
 
     #[test]
     fn single_runtime_selection_excludes_kv_router() {
@@ -1096,6 +1167,55 @@ mod tests {
         assert!(!use_single_runtime(1, ReplayRouterMode::KvRouter));
         assert!(!use_single_runtime(2, ReplayRouterMode::RoundRobin));
         assert!(!use_single_runtime(2, ReplayRouterMode::KvRouter));
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn offload_args(worker_type: WorkerType) -> MockEngineArgs {
+        MockEngineArgs::builder()
+            .block_size(4)
+            .num_gpu_blocks(4)
+            .max_num_batched_tokens(Some(16))
+            .max_num_seqs(Some(2))
+            .worker_type(worker_type)
+            .num_g2_blocks(Some(8))
+            .kv_bytes_per_token(Some(1))
+            .build()
+            .unwrap()
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    fn offload_request() -> DirectRequest {
+        DirectRequest {
+            tokens: vec![1; 4],
+            max_output_tokens: 1,
+            uuid: Some(Uuid::from_u128(1)),
+            arrival_timestamp_ms: Some(0.0),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(feature = "kvbm-offload")]
+    #[test]
+    fn disagg_replay_initializes_kvbm_workers() {
+        let report = simulate_trace_disagg(
+            OfflineDisaggReplayConfig {
+                prefill_args: offload_args(WorkerType::Prefill),
+                decode_args: offload_args(WorkerType::Decode),
+                num_prefill_workers: 1,
+                num_decode_workers: 1,
+            },
+            None,
+            None,
+            vec![offload_request()],
+            1.0,
+            ReplayRouterMode::RoundRobin,
+            false,
+            None,
+            SlaThresholds::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 1);
     }
 
     #[test]

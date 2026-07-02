@@ -501,6 +501,18 @@ func GetDGDComponentResourceLabels(dgd *v1beta1.DynamoGraphDeployment, component
 	return labels
 }
 
+// GetDGDComponentResourceAnnotations returns annotations that should be applied to resources
+// created directly for a DGD component.
+func GetDGDComponentResourceAnnotations(dgd *v1beta1.DynamoGraphDeployment, componentName string, component *v1beta1.DynamoComponentDeploymentSharedSpec) map[string]string {
+	annotations := map[string]string{}
+	if dgd != nil {
+		maps.Copy(annotations, dgd.Spec.Annotations)
+		maps.Copy(annotations, getDGDComponentAlphaAnnotations(dgd, componentName))
+	}
+	maps.Copy(annotations, GetPodTemplateAnnotations(component))
+	return annotations
+}
+
 // GetDGDComponentPreservedIngressSpec returns an alpha component ingress spec that
 // was preserved during conversion to v1beta1.
 func GetDGDComponentPreservedIngressSpec(dgd *v1beta1.DynamoGraphDeployment, componentName string) (IngressSpec, bool) {
@@ -1198,6 +1210,27 @@ func expandMultinodeGMSRoles(componentName string, numberOfNodes int32, totalEng
 	return roles
 }
 
+// LongestPodCliqueNameForDGDComponent returns the longest rendered PodClique
+// name for a DGD component using the same role expansion as Grove rendering.
+func LongestPodCliqueNameForDGDComponent(
+	componentName string,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+) string {
+	lowerComponentName := strings.ToLower(componentName)
+	if component == nil || (component.GetNumberOfNodes() <= 1 && !component.IsInterPodGMSEnabled()) {
+		return lowerComponentName
+	}
+
+	longestName := lowerComponentName
+	for _, role := range expandRolesForComponent(componentName, component.Replicas, component.GetNumberOfNodes(), component) {
+		roleName := strings.ToLower(role.Name)
+		if len(roleName) > len(longestName) {
+			longestName = roleName
+		}
+	}
+	return longestName
+}
+
 // PCSNameForDGD computes the PodCliqueSet name for a DGD, auto-truncating if
 // the DGD name is too long to fit within Grove's combined resource name limit.
 //
@@ -1212,14 +1245,8 @@ func PCSNameForDGD(dgdName string, components []v1beta1.DynamoComponentDeploymen
 		lowerName := strings.ToLower(componentName)
 		var budget int
 		if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
-			maxCliqueNameLen := 0
-			for _, role := range expandRolesForComponent(componentName, component.Replicas, component.GetNumberOfNodes(), component) {
-				if cliqueNameLen := len(strings.ToLower(role.Name)); cliqueNameLen > maxCliqueNameLen {
-					maxCliqueNameLen = cliqueNameLen
-				}
-			}
 			// PCSG = lowerName, PCLQ = longest rendered role name.
-			budget = len(lowerName) + maxCliqueNameLen
+			budget = len(lowerName) + len(LongestPodCliqueNameForDGDComponent(componentName, component))
 		} else {
 			// Single-node: PCLQ = lowerName (no PCSG).
 			budget = len(lowerName)
@@ -1404,6 +1431,26 @@ func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alp
 	container.Env = MergeEnvs(standardEnvVars, container.Env)
 }
 
+func applyCheckpointProbeCadence(
+	container *corev1.Container,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	checkpointInfo *checkpoint.CheckpointInfo,
+) {
+	if operatorConfig.Checkpoint.Enabled &&
+		checkpointInfo != nil &&
+		checkpointInfo.Enabled &&
+		checkpointInfo.Ready &&
+		IsWorkerComponent(string(component.ComponentType)) {
+		if container.ReadinessProbe != nil {
+			container.ReadinessProbe.PeriodSeconds = 1
+		}
+		if container.StartupProbe != nil {
+			container.StartupProbe.PeriodSeconds = 1
+		}
+	}
+}
+
 // applyDefaultSecurityContext sets secure defaults for pod security context.
 // Currently only sets fsGroup to solve volume permission issues.
 // Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
@@ -1485,6 +1532,7 @@ func GenerateBasePodSpec(
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
 	backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer)
+	applyCheckpointProbeCadence(&container, component, operatorConfig, checkpointInfo)
 
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
@@ -1675,6 +1723,9 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 	seen := make(map[string]struct{}, len(volumes)+len(mounts))
 	for _, mount := range mounts {
 		if mount.Name == "" {
+			continue
+		}
+		if _, ok := seen[mount.Name]; ok {
 			continue
 		}
 		if volume, ok := volumesByName[mount.Name]; ok {
@@ -2044,6 +2095,8 @@ type cliqueParams struct {
 
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
 // injecting labels, annotations, checkpoint config, and scheduler settings.
+//
+//nolint:gocyclo
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
@@ -2070,46 +2123,31 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		}
 	}
 
-	// minAvailable controls Grove gang-scheduling: the clique is only
-	// considered available when at least this many replicas are Ready.
-	//
-	// The invariant we want is "minAvailable = Replicas unless the clique
-	// has redundant replicas". Concretely:
-	//
-	//   - Plain multinode (no inter-pod GMS failover): the worker clique
-	//     collapses non-leader ranks into a single clique with
-	//     Replicas = numberOfNodes - 1 and those pods are NCCL peers of each
-	//     other — losing any one breaks the collective, so all replicas
-	//     must be Ready. Standalone inter-pod GMS on multinode also lands
-	//     here but has Replicas = 1 per PCLQ (primary only, no shadows), so
-	//     the same rule evaluates to minAvailable = 1 without a special case.
-	//
-	//   - Inter-pod GMS failover (single- or multinode): within each rank
-	//     Replicas = primary + shadows and shadows ARE redundant hot spares
-	//     — requiring every shadow to be Ready would defeat failover, so
-	//     the clique stays at minAvailable = 1.
-	//
-	//   - Single-node clique (no multinode, with or without intra-pod
-	//     failover or standalone inter-pod GMS): Replicas is at most 1 or a
-	//     small DP fanout under the outer PCSG where the replicas are
-	//     independent of each other; minAvailable = 1 is correct.
-	//
-	// The two-line rule below captures all of the above: take the baseline
-	// of 1, then lift it to Replicas only on plain multinode without
-	// inter-pod failover (the only layout that combines >1 replicas per
-	// clique with no redundancy between them).
+	// MinAvailable serves two purposes for Grove PCLQ:
+	// 1. It defines the minimum number of pods that are guaranteed to be gang scheduled.
+	// 2. It defines the minimum requirement of available pods in a PodClique. Violation of this threshold will result
+	// in termination of the PodGang that it belongs to.
 	minAvailable := int32(1)
+	// single-node standalone pclq set to component.MinAvailable if defined
+	if !p.usesPCSG && p.component.MinAvailable != nil {
+		minAvailable = *p.component.MinAvailable
+	}
+	// pclqs that are part of a multi-node component set minAvailable to their
+	// replica count. Plain multi-node needs every leader/worker rank ready for
+	// collective operations. multi-node inter-pod GMS without failover creates
+	// one replica per rank PCLQ, so this also evaluates to minAvailable=1.
 	if p.isMultinode && !p.isInterPodFailover {
 		minAvailable = p.r.Replicas
 	}
 	replicas := p.r.Replicas
+	// if checkpoint is enabled and not ready, set replicas to 0
+	// to prevent the engine clique from being scheduled
 	if p.r.Role != RoleGMS &&
 		p.checkpointInfo != nil &&
 		p.checkpointInfo.Enabled &&
 		p.checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 		!p.checkpointInfo.Ready {
 		replicas = 0
-		minAvailable = 0
 	}
 
 	clique := &grovev1alpha1.PodCliqueTemplateSpec{
@@ -2373,12 +2411,14 @@ func GenerateGrovePodCliqueSet(
 		if usesPCSG {
 			replicas := component.Replicas
 			minAvailable := ptr.To(int32(1))
+			if component.MinAvailable != nil {
+				minAvailable = ptr.To(*component.MinAvailable)
+			}
 			if checkpointInfo != nil &&
 				checkpointInfo.Enabled &&
 				checkpointInfo.StartupPolicy == v1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
 				!checkpointInfo.Ready {
 				replicas = ptr.To(int32(0))
-				minAvailable = ptr.To(int32(0))
 			}
 			pcsg := grovev1alpha1.PodCliqueScalingGroupConfig{
 				Name:               strings.ToLower(componentName),
