@@ -128,7 +128,31 @@ For per-request tracing (token counts, cache hits, worker placement), the router
 
 ## Reproducing with Pi
 
-The maintained smoke path is Pi through the Dynamo provider. Start a source-checkout deployment with this router and a served model, then wait for the frontend to advertise that model:
+The maintained smoke path is one SGLang worker, this router, and Pi. In separate terminals, launch the worker, router, and frontend:
+
+```bash
+# Terminal 1: SGLang worker with native GPU-to-host HiCache.
+python -m dynamo.sglang \
+  --model-path <model> \
+  --served-model-name <model> \
+  --tp <N> \
+  --enable-hierarchical-cache \
+  --hicache-size <GiB> \
+  --hicache-write-policy write_back \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+
+# Terminal 2: ThunderAgent program scheduler.
+python -m dynamo.thunderagent_router \
+  --endpoint dynamo.backend.generate \
+  --model-name <model> \
+  --router-block-size 16 \
+  --router-reset-states
+
+# Terminal 3: OpenAI-compatible frontend.
+python -m dynamo.frontend --router-mode round-robin --router-reset-states
+```
+
+Wait for the frontend to advertise the served model:
 
 ```bash
 curl -fsS http://127.0.0.1:8000/v1/models
