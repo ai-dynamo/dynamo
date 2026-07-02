@@ -125,9 +125,10 @@ fern/
 └── assets/                       # Images, fonts, SVGs
 ```
 
-Each `pages-vX.Y.Z/` directory is an immutable copy of `pages/` taken at
-release time. The corresponding `versions/vX.Y.Z.yml` file is a copy of
-`dev.yml` with all `../pages/` paths rewritten to `../pages-vX.Y.Z/`.
+Each `pages-vX.Y.Z/` directory is an immutable snapshot built from `docs/` at
+the corresponding Git tag. The matching `versions/vX.Y.Z.yml` is built from
+that tag's `docs/index.yml`, with content paths rewritten to
+`../pages-vX.Y.Z/`.
 
 The sync workflow copies content from `main`'s `docs/` into `fern/pages/` and
 transforms navigation paths in `index.yml` → `versions/dev.yml` accordingly.
@@ -240,20 +241,24 @@ manual `workflow_dispatch` with a tag specified.
 
 **Steps:**
 1. Validates tag format (must be exactly `vX.Y.Z`, no suffixes like `-rc1`)
-2. Checks that the version doesn't already exist (no duplicate snapshots)
-3. Creates `fern/pages-vX.Y.Z/` by copying `fern/pages/`
-4. Rewrites GitHub links in the snapshot:
+2. Checks out the tagged source and the `docs-website` branch side by side
+3. Checks that the version doesn't already exist, unless a manual dispatch sets
+   `force_rebuild=true`
+4. Creates `fern/pages-vX.Y.Z/` from the tag's raw `docs/`, excluding the
+   shared `digest/` tree and `index.yml`
+5. Rewrites GitHub links in the snapshot:
    - `github.com/ai-dynamo/dynamo/tree/main` → `tree/vX.Y.Z`
    - `github.com/ai-dynamo/dynamo/blob/main` → `blob/vX.Y.Z`
-5. Runs `convert_callouts.py` on the snapshot
-6. Creates `fern/versions/vX.Y.Z.yml` from `dev.yml` with paths updated to
-   `../pages-vX.Y.Z/`
-7. Updates `fern/docs.yml`:
+6. Runs the tag's `convert_callouts.py` once on the raw snapshot
+7. Creates `fern/versions/vX.Y.Z.yml` from the tag's `docs/index.yml`
+8. Updates `fern/docs.yml`:
    - Inserts new version right after the "dev" entry
    - Sets the product's default `path` to the new version
    - Updates the "Latest" display-name to `"Latest (vX.Y.Z)"`
-8. Commits and pushes to `docs-website`
-9. Publishes to Fern via `fern generate --docs`
+9. Verifies the tagged file inventory, versioned navigation targets, and Fern
+   configuration; missing shared Digest targets produce warnings
+10. Commits and pushes to `docs-website`
+11. Publishes to Fern via `fern generate --docs`
 
 **Anti-recursion note:** Pushes made with `GITHUB_TOKEN` do not trigger other
 workflows (GitHub's built-in guard). This is why the publish step is inline in
@@ -380,6 +385,19 @@ fern docs broken-links
 
 This is the same check that runs in CI on every pull request.
 
+### Dry-run a version release
+
+Build a tagged snapshot in temporary worktrees and run the release validation
+without committing, pushing, or publishing:
+
+```bash
+fern/release_dryrun.sh v1.2.1
+```
+
+The script requires `git`, `fern`, `yq`, `jq`, `rsync`, and Python 3.10 or
+newer. Set `PYTHON=.venv/bin/python` to select a non-default interpreter, and
+set `KEEP=1` to retain the temporary worktrees for inspection.
+
 ### Start a local preview server
 
 Run `fern docs dev` to build the site and serve it locally with hot-reload:
@@ -497,14 +515,15 @@ only the `dev` redirect is needed.
 │       ▼                                                             │
 │  release-version job:                                               │
 │    1. Validate tag format (vX.Y.Z only)                             │
-│    2. Check version doesn't already exist                           │
-│    3. Snapshot fern/pages/ → fern/pages-vX.Y.Z/                     │
+│    2. Check out the tag and docs-website                            │
+│    3. Build pages-vX.Y.Z/ from the tagged docs/                     │
 │    4. Rewrite GitHub links (tree/main → tree/vX.Y.Z)                │
-│    5. Convert callouts in snapshot                                  │
-│    6. Create fern/versions/vX.Y.Z.yml (paths → pages-vX.Y.Z/)       │
+│    5. Convert callouts once with the tagged converter               │
+│    6. Build the version nav from the tagged docs/index.yml          │
 │    7. Update fern/docs.yml (insert version, set as default)         │
-│    8. Commit + push to docs-website                                 │
-│    9. fern generate --docs (publishes to Fern)                      │
+│    8. Validate tagged inventory, nav targets, and Fern config       │
+│    9. Commit + push to docs-website                                 │
+│   10. fern generate --docs (publishes to Fern)                      │
 │       │                                                             │
 │       ▼                                                             │
 │  New version visible in dropdown at docs.nvidia.com/dynamo/         │

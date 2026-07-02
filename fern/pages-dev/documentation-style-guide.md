@@ -199,8 +199,8 @@ Author against `docs/` on `main`; the publish step applies transforms, so you do
 Fern-specific output:
 
 - **Callouts:** `fern/convert_callouts.py` converts GitHub admonitions to Fern components.
-- **Versioned paths:** content is copied `pages-dev/ → pages-vX.Y.Z/`, and nav paths are rewritten
-  when a version is cut.
+- **Versioned paths:** the release workflow builds `pages-vX.Y.Z/` from the tagged `docs/` tree and
+  rewrites the tagged `docs/index.yml` paths for the versioned snapshot.
 
 Write portable GitHub-flavored Markdown; don't pre-bake Fern components or version-specific paths.
 
