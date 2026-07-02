@@ -13,6 +13,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 
 from dynamo._core import Endpoint
+from dynamo.common.utils.media_decoder import build_frontend_image_decoder_options
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -74,7 +75,7 @@ def _build_media_decoder_and_fetcher():
     Mirrors the vLLM backend pattern (components/src/dynamo/vllm/main.py).
     """
     media_decoder = MediaDecoder()
-    media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+    media_decoder.enable_image(build_frontend_image_decoder_options())
 
     media_fetcher = MediaFetcher()
     media_fetcher.timeout_ms(30000)

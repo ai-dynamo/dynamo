@@ -400,6 +400,8 @@ impl MediaLoader {
     }
 
     pub fn new(media_decoder: MediaDecoder, media_fetcher: Option<MediaFetcher>) -> Result<Self> {
+        media_decoder.warn_if_unavailable_backends();
+
         // Fall back to env-aware defaults so `DYN_MM_ALLOW_INTERNAL=1` is
         // honored even when the caller doesn't pass an explicit fetcher.
         let media_fetcher = media_fetcher.unwrap_or_else(MediaFetcher::from_env);

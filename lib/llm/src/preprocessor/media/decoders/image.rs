@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::Cursor;
+use std::{io::Cursor, sync::Once};
 
 use anyhow::Result;
 use image::{ColorType, GenericImageView, ImageFormat, ImageReader};
@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::super::common::EncodedMediaData;
+use super::super::jpeg_turbo;
 use super::super::rdma::DecodedMediaData;
 use super::{DecodedMediaMetadata, Decoder};
 
 const DEFAULT_MAX_ALLOC: u64 = 128 * 1024 * 1024; // 128 MB
+static LIBJPEG_TURBO_UNAVAILABLE_WARNING: Once = Once::new();
 
 /// Image decoder limits - can only be set via server config, not runtime kwargs.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -43,6 +45,17 @@ impl Default for ImageDecoderLimits {
 pub struct ImageDecoder {
     #[serde(default)]
     pub(crate) limits: ImageDecoderLimits,
+    /// Decoder backend. Defaults to the original Rust `image::ImageReader`.
+    #[serde(default)]
+    pub(crate) backend: ImageDecoderBackend,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageDecoderBackend {
+    #[default]
+    ImageReader,
+    LibjpegTurbo,
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -72,6 +85,25 @@ impl Decoder for ImageDecoder {
 
     fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
         let bytes = data.into_bytes()?;
+
+        if self.backend == ImageDecoderBackend::LibjpegTurbo && jpeg_turbo::is_jpeg(&bytes) {
+            if let Some(jpeg) = jpeg_turbo::decode_jpeg_rgb(
+                &bytes,
+                self.limits.max_image_width,
+                self.limits.max_image_height,
+                self.limits.max_alloc,
+            )? {
+                let shape = (jpeg.height as usize, jpeg.width as usize, 3_usize);
+                let array = Array3::from_shape_vec(shape, jpeg.data)?;
+                let mut decoded: DecodedMediaData = array.try_into()?;
+                decoded.tensor_info.metadata = Some(DecodedMediaMetadata::Image(ImageMetadata {
+                    format: Some(ImageFormat::Jpeg),
+                    color_type: ColorType::Rgb8,
+                    layout: ImageLayout::HWC,
+                }));
+                return Ok(decoded);
+            }
+        }
 
         let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
         let mut limits = image::Limits::no_limits();
@@ -103,6 +135,19 @@ impl Decoder for ImageDecoder {
             layout: ImageLayout::HWC,
         }));
         Ok(decoded)
+    }
+}
+
+impl ImageDecoder {
+    pub(crate) fn warn_if_unavailable_backend(&self) {
+        if self.backend == ImageDecoderBackend::LibjpegTurbo && !jpeg_turbo::available() {
+            LIBJPEG_TURBO_UNAVAILABLE_WARNING.call_once(|| {
+                tracing::warn!(
+                    "image decoder backend is set to libjpeg_turbo, but libturbojpeg could not be \
+                     loaded; falling back to image::ImageReader for JPEG inputs"
+                );
+            });
+        }
     }
 }
 
@@ -202,6 +247,7 @@ mod tests {
                 max_image_height: max_height,
                 max_alloc: Some(DEFAULT_MAX_ALLOC),
             },
+            backend: ImageDecoderBackend::ImageReader,
         };
         let image_bytes = create_test_image(width, height, 3, format); // RGB
         let encoded_data = create_encoded_media_data(image_bytes);
@@ -284,6 +330,7 @@ mod tests {
         };
         let server_config = ImageDecoder {
             limits: server_limits.clone(),
+            backend: ImageDecoderBackend::ImageReader,
         };
 
         // Runtime config tries to override limits (should be ignored)
@@ -294,6 +341,7 @@ mod tests {
         };
         let runtime_config = ImageDecoder {
             limits: runtime_limits,
+            backend: ImageDecoderBackend::LibjpegTurbo,
         };
 
         let merged = server_config.with_runtime(Some(&runtime_config));
@@ -302,5 +350,151 @@ mod tests {
         assert_eq!(merged.limits.max_image_width, Some(100));
         assert_eq!(merged.limits.max_image_height, Some(100));
         assert_eq!(merged.limits.max_alloc, Some(1024));
+        assert_eq!(merged.backend, ImageDecoderBackend::LibjpegTurbo);
+    }
+
+    #[test]
+    fn test_default_backend_is_image_reader() {
+        let decoder = ImageDecoder::default();
+        assert_eq!(decoder.backend, ImageDecoderBackend::ImageReader);
+
+        let decoder: ImageDecoder = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(decoder.backend, ImageDecoderBackend::ImageReader);
+    }
+
+    #[test]
+    fn test_config_can_select_libjpeg_turbo_backend() {
+        let decoder: ImageDecoder =
+            serde_json::from_value(serde_json::json!({"backend": "libjpeg_turbo"})).unwrap();
+        assert_eq!(decoder.backend, ImageDecoderBackend::LibjpegTurbo);
+    }
+
+    #[test]
+    fn test_libjpeg_turbo_backend_falls_back_for_non_jpeg() {
+        let decoder = ImageDecoder {
+            backend: ImageDecoderBackend::LibjpegTurbo,
+            ..Default::default()
+        };
+        let image_bytes = create_test_image(8, 9, 3, ImageFormat::Png);
+        let decoded = decoder
+            .decode(create_encoded_media_data(image_bytes))
+            .unwrap();
+        assert_eq!(decoded.tensor_info.shape, vec![9, 8, 3]);
+        match decoded.tensor_info.metadata {
+            Some(DecodedMediaMetadata::Image(metadata)) => {
+                assert_eq!(metadata.format, Some(ImageFormat::Png));
+                assert_eq!(metadata.color_type, ColorType::Rgb8);
+            }
+            other => panic!("expected image metadata, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_libjpeg_turbo_backend_falls_back_for_rgba_png() {
+        let decoder = ImageDecoder {
+            backend: ImageDecoderBackend::LibjpegTurbo,
+            ..Default::default()
+        };
+        let image_bytes = create_test_image(8, 9, 4, ImageFormat::Png);
+        let decoded = decoder
+            .decode(create_encoded_media_data(image_bytes))
+            .unwrap();
+        assert_eq!(decoded.tensor_info.shape, vec![9, 8, 4]);
+        match decoded.tensor_info.metadata {
+            Some(DecodedMediaMetadata::Image(metadata)) => {
+                assert_eq!(metadata.format, Some(ImageFormat::Png));
+                assert_eq!(metadata.color_type, ColorType::Rgba8);
+            }
+            other => panic!("expected image metadata, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_libjpeg_turbo_backend_enforces_configured_limits() {
+        if !jpeg_turbo::available() {
+            eprintln!("skipping libjpeg-turbo limit test: libturbojpeg not available");
+            return;
+        }
+
+        let decoder = ImageDecoder {
+            limits: ImageDecoderLimits {
+                max_image_width: Some(4),
+                max_image_height: None,
+                max_alloc: Some(DEFAULT_MAX_ALLOC),
+            },
+            backend: ImageDecoderBackend::LibjpegTurbo,
+        };
+        let image_bytes = create_test_image(8, 8, 3, ImageFormat::Jpeg);
+        let error = decoder
+            .decode(create_encoded_media_data(image_bytes))
+            .expect_err("width limit must reject before fallback");
+        let error_msg = error.to_string();
+        assert!(
+            error_msg.contains("dimensions") || error_msg.contains("limit"),
+            "Error should mention dimension limits, got: {error_msg}"
+        );
+    }
+
+    #[test]
+    fn test_libjpeg_turbo_pixels_match_pil_vllm_decode_when_available() {
+        let require = std::env::var_os("DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST").is_some();
+        if !jpeg_turbo::available() {
+            if require {
+                panic!("DYNAMO_REQUIRE_LIBJPEG_TURBO_TEST is set but libturbojpeg is unavailable");
+            }
+            eprintln!("skipping PIL parity test: libturbojpeg not available");
+            return;
+        }
+
+        let (jpeg_bytes, expected_rgb, width, height) = pil_parity_fixture();
+
+        let decoded = jpeg_turbo::decode_jpeg_rgb(&jpeg_bytes, None, None, Some(DEFAULT_MAX_ALLOC))
+            .unwrap()
+            .expect("libjpeg-turbo should decode the generated JPEG");
+
+        assert_eq!((decoded.width, decoded.height), (width, height));
+        assert_eq!(decoded.data, expected_rgb);
+
+        let decoder = ImageDecoder {
+            backend: ImageDecoderBackend::LibjpegTurbo,
+            ..Default::default()
+        };
+        let decoded_media = decoder
+            .decode(create_encoded_media_data(jpeg_bytes))
+            .unwrap();
+        assert_eq!(
+            decoded_media.tensor_info.shape,
+            vec![height as usize, width as usize, 3]
+        );
+        match decoded_media.tensor_info.metadata {
+            Some(DecodedMediaMetadata::Image(metadata)) => {
+                assert_eq!(metadata.format, Some(ImageFormat::Jpeg));
+                assert_eq!(metadata.color_type, ColorType::Rgb8);
+            }
+            other => panic!("expected image metadata, got {other:?}"),
+        }
+    }
+
+    fn pil_parity_fixture() -> (Vec<u8>, Vec<u8>, u32, u32) {
+        use base64::{Engine as _, engine::general_purpose};
+
+        const WIDTH: u32 = 17;
+        const HEIGHT: u32 = 11;
+        // JPEG generated from a deterministic RGB gradient with Pillow
+        // quality=87/subsampling=2; RGB fixture is Pillow convert("RGB").
+        const JPEG_B64: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/media/pil_parity_17x11.jpg.b64"
+        ));
+        const RGB_B64: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/media/pil_parity_17x11.rgb.b64"
+        ));
+
+        let jpeg_bytes = general_purpose::STANDARD.decode(JPEG_B64.trim()).unwrap();
+        let expected_rgb = general_purpose::STANDARD.decode(RGB_B64.trim()).unwrap();
+        assert_eq!(expected_rgb.len(), (WIDTH * HEIGHT * 3) as usize);
+
+        (jpeg_bytes, expected_rgb, WIDTH, HEIGHT)
     }
 }

@@ -31,6 +31,7 @@ from dynamo.common.snapshot.restore_context import (
     refresh_snapshot_restore_config,
 )
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
+from dynamo.common.utils.media_decoder import build_frontend_image_decoder_options
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_engine_metrics_callback,
@@ -802,7 +803,7 @@ async def register_vllm_model(
     media_fetcher = None
     if config.frontend_decoding:
         media_decoder = MediaDecoder()
-        media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+        media_decoder.enable_image(build_frontend_image_decoder_options())
         # media_decoder.enable_video({})
 
         media_fetcher = MediaFetcher()

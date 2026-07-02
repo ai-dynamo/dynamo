@@ -2577,6 +2577,7 @@ dependencies = [
  "ipnet",
  "json-five",
  "lazy_static",
+ "libloading 0.8.9",
  "llm-multimodal",
  "llm-tokenizer",
  "lru 0.16.4",

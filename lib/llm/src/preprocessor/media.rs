@@ -3,6 +3,7 @@
 
 mod common;
 mod decoders;
+mod jpeg_turbo;
 mod loader;
 mod rdma;
 

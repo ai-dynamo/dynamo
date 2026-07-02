@@ -25,6 +25,9 @@ Set media decoding default options and limits:
 from dynamo.llm import MediaDecoder
 decoder = MediaDecoder()
 decoder.enable_image({"limits": {"max_image_width": 4096, "max_image_height": 4096, "max_alloc": 16*1024*1024}})
+# Optional: decode JPEG inputs with libjpeg-turbo when the shared library is installed.
+# The default backend remains "image_reader".
+# decoder.enable_image({"backend": "libjpeg_turbo", "limits": {"max_alloc": 16*1024*1024}})
 decoder.enable_video({"fps": 2.0, "max_frames": 128, "limits": {"max_alloc": 1024*1024*128*3}})
 ```
 
@@ -53,6 +56,10 @@ register_model(
 > **Video decoding**: Video decoding needs to be enabled via the `dynamo-llm/media-ffmpeg` rust feature. The following ffmpeg dynamic libraries must be available on the system: `libavcodec`, `libavdevice`, `libavfilter`, `libavformat`, `libswresample`, `libswscale`. These are available in dynamo dockerfiles rendered with `enable_media_ffmpeg` set to true in `container/context.yaml`.
 
 ## Image decoding options
+
+### Backend
+- **backend** (`"image_reader"` or `"libjpeg_turbo"`): Selects the image decoder implementation. The default is `"image_reader"`, which preserves the original Rust `image::ImageReader` path.
+- **libjpeg_turbo**: JPEG inputs are decoded through libjpeg-turbo's TurboJPEG API when `libturbojpeg` is available at runtime. The implementation loads the shared library dynamically and falls back to `image::ImageReader` for non-JPEG inputs or when TurboJPEG cannot decode the image.
 
 ### Limits (not overridable at runtime via `media_io_kwargs`)
 - **limits.max_image_width** (uint32, > 0): If the image width exceeds this value, abort the decoding.

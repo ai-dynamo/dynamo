@@ -45,6 +45,14 @@ pub struct MediaDecoder {
     // TODO: audio decoder
 }
 
+impl MediaDecoder {
+    pub(crate) fn warn_if_unavailable_backends(&self) {
+        if let Some(image) = &self.image {
+            image.warn_if_unavailable_backend();
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum DecodedMediaMetadata {
     Image(ImageMetadata),
