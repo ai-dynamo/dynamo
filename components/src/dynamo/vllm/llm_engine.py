@@ -770,6 +770,12 @@ class VllmLLMEngine(LLMEngine):
             base_model_path=self.engine_args.model,
             worker_type=worker_type,
             needs=needs,
+            # The engine is already serving the base model when a LoRA loads,
+            # and the card only references config/tokenizer/chat-template
+            # files — never weights. Without this, a cache miss on model_path
+            # re-downloads the full base repo (hundreds of GB for large MoEs)
+            # on every publish, and any network failure aborts the publish.
+            ignore_weights=True,
         )
 
     def _lora_registration_topology(

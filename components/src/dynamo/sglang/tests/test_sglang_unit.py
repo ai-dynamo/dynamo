@@ -882,3 +882,6 @@ async def test_lora_registration_model_type_gate(
         str(captured["worker_type"]) == expected_worker_type
     ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"
+    # The engine already owns the base weights; the LoRA card needs only
+    # config/tokenizer files, so the publish must never fetch weights.
+    assert captured["ignore_weights"] is True
