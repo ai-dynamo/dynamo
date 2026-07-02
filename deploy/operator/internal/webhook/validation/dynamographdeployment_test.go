@@ -57,7 +57,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantErr: "spec.components must have at least one component",
 		},
 		{
-			name: "component identity is left to request-version validation",
+			name: "component name requirement is owned by request-version schema validation",
 			deployment: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-graph", Namespace: "default"},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
@@ -66,7 +66,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "component name uniqueness is left to request-version validation",
+			name: "component name uniqueness is owned by request-version CEL validation",
 			deployment: &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-graph", Namespace: "default"},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
@@ -172,6 +172,35 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantErr: "spec.components[worker].experimental.gpuMemoryService: GPU memory service requires podTemplate.spec.containers[main].resources.limits.nvidia.com/gpu >= 1",
+		},
+		{
+			name: "compilation cache PVC name requirement is owned by request-version schema validation",
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.CompilationCache = &nvidiacomv1beta1.CompilationCacheConfig{}
+			}),
+		},
+		{
+			name: "sidecar image requirement is owned by request-version CEL validation",
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.PodTemplate = &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: consts.MainContainerName},
+							{Name: "metrics"},
+						},
+					},
+				}
+			}),
+		},
+		{
+			name: "pod template backend annotation is owned by request-version CEL validation",
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.PodTemplate = &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+						consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid",
+					}},
+				}
+			}),
 		},
 	}
 
@@ -617,7 +646,7 @@ func TestDynamoGraphDeploymentValidator_ValidateConvertedAlphaResourceSemantics(
 			},
 		},
 		{
-			name: "converted alpha extraPodMetadata annotations are not revalidated as beta",
+			name: "converted alpha extraPodMetadata annotations do not receive v1beta1 CEL validation",
 			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].ExtraPodMetadata = &nvidiacomv1alpha1.ExtraPodMetadata{
 					Annotations: map[string]string{
@@ -635,7 +664,7 @@ func TestDynamoGraphDeploymentValidator_ValidateConvertedAlphaResourceSemantics(
 			},
 		},
 		{
-			name: "converted alpha compilation cache mount keeps empty PVC name",
+			name: "converted alpha compilation cache mount does not receive v1beta1 schema validation",
 			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].VolumeMounts = []nvidiacomv1alpha1.VolumeMount{
 					{
@@ -655,7 +684,7 @@ func TestDynamoGraphDeploymentValidator_ValidateConvertedAlphaResourceSemantics(
 			},
 		},
 		{
-			name: "converted alpha init containers are not revalidated as beta",
+			name: "converted alpha init containers do not receive v1beta1 CEL validation",
 			mutate: func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{
 					PodSpec: &corev1.PodSpec{

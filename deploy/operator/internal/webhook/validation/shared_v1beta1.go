@@ -66,7 +66,7 @@ func (v *SharedSpecValidatorV1Beta1) Validate(ctx context.Context) (admission.Wa
 	if err := v.validateMinAvailable(); err != nil {
 		errs = append(errs, err)
 	}
-	if err := v.validatePodTemplate(); err != nil {
+	if err := v.validateFrontendSidecar(); err != nil {
 		errs = append(errs, err)
 	}
 	if err := v.validateSharedMemory(); err != nil {
@@ -113,7 +113,7 @@ func (v *SharedSpecValidatorV1Beta1) validateMinAvailable() error {
 	return nil
 }
 
-func (v *SharedSpecValidatorV1Beta1) validatePodTemplate() error {
+func (v *SharedSpecValidatorV1Beta1) validateFrontendSidecar() error {
 	if v.spec.PodTemplate == nil {
 		if v.spec.FrontendSidecar != nil {
 			return fmt.Errorf("%s.frontendSidecar requires podTemplate.spec.containers", v.fieldPath)

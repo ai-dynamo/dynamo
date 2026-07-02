@@ -395,19 +395,14 @@ func TestDynamoGraphDeploymentAdmissionCompatibility(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			validator := requestValidators[tt.resource][tt.version]
 			requestErrs := validator.validate(tt.current, tt.old)
-			webhookCalls := 0
 			if tt.wantRequestErr != "" {
 				assertDGDAdmissionRequestError(t, requestErrs, tt.wantRequestErr)
-				if webhookCalls != 0 {
-					t.Fatalf("webhook calls = %d, want 0", webhookCalls)
-				}
 				return
 			}
 			if len(requestErrs) != 0 {
 				t.Fatalf("request-version validation errors = %v, want none", requestErrs)
 			}
 
-			webhookCalls++
 			_, err := invokeDGDAdmissionWebhook(t, tt.resource, tt.version, tt.operation, tt.old, tt.current)
 			if tt.wantWebhookErr == "" {
 				if err != nil {
@@ -415,9 +410,6 @@ func TestDynamoGraphDeploymentAdmissionCompatibility(t *testing.T) {
 				}
 			} else if err == nil || !strings.Contains(err.Error(), tt.wantWebhookErr) {
 				t.Fatalf("webhook error = %v, want one containing %q", err, tt.wantWebhookErr)
-			}
-			if webhookCalls != 1 {
-				t.Fatalf("webhook calls = %d, want 1", webhookCalls)
 			}
 		})
 	}
