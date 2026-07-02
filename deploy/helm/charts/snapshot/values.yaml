@@ -17,11 +17,16 @@
 # in a single namespace. Install this chart in each namespace where you want
 # to enable checkpoint/restore functionality for DynamoGraphDeployments.
 
-# Container runtime backend. Leave socketPath empty to use the conventional
-# path for the chosen type.
+# Container runtime backend. Leave socketPath and storagePath empty to use the
+# conventional paths for the chosen type.
 runtime:
   type: containerd  # containerd | crio
   socketPath: ""
+  # Host directory holding per-container runtime storage. The snapshot-agent
+  # mounts this path read-only to capture container rootfs diffs. Override this
+  # on distributions such as MicroK8s that keep containerd state outside
+  # /var/lib/containerd.
+  storagePath: ""
 
 # Gates the OCP RBAC template and the DS required-scc annotation. Keep false
 # on vanilla Kubernetes (it references an OCP-only built-in SCC).
