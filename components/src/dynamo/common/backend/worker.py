@@ -62,14 +62,14 @@ def _guard_loop_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
     loop.add_signal_handler = add_signal_handler  # type: ignore[assignment]
 
 
-# Map the user-facing `dynamo.common.constants.DisaggregationMode` (which
-# carries 4 modes including ENCODE) to the 3-mode Rust enum. ENCODE is not
-# supported by the unified abstraction yet — multimodal encode workers stay
-# on the legacy main.py path until they migrate.
+# Map the user-facing `dynamo.common.constants.DisaggregationMode` to the
+# Rust enum. All four modes (AGGREGATED, PREFILL, DECODE, ENCODE) are
+# supported by the unified abstraction.
 _DISAGG_MODE_TO_RUST = {
     DisaggregationMode.AGGREGATED: _backend.DisaggregationMode.Aggregated,
     DisaggregationMode.PREFILL: _backend.DisaggregationMode.Prefill,
     DisaggregationMode.DECODE: _backend.DisaggregationMode.Decode,
+    DisaggregationMode.ENCODE: _backend.DisaggregationMode.Encode,
 }
 
 
@@ -120,7 +120,7 @@ class WorkerConfig:
     exclude_tools_when_tool_choice_none: bool = True
     enable_local_indexer: bool = True
     # Operator-level kill switch for KV-aware-routing publishers. When False,
-    # Worker skips engine.kv_event_sources() and engine.metrics_sources() so
+    # Worker skips engine.kv_event_sources() and SnapshotPublisher setup so
     # the worker ships no KV events or worker-load metrics.
     enable_kv_routing: bool = True
     metrics_labels: list[tuple[str, str]] = field(default_factory=list)
@@ -136,6 +136,12 @@ class WorkerConfig:
     structural_tag_mode: str = "off"
     structural_tag_scope: str = "auto"
     structural_tag_schema: str = "auto"
+    # When True, this worker declares an upstream Encode peer in its
+    # topology `needs`. Meaningful only on AGGREGATED/PREFILL roles;
+    # the Rust validator rejects DECODE/ENCODE + True with InvalidArgument.
+    # Appended at the END of the dataclass to keep positional callers
+    # working -- inserting mid-class would silently shift downstream args.
+    route_to_encoder: bool = False
 
     @classmethod
     def from_runtime_config(
@@ -185,6 +191,10 @@ class WorkerConfig:
             "structural_tag_schema": getattr(
                 runtime_cfg, "dyn_structural_tag_schema", "auto"
             ),
+            # vLLM exposes `route_to_encoder` on its backend_args today;
+            # SGLang/TRT-LLM don't yet, so the getattr default keeps them at
+            # False until they add the field on their own runtime config.
+            "route_to_encoder": getattr(runtime_cfg, "route_to_encoder", False),
         }
         # vLLM/TRT-LLM expose `disaggregation_mode`; SGLang exposes
         # `serving_mode`. Skip the probe when an override is supplied so
@@ -264,6 +274,7 @@ class Worker:
             structural_tag_scope=self.config.structural_tag_scope,
             structural_tag_schema=self.config.structural_tag_schema,
             runtime=runtime_cfg,
+            route_to_encoder=self.config.route_to_encoder,
         )
 
         loop = asyncio.get_running_loop()

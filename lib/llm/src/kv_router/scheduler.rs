@@ -6,8 +6,8 @@ pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
 pub use dynamo_kv_router::scheduling::{
-    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, SchedulingRequest,
-    SchedulingResponse, TierOverlapBlocks,
+    KvSchedulerError, LocalScheduler, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
+    SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -149,6 +149,15 @@ where
         })
     }
 
+    pub async fn schedule_request(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
+        let response = self.inner.schedule_request(request).await;
+        self.observe_schedule_result(&response);
+        response
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
@@ -283,7 +292,12 @@ where
                 shared_cache_hits,
             )
             .await;
-        if let Err(KvSchedulerError::QueueRejected(rejection)) = &response
+        self.observe_schedule_result(&response);
+        response
+    }
+
+    fn observe_schedule_result(&self, response: &Result<SchedulingResponse, KvSchedulerError>) {
+        if let Err(KvSchedulerError::QueueRejected(rejection)) = response
             && let Some(metrics) = self
                 .queue_metric_indices
                 .get(&rejection.policy_class)
@@ -302,7 +316,6 @@ where
             }
         }
         self.update_queue_metrics();
-        response
     }
 
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {

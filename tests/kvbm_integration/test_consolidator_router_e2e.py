@@ -401,6 +401,12 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
     # Set ZMQ port for TensorRT-LLM consolidator
     if engine == "trtllm":
         env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
+    elif engine == "vllm":
+        # Enable forward-pass metrics (InstrumentedScheduler + FpmEventRelay).
+        # One serial worker per test and the suite pins fixed ports, so the
+        # canonical FPM default port is safe here. (trtllm uses FpmDirectPublisher
+        # and ignores this var, so it's only set for vLLM.)
+        env["DYN_FORWARDPASS_METRIC_PORT"] = "20380"
 
     # Create separate log directory for worker to avoid conflicts with frontend
     worker_log_dir = Path(os.path.join(test_directory, engine)).absolute()
@@ -837,6 +843,10 @@ class TestConsolidatorRouterE2E:
             # Set ZMQ port for TensorRT-LLM consolidator
             if engine == "trtllm":
                 worker_env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
+            elif engine == "vllm":
+                # Enable forward-pass metrics (InstrumentedScheduler + relay);
+                # canonical default port, safe for this serial fixed-port suite.
+                worker_env["DYN_FORWARDPASS_METRIC_PORT"] = "20380"
 
             worker_log_dir = Path(os.path.join(test_directory, engine)).absolute()
             worker_log_dir.mkdir(parents=True, exist_ok=True)

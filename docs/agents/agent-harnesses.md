@@ -50,7 +50,7 @@ export ANTHROPIC_API_KEY=
 claude
 ```
 
-Dynamo uses `x-claude-code-session-id` as the Claude Code session ID. For subagents, Dynamo uses `x-claude-code-agent-id` as the child session ID and the session ID as its parent.
+Dynamo uses `x-claude-code-session-id` as the Claude Code session ID. For subagents, Dynamo uses `x-claude-code-agent-id` as the child session ID. Nested subagents use `x-claude-code-parent-agent-id` as the parent; top-level subagents fall back to the root session ID.
 
 ## OpenCode
 

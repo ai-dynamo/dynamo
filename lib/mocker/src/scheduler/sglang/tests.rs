@@ -77,6 +77,7 @@ fn make_decoded_request(
         uuid: Uuid::new_v4(),
         prompt_tokens,
         max_output_tokens,
+        planned_output_ids: None,
         output_ids: Vec::new(),
         last_node: Some(alloc.last_node),
         kv_indices: alloc.kv_indices,
@@ -827,6 +828,7 @@ mod scheduling {
             scheduler.receive(crate::common::protocols::DirectRequest {
                 tokens: vec![i as u32; 10],
                 max_output_tokens: max_output,
+                output_token_ids: None,
                 uuid: None,
                 dp_rank: 0,
                 arrival_timestamp_ms: None,
@@ -879,6 +881,7 @@ mod scheduling {
                 uuid: no_match_uuid,
                 prompt_tokens: vec![9, 8, 7],
                 max_output_tokens: 1,
+                planned_output_ids: None,
                 output_ids: Vec::new(),
                 last_node: None,
                 kv_indices: Vec::new(),
@@ -890,6 +893,7 @@ mod scheduling {
                 uuid: match_uuid,
                 prompt_tokens: vec![1, 2, 3, 4, 5],
                 max_output_tokens: 1,
+                planned_output_ids: None,
                 output_ids: vec![6, 7],
                 last_node: None,
                 kv_indices: Vec::new(),
@@ -924,6 +928,7 @@ mod scheduling {
                 uuid: Uuid::new_v4(),
                 prompt_tokens: duplicate_prefix.clone(),
                 max_output_tokens: 1,
+                planned_output_ids: None,
                 output_ids: Vec::new(),
                 last_node: None,
                 kv_indices: Vec::new(),
@@ -937,6 +942,7 @@ mod scheduling {
             uuid: unique_uuid,
             prompt_tokens: (100..132).collect(),
             max_output_tokens: 1,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: None,
             kv_indices: Vec::new(),
@@ -957,6 +963,37 @@ mod core_behavior {
     use super::*;
 
     #[test]
+    fn test_planned_output_tokens_are_emitted_exactly() {
+        let mut core = SglangCore::new(test_args(100, 4, 8));
+        let uuid = Uuid::from_u128(0xB0B);
+        let planned = vec![111, 222, 333];
+        core.receive(DirectRequest {
+            tokens: vec![1, 2],
+            max_output_tokens: planned.len(),
+            output_token_ids: Some(planned.clone()),
+            uuid: Some(uuid),
+            dp_rank: 0,
+            arrival_timestamp_ms: None,
+            ..Default::default()
+        });
+
+        let mut collector = crate::replay::TraceCollector::default();
+        let mut emitted = Vec::new();
+        for step in 0..planned.len() {
+            let pass = core.execute_pass(&mut collector, step as f64);
+            emitted.extend(
+                pass.output_signals
+                    .into_iter()
+                    .filter(|signal| signal.uuid == uuid)
+                    .map(|signal| signal.token_id.expect("planned token should be present")),
+            );
+        }
+
+        assert_eq!(emitted, planned);
+        assert!(core.is_empty());
+    }
+
+    #[test]
     fn test_chunked_prefill_budget_is_page_aware() {
         let config = SglangConfig {
             chunked_prefill_size: 8,
@@ -973,6 +1010,7 @@ mod core_behavior {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1; 6],
             max_output_tokens: 3,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: None,
             kv_indices: Vec::new(),
@@ -1004,6 +1042,7 @@ mod core_behavior {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1; 16],
             max_output_tokens: 2,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: None,
             kv_indices: Vec::new(),
@@ -1038,6 +1077,7 @@ mod core_behavior {
                 uuid: first_uuid,
                 prompt_tokens: vec![1; 7],
                 max_output_tokens: 3,
+                planned_output_ids: None,
                 output_ids: Vec::new(),
                 last_node: None,
                 kv_indices: Vec::new(),
@@ -1049,6 +1089,7 @@ mod core_behavior {
                 uuid: second_uuid,
                 prompt_tokens: vec![2; 8],
                 max_output_tokens: 3,
+                planned_output_ids: None,
                 output_ids: Vec::new(),
                 last_node: None,
                 kv_indices: Vec::new(),
@@ -1083,6 +1124,7 @@ mod core_behavior {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1, 2, 3, 4, 5, 6],
             max_output_tokens: 4,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: Some(alloc.last_node),
             kv_indices: alloc.kv_indices,
@@ -1128,6 +1170,7 @@ mod core_behavior {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1, 2, 3, 4],
             max_output_tokens: 4,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: Some(base_alloc.last_node),
             kv_indices: base_alloc.kv_indices,
@@ -1142,6 +1185,7 @@ mod core_behavior {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1, 2, 3, 4],
             max_output_tokens: 4,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: Some(fast_alloc.last_node),
             kv_indices: fast_alloc.kv_indices,
@@ -1192,6 +1236,7 @@ mod core_behavior {
                 uuid: Uuid::new_v4(),
                 prompt_tokens: vec![1, 2, 3, 4],
                 max_output_tokens: 10,
+                planned_output_ids: None,
                 output_ids: vec![11, 12, 13],
                 last_node: None,
                 kv_indices: first,
@@ -1203,6 +1248,7 @@ mod core_behavior {
                 uuid: Uuid::new_v4(),
                 prompt_tokens: vec![9, 8, 7, 6],
                 max_output_tokens: 10,
+                planned_output_ids: None,
                 output_ids: vec![21],
                 last_node: None,
                 kv_indices: second,
@@ -1235,6 +1281,7 @@ mod core_behavior {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1, 2, 3, 4],
             max_output_tokens: 4,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: Some(alloc.last_node),
             kv_indices: alloc.kv_indices,
@@ -1266,6 +1313,7 @@ mod core_behavior {
         core.receive(crate::common::protocols::DirectRequest {
             tokens: vec![1; 6],
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: None,
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1531,6 +1579,7 @@ mod router_events {
             uuid,
             prompt_tokens: prompt_tokens.iter().map(|&token| token as u64).collect(),
             max_output_tokens: 2,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: None,
             kv_indices: Vec::new(),
@@ -1632,6 +1681,7 @@ mod router_events {
             uuid: Uuid::new_v4(),
             prompt_tokens: vec![1, 2, 3, 4, 5, 6],
             max_output_tokens: 3,
+            planned_output_ids: None,
             output_ids: Vec::new(),
             last_node: None,
             kv_indices: Vec::new(),
@@ -1852,6 +1902,7 @@ mod router_events {
         core.receive(DirectRequest {
             tokens: vec![1; 8],
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(91)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1896,6 +1947,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1927,6 +1979,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..4).collect(),
             max_output_tokens: 3,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1944,6 +1997,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (100..104).collect(),
             max_output_tokens: 3,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1970,6 +2024,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -1984,6 +2039,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -2039,6 +2095,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -2047,6 +2104,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (100..108).collect(),
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -2092,6 +2150,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..4).collect(), // prompt_len = 4
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -2100,6 +2159,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (100..112).collect(), // prompt_len = 12
             max_output_tokens: 1,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -2143,6 +2203,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..16).collect(),
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -2206,6 +2267,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (0..4).collect(),
             max_output_tokens: 20,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -2214,6 +2276,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (100..104).collect(),
             max_output_tokens: 20,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(2)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -2229,6 +2292,7 @@ mod forward_pass_metrics {
         core.receive(DirectRequest {
             tokens: (200..212).collect(), // 12 tokens
             max_output_tokens: 10,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(3)),
             dp_rank: 0,
             arrival_timestamp_ms: None,
@@ -2297,6 +2361,7 @@ mod forward_pass_metrics {
         scheduler.receive(DirectRequest {
             tokens: (0..8).collect(),
             max_output_tokens: 2,
+            output_token_ids: None,
             uuid: Some(Uuid::from_u128(1)),
             dp_rank: 0,
             arrival_timestamp_ms: None,

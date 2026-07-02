@@ -88,10 +88,8 @@ logger = logging.getLogger(__name__)
 
 
 class _UnifiedStatLogger(StatLoggerBase):
-    """vLLM stat-logger that writes a :class:`ComponentSnapshot` into the
-    factory's shared dict on every iteration. The framework's poll task
-    reads the dict and drives both the router-input signal and the
-    ``dynamo_component_*`` gauges."""
+    """vLLM stat-logger that pushes :class:`ComponentSnapshot` values into
+    the Rust-owned :class:`SnapshotPublisher` on every iteration."""
 
     def __init__(self, factory: _UnifiedStatLoggerFactory, dp_rank: int) -> None:
         self._factory = factory

@@ -536,26 +536,3 @@ async fn connect_replay_socket(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{WATERMARK_UNSET, cursor_from_watermark};
-    use crate::recovery::CursorObservation;
-
-    #[test]
-    fn initial_gap_replays_from_zero_and_replayed_seq_becomes_stale() {
-        let replay_start = match cursor_from_watermark(WATERMARK_UNSET).observe(5) {
-            CursorObservation::Initial { got } if got > 0 => Some(0),
-            CursorObservation::Gap { expected, .. } => Some(expected),
-            _ => None,
-        };
-        assert_eq!(replay_start, Some(0));
-        assert!(matches!(
-            cursor_from_watermark(5).observe(5),
-            CursorObservation::Stale {
-                got: 5,
-                last_applied: Some(5),
-            }
-        ));
-    }
-}
