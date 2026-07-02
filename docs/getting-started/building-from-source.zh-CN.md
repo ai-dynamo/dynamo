@@ -10,8 +10,6 @@ description: 从源代码构建 Dynamo，用于开发和贡献
   <a href="./building-from-source.md" hreflang="en">English</a> | <strong>简体中文</strong>
 </p>
 
-# 从源代码构建
-
 当你想贡献代码、测试开发分支上的功能，或自定义构建时，可以从源代码构建 Dynamo。如果你只是想运行 Dynamo，[本地安装](local-installation.zh-CN.md)指南会更快。
 
 本指南涵盖 Ubuntu 和 macOS。如需一个能自动处理所有这些步骤的容器化开发环境，请参阅 [DevContainer](#devcontainer)。
