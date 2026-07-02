@@ -76,8 +76,10 @@ impl EngineComponent {
         id
     }
 
-    /// Mark a worker for removal. It stops receiving newly routed work, but
-    /// remains eligible for `drive_ready` until its existing work drains.
+    /// Mark a worker for removal. Round-robin routing skips marked workers;
+    /// in router mode the caller must also remove the worker from the router
+    /// (see `apply_target_count`). The worker remains eligible for
+    /// `drive_ready` until its existing work drains.
     pub(in crate::replay::offline) fn mark_for_removal(&mut self, worker_id: usize) {
         self.pending_removal.insert(worker_id);
     }
