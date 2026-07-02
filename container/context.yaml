@@ -69,7 +69,7 @@ vllm:
     runtime_image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo
     base_image_tag: ad7125a431e176d4161099480a66f0169609a690-xpu
     runtime_image_tag: ad7125a431e176d4161099480a66f0169609a690-xpu
-    # baseline_sbom: not yet captured for xpu — runtime build runs without subtraction
+    baseline_sbom: vllm-ci-test-repo@efec382c
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
