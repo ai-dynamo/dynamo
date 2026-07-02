@@ -505,13 +505,18 @@ impl InnerClient {
     async fn wait(&self) -> anyhow::Result<()> {
         let watcher = self.etcd_client.kv_watch_prefix(&self.key).await?;
         let (_prefix, mut receiver) = watcher.dissolve();
-        tokio::select! {
-            _ = receiver.recv() => {
-                Ok(())
+        loop {
+            tokio::select! {
+                event = receiver.recv() => match event {
+                    Some(etcd::WatchEvent::Put(_)) | Some(etcd::WatchEvent::Delete(_)) => return Ok(()),
+                    // Resync is a reconnect snapshot, not a new planner decision.
+                    Some(etcd::WatchEvent::Resync(_)) => continue,
+                    None => anyhow::bail!("VirtualConnectorClient.wait: etcd watcher closed"),
+                },
+                _ = self.cancellation_token.cancelled() => {
+                    anyhow::bail!("VirtualConnectorClient.wait: Runtime shutdown");
+                },
             }
-            _ = self.cancellation_token.cancelled() => {
-                anyhow::bail!("VirtualConnectorClient.wait: Runtime shutdown");
-            },
         }
     }
 }
