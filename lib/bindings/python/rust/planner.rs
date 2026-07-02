@@ -511,7 +511,7 @@ impl InnerClient {
             }
             _ = self.cancellation_token.cancelled() => {
                 anyhow::bail!("VirtualConnectorClient.wait: Runtime shutdown");
-            }
+            },
         }
     }
 }
