@@ -411,6 +411,85 @@ def _compute_mm_uuids(
     return {"image": uuids}
 
 
+def _normalize_forwarded_mm_modality(
+    modality: str,
+    use_unified_vision_chunk: bool,
+) -> str:
+    if use_unified_vision_chunk and modality == "image":
+        return "vision_chunk"
+    return modality
+
+
+def _build_forwarded_mm_uuids(
+    extra_args: Dict[str, Any],
+    use_unified_vision_chunk: bool,
+) -> dict[str, Any] | None:
+    grouped_hashes = extra_args.get("mm_hashes_by_modality")
+    if isinstance(grouped_hashes, dict):
+        mm_uuids: dict[str, Any] = {}
+        for modality, hashes in grouped_hashes.items():
+            if not hashes:
+                continue
+            modality_key = _normalize_forwarded_mm_modality(
+                str(modality),
+                use_unified_vision_chunk,
+            )
+            mm_uuids.setdefault(modality_key, []).extend(
+                _pad_mm_hashes_to_64(list(hashes))
+            )
+        if mm_uuids:
+            return mm_uuids
+
+    forwarded_hashes = extra_args.get("mm_hashes")
+    if forwarded_hashes:
+        modality_key = _normalize_forwarded_mm_modality(
+            "image",
+            use_unified_vision_chunk,
+        )
+        return {modality_key: _pad_mm_hashes_to_64(list(forwarded_hashes))}
+
+    return None
+
+
+def _get_modality_extra_values(
+    extra_args: Dict[str, Any],
+    grouped_key: str,
+    flat_key: str,
+    metadata_modality: str,
+    backend_modality: str,
+) -> Any | None:
+    grouped_values = extra_args.get(grouped_key)
+    if isinstance(grouped_values, dict):
+        for key in (metadata_modality, backend_modality):
+            values = grouped_values.get(key)
+            if values:
+                return values
+    if metadata_modality != "image":
+        return None
+    return extra_args.get(flat_key)
+
+
+def _placeholder_range_from_extra_arg(value: Any) -> PlaceholderRange:
+    if isinstance(value, dict):
+        offset = int(value["offset"])
+        length = int(value["length"])
+        is_embed_raw = value.get("is_embed")
+        is_embed = (
+            None
+            if is_embed_raw is None
+            else torch.as_tensor(is_embed_raw, dtype=torch.bool)
+        )
+        if is_embed is not None and is_embed.numel() != length:
+            raise ValueError(
+                "forwarded mm placeholder is_embed length "
+                f"{is_embed.numel()} does not match placeholder length {length}"
+            )
+        return PlaceholderRange(offset=offset, length=length, is_embed=is_embed)
+
+    offset, length = value
+    return PlaceholderRange(offset=offset, length=length)
+
+
 # Helpers for nvext response fields requested through `nvext.extra_fields`.
 
 
@@ -2498,8 +2577,27 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         color = "magenta" if transport == "nixl" else "cyan"
         rng = _nvtx.start_range(f"mm_backend:{transport}_receive", color=color)
         try:
-            mm_hashes = extra_args.get("mm_hashes")
-            mm_placeholders = extra_args.get("mm_placeholders")
+            backend_modality = _normalize_forwarded_mm_modality(
+                metadata.modality,
+                self._use_unified_vision_chunk,
+            )
+            mm_hashes = (
+                _get_modality_extra_values(
+                    extra_args,
+                    "mm_hashes_by_modality",
+                    "mm_hashes",
+                    metadata.modality,
+                    backend_modality,
+                )
+                or metadata.mm_hashes
+            )
+            mm_placeholders = _get_modality_extra_values(
+                extra_args,
+                "mm_placeholders_by_modality",
+                "mm_placeholders",
+                metadata.modality,
+                backend_modality,
+            )
             if not mm_hashes or not mm_placeholders:
                 logger.warning(
                     "[mm-routing] %s present but mm_hashes/mm_placeholders missing",
@@ -2547,8 +2645,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 )
                 return None
 
-            mm_hashes_dict = {metadata.modality: mm_hashes}
-            mm_kwargs_dict = {metadata.modality: kwargs_items}
+            mm_hashes_dict = {backend_modality: mm_hashes}
+            mm_kwargs_dict = {backend_modality: kwargs_items}
             with _nvtx.annotate(
                 f"mm_backend:{transport}_build_engine_input", color=color
             ):
@@ -2558,9 +2656,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     "mm_kwargs": mm_kwargs_dict,
                     "mm_hashes": mm_hashes_dict,
                     "mm_placeholders": {
-                        metadata.modality: [
-                            PlaceholderRange(offset=off, length=length)
-                            for off, length in mm_placeholders
+                        backend_modality: [
+                            _placeholder_range_from_extra_arg(placeholder)
+                            for placeholder in mm_placeholders
                         ],
                     },
                 }
@@ -2830,26 +2928,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     },
                 )
         # Normal path: use token IDs.
-        # Prefer frontend-forwarded mm_hashes for hash consistency with the
-        # routing layer. Fall back to computing from loaded image data when
-        # not in EPD mode — in EPD mode multi_modal_data carries pre-computed
-        # embeddings from the encode worker, not raw images, and raw-image
-        # identity lives upstream at the Router / URL-keyed encoder cache.
+        # Frontend-forwarded hashes are the routing/transfer identity. Preserve
+        # their canonical hash strings for vLLM/Dynamo cache metadata parsing;
+        # modality grouping belongs in the multi_modal_uuids dict keys, not in
+        # the hash value. If no hashes were forwarded, compute image UUIDs only
+        # in aggregated mode, where the worker owns raw image payloads. In EPD,
+        # image identity lives upstream at the router / encoder cache.
         extra_args = request.get("extra_args") or {}
-        forwarded_hashes = extra_args.get("mm_hashes")
         mm_uuids: dict[str, Any] | None = None
-        if forwarded_hashes:
-            forwarded_hashes = _pad_mm_hashes_to_64(forwarded_hashes)
-            # vLLM binds multi_modal_uuids by modality key string match.
-            # For models with use_unified_vision_chunk=True (e.g. Kimi-K2.5)
-            # images live under `vision_chunk`, not `image`; hardcoding
-            # `image` here would silently fail to bind and force vLLM back
-            # to its own content-derived hash, breaking router/worker
-            # cache-key alignment.
-            mm_modality_key = (
-                "vision_chunk" if self._use_unified_vision_chunk else "image"
-            )
-            mm_uuids = {mm_modality_key: forwarded_hashes}
+        forwarded_mm_uuids = _build_forwarded_mm_uuids(
+            extra_args,
+            self._use_unified_vision_chunk,
+        )
+        if forwarded_mm_uuids:
+            mm_uuids = forwarded_mm_uuids
         elif self.embedding_loader is None:
             mm_uuids = _compute_mm_uuids(multi_modal_data)
             if mm_uuids and multi_modal_data:

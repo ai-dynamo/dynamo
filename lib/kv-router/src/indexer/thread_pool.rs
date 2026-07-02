@@ -616,9 +616,10 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         let thread_idx = self.worker_assignments.get(&worker_id).map(|v| *v);
         match thread_idx {
             Some(idx) => {
-                if let Err(e) =
-                    self.worker_event_channels[idx].send(WorkerTask::RemoveWorker(worker_id))
-                {
+                if let Err(e) = self.worker_event_channels[idx].send(WorkerTask::RemoveWorker {
+                    worker_id,
+                    sweep_tree: true,
+                }) {
                     tracing::error!(
                         "Failed to send RemoveWorker to worker thread {}: {:?}",
                         idx,
@@ -631,8 +632,11 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             }
             None => {
                 // Worker was never assigned a thread - broadcast to all
-                for channel in &self.worker_event_channels {
-                    let _ = channel.send(WorkerTask::RemoveWorker(worker_id));
+                for (idx, channel) in self.worker_event_channels.iter().enumerate() {
+                    let _ = channel.send(WorkerTask::RemoveWorker {
+                        worker_id,
+                        sweep_tree: idx == 0,
+                    });
                 }
                 self.maybe_enqueue_cleanup(0);
             }
@@ -644,10 +648,18 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
             prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
         }
 
-        // Broadcast to all threads — the dp_rank may be on any thread.
-        // Don't remove from worker_assignments since other dp_ranks may still exist.
-        for channel in &self.worker_event_channels {
-            let _ = channel.send(WorkerTask::RemoveWorkerDpRank(worker_id, dp_rank));
+        // Broadcast local-map cleanup, but let only the sticky worker thread run
+        // shared structural cleanup so the sweep occurs once and stays FIFO.
+        let sweep_idx = self
+            .worker_assignments
+            .get(&worker_id)
+            .map_or(0, |idx| *idx);
+        for (idx, channel) in self.worker_event_channels.iter().enumerate() {
+            let _ = channel.send(WorkerTask::RemoveWorkerDpRank {
+                worker_id,
+                dp_rank,
+                sweep_tree: idx == sweep_idx,
+            });
         }
         self.maybe_enqueue_cleanup(0);
     }

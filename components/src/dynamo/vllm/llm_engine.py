@@ -64,7 +64,7 @@ from dynamo.llm import (
     unregister_model,
 )
 from dynamo.runtime import Endpoint
-from dynamo.vllm.args import configure_rl_logprobs_mode, parse_args
+from dynamo.vllm.args import Config, configure_rl_logprobs_mode, parse_args
 from dynamo.vllm.cache_info import (
     configure_kv_event_block_size,
     get_configured_kv_event_block_size,
@@ -227,14 +227,29 @@ class VllmLLMEngine(LLMEngine):
 
     @classmethod
     async def from_args(
-        cls, argv: list[str] | None = None
+        cls, argv: list[str] | None = None, config: Config | None = None
     ) -> tuple[VllmLLMEngine, WorkerConfig]:
-        config = parse_args(argv)
+        # `config` lets unified_main thread its already-parsed args through so we
+        # don't re-parse (idempotent, but avoids a duplicate argparse + doubled
+        # vLLM deprecation warnings at startup).
+        if config is None:
+            config = parse_args(argv)
 
         if config.disaggregation_mode == DisaggregationMode.ENCODE:
             raise NotImplementedError(
                 "ENCODE is not supported by the unified vLLM entry point; "
                 "use `python -m dynamo.vllm` for multimodal encode workers"
+            )
+
+        # Headless is handled by unified_main before engine construction; a
+        # headless config reaching here means run() was driven directly,
+        # bypassing the entry point. Fail loud rather than booting a full
+        # backend on what should be a vLLM-workers-only secondary node.
+        if config.headless:
+            raise NotImplementedError(
+                "--headless must be launched via `python -m dynamo.vllm.unified_main` "
+                "(or the legacy `python -m dynamo.vllm`); it is not supported when "
+                "driving the unified Worker directly"
             )
 
         if not config.served_model_name:

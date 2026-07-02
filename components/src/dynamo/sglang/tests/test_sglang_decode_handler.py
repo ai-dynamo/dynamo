@@ -218,6 +218,28 @@ def test_build_sampling_params_forwards_repetition_controls_for_token_requests()
     assert "seed" not in sampling_params
 
 
+def test_build_sampling_params_maps_guided_decoding_to_json_schema():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {
+                "guided_decoding": {
+                    "json": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }
+                }
+            },
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["json_schema"] == (
+        '{"type": "object", "properties": {"city": {"type": "string"}}}'
+    )
+
+
 def test_build_sampling_params_passes_n_for_sglang_tokenizer_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=True)
 
@@ -454,6 +476,53 @@ async def test_metadata_upload_normalizes_numpy_values(tmp_path):
     assert uploaded_array["dtype"] == "float32"
     assert uploaded_array["shape"] == [2, 2]
     assert uploaded_array["data"] == expected.tobytes()
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_treats_completion_usage_as_optional():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                        },
+                    },
+                    {
+                        "index": 1,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                            "prompt_tokens": 2,
+                            "completion_tokens": 3,
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert chunks == [
+        {"index": 0, "finish_reason": "stop", "token_ids": []},
+        {
+            "index": 1,
+            "finish_reason": "stop",
+            "token_ids": [],
+            "completion_usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 3,
+                "total_tokens": 5,
+            },
+        },
+    ]
 
 
 @pytest.mark.asyncio
