@@ -41,20 +41,25 @@ ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
 
 # DYNAMO_HOME points at /workspace so bundled TRT-LLM scripts that reference
-# $DYNAMO_HOME/examples/... resolve. LD_PRELOAD/NIXL_PLUGIN_DIR are a workaround
-# for ai-dynamo/nixl#1668: nixl-cu13's bundled UCX 1.20.0 hangs in
-# `uct_md_query_tl_resources` (md_resources realloc loop, >1 GiB) when two NIXL
-# agents init on the same host. Force-load TRT-LLM's bundled libnixl 0.9.0
-# (uses system UCX, no bug). LD_PRELOAD is the only lever: nixl-cu13's
-# _bindings.so has DT_RPATH which beats LD_LIBRARY_PATH. Drop the two NIXL
-# vars when the upstream issue is fixed.
+# $DYNAMO_HOME/examples/... resolve. NIXL comes from the source-built wheel
+# produced by wheel_builder, linked against /usr/local/ucx so torch and NIXL
+# share one UCX core. LD_PRELOAD is kept only for the stable libstdc++ path used
+# by PyInstaller-packaged tools in CI.
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     PATH=/usr/local/bin/etcd:${PATH} \
-    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6 \
+    NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
 
 WORKDIR /workspace
+
+# Keep NIXL and UCX aligned with the source-built Python NIXL wheel installed
+# below. This prevents mixing the auditwheel-vendored nixl-cu13 UCX with the
+# UCX core torch loads from /usr/local/ucx.
+COPY --from=wheel_builder /usr/local/ucx/ /usr/local/ucx/
+COPY --from=wheel_builder /opt/nvidia/nvda_nixl/ /opt/nvidia/nvda_nixl/
 
 # Install packages missing from upstream, sanity-check libnixl, register
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
@@ -70,9 +75,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         openssh-server \
         librdmacm1 \
         rdma-core && \
-    test -f /usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so && \
-    test -d "${NIXL_PLUGIN_DIR}" && \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    if [ ! -d "${NIXL_LIB_DIR}" ] && [ -d "/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu" ]; then \
+        ln -s "/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu" "${NIXL_LIB_DIR}"; \
+    fi && \
+    test -f "${NIXL_LIB_DIR}/libnixl.so" && \
+    test -d "${NIXL_PLUGIN_DIR}" && \
     printf '%s\n' \
         "/usr/local/tensorrt/lib" \
         "/usr/local/cuda/lib64" \
@@ -108,6 +116,14 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
 {% if target not in ("dev", "local-dev") %}
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:${PATH}
+
+# Optional local TensorRT-LLM override. Remote-G2 development images pass a
+# trtllm_wheel build context containing a patched tensorrt_llm wheel; installing
+# it into the venv makes it shadow the stock package from the base TRT-LLM image.
+RUN --mount=type=bind,from=trtllm_wheel,source=/,target=/tmp/trtllm_wheel,readonly \
+    TRTLLM_WHEEL=$(find /tmp/trtllm_wheel -maxdepth 1 -type f -name 'tensorrt_llm*.whl' | sort | tail -1) && \
+    test -n "${TRTLLM_WHEEL}" && \
+    uv pip install --no-deps --force-reinstall "${TRTLLM_WHEEL}"
 {% endif %}
 
 # Place wheels in /opt/dynamo/wheelhouse unconditionally — dev/local-dev images
@@ -115,6 +131,8 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # the wheels on disk because tests/dependencies/test_kvbm_imports.py greps
 # this path and runs in dev-derived test images.
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 {% if target not in ("dev", "local-dev") %}
 RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
@@ -125,9 +143,12 @@ RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     \
-    # Third-party deps Dynamo wheels declare but upstream lacks, plus the
-    # huggingface-hub pin and KVBM-matching nixl-cu13. See the file for context.
-    # The requirements.trtllm.txt file itself carries a `--no-binary imageio-ffmpeg`
+    # Source-built NIXL wheel linked against /usr/local/ucx. Install this before
+    # third-party deps so `import nixl` never resolves to the PyPI nixl-cu13 wheel.
+    uv pip install --no-deps /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    \
+    # Third-party deps Dynamo wheels declare but upstream lacks. The
+    # requirements.trtllm.txt file itself carries a `--no-binary imageio-ffmpeg`
     # directive that keeps the GPL-encumbered prebuilt ffmpeg off disk; IMAGEIO_FFMPEG_EXE
     # below points imageio at the in-tree LGPL CLI.
     uv pip install --no-deps --requirement /tmp/requirements.trtllm.txt && \
@@ -199,8 +220,10 @@ ENV DYNAMO_HOME=/workspace \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
-    LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
-    NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins
+    LD_PRELOAD=/opt/dynamo/libstdc++.so.6 \
+    NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib64 \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib64/plugins
 
 WORKDIR /workspace
 
