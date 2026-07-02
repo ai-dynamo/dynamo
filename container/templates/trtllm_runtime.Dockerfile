@@ -69,6 +69,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         openssh-server \
+        libturbojpeg \
         librdmacm1 \
         rdma-core && \
     test -f /usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so && \
@@ -82,6 +83,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         "/opt/nvidia/nvda_nixl/lib64" \
         > /etc/ld.so.conf.d/00-dynamo-trtllm.conf && \
     ldconfig && \
+    ldconfig -p | grep -q 'libturbojpeg.so.0' && \
     rm -f /usr/local/bin/etcd && \
     mkdir -p /opt/dynamo && \
     LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \

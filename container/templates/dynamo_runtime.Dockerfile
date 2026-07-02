@@ -80,7 +80,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         patchelf \
         git \
         git-lfs \
-        libjemalloc2 && \
+        libjemalloc2 \
+        libturbojpeg && \
+    ldconfig && \
+    ldconfig -p | grep -q 'libturbojpeg.so.0' && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3
 
