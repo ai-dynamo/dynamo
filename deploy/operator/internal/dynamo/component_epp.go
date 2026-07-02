@@ -96,10 +96,6 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Value: "debug,dynamo_llm::kv_router=trace",
 		},
 		{
-			Name:  "DYN_ENFORCE_DISAGG",
-			Value: "false",
-		},
-		{
 			Name:  commonconsts.DynamoNamespacePrefixEnvVar,
 			Value: context.DynamoNamespace,
 		},
