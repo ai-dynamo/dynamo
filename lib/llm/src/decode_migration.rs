@@ -207,6 +207,7 @@ struct ControlResponse {
     committed_len: Option<usize>,
     logical_len: Option<usize>,
     unforwarded_committed_output_ids: Option<Vec<TokenIdType>>,
+    unforwarded_output_ids: Option<Vec<TokenIdType>>,
 }
 
 struct PreparedDestination {
@@ -850,8 +851,9 @@ impl
                     return;
                 }
                 let unforwarded = quiesced
-                    .unforwarded_committed_output_ids
+                    .unforwarded_output_ids
                     .clone()
+                    .or_else(|| quiesced.unforwarded_committed_output_ids.clone())
                     .unwrap_or_default();
                 let committed_output_tokens = committed_len.saturating_sub(prompt_len);
                 let mut duplicate_tokens = (forwarded_tokens + unforwarded.len())
@@ -1629,7 +1631,7 @@ mod tests {
                         "prompt_len": 3,
                         "committed_len": 5,
                         "logical_len": 6,
-                        "unforwarded_committed_output_ids": [11],
+                        "unforwarded_output_ids": [11],
                     })
                 }
             } else if phase == Some("prepare") {
