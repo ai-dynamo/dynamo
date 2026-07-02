@@ -11,8 +11,8 @@ from dynamo.frontend.cpu_affinity import (
     NumaAffinityStatus,
     detect_cpu_numa_affinity,
     format_cpu_list,
-    log_frontend_cpu_affinity,
     parse_cpu_list,
+    warn_if_frontend_cpu_affinity_spans_numa_nodes,
 )
 
 pytestmark = [
@@ -143,7 +143,7 @@ def test_affinity_syscall_error_is_unknown(tmp_path: Path):
     assert result.reason == "sched_getaffinity failed: not permitted"
 
 
-def test_logging_fails_open_on_unexpected_detection_error(
+def test_warning_check_fails_open_silently_on_unexpected_detection_error(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ):
@@ -151,8 +151,8 @@ def test_logging_fails_open_on_unexpected_detection_error(
         raise RuntimeError("unexpected failure")
 
     test_logger = logging.getLogger("test.frontend.cpu_affinity.fail_open")
-    with caplog.at_level(logging.WARNING, logger=test_logger.name):
-        result = log_frontend_cpu_affinity(
+    with caplog.at_level(logging.DEBUG, logger=test_logger.name):
+        result = warn_if_frontend_cpu_affinity_spans_numa_nodes(
             test_logger,
             node_root=tmp_path,
             affinity_getter=fail_affinity,
@@ -161,47 +161,56 @@ def test_logging_fails_open_on_unexpected_detection_error(
     records = [record for record in caplog.records if record.name == test_logger.name]
     assert result.status == NumaAffinityStatus.UNKNOWN
     assert result.reason == "unexpected affinity detection error: unexpected failure"
-    assert len(records) == 1
-    assert records[0].levelno == logging.WARNING
+    assert records == []
 
 
-@pytest.mark.parametrize(
-    ("available_cpus", "expected_status", "expected_level", "expected_message"),
-    [
-        (
-            {0, 1},
-            NumaAffinityStatus.SINGLE_NODE,
-            logging.INFO,
-            "confined to one NUMA node",
-        ),
-        (
-            {1, 4},
-            NumaAffinityStatus.MULTIPLE_NODES,
-            logging.WARNING,
-            "spans multiple NUMA nodes",
-        ),
-        (
-            {1, 8},
-            NumaAffinityStatus.UNKNOWN,
-            logging.WARNING,
-            "Unable to determine",
-        ),
-    ],
-)
-def test_logs_exactly_one_affinity_result(
+def test_logs_loud_warning_when_affinity_spans_multiple_nodes(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
-    available_cpus: set[int],
-    expected_status: NumaAffinityStatus,
-    expected_level: int,
-    expected_message: str,
 ):
     _write_node(tmp_path, 0, "0-3")
     _write_node(tmp_path, 1, "4-7")
     test_logger = logging.getLogger("test.frontend.cpu_affinity")
 
-    with caplog.at_level(logging.INFO, logger=test_logger.name):
-        result = log_frontend_cpu_affinity(
+    with caplog.at_level(logging.WARNING, logger=test_logger.name):
+        result = warn_if_frontend_cpu_affinity_spans_numa_nodes(
+            test_logger,
+            node_root=tmp_path,
+            affinity_getter=lambda _pid: {1, 4},
+        )
+
+    records = [record for record in caplog.records if record.name == test_logger.name]
+    assert result.status == NumaAffinityStatus.MULTIPLE_NODES
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    message = records[0].getMessage()
+    assert message.startswith("=" * 80)
+    assert message.endswith("=" * 80)
+    assert "WARNING: Frontend CPU affinity spans multiple NUMA nodes!" in message
+    assert "Available CPUs: 1,4" in message
+    assert "NUMA nodes: 0-1" in message
+    assert "Pin the frontend to CPUs from a single NUMA node." in message
+
+
+@pytest.mark.parametrize(
+    ("available_cpus", "expected_status"),
+    [
+        ({0, 1}, NumaAffinityStatus.SINGLE_NODE),
+        ({1, 8}, NumaAffinityStatus.UNKNOWN),
+    ],
+)
+def test_does_not_log_unless_multiple_nodes_are_detected(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    available_cpus: set[int],
+    expected_status: NumaAffinityStatus,
+):
+    _write_node(tmp_path, 0, "0-3")
+    _write_node(tmp_path, 1, "4-7")
+    test_logger = logging.getLogger("test.frontend.cpu_affinity.silent")
+
+    with caplog.at_level(logging.DEBUG, logger=test_logger.name):
+        result = warn_if_frontend_cpu_affinity_spans_numa_nodes(
             test_logger,
             node_root=tmp_path,
             affinity_getter=lambda _pid: available_cpus,
@@ -209,6 +218,4 @@ def test_logs_exactly_one_affinity_result(
 
     records = [record for record in caplog.records if record.name == test_logger.name]
     assert result.status == expected_status
-    assert len(records) == 1
-    assert records[0].levelno == expected_level
-    assert expected_message in records[0].getMessage()
+    assert records == []

@@ -204,13 +204,13 @@ def _read_cpu_to_node_map(node_root: Path) -> dict[int, int]:
     return cpu_to_node
 
 
-def log_frontend_cpu_affinity(
+def warn_if_frontend_cpu_affinity_spans_numa_nodes(
     logger: logging.Logger,
     *,
     node_root: Path = _NUMA_NODE_ROOT,
     affinity_getter: AffinityGetter | None = None,
 ) -> CpuNumaAffinity:
-    """Detect and log the frontend CPU affinity without blocking startup."""
+    """Warn if the frontend can run across NUMA nodes without blocking startup."""
 
     try:
         result = detect_cpu_numa_affinity(
@@ -219,34 +219,23 @@ def log_frontend_cpu_affinity(
         )
     except Exception as error:
         result = _unknown(reason=f"unexpected affinity detection error: {error}")
-    available_cpus = format_cpu_list(result.available_cpus)
-    numa_nodes = format_cpu_list(result.numa_nodes)
-
-    if result.status == NumaAffinityStatus.SINGLE_NODE:
-        logger.info(
-            "Frontend CPU affinity is confined to one NUMA node "
-            "(available_cpus=%s, numa_nodes=%s)",
-            available_cpus,
-            numa_nodes,
-        )
-    elif result.status == NumaAffinityStatus.MULTIPLE_NODES:
+    if result.status == NumaAffinityStatus.MULTIPLE_NODES:
+        border = "=" * 80
         logger.warning(
-            "Frontend CPU affinity spans multiple NUMA nodes; Tokio worker "
-            "threads may execute across NUMA domains "
-            "(available_cpus=%s, numa_nodes=%s, unmapped_cpus=%s)",
-            available_cpus,
-            numa_nodes,
+            "%s\n"
+            "WARNING: Frontend CPU affinity spans multiple NUMA nodes!\n"
+            "Tokio worker threads may execute across NUMA domains, which can "
+            "degrade performance.\n"
+            "Available CPUs: %s\n"
+            "NUMA nodes: %s\n"
+            "Unmapped CPUs: %s\n"
+            "Pin the frontend to CPUs from a single NUMA node.\n"
+            "%s",
+            border,
+            format_cpu_list(result.available_cpus),
+            format_cpu_list(result.numa_nodes),
             format_cpu_list(result.unmapped_cpus),
-        )
-    else:
-        logger.warning(
-            "Unable to determine whether frontend CPU affinity spans multiple "
-            "NUMA nodes: %s "
-            "(available_cpus=%s, numa_nodes=%s, unmapped_cpus=%s)",
-            result.reason or "unknown error",
-            available_cpus,
-            numa_nodes,
-            format_cpu_list(result.unmapped_cpus),
+            border,
         )
 
     return result

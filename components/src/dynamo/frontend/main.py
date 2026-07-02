@@ -41,7 +41,7 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .cpu_affinity import log_frontend_cpu_affinity
+from .cpu_affinity import warn_if_frontend_cpu_affinity_spans_numa_nodes
 from .frontend_args import FrontendArgGroup, FrontendConfig
 
 if TYPE_CHECKING:
@@ -198,7 +198,7 @@ async def async_main():
         )
 
     loop = asyncio.get_running_loop()
-    log_frontend_cpu_affinity(logger)
+    warn_if_frontend_cpu_affinity_spans_numa_nodes(logger)
     runtime = DistributedRuntime(
         loop,
         config.discovery_backend,
