@@ -77,6 +77,10 @@ hunk changes only link destinations; no prose, tables, fences, frontmatter,
 HTML, or JSX was rendered or reformatted. The generated Fern tree passes both
 `fern check` and `fern docs broken-links`.
 
+The [parser-free lexer spike](link_rewrite_lexer_spike.md) produces
+byte-for-byte identical rewritten output on the current corpus and documents
+the additional grammar that must be maintained without the parser oracle.
+
 ## Remaining boundaries
 
 - This handles Markdown links, images, and reference definitions. Explicit
