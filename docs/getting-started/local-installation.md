@@ -1,15 +1,12 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+title: Local Installation
 sidebar-title: Local Installation
 description: Install and run Dynamo on a local machine or VM with containers or PyPI
 ---
 
-<p align="left">
-  <a href="./local-installation.zh-CN.md" hreflang="zh-CN"><img src="../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
-
-# Local Installation
+[简体中文](./local-installation.zh-CN.md)
 
 This guide walks through installing and running Dynamo on a local machine or VM with one or more GPUs. By the end, you'll have a working OpenAI-compatible endpoint serving a model.
 
@@ -38,13 +35,13 @@ Containers have all dependencies pre-installed. No setup required.
 
 ```bash
 # SGLang
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
 # TensorRT-LLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.1.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1
 
 # vLLM
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
 ```
 
 To run frontend and worker in the same container, either:
@@ -57,6 +54,8 @@ versions and backend guides for run instructions: [SGLang](../backends/sglang/RE
 [TensorRT-LLM](../backends/trtllm/README.md) | [vLLM](../backends/vllm/README.md)
 
 ### Option B: Install from PyPI
+
+Supported for vLLM and SGLang only. Use Option A for TensorRT-LLM.
 
 ```bash
 # Install uv (recommended Python package manager)
@@ -79,19 +78,6 @@ uv pip install --prerelease=allow "ai-dynamo[sglang]"
 
 For CUDA 13 (B300/GB300), the container is recommended. See
 [SGLang install docs](https://docs.sglang.io/get_started/install.html) for details.
-
-**TensorRT-LLM**
-
-```bash
-sudo apt install python3-dev
-pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
-pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
-```
-
-TensorRT-LLM requires `pip` due to a transitive Git URL dependency that
-`uv` doesn't resolve. We recommend using the TensorRT-LLM container for
-broader compatibility. See the [TRT-LLM backend guide](../backends/trtllm/README.md)
-for details.
 
 **vLLM**
 
@@ -210,9 +196,10 @@ The default model `Qwen/Qwen3-0.6B` requires ~2GB of GPU memory. Larger models n
 
 Start with a small model and scale up based on your hardware.
 
-**Python 3.11 with TensorRT-LLM**
+**TensorRT-LLM**
 
-TensorRT-LLM does not support Python 3.11. If you see installation failures with TensorRT-LLM, check your Python version with `python3 --version`. Use Python 3.10 or 3.12 instead.
+TensorRT-LLM is not supported via a local PyPI install. Use the
+`tensorrtllm-runtime` container (Option A).
 
 **Container runs but GPU not detected**
 
@@ -220,10 +207,10 @@ Ensure you passed `--gpus all` to `docker run`. Without this flag, the container
 
 ```bash
 # Correct
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 
 # Wrong -- no GPU access
-docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1
+docker run --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.1
 ```
 
 ## Next Steps

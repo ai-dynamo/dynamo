@@ -3,7 +3,6 @@
 
 import asyncio
 import logging
-import os
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -11,64 +10,54 @@ import sglang as sgl
 from PIL.Image import Image as PILImage
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.sglang._compat import filter_supported_async_generate_kwargs
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
-
-# Escape hatch: set to "1" (or any truthy value) to allow top_logprobs_num >= 1.
-# Default-off because SGLang's tokenizer manager detokenizes top-k tokens
-# per-position serially (O(N) per generated token), causing severe latency
-# degradation. Flip once upstream lands batched top-logprob detokenization:
-# https://github.com/sgl-project/sglang/pull/24447
-_ALLOW_TOP_LOGPROBS_ENV = "DYN_SGL_ALLOW_TOP_LOGPROBS"
-
-_TOP_LOGPROBS_UNSUPPORTED_MSG = (
-    "Dynamo's SGLang backend does not currently support logprobs >= 1 due to "
-    "an O(N) per-position detokenization in the upstream sglang tokenizer "
-    "manager. Use logprobs=0 for chosen-token logprobs, or set "
-    "DYN_SGL_ALLOW_TOP_LOGPROBS=1 to override at your own risk. "
-    "Track the upstream fix at https://github.com/sgl-project/sglang/pull/24447."
+from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
+    IMAGE_URL_KEY,
+    VIDEO_URL_KEY,
+    build_disagg_mm_kwargs,
+    extract_media_urls,
+    raise_if_unextracted_multimodal,
 )
 
-
-def _top_logprobs_allowed() -> bool:
-    """Return True if the DYN_SGL_ALLOW_TOP_LOGPROBS escape hatch is enabled."""
-    return os.environ.get(_ALLOW_TOP_LOGPROBS_ENV, "").lower() not in ("", "0", "false")
-
-
-def _extract_media_urls(mm_data: Dict[str, Any], media_key: str) -> list[str] | None:
-    """Normalize multimodal URL items from the frontend wire format."""
-
-    items = mm_data.get(media_key)
-    if not items:
-        return None
-
-    urls: list[str] = []
-    for item in items:
-        if isinstance(item, str):
-            urls.append(item)
-            continue
-
-        if isinstance(item, dict):
-            url = item.get("Url")
-            if isinstance(url, str):
-                urls.append(url)
-
-    return urls or None
+_SAMPLING_OPTION_FIELDS = (
+    "presence_penalty",
+    "frequency_penalty",
+    "repetition_penalty",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+)
 
 
 def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     nvext = request.get("nvext")
-    if not isinstance(nvext, dict):
-        return False
-    extra_fields = nvext.get("extra_fields")
-    if not isinstance(extra_fields, list):
-        return False
-    return field in extra_fields
+    extra_args = request.get("extra_args") or {}
+    extra_nvext = extra_args.get("nvext") if isinstance(extra_args, dict) else None
+
+    for source in (nvext, extra_nvext):
+        if not isinstance(source, dict):
+            continue
+        extra_fields = source.get("extra_fields")
+        if isinstance(extra_fields, list) and field in extra_fields:
+            return True
+    return False
+
+
+def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract sampling options that SGLang accepts as sampling params."""
+    params = {field: values.get(field) for field in _SAMPLING_OPTION_FIELDS}
+    if values.get("seed") is not None:
+        params["sampling_seed"] = values.get("seed")
+    return params
 
 
 def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
@@ -255,6 +244,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return None
         return mm_hashes
 
+    def _metadata_uploader_from_request(
+        self, request: Dict[str, Any]
+    ) -> MetadataUploader | None:
+        if not getattr(getattr(self.config, "dynamo_args", None), "enable_rl", False):
+            return None
+        return MetadataUploader.from_backend_request(request)
+
     def cleanup(self) -> None:
         """Shutdown the engine and cleanup resources."""
         super().cleanup()
@@ -281,13 +277,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             stop_token_ids = _merged if _merged else None
 
             param_mapping = {
-                "temperature": sampling_opts.get("temperature"),
-                "top_p": sampling_opts.get("top_p"),
-                "top_k": sampling_opts.get("top_k"),
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
                 "stop_token_ids": stop_token_ids,
+                **_sampling_option_params(sampling_opts),
                 **self._get_guided_decoding_params(
                     sampling_opts.get("guided_decoding")
                 ),
@@ -295,11 +289,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             # OpenAI request format
             param_mapping = {
-                "temperature": request.get("temperature"),
-                "top_p": request.get("top_p"),
-                "top_k": request.get("top_k"),
                 "n": request.get("n"),
                 "max_new_tokens": request.get("max_tokens"),
+                **_sampling_option_params(request),
                 **_openai_stop_sampling_params(request),
                 **self._get_guided_decoding_params(request.get("guided_decoding")),
             }
@@ -313,78 +305,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     @staticmethod
     def _build_logprob_kwargs(request: Dict[str, Any]) -> Dict[str, Any]:
-        """Build logprob kwargs for SGLang async_generate from output_options.
-
-        Maps the Dynamo output_options format (shared with vLLM/TRT-LLM) to
-        SGLang's async_generate keyword arguments:
-
-          - return_logprob (bool): enables logprob computation
-          - top_logprobs_num (int): number of top-k logprobs per token
-          - logprob_start_len (int): absolute position in the sequence where
-            logprob computation begins. SGLang defaults this to -1, which
-            means len(prompt) - 1 (i.e. output tokens only). Setting it to 0
-            computes logprobs from the start of the prompt — this is how we
-            implement prompt_logprobs. We don't expose logprob_start_len
-            directly; it's an SGLang-internal detail derived from whether the
-            user requested prompt_logprobs.
-
-        Args:
-            request: Request dict containing optional output_options.
-
-        Returns:
-            Dict of logprob-related kwargs for engine.async_generate().
-        """
-        kwargs: Dict[str, Any] = {}
-        output_options = request.get("output_options", {})
-        if not output_options:
-            return kwargs
-
-        allow_top = _top_logprobs_allowed()
-
-        def _parse(name: str, value: Any) -> Optional[int]:
-            try:
-                parsed = int(value)
-            except (ValueError, TypeError):
-                logging.warning(
-                    f"Invalid {name} value: {value} (must be integer), ignoring"
-                )
-                return None
-            if parsed < 0:
-                logging.warning(
-                    f"Invalid {name} value: {value} (must be non-negative), ignoring"
-                )
-                return None
-            if parsed >= 1 and not allow_top:
-                raise ValueError(_TOP_LOGPROBS_UNSUPPORTED_MSG)
-            return parsed
-
-        logprobs_value = output_options.get("logprobs")
-        if logprobs_value is not None:
-            parsed = _parse("logprobs", logprobs_value)
-            if parsed is not None:
-                kwargs["return_logprob"] = True
-                kwargs["top_logprobs_num"] = parsed
-
-        prompt_logprobs_value = output_options.get("prompt_logprobs")
-        if prompt_logprobs_value is not None:
-            parsed = _parse("prompt_logprobs", prompt_logprobs_value)
-            if parsed is not None:
-                kwargs["return_logprob"] = True
-                # SGLang has a single top_logprobs_num for both prompt
-                # and output tokens, so take the max of the two.
-                kwargs["top_logprobs_num"] = max(
-                    kwargs.get("top_logprobs_num", 0), parsed
-                )
-                # logprob_start_len=0 computes from prompt start;
-                # omitting it (or -1) computes output tokens only.
-                kwargs["logprob_start_len"] = 0
-
-        # Belt-and-suspenders: if return_logprob was requested and the gate is
-        # not open, pin top_logprobs_num=0 so no future code path can flip it on.
-        if kwargs.get("return_logprob") and not allow_top:
-            kwargs["top_logprobs_num"] = 0
-
-        return kwargs
+        return _shared_logprobs.build_sglang_logprob_kwargs(
+            request.get("output_options", {}) or {},
+            allow_top_logprobs=_shared_logprobs.sglang_top_logprobs_allowed(),
+        )
 
     @staticmethod
     def _extract_logprobs(
@@ -392,66 +316,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         num_output_logprobs_so_far: int,
         return_tokens_as_token_ids: bool = False,
     ) -> tuple:
-        """Extract logprobs from SGLang meta_info for new tokens.
-
-        While Dynamo forces stream_output=True (args.py) so that output_ids
-        are disjoint per chunk, SGLang's output_token_logprobs and
-        output_top_logprobs in meta_info are always cumulative. We track an
-        offset to slice out only the new entries each chunk.
-
-        Args:
-            meta_info: SGLang response meta_info dict.
-            num_output_logprobs_so_far: Number of logprob entries already
-                processed in previous chunks.
-
-        Returns:
-            Tuple of (log_probs, top_logprobs, new_total):
-            - log_probs: List of floats (selected token logprob per position)
-            - top_logprobs: List of lists of dicts with rank/token_id/token/logprob
-            - new_total: Updated count of logprob entries processed so far
-        """
-        output_token_logprobs = meta_info.get("output_token_logprobs")
-        if not output_token_logprobs:
-            return None, None, num_output_logprobs_so_far
-
-        new_logprobs = output_token_logprobs[num_output_logprobs_so_far:]
-        if not new_logprobs:
-            return None, None, num_output_logprobs_so_far
-
-        # Extract selected-token logprobs: each entry is (logprob, token_id, text_or_None)
-        log_probs = [float(entry[0]) for entry in new_logprobs]
-
-        # Extract top logprobs if available
-        top_logprobs: list[list[dict[str, Any]]] | None = None
-        output_top = meta_info.get("output_top_logprobs")
-        if output_top:
-            new_top = output_top[num_output_logprobs_so_far:]
-            if new_top:
-                top_logprobs = []
-                for position_entries in new_top:
-                    if position_entries is None:
-                        top_logprobs.append([])
-                        continue
-                    position_list = []
-                    for rank_idx, entry in enumerate(position_entries):
-                        tok_id = entry[1]
-                        token_str = (
-                            f"token_id:{tok_id}"
-                            if return_tokens_as_token_ids
-                            else entry[2]
-                        )
-                        position_list.append(
-                            {
-                                "rank": rank_idx + 1,
-                                "token_id": tok_id,
-                                "token": token_str,
-                                "logprob": float(entry[0]),
-                            }
-                        )
-                    top_logprobs.append(position_list)
-
-        new_total = len(output_token_logprobs)
-        return log_probs, top_logprobs, new_total
+        return _shared_logprobs.extract_from_sglang_meta(
+            meta_info,
+            num_output_logprobs_so_far,
+            return_tokens_as_token_ids=return_tokens_as_token_ids,
+        )
 
     async def generate(
         self, request: Dict[str, Any], context: Context
@@ -474,6 +343,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
         logprob_kwargs = self._build_logprob_kwargs(request)
+        metadata_uploader = self._metadata_uploader_from_request(request)
 
         output_options = request.get("output_options", {})
         return_tokens_as_token_ids = bool(
@@ -486,6 +356,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             logging.debug(f"Request {context.id()} will use LoRA adapter: {lora_path}")
 
         if self.serving_mode == DisaggregationMode.DECODE:
+            raise_if_unextracted_multimodal(request)
+
             # Check if bootstrap_info is pre-computed in the request (from frontend)
             bootstrap_info = request.get("bootstrap_info")
 
@@ -507,8 +379,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routing = request.get("routing") or {}
             dp_rank = routing.get("dp_rank")
 
+            # Decode re-extracts the media so its token layout matches prefill's
+            # and the transferred KV lines up.
+            decode_mm_kwargs = build_disagg_mm_kwargs(request)
+
             decode = await self.engine.async_generate(
                 **input_param,
+                **decode_mm_kwargs,
                 sampling_params=sampling_params,
                 stream=True,
                 **self._routed_experts_kwargs,
@@ -523,13 +400,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **logprob_kwargs,
                 **self._priority_kwargs(priority),
             )
-
             if not self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(
                     decode,
                     context,
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
+                    metadata_uploader=metadata_uploader,
                 ):
                     yield out
             else:
@@ -538,13 +415,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     context,
                     request=request,
                     user_stop_token_ids=user_stop_token_ids,
+                    metadata_uploader=metadata_uploader,
                 ):
                     yield out
         else:
+            raise_if_unextracted_multimodal(request)
+
             # Extract image/video URLs for multimodal requests. SGLang's mm_data_processor
             # handles loading/preprocessing, and the scheduler does vision encoding.
             mm_data = request.get("multi_modal_data", {})
-            video_data = _extract_media_urls(mm_data, "video_url")
+            video_data = extract_media_urls(mm_data, VIDEO_URL_KEY)
 
             image_data: list[str] | list[PILImage] | None
             if self._enable_frontend_decoding:
@@ -552,13 +432,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # _enable_frontend_decoding is True. Assert narrows the
                 # Optional for the type checker without runtime branching.
                 assert self._image_loader is not None
-                image_items = mm_data.get("image_url") or []
+                image_items = mm_data.get(IMAGE_URL_KEY) or []
                 if image_items:
                     image_data = await self._image_loader.load_image_batch(image_items)
                 else:
                     image_data = None
             else:
-                image_data = _extract_media_urls(mm_data, "image_url")
+                image_data = extract_media_urls(mm_data, IMAGE_URL_KEY)
 
             trace_header = context.trace_headers() if self.enable_trace else None
 
@@ -594,6 +474,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     context,
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
+                    metadata_uploader=metadata_uploader,
                 ):
                     yield out
             else:
@@ -602,6 +483,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     context,
                     request=request,
                     user_stop_token_ids=user_stop_token_ids,
+                    metadata_uploader=metadata_uploader,
                 ):
                     yield out
 
@@ -611,6 +493,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         context: Context,
         return_tokens_as_token_ids: bool = False,
         user_stop_token_ids: set[int] | None = None,
+        metadata_uploader: MetadataUploader | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -633,9 +516,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         output_logprobs_per_choice: dict[int, int] = {}
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
+                meta_info = res.get("meta_info", {})
                 # Extract SGLang request ID from the first response and set the future
                 if not request_id_future.done():
-                    meta_info = res.get("meta_info", {})
                     sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
@@ -648,8 +531,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # SGLang omits index for non-n/legacy chunks; treat those as
                 # choice 0 while preserving explicit indices for n>1.
                 output_idx = res.get("index") or 0
+
                 out: dict[str, Any] = {"index": output_idx}
-                finish_reason = res["meta_info"]["finish_reason"]
+                finish_reason = meta_info["finish_reason"]
                 if finish_reason:
                     out["finish_reason"] = normalize_finish_reason(
                         finish_reason["type"]
@@ -672,39 +556,54 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
 
-                # Extract logprobs for new tokens if available
-                (
-                    log_probs,
-                    top_logprobs,
-                    next_logprobs_total,
-                ) = self._extract_logprobs(
-                    res["meta_info"],
-                    output_logprobs_per_choice.get(output_idx, 0),
-                    return_tokens_as_token_ids=return_tokens_as_token_ids,
-                )
-                output_logprobs_per_choice[output_idx] = next_logprobs_total
-                if log_probs is not None:
-                    out["log_probs"] = log_probs
-                if top_logprobs is not None:
-                    out["top_logprobs"] = top_logprobs
+                if metadata_uploader is None:
+                    # Extract logprobs for new tokens if available
+                    (
+                        log_probs,
+                        top_logprobs,
+                        next_logprobs_total,
+                    ) = self._extract_logprobs(
+                        meta_info,
+                        output_logprobs_per_choice.get(output_idx, 0),
+                        return_tokens_as_token_ids=return_tokens_as_token_ids,
+                    )
+                    output_logprobs_per_choice[output_idx] = next_logprobs_total
+                    if log_probs is not None:
+                        out["log_probs"] = log_probs
+                    if top_logprobs is not None:
+                        out["top_logprobs"] = top_logprobs
 
-                routed_experts = res["meta_info"].get("routed_experts")
-                if routed_experts is not None:
-                    # sglang >= 0.5.11 base64-encodes routed_experts upstream.
-                    out["disaggregated_params"] = {"routed_experts": routed_experts}
+                routed_experts = meta_info.get("routed_experts")
+                if routed_experts is not None and metadata_uploader is None:
+                    # sglang >= 0.5.11 base64-encodes routed_experts upstream. It rides
+                    # the engine's opaque engine_data passthrough (surfaced by the frontend
+                    # as nvext.routed_experts); disaggregated_params stays KV-transfer only.
+                    out["engine_data"] = {"routed_experts": routed_experts}
                 if finish_reason:
-                    input_tokens = res["meta_info"]["prompt_tokens"]
-                    completion_tokens = res["meta_info"]["completion_tokens"]
-                    cached_tokens = res["meta_info"]["cached_tokens"]
+                    input_tokens = meta_info.get("prompt_tokens")
+                    completion_tokens = meta_info.get("completion_tokens")
+                    cached_tokens = meta_info.get("cached_tokens")
                     prefill_prompt_tokens_details = None
                     if cached_tokens is not None and cached_tokens > 0:
                         prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    out["completion_usage"] = {
-                        "prompt_tokens": input_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": input_tokens + completion_tokens,
-                        "prompt_tokens_details": prefill_prompt_tokens_details,
-                    }
+                    if input_tokens is not None and completion_tokens is not None:
+                        completion_usage = {
+                            "prompt_tokens": input_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": input_tokens + completion_tokens,
+                        }
+                        if prefill_prompt_tokens_details is not None:
+                            completion_usage[
+                                "prompt_tokens_details"
+                            ] = prefill_prompt_tokens_details
+                        out["completion_usage"] = completion_usage
+                    if metadata_uploader is not None:
+                        try:
+                            await metadata_uploader.upload_choice(output_idx, meta_info)
+                        finally:
+                            meta_info.clear()
+                elif metadata_uploader is not None:
+                    meta_info.clear()
                 if not context.is_stopped():
                     yield out
 
@@ -714,6 +613,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         context: Context,
         request: Dict[str, Any] | None = None,
         user_stop_token_ids: set[int] | None = None,
+        metadata_uploader: MetadataUploader | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process text-based stream output in OpenAI format.
 
@@ -734,9 +634,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id_future: asyncio.Future[str] = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
+                meta_info = res.get("meta_info", {})
                 # Extract SGLang request ID from the first response and set the future
                 if not request_id_future.done():
-                    meta_info = res.get("meta_info", {})
                     sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
@@ -749,9 +649,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # Same defaulting as token mode: non-n chunks are choice 0.
                 index = res.get("index") or 0
+
                 text = res.get("text", "")
 
-                finish_reason = res["meta_info"]["finish_reason"]
+                finish_reason = meta_info["finish_reason"]
                 finish_reason_type = (
                     normalize_finish_reason(finish_reason["type"])
                     if finish_reason
@@ -771,7 +672,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
 
                 response = {
-                    "id": res["meta_info"]["id"],
+                    "id": meta_info["id"],
                     "created": int(time.time()),
                     "choices": [choice_data],
                     "model": self.config.server_args.served_model_name,
@@ -782,10 +683,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request, "stop_reason"
                 ):
                     response_nvext["stop_reason"] = stop_reason
-                routed_experts = res["meta_info"].get("routed_experts")
-                if routed_experts is not None:
+                routed_experts = meta_info.get("routed_experts")
+                if routed_experts is not None and metadata_uploader is None:
                     # sglang >= 0.5.11 base64-encodes routed_experts upstream.
                     response_nvext["routed_experts"] = routed_experts
+                if finish_reason and metadata_uploader is not None:
+                    try:
+                        await metadata_uploader.upload_choice(index, meta_info)
+                    finally:
+                        meta_info.clear()
+                elif metadata_uploader is not None:
+                    meta_info.clear()
                 if response_nvext:
                     response["nvext"] = response_nvext
                 if not context.is_stopped():

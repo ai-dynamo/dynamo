@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: qwen3-6-35b-feature-stack
+title: Qwen3.6 Frontend and Cache Benchmark
+page: benchmarks/qwen3-6-35b-feature-stack.mdx
+claim: Dynamo FD + 8 GiB embedding cache beats vanilla vllm serve by +29.8% RPS / -66.4% TTFT avg (H100) and +31.5% RPS
+  / -43.3% TTFT avg (GB200) on a single GPU
+subtype: feature-stack
+features:
+- frontend-decoding
+- multimodal-embedding-cache
+model:
+  name: Qwen3.6-35B-A3B FP8
+  hf_id: Qwen/Qwen3.6-35B-A3B-FP8
+hardware:
+  gpu: H100 or GB200
+  count: 1
+traffic: 'Sliding-window multimodal: 30 users x 8 turns (240 reqs), window 5, 2400x1080 base64 images, 8,000 text tokens,
+  max_tokens 1024, concurrency 30'
+arms:
+- role: winner
+  name: dynamo-fd-ec
+  deploy: recipes/qwen3.6-35b/deploy/dynamo-fd-ec.yaml
+  perf: recipes/qwen3.6-35b/perf.yaml
+- role: treatment
+  name: dynamo-fd
+  deploy: recipes/qwen3.6-35b/deploy/dynamo-fd.yaml
+  perf: recipes/qwen3.6-35b/perf.yaml
+- role: baseline
+  name: vllm-serve
+  deploy: recipes/qwen3.6-35b/deploy/vllm-serve.yaml
+  perf: recipes/qwen3.6-35b/perf.yaml
+results:
+  available: true
+  summary: Full H100 + GB200 RPS/ITL/TTFT tables from docs/benchmarks/embedding_cache.md, reproduced on-page
+related_recipes: []
+maintainer: null
+gaps:
+- deploy YAMLs are envsubst templates, not directly kubectl-applicable; reproduce via run-benchmark.sh
+- maintainer unknown
+promotion_candidate:
+  deferred_recipe_id: qwen3-6-35b
+  note: winning arm is a recipe-promotion candidate; held back in R1, see deferred_recipes in recipes.yaml

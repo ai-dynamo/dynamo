@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, BackendError, DisaggregationMode, DynamoError, EngineConfig, ErrorType,
     FinishReason, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
-    PreprocessedRequest, WorkerConfig, chunk, usage,
+    LlmRegistration, PreprocessedRequest, WorkerConfig, chunk, usage,
 };
 use futures::stream::BoxStream;
 use rand::Rng;
@@ -77,6 +77,8 @@ impl SglangBridge {
             endpoint: args.common.endpoint,
             endpoint_types: args.common.endpoint_types,
             custom_jinja_template: args.common.custom_jinja_template,
+            disaggregation_mode: args.common.disaggregation_mode,
+            route_to_encoder: args.common.route_to_encoder,
             ..Default::default()
         };
         Ok((engine, config))
@@ -410,15 +412,17 @@ impl LLMEngine for SglangBridge {
         Ok(EngineConfig {
             model: model_path,
             served_model_name: Some(served_model_name),
-            engine_disaggregation_mode: Some(mode),
-            context_length,
-            kv_cache_block_size: info.page_size,
-            total_kv_blocks,
-            max_num_seqs: info.max_running_requests,
-            max_num_batched_tokens: info.max_prefill_tokens.or(info.max_total_num_tokens),
-            data_parallel_size: info.dp_size,
-            bootstrap_host,
-            bootstrap_port,
+            llm: Some(LlmRegistration {
+                context_length,
+                kv_cache_block_size: info.page_size,
+                total_kv_blocks,
+                max_num_seqs: info.max_running_requests,
+                max_num_batched_tokens: info.max_prefill_tokens.or(info.max_total_num_tokens),
+                data_parallel_size: info.dp_size,
+                data_parallel_start_rank: None,
+                bootstrap_host,
+                bootstrap_port,
+            }),
             ..Default::default()
         })
     }

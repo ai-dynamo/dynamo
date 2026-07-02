@@ -18,6 +18,16 @@ DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 logger = logging.getLogger(__name__)
 
 
+def positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be positive, got {parsed}")
+    return parsed
+
+
 def non_negative_int(value: str) -> int:
     try:
         parsed = int(value)
@@ -212,6 +222,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "depends on engine: vLLM 64, SGLang 1, TRTLLM 32.",
     )
     parser.add_argument(
+        "--max-model-len",
+        type=positive_int,
+        default=None,
+        help="Maximum vLLM sequence length, including prompt and generated tokens. "
+        "When omitted, no model-length limit is enforced.",
+    )
+    parser.add_argument(
         "--max-num-seqs",
         type=int,
         default=256,
@@ -374,6 +391,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Corresponds to the 'dp' dimension in AIC CLI output.",
     )
     parser.add_argument(
+        "--aic-nextn",
+        type=int,
+        default=None,
+        help="[EXPERIMENTAL] Number of MTP draft tokens to sample (1-5).",
+    )
+    parser.add_argument(
+        "--aic-nextn-accept-rates",
+        type=str,
+        default=None,
+        help=(
+            "[EXPERIMENTAL] Comma-separated conditional MTP acceptance rates. "
+            "Entry i is P(draft i accepted | all earlier drafts were accepted)."
+        ),
+    )
+    parser.add_argument(
+        "--aic-mtp-seed",
+        type=int,
+        default=42,
+        help="[EXPERIMENTAL] Base RNG seed for mocker MTP burst sampling.",
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=1,
@@ -389,6 +427,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Enable reasoning token output. JSON object with fields: "
         "start_thinking_token_id (u32), end_thinking_token_id (u32), thinking_ratio (0.0-1.0). "
         'Example: \'{"start_thinking_token_id": 123, "end_thinking_token_id": 456, "thinking_ratio": 0.6}\'',
+    )
+    parser.add_argument(
+        "--response-replay-trace-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional Mooncake JSONL trace containing output_token_ids for "
+            "output_replay_id annotation lookup."
+        ),
     )
 
     # Engine type selection
@@ -522,6 +569,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation. "
         "Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay. "
         "For intra-node NVLink, typical value is ~450.",
+    )
+    parser.add_argument(
+        "--kv-transfer-timing-mode",
+        choices=("full_prompt", "destination_missing"),
+        default="full_prompt",
+        help="Physical KV footprint used for coordinated disaggregated transfer timing.",
     )
     parser.add_argument(
         "--kv-cache-dtype",

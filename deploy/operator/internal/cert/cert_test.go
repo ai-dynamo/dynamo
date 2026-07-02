@@ -7,7 +7,11 @@ package cert
 
 import (
 	"context"
+	"crypto/x509"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -45,9 +49,12 @@ func (f *fakeCertProvisioner) AddRotator(_ ctrl.Manager, rotator *certrotator.Ce
 }
 
 const (
-	testSecretName  = "webhook-cert"
-	testServiceName = "my-operator-webhook-service"
-	testNamespace   = "test-ns"
+	testSecretName          = "webhook-cert"
+	testServiceName         = "my-operator-webhook-service"
+	testNamespace           = "test-ns"
+	testManifestServiceName = "manifest-webhook-service"
+	testManifestNamespace   = "manifest-ns"
+	testManifestPath        = "/manifest-convert"
 )
 
 func newScheme() *runtime.Scheme {
@@ -70,10 +77,11 @@ func newTestCertManager(cl *fake.ClientBuilder, cfg *configv1alpha1.WebhookServe
 
 func newTestInjector(cl *fake.ClientBuilder, cfg *configv1alpha1.OperatorConfiguration) *CABundleInjector {
 	return &CABundleInjector{
-		client:    cl.Build(),
-		cfg:       cfg,
-		namespace: testNamespace,
-		logger:    logr.Discard(),
+		client:       cl.Build(),
+		cfg:          cfg,
+		namespace:    testNamespace,
+		logger:       logr.Discard(),
+		pollInterval: defaultCABundlePollInterval,
 	}
 }
 
@@ -97,8 +105,10 @@ func TestCreatePlaceholderSecretIfNotExists_CreatesWhenMissing(t *testing.T) {
 	if secret.Labels[partOfLabel] != partOfValue {
 		t.Errorf("expected label %s=%s, got %s", partOfLabel, partOfValue, secret.Labels[partOfLabel])
 	}
-	if _, ok := secret.Data["ca.crt"]; !ok {
-		t.Error("expected ca.crt key in secret data")
+	for _, key := range []string{defaultCertName, defaultKeyName, defaultCACertName, defaultCAKeyName} {
+		if _, ok := secret.Data[key]; !ok {
+			t.Errorf("expected %s key in secret data", key)
+		}
 	}
 }
 
@@ -110,9 +120,9 @@ func TestCreatePlaceholderSecretIfNotExists_NoopWhenExists(t *testing.T) {
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
-			"tls.crt": []byte("existing-cert"),
-			"tls.key": []byte("existing-key"),
-			"ca.crt":  []byte("existing-ca"),
+			defaultCertName:   []byte("existing-cert"),
+			defaultKeyName:    []byte("existing-key"),
+			defaultCACertName: []byte("existing-ca"),
 		},
 	}
 	cfg := &configv1alpha1.WebhookServer{SecretName: testSecretName}
@@ -127,7 +137,7 @@ func TestCreatePlaceholderSecretIfNotExists_NoopWhenExists(t *testing.T) {
 	if err := cm.client.Get(ctx, types.NamespacedName{Namespace: testNamespace, Name: testSecretName}, secret); err != nil {
 		t.Fatalf("secret should exist: %v", err)
 	}
-	if string(secret.Data["tls.crt"]) != "existing-cert" {
+	if string(secret.Data[defaultCertName]) != "existing-cert" {
 		t.Error("existing secret data should not be overwritten")
 	}
 }
@@ -140,7 +150,7 @@ func TestCertManager_ManualModeClosesChannelImmediately(t *testing.T) {
 	}
 	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 
-	if err := cm.Setup(context.Background(), nil); err != nil {
+	if err := cm.SetupAndRunOnce(context.Background(), nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -162,7 +172,7 @@ func TestCertManager_AutoModeConfiguresRotator(t *testing.T) {
 	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 	cm.provisioner = prov
 
-	if err := cm.Setup(context.Background(), nil); err != nil {
+	if err := cm.SetupAndRunOnce(context.Background(), nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -170,16 +180,23 @@ func TestCertManager_AutoModeConfiguresRotator(t *testing.T) {
 		t.Fatal("expected provisioner.AddRotator to be called")
 	}
 
+	extKeyUsages := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
 	expected := &certrotator.CertRotator{
 		SecretKey: types.NamespacedName{
 			Namespace: testNamespace,
 			Name:      testSecretName,
 		},
-		CertDir:        "/tmp/certs",
-		CAName:         certificateAuthorityName,
-		CAOrganization: certificateAuthorityOrganization,
-		IsReady:        cm.ready,
-		DNSName:        fmt.Sprintf("%s.%s.svc", testServiceName, testNamespace),
+		CertDir:            "/tmp/certs",
+		CAName:             certificateAuthorityName,
+		CAOrganization:     certificateAuthorityOrganization,
+		IsReady:            cm.ready,
+		DNSName:            fmt.Sprintf("%s.%s.svc", testServiceName, testNamespace),
+		ExtKeyUsages:       &extKeyUsages,
+		CaCertDuration:     defaultCACertValidityDuration,
+		ServerCertDuration: defaultServerCertValidity,
+		LookaheadInterval:  defaultLookaheadInterval,
+		CertName:           defaultCertName,
+		KeyName:            defaultKeyName,
 		ExtraDNSNames: []string{
 			testServiceName,
 			fmt.Sprintf("%s.%s", testServiceName, testNamespace),
@@ -195,7 +212,12 @@ func TestCertManager_AutoModeConfiguresRotator(t *testing.T) {
 	// Verify placeholder secret was created
 	secret := &corev1.Secret{}
 	if err := cm.client.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testSecretName}, secret); err != nil {
-		t.Fatalf("placeholder secret should exist: %v", err)
+		t.Fatalf("webhook TLS secret should exist: %v", err)
+	}
+	for _, key := range []string{defaultCertName, defaultKeyName, defaultCACertName, defaultCAKeyName} {
+		if len(secret.Data[key]) == 0 {
+			t.Errorf("expected %s to be populated before rotator registration", key)
+		}
 	}
 }
 
@@ -209,12 +231,59 @@ func TestCertManager_AutoModeProvisionerError(t *testing.T) {
 	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 	cm.provisioner = prov
 
-	err := cm.Setup(context.Background(), nil)
+	err := cm.SetupAndRunOnce(context.Background(), nil)
 	if err == nil {
 		t.Fatal("expected error from provisioner")
 	}
 	if !prov.called {
 		t.Fatal("expected provisioner.AddRotator to be called")
+	}
+}
+
+func TestWaitForMountedCertificate_SucceedsWhenKeyPairIsMounted(t *testing.T) {
+	cfg := &configv1alpha1.WebhookServer{
+		CertDir:     t.TempDir(),
+		SecretName:  testSecretName,
+		ServiceName: testServiceName,
+	}
+	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
+	rotator := cm.newCertRotator()
+	now := time.Now()
+	ca, err := rotator.CreateCACert(now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("creating CA certificate: %v", err)
+	}
+	cert, key, err := rotator.CreateCertPEM(ca, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("creating server certificate: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.CertDir, defaultCertName), cert, 0o600); err != nil {
+		t.Fatalf("writing cert file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.CertDir, defaultKeyName), key, 0o600); err != nil {
+		t.Fatalf("writing key file: %v", err)
+	}
+
+	if err := cm.waitForMountedCertificate(context.Background(), time.Millisecond); err != nil {
+		t.Fatalf("expected mounted certificate to be ready, got: %v", err)
+	}
+}
+
+func TestWaitForMountedCertificate_WaitsWhenKeyPairIsMissing(t *testing.T) {
+	cfg := &configv1alpha1.WebhookServer{
+		CertDir:    t.TempDir(),
+		SecretName: testSecretName,
+	}
+	cm := newTestCertManager(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	err := cm.waitForMountedCertificate(ctx, time.Millisecond)
+	if err == nil {
+		t.Fatal("expected context timeout while waiting for missing certificate files")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got: %v", err)
 	}
 }
 
@@ -271,10 +340,11 @@ func TestInjectIntoValidatingWebhooks_SkipsNonMatchingLabels(t *testing.T) {
 
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	injector := &CABundleInjector{
-		client:    fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(wc).Build(),
-		cfg:       cfg,
-		namespace: "my-ns",
-		logger:    logr.Discard(),
+		client:       fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(wc).Build(),
+		cfg:          cfg,
+		namespace:    "my-ns",
+		logger:       logr.Discard(),
+		pollInterval: defaultCABundlePollInterval,
 	}
 	ctx := context.Background()
 
@@ -309,10 +379,11 @@ func TestInjectIntoValidatingWebhooks_SkipsDifferentNamespace(t *testing.T) {
 
 	cfg := &configv1alpha1.OperatorConfiguration{}
 	injector := &CABundleInjector{
-		client:    fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(wc).Build(),
-		cfg:       cfg,
-		namespace: "my-ns",
-		logger:    logr.Discard(),
+		client:       fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(wc).Build(),
+		cfg:          cfg,
+		namespace:    "my-ns",
+		logger:       logr.Discard(),
+		pollInterval: defaultCABundlePollInterval,
 	}
 	ctx := context.Background()
 
@@ -364,36 +435,75 @@ func TestInjectIntoMutatingWebhooks(t *testing.T) {
 	}
 }
 
-func TestEnsureCRDConversion(t *testing.T) {
-	crd := &apiextensionsv1.CustomResourceDefinition{
+func newConversionCRD(name, plural, singular, kind string) *apiextensionsv1.CustomResourceDefinition {
+	path := testManifestPath
+	return &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: dgdrCRDName,
+			Name: name,
 		},
 		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 			Group: "nvidia.com",
 			Names: apiextensionsv1.CustomResourceDefinitionNames{
-				Plural:   "dynamographdeploymentrequests",
-				Singular: "dynamographdeploymentrequest",
-				Kind:     "DynamoGraphDeploymentRequest",
+				Plural:   plural,
+				Singular: singular,
+				Kind:     kind,
 			},
 			Scope: apiextensionsv1.NamespaceScoped,
 			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
-				{Name: "v1beta1", Served: true, Storage: true},
+				{Name: "v1alpha1", Served: true, Storage: true},
+				{Name: "v1beta1", Served: true, Storage: false},
+			},
+			Conversion: &apiextensionsv1.CustomResourceConversion{
+				Strategy: apiextensionsv1.WebhookConverter,
+				Webhook: &apiextensionsv1.WebhookConversion{
+					ClientConfig: &apiextensionsv1.WebhookClientConfig{
+						Service: &apiextensionsv1.ServiceReference{
+							Name:      testManifestServiceName,
+							Namespace: testManifestNamespace,
+							Path:      &path,
+						},
+					},
+					ConversionReviewVersions: []string{"v1"},
+				},
 			},
 		},
 	}
+}
+
+func newDGDConversionCRD() *apiextensionsv1.CustomResourceDefinition {
+	return newConversionCRD(
+		dgdCRDName,
+		"dynamographdeployments",
+		"dynamographdeployment",
+		"DynamoGraphDeployment",
+	)
+}
+
+func TestInjectCRDConversionCA_ReadsCABundleAndPatchesOnlyCABundle(t *testing.T) {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace,
+			Name:      testSecretName,
+		},
+		Data: map[string][]byte{
+			defaultCertName:   []byte("cert-data"),
+			defaultKeyName:    []byte("key-data"),
+			defaultCACertName: []byte("manual-ca"),
+		},
+	}
+	crd := newDGDConversionCRD()
 
 	cfg := &configv1alpha1.OperatorConfiguration{}
-	cfg.Server.Webhook.ServiceName = testServiceName
-	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(crd), cfg)
+	cfg.Server.Webhook.SecretName = testSecretName
+	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(secret, crd), cfg)
 	ctx := context.Background()
 
-	if err := injector.ensureCRDConversion(ctx, []byte("test-ca")); err != nil {
+	if err := injector.InjectCRDConversionCA(ctx); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	updated := &apiextensionsv1.CustomResourceDefinition{}
-	if err := injector.client.Get(ctx, types.NamespacedName{Name: dgdrCRDName}, updated); err != nil {
+	if err := injector.client.Get(ctx, types.NamespacedName{Name: dgdCRDName}, updated); err != nil {
 		t.Fatalf("failed to get CRD: %v", err)
 	}
 
@@ -403,22 +513,60 @@ func TestEnsureCRDConversion(t *testing.T) {
 	if updated.Spec.Conversion.Strategy != apiextensionsv1.WebhookConverter {
 		t.Errorf("expected Webhook strategy, got %s", updated.Spec.Conversion.Strategy)
 	}
-	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Name != testServiceName {
-		t.Errorf("expected service name my-operator-webhook-service, got %s",
+	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Name != testManifestServiceName {
+		t.Errorf("expected service name %s, got %s",
+			testManifestServiceName,
 			updated.Spec.Conversion.Webhook.ClientConfig.Service.Name)
 	}
-	if string(updated.Spec.Conversion.Webhook.ClientConfig.CABundle) != "test-ca" {
+	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Namespace != testManifestNamespace {
+		t.Errorf("expected service namespace %s, got %s",
+			testManifestNamespace,
+			updated.Spec.Conversion.Webhook.ClientConfig.Service.Namespace)
+	}
+	if updated.Spec.Conversion.Webhook.ClientConfig.Service.Path == nil ||
+		*updated.Spec.Conversion.Webhook.ClientConfig.Service.Path != testManifestPath {
+		t.Errorf("expected service path %s, got %v", testManifestPath,
+			updated.Spec.Conversion.Webhook.ClientConfig.Service.Path)
+	}
+	if string(updated.Spec.Conversion.Webhook.ClientConfig.CABundle) != "manual-ca" {
 		t.Errorf("expected CA bundle, got %q", string(updated.Spec.Conversion.Webhook.ClientConfig.CABundle))
 	}
 }
 
-func TestEnsureCRDConversion_SkipsWhenCRDNotFound(t *testing.T) {
+func TestEnsureCRDConversionCA_ErrorsWhenConversionMissing(t *testing.T) {
+	crd := newDGDConversionCRD()
+	crd.Spec.Conversion = nil
+
 	cfg := &configv1alpha1.OperatorConfiguration{}
-	cfg.Server.Webhook.ServiceName = testServiceName
+	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(crd), cfg)
+
+	if err := injector.ensureCRDConversionCA(context.Background(), []byte("test-ca")); err == nil {
+		t.Fatal("expected error when conversion webhook is missing")
+	}
+}
+
+func TestInjectCRDConversionCA_WaitsWhenSecretNotFound(t *testing.T) {
+	cfg := &configv1alpha1.OperatorConfiguration{}
+	cfg.Server.Webhook.SecretName = testSecretName
+	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+
+	err := injector.InjectCRDConversionCA(ctx)
+	if err == nil {
+		t.Fatal("expected context timeout while waiting for missing secret")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got: %v", err)
+	}
+}
+
+func TestEnsureCRDConversionCA_SkipsWhenCRDNotFound(t *testing.T) {
+	cfg := &configv1alpha1.OperatorConfiguration{}
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()), cfg)
 	ctx := context.Background()
 
-	if err := injector.ensureCRDConversion(ctx, []byte("test-ca")); err != nil {
+	if err := injector.ensureCRDConversionCA(ctx, []byte("test-ca")); err != nil {
 		t.Fatalf("expected no error when CRD not found, got: %v", err)
 	}
 }
@@ -430,9 +578,9 @@ func TestReadCABundle(t *testing.T) {
 			Name:      testSecretName,
 		},
 		Data: map[string][]byte{
-			"tls.crt": []byte("cert-data"),
-			"tls.key": []byte("key-data"),
-			"ca.crt":  []byte("ca-data"),
+			defaultCertName:   []byte("cert-data"),
+			defaultKeyName:    []byte("key-data"),
+			defaultCACertName: []byte("ca-data"),
 		},
 	}
 	cfg := &configv1alpha1.OperatorConfiguration{}
@@ -455,8 +603,8 @@ func TestReadCABundle_ErrorOnMissingCA(t *testing.T) {
 			Name:      testSecretName,
 		},
 		Data: map[string][]byte{
-			"tls.crt": []byte("cert-data"),
-			"tls.key": []byte("key-data"),
+			defaultCertName: []byte("cert-data"),
+			defaultKeyName:  []byte("key-data"),
 		},
 	}
 	cfg := &configv1alpha1.OperatorConfiguration{}

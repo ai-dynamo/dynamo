@@ -11,7 +11,12 @@ The Dynamo TensorRT-LLM image layers Dynamo on top of the upstream `nvcr.io/nvid
 
 ## KV Cache Transfer
 
-Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV Cache Transfer Guide](./trtllm-kv-cache-transfer.md).
+Dynamo with TensorRT-LLM supports three methods for transferring KV cache in disaggregated serving:
+* NIXL with UCX (default)
+* NIXL with Libfabric
+* using UCX directly
+
+For detailed information and configuration instructions for each method, see the [KV Cache Transfer Guide](./trtllm-kv-cache-transfer.md).
 
 ## Request Migration
 

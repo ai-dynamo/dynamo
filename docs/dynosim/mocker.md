@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Live Simulation with Mocker
+subtitle: Mocker simulates production engine scheduling, KV cache, and timing so you can exercise Dynamo's frontend, router, and planner without GPUs.
 ---
 
 Mocker is the live simulated engine in DynoSim. It runs as a Dynamo backend, registers workers, publishes KV events, and exercises the real frontend/router/planner path without requiring GPUs.
@@ -279,6 +280,7 @@ Important notes:
   - engine timing AIC through `--extra-engine-args` / staged engine JSON
   - router-side prefill-load AIC through top-level `--aic-*` flags plus `router_prefill_load_model="aic"` in `--router-config`
 - The Python AIC session bridge is now shared with the live KV router path via the internal `dynamo._internal.aic` module. Mocker CLI behavior is unchanged; this just removes duplicate AIC session code.
+- **Pure-Rust callback.** When AIC is enabled, the mocker builds an `aiconfigurator_core::AicEngine` once at startup and answers per-step prefill/decode latency predictions from Rust with no GIL on the hot path (this is what lets predictions scale across threads in the live/concurrent path). It requires a build with the `aic-forward-pass` feature (release wheels enable it). There is no Python fallback: if the Rust engine cannot be built for the requested model/system/backend, mocker fails fast with a clear error rather than silently degrading to the slower GIL-bound Python op-walk. (`aiconfigurator`'s `compile_engine` covers every supported config, so a build failure indicates a real problem — missing perf data or an unsupported config.)
 - `aiconfigurator` must be able to load the requested performance database for the selected `system/backend/version`. If the SDK is installed but the backing systems data is missing or unreadable, mocker now fails fast at startup with a clear error instead of failing later on first request.
 - In development environments, this may require pointing Python at a source checkout of `aiconfigurator` with real Git LFS payloads materialized in its `systems/` directory.
 

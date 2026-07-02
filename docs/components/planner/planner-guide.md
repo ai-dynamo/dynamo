@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Planner Guide
+subtitle: Configures Planner optimization targets, scaling modes, and PlannerConfig fields for production deployments.
 ---
 
-<p align="left">
-  <a href="./planner-guide.zh-CN.md" hreflang="zh-CN"><img src="../../assets/img/readme-zh-cn-link.svg" alt="简体中文" height="28" /></a>
-</p>
+[简体中文](./planner-guide.zh-CN.md)
 
 The Dynamo Planner is an autoscaling controller that adjusts prefill and decode engine replica counts at runtime to meet latency SLAs. It reads traffic signals (Prometheus metrics or load predictor output) and engine performance models to decide when to scale up or down.
 
@@ -30,35 +29,41 @@ The planner supports four optimization targets that determine how scaling decisi
 
 ## PlannerConfig Reference
 
-The planner is configured via a `PlannerConfig` JSON/YAML object. When using the profiler, this is placed under the `features.planner` section of the DGDR spec:
+The planner is configured via a `PlannerConfig` JSON/YAML object. When using the
+profiler, place this under `spec.features.planner` in the DGDR spec. Any
+PlannerConfig field listed below can be set there; DGDR passes that object to
+the Planner service for validation.
 
 ```yaml
-features:
-  planner:
-    mode: disagg
-    backend: vllm
-    # optimization_target defaults to "throughput" — works out of the box
+spec:
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
+      # optimization_target defaults to "throughput" — works out of the box
 ```
 
 For SLA-based scaling:
 
 ```yaml
-features:
-  planner:
-    optimization_target: sla
-    enable_throughput_scaling: true
-    enable_load_scaling: false
-    pre_deployment_sweeping_mode: rapid
-    mode: disagg
-    backend: vllm
+spec:
+  features:
+    planner:
+      optimization_target: sla
+      enable_throughput_scaling: true
+      enable_load_scaling: false
+      pre_deployment_sweeping_mode: rapid
+      mode: disagg
+      backend: vllm
 ```
 
 To evaluate Planner behavior without changing replica counts, turn on advisory mode:
 
 ```yaml
-features:
-  planner:
-    advisory: true
+spec:
+  features:
+    planner:
+      advisory: true
 ```
 
 Advisory mode is suggestion-only. The Planner computes recommended replica counts, logs them, exports them as diagnostics, and shows them in HTML reports. The recommendations are not applied as scaling decisions: the Planner does not execute scaling actions or change the deployment.
@@ -123,7 +128,6 @@ features:
 | `max_num_fpm_samples` | int | `64` | Maximum retained FPM observations for online tuning or regression. |
 | `fpm_sample_bucket_size` | int | `16` | Number of buckets for observation retirement (must be a perfect square). |
 | `load_scaling_down_sensitivity` | int | `80` | Scale-down sensitivity 0–100 (0=never, 100=aggressive). |
-| `load_metric_samples` | int | `10` | Number of metric samples to collect per decision. |
 | `load_min_observations` | int | `5` | Minimum observations before making scaling decisions. |
 
 ### General Settings
@@ -140,10 +144,12 @@ features:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `load_predictor` | string | `arima` | Prediction method: `constant`, `arima`, `kalman`, or `prophet`. |
-| `load_predictor_log1p` | bool | `false` | Apply log1p transform to load data before prediction. |
+| `load_predictor` | string | `arima` | Prediction method for request count, ISL, and OSL: `constant`, `arima`, `kalman`, or `prophet`. Runtime metadata such as KV hit rate and speculative decode accept length uses the latest valid observation instead. |
+| `load_predictor_log1p` | bool | `false` | Apply log1p transform to predicted request count, ISL, and OSL data. |
 | `prophet_window_size` | int | `50` | Window size (seconds) for Prophet predictor. |
 | `load_predictor_warmup_trace` | string | `null` | Path to a warmup trace file for bootstrapping predictions. |
+
+KV hit rate and speculative decode accept length are runtime engine/router signals, not traffic shape. The planner stores the latest valid observation for each signal and reuses it until a newer valid value arrives. On cold start, missing KV hit rate means no prefix-cache discount, and missing accept length means `1.0`.
 
 ### Kalman Filter Settings
 
@@ -165,6 +171,49 @@ features:
 The same diagnostic signals surfaced in these reports are also exported as Prometheus metrics under the `dynamo_planner_*` prefix—for example estimated TTFT/ITL (`dynamo_planner_estimated_ttft_ms`, `dynamo_planner_estimated_itl_ms`), recommended replica counts (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), per-engine capacity and FPM queue depths, and load/throughput scaling decision enums.
 
 The Replica Counts plot overlays actual prefill/decode replicas with discrete recommendation markers for the Planner's recommended prefill/decode replicas. When `advisory: true`, these recommended counts are suggestions only; the Planner records what it would do without applying the change.
+
+### Scheduling / plugin pipeline
+
+The planner runs through the builtin plugin pipeline by default. The base
+pipeline cadence lives under the `scheduling` sub-tree of `PlannerConfig`;
+plugin registration, transport, and auth settings live under
+`plugin_registration`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `scheduling.scale_interval_seconds` | float | gcd of enabled builtin intervals | Base pipeline cadence. The pipeline wakes once per interval; each plugin's `execution_interval_seconds` decides whether that plugin fires on the tick. By default, the cadence is the gcd of `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`, preserving existing config fire times. |
+| `scheduling.tick_max_duration_seconds` | float | `30.0` | Outer deadline wrapping the full plugin pipeline. Exceeding it aborts the tick; the next tick runs from a clean state. |
+| `plugin_registration.transport.request_timeout_seconds` | float | `5.0` | Per-plugin RPC timeout. Plugins exceeding this raise `PluginTimeoutError`; the stage continues with the remaining plugins. |
+
+Existing planner fields still drive the builtin plugins:
+
+- `load_adjustment_interval_seconds` schedules `builtin_load_propose`, which reads FPM and worker-count observations and applies the current load-based algorithm.
+- `throughput_adjustment_interval_seconds` schedules `builtin_load_predict` and `builtin_throughput_propose`. The throughput proposer requires the prediction from the same tick, so it only fires when the predict plugin fires.
+- When both builtins propose targets in the same tick, load-based scaling runs after throughput-based scaling and preserves the existing behavior: throughput updates the lower-bound replicas, then load-based scaling can adjust above that floor and apply the global GPU budget clamp.
+- After the plugin pipeline finishes, the planner applies the same final `min_endpoint` and GPU-budget safety checks to builtin and external-plugin targets before scaling the deployment.
+
+#### DGDR example
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: my-deployment
+spec:
+  model: Qwen/Qwen3-0.6B
+  features:
+    planner:
+      optimization_target: sla
+      enable_load_scaling: true
+      ttft: 200.0
+      itl: 10.0
+      pre_deployment_sweeping_mode: rapid
+      scheduling:
+        tick_max_duration_seconds: 30.0
+      plugin_registration:
+        transport:
+          request_timeout_seconds: 5.0
+```
 
 ## Integration with Profiler
 
@@ -193,6 +242,7 @@ In the current workflow, run profiling independently for each intended pool, the
 
 - [Planner overview](README.md) — Why LLM inference needs a different autoscaler
 - [Planner Design](../../design-docs/planner-design.md) — Architecture and algorithm internals
-- [Planner Examples](planner-examples.md) — DGDR YAML examples, sample configurations, advanced patterns
+- [Planner Examples](planner-examples.md) — Planner-specific configuration examples
+- [DGDR Examples](../../kubernetes/dgdr-examples.md) — DGDR YAML examples, sample configurations, advanced patterns
 - [Global Planner Guide](global-planner.md) — Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments
 - [Profiler Guide](../profiler/profiler-guide.md) — How profiling data is generated

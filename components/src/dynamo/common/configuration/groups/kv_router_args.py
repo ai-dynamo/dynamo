@@ -27,6 +27,7 @@ from dynamo.common.configuration.utils import (
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_weight",
     "overlap_score_credit",
+    "overlap_score_credit_decay",
     "prefill_load_scale",
     "host_cache_hit_weight",
     "disk_cache_hit_weight",
@@ -43,7 +44,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_reset_states",
     "router_ttl_secs",
     "router_queue_threshold",
-    "router_queue_by_incoming_missing_isl",
+    "router_policy_config",
     "router_event_threads",
     "router_queue_policy",
     "use_remote_indexer",
@@ -109,6 +110,7 @@ class KvRouterConfigBase(ConfigBase):
 
     overlap_score_weight: Optional[float] = None
     overlap_score_credit: float
+    overlap_score_credit_decay: float
     prefill_load_scale: float
     host_cache_hit_weight: float
     disk_cache_hit_weight: float
@@ -125,7 +127,7 @@ class KvRouterConfigBase(ConfigBase):
     router_reset_states: bool
     router_ttl_secs: float
     router_queue_threshold: Optional[float]
-    router_queue_by_incoming_missing_isl: Optional[list[tuple[int, int]]] = None
+    router_policy_config: Optional[str] = None
     router_event_threads: int
     router_queue_policy: str
     use_remote_indexer: bool = False
@@ -180,6 +182,20 @@ class KvRouterArgGroup(ArgGroup):
             ),
             arg_type=float,
             dest="overlap_score_credit",
+        )
+        add_argument(
+            g,
+            flag_name="--router-kv-overlap-score-credit-decay",
+            env_var="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
+            default=0.0,
+            help=(
+                "KV Router: Decay rate for device-local overlap credit as active "
+                "prefill load rises above the least-loaded eligible worker. "
+                "0 disables decay; 1 halves credit at one request-equivalent "
+                "of excess active prefill load."
+            ),
+            arg_type=float,
+            dest="overlap_score_credit_decay",
         )
         g.add_argument(
             "--router-kv-overlap-score-weight",
@@ -386,6 +402,19 @@ class KvRouterArgGroup(ArgGroup):
                 "explicitly for predictable semantics, or use a smaller threshold."
             ),
             arg_type=nullable_float,
+        )
+        add_argument(
+            g,
+            flag_name="--router-policy-config",
+            env_var="DYN_ROUTER_POLICY_CONFIG",
+            default=None,
+            help=(
+                "KV Router: Startup-only YAML policy-family and cache-bucket "
+                "queue configuration. "
+                "When omitted, router_queue_threshold and router_queue_policy define "
+                "the existing single default queue."
+            ),
+            arg_type=str,
         )
         add_argument(
             g,

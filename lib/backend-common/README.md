@@ -8,11 +8,11 @@ SPDX-License-Identifier: Apache-2.0
 > **Work in progress.** The unified backend covers aggregated and
 > disaggregated (prefill/decode) inference, metrics + Prometheus
 > bridging, KV event publishing, KV-aware (DP-rank) routing,
-> health-check canaries, OpenTelemetry tracing, and request-side
-> guided decoding. Logprob response wire, multimodal, diffusion
-> (image/video/DLLM), LoRA, engine routes (pause/resume, profiling,
-> weight updates), text-in-text-out, and snapshot/CRIU are still on
-> the non-unified path. See the
+> health-check canaries, OpenTelemetry tracing, request-side
+> guided decoding, and both completion-side and prompt-side
+> logprobs. Multimodal, diffusion (image/video/DLLM), LoRA, engine
+> routes (pause/resume, profiling, weight updates), text-in-text-out,
+> and snapshot/CRIU are still on the non-unified path. See the
 > [Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps)
 > for the per-engine matrix. The Python `Worker`
 > ([`dynamo.common.backend`](../../components/src/dynamo/common/backend/))
@@ -35,7 +35,7 @@ LLMEngine (trait)              <-- engine boundary (engine.rs)
     |   - start(worker_id) -> Result<EngineConfig, DynamoError>
     |   - generate(request, ctx) -> Result<BoxStream<...>, DynamoError>
     |   - abort(ctx)                            (optional, default no-op)
-    |   - drain() -> Result<(), DynamoError>    (optional, default no-op)
+    |   - is_quiescent() -> Result<Option<bool>, DynamoError> (optional, default Ok(None))
     |   - cleanup() -> Result<(), DynamoError>
     |
     +-- MockerBackend          <-- examples/mocker/src/engine.rs
@@ -48,7 +48,7 @@ Worker (concrete, non-generic)  <-- runtime integration (worker.rs)
     - calls engine.start(worker_id), registers model with discovery
     - serves the generate endpoint with cancellation monitoring
     - on shutdown: discovery unregister -> grace period
-                   -> engine.drain() -> engine.cleanup()
+                   -> drain loop (poll engine.is_quiescent()) -> engine.cleanup()
                    -> 3-phase distributed-runtime teardown
 
 run(engine, config)             <-- src/run.rs
@@ -177,7 +177,7 @@ Roles and `Worker` behavior:
 | Mode | Role | Worker effects |
 | --- | --- | --- |
 | `Aggregated` | Self-contained inference (default) | Standard registration; KV indexer enabled |
-| `Prefill`    | Run prompt → emit 1 token + KV handoff | Registers as `ModelType::Prefill`; advertises `bootstrap_host`/`port` if set in `EngineConfig` |
+| `Prefill`    | Run prompt → emit 1 token + KV handoff | Registers with `ModelType::empty()` + `WorkerType::Prefill`; advertises `bootstrap_host`/`port` if set in `EngineConfig` |
 | `Decode`     | Resume from a prefill peer's KV | Disables the local indexer (KV is owned by the prefill peer) |
 
 The crate re-exports `PrefillResult` and `BootstrapInfo` from
@@ -278,6 +278,23 @@ async fn my_engine_passes_conformance() {
     .expect("conformance");
 }
 ```
+
+Encode-role engines use the narrower handoff contract:
+
+```rust
+#[tokio::test]
+async fn my_encoder_passes_conformance() {
+    dynamo_backend_common::testing::run_encode_conformance(MyEncoder::new_for_test)
+        .await
+        .expect("encode conformance");
+}
+```
+
+`run_encode_conformance` sends a multimodal request and requires one terminal
+`FinishReason::Stop` chunk, empty `token_ids`, and an object-shaped
+`encoder_result`. When terminal usage is provided, it must consistently report
+zero completion tokens. The suite also applies the same KV source, metrics,
+concurrency, cancellation, and cleanup checks as token-engine conformance.
 
 The kit asserts:
 

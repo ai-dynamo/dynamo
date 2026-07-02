@@ -4,7 +4,7 @@
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
@@ -93,16 +93,25 @@ fn apply_routing_decision_with_prune_tracking(
 }
 
 fn apply_prune_removes(trie: &mut RadixTree, entries: Vec<BlockEntry>, event_id_counter: &mut u64) {
+    let mut entries_by_worker = BTreeMap::<WorkerWithDpRank, Vec<BlockEntry>>::new();
     for entry in entries {
+        entries_by_worker
+            .entry(entry.worker)
+            .or_default()
+            .push(entry);
+    }
+
+    for (worker, mut entries) in entries_by_worker {
+        entries.sort_unstable_by_key(|entry| entry.seq_position);
         *event_id_counter += 1;
         let event = RouterEvent::new(
-            entry.worker.worker_id,
+            worker.worker_id,
             KvCacheEvent {
                 event_id: *event_id_counter,
                 data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: vec![entry.key],
+                    block_hashes: entries.into_iter().map(|entry| entry.key).collect(),
                 }),
-                dp_rank: entry.worker.dp_rank,
+                dp_rank: worker.dp_rank,
             },
         );
         let _ = trie.apply_event(event);
@@ -192,15 +201,13 @@ impl KvIndexer {
     /// ### Arguments
     ///
     /// * `token` - A `CancellationToken` for managing shutdown.
-    /// * `expiration_duration` - The amount of time that block usage should be buffered.
     /// * `prune_config` - Optional TTL configuration for approximate-mode routing decisions.
     ///
     /// ### Returns
     ///
     /// A new `KvIndexer`.
-    pub fn new_with_frequency(
+    pub fn new_with_pruning(
         token: CancellationToken,
-        expiration_duration: Option<Duration>,
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
         prune_config: Option<PruneConfig>,
@@ -237,7 +244,7 @@ impl KvIndexer {
                     let mut get_workers_rx = get_workers_rx;
                     let mut dump_rx = dump_rx;
                     let mut flush_rx = flush_rx;
-                    let mut trie = RadixTree::new_with_frequency(expiration_duration);
+                    let mut trie = RadixTree::new();
 
                     let prune_manager = prune_config.map(WorkerPruneManager::new);
                     let mut prune_ready_rx = prune_manager.as_ref().map(|pm| pm.subscribe_ready());
@@ -410,7 +417,7 @@ impl KvIndexer {
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
     ) -> Self {
-        Self::new_with_frequency(token, None, kv_block_size, metrics, None)
+        Self::new_with_pruning(token, kv_block_size, metrics, None)
     }
 
     /// Get a sender for `RouterEvent`s.

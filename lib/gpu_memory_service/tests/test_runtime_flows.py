@@ -255,6 +255,7 @@ def running_gms(monkeypatch, tmp_path):
         server_allocations, "cumem_export_to_shareable_handle", export_fd
     )
 
+    monkeypatch.setattr(client_memory_manager, "cuda_ensure_initialized", lambda: None)
     monkeypatch.setattr(
         client_memory_manager,
         "cuda_set_current_device",
@@ -265,6 +266,11 @@ def running_gms(monkeypatch, tmp_path):
         client_memory_manager,
         "cumem_get_allocation_granularity",
         lambda device: 4096,
+    )
+    monkeypatch.setattr(
+        client_memory_manager,
+        "cumem_create_tolerate_oom",
+        lambda size, device: (True, next(client_handles)),
     )
     monkeypatch.setattr(client_memory_manager, "cuda_synchronize", lambda: None)
     monkeypatch.setattr(
@@ -949,6 +955,31 @@ def test_reallocate_all_handles_reuses_preserved_vas_in_new_layout(
     assert manager.mappings[va].handle != 0
     manager.close()
     _wait_for_server_state(server, ServerState.EMPTY)
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_scratch_reallocation_keeps_committed_allocation_on_cuda_granularity(
+    running_gms,
+):
+    _, socket_path = running_gms
+
+    scratch_size = 1 << 20
+    requested_size = 4097
+    manager = GMSClientMemoryManager(socket_path, device=0, scratch_size=scratch_size)
+    try:
+        va = manager.create_scratch_mapping(size=requested_size, tag="kv_cache")
+        manager.unmap_all_vas()
+        manager.prepare_scratch_for_reallocation()
+
+        manager.connect(RequestedLockType.RW)
+        manager.reallocate_all_handles(tag="kv_cache")
+        allocation = manager.get_handle_info(manager.mappings[va].allocation_id)
+        assert allocation.size == requested_size
+        assert allocation.aligned_size == 8192
+
+        manager.remap_all_vas()
+    finally:
+        manager.close()
 
 
 @pytest.mark.asyncio

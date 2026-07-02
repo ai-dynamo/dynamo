@@ -36,6 +36,7 @@ type CheckpointInfo struct {
 	ArtifactVersion  string
 	CheckpointName   string
 	Ready            bool
+	StartupPolicy    nvidiacomv1alpha1.CheckpointStartupPolicy
 	// Empty means the restore pod targets the default main container.
 	RestoreTargetContainers []string
 }
@@ -71,6 +72,10 @@ func ResolveCheckpointForService(
 	namespace string,
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
 ) (*CheckpointInfo, error) {
+	startupPolicy := nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+	if config != nil && config.StartupPolicy != "" {
+		startupPolicy = config.StartupPolicy
+	}
 	switch {
 	case config == nil || !config.Enabled:
 		return &CheckpointInfo{Enabled: false}, nil
@@ -93,19 +98,12 @@ func ResolveCheckpointForService(
 		if config.TargetContainerName != "" {
 			info.RestoreTargetContainers = []string{config.TargetContainerName}
 		}
+		info.StartupPolicy = startupPolicy
 		return info, nil
 	case config.Identity == nil:
-		// Manual mode with neither checkpointRef nor identity cannot resolve or
-		// create anything: the DGD controller only creates DynamoCheckpoint CRs
-		// in Auto mode, so without a ref or identity a Manual checkpoint would
-		// silently never become Ready. Fail fast instead. (Auto mode legitimately
-		// reaches here with a nil identity; the controller owns CR creation.)
-		if config.Mode == nvidiacomv1alpha1.CheckpointModeManual {
-			return nil, fmt.Errorf(
-				"checkpoint Manual mode requires checkpointRef or identity to be set")
-		}
 		return &CheckpointInfo{
-			Enabled: true,
+			Enabled:       true,
+			StartupPolicy: startupPolicy,
 		}, nil
 	}
 
@@ -120,9 +118,10 @@ func ResolveCheckpointForService(
 	}
 	if existing == nil {
 		return &CheckpointInfo{
-			Enabled:  true,
-			Identity: config.Identity,
-			Hash:     hash,
+			Enabled:       true,
+			Identity:      config.Identity,
+			Hash:          hash,
+			StartupPolicy: startupPolicy,
 		}, nil
 	}
 
@@ -137,6 +136,7 @@ func ResolveCheckpointForService(
 	if config.TargetContainerName != "" {
 		info.RestoreTargetContainers = []string{config.TargetContainerName}
 	}
+	info.StartupPolicy = startupPolicy
 	return info, nil
 }
 

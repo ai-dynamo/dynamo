@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for the TRT-LLM slice of the
-DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR hook: the unified `from_args`
+DYN_ENABLE_TEST_LOGITS_PROCESSOR hook: the unified `from_args`
 tokenizer-init flip, the unified `generate` attach/skip matrix
 threaded through the shared spec entry layer in
 `dynamo.common.backend.engine`, the TRT-LLM realizer (spec entry →
@@ -38,7 +38,7 @@ from dynamo.trtllm.logits_processing.adapter import (
     attach_logits_processors,
 )
 
-ENV = "DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR"
+ENV = "DYN_ENABLE_TEST_LOGITS_PROCESSOR"
 
 pytestmark = [
     pytest.mark.unit,

@@ -83,7 +83,7 @@ Pick the use-case variant and apply:
 SKU=b200       # or h200
 USECASE=chat   # or agentic
 
-kubectl apply -f vllm/nemotron_3_super_agg_${SKU}_${USECASE}.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/agg-${SKU}-${USECASE}/deploy.yaml -n ${NAMESPACE}
 kubectl get dgd nemotron-3-super-${SKU}-${USECASE} -n ${NAMESPACE} -w
 ```
 
@@ -139,10 +139,10 @@ recipes/nemotron-3-super/
     model-download.yaml       # Job: hf download NVFP4 checkpoint (B200)
     model-download-fp8.yaml   # Job: hf download FP8 checkpoint (H200)
   vllm/
-    nemotron_3_super_agg_b200_chat.yaml      # DGD: B200×4, NVFP4, DeepEP high-throughput
-    nemotron_3_super_agg_b200_agentic.yaml   # DGD: B200×4, NVFP4, DeepEP low-latency
-    nemotron_3_super_agg_h200_chat.yaml      # DGD: H200×4, FP8, FlashInfer NVLink one-sided, MTP spec-dec
-    nemotron_3_super_agg_h200_agentic.yaml   # DGD: H200×4, FP8, DeepEP high-throughput, MTP spec-dec
+    agg-b200-chat/deploy.yaml      # DGD: B200×4, NVFP4, DeepEP high-throughput
+    agg-b200-agentic/deploy.yaml   # DGD: B200×4, NVFP4, DeepEP low-latency
+    agg-h200-chat/deploy.yaml      # DGD: H200×4, FP8, FlashInfer NVLink one-sided, MTP spec-dec
+    agg-h200-agentic/deploy.yaml   # DGD: H200×4, FP8, DeepEP high-throughput, MTP spec-dec
   perf/
     README.md                 # benchmark workflow
     perf.yaml                 # AIPerf trace-replay Job

@@ -28,7 +28,14 @@ import uvloop
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from transformers import AutoProcessor
 
-from dynamo.llm import KvRouter, KvRouterConfig, ModelInput, ModelType, register_llm
+from dynamo.llm import (
+    KvRouter,
+    KvRouterConfig,
+    ModelInput,
+    ModelType,
+    WorkerType,
+    register_llm,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 from .handler import MMRouterHandler
@@ -183,6 +190,7 @@ async def worker(runtime: DistributedRuntime) -> None:
         endpoint,
         args.model,
         kv_cache_block_size=args.block_size,
+        worker_type=WorkerType.Aggregated,
     )
 
     logger.info(f"MM Router Worker ready, serving {args.endpoint} endpoint...")

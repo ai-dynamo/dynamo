@@ -60,6 +60,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -102,6 +103,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -148,6 +150,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -195,6 +198,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -242,6 +246,7 @@ mod tests {
                     service_tier: None,
                 },
                 nvext: None,
+                llm_metrics: None,
             };
 
             Annotated {
@@ -314,6 +319,40 @@ mod tests {
             } else if !args.is_null() {
                 panic!("Expected tool call arguments {} but got None", args);
             }
+        }
+
+        /// Assert that a stream with tool calls but no upstream finish chunk ends
+        /// with the synthesized `ToolCalls` terminal chunk required by strict clients.
+        pub fn assert_synthesized_tool_calls_finish(
+            results: &[Annotated<NvCreateChatCompletionStreamResponse>],
+            expected_prefix_chunks: usize,
+            index: u32,
+        ) {
+            assert_eq!(
+                results.len(),
+                expected_prefix_chunks + 1,
+                "expected {expected_prefix_chunks} content/tool-call chunks followed by one synthesized terminal chunk"
+            );
+
+            let choice = results
+                .last()
+                .and_then(|result| result.data.as_ref())
+                .and_then(|data| data.inner.choices.first())
+                .expect("expected a synthesized terminal choice");
+            assert_eq!(choice.index, index, "terminal choice index mismatch");
+            assert_eq!(
+                choice.finish_reason,
+                Some(FinishReason::ToolCalls),
+                "missing synthesized ToolCalls finish reason"
+            );
+            assert!(
+                choice.delta.content.is_none(),
+                "synthesized terminal chunk must not contain content"
+            );
+            assert!(
+                choice.delta.tool_calls.is_none(),
+                "synthesized terminal chunk must not repeat tool calls"
+            );
         }
 
         /// Helper to assert no content or tool calls (for accumulated chunks)
@@ -544,7 +583,7 @@ mod tests {
     async fn test_jailed_stream_early_exit() {
         // Tests detection of complete tool call with unjail in same chunk as the end marker
         // Input: "<TOOLCALL>" + "[{\"name\": \"test\", " + "\"arguments\": {}}]" + "</TOOLCALL>More text"
-        // Expected output: 2 chunks [ToolCall(), Content()]
+        // Expected output: 3 chunks [ToolCall(), Content(), Finish(ToolCalls)]
         let chunks = vec![
             create_mock_response_chunk("<TOOLCALL>".to_string(), 0),
             create_mock_response_chunk("[{\"name\": \"test\", ".to_string(), 0),
@@ -560,14 +599,9 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should have exactly 2 chunks: tool call + trailing content
-        assert_eq!(
-            results.len(),
-            2,
-            "Should have tool call and trailing content"
-        );
+        assert_synthesized_tool_calls_finish(&results, 2, 0);
 
-        // Verify exact output structure: [ToolCall(), Content()]
+        // Verify the non-terminal prefix: [ToolCall(), Content()]
         test_utils::assert_tool_call(&results[0], "test", serde_json::json!({}));
         test_utils::assert_content(&results[1], "More text");
 
@@ -635,7 +669,7 @@ mod tests {
     async fn test_jailed_stream_hermes_parser() {
         // Tests Hermes format tool call parsing with <tool_call> markers
         // Input: "I'll help you with that. " + "<tool_call>{\"name\": \"search_web\", \"arguments\": {\"query\": \"weather today\"}}</tool_call>" + " Let me search for that."
-        // Expected output: 3 chunks [Content(), ToolCall(), Content()]
+        // Expected output: 4 chunks [Content(), ToolCall(), Content(), Finish(ToolCalls)]
         let chunks = vec![
             create_mock_response_chunk("I'll help you with that. ".to_string(), 0),
             create_mock_response_chunk("<tool_call>".to_string(), 0),
@@ -655,14 +689,9 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should have exactly 3 chunks: content + tool call + content
-        assert_eq!(
-            results.len(),
-            3,
-            "Should have content, tool call, and trailing content"
-        );
+        assert_synthesized_tool_calls_finish(&results, 3, 0);
 
-        // Verify exact output structure: [Content(), ToolCall(), Content()]
+        // Verify the non-terminal prefix: [Content(), ToolCall(), Content()]
         test_utils::assert_content(&results[0], "I'll help you with that. ");
         test_utils::assert_tool_call(
             &results[1],
@@ -683,7 +712,7 @@ mod tests {
     async fn test_jailed_stream_mistral_parser() {
         // Tests Mistral format tool call parsing with [{ pattern
         // Input: "Sure, I can help. " + "[{\"name\": \"calculate\", \"arguments\": {\"expression\": \"2+2\"}}]" + " The calculation is done."
-        // Expected output: 3 chunks [Content(), ToolCall(), Content()]
+        // Expected output: 4 chunks [Content(), ToolCall(), Content(), Finish(ToolCalls)]
         let chunks = vec![
             create_mock_response_chunk("Sure, I can help. ".to_string(), 0),
             create_mock_response_chunk("[{".to_string(), 0),
@@ -700,14 +729,9 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should have exactly 3 chunks: content + tool call + content
-        assert_eq!(
-            results.len(),
-            3,
-            "Should have content, tool call, and trailing content"
-        );
+        assert_synthesized_tool_calls_finish(&results, 3, 0);
 
-        // Verify exact output structure: [Content(), ToolCall(), Content()]
+        // Verify the non-terminal prefix: [Content(), ToolCall(), Content()]
         test_utils::assert_content(&results[0], "Sure, I can help. ");
         test_utils::assert_tool_call(
             &results[1],
@@ -725,7 +749,7 @@ mod tests {
     async fn test_jailed_stream_mistral_parser_with_tool_calls_marker() {
         // Tests Mistral format tool call parsing with explicit [TOOL_CALLS] marker
         // Input: "Let me check that for you. " + "[TOOL_CALLS][{\"name\": \"get_time\", \"arguments\": {\"timezone\": \"UTC\"}}]" + " Here's the time."
-        // Expected output: 3 chunks [Content(), ToolCall(), Content()]
+        // Expected output: 4 chunks [Content(), ToolCall(), Content(), Finish(ToolCalls)]
         let chunks = vec![
             create_mock_response_chunk("Let me check that for you. ".to_string(), 0),
             create_mock_response_chunk("[TOOL_CALLS]".to_string(), 0),
@@ -741,14 +765,9 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should have exactly 3 chunks: content + tool call + content
-        assert_eq!(
-            results.len(),
-            3,
-            "Should have content, tool call, and trailing content"
-        );
+        assert_synthesized_tool_calls_finish(&results, 3, 0);
 
-        // Verify exact output structure: [Content(), ToolCall(), Content()]
+        // Verify the non-terminal prefix: [Content(), ToolCall(), Content()]
         test_utils::assert_content(&results[0], "Let me check that for you. ");
         test_utils::assert_tool_call(
             &results[1],
@@ -766,10 +785,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_jailed_stream_mistral_parser_repeated_close_markers() {
+        // Framed Mistral call immediately followed by consecutive [/TOOL_CALLS]
+        // close markers. The jail must consume through ALL adjacent closers so
+        // none leak into trailing content. Regression for the streaming
+        // end-position only advancing past the first close marker.
+        // Input: "[TOOL_CALLS][{...}][/TOOL_CALLS][/TOOL_CALLS]" + " All set."
+        let chunks = vec![
+            create_mock_response_chunk("[TOOL_CALLS]".to_string(), 0),
+            create_mock_response_chunk("[{\"name\": \"get_time\", ".to_string(), 0),
+            create_mock_response_chunk("\"arguments\": {\"timezone\": \"UTC\"}}]".to_string(), 0),
+            create_mock_response_chunk("[/TOOL_CALLS][/TOOL_CALLS]".to_string(), 0),
+            create_mock_response_chunk(" All set.".to_string(), 0),
+        ];
+
+        let input_stream = stream::iter(chunks);
+
+        let jail = JailedStream::builder().tool_call_parser("mistral").build();
+
+        let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
+
+        // Exactly one tool call; no [/TOOL_CALLS] marker leaks into content.
+        let reconstructed = test_utils::reconstruct_content(&results);
+        assert!(
+            !reconstructed.contains("[/TOOL_CALLS]"),
+            "repeated close markers must not leak into normal_text, got: {reconstructed:?}"
+        );
+        assert_eq!(
+            reconstructed.trim(),
+            "All set.",
+            "only the trailing prose should remain as content"
+        );
+        let tool_calls: Vec<_> = results
+            .iter()
+            .filter(|r| {
+                r.data
+                    .as_ref()
+                    .and_then(|d| d.inner.choices.first())
+                    .and_then(|c| c.delta.tool_calls.as_ref())
+                    .is_some_and(|tc| !tc.is_empty())
+            })
+            .collect();
+        assert_eq!(tool_calls.len(), 1, "should emit exactly one tool call");
+        test_utils::assert_tool_call(
+            tool_calls[0],
+            "get_time",
+            serde_json::json!({"timezone": "UTC"}),
+        );
+    }
+
+    #[tokio::test]
     async fn test_jailed_stream_phi4_parser() {
         // Tests Phi4 format tool call parsing with functools[ pattern
         // Input: "I'll analyze this data. " + "functools[{\"name\": \"analyze_data\", \"arguments\": {\"dataset\": \"sales_data\"}}]" + " Analysis complete."
-        // Expected output: 3 chunks [Content(), ToolCall(), Content()]
+        // Expected output: 4 chunks [Content(), ToolCall(), Content(), Finish(ToolCalls)]
         let chunks = vec![
             create_mock_response_chunk("I'll analyze this data. ".to_string(), 0),
             create_mock_response_chunk("functools[".to_string(), 0),
@@ -789,14 +858,9 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should have exactly 3 chunks: content + tool call + content
-        assert_eq!(
-            results.len(),
-            3,
-            "Should have content, tool call, and trailing content"
-        );
+        assert_synthesized_tool_calls_finish(&results, 3, 0);
 
-        // Verify exact output structure: [Content(), ToolCall(), Content()]
+        // Verify the non-terminal prefix: [Content(), ToolCall(), Content()]
         test_utils::assert_content(&results[0], "I'll analyze this data. ");
         test_utils::assert_tool_call(
             &results[1],
@@ -814,7 +878,7 @@ mod tests {
     async fn test_jailed_stream_llama3_json_parser() {
         // Tests Llama3 JSON format tool call parsing with <|python_tag|> pattern
         // Input: "Let me run some code. " + "<|python_tag|>{\"name\": \"execute_code\", \"arguments\": {\"code\": \"print('Hello')\"}}" + " Done executing."
-        // Expected output: 3 chunks [Content(), ToolCall(), Content()]
+        // Expected output: 4 chunks [Content(), ToolCall(), Content(), Finish(ToolCalls)]
         let chunks = vec![
             create_mock_response_chunk("Let me run some code. ".to_string(), 0),
             create_mock_response_chunk("<|python_tag|>".to_string(), 0),
@@ -835,14 +899,9 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should have exactly 3 chunks: content + tool call + content
-        assert_eq!(
-            results.len(),
-            3,
-            "Should have content, tool call, and trailing content"
-        );
+        assert_synthesized_tool_calls_finish(&results, 3, 0);
 
-        // Verify exact output structure: [Content(), ToolCall(), Content()]
+        // Verify the non-terminal prefix: [Content(), ToolCall(), Content()]
         test_utils::assert_content(&results[0], "Let me run some code. ");
         test_utils::assert_tool_call(
             &results[1],
@@ -948,7 +1007,8 @@ mod tests {
         // end-token to actually arrive, so this only fires at stream end.
         //
         // Input: "Starting function call. " + "<TOOLCALL>[{\"name\": \"incomplete_func\", \"arguments\": {" (no end marker)
-        // Expected output: 2 chunks [Content(), ToolCall(incomplete_func, {})]
+        // Expected output: 3 chunks
+        // [Content(), ToolCall(incomplete_func, {}), Finish(ToolCalls)]
         let chunks = vec![
             create_mock_response_chunk("Starting function call. ".to_string(), 0),
             create_mock_response_chunk("<TOOLCALL>".to_string(), 0),
@@ -966,11 +1026,7 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        assert_eq!(
-            results.len(),
-            2,
-            "Should emit prefix content + recovered tool call"
-        );
+        assert_synthesized_tool_calls_finish(&results, 2, 0);
 
         test_utils::assert_content(&results[0], "Starting function call. ");
         test_utils::assert_tool_call(&results[1], "incomplete_func", serde_json::json!({}));
@@ -1018,6 +1074,7 @@ mod tests {
         // [2] Content(" Now let me get the time. ")
         // [3] ToolCall("get_time", {"timezone": "EST"})
         // [4] Content(" Both tasks completed!")
+        // [5] Finish(ToolCalls)
         let chunks = vec![
             create_mock_response_chunk("I'll help with multiple tasks. ".to_string(), 0),
             // First tool call
@@ -1047,12 +1104,7 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // === Verify chunk count ===
-        assert_eq!(
-            results.len(),
-            5,
-            "Should emit exactly 5 chunks as documented above"
-        );
+        assert_synthesized_tool_calls_finish(&results, 5, 0);
 
         // === Verify individual chunks ===
         assert_content(&results[0], "I'll help with multiple tasks. ");
@@ -1075,7 +1127,7 @@ mod tests {
     async fn test_jailed_stream_tool_call_across_many_chunks() {
         // Tests extreme fragmentation: tool call split across 65 individual character chunks
         // Input: "I'll process your request. " + "<TOOLCALL>[{"name": "process_data", "arguments": {}}]</TOOLCALL>" + " Processing complete!"
-        // Expected output: 3 chunks [Content(), ToolCall(), Content()]
+        // Expected output: 4 chunks [Content(), ToolCall(), Content(), Finish(ToolCalls)]
         let chunks = vec![
             create_mock_response_chunk("I'll process your request. ".to_string(), 0),
             create_mock_response_chunk("<".to_string(), 0),
@@ -1156,14 +1208,10 @@ mod tests {
 
         // Should consolidate extreme fragmentation into 3 clean chunks
         // Input: "I'll process your request. " + 54-char tool call + " Processing complete!"
-        // Expected output: [Content(), ToolCall(), Content()]
-        assert_eq!(
-            results.len(),
-            3,
-            "Should consolidate fragments into 3 chunks"
-        );
+        // Expected output: [Content(), ToolCall(), Content(), Finish(ToolCalls)]
+        assert_synthesized_tool_calls_finish(&results, 3, 0);
 
-        // Verify exact output structure
+        // Verify the non-terminal prefix.
         test_utils::assert_content(&results[0], "I'll process your request. ");
         test_utils::assert_tool_call(&results[1], "process_data", serde_json::json!({}));
         test_utils::assert_content(&results[2], " Processing complete!");
@@ -1298,8 +1346,9 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should get 2 chunks: first chunk passes through, stream end releases accumulated
-        assert_eq!(results.len(), 2, "Should have exactly 2 chunks");
+        // The first chunk passes through, stream end releases the accumulated tool
+        // call, and the finish-reason postprocessor adds its terminal chunk.
+        assert_synthesized_tool_calls_finish(&results, 2, 0);
 
         // The second chunk is the accumulated content released when stream ended
         let accumulated_chunk = &results[1];
@@ -1333,17 +1382,30 @@ mod tests {
             "Inner response created should carry forward from real stream chunks, not be 0"
         );
 
-        // Verify accumulated content is returned
+        // The hermes parser (dynamo-parsers 2.0.1, PR #63) never surfaces tool-call
+        // markup to the client: a call truncated at stream end is recovered as a real
+        // tool call and the raw `<tool_call>` markup is stripped, rather than leaking
+        // the buffer as text. So the released chunk carries the recovered call with
+        // empty content (the metadata-preservation checks above are the test's subject).
         let content = &inner.inner.choices[0].delta.content;
-        assert!(content.is_some(), "Should have accumulated content");
-        let content = content.as_ref().unwrap();
-        assert!(
-            test_utils::extract_text(content).contains("<tool_call>"),
-            "Should contain jail start marker in accumulated content"
+        assert_eq!(
+            content.as_ref().map(test_utils::extract_text),
+            Some(""),
+            "Released chunk must not leak raw tool-call markup as content"
         );
-        assert!(
-            test_utils::extract_text(content).contains("incomplete_call"),
-            "Should contain accumulated incomplete content"
+        let tool_calls = inner.inner.choices[0].delta.tool_calls.as_ref();
+        assert_eq!(
+            tool_calls.map(|tc| tc.len()),
+            Some(1),
+            "Truncated call must be recovered as a tool call, not leaked as text"
+        );
+        assert_eq!(
+            tool_calls.unwrap()[0]
+                .function
+                .as_ref()
+                .and_then(|f| f.name.as_deref()),
+            Some("incomplete_call"),
+            "Recovered tool call should carry the parsed function name"
         );
     }
 
@@ -1413,6 +1475,7 @@ mod tests {
         // [0] Content("I'll help you. ")
         // [1] ToolCall("search", {})
         // [2] Content("trailing text that should not be lost")
+        // [3] Finish(ToolCalls)
         let chunks = vec![
             create_mock_response_chunk("I'll help you. ".to_string(), 0),
             create_mock_response_chunk("<tool_call>".to_string(), 0),
@@ -1430,12 +1493,7 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // === Verify chunk count ===
-        assert_eq!(
-            results.len(),
-            3,
-            "Should emit exactly 3 chunks as documented above"
-        );
+        assert_synthesized_tool_calls_finish(&results, 3, 0);
 
         // === Verify individual chunks ===
         assert_content(&results[0], "I'll help you. ");
@@ -1455,7 +1513,7 @@ mod tests {
     async fn test_jailed_stream_early_exit_with_trailing() {
         // Tests early exit when complete tool call is detected in chunk that also contains trailing content
         // Input: "Starting task: " + "<tool_call>{\"name\": \"complete_task\", \"arguments\": {}}" + "</tool_call> Task completed successfully."
-        // Expected output: 3 chunks [Content(), ToolCall(), Content()]
+        // Expected output: 4 chunks [Content(), ToolCall(), Content(), Finish(ToolCalls)]
         let chunks = vec![
             create_mock_response_chunk("Starting task: ".to_string(), 0),
             create_mock_response_chunk(
@@ -1472,14 +1530,9 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // Should have exactly 3 chunks: content + tool call + trailing
-        assert_eq!(
-            results.len(),
-            3,
-            "Should have content, tool call, and trailing content"
-        );
+        assert_synthesized_tool_calls_finish(&results, 3, 0);
 
-        // Verify exact output structure: [Content(), ToolCall(), Content()]
+        // Verify the non-terminal prefix: [Content(), ToolCall(), Content()]
         test_utils::assert_content(&results[0], "Starting task: ");
         test_utils::assert_tool_call(&results[1], "complete_task", serde_json::json!({}));
         test_utils::assert_content(&results[2], " Task completed successfully.");
@@ -1828,6 +1881,7 @@ mod tests {
         // Expected output:
         // [0] Content("text")  // "<TO" held as partial
         // [1] ToolCall("test", {})
+        // [2] Finish(ToolCalls)
         let chunks = vec![
             create_mock_response_chunk("text<TO".to_string(), 0),
             create_mock_response_chunk(
@@ -1845,12 +1899,7 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        // === Verify chunk count ===
-        assert_eq!(
-            results.len(),
-            2,
-            "Should emit exactly 2 chunks: [0] 'text' content, [1] tool call"
-        );
+        assert_synthesized_tool_calls_finish(&results, 2, 0);
 
         // === Verify individual chunks ===
         assert_content(&results[0], "text");
@@ -2152,7 +2201,7 @@ mod tests {
         // "I'll call a function. "
         // + "<tool_call><function=get_weather><parameter=location>San Francisco</parameter><parameter=unit>celsius</parameter></function></tool_call>"
         // + " Done."
-        // Expected output: 3 chunks [Content(), ToolCall(), Content()]
+        // Expected output: 4 chunks [Content(), ToolCall(), Content(), Finish(ToolCalls)]
         let chunks = vec![
             create_mock_response_chunk("I'll call a function. ".to_string(), 0),
             create_mock_response_chunk("<tool_call>".to_string(), 0),
@@ -2175,13 +2224,9 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        assert_eq!(
-            results.len(),
-            3,
-            "Should have content, tool call, and trailing content"
-        );
+        assert_synthesized_tool_calls_finish(&results, 3, 0);
 
-        // Verify exact output structure: [Content(), ToolCall(), Content()].
+        // Verify the non-terminal prefix: [Content(), ToolCall(), Content()].
         test_utils::assert_content(&results[0], "I'll call a function. ");
         test_utils::assert_tool_call(
             &results[1],
@@ -2230,7 +2275,7 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        assert_eq!(results.len(), 3, "Should have 3 chunks");
+        assert_synthesized_tool_calls_finish(&results, 3, 0);
 
         test_utils::assert_content(&results[0], "Let me search for that. ");
         test_utils::assert_tool_call(
@@ -2270,11 +2315,7 @@ mod tests {
 
         let results: Vec<_> = jail.apply_with_finish_reason(input_stream).collect().await;
 
-        assert_eq!(
-            results.len(),
-            3,
-            "Should have content, tool call, and trailing content"
-        );
+        assert_synthesized_tool_calls_finish(&results, 3, 0);
 
         test_utils::assert_content(&results[0], "Before tool call. ");
         test_utils::assert_tool_call(
@@ -2519,6 +2560,7 @@ mod parallel_jail_tests {
                 service_tier: None,
             },
             nvext: None,
+            llm_metrics: None,
         };
 
         Annotated {

@@ -23,12 +23,15 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 func CheckpointID(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (string, error) {
@@ -137,7 +140,9 @@ func CreateOrGetAutoCheckpoint(
 	identity nvidiacomv1alpha1.DynamoCheckpointIdentity,
 	podTemplate corev1.PodTemplateSpec,
 	targetContainerName string,
+	deletionPolicy nvidiacomv1alpha1.CheckpointDeletionPolicy,
 	gpuMemoryService *nvidiacomv1alpha1.GPUMemoryServiceSpec,
+	owner client.Object,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
 	if err := ValidateGMSSnapshotGate("spec.gpuMemoryService", true, gpuMemoryService); err != nil {
 		return nil, err
@@ -152,6 +157,9 @@ func CreateOrGetAutoCheckpoint(
 		if err != nil {
 			return nil, err
 		}
+	}
+	if deletionPolicy == "" {
+		deletionPolicy = nvidiacomv1alpha1.CheckpointDeletionPolicyDelete
 	}
 
 	labels := map[string]string{
@@ -175,6 +183,7 @@ func CreateOrGetAutoCheckpoint(
 			Annotations: map[string]string{
 				snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.DefaultCheckpointArtifactVersion,
 				commonconsts.CheckpointAutoAnnotation:                commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointDeletionPolicyAnnotation:      string(deletionPolicy),
 			},
 		},
 		Spec: nvidiacomv1alpha1.DynamoCheckpointSpec{
@@ -186,6 +195,16 @@ func CreateOrGetAutoCheckpoint(
 			},
 		},
 	}
+	if owner != nil {
+		if err := controllerutil.SetControllerReference(owner, ckpt, c.Scheme()); err != nil {
+			return nil, fmt.Errorf("failed to set checkpoint owner reference: %w", err)
+		}
+	}
+	if deletionPolicy == nvidiacomv1alpha1.CheckpointDeletionPolicyRetain {
+		ckpt.OwnerReferences = nil
+	}
+	commonController.AddFinalizer(ckpt)
+
 	if err := c.Create(ctx, ckpt); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
 			return nil, fmt.Errorf("failed to create checkpoint %s: %w", ckpt.Name, err)
@@ -203,6 +222,31 @@ func CreateOrGetAutoCheckpoint(
 		if existingCheckpointID != checkpointID {
 			return nil, fmt.Errorf("checkpoint %s already exists with checkpoint ID %s", ckpt.Name, existingCheckpointID)
 		}
+		original := existing.DeepCopy()
+		desiredDeletionPolicy := string(deletionPolicy)
+		desired := existing.DeepCopy()
+		if desired.Annotations == nil {
+			desired.Annotations = map[string]string{}
+		}
+		desired.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = desiredDeletionPolicy
+		commonController.AddFinalizer(desired)
+		if deletionPolicy == nvidiacomv1alpha1.CheckpointDeletionPolicyRetain {
+			desired.OwnerReferences = nil
+		} else if owner != nil {
+			if err := controllerutil.SetControllerReference(owner, desired, c.Scheme()); err != nil {
+				return nil, fmt.Errorf("failed to set checkpoint owner reference: %w", err)
+			}
+		}
+		if !equality.Semantic.DeepEqual(original.Annotations, desired.Annotations) ||
+			!equality.Semantic.DeepEqual(original.OwnerReferences, desired.OwnerReferences) ||
+			!equality.Semantic.DeepEqual(original.Finalizers, desired.Finalizers) {
+			patch := client.MergeFrom(original)
+			if err := c.Patch(ctx, desired, patch); err != nil {
+				return nil, fmt.Errorf("failed to update checkpoint %s deletion policy: %w", ckpt.Name, err)
+			}
+			existing = desired
+		}
+
 		return existing, nil
 	}
 

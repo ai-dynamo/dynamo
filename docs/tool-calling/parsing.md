@@ -27,5 +27,6 @@ In `vllm serve`, `sglang serve`, and `trtllm-serve`, tool-call and reasoning par
 - [Parser Configuration](parser-configuration.md) -- which flags combine, and which combinations don't make sense
 - [Tool Call Parsing (Dynamo)](README.md) / [Reasoning Parsing (Dynamo)](../reasoning/README.md) -- Dynamo-native parser names
 - [Parser Engine Fallback](engine-fallback.md) -- upstream vLLM / SGLang parsers
+- [Tool Calling Probe Snapshot for Dynamo 1.2](release-1.2-probe-snapshot.md) -- static release-readiness probe results
 - [Troubleshooting Tool Calls](troubleshooting.md) -- capture `logprobs` so issues can be localized
 - [Frontend Configuration Reference](../components/frontend/configuration.md) -- full CLI flag reference

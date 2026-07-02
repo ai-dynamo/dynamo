@@ -15,7 +15,7 @@ Go, Ginkgo v2, and typed CRD structs.
      --set operator.image.tag=<your-branch-tag>
    ```
 2. `kubectl` configured for the cluster
-3. Go 1.25+
+3. Go 1.26.3+
 
 ## Image Override
 
@@ -65,17 +65,19 @@ go test ./test/e2e/dgdr/ -v -ginkgo.v \
 
 ### Ginkgo labels
 
-Each Describe is tagged with one or more labels you can filter on via
-`-ginkgo.label-filter`:
+Specs are tagged with labels you can filter on via `-ginkgo.label-filter`:
 
 | Label | Applies to | Meaning |
 |---|---|---|
-| `validation` | `validation_test.go` only | Webhook dry-run; no resources persisted, no GPUs needed. |
-| `gpu_0` | all suites | Can run on a node with 0 GPUs (validation, plus mocker-mode lifecycle/profiling). |
-| `integration`, `k8s`, `nightly` | all suites | Categorical tags used by CI scheduling. |
+| `validation` | `validation_test.go` | Webhook, CRD metadata, API discovery, and conversion checks. |
+| `rapid` | rapid DGDR profiling specs | Rapid profiling strategy. |
+| `thorough` | thorough DGDR profiling specs | Thorough profiling strategy. |
+| `gpu_0` | validation and rapid mocker specs | Does not require schedulable Kubernetes GPUs. |
+| `gpu_1` | thorough or non-mocker deployment specs | Requires at least one schedulable Kubernetes GPU. |
+| `e2e`, `integration`, `k8s`, `nightly` | full DGDR e2e suite | Categorical tags used by CI scheduling. |
 
-Use `validation` (not `gpu_0`) when you only want the webhook validation
-suite — `gpu_0` matches every Describe in this directory.
+Use `validation` when you only want webhook/metadata/conversion checks. Use
+`rapid && gpu_0` for the GPU-free profiling path.
 
 ## CLI Flags
 

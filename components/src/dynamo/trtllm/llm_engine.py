@@ -33,15 +33,17 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 from torch.cuda import device_count
 
 from dynamo._core import Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend import telemetry
 from dynamo.common.backend.disagg import require_prefill_result
 from dynamo.common.backend.dp_rank import forced_dp_rank, validate_global_dp_rank
 from dynamo.common.backend.engine import (
-    TEST_LOGITS_PROCESSOR_ENV,
+    DYN_ENABLE_TEST_LOGITS_PROCESSOR,
     EngineConfig,
     GenerateChunk,
     GenerateRequest,
     LLMEngine,
+    LlmRegistration,
     LogitsProcessorSpec,
     is_generation_stage,
     logits_processors_for_request,
@@ -75,10 +77,6 @@ if TYPE_CHECKING:
     from dynamo.trtllm.metrics import AdditionalMetricsCollector
 
 logger = logging.getLogger(__name__)
-
-# Match legacy `trtllm/main.py` so prefill drain behaves the same.
-_DRAIN_TIMEOUT_S = 30.0
-_DRAIN_POLL_INTERVAL_S = 0.5
 
 # 1021 is the largest 10-bit prime — spreads machine_ids more evenly
 # under modulo than 1024 would. Matches legacy
@@ -290,7 +288,7 @@ class TrtllmLLMEngine(LLMEngine):
         # explicit user `skip_tokenizer_init=True` can't starve the processor.
         # Gated to generation roles for the same reason as the spec resolution
         # below. The flag is TRT-LLM-shaped; each backend sets its own.
-        if os.getenv(TEST_LOGITS_PROCESSOR_ENV) == "1" and is_generation_stage(
+        if os.getenv(DYN_ENABLE_TEST_LOGITS_PROCESSOR) == "1" and is_generation_stage(
             _TRTLLM_TO_COMMON_DISAGG[config.disaggregation_mode]
         ):
             engine_args["skip_tokenizer_init"] = False
@@ -336,6 +334,9 @@ class TrtllmLLMEngine(LLMEngine):
         # Resolve the engine-declared spec now the engine (and its tokenizer)
         # is initialized; see `logits_processor_spec()`.
         self._logits_processor_spec = await self.logits_processor_spec()
+        # TODO: Thread runtime and shutdown_event through unified LLMEngine
+        # startup so the TRT-LLM monitor can match the legacy shutdown path.
+        self._engine.start_health_monitor()
 
         from tensorrt_llm.metrics import MetricsCollector
 
@@ -378,11 +379,13 @@ class TrtllmLLMEngine(LLMEngine):
         return EngineConfig(
             model=self.model_name,
             served_model_name=self.served_model_name,
-            context_length=self.max_seq_len,
-            kv_cache_block_size=self.kv_block_size,
-            max_num_seqs=self.max_batch_size,
-            max_num_batched_tokens=self.max_num_tokens,
-            data_parallel_size=self._attention_dp_size,
+            llm=LlmRegistration(
+                context_length=self.max_seq_len,
+                kv_cache_block_size=self.kv_block_size,
+                max_num_seqs=self.max_batch_size,
+                max_num_batched_tokens=self.max_num_tokens,
+                data_parallel_size=self._attention_dp_size,
+            ),
         )
 
     # TRT-LLM's `get_kv_cache_events` / `get_stats` block the calling
@@ -769,6 +772,24 @@ class TrtllmLLMEngine(LLMEngine):
             self._default_sampling_params, request
         )
 
+        # TRT-LLM's `logprobs=0` disables computation entirely. Floor at 1
+        # so a `logprobs=0` request still gets the chosen-token logprob;
+        # the raw requested count gates top_logprobs emission below.
+        (
+            requested_logprobs_count,
+            prompt_logprobs_count,
+        ) = _shared_logprobs.parse_logprob_options(
+            request.get("output_options", {}) or {}
+        )
+        if requested_logprobs_count is not None and hasattr(
+            sampling_params, "logprobs"
+        ):
+            sampling_params.logprobs = max(1, requested_logprobs_count)
+        if prompt_logprobs_count is not None and hasattr(
+            sampling_params, "prompt_logprobs"
+        ):
+            sampling_params.prompt_logprobs = prompt_logprobs_count
+
         # Prefill: context_only handle → packed into the response.
         # Decode: read prefill peer's handle, flip to generation_only.
         disaggregated_params: LlmDisaggregatedParams | None = None
@@ -797,6 +818,8 @@ class TrtllmLLMEngine(LLMEngine):
             elif self.max_seq_len is not None:
                 sampling_params.max_tokens = max(1, self.max_seq_len - len(token_ids))
 
+        # TODO: mirror visible/hidden stop-token handling from the disagg
+        # path (handler_base.py) into a shared helper. See PR #9778.
         ignore_eos = stop_conditions.get("ignore_eos")
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos
@@ -852,12 +875,39 @@ class TrtllmLLMEngine(LLMEngine):
                         "index": output_idx,
                     }
 
+                    # output.logprobs is cumulative in lockstep with
+                    # output.token_ids — reuse the same slice offset.
+                    (
+                        log_probs,
+                        top_logprobs,
+                    ) = _shared_logprobs.extract_from_completion_output(
+                        output,
+                        tokens_so_far,
+                        fallback_to_first_on_missing=True,
+                        include_bytes=False,
+                    )
+                    if log_probs is not None:
+                        out["log_probs"] = log_probs
+                    if (
+                        top_logprobs is not None
+                        and requested_logprobs_count is not None
+                        and requested_logprobs_count > 0
+                    ):
+                        out["top_logprobs"] = top_logprobs
+
                     if output.finish_reason:
                         out["finish_reason"] = str(output.finish_reason)
 
                     if out.get("finish_reason") or res.finished:
                         if not out.get("finish_reason"):
                             out["finish_reason"] = "unknown"
+                        # TRT-LLM shares vLLM's prompt_logprobs shape.
+                        if prompt_logprobs_count is not None:
+                            prompt_payload = _shared_logprobs.extract_prompt_logprobs_from_completion_output(
+                                res
+                            )
+                            if prompt_payload is not None:
+                                out["engine_data"] = {"prompt_logprobs": prompt_payload}
                         prompt_tokens = len(token_ids)
                         total_completion_tokens = sum(
                             len(o.token_ids) for o in res.outputs
@@ -1004,51 +1054,11 @@ class TrtllmLLMEngine(LLMEngine):
             extras={"priority": 1.0},
         )
 
-    async def drain(self) -> None:
-        """Prefill-only: poll until in-flight requests finish so a
-        decode peer's NIXL pull doesn't see freed GPU memory (#7319).
-        Mirrors legacy `_make_drain_callback`."""
-        if (
-            self._engine is None
-            or self.disaggregation_mode != DisaggregationMode.PREFILL
-        ):
-            return
-
-        deadline = asyncio.get_running_loop().time() + _DRAIN_TIMEOUT_S
-        logger.info(
-            "Draining in-flight requests on prefill worker (timeout=%.1fs)",
-            _DRAIN_TIMEOUT_S,
-        )
-        # The stats stream can raise asyncio.TimeoutError when the engine
-        # has nothing fresh to report, or StopAsyncIteration when the
-        # underlying iterator is exhausted — both are benign and just mean
-        # "no signal this tick, try again". A wider `Exception` would
-        # swallow code bugs introduced later; the test stub raises
-        # RuntimeError to exercise the retry path.
-        _BENIGN_POLL = (asyncio.TimeoutError, StopAsyncIteration, RuntimeError)
-        while asyncio.get_running_loop().time() < deadline:
-            try:
-                stats_iter = self._engine.llm.get_stats_async(timeout=2)
-                stat = await anext(stats_iter)
-                active = stat.get("numActiveRequests", 0)
-                queued = stat.get("numQueuedRequests", 0)
-                if active + queued == 0:
-                    logger.info("All in-flight requests drained")
-                    return
-                logger.info(
-                    "Waiting for %d in-flight request(s) (active=%d, queued=%d)",
-                    active + queued,
-                    active,
-                    queued,
-                )
-            except _BENIGN_POLL as e:
-                logger.debug("Stats poll failed during drain: %s", e)
-            await asyncio.sleep(_DRAIN_POLL_INTERVAL_S)
-        logger.warning(
-            "Drain timeout (%.1fs) reached; proceeding with shutdown — "
-            "some NIXL transfers may still be in flight",
-            _DRAIN_TIMEOUT_S,
-        )
+    # TRT-LLM deliberately does not override is_quiescent (inherits None: wait
+    # the full drain budget). It has no signal for "pending KV transfers done":
+    # iteration stats stop arriving once the worker is idle, so active == 0 is
+    # never observed; and _active_requests is popped at handoff, before decode
+    # pulls the KV. The budget alone gives decode time to drain.
 
     async def cleanup(self) -> None:
         # Stop the publisher threads BEFORE engine shutdown so they don't
@@ -1062,6 +1072,15 @@ class TrtllmLLMEngine(LLMEngine):
         self._metrics_thread = None
         self._kv_publishers.clear()
         self._pause_controller = None
+        # Abort any still-tracked requests so llm.shutdown() runs on an idle
+        # engine. Mostly a no-op for prefill (popped at handoff); matters for
+        # decode/aggregated workers mid-generation.
+        for result in list(self._active_requests.values()):
+            try:
+                result.abort()
+            except Exception:
+                logger.debug("abort during cleanup failed", exc_info=True)
+        self._active_requests.clear()
         if self._engine is not None:
             await self._engine.cleanup()
             logger.info("TensorRT-LLM engine shutdown")

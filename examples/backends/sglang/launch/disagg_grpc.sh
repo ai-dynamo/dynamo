@@ -61,10 +61,12 @@ done
 
 DYN_SYSTEM_PORT="$PREFILL_SYSTEM_PORT" \
 python3 -m dynamo.sglang_grpc \
+    --disaggregation-mode prefill \
     --sglang-grpc-endpoint "http://127.0.0.1:$PREFILL_GRPC_PORT" &
 
 DYN_SYSTEM_PORT="$DECODE_SYSTEM_PORT" \
 python3 -m dynamo.sglang_grpc \
+    --disaggregation-mode decode \
     --sglang-grpc-endpoint "http://127.0.0.1:$DECODE_GRPC_PORT" &
 
 wait_any_exit

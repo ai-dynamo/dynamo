@@ -87,6 +87,23 @@ class _FakeRustModel:
         return self._capacity
 
 
+class _FakeCapacity:
+    def __init__(
+        self,
+        *,
+        rps,
+        itl_ms=None,
+        ttft_ms=None,
+        e2e_latency_ms=None,
+        eligible=True,
+    ):
+        self.rps = rps
+        self.itl_ms = itl_ms
+        self.ttft_ms = ttft_ms
+        self.e2e_latency_ms = e2e_latency_ms
+        self.eligible = eligible
+
+
 def _install_fake_rust(monkeypatch, fake_model: _FakeRustModel) -> None:
     _FakeRustFactory.next_model = fake_model
     _FakeRustFactory.last_kwargs = None
@@ -99,7 +116,12 @@ def _install_fake_rust(monkeypatch, fake_model: _FakeRustModel) -> None:
     monkeypatch.setattr(rust_adapter, "RustEnginePerfModel", _FakeRustFactory)
 
 
-def _config(*, dp: int = 1, min_observations: int = 5) -> PlannerConfig:
+def _config(
+    *,
+    dp: int = 1,
+    min_observations: int = 5,
+    speculative_nextn: int = 0,
+) -> PlannerConfig:
     pick = PickedParallelConfig(dp=dp)
     return PlannerConfig.model_construct(
         aic_perf_model=AICPerfModelSpec.model_construct(
@@ -114,15 +136,17 @@ def _config(*, dp: int = 1, min_observations: int = 5) -> PlannerConfig:
         fpm_sample_bucket_size=16,
         ttft_ms=500.0,
         itl_ms=50.0,
+        speculative_nextn=speculative_nextn,
     )
 
 
-def _caps() -> EngineCapabilities:
+def _caps(*, speculative_nextn: int | None = None) -> EngineCapabilities:
     return EngineCapabilities(
         max_num_batched_tokens=1024,
         max_num_seqs=128,
         max_kv_tokens=100_000,
         kv_cache_block_size=16,
+        speculative_nextn=speculative_nextn,
     )
 
 
@@ -143,6 +167,23 @@ def _prefill_fpm(
         queued_requests=QueuedRequestMetrics(
             num_prefill_requests=1 if queued_tokens else 0,
             sum_prefill_tokens=queued_tokens,
+        ),
+    )
+
+
+def _decode_fpm(
+    *,
+    requests: int = 1,
+    kv_tokens: int = 128,
+    wall_time: float = 0.01,
+) -> ForwardPassMetrics:
+    return ForwardPassMetrics(
+        worker_id="w0",
+        dp_rank=0,
+        wall_time=wall_time,
+        scheduled_requests=ScheduledRequestMetrics(
+            num_decode_requests=requests,
+            sum_decode_kv_tokens=kv_tokens,
         ),
     )
 
@@ -195,6 +236,86 @@ def test_missing_capability_fields_use_rust_shim_defaults(monkeypatch):
         "max_num_seqs": rust_adapter.DEFAULT_MAX_NUM_SEQS,
         "max_kv_tokens": rust_adapter.DEFAULT_MAX_KV_TOKENS,
     }
+
+
+@pytest.mark.parametrize(
+    ("capability_nextn", "config_nextn", "expected_nextn"),
+    [
+        (3, 5, "3"),
+        (None, 4, "4"),
+    ],
+)
+def test_aic_config_requests_raw_spec_decode_iteration_time(
+    monkeypatch,
+    capability_nextn,
+    config_nextn,
+    expected_nextn,
+):
+    fake = _FakeRustModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        }
+    )
+    _install_fake_rust(monkeypatch, fake)
+
+    PlannerEnginePerfModel(
+        worker_type="decode",
+        config=_config(speculative_nextn=config_nextn),
+        capabilities=_caps(speculative_nextn=capability_nextn),
+    )
+
+    assert _FakeRustFactory.last_kwargs is not None
+    aic_config = _FakeRustFactory.last_kwargs["aic_config"]
+    assert aic_config.kwargs["extra"] == {
+        "nextn": expected_nextn,
+        "nextn_accept_rates": rust_adapter.RAW_AIC_NEXTN_ACCEPT_RATES,
+    }
+
+
+def test_capability_nextn_update_rebuilds_aic_model_and_replays_fpms(monkeypatch):
+    first = _FakeRustModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        }
+    )
+    _install_fake_rust(monkeypatch, first)
+    model = PlannerEnginePerfModel(
+        worker_type="decode",
+        config=_config(),
+        capabilities=_caps(),
+    )
+    fpm = _decode_fpm(requests=2, kv_tokens=256, wall_time=0.02)
+    model.add_observations({("w0", 0): fpm})
+    assert first.tuned_iterations == [[fpm]]
+
+    second = _FakeRustModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        }
+    )
+    _FakeRustFactory.next_model = second
+
+    model.update_capabilities(_caps(speculative_nextn=3))
+
+    assert _FakeRustFactory.last_kwargs is not None
+    aic_config = _FakeRustFactory.last_kwargs["aic_config"]
+    assert aic_config.kwargs["extra"] == {
+        "nextn": "3",
+        "nextn_accept_rates": rust_adapter.RAW_AIC_NEXTN_ACCEPT_RATES,
+    }
+    assert second.tuned_iterations == [[fpm]]
 
 
 def test_rust_none_result_remains_unavailable(monkeypatch):
@@ -268,6 +389,106 @@ def test_capacity_request_passes_kv_hit_rate(monkeypatch):
     assert model.find_engine_capacity_rps(isl=1000, osl=100, kv_hit_rate=0.4) is None
     assert fake.capacity_requests
     assert fake.capacity_requests[0].kwargs["kv_hit_rate"] == 0.4
+
+
+def test_prefill_capacity_does_not_pass_accept_length(monkeypatch):
+    fake = _FakeRustModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        },
+        capacity=_FakeCapacity(rps=10.0, ttft_ms=100.0),
+    )
+    _install_fake_rust(monkeypatch, fake)
+    model = PlannerEnginePerfModel(
+        worker_type="prefill",
+        config=_config(min_observations=1),
+        capabilities=_caps(),
+    )
+
+    capacity = model.find_engine_capacity_rps(
+        isl=1000,
+        osl=100,
+        ttft_sla_ms=500.0,
+        accept_length=2.0,
+    )
+
+    assert "accept_length" not in fake.capacity_requests[0].kwargs
+    assert capacity is not None
+    assert capacity.rps == 10.0
+
+
+def test_decode_capacity_passes_accept_length_to_rust(monkeypatch):
+    fake = _FakeRustModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        },
+        capacity=_FakeCapacity(rps=200.0, itl_ms=25.0),
+    )
+    _install_fake_rust(monkeypatch, fake)
+    model = PlannerEnginePerfModel(
+        worker_type="decode",
+        config=_config(min_observations=1),
+        capabilities=_caps(),
+    )
+
+    capacity = model.find_engine_capacity_rps(
+        isl=1000,
+        osl=100,
+        itl_sla_ms=30.0,
+        accept_length=2.0,
+    )
+
+    assert fake.capacity_requests[0].kwargs["itl_sla_ms"] == 30.0
+    assert fake.capacity_requests[0].kwargs["accept_length"] == 2.0
+    assert capacity is not None
+    assert capacity.rps == 200.0
+    assert capacity.itl_ms == 25.0
+
+
+def test_agg_capacity_passes_accept_length_to_rust(monkeypatch):
+    fake = _FakeRustModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        },
+        capacity=_FakeCapacity(rps=100.0, ttft_ms=10.0, itl_ms=25.0),
+    )
+    _install_fake_rust(monkeypatch, fake)
+    model = PlannerEnginePerfModel(
+        worker_type="aggregated",
+        config=_config(min_observations=1),
+        capabilities=EngineCapabilities(
+            max_num_batched_tokens=1000,
+            max_num_seqs=1000,
+            max_kv_tokens=100_000,
+            kv_cache_block_size=16,
+        ),
+    )
+
+    capacity = model.find_engine_capacity_rps(
+        isl=100,
+        osl=100,
+        ttft_sla_ms=1000.0,
+        itl_sla_ms=30.0,
+        accept_length=2.0,
+    )
+
+    assert fake.capacity_requests[0].kwargs["itl_sla_ms"] == 30.0
+    assert fake.capacity_requests[0].kwargs["accept_length"] == 2.0
+    assert capacity is not None
+    assert capacity.rps == 100.0
+    assert capacity.itl_ms == 25.0
 
 
 def test_adapter_does_not_expose_legacy_prediction_passthroughs():

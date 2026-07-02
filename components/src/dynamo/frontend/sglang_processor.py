@@ -6,6 +6,7 @@
 #
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -19,7 +20,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.frontend.frontend_args import FrontendConfig
-from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine, fetch_model
+from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
 
 from .sglang_prepost import (
@@ -39,10 +40,52 @@ from .utils import (
     make_internal_error,
     nvext_extra_field_requested,
     random_uuid,
+    resolve_chat_template,
     worker_warmup,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _cached_tokens_from_usage(usage: dict[str, Any] | None) -> int | None:
+    if not isinstance(usage, dict):
+        return None
+    prompt_details = usage.get("prompt_tokens_details")
+    if not isinstance(prompt_details, dict):
+        return None
+    cached_tokens = prompt_details.get("cached_tokens")
+    return cached_tokens if isinstance(cached_tokens, int) else None
+
+
+def _normalize_eos_token_ids(value: Any) -> list[int]:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        token_ids: list[int] = []
+        seen: set[int] = set()
+        for token_id in value:
+            if isinstance(token_id, int) and not isinstance(token_id, bool):
+                if token_id not in seen:
+                    token_ids.append(token_id)
+                    seen.add(token_id)
+        return token_ids
+    return []
+
+
+def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
+    eos_token_ids = _normalize_eos_token_ids(getattr(tokenizer, "eos_token_ids", None))
+    if eos_token_ids:
+        return eos_token_ids
+    return _normalize_eos_token_ids(getattr(tokenizer, "eos_token_id", None))
+
+
+def _load_tokenizer(source_path: str, trust_remote_code: bool):
+    """Load the SGLang tokenizer, falling back to an on-disk chat template
+    (e.g. chat_template.json) when the tokenizer defines none."""
+    tokenizer = get_tokenizer(source_path, trust_remote_code=trust_remote_code)
+    if getattr(tokenizer, "chat_template", None) is None:
+        tokenizer.chat_template = resolve_chat_template(source_path)
+    return tokenizer
 
 
 def _runtime_config_parser_name(
@@ -125,7 +168,7 @@ def _init_worker(
     """Initialize a worker process with its own tokenizer."""
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
-    _w_tokenizer = get_tokenizer(model_path, trust_remote_code=trust_remote_code)
+    _w_tokenizer = _load_tokenizer(model_path, trust_remote_code)
     _w_tool_call_parser_name = tool_call_parser_name
     _w_reasoning_parser_name = reasoning_parser_name
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
@@ -135,7 +178,7 @@ def _init_worker(
 def _preprocess_worker(
     request: dict[str, Any],
     model_name: str,
-    eos_token_id: int | None,
+    eos_token_ids: list[int] | None,
 ) -> SglangPreprocessWorkerResult:
     """Preprocess a request in a worker process and return a picklable result."""
     pre = preprocess_chat_request(
@@ -155,7 +198,7 @@ def _preprocess_worker(
         request,
         pre.prompt_token_ids,
         model_name,
-        eos_token_id,
+        eos_token_ids,
         pre.guided_decoding,
         pre.tool_call_parser,
     )
@@ -177,7 +220,7 @@ def _build_dynamo_preproc(
     request: dict[str, Any],
     prompt_token_ids: list[int],
     model_name: str,
-    eos_token_id: int | None,
+    eos_token_ids: int | list[int] | None,
     guided_decoding: dict[str, Any] | None = None,
     tool_call_parser: ToolCallParserType | None = None,
 ) -> dict[str, Any]:
@@ -240,7 +283,7 @@ def _build_dynamo_preproc(
             "skip_special_tokens": tool_call_parser is None,
             "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
-        "eos_token_ids": [eos_token_id] if eos_token_id is not None else [],
+        "eos_token_ids": _normalize_eos_token_ids(eos_token_ids),
         "annotations": [],
         "routing": request.get("routing"),
     }
@@ -249,6 +292,13 @@ def _build_dynamo_preproc(
     mm_data = extract_mm_urls(request.get("messages", []))
     if mm_data:
         preproc["multi_modal_data"] = mm_data
+
+    nvext = request.get("nvext") or {}
+    nvext_passthrough = {
+        key: nvext[key] for key in ("metadata_upload", "extra_fields") if key in nvext
+    }
+    if nvext_passthrough:
+        preproc["extra_args"] = {"nvext": nvext_passthrough}
 
     return preproc
 
@@ -260,7 +310,7 @@ class SglangProcessor:
         routed_engine: RoutedEngine,
         tool_call_parser_name: str | None,
         reasoning_parser_name: str | None,
-        eos_token_id: int | None,
+        eos_token_ids: list[int] | None,
         debug_perf: bool = False,
         preprocess_pool: ProcessPoolExecutor | None = None,
         preprocess_workers: int = 0,
@@ -285,7 +335,7 @@ class SglangProcessor:
         self.tool_call_parser_name = tool_call_parser_name
         self.reasoning_parser_name = reasoning_parser_name
         self.exclude_tools_when_tool_choice_none = True
-        self.eos_token_id = eos_token_id
+        self.eos_token_ids = _normalize_eos_token_ids(eos_token_ids)
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
         self.preprocess_pool = preprocess_pool
@@ -365,10 +415,12 @@ class SglangProcessor:
                 request,
                 tokens,
                 request["model"],
-                self.eos_token_id,
+                self.eos_token_ids,
                 pre.guided_decoding,
                 pre.tool_call_parser,
             )
+        except PreprocessError as exc:
+            raise InvalidArgument(str(exc)) from exc
         except InvalidArgument:
             raise
         except Exception as exc:
@@ -384,6 +436,7 @@ class SglangProcessor:
             ),
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
+            eos_token_ids=self.eos_token_ids,
         )
 
         async for item in self._generate_and_stream(
@@ -406,7 +459,7 @@ class SglangProcessor:
                     _preprocess_worker,
                     request,
                     request["model"],
-                    self.eos_token_id,
+                    self.eos_token_ids,
                 )
                 preproc_result: SglangPreprocessWorkerResult = (
                     await asyncio.wrap_future(future)
@@ -440,6 +493,7 @@ class SglangProcessor:
             ),
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
+            eos_token_ids=self.eos_token_ids,
         )
 
         async for item in self._generate_and_stream(
@@ -479,6 +533,8 @@ class SglangProcessor:
             pending_token_ids: list[int] = []
             pending_usage: dict[str, Any] | None = None
             first_chunk = True
+            input_tokens = len(tokens)
+            cumulative_output_tokens = 0
 
             async for dynamo_response in dynamo_stream:
                 if dynamo_response.is_error():
@@ -506,12 +562,15 @@ class SglangProcessor:
                     break
 
                 new_ids = engine_response["token_ids"]
+                chunk_tokens = len(new_ids)
+                cumulative_output_tokens += chunk_tokens
                 raw_finish = engine_response.get("finish_reason")
                 finish_reason = _map_finish_reason(raw_finish)
                 stop_reason = engine_response.get("stop_reason")
 
                 if usage := engine_response.get("completion_usage"):
                     pending_usage = usage
+                engine_data = engine_response.get("engine_data")
 
                 pending_token_ids.extend(new_ids)
 
@@ -519,6 +578,7 @@ class SglangProcessor:
                 # First chunk flushes immediately (si=1) to minimize TTFT.
                 flush_threshold = 1 if first_chunk else stream_interval
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
+                    usage_for_metrics = pending_usage
                     mapped_response = {
                         "token_ids": pending_token_ids,
                         "finish_reason": finish_reason,
@@ -534,6 +594,7 @@ class SglangProcessor:
                         post_proc_total_ms += (t_pp1 - t_pp0) * 1000.0
                         token_count += len(pending_token_ids)
 
+                    envelope: dict[str, Any] = {"_dynamo_annotated": True}
                     if choice:
                         dynamo_out: dict[str, Any] = {
                             "id": request_id,
@@ -544,12 +605,33 @@ class SglangProcessor:
                         }
                         if pending_usage:
                             dynamo_out["usage"] = pending_usage
+                            pending_usage = None
+                        response_nvext: dict[str, Any] = {}
                         if stop_reason is not None and nvext_extra_field_requested(
                             request, "stop_reason"
                         ):
-                            dynamo_out["nvext"] = {"stop_reason": stop_reason}
+                            response_nvext["stop_reason"] = stop_reason
+                        if engine_data is not None and (
+                            nvext_extra_field_requested(request, "engine_data")
+                        ):
+                            response_nvext["engine_data"] = engine_data
+                        if response_nvext:
+                            dynamo_out["nvext"] = response_nvext
 
-                        yield dynamo_out
+                        envelope["data"] = dynamo_out
+
+                    metrics: dict[str, Any] = {
+                        "input_tokens": input_tokens,
+                        "output_tokens": cumulative_output_tokens,
+                        "chunk_tokens": len(pending_token_ids),
+                    }
+                    cached_tokens = _cached_tokens_from_usage(usage_for_metrics)
+                    if cached_tokens is not None:
+                        metrics["cached_tokens"] = cached_tokens
+                    envelope["event"] = "llm_metrics"
+                    envelope["comment"] = [json.dumps(metrics)]
+
+                    yield envelope
 
                     pending_token_ids = []
                     pending_usage = None
@@ -613,17 +695,17 @@ class SglangEngineFactory:
             )
         loop = asyncio.get_running_loop()
 
-        # TODO(gh-8749): consume mdc.model_info.path()'s parent (slug_dir)
-        # instead of re-running fetch_model. The MDC cache already has
-        # blake3-verified copies; this path duplicates the download.
-        source_path = mdc.source_path()
-        if not os.path.exists(source_path):
-            await fetch_model(source_path, ignore_weights=True)
+        local_dir = mdc.local_dir()
+        if not os.path.isdir(local_dir):
+            raise RuntimeError(
+                f"MDC local_dir {local_dir!r} not populated for model {mdc.name()!r}; "
+                f"download_config must run before the engine factory."
+            )
 
-        logger.info("Loading SGLang tokenizer from %s", source_path)
-        tokenizer = get_tokenizer(source_path, trust_remote_code=self.trust_remote_code)
+        logger.info("Loading SGLang tokenizer from %s", local_dir)
+        tokenizer = _load_tokenizer(local_dir, self.trust_remote_code)
 
-        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        eos_token_ids = _tokenizer_eos_token_ids(tokenizer)
 
         # Static reasoning-template scan (mirrors sglang's template_manager).
         # Shared with worker-pool processes via initargs so they compute the
@@ -652,13 +734,13 @@ class SglangEngineFactory:
             logger.info(
                 "Creating SGLang preprocess worker pool with %d workers for %s",
                 preprocess_workers,
-                source_path,
+                local_dir,
             )
             preprocess_pool = ProcessPoolExecutor(
                 max_workers=preprocess_workers,
                 initializer=_init_worker,
                 initargs=(
-                    source_path,
+                    local_dir,
                     tool_call_parser_name,
                     reasoning_parser_name,
                     self.config.exclude_tools_when_tool_choice_none,
@@ -694,7 +776,7 @@ class SglangEngineFactory:
             routed_engine,
             tool_call_parser_name,
             reasoning_parser_name,
-            eos_token_id,
+            eos_token_ids,
             debug_perf=self.debug_perf,
             preprocess_pool=preprocess_pool,
             preprocess_workers=preprocess_workers,

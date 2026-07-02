@@ -34,6 +34,7 @@ from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
+from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
@@ -411,71 +412,12 @@ class HandlerBase(BaseGenerativeHandler):
     def _extract_logprobs(
         output, num_output_tokens_so_far: int
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
-        """
-        Extract logprobs from the TRTLLM output for new tokens.
-
-        Args:
-            output: TRTLLM CompletionOutput object
-            num_output_tokens_so_far: Number of tokens already processed
-        Returns:
-            Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
-            - log_probs: List of log probabilities for each new token
-            - top_logprobs: List of top logprobs dicts for each new token
-        """
-        if output.logprobs is None:
-            return None, None
-
-        # Get logprobs for new tokens only
-        new_logprobs = output.logprobs[num_output_tokens_so_far:]
-        if not new_logprobs:
-            return None, None
-
-        # From TRTLLM CompletionOutput API, logprobs: (TokenLogprobs | List[float], optional)
-        # Expect TokenLogprobs output when logprobs is set, check edge case where list[float] is returned instead
-        if isinstance(new_logprobs[0], float):
-            return [float(lp) for lp in new_logprobs], None
-
-        log_probs = []
-        top_logprobs = []
-
-        for token_idx, token_logprobs_dict in enumerate(new_logprobs):
-            if token_logprobs_dict is None:
-                continue
-
-            # Get the actual token_id that was generated at this position
-            actual_token_id = output.token_ids[num_output_tokens_so_far + token_idx]
-
-            # Extract log probability for the selected token
-            if actual_token_id in token_logprobs_dict:
-                selected_logprob = token_logprobs_dict[actual_token_id]
-                log_probs.append(float(selected_logprob.logprob))
-            else:
-                # Fallback: use the first logprob if selected token not found
-                first_logprob = next(iter(token_logprobs_dict.values()), None)
-                if first_logprob:
-                    log_probs.append(float(first_logprob.logprob))
-
-            # Build top_logprobs list for this token position
-            # NOTE: TRTLLM LogProb API doesn't have decoded_token, will default to None
-            token_top_logprobs = []
-            for tok_id, logprob_info in token_logprobs_dict.items():
-                token_top_logprobs.append(
-                    {
-                        "rank": (
-                            logprob_info.rank if hasattr(logprob_info, "rank") else 0
-                        ),
-                        "token_id": tok_id,
-                        "token": (
-                            logprob_info.decoded_token
-                            if hasattr(logprob_info, "decoded_token")
-                            else None
-                        ),
-                        "logprob": float(logprob_info.logprob),
-                    }
-                )
-            top_logprobs.append(token_top_logprobs)
-
-        return log_probs if log_probs else None, top_logprobs if top_logprobs else None
+        return _shared_logprobs.extract_from_completion_output(
+            output,
+            num_output_tokens_so_far,
+            fallback_to_first_on_missing=True,
+            include_bytes=False,
+        )
 
     async def _handle_cancellation(
         self,
@@ -1101,18 +1043,35 @@ class HandlerBase(BaseGenerativeHandler):
                 dynamic_default = max(1, self.max_seq_len - input_length)
                 sampling_params.max_tokens = dynamic_default
 
-        ignore_eos = request["stop_conditions"].get("ignore_eos")
-        if ignore_eos:
-            sampling_params.ignore_eos = ignore_eos
+        stop_conditions = request["stop_conditions"]
+        ignore_eos = stop_conditions.get("ignore_eos")
+        visible_stop_token_ids = set(
+            stop_conditions.get("stop_token_ids_visible") or []
+        )
+        # TRT-LLM PyTorch backend has no per-token "visible stop" hook, so
+        # visible stop tokens (e.g. Harmony's `<|call|>` for gpt-oss) are
+        # stripped before Dynamo sees them. Force `ignore_eos=True` to disable
+        # engine-side stopping and let backend.rs (`VisibleStopTokenDetected` /
+        # `HiddenStopTokenDetected`) own all stopping.
+        #
+        # TODO: revisit once TRT-LLM exposes a per-token visible-stop hook.
+        if ignore_eos or visible_stop_token_ids:
+            sampling_params.ignore_eos = True
 
-        min_tokens = request["stop_conditions"].get("min_tokens")
+        min_tokens = stop_conditions.get("min_tokens")
         if min_tokens:
             sampling_params.min_tokens = min_tokens
 
-        stop_token_ids = request["stop_conditions"].get("stop_token_ids_hidden")
+        stop_token_ids = stop_conditions.get("stop_token_ids_hidden")
         if stop_token_ids:
             existing = sampling_params.stop_token_ids or []
-            sampling_params.stop_token_ids = list(set(existing).union(stop_token_ids))
+            engine_stop_token_ids = set(existing).union(stop_token_ids)
+            engine_stop_token_ids.difference_update(visible_stop_token_ids)
+            sampling_params.stop_token_ids = list(engine_stop_token_ids)
+        elif visible_stop_token_ids and sampling_params.stop_token_ids:
+            sampling_params.stop_token_ids = list(
+                set(sampling_params.stop_token_ids) - visible_stop_token_ids
+            )
 
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
@@ -1122,8 +1081,8 @@ class HandlerBase(BaseGenerativeHandler):
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
 
-        # Optional test-only logits processing (enable with DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1)
-        if os.getenv("DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
+        # Optional test-only logits processing (enable with DYN_ENABLE_TEST_LOGITS_PROCESSOR=1)
+        if os.getenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
             processors = [HelloWorldLogitsProcessor(self.engine.llm.tokenizer)]
             adapters = create_trtllm_adapters(processors)
             sampling_params.logits_processor = adapters

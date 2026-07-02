@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Static linkage map. OSRB asks: "for each shipped third-party package,
+# is it statically linked into your binary, dynamically loaded, or shipped
+# as a standalone executable?" The answer determines what derivative-work
+# obligations apply.
+#
+# The packager (container/compliance/osrb/package.py) joins this map onto
+# every row of manifest.csv. Per-package overrides take priority over
+# ecosystem defaults.
+
+ecosystem_defaults:
+  rust:    static          # cargo's default linkage
+  go:      static          # CGO_ENABLED=0 default produces statically-linked binaries
+  python:  dynamic          # Python imports at runtime
+  dpkg:    dynamic          # .so libraries linked at runtime
+  native:  case_by_case     # determined per-entry below
+
+
+# Per-package overrides, used when a specific package's linkage differs from
+# its ecosystem default. Currently only native overlays need this — none of
+# the build-from-source components are uniformly "static".
+native_overrides:
+  criu:           dynamic_load    # criu loads cuda_plugin.so via dlopen at runtime
+  ucx:            dynamic
+  libfabric:      dynamic
+  ffmpeg:         static_into_nixl   # ffmpeg statically linked into NIXL's wheel
+  gdrcopy:        dynamic
+  aws-sdk-cpp:    static_into_nixl
+  intel-oneCCL:   dynamic
+  LMCache:        dynamic
+  vllm-from-source: dynamic

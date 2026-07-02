@@ -10,12 +10,11 @@ use async_stream::stream;
 use async_trait::async_trait;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
+#[cfg(test)]
+use dynamo_runtime::pipeline::RequestStream;
 use dynamo_runtime::pipeline::{Error, ManyIn, ManyOut, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::StreamExt;
-
-#[cfg(test)]
-use dynamo_runtime::engine::RequestStream;
 
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -152,11 +151,15 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
 {
     async fn generate(
         &self,
-        mut incoming: ManyIn<RealtimeClientEvent>,
+        incoming: ManyIn<RealtimeClientEvent>,
     ) -> Result<ManyOut<Annotated<RealtimeServerEvent>>, Error> {
         let ctx = incoming.context();
         let session_id = ctx.id().to_string();
         let ctx_for_stream = ctx.clone();
+        let (request_stream, _ctx_unit) = incoming.into_parts();
+        let mut incoming = request_stream.take().ok_or_else(|| {
+            anyhow::anyhow!("RequestStream::take called twice on bidirectional input")
+        })?;
 
         let output = stream! {
             let ctx = ctx_for_stream;
@@ -561,7 +564,7 @@ mod tests {
     use futures::stream;
 
     fn make_input(events: Vec<RealtimeClientEvent>) -> ManyIn<RealtimeClientEvent> {
-        RequestStream::new(Box::pin(stream::iter(events)), Context::new(()).context())
+        Context::new(RequestStream::new(Box::pin(stream::iter(events))))
     }
 
     fn parse_client_event(json: serde_json::Value) -> RealtimeClientEvent {

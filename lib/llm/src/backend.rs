@@ -269,6 +269,13 @@ impl
                                 Some(StopReason::Int((*token_id).into())),
                             )
                         }
+                        Some(StopTrigger::VisibleStopTokenDetected(token_id)) => {
+                            // Token stop included in output.
+                            (
+                                Some(FinishReason::Stop),
+                                Some(StopReason::Int((*token_id).into())),
+                            )
+                        }
                         Some(StopTrigger::HiddenStopSequenceDetected(seq)) => {
                             // User-provided stop sequence (hidden from output)
                             (
@@ -388,6 +395,7 @@ impl
                     index: data.index,
                     completion_usage: data.completion_usage,
                     disaggregated_params: data.disaggregated_params,
+                    encoder_result: data.encoder_result,
                     worker_trace_link: data.worker_trace_link,
                     engine_data: data.engine_data,
                     routing_data: data.routing_data,
@@ -444,6 +452,9 @@ pub struct Decoder {
     // minimum number of tokens have been generated
     hidden_stop_ids: HashSet<TokenIdType>,
 
+    // single tokens that if found in the response will trigger a stop condition and be returned
+    visible_stop_ids: HashSet<TokenIdType>,
+
     // user-provided token stop IDs, kept separate from system/EOS stop IDs so
     // stop_reason can report user-triggered token stops without reporting EOS.
     user_stop_ids: HashSet<TokenIdType>,
@@ -475,6 +486,7 @@ pub enum StopTrigger {
     MaxTokensLimit,
     HiddenStopTokenDetected(TokenIdType),
     UserStopTokenDetected(TokenIdType),
+    VisibleStopTokenDetected(TokenIdType),
     HiddenStopSequenceDetected(String),
     VisibleStopSequenceDetected(String),
 }
@@ -527,6 +539,12 @@ impl Decoder {
             .iter()
             .copied()
             .collect();
+        let visible_stop_ids: HashSet<TokenIdType> = stop_condition
+            .stop_token_ids_visible
+            .unwrap_or_default()
+            .iter()
+            .copied()
+            .collect();
         let hidden_stop_ids = user_stop_ids.union(&system_stop_ids).copied().collect();
 
         // Categorize stop sequences based on include_stop_str_in_output:
@@ -550,6 +568,7 @@ impl Decoder {
             decode_stream,
             tracker,
             hidden_stop_ids,
+            visible_stop_ids,
             user_stop_ids,
             hidden_stop_sequences,
             visible_stop_sequences,
@@ -585,6 +604,14 @@ impl Decoder {
         // stop conditions to not apply until the minimum number of tokens have been generated
         if self.generated_tokens < self.min_tokens {
             return Ok(StepResult::ok(token));
+        }
+
+        // Check token stops. Visible token IDs are included in output.
+        if self.visible_stop_ids.contains(&token_id) {
+            return Ok(StepResult::with_stop_trigger(
+                token,
+                StopTrigger::VisibleStopTokenDetected(token_id),
+            ));
         }
 
         // Check token stops. User-provided token IDs take precedence over
